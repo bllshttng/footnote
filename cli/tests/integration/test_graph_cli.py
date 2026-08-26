@@ -216,6 +216,26 @@ def test_update_difficulty_records_history(tmp_graph):
     assert len(_read_graph(tmp_graph)[0]["difficulty_history"]) == 2
 
 
+def test_update_difficulty_supersedes_retired_model_tier(tmp_graph):
+    """x-baef round-3: the canonical write clears the retired spelling, so
+    following the tombstone's own prescription can never manufacture a
+    both-spellings row the migration would then refuse batch-wide; a null
+    difficulty_history row also survives the write instead of crashing it."""
+    r = _invoke("backlog", "add", "Legacy Band")
+    nid = json.loads(r.output)["id"]
+    entries = _read_graph(tmp_graph)
+    entries[0]["model_tier"] = "high"
+    entries[0]["difficulty_history"] = None
+    tmp_graph.write_text(json.dumps({"entries": entries}))
+
+    r2 = _invoke("backlog", "update", nid, "--difficulty", "high")
+    assert r2.exit_code == 0, r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    assert "model_tier" not in node
+    assert [h["source"] for h in node["difficulty_history"]] == ["update"]
+
+
 def test_update_blocks_everything_alone_acks_existing_p0(tmp_graph):
     """Standalone --blocks-everything acknowledges an already-p0 node (the
     migrate-priorities ack spelling) instead of silently writing nothing."""

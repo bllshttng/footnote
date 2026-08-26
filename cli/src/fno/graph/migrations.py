@@ -71,6 +71,40 @@ def rollback_legacy_p0(entries: list[dict]) -> dict[str, int]:
     return {"restored_to_p0": len(candidates)}
 
 
+def _retired_band(row: dict) -> str | None:
+    """The row's model_tier as a canonical band, or None if it is not one.
+
+    AttributeError joins ValueError: a non-string value (a hand-edit's int,
+    list) dies inside ``str.strip``/``.lower`` before the band check, which
+    would surface as a traceback instead of the by-id refusal below.
+    """
+    from fno.graph._constants import normalize_difficulty
+
+    try:
+        return normalize_difficulty(row.get("model_tier"))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
+    """(migratable ids, both-spellings ids) for rows still carrying model_tier.
+
+    ONE classifier, shared by the migration verb and the reconcile advisory,
+    so the prescription the advisory prints can never drift from the verdict
+    the verb delivers.
+    """
+    migratable: list[str] = []
+    conflicted: list[str] = []
+    for row in entries:
+        if not isinstance(row, dict) or row.get("model_tier") is None:
+            continue
+        if row.get("difficulty") is not None:
+            conflicted.append(str(row.get("id", "?")))
+        else:
+            migratable.append(str(row.get("id", "?")))
+    return migratable, conflicted
+
+
 def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     """Move the retired ``model_tier`` band onto ``difficulty``, once, audibly.
 
@@ -81,32 +115,18 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     every other difficulty writer - a value that does not normalize is
     refused by id, never migrated verbatim under a success receipt.
     """
-    from fno.graph._constants import normalize_difficulty
-
-    def _band_of(row: dict) -> str | None:
-        try:
-            return normalize_difficulty(row.get("model_tier"))
-        except ValueError:
-            return None
-
-    conflict_ids = sorted(
-        str(row.get("id", "?"))
-        for row in entries
-        if isinstance(row, dict)
-        and row.get("model_tier") is not None
-        and row.get("difficulty") is not None
-    )
-    if conflict_ids:
+    _migratable, conflicted = split_retired_tier_rows(entries)
+    if conflicted:
         raise ValueError(
             "rows carry both difficulty and model_tier; resolve by hand "
-            "before migrating: " + ", ".join(conflict_ids)
+            "before migrating: " + ", ".join(sorted(conflicted))
         )
     invalid = sorted(
         f"{row.get('id', '?')}={row.get('model_tier')!r}"
         for row in entries
         if isinstance(row, dict)
         and row.get("model_tier") is not None
-        and _band_of(row) is None
+        and _retired_band(row) is None
     )
     if invalid:
         raise ValueError(
@@ -127,7 +147,7 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
 
     now = datetime.now(timezone.utc).isoformat()
     for row in pending:
-        band = _band_of(row) or normalize_difficulty(row.pop("model_tier"))
+        band = _retired_band(row)
         row.pop("model_tier", None)
         row["difficulty"] = band
         # `or []`, not setdefault: a hand-edited row can carry

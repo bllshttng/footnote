@@ -792,14 +792,14 @@ def _spawn_think_worker(
     native_think = resolved["command"]
     resolved_model = (model or "").strip() or None
     if resolved_model is None and node is not None:
-        # resolve_difficulty=False: same deferral contract as every other
-        # dispatch seam (advance.py, reconcile_dispatch.py) - a difficulty
-        # band joins live provider capacity at the spawn grid, never a
-        # static benchmark-table pin here.
+        # Left at node_model's default resolution: this seam has NO grid
+        # receiving end (the argv always carries an explicit --harness and
+        # never --node, so inject_spawn_defaults' grid stands down), and
+        # resolve_difficulty=False here would silently drop a banded node's
+        # band instead of deferring it (x-baef round-3 finding 1).
         resolved_model = _route_resolve.node_model(
             node,
             provider=resolved_harness,
-            resolve_difficulty=False,
         )
     portable_think = f"/think {node_id}"
     rendered_prompt = (

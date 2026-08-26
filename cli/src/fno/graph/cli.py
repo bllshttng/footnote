@@ -3764,17 +3764,26 @@ def cmd_update(
             except ValueError as exc:
                 typer.echo(f"fno backlog update: {exc}", err=True)
                 raise typer.Exit(code=2)
+            # The canonical write supersedes the retired spelling: leaving
+            # model_tier behind here would manufacture a both-spellings row
+            # the migration then refuses batch-wide, with no verb left that
+            # can remove the retired key (its own flag is a tombstone now).
+            node.pop("model_tier", None)
             if revised_difficulty != node.get("difficulty"):
                 node["difficulty"] = revised_difficulty
                 # Same attributable trail the birth paths keep: a manual
                 # revision is the estimate most likely to have changed hands.
-                node.setdefault("difficulty_history", []).append(
+                # `or []`: a hand-edited row can carry difficulty_history
+                # null, and setdefault would hand that null to .append.
+                history = node.get("difficulty_history") or []
+                history.append(
                     {
                         "value": revised_difficulty,
                         "source": "update",
                         "ts": datetime.now(timezone.utc).isoformat(),
                     }
                 )
+                node["difficulty_history"] = history
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
         if type_ is not None:
@@ -9980,24 +9989,12 @@ def cmd_reconcile(
     # x-baef: leftover model_tier rows read as no band everywhere now (the
     # compat read died with the field), so the daily sweep names them until
     # the one-shot migration clears the key. Self-extinguishing: zero rows,
-    # zero lines, and the migrated graph never trips it again. The two row
-    # shapes get different prescriptions because the migration refuses
-    # both-spellings rows - naming the verb for one of those would promise a
-    # verdict the verb cannot deliver.
-    _migratable = sorted(
-        str(e.get("id", "?"))
-        for e in entries
-        if isinstance(e, dict)
-        and e.get("model_tier") is not None
-        and e.get("difficulty") is None
-    )
-    _conflicted = sorted(
-        str(e.get("id", "?"))
-        for e in entries
-        if isinstance(e, dict)
-        and e.get("model_tier") is not None
-        and e.get("difficulty") is not None
-    )
+    # zero lines, and the migrated graph never trips it again. The split
+    # comes from the migration's own classifier, so the prescription printed
+    # here can never drift from the verdict the verb delivers.
+    from fno.graph.migrations import split_retired_tier_rows
+
+    _migratable, _conflicted = split_retired_tier_rows(entries)
     if _migratable:
         typer.echo(
             f"reconcile: {len(_migratable)} row(s) still carry the retired "
@@ -12886,14 +12883,22 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
             else:
                 entry["difficulty"] = revised_difficulty
-                entry.setdefault("difficulty_history", []).append(
+                # `or []` over setdefault: a null difficulty_history row
+                # must not crash the claim mid-mutator (same hazard the
+                # migration guards against).
+                history = entry.get("difficulty_history") or []
+                history.append(
                     {
                         "value": revised_difficulty,
                         "source": "blueprint",
                         "ts": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-        if claimed_type != DEFAULT_NODE_TYPE and entry.get("type") != claimed_type:
+                entry["difficulty_history"] = history
+        if (
+            claimed_type != DEFAULT_NODE_TYPE
+            and entry.get("type") != claimed_type
+        ):
             # `add` and `update` both refuse a write that would make a
             # third epic level; a doc-frontmatter lane that skips the cap
             # would be the decorative guard this whole change is about.

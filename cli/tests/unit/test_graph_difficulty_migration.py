@@ -130,3 +130,15 @@ def test_migrate_difficulty_normalizes_and_refuses_bad_bands(tmp_graph):
     row = json.loads(tmp_graph.read_text())["entries"][0]
     assert row["difficulty"] == "high"
     assert row["difficulty_history"][-1]["value"] == "high"
+
+
+def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
+    """x-baef round-3: a non-string model_tier (hand-edit) gets the designed
+    by-id exit-2 refusal, not an AttributeError traceback from strip()."""
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-0005", "model_tier": 3},
+    ]}))
+    r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r.exit_code == 2, r.output
+    assert "x-0005=3" in r.output
+    assert json.loads(tmp_graph.read_text())["entries"][0].get("difficulty") is None

@@ -277,6 +277,7 @@ Load [references/quick-template.md](references/quick-template.md) for the full t
 status: ready
 kind: quick-plan
 created: <YYYY-MM-DD>      # required; the consolidation gate reads it
+difficulty: <low|medium|high> # required for plans created after 2026-08-26
 # claims: ab-XXXXXXXX      # only when the input was an ab-id
 # executor: tdd            # transcribed from a Locked Decision, if any
 consolidation:             # step 2d, exactly one outcome (see 2d above)
