@@ -5244,6 +5244,12 @@ impl Core {
 
     /// (x-d401) Does any live pane of this session resume this row's session
     /// id? The comparison uses the same id sources the disposition does.
+    /// Liveness is read from the pane, not assumed from presence: entries
+    /// leave `self.panes` only on kill/reap, so a pane whose child died or
+    /// whose integration markers show the resume command finished must not
+    /// keep answering "backend live". A pane without markers cannot be read
+    /// (`Unmeasured`): the join then keeps protecting the rollout rather
+    /// than guessing the backend dead.
     fn pane_resumes_session(&self, a: &RegistryAgent) -> bool {
         let sid = a
             .harness_session_id
@@ -5251,10 +5257,14 @@ impl Core {
             .or(a.claude_session_uuid.as_deref())
             .unwrap_or("");
         !sid.is_empty()
-            && self
-                .panes
-                .values()
-                .any(|e| e.resume_target.as_deref() == Some(sid))
+            && self.panes.values().any(|e| {
+                e.resume_target.as_deref() == Some(sid)
+                    && e.pty.is_child_alive()
+                    && !matches!(
+                        e.vt.shell_activity(),
+                        vt::ShellActivity::Idle | vt::ShellActivity::Empty
+                    )
+            })
     }
 
     /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
@@ -7559,9 +7569,12 @@ impl Core {
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
                                 no_pane_reason: None,
-                                // A registry-hosted pane speaks through its
-                                // badge; the vt reading is the bare-pane signal.
-                                pane_activity: None,
+                                // A registry-hosted pane's badge is its primary
+                                // signal, but the vt reading is still real and
+                                // one field away: keep it so the client can
+                                // show activity when the badge goes quiet.
+                                pane_activity: pane_entry
+                                    .map(|e| e.vt.shell_activity()),
                             }
                         }
                         None => {
@@ -9598,8 +9611,8 @@ impl Core {
                     let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                         self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
                     });
-                    if live_pane || !Self::row_resumable(a) {
-                        None
+                    if live_pane || !self.row_resumable_in_session(a) {
+                        None // refused; notice below
                     } else {
                         Self::worker_facts(a)
                     }
