@@ -3240,7 +3240,7 @@ def _raw_send(
         if explicit_pr:
             pr = int(explicit_pr.group("pr"))
         emit_review_invocation(
-            source="target",
+            source="daemon",
             invocation_id=invocation_id,
             stage="sent",
             verb=review["verb"],

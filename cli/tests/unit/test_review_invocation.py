@@ -19,7 +19,7 @@ def _sent_event() -> dict:
     return {
         "ts": "2026-08-26T00:00:00Z",
         "type": "review_invocation",
-        "source": "hook",
+        "source": "daemon",
         "data": {
             "invocation_id": "ri-test-1",
             "stage": "sent",

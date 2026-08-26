@@ -320,7 +320,10 @@ event_types:
       reviewer observations may arrive as separate rows joined by
       invocation_id; a sent row with no later started or attestation row names
       a lost review without claiming that an absence is a delivery result.
-    sources: [target, hook, daemon, subagent, test]
+    # The daemon owns this cross-language registry entry. Python control-plane
+    # sites and Rust transports both append the same canonical event, while
+    # data.initiator and data.transport retain their measured provenance.
+    sources: [daemon]
     data:
       required: [invocation_id, stage, verb]
       properties:

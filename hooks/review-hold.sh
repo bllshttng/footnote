@@ -128,7 +128,7 @@ data="$(jq -cn \
   '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch} | if $model_family == "" then . else .model_family=$model_family end' \
   2>/dev/null || true)"
 if [[ -n "$data" ]]; then
-  "$FNO_BIN" doctor event emit -t review_invocation -s hook -d "$data" \
+  "$FNO_BIN" doctor event emit -t review_invocation -s daemon -d "$data" \
     --events "${FNO_EVENTS_PATH:-$cwd/.fno/events.jsonl}" >/dev/null 2>&1 || true
 fi
 

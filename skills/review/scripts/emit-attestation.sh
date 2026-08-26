@@ -292,7 +292,7 @@ review_event_data="$(jq -cn \
   '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch,execution_context:$execution_context,output_contract:$output_contract,subagent_count:$subagent_count} | if $model_family == "" then . else .model_family=$model_family end' \
   2>/dev/null || true)"
 if [[ -n "$review_event_data" ]]; then
-  "${FNO:-fno}" doctor event emit -t review_invocation -s hook -d "$review_event_data" \
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" \
     --events "$repo_root/.fno/events.jsonl" >/dev/null 2>&1 || true
 fi
 
