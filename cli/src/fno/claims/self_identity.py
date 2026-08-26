@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 from fno.harness_identity import (
     parse_canonical_identity,
@@ -12,7 +12,11 @@ from fno.harness_identity import (
 )
 
 
-def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
+def resolve_self_identity(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    collide: Optional[Callable[[str, str], Optional[str]]] = None,
+):
     """Resolve the harness identity this process can prove it owns.
 
     The prover is the process-tree walk, and it is the ONLY prover. The nearest
@@ -66,11 +70,6 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
         if not canonical_proven:
             return None
         return session_identity_key(session_id) == session_identity_key(canonical_session_id)
-
-    def collide(_harness: str, session_id: str) -> Optional[str]:
-        from fno.agents.registry import row_owning_session_id
-
-        return row_owning_session_id(session_id)
 
     return resolve_owned_identity(
         env,
