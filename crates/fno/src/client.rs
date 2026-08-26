@@ -1454,7 +1454,8 @@ struct SearchView {
 /// same per-key re-read discipline as the selector/search), so a layout push
 /// under an open navigator is reflected at once.
 struct NavView {
-    /// Incremental text filter (substring, case-insensitive) over row labels.
+    /// Incremental text filter (substring, case-insensitive) over row match
+    /// keys: label + pane id + node id + slug + workspace (x-e10f).
     query: String,
     /// The active state chip; `None` = all states. `Tab` cycles it.
     state_filter: Option<PaneState>,
@@ -4996,27 +4997,45 @@ impl View {
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut out = Vec::new();
         let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
+        // (x-e10f) The pane -> work-queue join behind "find by node": an agent
+        // row's pane is the pane a card's `pane_id` names when that node is in
+        // flight, so the card carries the node id and title-slug the pane's own
+        // row can be searched by.
+        let card_for_pane = |pid: Option<u64>| -> Option<&BacklogCard> {
+            self.layout
+                .backlog
+                .iter()
+                .find(|c| c.pane_id.is_some_and(|cp| Some(cp) == pid))
+        };
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
             // CycleSection): the navigator is a jump, never a view-state cycle.
-            out.push(NavRow {
-                label: s.name.clone(),
-                state: PaneState::Idle,
-                goto_squad: None,
-                goto_tab: None,
-                hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
-            });
-            for (t, tab) in s.tabs.iter().enumerate() {
-                let tab_text = tab_label_text(&tab.name, t, tab.named);
-                out.push(NavRow {
-                    label: format!("{} › {}", s.name, tab_text),
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: s.name.clone(),
                     state: PaneState::Idle,
-                    // SelectTab resolves the squad server-side, so one command
-                    // switches squad+tab (row_action's tab arm, gemini review).
                     goto_squad: None,
                     goto_tab: None,
-                    hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
-                });
+                    hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
+                }
+                .with_match_key(&[]),
+            );
+            for (t, tab) in s.tabs.iter().enumerate() {
+                let tab_text = tab_label_text(&tab.name, t, tab.named);
+                out.push(
+                    NavRow {
+                        match_key: String::new(),
+                        label: format!("{} › {}", s.name, tab_text),
+                        state: PaneState::Idle,
+                        // SelectTab resolves the squad server-side, so one command
+                        // switches squad+tab (row_action's tab arm, gemini review).
+                        goto_squad: None,
+                        goto_tab: None,
+                        hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
+                    }
+                    .with_match_key(&[s.name.clone()]),
+                );
                 // Plain panes of the tab (v22): a pane already shown as an agent
                 // row is skipped (the agent row is the richer view of the same
                 // pane); the rest become goto-able so a bare shell pane in any
@@ -5025,13 +5044,17 @@ impl View {
                     if self.layout.agents.iter().any(|a| a.pane_id == Some(p.id)) {
                         continue;
                     }
-                    out.push(NavRow {
-                        label: format!("{} › {} › {}", s.name, tab_text, p.label),
-                        state: PaneState::Idle,
-                        goto_squad: cross(s.id),
-                        goto_tab: Some(tab.id),
-                        hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
-                    });
+                    out.push(
+                        NavRow {
+                            match_key: String::new(),
+                            label: format!("{} › {} › {}", s.name, tab_text, p.label),
+                            state: PaneState::Idle,
+                            goto_squad: cross(s.id),
+                            goto_tab: Some(tab.id),
+                            hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
+                        }
+                        .with_match_key(&[p.id.to_string(), s.name.clone()]),
+                    );
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
@@ -5045,56 +5068,84 @@ impl View {
                     Some(TabContext::Ordinal(n)) => format!("{} › {} ·{n}", s.name, a.name),
                     None => format!("{} › {}", s.name, a.name),
                 };
-                out.push(NavRow {
-                    label,
-                    state: nav_agent_state(a),
-                    // Switch to the agent's squad first when it is not active, so
-                    // the following FocusPane lands there (the server resolves the
-                    // pane's tab on focus; the ordinal is display-only).
-                    goto_squad: cross(s.id),
-                    goto_tab: None,
-                    hit: agent_hit(a, self.layout.active_squad),
-                });
+                let card = card_for_pane(a.pane_id);
+                out.push(
+                    NavRow {
+                        match_key: String::new(),
+                        label,
+                        state: nav_agent_state(a),
+                        // Switch to the agent's squad first when it is not active, so
+                        // the following FocusPane lands there (the server resolves the
+                        // pane's tab on focus; the ordinal is display-only).
+                        goto_squad: cross(s.id),
+                        goto_tab: None,
+                        hit: agent_hit(a, self.layout.active_squad),
+                    }
+                    .with_match_key(&[
+                        a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                        card.map(|c| c.id.clone()).unwrap_or_default(),
+                        card.map(|c| c.slug.clone()).unwrap_or_default(),
+                        s.name.clone(),
+                    ]),
+                );
             }
         }
         // Orphan agents (no live squad), mirroring display_rows' orphan section.
         for a in self.layout.agents.iter().filter(
             |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
         ) {
-            out.push(NavRow {
-                label: a.name.clone(),
-                state: nav_agent_state(a),
-                goto_squad: None,
-                goto_tab: None,
-                hit: agent_hit(a, self.layout.active_squad),
-            });
+            let card = card_for_pane(a.pane_id);
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: a.name.clone(),
+                    state: nav_agent_state(a),
+                    goto_squad: None,
+                    goto_tab: None,
+                    hit: agent_hit(a, self.layout.active_squad),
+                }
+                .with_match_key(&[
+                    a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                    card.map(|c| c.id.clone()).unwrap_or_default(),
+                    card.map(|c| c.slug.clone()).unwrap_or_default(),
+                ]),
+            );
         }
         // Work-queue cards: goto opens the dispatch confirm / focuses the worker
         // (card_hit), no squad switch. A blocked/in-flight card reads as
         // Blocked/Working so the state filter surfaces stuck work uniformly.
         for c in &self.layout.backlog {
             let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-            out.push(NavRow {
-                label: format!("{label} {}", c.priority),
-                state: card_state(c),
-                goto_squad: None,
-                goto_tab: None,
-                hit: self.card_hit(c),
-            });
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: format!("{label} {}", c.priority),
+                    state: card_state(c),
+                    goto_squad: None,
+                    goto_tab: None,
+                    hit: self.card_hit(c),
+                }
+                .with_match_key(&[
+                    c.id.clone(),
+                    c.slug.clone(),
+                    c.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                ]),
+            );
         }
         out
     }
 
     /// The navigator rows matching the current text + state filter (x-653d),
     /// recomputed per keypress (no cache): case-insensitive substring on the
-    /// label AND the state chip when one is set. Text and state compose (both
-    /// must match); letters only ever edit the query (Locked 5).
+    /// match key (label + identity, x-e10f) AND the state chip when one is set.
+    /// Text and state compose (both must match); letters only ever edit the
+    /// query (Locked 5).
     fn nav_filtered(&self, nav: &NavView) -> Vec<NavRow> {
         let q = nav.query.to_lowercase();
         self.nav_rows()
             .into_iter()
             .filter(|r| nav.state_filter.is_none_or(|s| r.state == s))
-            .filter(|r| q.is_empty() || r.label.to_lowercase().contains(&q))
+            .filter(|r| q.is_empty() || r.match_key.contains(&q))
             .collect()
     }
 
@@ -8981,9 +9032,17 @@ const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
 struct NavRow {
-    /// The searchable, displayed label (e.g. `nairobi › build` or
-    /// `nairobi › claude#3`). The text filter matches here, case-insensitively.
+    /// The displayed label (e.g. `nairobi › build` or `nairobi › claude#3`).
+    /// Rendering only - the text filter matches [`NavRow::match_key`].
     label: String,
+    /// (x-e10f) The searchable identity, composed at build time and NEVER
+    /// displayed: `label` plus the mux pane id, the bound node id, the
+    /// title-slug and the workspace name, lowercased and space-joined. The
+    /// text filter matches HERE, so a row is findable by what it IS (pane
+    /// `307`, node `x-6233`, a slug) not just by its label text. A row whose
+    /// hit is invisible in the label shows the matched token
+    /// ([`nav_overlay_lines`]) - a hit with no visible reason reads as a bug.
+    match_key: String,
     /// Derived rollup state, for the state filter + the leading glyph.
     state: PaneState,
     /// Switch to this squad before applying `hit`, when it is not already the
@@ -9000,6 +9059,31 @@ struct NavRow {
     /// FocusPane/AttachAgent for an agent, the dispatch confirm / focus for a
     /// card, or a [`ChromeHit::Notice`] that keeps the navigator open.
     hit: ChromeHit,
+}
+
+impl NavRow {
+    /// (x-e10f) Fill `match_key` from the row's own label plus its resolved
+    /// identity `tokens`. The one population path for every row class, so the
+    /// searchable identity cannot drift from the row that renders it.
+    fn with_match_key(mut self, tokens: &[String]) -> Self {
+        self.match_key = nav_match_key(&self.label, tokens);
+        self
+    }
+}
+
+/// (x-e10f) Compose a nav row's searchable identity: the label plus every
+/// non-empty token, lowercased and space-joined. An unresolved field
+/// contributes NO token, so a squad row without a node binding is not made
+/// matchable by the empty string.
+fn nav_match_key(label: &str, tokens: &[String]) -> String {
+    let mut key = label.to_lowercase();
+    for t in tokens {
+        if !t.is_empty() {
+            key.push(' ');
+            key.push_str(&t.to_lowercase());
+        }
+    }
+    key
 }
 
 /// The navigator state of an agent row: an exited pane reads `Idle` (finished,
@@ -28204,6 +28288,73 @@ mod tests {
             v.nav_filtered(&state_only).len(),
             1,
             "[blocked] excludes the Idle squad/tab rows"
+        );
+    }
+
+    #[test]
+    fn nav_filter_matches_pane_id_node_id_and_slug() {
+        // x-e10f AC1-HP/AC2-HP/AC3-HP: the query matches what the row IS, not
+        // just its label. Pane 307 is the screenshot specimen (live, running
+        // x-8a01, `find > 307` said `no matches`); x-6233 is the bound node;
+        // the slug is the node's title-slug. All three find the pane's row.
+        let mut v = two_pane_view();
+        // A plain (non-agent) pane 307 in notes' first tab, plus an agent on
+        // pane 11 working in-flight node x-6233 - both row classes must match.
+        v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
+            id: 307,
+            label: "shell".into(),
+        }];
+        v.layout.agents = vec![agent_row("claude", 11, None, false)];
+        v.layout.backlog = vec![BacklogCard {
+            id: "x-6233".into(),
+            slug: "mux-navigator-matches-by-identity".into(),
+            priority: "p1".into(),
+            state: CardState::InFlight,
+            pane_id: Some(11),
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            plan_path: None,
+            head: false,
+        }];
+        let rows = |q: &str| {
+            let nav = NavView {
+                query: q.into(),
+                state_filter: None,
+                cursor: 0,
+            };
+            v.nav_filtered(&nav)
+        };
+        let hits_pane = |r: &NavRow| {
+            matches!(
+                &r.hit,
+                ChromeHit::Cmds(cs) if cs.iter().any(|c| matches!(c, Command::FocusPane(p) if *p == 307))
+            )
+        };
+        assert!(
+            rows("307").iter().any(hits_pane),
+            "the plain pane row is found by its mux pane id, not its label"
+        );
+        assert!(
+            rows("307").iter().all(|r| !r.label.contains("307")),
+            "the hit is invisible in every matched label - it matched the key"
+        );
+        assert!(
+            rows("x-6233")
+                .iter()
+                .any(|r| r.label.contains("claude")),
+            "the agent row working x-6233 is found by node id via the pane join"
+        );
+        assert!(
+            rows("matches-by-identity")
+                .iter()
+                .any(|r| r.label.contains("claude")),
+            "the agent row is found by its bound node's title-slug, invisible in its label"
+        );
+        assert!(
+            rows("notes").iter().any(|r| r.label == "notes"),
+            "label substrings still match (the workspace half of the ask)"
         );
     }
 
