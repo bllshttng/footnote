@@ -16,6 +16,9 @@ created: <YYYY-MM-DD>
 type: blueprint
 node: <node id>
 claims: <node id>
+difficulty: <low | medium | high>   # Required for plans created after 2026-08-26.
+# An intrinsic property of the work: expected time, edge cases, unknowns, and
+# what a senior tech lead makes of the problem. Not a model or capacity hint.
 sources: [<artifacts actually read>]
 consolidation:
   outcome: <absorb | append | proceed_alone>

@@ -13,6 +13,11 @@ created: <YYYY-MM-DD>            # Required. The consolidation gate reads it to
 #                                 # and the gate falls back to a YYYY-MM-DD in
 #                                 # the filename, then REFUSES the plan if
 #                                 # neither carries a date.
+difficulty: <low | medium | high> # Required for plans created after 2026-08-26.
+#                                 # An intrinsic property of the work: expected
+#                                 # time, edge cases, unknowns, and what a
+#                                 # senior tech lead makes of the problem. Not
+#                                 # a model or capacity hint.
 # claims: ab-XXXXXXXX             # Only when the input was an ab-id. When set,
 #                                 # `fno backlog intake` updates that idea-state
 #                                 # node in place instead of creating a duplicate.

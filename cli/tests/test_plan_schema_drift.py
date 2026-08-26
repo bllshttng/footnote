@@ -149,6 +149,7 @@ def test_design_template_actually_validates() -> None:
         .replace("<node id; a scalar, never a list>", "x-9999")
         .replace("<node id>", "x-9999")
         .replace("<YYYY-MM-DD>", "2026-07-28")
+        .replace("<low | medium | high>", "medium")
         .replace("light|standard|deep", "standard")
         .replace("[<artifacts actually read>]", "[probe.py]")
         .replace("<absorb | append | proceed_alone>", "proceed_alone")
@@ -158,6 +159,20 @@ def test_design_template_actually_validates() -> None:
         f"so it is no longer validating the real shape: {filled!r}"
     )
     PlanFrontmatter(**yaml.safe_load(filled))  # raises ValidationError on drift
+
+
+def test_design_template_shows_difficulty() -> None:
+    """x-baef: the gate now demands ``difficulty`` on every post-gate plan, and
+    the field stays Pydantic-optional so the required-subset test above cannot
+    see it. Name it directly or the template can silently drop the one key the
+    gate refuses to default."""
+    frontmatter = _design_template().split("---")[1]
+    shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))
+    assert "difficulty" in shown, (
+        f"{DESIGN_SPEC.name}'s frontmatter template omits `difficulty`; a plan "
+        "written to it after 2026-08-26 fails validation on a key the author "
+        "was never shown"
+    )
 
 
 def test_design_template_carries_the_section_blueprint_builds_tasks_from() -> None:
