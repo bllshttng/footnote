@@ -54,7 +54,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::claude_ask::{emit_event, validate_spawn_inputs};
-use crate::opencode_ask::AskOutcome;
+use crate::opencode_ask::{apply_opencode_variant, AskOutcome, OPENCODE_DEFAULT_MODEL};
 use crate::paths::AgentsHome;
 use crate::state::{load_registry, update_registry, RegistryEntry};
 use crate::AgentStatus;
@@ -512,6 +512,7 @@ pub fn dispatch_opencode_serve(
     from_name: &str,
     cwd: &Path,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> AskOutcome {
     dispatch_opencode_serve_inner(
         home,
@@ -520,6 +521,7 @@ pub fn dispatch_opencode_serve(
         from_name,
         cwd,
         model,
+        effort,
         crate::claude_ask::state_dirs_from_env(),
         "opencode",
     )
@@ -536,6 +538,7 @@ fn dispatch_opencode_serve_inner(
     from_name: &str,
     cwd: &Path,
     model: Option<&str>,
+    effort: Option<&str>,
     state_dirs: Vec<String>,
     opencode_bin: &str,
 ) -> AskOutcome {
@@ -567,6 +570,15 @@ fn dispatch_opencode_serve_inner(
             ),
             2,
         );
+    }
+
+    if let Some(effort) = effort {
+        let selected_model = model
+            .filter(|model| !model.is_empty())
+            .unwrap_or(OPENCODE_DEFAULT_MODEL);
+        if let Err(error) = apply_opencode_variant(selected_model, effort) {
+            return AskOutcome::err(error, 2);
+        }
     }
 
     let serve = match ensure_serve(home) {
@@ -785,7 +797,7 @@ fn dispatch_opencode_serve_inner(
         model_basis: model
             .filter(|m| !m.is_empty())
             .map(|_| "requested".to_string()),
-        effort: None,
+        effort: effort.map(str::to_string),
         harness: Some("opencode".to_string()),
         harness_session_id: Some(session_id.clone()),
         cwd: cwd.to_string_lossy().to_string(),
@@ -1260,6 +1272,7 @@ mod tests {
             "op",
             &cwd,
             None,
+            None,
             vec![state_dir.to_string_lossy().to_string()],
             &stub.to_string_lossy(),
         );
@@ -1316,6 +1329,7 @@ mod tests {
             "op",
             Path::new("/tmp"),
             None,
+            None,
             Vec::new(),
             "opencode",
         );
@@ -1336,6 +1350,7 @@ mod tests {
             "m",
             "op",
             Path::new("/tmp"),
+            None,
             None,
             Vec::new(),
             "opencode",
