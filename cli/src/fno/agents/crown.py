@@ -114,7 +114,7 @@ def calling_agent_row():
         "invalid",
         "contradiction",
         "name_only",
-    }:
+    } or (ident.disposition == "canonical" and not ident.session_id):
         return REGISTRY_UNREADABLE
     if not ident.session_id or not ident.harness:
         return None

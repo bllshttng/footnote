@@ -110,13 +110,16 @@ def test_unregistered_agent_refuses_grant(monkeypatch):
     assert "/fno-me" in problem or "wait for the row" in problem
 
 
-@pytest.mark.parametrize("disposition", ["invalid", "contradiction", "name_only"])
-def test_malformed_self_identity_refuses_grant(monkeypatch, disposition):
+@pytest.mark.parametrize(
+    ("disposition", "harness"),
+    [("invalid", None), ("contradiction", None), ("name_only", None), ("canonical", "claude")],
+)
+def test_malformed_self_identity_refuses_grant(monkeypatch, disposition, harness):
     """Malformed canonical identity is not an attended-human identity."""
     monkeypatch.setattr(
         "fno.agents.self_stamp.resolve_self_identity",
         lambda: SimpleNamespace(
-            session_id=None, harness=None, disposition=disposition
+            session_id=None, harness=harness, disposition=disposition
         ),
     )
 
