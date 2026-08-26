@@ -314,7 +314,12 @@ class RenderTargetConfig(BaseModel):
         # HTML over it on every mutation. Reject at load; resolution itself is
         # best-effort (a path that cannot resolve skips only this check).
         try:
-            from fno.graph import _constants as _gc
+            # importlib, not a direct import: a static fno.config ->
+            # fno.graph edge here creates a mypy import cycle that
+            # degrades _constants' lazy attrs to Path? downstream.
+            import importlib as _il
+
+            _gc = _il.import_module("fno.graph._constants")
 
             resolved = expanded.resolve()
             for state_path in (_gc.GRAPH_JSON, _gc.GRAPH_MD, _gc.GRAPH_HTML):
