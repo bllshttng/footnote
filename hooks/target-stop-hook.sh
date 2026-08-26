@@ -51,7 +51,13 @@ fi
 # present, a checker that cannot do its job must block-and-signal, never allow.
 LIVE_STATE_FILE=".fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
+TARGET_CWD="$PWD"
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+WORKTREE_COUNT=$(git -C "$PWD" worktree list --porcelain 2>/dev/null \
+    | grep -c '^worktree ' || true)
+[[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
+OTHER_WORKTREE_PRESENT=0
+(( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
 
 resolve_agents_bin() {
     if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
@@ -96,9 +102,14 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
             RESOLVED_STATE=$("$BIN" manifest-for-session \
                 --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
         fi
+        RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
             exit 0
@@ -112,12 +123,21 @@ else
         RESOLVE_RC=0
         RESOLVED_STATE=$("$BIN" manifest-for-session \
             --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+        RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             TARGET_NO_MATCH=1
+        elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+            TARGET_RESOLVE_BROKEN=1
         fi
+    elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+        TARGET_RESOLVE_BROKEN=1
     fi
 fi
 
@@ -171,6 +191,21 @@ trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 KING_STATE_FILE=""
 DRIVER="target"
 if [[ ! -f "$STATE_FILE" ]]; then
+    if [[ "$TARGET_RESOLVE_BROKEN" -eq 1 ]]; then
+        RCOUNT_FILE=".fno/.loop-check-unavail-${RESOLVE_HARNESS_ID:-anon}"
+        RCOUNT=0
+        mkdir -p .fno 2>/dev/null || true
+        [[ -f "$RCOUNT_FILE" ]] && RCOUNT=$(tr -dc '0-9' < "$RCOUNT_FILE" 2>/dev/null)
+        [[ -n "$RCOUNT" ]] || RCOUNT=0
+        RCOUNT=$((10#$RCOUNT + 1))
+        echo "$RCOUNT" > "$RCOUNT_FILE" 2>/dev/null || true
+        if (( RCOUNT <= MAX_UNAVAIL_RETRIES )); then
+            echo "target stop-hook: checker unavailable (${RCOUNT}/${MAX_UNAVAIL_RETRIES}), keeping session running" >&2
+            exit 2
+        fi
+        echo "target stop-hook: manifest resolver unavailable ${RCOUNT} times; allowing visitor stop" >&2
+        exit 0
+    fi
     # Presence is NOT ownership. Kings run in the canonical checkout, which is
     # where every ordinary session also runs, and nothing deletes this manifest
     # when a king dies. Gating on the file alone therefore held every later
@@ -399,7 +434,7 @@ else
         --driver "$DRIVER" \
         --state "$STATE_FILE" \
         --transcript "$TRANSCRIPT_PATH" \
-        --cwd "$PWD" \
+        --cwd "$TARGET_CWD" \
         --hook-input-stdin \
         2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
 
@@ -493,7 +528,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_OUT="$("$BIN" finalize \
         --state "$FINALIZE_STATE" \
         --transcript "$TRANSCRIPT_PATH" \
-        --cwd "$PWD" \
+        --cwd "$TARGET_CWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     if [[ -n "$FINALIZE_OUT" ]]; then
         printf '%s\n' "$FINALIZE_OUT" >> "${REPO_ROOT}/.fno/finalize.stderr.log" 2>/dev/null || true

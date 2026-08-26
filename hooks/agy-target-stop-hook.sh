@@ -85,7 +85,13 @@ EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
 LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
+TARGET_CWD="$ROOT"
 REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
+WORKTREE_COUNT=$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
+    | grep -c '^worktree ' || true)
+[[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
+OTHER_WORKTREE_PRESENT=0
+(( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
 
 resolve_agents_bin() {
     if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
@@ -103,8 +109,9 @@ BIN=""
 TARGET_RESOLVE_BROKEN=0
 TARGET_NO_MATCH=0
 if [[ -f "$LIVE_STATE_FILE" ]]; then
-    RESIDENT_HARNESS_ID=$(grep '^harness_session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
-        | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' \
+    RESIDENT_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' \
+        "$LIVE_STATE_FILE" 2>/dev/null \
+        | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' | tr -d '[:space:]' \
         | grep -Ev '^(null)?$' | head -1 || true)
     if [[ -n "$CONVERSATION_ID" && -n "$RESIDENT_HARNESS_ID" \
         && "$RESIDENT_HARNESS_ID" != "$CONVERSATION_ID" ]]; then
@@ -116,9 +123,14 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
             RESOLVED_STATE=$("$BIN" manifest-for-session \
                 --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
         fi
+        RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             echo "loop-check: no manifest names session ${CONVERSATION_ID}; visitor allowed" >&2
             emit '{}'
@@ -132,12 +144,21 @@ else
         RESOLVE_RC=0
         RESOLVED_STATE=$("$BIN" manifest-for-session \
             --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
+        RESOLVED_CWD=""
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
             TARGET_NO_MATCH=1
+        elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+            TARGET_RESOLVE_BROKEN=1
         fi
+    elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+        TARGET_RESOLVE_BROKEN=1
     fi
 fi
 
@@ -370,7 +391,7 @@ else
     DECISION_JSON=$("$BIN" loop-check \
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \
-        --cwd "$ROOT" \
+        --cwd "$TARGET_CWD" \
         2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
 
     if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
@@ -414,7 +435,7 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_OUT="$("$BIN" finalize \
         --state "$FINALIZE_STATE" \
         --transcript "$SYNTH" \
-        --cwd "$ROOT" \
+        --cwd "$TARGET_CWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "$ROOT/.fno/finalize.stderr.log" 2>/dev/null || true
     if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then
