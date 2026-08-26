@@ -926,6 +926,61 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
     assert rows[0].word_count == style.word_count(rows[0].body)
 
 
+def test_raw_review_emits_started_transport_observation_with_literal_receipt(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_claude(mailbox, monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        "fno.review.invocation.emit_review_invocation",
+        lambda **kwargs: seen.append(kwargs) or {"positive": True},
+    )
+
+    with pytest.raises(typer.Exit) as sent:
+        _raw_send("claudepeer", "/code-review medium --comment", self_ok=False)
+
+    assert sent.value.exit_code == 0
+    assert capsys.readouterr().out.strip() == "injected"
+    assert len(seen) == 1
+    observation = seen[0]
+    assert observation["stage"] == "sent"
+    assert observation["verb"] == "/code-review"
+    assert observation["level"] == "medium"
+    assert observation["level_source"] == "explicit"
+    assert observation["transport"] == "mail_send_raw"
+    assert observation["receipt"] == "delivered (hosted)"
+    assert observation["submit_required"] is False
+
+
+def test_codex_review_invocation_keeps_rpc_server_error_message(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    seen = []
+    monkeypatch.setattr(
+        "fno.review.invocation.emit_review_invocation",
+        lambda **kwargs: seen.append(kwargs) or {"positive": True},
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *args, **kwargs: {
+            "delivered": False,
+            "reason": "server-error: review target must be a base branch",
+        },
+    )
+
+    with pytest.raises(typer.Exit) as refused:
+        _raw_send("codexpeer", "/review --base origin/main", self_ok=False)
+
+    assert refused.value.exit_code != 0
+    assert not seen, "the Rust Codex RPC transport owns the sole audit event"
+    assert "review target must be a base branch" in capsys.readouterr().err
+
+
 def test_raw_hosted_audit_uses_stable_sender_without_ambient_identity(
     mailbox, monkeypatch, capsys
 ):

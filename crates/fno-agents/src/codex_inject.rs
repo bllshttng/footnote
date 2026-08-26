@@ -638,6 +638,155 @@ fn review_start_audit_payload_len(fields: &serde_json::Map<String, serde_json::V
         .unwrap_or(usize::MAX)
 }
 
+fn review_invocation_id() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("ri-{nanos:x}-{}", std::process::id())
+}
+
+fn review_invocation_sidecar(session_id: &str) -> Option<std::path::PathBuf> {
+    if session_id.is_empty()
+        || std::path::Path::new(session_id).file_name()?.to_str()? != session_id
+    {
+        return None;
+    }
+    let root = crate::paths::AgentsHome::from_env()
+        .root()
+        .parent()
+        .map(std::path::Path::to_path_buf)?;
+    Some(
+        root.join("review-invocations")
+            .join(format!("{session_id}.json")),
+    )
+}
+
+fn read_pending_review_invocation(session_id: &str) -> Option<String> {
+    let path = review_invocation_sidecar(session_id)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get("invocation_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+fn write_pending_review_invocation(session_id: &str, invocation_id: &str) {
+    let Some(path) = review_invocation_sidecar(session_id) else {
+        return;
+    };
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    else {
+        return;
+    };
+    let value = serde_json::json!({
+        "invocation_id": invocation_id,
+        "target_session_id": session_id,
+    });
+    let _ = std::io::Write::write_all(&mut file, value.to_string().as_bytes());
+}
+
+fn review_invocation_event_fields(
+    invocation_id: &str,
+    thread_id: &str,
+    audit_payload: Option<&str>,
+    audit_sender: Option<&str>,
+    audit_origin: Option<&str>,
+    confirmed: bool,
+    receipt: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let command = audit_payload.unwrap_or("/review").trim();
+    let mut parts = command.splitn(2, char::is_whitespace);
+    let verb = parts
+        .next()
+        .filter(|token| token.starts_with('/'))
+        .unwrap_or("/review");
+    let args_raw = parts.next().unwrap_or("").trim_start();
+    let mut args = args_raw.split_whitespace();
+    let first_arg = args.next().unwrap_or("");
+    let (level, level_source) = match first_arg {
+        "ultra" => ("ultra", "ultra_forced"),
+        "low" | "medium" | "high" | "xhigh" | "max" => (first_arg, "explicit"),
+        _ => ("unset", "fallback"),
+    };
+    let flags: Vec<&str> = args_raw
+        .split_whitespace()
+        .filter(|arg| arg.starts_with("--"))
+        .collect();
+    let initiator = match audit_origin {
+        Some("operator") => "operator",
+        Some("peer") => "king",
+        Some("scheduler" | "recovery") => "daemon",
+        _ => "unknown",
+    };
+    let mut fields = serde_json::Map::new();
+    fields.insert("invocation_id".into(), invocation_id.into());
+    fields.insert("stage".into(), "sent".into());
+    fields.insert("verb".into(), verb.into());
+    fields.insert("args_raw".into(), args_raw.into());
+    fields.insert("level".into(), level.into());
+    fields.insert("level_source".into(), level_source.into());
+    fields.insert("flags".into(), json!(flags));
+    fields.insert("transport".into(), "codex_rpc".into());
+    fields.insert("initiator".into(), initiator.into());
+    fields.insert("target_session_id".into(), thread_id.into());
+    fields.insert("submit_required".into(), false.into());
+    fields.insert("submit_key".into(), "none".into());
+    fields.insert("submit_confirmed".into(), confirmed.into());
+    fields.insert(
+        "receipt".into(),
+        receipt.chars().take(240).collect::<String>().into(),
+    );
+    if let Some(sender) = audit_sender.filter(|sender| !sender.is_empty()) {
+        fields.insert("initiator_session_id".into(), sender.into());
+    }
+    fields
+}
+
+fn emit_review_invocation_event(
+    thread_id: &str,
+    audit_payload: Option<&str>,
+    audit_sender: Option<&str>,
+    audit_target_cwd: Option<&str>,
+    audit_origin: Option<&str>,
+    invocation_id: &str,
+    confirmed: bool,
+    receipt: &str,
+) {
+    let cwd = audit_target_cwd
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+    let events_path = std::env::var("FNO_EVENTS_PATH")
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| crate::paths::worktree_repo_root(&cwd).join(".fno/events.jsonl"));
+    let fields = review_invocation_event_fields(
+        invocation_id,
+        thread_id,
+        audit_payload,
+        audit_sender,
+        audit_origin,
+        confirmed,
+        receipt,
+    );
+    let _ = crate::events::EventEmitter::new(events_path, "daemon")
+        .emit_fields("review_invocation", fields);
+}
+
+/// The review-start verb entry: parse CLI, drive the round-trip, print the outcome receipt.
+
 /// The `fno-agents review-start` verb entry: parse CLI, drive the round-trip,
 /// print the outcome receipt (or a clean not-delivered reason). The socket
 /// round-trip needs the user's daemon and stays a manual verification, as
@@ -721,8 +870,25 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             return 2;
         }
     };
+    let invocation_id =
+        read_pending_review_invocation(&thread_id).unwrap_or_else(|| review_invocation_id());
+    write_pending_review_invocation(&thread_id, &invocation_id);
     let outcome = deliver_via_codex_review_start(&thread_id, &target, delivery).await;
     let failure_reason = outcome.as_ref().err().map(ToString::to_string);
+    let receipt = match failure_reason.as_deref() {
+        Some(reason) => format!("codex review/start failed: {reason}"),
+        None => "review/start delivered".to_string(),
+    };
+    emit_review_invocation_event(
+        &thread_id,
+        audit_payload.as_deref(),
+        audit_sender.as_deref(),
+        audit_target_cwd.as_deref(),
+        audit_origin.as_deref(),
+        &invocation_id,
+        outcome.is_ok(),
+        &receipt,
+    );
 
     // Audit floor: `review/start` is the second unwrapped-fire path this crate
     // ships. It carries no `<fno_mail>` envelope and leaves no agent-authored
@@ -1221,6 +1387,32 @@ mod tests {
         assert_eq!(fields["lane"], "codex-review-start");
         assert_eq!(fields["confirmed"], false);
         assert_eq!(fields["reason"], "review target must be a base branch");
+    }
+
+    #[test]
+    fn review_invocation_audit_carries_server_message_and_canonical_fields() {
+        let fields = review_invocation_event_fields(
+            "ri-positive",
+            "thread-1",
+            Some("/review medium --comment"),
+            Some("sender-1"),
+            Some("peer"),
+            false,
+            "codex review/start failed: server-error: review target must be a base branch",
+        );
+
+        assert_eq!(fields["stage"], "sent");
+        assert_eq!(fields["transport"], "codex_rpc");
+        assert_eq!(fields["level"], "medium");
+        assert_eq!(fields["level_source"], "explicit");
+        assert_eq!(fields["flags"], serde_json::json!(["--comment"]));
+        assert_eq!(fields["initiator"], "king");
+        assert_eq!(fields["submit_key"], "none");
+        assert_eq!(
+            fields["receipt"],
+            "codex review/start failed: server-error: review target must be a base branch"
+        );
+        assert!(fields["invocation_id"].as_str().unwrap().starts_with("ri-"));
     }
 
     #[test]

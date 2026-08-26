@@ -3049,6 +3049,12 @@ def _raw_send(
         mail_inject_probe,
     )
     from fno.agents.registry import AgentResolutionError, resolve_agent
+    from fno.review.invocation import (
+        emit_review_invocation,
+        mint_invocation_id,
+        parse_review_invocation,
+        write_pending_invocation,
+    )
 
     def _refused(reason: str, *, usage: bool = False) -> None:
         # Under --check a refusal about the SESSION is an ANSWER, not an error:
@@ -3137,6 +3143,7 @@ def _raw_send(
         _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
 
     session_id = getattr(entry, "harness_session_id", None) or ""
+    review = parse_review_invocation(stripped)
 
     # 5. Self-send redirect. The transport is send-keys: an unwrapped payload is
     #    text typed at a prompt line, so nothing here can be a capability
@@ -3196,6 +3203,61 @@ def _raw_send(
     transport_sender = resolve_self_handle()
     sender = stamp_from(transport_sender)
     raw_recipient = canonical_handle(session_id)
+
+    invocation_id = None
+    failure_reasons: list[str] = []
+    if review and not check:
+        invocation_id = mint_invocation_id()
+        write_pending_invocation(
+            target_session_id=session_id,
+            invocation_id=invocation_id,
+        )
+
+    def _emit_review_sent(
+        *,
+        transport: str,
+        result: object,
+        receipt: str | None = None,
+        submit_required: bool = False,
+    ) -> None:
+        if review is None or invocation_id is None:
+            return
+        if transport == "codex_rpc":
+            return
+        confirmed = result is True or result in {"started", "queued"}
+        if receipt is None:
+            receipt = "delivered (hosted)" if confirmed else "live-miss"
+        initiator = "self" if self_ok else "king"
+        if origin == "operator":
+            initiator = "operator"
+        elif origin in {"scheduler", "recovery"}:
+            initiator = "daemon"
+        submit_key = None
+        if submit_required:
+            submit_key = "tab" if getattr(entry, "harness", "") == "codex" and review else "\\r"
+        pr = None
+        explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(str(review.get("args_raw") or ""))
+        if explicit_pr:
+            pr = int(explicit_pr.group("pr"))
+        emit_review_invocation(
+            source="target",
+            invocation_id=invocation_id,
+            stage="sent",
+            verb=review["verb"],
+            args_raw=review["args_raw"],
+            level=review["level"],
+            level_source=review["level_source"],
+            flags=review["flags"],
+            transport=transport,
+            initiator=initiator,
+            initiator_session_id=transport_sender,
+            target_session_id=session_id or None,
+            submit_required=submit_required,
+            submit_key=submit_key,
+            submit_confirmed=confirmed if submit_required else None,
+            receipt=receipt,
+            pr=pr,
+        )
 
     def _reserve_raw():
         raw_msg_id = generate_msg_id()
@@ -3305,6 +3367,15 @@ def _raw_send(
             if origin is not None:
                 review_kwargs["origin"] = origin
             receipt = _review_start_codex(session_id, target, **review_kwargs)
+            if receipt.get("delivered"):
+                receipt_text = "review/start delivered"
+            else:
+                receipt_text = f"codex review/start failed: {receipt.get('reason') or 'rpc-error'}"
+            _emit_review_sent(
+                transport="codex_rpc",
+                result=bool(receipt.get("delivered")),
+                receipt=receipt_text,
+            )
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""
@@ -3433,7 +3504,9 @@ def _raw_send(
             # wall's default, the verb never runs, and codex has no transcript
             # confirm, so the receipt still reads `injected`.
             gate=True,
-            review=review_request,
+            review=review is not None,
+            review_invocation_id=invocation_id,
+            failure_out=failure_reasons,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
@@ -3442,6 +3515,14 @@ def _raw_send(
             sender=transport_sender,
             origin=origin,
         )
+
+    failure_receipt = failure_reasons[-1] if failure_reasons else None
+    _emit_review_sent(
+        transport=("mux_pane_send_raw" if entry.mux else ("mail_to_self_raw" if self_ok else "mail_send_raw")),
+        result=delivered,
+        receipt=(str(delivered) if isinstance(delivered, str) else failure_receipt),
+        submit_required=bool(entry.mux),
+    )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
