@@ -22,7 +22,16 @@ Two readings follow, and neither is obvious from the table alone.
 
 **agy has both durable halves, like codex.** Three turns ran on one conversation, each from a fresh process. Turns 2 and 3 both returned a token planted in turn 1. Per-turn wall clock was 7.64s, 4.56s and 4.67s. The `.db` filename equals the `conversation_id` the CLI returns in its own JSON, so the identity join needs no inference. `harness_capabilities.toml` records agy's `interactive_resume` as `kind = "unsupported"`, which understates the CLI. Correcting that row changes what fno will try to run, so it needs its own verification rather than a docs edit.
 
-agy also exposes `--input-format stream-json`, which reads one NDJSON message per line from stdin and runs a turn for each. That is the boot-once, drive-many property `codex exec resume` lacks, and it is the same shape as `provider.rs`'s `claude_stream_json_resume_argv`. So agy's lane plausibly reuses machinery fno already ships for claude.
+agy also holds a bidirectional NDJSON lane, and this was driven rather than inferred. Two turns went down one process that was never restarted. Turn 1 answered `ack` at step 17. Turn 2 answered the turn-1 token at step 19. The process was still alive afterwards.
+
+```
+agy --conversation <uuid> --input-format stream-json --output-format stream-json \
+    --dangerously-skip-permissions -p=
+```
+
+`-p=` with an empty attached value is load-bearing. A bare `-p` swallows the next flag as its prompt, and `--print` alone is rejected with `flag needs an argument`. Input messages are `{"event":"user","message":{"role":"user","content":"<text>"}}`. A `content` array of `{"type":"text","text":...}` parts also parses. The vault documents the output stream only, so the event name came from the binary's own error strings.
+
+That is the boot-once, drive-many property `codex exec resume` lacks, and it is the same shape as `provider.rs`'s `claude_stream_json_resume_argv`. So agy's lane can reuse machinery fno already ships for claude. Its `agent_response` steps also carry `text_delta` and a per-step `duration_seconds`, so a driver can attribute latency, which `codex exec resume` does not permit.
 
 **opencode's `true` is the one bit not earned to this page's standard.** `harness_map.py`'s `substrate_default` returns `thread` for any harness whose bit is true. So opencode is the only harness routed onto a thread lane by default. Every harness with a false bit defaults to `headless`, a one-shot.
 
