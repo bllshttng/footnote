@@ -833,7 +833,7 @@ def test_codex_ambient_pointer_keeps_default_worker_provider_claude(
     assert seen["pointer"] == ("codex", "codex-thread-123", "/tmp/codex-live")
     cmd = seen["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "claude"
-    assert cmd[cmd.index("--substrate") + 1] == "bg"
+    assert cmd[cmd.index("--substrate") + 1] == "thread"
 
 
 def test_spawn_worker_threads_model_and_provider(monkeypatch):
@@ -1539,11 +1539,11 @@ def _write_config(root: Path, body: str) -> None:
     (root / ".fno" / "config.toml").write_text(body)
 
 
-def test_AC10_HP_absent_substrate_key_still_yields_bg(monkeypatch, tmp_path):
+def test_AC10_HP_absent_substrate_key_still_yields_thread(monkeypatch, tmp_path):
     """The historical hardcode is the default, so nothing changes unconfigured."""
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
-    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "thread"
 
 
 def test_AC10_HP_configured_dispatch_substrate_reaches_every_spawn(monkeypatch, tmp_path):
@@ -1572,7 +1572,7 @@ def test_shared_dispatch_substrate_overrides_legacy_compatibility_key(
     )
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
-    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "thread"
 
 
 def test_a_garbage_dispatch_substrate_fails_loud(monkeypatch, tmp_path):
