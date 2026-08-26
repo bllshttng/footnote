@@ -4,11 +4,19 @@ HTML authoring belongs exclusively to :mod:`fno.graph.render_html`.
 """
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from fno.graph.render import (
     _project_key,
     make_kanban_classifiers,
 )
 from fno.graph.render_html import PUBLIC_BACKLOG_STATUSES, group_for
+
+if TYPE_CHECKING:
+    from fno.config import RenderTargetConfig
 
 # Public-facing column set + labels. Active work is folded into Now and the
 # internal Triage column is folded into Later; Done is relabeled "Shipped".
@@ -121,3 +129,96 @@ def render_public_backlog_html(entries: list[dict], project: str) -> str:
         title=f"{project} backlog",
         projection="backlog",
     )
+
+
+def _configured_targets() -> "list[RenderTargetConfig]":
+    """Read ``config.backlog.render_targets`` from the GLOBAL config file.
+
+    Walks the config.toml-first candidates (``_global_settings_path`` alone
+    names the legacy ``settings.yaml``; the operator's list lives in
+    ``~/.fno/config.toml``), for the same recorded reason as
+    ``render_html._load_obsidian_vault``: this runs inside
+    ``locked_mutate_graph`` and ``load_settings()`` stops at a project-local
+    file that would shadow the operator's global list. Runs after graph.json
+    is already written, so every failure degrades to ``[]`` instead of raising
+    into the mutation.
+    """
+    try:
+        # Function-local: keep graph-module imports free of config's pydantic.
+        from fno.config import RenderTargetConfig
+        from fno.config_io import (
+            _global_settings_path,
+            config_read_candidates,
+            read_config_flat,
+        )
+
+        for candidate in config_read_candidates([_global_settings_path()]):
+            if not candidate.is_file():
+                continue
+            backlog = read_config_flat(candidate).get("backlog")
+            if not isinstance(backlog, dict) or "render_targets" not in backlog:
+                continue
+            rows = backlog["render_targets"]
+            if not isinstance(rows, list):
+                print(
+                    "Warning: backlog.render_targets is not an array of tables; "
+                    "ignoring it",
+                    file=sys.stderr,
+                )
+                return []
+            out: list[RenderTargetConfig] = []
+            for row in rows:
+                try:
+                    out.append(RenderTargetConfig.model_validate(row))
+                except Exception as exc:
+                    print(
+                        f"Warning: skipping malformed backlog.render_targets row: {exc}",
+                        file=sys.stderr,
+                    )
+            return out
+        return []
+    except Exception:
+        return []
+
+
+def render_configured_targets(entries: list[dict]) -> None:
+    """Render every configured public projection (x-9415). Called from
+    ``locked_mutate_graph`` AFTER graph.json is written, so it must never
+    raise: a failing operator target warns and is skipped, never wedging the
+    mutation. The leak gate stays fail-closed - a refusal leaves the target
+    byte-unchanged and names every offender; it still only skips the target."""
+    from fno.graph.render_html import atomic_write_documents, public_title_leaks
+
+    for target in _configured_targets():
+        out = Path(os.path.expanduser(target.path))
+        try:
+            if target.projection == "roadmap":
+                render_set = [
+                    e for items in _columns(entries, target.project).values() for e in items
+                ]
+                html = render_public_roadmap_html(entries, target.project)
+            else:
+                render_set = public_backlog_entries(entries, target.project)
+                html = render_public_backlog_html(entries, target.project)
+            offenders = public_title_leaks(render_set)
+            if offenders:
+                # Fail closed, before any write: the public file stays
+                # byte-unchanged while the already-written graph.json and the
+                # remaining targets are untouched by this refusal.
+                print(
+                    f"Warning: public title leak gate refused {out}: "
+                    f"{len(offenders)} offending title(s); target left unchanged",
+                    file=sys.stderr,
+                )
+                for node_id, title, classes in offenders:
+                    print(f"  {node_id}: {','.join(classes)}: {title}", file=sys.stderr)
+                continue
+            atomic_write_documents({out: html})
+        except Exception as exc:
+            # Wide on purpose, unlike store.py's OSError-only render handlers:
+            # graph.json is already committed and a bad operator target must
+            # never fail `fno backlog update`. The type name keeps bugs visible.
+            print(
+                f"Warning: render target {out} failed: {type(exc).__name__}: {exc}",
+                file=sys.stderr,
+            )

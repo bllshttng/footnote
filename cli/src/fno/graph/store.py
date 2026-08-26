@@ -1076,11 +1076,23 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # KeyError/TypeError/etc. surface so render bugs are visible
             # instead of silently producing a stale graph.md.
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
+        _archived = entries_with_archive(entries)
         try:
             from fno.graph.render_html import render_graph_html
-            render_graph_html(entries_with_archive(entries), html_target)
+            render_graph_html(_archived, html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+        # Operator-configured project-scoped public projections (x-9415),
+        # through the same leak gate as the manual roadmap verb. CANONICAL
+        # ONLY: a tmp graph.json in a test must never write the operator's
+        # real public targets. Fail-open like the renders above - graph.json
+        # is already written; render_configured_targets itself never raises.
+        if is_canonical:
+            try:
+                from fno.graph.roadmap_public import render_configured_targets
+                render_configured_targets(_archived)
+            except Exception as e:
+                print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
         # produced a fresh ready node. Best-effort; the daemon's poll floor is the
         # guarantee, so a failed touch is harmless and never wedges the mutation.

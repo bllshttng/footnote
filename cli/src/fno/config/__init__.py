@@ -273,6 +273,52 @@ class MaintainBlock(BaseModel):
         return v
 
 
+_RENDER_PROJECTIONS = ("backlog", "roadmap")
+
+
+class RenderTargetConfig(BaseModel):
+    """One auto-rendered public projection (``config.backlog.render_targets[]``).
+
+    Every graph mutation re-renders each configured target through the shared
+    public title leak gate (one renderer, one gate - never a second HTML
+    author). An unknown ``projection`` raises at config load so a typo is a
+    loud error rather than a target that silently never renders.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    project: str
+    projection: str = "backlog"
+
+    @field_validator("path")
+    @classmethod
+    def _plain_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets path must not be empty")
+        _check_no_glob(v, "backlog.render_targets path")
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def _nonempty_project(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets project must not be empty")
+        return v
+
+    @field_validator("projection")
+    @classmethod
+    def _known_projection(cls, v: str) -> str:
+        if v not in _RENDER_PROJECTIONS:
+            raise ValueError(
+                f"unknown backlog.render_targets projection {v!r} "
+                f"(allowed: {', '.join(_RENDER_PROJECTIONS)})"
+            )
+        return v
+
+
 class BacklogBlock(BaseModel):
     """Backlog hygiene settings (nested under 'config.backlog').
 
@@ -295,6 +341,27 @@ class BacklogBlock(BaseModel):
     # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
+    render_targets: list[RenderTargetConfig] = Field(default_factory=list)
+
+    @field_validator("render_targets", mode="before")
+    @classmethod
+    def _coerce_render_targets(cls, v: object) -> object:
+        """Fail-safe container: a non-list ``render_targets`` degrades to [] so
+        a stray scalar never bricks settings load. Present-but-not-a-list (the
+        ``[backlog.render_targets.<name>]`` table typo where the
+        ``[[backlog.render_targets]]`` array belongs) is WARNED, not silently
+        dropped - the operator would otherwise believe their public board is
+        wired. Mirrors ``_coerce_status_sinks``."""
+        if isinstance(v, list):
+            return v
+        if v is not None:
+            _LOG.warning(
+                "config.backlog.render_targets is %s, not an array of tables - "
+                "ignoring it (use [[backlog.render_targets]], not "
+                "[backlog.render_targets.<name>])",
+                type(v).__name__,
+            )
+        return []
 
     @field_validator("staleness_days")
     @classmethod
