@@ -146,16 +146,28 @@ def _configured_targets() -> "list[RenderTargetConfig]":
     """
     try:
         # Function-local: keep graph-module imports free of config's pydantic.
-        from fno.config import BacklogBlock, RenderTargetConfig
+        from fno.config import RENDER_TARGETS_TABLE_TYPO_MSG, RenderTargetConfig
         from fno.config_io import read_global_block
 
-        backlog = read_global_block("backlog") or {}
+        unreadable: list = []
+        backlog = read_global_block("backlog", unreadable=unreadable) or {}
+        if unreadable:
+            # A corrupt global config must not silently disable every target
+            # behind the generic parse warning config_io already logged.
+            print(
+                "Warning: backlog.render_targets may be disabled: global "
+                f"config unreadable: {', '.join(str(p) for p in unreadable)}",
+                file=sys.stderr,
+            )
         rows = backlog.get("render_targets")
         if rows is None:
             rows = []
         elif not isinstance(rows, list):
-            # Container typo: one warning source - the BacklogBlock coercion.
-            BacklogBlock.model_validate({"render_targets": rows})
+            # Same text the BacklogBlock coercion logs at settings load.
+            print(
+                "Warning: " + RENDER_TARGETS_TABLE_TYPO_MSG % type(rows).__name__,
+                file=sys.stderr,
+            )
             rows = []
         # Per-row validation, not one atomic model_validate: a single bad row
         # (e.g. a relative path) must not stop every OTHER target rendering.

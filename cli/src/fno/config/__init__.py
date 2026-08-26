@@ -275,6 +275,14 @@ class MaintainBlock(BaseModel):
 
 _RENDER_PROJECTIONS = ("backlog", "roadmap")
 
+# Shared with the graph-layer auto-render so the array-of-tables typo warns
+# with one text over both channels (logger at load, stderr at render).
+RENDER_TARGETS_TABLE_TYPO_MSG = (
+    "config.backlog.render_targets is %s, not an array of tables - "
+    "ignoring it (use [[backlog.render_targets]], not "
+    "[backlog.render_targets.<name>])"
+)
+
 
 class RenderTargetConfig(BaseModel):
     """One auto-rendered public projection (``config.backlog.render_targets[]``).
@@ -299,6 +307,7 @@ class RenderTargetConfig(BaseModel):
         if not v:
             raise ValueError("backlog.render_targets path must not be empty")
         _check_no_glob(v, "backlog.render_targets path")
+        _check_path_max(v, "backlog.render_targets path")
         # The auto-render fires from arbitrary project and agent cwds, so a
         # relative path would scatter a copy of the public board into each
         # one. Absolute (or ~/-rooted) only.
@@ -326,8 +335,11 @@ class RenderTargetConfig(BaseModel):
                 _gc.GRAPH_HTML,
                 _gc.GRAPH_ARCHIVE_JSON,
                 _gc.LEDGER_JSON,
-                # the integrity sidecar _write_sha256_sidecar maintains
+                # the integrity sidecar _write_sha256_sidecar maintains, and
+                # the corruption-recovery backup _read_json writes and points
+                # operators to restore from
                 Path(str(_gc.GRAPH_JSON) + ".sha256"),
+                Path(str(_gc.GRAPH_JSON) + ".bak"),
             )
             for state_path in state_paths:
                 if resolved == Path(state_path).resolve():
@@ -396,12 +408,7 @@ class BacklogBlock(BaseModel):
         if isinstance(v, list):
             return v
         if v is not None:
-            _LOG.warning(
-                "config.backlog.render_targets is %s, not an array of tables - "
-                "ignoring it (use [[backlog.render_targets]], not "
-                "[backlog.render_targets.<name>])",
-                type(v).__name__,
-            )
+            _LOG.warning(RENDER_TARGETS_TABLE_TYPO_MSG, type(v).__name__)
         return []
 
     @field_validator("staleness_days")
