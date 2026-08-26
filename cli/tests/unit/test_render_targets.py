@@ -237,7 +237,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     assert row["priority"] == "p1"
 
 
-def test_empty_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch):
+def test_empty_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):
     target = tmp_path / "out" / "empty.html"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("STALE BYTES FROM A DEAD PROJECT", encoding="utf-8")
@@ -254,6 +254,9 @@ def test_empty_project_writes_valid_empty_projection(_isolate, tmp_path, monkeyp
     text = target.read_text(encoding="utf-8")
     assert "STALE BYTES" not in text
     assert "0 public items" in text
+    # A project matching zero entries is also the typo'd-name signature, so
+    # the empty write carries a loud warning rather than passing silently.
+    assert "matches no graph entry" in capsys.readouterr().err
 
 
 def test_unwritable_target_warns_and_completes(_isolate, tmp_path, monkeypatch, capsys):

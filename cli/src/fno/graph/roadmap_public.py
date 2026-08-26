@@ -112,9 +112,12 @@ def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list
     return [(name, groups[name]) for name in sorted(groups)]
 
 
-def render_public_roadmap_html(entries: list[dict], project: str) -> str:
+def render_public_roadmap_html(
+    entries: list[dict], project: str, cols: dict[str, list[dict]] | None = None
+) -> str:
     from fno.graph.render_html import render_public_sections_html
-    cols = _columns(entries, project)
+    if cols is None:
+        cols = _columns(entries, project)
     sections = [(label, cols[column]) for column, label in _PUBLIC_COLUMNS]
     return render_public_sections_html(
         sections, title=f"{project} roadmap", projection="roadmap"
@@ -178,7 +181,14 @@ def _configured_targets() -> "list[RenderTargetConfig]":
             break
         _warn_shadowed_local_rows(out)
         return out
-    except Exception:
+    except Exception as exc:
+        # Every other degradation in this module warns; a silent [] here would
+        # read as "no targets configured" while the board rots.
+        print(
+            f"Warning: backlog.render_targets read failed: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
         return []
 
 
@@ -220,28 +230,30 @@ def render_configured_targets(entries: list[dict]) -> None:
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
     byte-unchanged and names every offender; it still only skips the target."""
-    from fno.graph.render_html import (
-        atomic_write_documents,
-        public_title_leaks,
-        render_public_sections_html,
-    )
+    from fno.graph.render_html import atomic_write_documents, public_title_leaks
 
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
         try:
             if target.projection == "roadmap":
                 # One _columns pass feeds both the gate's render set and the
-                # sections; render_public_roadmap_html would derive it again.
+                # renderer (the manual verb derives it internally).
                 cols = _columns(entries, target.project)
                 render_set = [e for items in cols.values() for e in items]
-                html = render_public_sections_html(
-                    [(label, cols[column]) for column, label in _PUBLIC_COLUMNS],
-                    title=f"{target.project} roadmap",
-                    projection="roadmap",
-                )
+                html = render_public_roadmap_html(entries, target.project, cols=cols)
             else:
                 render_set = public_backlog_entries(entries, target.project)
                 html = render_public_backlog_html(entries, target.project)
+            if not any(_project_key(e) == target.project for e in entries):
+                # Almost certainly a typo'd project: the empty projection is
+                # still written (a drained project must not keep a stale
+                # board), but the operator gets a loud signal each mutation.
+                print(
+                    f"Warning: render target {out} matches no graph entry with "
+                    f"project {target.project!r}; wrote an empty projection "
+                    "(check the project name)",
+                    file=sys.stderr,
+                )
             offenders = public_title_leaks(render_set)
             if offenders:
                 # Fail closed, before any write: the public file stays
