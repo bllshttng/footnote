@@ -85,6 +85,12 @@ inbox approvals decide !--db
 inbox approvals ls !--db
 inbox approvals show !--db
 inbox board !--state
+inbox decide !--decision !--origin !--subject
+inbox decisions !--subject
+inbox law enact
+inbox law inspect
+inbox law prepare
+inbox law resume
 inbox notify
 inbox outstanding ask
 inbox outstanding clear !--origin
@@ -127,7 +133,6 @@ retro
 review !--session !--sigma-current-head !--sigma-head !--sigma-node !--sigma-pr !--sigma-project !--sigma-reviews-root !--sigma-round !--sigma-scope-base !--sigma-scope-reason
 roles
 route
-runtime
 scoreboard
 setup
 skill-diff

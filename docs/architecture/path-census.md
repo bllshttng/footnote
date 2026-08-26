@@ -120,7 +120,7 @@ Neither reads a field `_apply_graph_defaults` rewrites, so neither is a drift la
 
 | # | Path | Entry | Disposition | Closing PR |
 |---|---|---|---|---|
-| 1 | `fno workspace worktree ensure` / `fno do target start` | `worktree_cli/cli.py:282`, `target_cli.py:900` | KEEP, canonical autonomous path | — |
+| 1 | `fno agents workspace worktree ensure` / `fno do target start` | `worktree_cli/cli.py:282`, `target_cli.py:900` | KEEP, canonical autonomous path | - |
 | 2 | Raw `git worktree add` + linker | `scripts/setup/setup-worktree.sh` | KEEP, manual path converges | — |
 | 3 | Conductor UI recipe | `conductor.json:3`, `worktree-create-hook.sh` | KEEP, converge on linker | — |
 | 4 | Claude WorktreeCreate hook | `hooks/worktree-setup.sh` | RETIRE duplicate setup | OPEN |

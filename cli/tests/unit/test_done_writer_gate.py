@@ -150,7 +150,13 @@ def _stub_gh(monkeypatch, state: str | None, *, calls: list | None = None):
             merged_at="2026-01-01T00:00:00Z" if state == "MERGED" else None,
         )
 
+    # x-6233: the fold merged the two done commands; the canonical close
+    # queries through graph.cli's seam, the delegated surface through
+    # done.cli's. Patch both so either path sees the fixed state.
+    import fno.graph.cli as graph_cli
+
     monkeypatch.setattr(done_cli, "_gh_query", _q)
+    monkeypatch.setattr(graph_cli, "_done_gh_query", _q)
 
 
 def test_ac2_hp_done_on_open_pr_exits_5_after_querying_gh(done_graph, monkeypatch):
@@ -210,13 +216,13 @@ def test_compat_done_routing_refusal_is_not_retryable(done_graph, monkeypatch):
         "pr_number": 1140,
         "pr_url": "https://github.com/o/r/pull/1140",
     })
-    monkeypatch.setattr(
-        done_cli,
-        "_gh_query",
-        lambda n, **kw: (_ for _ in ()).throw(
-            ReconcileError("[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal")
-        ),
+    _throw = lambda n, **kw: (_ for _ in ()).throw(
+        ReconcileError("[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal")
     )
+    monkeypatch.setattr(done_cli, "_gh_query", _throw)
+    import fno.graph.cli as graph_cli
+
+    monkeypatch.setattr(graph_cli, "_done_gh_query", _throw)
 
     result = CliRunner().invoke(app, ["done", "ab-routec01"])
 
@@ -459,7 +465,13 @@ def test_explicit_pr_is_scoped_to_the_nodes_repo_not_the_callers(
         seen.append((pr_number, kwargs.get("repo")))
         return PrMergeState(number=pr_number, state="OPEN", url=None, merged_at=None)
 
+    # x-6233: the fold merged the two done commands; the canonical close
+    # queries through graph.cli's seam, the delegated surface through
+    # done.cli's. Patch both so either path sees the fixed state.
+    import fno.graph.cli as graph_cli
+
     monkeypatch.setattr(done_cli, "_gh_query", _q)
+    monkeypatch.setattr(graph_cli, "_done_gh_query", _q)
 
     CliRunner().invoke(app, ["done", "ab-repo001", "--pr", "99"])
 

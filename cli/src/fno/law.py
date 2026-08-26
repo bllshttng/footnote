@@ -50,6 +50,18 @@ class InvalidOperatorConsentError(ProposalError):
     """A consent record is absent, expired, forged, or already consumed."""
 
 
+def enact_spellings(proposal_id: str, content_hash: str) -> tuple[str, str]:
+    """The canonical and pre-fold spellings of the enact command.
+
+    The root ``fno law`` spelling forwards for one release (x-6233), so a
+    consent armed under either spelling is valid: the operator typed what
+    the docs of their moment taught.
+    """
+    canonical = f"fno inbox law enact --proposal {proposal_id} --hash {content_hash}"
+    pre_fold = canonical.replace("fno inbox law enact", "fno law enact", 1)
+    return canonical, pre_fold
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -290,8 +302,7 @@ def _arm_proposal_from_hook_unlocked(
         raise InvalidOperatorConsentError("session id is required")
     if permission_mode not in PROMPTING_MODES:
         raise InvalidOperatorConsentError("permission mode cannot approve law")
-    expected_tool = f"fno law enact --proposal {proposal_id} --hash {content_hash}"
-    if tool_input != expected_tool:
+    if tool_input not in enact_spellings(proposal_id, content_hash):
         raise InvalidOperatorConsentError("tool input is not the canonical enact command")
     approval_receipt = secrets.token_urlsafe(32)
     armed_tool_input = f"{tool_input} --receipt {approval_receipt}"
@@ -336,13 +347,16 @@ def _validate_operator_consent(
         raise InvalidOperatorConsentError("session mismatch")
     if consent.permission_mode != proposal.get("armed_permission_mode"):
         raise InvalidOperatorConsentError("permission mode mismatch")
-    expected_tool_prefix = (
-        f"fno law enact --proposal {proposal['proposal_id']} "
-        f"--hash {proposal['content_hash']} --receipt "
+    expected_prefixes = [
+        f"{sp} --receipt "
+        for sp in enact_spellings(proposal["proposal_id"], proposal["content_hash"])
+    ]
+    matched = next(
+        (p for p in expected_prefixes if consent.tool_input.startswith(p)), None
     )
-    if not consent.tool_input.startswith(expected_tool_prefix):
+    if matched is None:
         raise InvalidOperatorConsentError("tool input mismatch")
-    receipt = consent.tool_input[len(expected_tool_prefix) :]
+    receipt = consent.tool_input[len(matched) :]
     receipt_hash = proposal.get("approval_receipt_hash")
     if not receipt or " " in receipt:
         raise InvalidOperatorConsentError("approval receipt is invalid")
@@ -464,7 +478,7 @@ def _consent_from_proposal(
     from fno.decide import OperatorConsent
 
     tool_input = (
-        f"fno law enact --proposal {proposal['proposal_id']} "
+        f"fno inbox law enact --proposal {proposal['proposal_id']} "
         f"--hash {content_hash} --receipt {receipt}"
     )
 

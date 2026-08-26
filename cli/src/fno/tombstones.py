@@ -31,6 +31,14 @@ import click
 import typer.core
 
 TOMBSTONES: dict[str, str] = {
+    # x-6233 (d-cf2d6fe1): the runtime root is RETIRED with the workspace
+    # fold, not re-registered - it was a one-release shim whose destination
+    # itself moved. The implementation modules (fno.runtime.registry,
+    # fno.runtime.worktree) stay; only the CLI surface is gone.
+    "runtime": (
+        "`fno agents workspace` - worktree lifecycle and worker registration "
+        "(`register-worker` moved there with it)"
+    ),
     # Four top-level groups whose every leaf scored zero in `verb-callers.py
     # --dead`: no skill, doc, script, hook, or cli/src argv named any of them.
     # Confirmed by a second whole-repo walk sharing no code with that tool.

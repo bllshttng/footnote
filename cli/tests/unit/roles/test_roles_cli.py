@@ -464,10 +464,14 @@ def test_ac_r7_ui_roles_is_hidden_lazy_and_discoverable() -> None:
 
     normal = _invoke("--help")
     full = _invoke("help", "--all")
+    # Reachability, not listing: `roles` is a moved spelling (agents roles) and
+    # moved spellings render nowhere after d-26002be8, so the door no longer
+    # lists it - invoking the spelling still answers.
+    reachable = _invoke("roles", "--help")
 
-    assert normal.exit_code == full.exit_code == 0
+    assert normal.exit_code == full.exit_code == reachable.exit_code == 0
     assert "roles" not in normal.output
-    assert "roles" in full.output
+    assert "roles" not in full.output
     assert LAZY_SUBCOMMANDS["roles"] == (
         "fno.roles.cli:roles_app",
         "Inspect bounded business-role definitions and resolutions.",

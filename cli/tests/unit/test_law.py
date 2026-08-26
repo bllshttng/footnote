@@ -86,7 +86,7 @@ def test_armed_proposal_cannot_be_rebound_to_another_session(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -119,7 +119,7 @@ def test_valid_consent_records_once_and_replay_refuses_before_writes(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -169,7 +169,7 @@ def test_enact_requires_a_hook_approval_receipt(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -194,7 +194,7 @@ def test_expired_consent_window_allows_rearming(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -229,7 +229,7 @@ def test_approval_receipt_is_not_persisted_in_proposal_state(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -268,7 +268,7 @@ def test_proposal_arming_holds_the_proposal_lock(
         content_hash=proposal["content_hash"],
         session_id="human-session-1",
         permission_mode="default",
-        tool_input=f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
+        tool_input=f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
     )
 
     assert calls == [proposal["proposal_id"]]
@@ -295,7 +295,7 @@ def test_consuming_proposal_cannot_be_rearmed(
             content_hash=proposal["content_hash"],
             session_id="new-session",
             permission_mode="default",
-            tool_input=f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
+            tool_input=f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}",
         )
 
 
@@ -353,7 +353,7 @@ def test_mismatched_consent_refuses_before_any_decision_store(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],
@@ -407,7 +407,7 @@ def test_expired_consent_refuses_and_leaves_proposal_staged(
             content_hash=proposal["content_hash"],
             session_id="human-session-1",
             permission_mode="default",
-            tool_input="fno law enact",
+            tool_input="fno inbox law enact",
         )
     assert law.load_proposal(proposal["proposal_id"])["status"] == "expired"
 
@@ -425,7 +425,7 @@ def test_event_failure_leaves_valid_consent_retryable(
         decision="Merges belong to the operator",
         rationale="Durable policy needs human approval.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],

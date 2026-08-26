@@ -1664,16 +1664,17 @@ def _run_census_deferred(args: Sequence[str]) -> int:
     name="test",
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
-        "Run the Python suite (default), or a sub-suite: `fno test rust ...` "
-        "(crates) or `fno test smoke [flags]` (the full CI smoke: structural "
-        "steps plus auto-discovered shell harnesses). `fno test "
-        "--census-deferred` runs every _DISCOVERY_DEFERRED entry bounded and "
+        "Run the Python suite (default), or a sub-suite: `fno doctor test "
+        "rust ...` (crates) or `fno doctor test smoke [flags]` (the full CI "
+        "smoke: structural steps plus auto-discovered shell harnesses). "
+        "`fno doctor test --census-deferred` runs every _DISCOVERY_DEFERRED "
+        "entry bounded and "
         "exits non-zero if any passes inside the 60s tranche, so the quarantine "
         "cannot silently hold working tests. The real exit code is "
         "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
         "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
         "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
-        "and masks the exit code. Bare `fno test` runs the Python suite in parallel "
+        "and masks the exit code. Bare `fno doctor test` runs the Python suite in parallel "
         "and captures to .fno/last-test.log (the transcript gets PASS or the failing tail); "
         "--stream restores full inherited-stdio output."
     ),

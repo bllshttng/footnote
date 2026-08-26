@@ -11,7 +11,7 @@ When you edit the hook, remove or prune a worktree, or trace why a location gate
 
 ## The refusal shape
 
-Both creation paths honor `policy = "never"`. The `WorktreeCreate` hook resolves the policy through `fno workspace worktree policy`, so there is one resolver and no second precedence implementation.
+Both creation paths honor `policy = "never"`. The `WorktreeCreate` hook resolves the policy through `fno agents workspace worktree policy`, so there is one resolver and no second precedence implementation.
 
 The refusal SHAPE is load-bearing and counter-intuitive.
 It differs by payload shape.
@@ -33,17 +33,17 @@ The gate fails open on anything but an affirmative `never`, because a stale `fno
 An in-session `claude --worktree` spawn is a child (`CLAUDE_CODE_CHILD_SESSION`) and never fires `WorktreeCreate`.
 Test with a top-level run.
 
-When `worktrees_base` is set, the two paths still diverge on WHERE. Autonomous dispatch (`fno workspace worktree ensure`) stays harness-native unless `policy = "external"`.
+When `worktrees_base` is set, the two paths still diverge on WHERE. Autonomous dispatch (`fno agents workspace worktree ensure`) stays harness-native unless `policy = "external"`.
 The hook relocates off `worktrees_base` directly.
 
 ## The harness-native fallback
 
-A harness or Codex substrate with no native worktree transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`. That fallback is Footnote's own allocation. It does not inherit an external allocator configured by `worktrees_base`, so a repo that sets the base still lands there under `harness-native`. For that reason `fno workspace worktree ensure` requires `--harness` and never guesses the substrate.
+A harness or Codex substrate with no native worktree transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`. That fallback is Footnote's own allocation. It does not inherit an external allocator configured by `worktrees_base`, so a repo that sets the base still lands there under `harness-native`. For that reason `fno agents workspace worktree ensure` requires `--harness` and never guesses the substrate.
 
 ## Removal
 
 ```bash
-fno workspace worktree archive <name|path>           # the public guarded path
+fno agents workspace worktree archive <name|path>           # the public guarded path
 bash scripts/setup/archive-worktree.sh <name|path>   # the shared implementation
 ```
 
@@ -55,7 +55,7 @@ With `--force`, the script measures and prints every dirty path. It prints each 
 
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
-Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno workspace worktree cleanup --merged --apply` sweeps landed ones.
+Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno agents workspace worktree cleanup --merged --apply` sweeps landed ones.
 
 ## Enforcement
 

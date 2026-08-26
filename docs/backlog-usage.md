@@ -284,7 +284,7 @@ fno backlog lanes                  # rollup: live lanes vs the cap, per-node sta
 
 ## Worktree isolation policy
 
-Every code payload launched from a repo main checkout is auto-isolated into a worktree by `fno workspace worktree ensure`. `config.worktree.policy` opts a project out of that. Values (`never | harness-native | external`):
+Every code payload launched from a repo main checkout is auto-isolated into a worktree by `fno agents workspace worktree ensure`. `config.worktree.policy` opts a project out of that. Values (`never | harness-native | external`):
 
 - `never` - launch in place, no worktree. For a checkout whose working tree IS the product (e.g. an Obsidian vault attached live, committing straight to main). `ensure` prints the repo root and exits 0 (not a failure, so dispatch lanes are never skipped).
 - `harness-native` (default) - the harness's own worktree lifecycle. Claude -> `<repo>/.claude/worktrees/<name>`. Codex Desktop -> same-thread `/worktree` or **Hand off -> Worktree** under `$CODEX_HOME/worktrees`. A substrate with no native transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback (normally `~/.fno/worktrees`). It never inherits an external allocator from `paths.worktrees_base`.
@@ -314,7 +314,7 @@ trap: a misspelled key silently means "default policy"). Read the resolved
 verdict without creating anything:
 
 ```bash
-fno workspace worktree policy --repo <path> [--harness claude]
+fno agents workspace worktree policy --repo <path> [--harness claude]
 ```
 
 ## Public roadmap

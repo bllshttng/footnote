@@ -32,18 +32,19 @@ def _run_fno(*args: str, extra_env: dict[str, str] | None = None) -> subprocess.
 
 
 def test_fno_top_level_lists_demoted_verbs() -> None:
-    """`fno help --all` exposes codemap, worktree.
+    """codemap and worktree stay reachable as moved spellings.
 
-    x-71b6 In-N-Out tiering hides these from the curated `fno --help`; the
-    full-surface door lists them (they remain invocable either way).
-    (`consolidation` was retired in x-71b6 - its audit re-homed to
-    `fno doctor lint stale-skill-refs`.)
+    They used to render in the full-surface door `fno help --all`, but moved
+    spellings render nowhere now (d-26002be8: discovered in their own
+    subcommands; the x-6233 fold moved worktree under agents workspace).
+    Reachability is proven by invoking each spelling's --help.
     """
-    result = _run_fno("help", "--all")
-    assert result.returncode == 0, result.stdout + result.stderr
-    out = result.stdout + result.stderr
     for verb in ("codemap", "worktree"):
-        assert verb in out, f"fno help --all missing '{verb}': {out[-1000:]}"
+        result = _run_fno(verb, "--help")
+        assert result.returncode == 0, (
+            f"fno {verb} --help exited {result.returncode}: "
+            f"{result.stdout[-500:]}{result.stderr[-500:]}"
+        )
 
 
 def test_fno_codemap_help_renders() -> None:

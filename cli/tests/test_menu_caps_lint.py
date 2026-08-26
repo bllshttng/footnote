@@ -9,6 +9,7 @@ from __future__ import annotations
 import click
 import typer
 import typer.main
+import pytest
 # click's runner: `fno doctor lint` is a plain-function registry entry that the live
 # CLI resolves to a bare TyperCommand, which typer.testing.CliRunner rejects.
 from click.testing import CliRunner
@@ -28,7 +29,12 @@ runner = CliRunner()
 
 def test_menu_caps_passes_on_the_shipped_registry():
     """The real curated menu is within caps (top-level <= 10)."""
+    # This isolates the legacy advertised-menu assertion from the root
+    # namespace ratchet, which intentionally starts red on this branch.
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 50, raising=False)
     result = runner.invoke(_lint_command(), ["menu-caps"])
+    monkeypatch.undo()
     assert result.exit_code == 0, result.output
     assert "menu-caps: ok" in result.output
 
@@ -57,8 +63,70 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
     """AC5-FR: raising the cap constant (remedy 2) clears the failure."""
     # Set the cap comfortably above the shipped set: the ratchet passes again.
     monkeypatch.setattr(L, "MENU_CAP_TOP_LEVEL", 50)
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 50, raising=False)
     result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 0, result.output
+
+
+def test_root_namespace_names_pin_today_by_name():
+    """AC2-HP/AC4-HP: the folded surface is eleven, pinned by name.
+
+    The pre-fold red state (20 real roots failing at cap 12) is the branch's
+    own history: the gate commit landed first and the folds brought it green.
+    This pin holds the ELEVEN (d-b93d7754) - agents, backlog, config, do,
+    doctor, help, inbox, mux, update, version, whoami - so the next root
+    addition is a named event, not a drift.
+    """
+    names = set(L._root_namespace_names())
+    assert names == {
+        "agents",
+        "backlog",
+        "config",
+        "do",
+        "doctor",
+        "help",
+        "inbox",
+        "mux",
+        "update",
+        "version",
+        "whoami",
+    }
+
+
+def test_root_namespace_excludes_a_move_and_counts_a_hidden_root(monkeypatch):
+    """AC1-EDGE/ERR: visibility does not hide roots, and moves cost no slot."""
+    import fno.cli as cli_mod
+
+    monkeypatch.setitem(
+        cli_mod.LAZY_SUBCOMMANDS,
+        "hidden-fixture",
+        ("fno.test_cmd:test_command", "fixture", {"hidden": True}),
+    )
+    names = set(L._root_namespace_names())
+    assert "hidden-fixture" in names
+    assert "annotate" not in names
+    # One below the count WITH the fixture: the hidden registration pushed
+    # the namespace over, which is the exact regression (a hidden verb that
+    # moves no number) this gate exists to kill.
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", len(names) - 1)
+    result = runner.invoke(_lint_command(), ["menu-caps"])
+    assert result.exit_code == 1, result.output
+    assert "root namespace has" in result.output
+
+
+def test_root_namespace_cap_fails_and_names_the_overage(monkeypatch):
+    """AC1-HP shape, post-fold: an over-cap namespace fails, names the verbs
+    over, and never offers hiding as a remedy (hiding is the evasion the
+    rewritten gate exists to kill)."""
+    today = len(L._root_namespace_names())
+    assert today == 11, f"surface drifted from eleven: {L._root_namespace_names()}"
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 10)
+    result = runner.invoke(_lint_command(), ["menu-caps"])
+    assert result.exit_code == 1, result.output
+    assert f"root namespace has {today} real verbs (cap 10)" in result.output
+    assert "over the cap:" in result.output
+    assert "mark it hidden" not in result.output
+    assert "whoami" in result.output
 
 
 def _make_group(n_visible: int, n_hidden: int) -> click.Group:

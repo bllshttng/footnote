@@ -1643,7 +1643,7 @@ event_types:
     consumers: [audit]
 
   - name: worktree_overlap_observed
-    description: "A SessionStart carrier observed at least one other session with a fresh worktree-local liveness stamp. Advisory-only: it proves concurrent recent activity, not simultaneous writes, ownership, or harm. Written to the machine-global journal so it survives worktree cleanup; consumed by `fno workspace worktree overlaps` for recurrence reporting. Harness identity may ride as optional diagnostic metadata but never shapes the predicate, the observation id, or the recurrence threshold."
+    description: "A SessionStart carrier observed at least one other session with a fresh worktree-local liveness stamp. Advisory-only: it proves concurrent recent activity, not simultaneous writes, ownership, or harm. Written to the machine-global journal so it survives worktree cleanup; consumed by `fno agents workspace worktree overlaps` for recurrence reporting. Harness identity may ride as optional diagnostic metadata but never shapes the predicate, the observation id, or the recurrence threshold."
     sources: [hook]
     data:
       required: [observation_id, repository_key, worktree_key, observer_session_id, peer_session_ids, live_window_seconds]
@@ -1670,7 +1670,7 @@ event_types:
         harness:
           type: string
           description: "Optional diagnostic: the observer harness (claude|codex). Never participates in the predicate, observation id, or recurrence threshold."
-    consumers: [fno workspace worktree overlaps]
+    consumers: [fno agents workspace worktree overlaps]
 
 # ---------------------------------------------------------------------------
 # W7 additive: Rust fno-agents supervisor event kinds.
@@ -2087,7 +2087,7 @@ event_types:
           type: [integer, "null"]
 
   - name: worktree_sweep
-    description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
+    description: "One repo's reading from the daemon's 24h worktree report sweep (x-5a30): what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by construction, because a merged PR is external proof that work landed and a timer tick is not; removal stays on the merge-triggered path gated by post_merge.self_reap. Emitted for every repo including those reading zero, so a quiet repo is never mistaken for a sweep that did not run. `error: unreadable-summary` when the verb's Summary line could not be parsed, since a zeroed report is indistinguishable from a clean machine."
     sources: [daemon]
     data:
       required: []
@@ -2539,7 +2539,7 @@ event_types:
 
   - name: operator_decision
     retention: durable
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno backlog decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno backlog decisions` reads. See docs/architecture/decision-record.md."
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno inbox decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno inbox decisions` reads. See docs/architecture/decision-record.md."
     sources: [target, hook, subagent, test]
     data:
       required: [decision_id, decision]
@@ -2564,7 +2564,7 @@ event_types:
           description: "Optional. When the question was asked; age is the attention signal."
         subject:
           type: string
-          description: "Optional. The node, file, or area the decision governs. The recovery key: `fno backlog decisions <subject>` and the graph projection read it."
+          description: "Optional. The node, file, or area the decision governs. The recovery key: `fno inbox decisions <subject>` and the graph projection read it."
         expiry_ref:
           type: object
           description: "Optional exact coordination closure reference. Node refs name node_id. PR refs name repository and number, with an optional URL."
@@ -2592,7 +2592,7 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
-    consumers: [operator, fno backlog decisions]
+    consumers: [operator, fno inbox decisions]
 
   - name: decision_retracted
     retention: durable
@@ -2628,7 +2628,7 @@ event_types:
         authority_source:
           type: string
           description: "Optional authority lane used for the retraction."
-    consumers: [operator, fno backlog decisions]
+    consumers: [operator, fno inbox decisions]
 
   - name: agent_raw_inject
     retention: durable

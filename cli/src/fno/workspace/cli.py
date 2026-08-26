@@ -5,8 +5,8 @@ app plus the runtime merge: ``runtime worktree --action create``
 duplicated what ``worktree ensure`` already covered and had zero lifetime
 calls, so the capability folded in here rather than carrying the flag-shaped
 command across. The old top-level spellings stay one-release shims
-(``fno.verb_moves`` for ``worktree``; ``fno.runtime.cli`` keeps the runtime
-surface with its exact flags).
+(``fno.verb_moves`` for ``worktree`` and, since x-6233, ``workspace`` itself;
+the runtime root is retired outright - its refusal teaches this verb).
 """
 from __future__ import annotations
 

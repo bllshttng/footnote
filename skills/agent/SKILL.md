@@ -455,7 +455,7 @@ follows the work-map root:
 `--cwd` is a repo's MAIN checkout, `spawn.sh` deterministically creates a
 worktree on a fresh feature branch and launches the worker THERE - born
 isolated, location verdict `ok` from line one, no reliance on the worker
-self-creating a worktree. It forwards the payload's harness to `fno workspace worktree
+self-creating a worktree. It forwards the payload's harness to `fno agents workspace worktree
 ensure`, so the location is whatever the per-project policy resolves to (a
 claude payload lands harness-native under `<repo>/.claude/worktrees/`); never
 assume a fixed base. "Writes code" is keyed off `payload_mode`,
@@ -477,7 +477,7 @@ launch dir, and claude keys `~/.claude/projects/` off that launch dir with no
 rename hook, so pre-creating binds the project to the worktree and mints a
 throwaway project dir per spawn that is orphaned when the worktree is reaped.
 Isolation itself is unchanged - still a worktree off `origin/main`, and both
-paths run the same `fno workspace worktree ensure`, so the per-project `worktree` policy
+paths run the same `fno agents workspace worktree ensure`, so the per-project `worktree` policy
 is honored either way. Only the timing, the owner, and the branch name move.
 
 Three conditions, all load-bearing. **claude**, because `EnterWorktree` is a
@@ -602,7 +602,7 @@ the worker starts autonomously and can later be driven through the provider's
 supported pane tools. Work that is really a feature build belongs in a node id
 or an explicit `/target`, not `handoff`.
 
-It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno backlog decisions <topic> --lane law --state live` for standing law. When none is returned, it surfaces `<help reason="outward-action" evidence="...">` for human confirmation.
+It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic> --lane law --state live` for standing law. When none is returned, it surfaces `<help reason="outward-action" evidence="...">` for human confirmation.
 
 When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from an operator typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the operator granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
 

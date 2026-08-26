@@ -1,6 +1,6 @@
 """The Rust-to-Python renderer bridge, asserted as a contract.
 
-`fno mux pane send` (Rust) shells to `fno mail pane-prepare` (Python) for every
+`fno mux pane send` (Rust) shells to `fno agents mail pane-prepare` (Python) for every
 non-raw send, and FAILS CLOSED when that call cannot run. Fail-closed is right,
 and it is also why this needs a test: rename the command or the flag and every
 existing test still passes while non-raw pane sends refuse at runtime, quietly,
@@ -35,7 +35,7 @@ def _bridge_argv() -> list[str]:
 
 
 def _declared_options() -> set[str]:
-    """Every option string `mail pane-prepare` declares."""
+    """Every option string `agents mail pane-prepare` declares."""
     from typer.main import get_command
 
     group = get_command(mail_app)
@@ -50,13 +50,13 @@ def _declared_options() -> set[str]:
 
 def test_the_rust_bridge_names_a_command_this_cli_has():
     argv = _bridge_argv()
-    # The shape it has always had: `mail pane-prepare` plus flags.
-    assert argv[:2] == ["mail", "pane-prepare"], argv
+    # The x-6233 fold shape: `agents mail pane-prepare` plus flags.
+    assert argv[:3] == ["agents", "mail", "pane-prepare"], argv
 
     result = CliRunner().invoke(mail_app, ["pane-prepare", "--help"])
     assert result.exit_code == 0, (
-        f"the Rust bridge shells to `mail pane-prepare`, which this CLI no "
-        f"longer accepts: {result.output}"
+        f"the Rust bridge shells to `agents mail pane-prepare`, which this "
+        f"CLI no longer accepts: {result.output}"
     )
 
 
@@ -75,7 +75,7 @@ def test_the_rust_bridge_flags_still_exist(flag):
     # The parameter list is what the command actually accepts, and it does not
     # depend on how wide the screen is.
     assert flag in _declared_options(), (
-        f"`mail pane-prepare` no longer accepts {flag}; the Rust bridge passes it"
+        f"`agents mail pane-prepare` no longer accepts {flag}; the Rust bridge passes it"
     )
 
 

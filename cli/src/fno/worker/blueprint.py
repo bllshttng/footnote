@@ -2,7 +2,7 @@
 
 The CLI does NOT write feature code. It emits a dispatch action so the
 skill layer can invoke the appropriate Agent tool, then resume via
-`fno workspace register-worker`.
+`fno agents workspace register-worker`.
 """
 from __future__ import annotations
 
