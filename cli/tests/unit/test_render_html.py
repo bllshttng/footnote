@@ -437,6 +437,26 @@ def test_render_html_project_filter_persists_and_supports_web_scope(tmp_path: Pa
     assert "data-project-option" in text
 
 
+def test_scoped_render_preserves_cross_project_relationship_context(tmp_path: Path):
+    entries = [
+        _entry("parent-card", project="alpha", title="Alpha parent"),
+        _entry(
+            "child-card",
+            project="beta",
+            title="Beta child",
+            blocked_by=["parent-card"],
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out, project="beta")
+
+    text = out.read_text()
+    assert "Beta child" in text
+    assert "parent-card (Alpha parent)" in text
+    assert "data-id=\"parent-card\"" not in text
+
+
 def test_public_projection_never_emits_private_plan_links():
     from fno.graph.roadmap_public import render_public_backlog_html, render_public_roadmap_html
 

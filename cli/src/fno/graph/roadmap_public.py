@@ -24,23 +24,36 @@ _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done"
 ALL_PROJECTS = "all"
 
 
-def _scope_matches(entry: dict, scope: str) -> bool:
-    return scope in (ALL_PROJECTS, "*") or _project_key(entry) == scope
+def _scope_matches(entry: dict, scope: str, *, all_projects: bool = False) -> bool:
+    return all_projects or _project_key(entry) == scope
 
 
-def _public_entries(entries: list[dict], project: str) -> list[dict]:
+def _target_scope(target: "RenderTargetConfig") -> tuple[str, bool]:
+    """Resolve new ``scope`` without changing legacy ``project`` semantics."""
+    if target.scope is not None:
+        return target.scope, target.scope == ALL_PROJECTS
+    if target.project is not None:
+        return target.project, False
+    return ALL_PROJECTS, True
+
+
+def _public_entries(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> list[dict]:
     return [
         e for e in entries
         if isinstance(e, dict)
         and e.get("public") is not False
-        and _scope_matches(e, project)
+        and _scope_matches(e, project, all_projects=all_projects)
     ]
 
 
-def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
+def _columns(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> dict[str, list[dict]]:
     cols: dict[str, list[dict]] = {col: [] for col, _ in _PUBLIC_COLUMNS}
     board_order, column_for = make_kanban_classifiers(entries)
-    for e in _public_entries(entries, project):
+    for e in _public_entries(entries, project, all_projects=all_projects):
         col = column_for(e)
         if col == "In Progress":
             col = "Now"
@@ -93,10 +106,12 @@ def public_projection_entries(entries: list[dict], project: str) -> list[dict]:
     return list(by_id.values())
 
 
-def public_backlog_entries(entries: list[dict], project: str) -> list[dict]:
+def public_backlog_entries(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> list[dict]:
     return [
         entry
-        for entry in _public_entries(entries, project)
+        for entry in _public_entries(entries, project, all_projects=all_projects)
         if entry.get("status") in PUBLIC_BACKLOG_STATUSES
     ]
 
@@ -122,11 +137,15 @@ def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list
 
 
 def render_public_roadmap_html(
-    entries: list[dict], project: str, cols: dict[str, list[dict]] | None = None
+    entries: list[dict],
+    project: str,
+    cols: dict[str, list[dict]] | None = None,
+    *,
+    all_projects: bool = False,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
     if cols is None:
-        cols = _columns(entries, project)
+        cols = _columns(entries, project, all_projects=all_projects)
     sections = [(label, cols[column]) for column, label in _PUBLIC_COLUMNS]
     return render_public_sections_html(
         sections, title=f"{project} roadmap", projection="roadmap"
@@ -134,12 +153,18 @@ def render_public_roadmap_html(
 
 
 def render_public_backlog_html(
-    entries: list[dict], project: str, backlog_entries: list[dict] | None = None
+    entries: list[dict],
+    project: str,
+    backlog_entries: list[dict] | None = None,
+    *,
+    all_projects: bool = False,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
 
     if backlog_entries is None:
-        backlog_entries = public_backlog_entries(entries, project)
+        backlog_entries = public_backlog_entries(
+            entries, project, all_projects=all_projects
+        )
     return render_public_sections_html(
         _backlog_sections_for(backlog_entries),
         title=f"{project} backlog",
@@ -221,6 +246,7 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         # Per-row validation, not one atomic model_validate: a single bad row
         # (e.g. a relative path) must not stop every OTHER target rendering.
         out: list[RenderTargetConfig] = []
+        seen_paths: set[Path] = set()
         for row in rows:
             try:
                 target = RenderTargetConfig.model_validate(row)
@@ -239,6 +265,15 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                     file=sys.stderr,
                 )
                 continue
+            resolved = Path(os.path.expanduser(target.path)).resolve()
+            if resolved in seen_paths:
+                print(
+                    f"Warning: skipping duplicate render target path {target.path}: "
+                    "duplicate render target path; first target kept",
+                    file=sys.stderr,
+                )
+                continue
+            seen_paths.add(resolved)
             out.append(target)
         _warn_shadowed_local_rows(out)
         from fno.graph._constants import GRAPH_HTML
@@ -325,9 +360,11 @@ def render_configured_targets(entries: list[dict]) -> None:
 
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
-        scope = target.scope or target.project or ALL_PROJECTS
-        scoped_entries = [e for e in entries if _scope_matches(e, scope)]
-        if scope != ALL_PROJECTS and not scoped_entries:
+        scope, all_projects = _target_scope(target)
+        scoped_entries = [
+            e for e in entries if _scope_matches(e, scope, all_projects=all_projects)
+        ]
+        if not all_projects and not scoped_entries:
             # Zero matching entries is the typo'd-project signature: leave the
             # operator's last good board byte-unchanged rather than replace it
             # with an empty projection. A project whose entries exist but are
@@ -344,18 +381,30 @@ def render_configured_targets(entries: list[dict]) -> None:
                 # Local is the explicit private projection: it keeps ids,
                 # details, plan paths, and Obsidian links and never enters the
                 # public title gate.
-                render_graph_html(entries, out, project=scope)
+                render_graph_html(
+                    entries,
+                    out,
+                    project=scope,
+                    all_projects=all_projects,
+                )
                 continue
             if target.projection == "roadmap":
                 # One _columns pass feeds both the gate's render set and the
                 # renderer (the manual verb derives it internally).
-                cols = _columns(entries, scope)
+                cols = _columns(entries, scope, all_projects=all_projects)
                 render_set = [e for items in cols.values() for e in items]
-                html = render_public_roadmap_html(entries, scope, cols=cols)
+                html = render_public_roadmap_html(
+                    entries, scope, cols=cols, all_projects=all_projects
+                )
             else:
-                render_set = public_backlog_entries(entries, scope)
+                render_set = public_backlog_entries(
+                    entries, scope, all_projects=all_projects
+                )
                 html = render_public_backlog_html(
-                    entries, scope, backlog_entries=render_set
+                    entries,
+                    scope,
+                    backlog_entries=render_set,
+                    all_projects=all_projects,
                 )
             offenders = public_title_leaks(render_set)
             if offenders:

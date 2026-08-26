@@ -975,7 +975,11 @@ _JS = """\
 
 
 def render_graph_html(
-    entries: list[dict], path: Path | None = None, project: str | None = None
+    entries: list[dict],
+    path: Path | None = None,
+    project: str | None = None,
+    *,
+    all_projects: bool = False,
 ) -> None:
     """Render graph.json entries as a self-contained HTML kanban file.
 
@@ -989,13 +993,14 @@ def render_graph_html(
     ``fno.graph._constants.GRAPH_HTML`` without having to also
     patch this module's import-cached reference.
     """
-    entries = [e for e in entries if isinstance(e, dict)]
-    if project and project not in ("all", "*"):
+    all_entries = [e for e in entries if isinstance(e, dict)]
+    entries = all_entries
+    if project and not all_projects:
         entries = [e for e in entries if _project_key(e) == project]
     if path is None:
         from fno.graph._constants import GRAPH_HTML as _CURRENT_GRAPH_HTML
         path = _CURRENT_GRAPH_HTML
-    id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
+    id_to_entry = {e["id"]: e for e in all_entries if isinstance(e.get("id"), str)}
     statuses, projects = _stats(entries)
     vault = _load_obsidian_vault()
     caps = _load_wip_caps()
@@ -1022,7 +1027,10 @@ def render_graph_html(
     parts.append(_project_filter_html(_project_order(projects)))
     parts.append("</header>")
 
-    master = _bucket(entries)
+    # Keep full-graph indexes for relationships, orphanhood, and ordering while
+    # emitting only the requested project cards.
+    all_orphans = _orphan_ids(all_entries)
+    master = _bucket(entries, all_orphans, ordering_entries=all_entries)
     master_total = sum(len(items) for items in master.values())
     parts.append(
         f'<details class="board-section" id="master" open>'
@@ -1037,13 +1045,12 @@ def render_graph_html(
 
     # Computed over the FULL graph, then handed to each project slice: the
     # per-project sort and the card flags must agree about who is an orphan.
-    all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
         cols = _bucket(
             proj_entries,
             all_orphans,
-            ordering_entries=entries,
+            ordering_entries=all_entries,
         )
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (

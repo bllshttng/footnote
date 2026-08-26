@@ -142,6 +142,12 @@ def test_render_target_config_accepts_scope_and_local_projection():
     assert global_target.project == "all"
     assert project_target.project == "fno"
 
+    legacy_literal = RenderTargetConfig.model_validate(
+        {"path": "~/vault/legacy.html", "project": "all"}
+    )
+    assert legacy_literal.project == "all"
+    assert legacy_literal.scope is None
+
 
 def test_relative_target_path_rejected():
     from fno.config import RenderTargetConfig
@@ -489,6 +495,34 @@ def test_local_targets_support_global_and_project_scopes_without_public_gate(
     assert "/Users/me/private-plan.md" in project_text
     assert not public_target.exists()
     assert "leak gate refused" in capsys.readouterr().err
+
+
+def test_duplicate_target_paths_keep_the_first_projection(_isolate, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "out" / "same.html"
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"\nprojection = "backlog"\n'
+        f'[[backlog.render_targets]]\npath = "{target}"\nscope = "fno"\nprojection = "local"\n',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [
+            _entry(
+                "duplicate-marker",
+                title="clean public title",
+                project="fno",
+                plan_path="/Users/me/private-plan.md",
+            )
+        ],
+        "clean public title",
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert "clean public title" in text
+    assert "duplicate-marker" not in text
+    assert "/Users/me/private-plan.md" not in text
+    assert "duplicate render target path" in capsys.readouterr().err
 
 
 def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkeypatch, capsys):

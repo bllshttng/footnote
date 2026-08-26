@@ -333,7 +333,17 @@ class RenderTargetConfig(BaseModel):
             )
         return v
 
-    @field_validator("project", "scope")
+    @field_validator("project")
+    @classmethod
+    def _nonempty_project(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets scope must not be empty")
+        return v
+
+    @field_validator("scope")
     @classmethod
     def _nonempty_scope(cls, v: str | None) -> str | None:
         if v is None:
@@ -351,9 +361,11 @@ class RenderTargetConfig(BaseModel):
             raise ValueError(
                 "backlog.render_targets scope and project must name the same value"
             )
-        value = self.scope or self.project or "all"
-        self.scope = value
-        self.project = value
+        if self.scope is not None:
+            self.project = self.scope
+        elif self.project is None:
+            self.scope = "all"
+            self.project = "all"
         return self
 
     @field_validator("projection")
