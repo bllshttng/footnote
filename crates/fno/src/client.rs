@@ -9086,6 +9086,13 @@ fn nav_match_key(label: &str, tokens: &[String]) -> String {
     key
 }
 
+/// (x-e10f) Whether a nav row's goto lands on pane `pid`: every pane-hosted
+/// row class (a plain pane, a pane-hosted agent) applies `FocusPane(pid)`.
+/// The cursor-seed predicate for opening the navigator on the focused pane.
+fn nav_row_targets_pane(r: &NavRow, pid: u64) -> bool {
+    matches!(&r.hit, ChromeHit::Cmds(cs) if cs.iter().any(|c| matches!(c, Command::FocusPane(p) if *p == pid)))
+}
+
 /// The navigator state of an agent row: an exited pane reads `Idle` (finished,
 /// nothing to act on); otherwise derive from the badge + the server-owned
 /// seen bit (x-4328): a looked-at `Done` reads `Idle`, an unseen one
@@ -12415,10 +12422,19 @@ async fn dispatch_event(
             // bytes after the chord can't leak to the pane (like SearchOpen).
             // No width gate: draw_lines_overlay clips a tiny terminal, and a
             // zero-squad session shows an explicit `no matches` (AC1-EDGE).
+            // (x-e10f) Seed from the focused pane so the navigator opens on
+            // the row you are already at; the filter is empty at open, so the
+            // filtered list IS nav_rows() here. A focused pane with no row (a
+            // scratch pane) opens at row zero (AC7-EDGE).
+            let seed = view
+                .nav_rows()
+                .iter()
+                .position(|r| nav_row_targets_pane(r, view.layout.focus))
+                .unwrap_or(0);
             view.nav = Some(NavView {
                 query: String::new(),
                 state_filter: None,
-                cursor: 0,
+                cursor: seed,
             });
             view.nav_esc.clear();
             return Ok(DispatchFlow::Break);
@@ -28553,6 +28569,42 @@ mod tests {
             v.selector_anchor(0),
             "an unfocusable seed falls back to the row-zero anchor"
         );
+    }
+
+    #[tokio::test]
+    async fn navigator_opens_on_the_focused_panes_row_and_re_anchors_on_filter() {
+        // x-e10f: prefix+f opens on the focused pane's row (the same seed the
+        // global chord rides, AC11's client half); the filter-change
+        // cursor = 0 sites keep re-anchoring (ruling d-771c1d85, AC8-FR); a
+        // focused pane with no row opens at zero (AC7-EDGE).
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::OpenNav, &mut buf)
+            .await
+            .unwrap();
+        let cursor = v.nav.as_ref().unwrap().cursor;
+        let rows = v.nav_filtered(v.nav.as_ref().unwrap());
+        assert_ne!(cursor, 0, "pane 11's row is not the first row");
+        assert!(
+            nav_row_targets_pane(&rows[cursor], 11),
+            "opens on the focused pane 11's row"
+        );
+        v.nav_cycle_state();
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "a state-filter change still re-anchors to zero"
+        );
+        v.nav = None;
+        v.layout.focus = 99; // no row hosts pane 99
+        dispatch_event(&mut v, Event::OpenNav, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0);
     }
 
     #[test]
