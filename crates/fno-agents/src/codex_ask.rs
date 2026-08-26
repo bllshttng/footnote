@@ -1231,6 +1231,8 @@ fn dispatch_create(
         effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

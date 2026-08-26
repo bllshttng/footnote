@@ -515,6 +515,8 @@ mod tests {
             effort: None,
             harness: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/tmp/x".into(),
             project_root: String::new(),
             session_id: None,

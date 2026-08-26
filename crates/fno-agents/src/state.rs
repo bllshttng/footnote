@@ -109,8 +109,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // write re-serialized the row from the typed struct and dropped them. Measured
 // 2026-08-20: 0 of 37 live rows carried either key. The bump is what turns a
 // pre-v16 binary's SILENT erasure into a loud refusal, which is the same
-// reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=16.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 16;
+// reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=17.
+// v17 adds predecessor/fork lineage fields; an older writer must refuse rather
+// than erase those fields during a read-modify-write.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 17;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -453,6 +455,14 @@ pub struct RegistryEntry {
     pub harness: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
+    /// Historical current-session ids retained by a classified succession.
+    /// Delivery follows `harness_session_id`; this list is audit provenance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predecessor_session_ids: Vec<String>,
+    /// Immediate predecessor for a live branch row. Branch rows keep their own
+    /// full session id and stable fno id rather than sharing a mutable row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_session_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -718,7 +728,74 @@ pub const CLAUDE_MODE_STREAM_JSON: &str = "stream_json";
 /// See [`CLAUDE_MODE_STREAM_JSON`]: the interactive subscription-billed lane.
 pub const CLAUDE_MODE_INTERACTIVE: &str = "interactive";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTransition {
+    Succession,
+    Branch,
+    Deferred,
+}
+
+/// Classify a new full session id from one liveness truth result.
+pub fn classify_session_transition(
+    predecessor_session_id: &str,
+    successor_session_id: &str,
+    predecessor_reachable: Option<bool>,
+) -> SessionTransition {
+    if predecessor_session_id.is_empty()
+        || successor_session_id.is_empty()
+        || predecessor_session_id == successor_session_id
+    {
+        return SessionTransition::Deferred;
+    }
+    match predecessor_reachable {
+        Some(false) => SessionTransition::Succession,
+        Some(true) => SessionTransition::Branch,
+        None => SessionTransition::Deferred,
+    }
+}
+
 impl RegistryEntry {
+    /// Move a dead predecessor row to its successor while retaining history.
+    pub fn apply_succession(
+        &mut self,
+        predecessor_session_id: &str,
+        successor_session_id: &str,
+    ) -> bool {
+        if self.harness_session_id.as_deref() != Some(predecessor_session_id)
+            || successor_session_id.is_empty()
+            || predecessor_session_id == successor_session_id
+        {
+            return false;
+        }
+        if !self
+            .predecessor_session_ids
+            .iter()
+            .any(|id| id == predecessor_session_id)
+        {
+            self.predecessor_session_ids
+                .push(predecessor_session_id.to_string());
+        }
+        self.harness_session_id = Some(successor_session_id.to_string());
+        true
+    }
+
+    /// Clone this row as an independently addressable live branch.
+    pub fn fork_for_session(
+        &self,
+        name: &str,
+        successor_session_id: &str,
+        predecessor_session_id: &str,
+        fno_id: &str,
+    ) -> Self {
+        let mut branch = self.clone();
+        branch.name = name.to_string();
+        branch.fno_id = Some(fno_id.to_string());
+        branch.harness_session_id = Some(successor_session_id.to_string());
+        branch.predecessor_session_ids.clear();
+        branch.forked_from_session_id = Some(predecessor_session_id.to_string());
+        branch
+    }
+
     fn migrate_provider_semantics(&mut self, schema_version: u32) {
         if schema_version < 15 {
             if let Some(provider) = self.provider.take() {
@@ -1633,6 +1710,8 @@ mod tests {
             effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/tmp/x".into(),
             project_root: "/tmp/x".into(),
             session_id: Some("uuid-1".into()),
@@ -1961,6 +2040,43 @@ mod tests {
         assert!(matches!(result, Err(StateError::InvariantViolation(_))));
         assert_eq!(load_registry(&path).unwrap().entries.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn session_transition_classifies_dead_live_and_unknown_predecessors() {
+        assert_eq!(
+            classify_session_transition("session-a", "session-b", Some(false)),
+            SessionTransition::Succession
+        );
+        assert_eq!(
+            classify_session_transition("session-a", "session-b", Some(true)),
+            SessionTransition::Branch
+        );
+        assert_eq!(
+            classify_session_transition("session-a", "session-b", None),
+            SessionTransition::Deferred
+        );
+    }
+
+    #[test]
+    fn succession_preserves_thread_id_and_branch_keeps_two_rows() {
+        let mut predecessor = sample_entry("worker");
+        predecessor.fno_id = Some("thread-a".into());
+        predecessor.harness_session_id = Some("session-a".into());
+
+        assert!(predecessor.apply_succession("session-a", "session-b"));
+        assert_eq!(predecessor.fno_id.as_deref(), Some("thread-a"));
+        assert_eq!(predecessor.harness_session_id.as_deref(), Some("session-b"));
+        assert_eq!(predecessor.predecessor_session_ids, vec!["session-a"]);
+        assert!(!predecessor.apply_succession("session-a", "session-c"));
+
+        let branch =
+            predecessor.fork_for_session("worker-branch", "session-c", "session-b", "thread-c");
+        assert_eq!(predecessor.harness_session_id.as_deref(), Some("session-b"));
+        assert_eq!(branch.harness_session_id.as_deref(), Some("session-c"));
+        assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-b"));
+        assert_eq!(branch.fno_id.as_deref(), Some("thread-c"));
+        assert_ne!(predecessor.fno_id, branch.fno_id);
     }
 
     #[test]

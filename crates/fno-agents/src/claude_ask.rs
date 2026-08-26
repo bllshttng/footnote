@@ -3574,6 +3574,8 @@ fn create(
         // resolved uuid. A bounded miss stays a named spawning row below.
         harness: Some("claude".to_string()),
         harness_session_id: session_uuid.clone(),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

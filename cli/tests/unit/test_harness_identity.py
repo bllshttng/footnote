@@ -155,6 +155,18 @@ def test_canonical_vendor_contradiction_refuses_instead_of_precedence_guessing()
     assert owned.harness is None
 
 
+def test_canonical_pair_refuses_mixed_vendor_families():
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "claude-session",
+        "CODEX_THREAD_ID": "codex-session",
+        "GEMINI_SESSION_ID": "gemini-session",
+    }
+
+    assert resolve_harness_identity(env) == HarnessIdentity(None, None)
+    assert resolve_owned_identity(env).disposition == "contradiction"
+
+
 def test_canonical_names_are_in_the_shared_scrub_inventory():
     assert "FNO_HARNESS_NAME" in AMBIENT_IDENTITY_ENV
     assert "FNO_HARNESS_SESSION_ID" in AMBIENT_IDENTITY_ENV

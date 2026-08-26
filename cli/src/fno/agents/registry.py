@@ -191,11 +191,35 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # dropped the keys. Measured 2026-08-20: 0 of 37 live rows carried either. The
 # bump is not for a new Python field - it is what turns a pre-v16 binary's
 # SILENT erasure into a loud refusal, the same reason v11-v14 bumped.
-SCHEMA_VERSION = 16
+# v17 adds classified session lineage. Older readers must refuse rather than
+# silently erase predecessor or fork provenance on a read-modify-write.
+SCHEMA_VERSION = 17
 
 
 class RegistryVersionError(RuntimeError):
     """Raised when a registry file's schema_version != SCHEMA_VERSION."""
+
+
+SessionTransition = Literal["succession", "branch", "deferred"]
+
+
+def classify_session_transition(
+    predecessor_session_id: str,
+    successor_session_id: str,
+    predecessor_reachable: Optional[bool],
+) -> SessionTransition:
+    """Classify a new full session id from one existing truth result."""
+    if (
+        not predecessor_session_id
+        or not successor_session_id
+        or predecessor_session_id == successor_session_id
+    ):
+        return "deferred"
+    if predecessor_reachable is False:
+        return "succession"
+    if predecessor_reachable is True:
+        return "branch"
+    return "deferred"
 
 
 def _utc_now_iso() -> str:
@@ -262,6 +286,11 @@ class AgentEntry:
     # per-provider session-id fields (x-880e). load_registry back-fills it from a
     # legacy row's per-provider key on read; the Rust RegistryEntry mirrors it.
     harness_session_id: Optional[str] = None
+    # Classified session lineage. The current harness_session_id is the address
+    # used for delivery; these fields retain historical and parallel identities
+    # without changing the stable fno_id thread key.
+    predecessor_session_ids: list[str] = field(default_factory=list)
+    forked_from_session_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them

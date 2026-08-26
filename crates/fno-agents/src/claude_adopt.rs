@@ -85,6 +85,8 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(w.session_id.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: w.cwd.clone(),
         project_root: w.worktree_path.clone().unwrap_or_else(|| w.cwd.clone()),
         session_id: None,

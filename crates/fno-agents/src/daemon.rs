@@ -3431,6 +3431,8 @@ fn build_claude_stream_entry(
         effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: cwd_s.clone(),
         project_root: cwd_s,
         session_id: None,
@@ -6917,6 +6919,70 @@ fn late_bind_codex_sessions(
     }
 }
 
+/// Apply one classified full-session transition under the registry writer.
+/// Liveness is supplied by the existing family-1 truth probe; this function
+/// does not infer it from status, pid, pane metadata, or argv.
+#[allow(dead_code)]
+pub(crate) fn apply_session_transition(
+    registry: &mut state::Registry,
+    predecessor_name: &str,
+    successor_session_id: &str,
+    predecessor_reachable: Option<bool>,
+    branch_name: &str,
+    branch_fno_id: &str,
+) -> Result<state::SessionTransition, String> {
+    let index = registry
+        .entries
+        .iter()
+        .position(|entry| entry.name == predecessor_name)
+        .ok_or_else(|| format!("unknown predecessor row {predecessor_name:?}"))?;
+    let predecessor_session_id = registry.entries[index]
+        .harness_session_id
+        .as_deref()
+        .unwrap_or("")
+        .to_string();
+    let classification = state::classify_session_transition(
+        &predecessor_session_id,
+        successor_session_id,
+        predecessor_reachable,
+    );
+    match classification {
+        state::SessionTransition::Succession => {
+            if !registry.entries[index]
+                .apply_succession(&predecessor_session_id, successor_session_id)
+            {
+                return Err("succession predecessor changed before apply".to_string());
+            }
+        }
+        state::SessionTransition::Branch => {
+            if branch_name.is_empty() || branch_fno_id.is_empty() {
+                return Err("branch needs a distinct name and fno_id".to_string());
+            }
+            if registry
+                .entries
+                .iter()
+                .any(|entry| entry.harness_session_id.as_deref() == Some(successor_session_id))
+            {
+                return Err(format!(
+                    "branch successor session {successor_session_id:?} already has a row"
+                ));
+            }
+            if registry.entries[index].fno_id.as_deref() == Some(branch_fno_id) {
+                return Err("branch fno_id must be distinct from predecessor".to_string());
+            }
+            let branch = registry.entries[index].fork_for_session(
+                branch_name,
+                successor_session_id,
+                &predecessor_session_id,
+                branch_fno_id,
+            );
+            registry.entries.push(branch);
+        }
+        state::SessionTransition::Deferred => {}
+    }
+    Ok(classification)
+}
+
 /// Shell `fno agents codex-session-for-pid <pid>` -- the pane-tree rollout
 /// walk (`_codex_session_id_for_pid`), reused rather than reimplemented in
 /// Rust (Codex's rollout discovery needs a process-tree + open-fd walk this
@@ -8023,6 +8089,8 @@ mod tests {
             // x-7bcd: needs a resolvable handle (leg 3); deterministic per
             // name so two rows never collide.
             harness_session_id: Some(format!("{name}-sess")),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/tmp".into(),
             project_root: String::new(),
             session_id: None,
@@ -10338,6 +10406,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 effort: None,
                 harness: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
@@ -10419,6 +10489,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 effort: None,
                 harness: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
@@ -10568,6 +10640,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 effort: None,
                 harness: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
@@ -11034,6 +11108,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 effort: None,
                 harness: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
@@ -11195,6 +11271,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             effort: None,
             harness: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/".into(),
             project_root: "/".into(),
             session_id: None,
@@ -11244,6 +11322,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             effort: None,
             harness: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/tmp".into(),
             project_root: "/tmp".into(),
             session_id: Some("sid".into()),
@@ -11274,6 +11354,55 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             fno_id: None,
             delivery_policy: None,
         }
+    }
+
+    #[test]
+    fn session_transition_apply_preserves_succession_and_splits_live_branch() {
+        let mut registry = state::Registry::default();
+        let mut predecessor = rentry("worker", AgentStatus::Live, None);
+        predecessor.harness_session_id = Some("session-a".into());
+        predecessor.fno_id = Some("thread-a".into());
+        registry.entries.push(predecessor);
+
+        assert_eq!(
+            apply_session_transition(&mut registry, "worker", "session-b", Some(false), "", "",)
+                .unwrap(),
+            state::SessionTransition::Succession
+        );
+        assert_eq!(registry.entries.len(), 1);
+        assert_eq!(registry.entries[0].fno_id.as_deref(), Some("thread-a"));
+        assert_eq!(
+            registry.entries[0].predecessor_session_ids,
+            vec!["session-a"]
+        );
+
+        assert_eq!(
+            apply_session_transition(
+                &mut registry,
+                "worker",
+                "session-c",
+                Some(true),
+                "worker-branch",
+                "thread-c",
+            )
+            .unwrap(),
+            state::SessionTransition::Branch
+        );
+        assert_eq!(registry.entries.len(), 2);
+        assert_eq!(
+            registry.entries[0].harness_session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(
+            registry.entries[1].harness_session_id.as_deref(),
+            Some("session-c")
+        );
+        assert_eq!(
+            registry.entries[1].forked_from_session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(registry.entries[1].fno_id.as_deref(), Some("thread-c"));
+        assert_ne!(registry.entries[0].fno_id, registry.entries[1].fno_id);
     }
 
     fn probe_err() -> crate::provider::ReachabilityProbeError {
@@ -12682,6 +12811,8 @@ done
                 effort: None,
                 harness: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: "/tmp".into(),
                 session_id: None,
@@ -12733,6 +12864,8 @@ done
             effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             cwd: "/tmp".into(),
             project_root: "/tmp".into(),
             session_id: None,

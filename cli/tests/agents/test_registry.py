@@ -697,7 +697,35 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 16
+    assert SCHEMA_VERSION == 17
+
+
+def test_session_lineage_fields_round_trip() -> None:
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    entry = AgentEntry(
+        name="successor",
+        cwd="/tmp",
+        log_path="",
+        harness="claude",
+        harness_session_id="session-b",
+        predecessor_session_ids=["session-a"],
+        forked_from_session_id="session-root",
+    )
+    write_registry([entry])
+
+    loaded = load_registry()[0]
+    assert loaded.predecessor_session_ids == ["session-a"]
+    assert loaded.forked_from_session_id == "session-root"
+
+
+def test_session_transition_classifies_liveness_truth() -> None:
+    from fno.agents.registry import classify_session_transition
+
+    assert classify_session_transition("session-a", "session-b", False) == "succession"
+    assert classify_session_transition("session-a", "session-b", True) == "branch"
+    assert classify_session_transition("session-a", "session-b", None) == "deferred"
+    assert classify_session_transition("", "session-b", False) == "deferred"
 
 
 def test_v15_model_provider_round_trips_without_collapsing_harness(

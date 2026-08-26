@@ -389,7 +389,8 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] =
+    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1729,6 +1730,8 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         effort: None,
         harness: Some(harness),
         harness_session_id: Some(session.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: id.owner_cwd.clone(),
         project_root: id.owner_cwd.clone(),
         session_id: None,
@@ -1801,6 +1804,8 @@ fn upsert_synthesized_row(
                 merged.host_mode = old.host_mode.clone();
                 merged.mux = old.mux.clone();
                 merged.exited_at = old.exited_at.clone();
+                merged.predecessor_session_ids = old.predecessor_session_ids.clone();
+                merged.forked_from_session_id = old.forked_from_session_id.clone();
                 reg.entries[i] = merged;
             }
             None => reg.entries.push(entry),
@@ -5395,7 +5400,11 @@ mod tests {
             owner_cwd: "/x".into(),
             ..Default::default()
         };
-        upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t")).unwrap();
+        let mut seeded = mint_synthesized_entry(&id, "t");
+        seeded.predecessor_session_ids = vec!["thread-predecessor".into()];
+        seeded.forked_from_session_id = Some("thread-root".into());
+        upsert_synthesized_row(&home.registry_json(), seeded).unwrap();
+        upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t2")).unwrap();
         let (row, fno_id, source) =
             synthesize_and_adopt("thread-seed-1234", &home, false).expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
@@ -5404,6 +5413,15 @@ mod tests {
             Some("thread-seed-1234")
         );
         assert_eq!(fno_id, None, "seeded row carried no fno_id");
+        let persisted = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            persisted.entries[0].predecessor_session_ids,
+            vec!["thread-predecessor"]
+        );
+        assert_eq!(
+            persisted.entries[0].forked_from_session_id.as_deref(),
+            Some("thread-root")
+        );
         std::env::remove_var(crate::paths::HOME_ENV);
     }
 

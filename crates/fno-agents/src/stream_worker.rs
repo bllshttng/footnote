@@ -1999,6 +1999,8 @@ done
                 effort: None,
                 harness: Some("claude".into()),
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 cwd: "/tmp".into(),
                 project_root: String::new(),
                 session_id: None,
