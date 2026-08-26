@@ -1,6 +1,10 @@
 """Tests for the canonical review invocation telemetry contract."""
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
+
+from fno.doctor import _review_invocation_report
 from fno.events import validate
 from fno.review.invocation import (
     adopt_pending_invocation,
@@ -87,3 +91,63 @@ def test_pending_invocation_write_is_fail_open(tmp_path) -> None:
         home=blocked_home,
     ) is False
     assert invocation_id.startswith("ri-")
+
+
+def test_doctor_names_an_old_sent_attempt_with_transport_and_receipt(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-25T00:00:00Z",
+                "type": "review_invocation",
+                "source": "daemon",
+                "data": {
+                    "invocation_id": "ri-lost-positive",
+                    "stage": "sent",
+                    "verb": "/review",
+                    "transport": "mux_pane_send_raw",
+                    "receipt": "text delivered, submission unconfirmed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lines = _review_invocation_report(
+        path,
+        now=datetime(2026, 8, 26, tzinfo=timezone.utc),
+    )
+
+    assert any(
+        "ri-lost-positive" in line
+        and "mux_pane_send_raw" in line
+        and "submission unconfirmed" in line
+        for line in lines
+    )
+
+
+def test_doctor_explicitly_reports_no_lost_attempt_after_attestation(tmp_path) -> None:
+    path = tmp_path / "events.jsonl"
+    rows = [
+        {
+            "ts": "2026-08-25T00:00:00Z",
+            "type": "review_invocation",
+            "source": "daemon",
+            "data": {"invocation_id": "ri-covered-positive", "stage": "sent"},
+        },
+        {
+            "ts": "2026-08-25T00:01:00Z",
+            "type": "review_attestation",
+            "source": "hook",
+            "data": {"invocation_id": "ri-covered-positive"},
+        },
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    lines = _review_invocation_report(
+        path,
+        now=datetime(2026, 8, 26, tzinfo=timezone.utc),
+    )
+
+    assert any("none lost" in line for line in lines)
