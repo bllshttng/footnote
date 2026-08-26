@@ -2239,15 +2239,17 @@ fn scan_unrecorded_decisions(
 ///
 /// Fail closed everywhere: an empty/unreadable events file, a stale head_sha
 /// (attestation for a prior commit), or a `fail` verdict leaves the reviewer
-/// UNSATISFIED, mirroring how a missing bot review holds the login gate. An
-/// empty reviewer list is vacuously satisfied (no reviewers gate).
-/// x-aecc: the one softening of the `fail` arm - a `fail` whose chain
-/// findings are all terminally dispositioned ANSWERS this head, so it
-/// satisfies the reviewer exactly like a pass ("answered at this head",
-/// never "clean at this head"). Authorship is unknowable inside this scan,
-/// so the disposition read is fail-open on corroboration; the `reviewed`
-/// conjunction re-runs the disposition scan WITH authorship downstream and
-/// a solo author's decline still withholds there.
+/// UNSATISFIED - except x-aecc's ONE softening directly below. An empty
+/// reviewer list is vacuously satisfied (no reviewers gate).
+/// x-aecc: the one softening of the `fail` arm - a `fail` whose own chain
+/// raised keyed findings that are all terminally dispositioned ANSWERS this
+/// head, so it satisfies the reviewer exactly like a pass ("answered at this
+/// head", never "clean at this head"). A findings-free fail and a RETRACTION
+/// never satisfy (the bystander and revoked-pass shapes stay unsatisfied).
+/// Authorship is unknowable inside this scan, so the disposition read is
+/// fail-open on corroboration; the `reviewed` conjunction re-runs the
+/// disposition scan WITH authorship downstream and a solo author's decline
+/// still withholds there.
 /// `unattested_reviewers` plus the count of unparseable lines that LOOK like
 /// attestations. A torn write leaves a corrupt `review_attestation` in the file
 /// and the gate then reports "no head-pinned review_attestation", which is the
@@ -2295,6 +2297,16 @@ pub fn unattested_reviewers_scan(
     // that sequence.
     let mut other_heads: std::collections::HashMap<String, Vec<(String, bool)>> =
         std::collections::HashMap::new();
+    // x-aecc per-reviewer answered-fail marks, collected in the SAME pass
+    // (review findings 1-2): which reviewers' own fails raised keyed
+    // findings, and whether a reviewer's latest counting line is a RETRACTION
+    // (which revokes and never satisfies). Plus the in-scope chain for the
+    // disposition read, so the whole scan parses the file once.
+    let mut fail_carries: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    let mut latest_is_retraction: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    let mut chain: Vec<Value> = Vec::new();
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             if line.contains("review_attestation") {
@@ -2329,6 +2341,29 @@ pub fn unattested_reviewers_scan(
         if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
             continue;
         }
+        chain.push(val.clone());
+        let is_retraction = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !is_pass && !is_retraction {
+            let carries = val
+                .pointer("/data/findings")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter().any(|p| {
+                        p.get("finding_key")
+                            .and_then(|v| v.as_str())
+                            .map(|k| !k.is_empty())
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if carries {
+                fail_carries.insert(r.clone(), true);
+            }
+        }
         // The SAME zero-evidence predicate the coverage axis uses: a review
         // of nothing must not satisfy the config.review.reviewers gate either,
         // which is the surface that floors the self-review obligation.
@@ -2354,25 +2389,31 @@ pub fn unattested_reviewers_scan(
             }
             continue;
         }
-        latest_pass.insert(r, is_pass);
+        latest_pass.insert(r.clone(), is_pass);
+        latest_is_retraction.insert(r, is_retraction);
     }
-    // x-aecc: whether the chain's blocking findings are all terminal (or
-    // cap-filed, which only hard findings survive). Computed once, after the
-    // scan: any latest-`fail` reviewer is satisfied when this holds. The
-    // findings guard keeps a findings-free fail (retraction, revocation) a
-    // NON-answer - it revokes, it never covers.
-    let fail_answered = latest_pass.values().any(|p| !*p)
-        && fail_chain_carries_findings(&content, head_branch, head_sha)
-        && {
-            let blockers = disposition_blockers(&content, head_branch, head_sha, false);
-            !blockers_withhold(&blockers, rounds_exhausted)
-        };
+    // x-aecc: a latest-`fail` reviewer is satisfied when its OWN fails raised
+    // keyed findings AND the chain's blocking findings are all terminal (or
+    // cap-filed, which only hard findings survive). A bystander's
+    // findings-free fail never rides another reviewer's dispositions, and a
+    // RETRACTION latest never satisfies - it revokes, it never covers.
+    let any_answerable_fail = latest_pass
+        .iter()
+        .any(|(name, p)| !*p && fail_carries.get(name) == Some(&true));
+    let disposition_clear = any_answerable_fail && {
+        let blockers = disposition_blockers_on_chain(&chain, false);
+        !blockers_withhold(&blockers, rounds_exhausted)
+    };
     let out = reviewers
         .iter()
         .map(|entry| entry.trim_start_matches('/'))
         .filter(|name| match latest_pass.get(*name) {
             Some(true) => false,
-            Some(false) => !fail_answered,
+            Some(false) => {
+                !(disposition_clear
+                    && latest_is_retraction.get(*name) != Some(&true)
+                    && fail_carries.get(*name) == Some(&true))
+            }
             None => true,
         })
         .map(|name| UnattestedReviewer {
@@ -5388,6 +5429,10 @@ struct LocalPass {
     /// tiling chain reads it, nothing else does.
     reviewed_base: String,
     is_pass: bool,
+    /// The line that produced this entry was a RETRACTION
+    /// (`retracts_attester`): it revokes, it never covers - the answered-fail
+    /// arm must not resurrect the pass it killed (x-aecc review, finding 1).
+    is_retraction: bool,
 }
 
 /// The union-of-ranges coverage answer over a branch's attestations: whether
@@ -5531,24 +5576,12 @@ pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bo
     rounds_exhausted && blockers.iter().any(|b| b.hard)
 }
 
-/// The non-terminal blocking findings in the PR's attestation chain.
-///
-/// Terminal means: fixed (and a LATER round reviewed the fix delta),
-/// non-blocking by the gate's own re-derivation, or declined WITH
-/// corroboration the author cannot mint alone (`self_attested_alone` is the
-/// coverage row's existing predicate - a disposition pass carries its own
-/// corroboration requirement, independent of
-/// `config.review.require_corroboration`, because a disposition pass can be
-/// gamed by declining and a clean review cannot). Pure: scans the events
-/// text, no IO. An empty chain has no findings and blocks nothing.
-pub fn disposition_blockers(
-    events_text: &str,
-    head_branch: &str,
-    head_sha: &str,
-    self_attested_alone: bool,
-) -> Vec<DispositionBlocker> {
-    // Collect the in-scope chain, oldest first, exactly like the tiling
-    // scan: same scoping rule, same admission of both verdicts.
+/// The branch-scoped `review_attestation` chain, oldest first: branch match
+/// with the legacy exact-head admission, both verdicts, head-pinned lines
+/// only. ONE parse serves every consumer (disposition blockers, tiling
+/// ranges, the answered-fail predicates); a second hand-copy of this loop is
+/// how the gates drift (x-aecc review, finding 4).
+fn in_scope_chain(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<Value> {
     let mut chain: Vec<Value> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -5572,6 +5605,35 @@ pub fn disposition_blockers(
         }
         chain.push(val);
     }
+    chain
+}
+
+/// The non-terminal blocking findings in the PR's attestation chain.
+///
+/// Terminal means: fixed (and a LATER round reviewed the fix delta),
+/// non-blocking by the gate's own re-derivation, or declined WITH
+/// corroboration the author cannot mint alone (`self_attested_alone` is the
+/// coverage row's existing predicate - a disposition pass carries its own
+/// corroboration requirement, independent of
+/// `config.review.require_corroboration`, because a disposition pass can be
+/// gamed by declining and a clean review cannot). Pure: scans the events
+/// text, no IO. An empty chain has no findings and blocks nothing.
+pub fn disposition_blockers(
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+    self_attested_alone: bool,
+) -> Vec<DispositionBlocker> {
+    let chain = in_scope_chain(events_text, head_branch, head_sha);
+    disposition_blockers_on_chain(&chain, self_attested_alone)
+}
+
+/// [`disposition_blockers`] over an already-collected chain (the caller that
+/// parsed the events once passes the same chain to every predicate).
+fn disposition_blockers_on_chain(
+    chain: &[Value],
+    self_attested_alone: bool,
+) -> Vec<DispositionBlocker> {
     if chain.is_empty() {
         return Vec::new();
     }
@@ -5680,56 +5742,6 @@ pub fn disposition_blockers(
         }
     }
     blockers
-}
-
-/// Whether any in-scope `fail` attestation in the chain carries a keyed
-/// finding (x-aecc). The answered-fail predicate needs evidence the reviewer
-/// actually raised something to disposition; `disposition_blockers` is empty
-/// both when everything is terminal AND when there was nothing to disposition
-/// at all, and only the first is a decline. A findings-free fail is the
-/// retraction/revocation shape, never coverage: a fail posted after a pass
-/// still revokes it. Pure: scans text, no IO.
-fn fail_chain_carries_findings(events_text: &str, head_branch: &str, head_sha: &str) -> bool {
-    for line in events_text.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
-            continue;
-        }
-        if val.pointer("/data/verdict").and_then(|v| v.as_str()) != Some("fail") {
-            continue;
-        }
-        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if line_head.is_empty() {
-            continue;
-        }
-        let line_branch = val
-            .pointer("/data/branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
-            continue;
-        }
-        let carries = val
-            .pointer("/data/findings")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter().any(|p| {
-                    p.get("finding_key")
-                        .and_then(|v| v.as_str())
-                        .map(|k| !k.is_empty())
-                        .unwrap_or(false)
-                })
-            })
-            .unwrap_or(false);
-        if carries {
-            return true;
-        }
-    }
-    false
 }
 
 /// Run `git rev-list` and return its commit lines, oldest first only when
@@ -5846,28 +5858,9 @@ pub fn compute_range_tiling(
     // scan uses (branch field, with the legacy exact-head admission). Both
     // verdicts count - a review that found bugs still READ its range, and the
     // disposition gate (not coverage) is what its findings must satisfy.
+    // Collected through the ONE shared chain helper, not a fourth hand-copy.
     let mut ranges: Vec<(String, String)> = Vec::new();
-    for line in events_text.lines() {
-        let Ok(val) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
-            continue;
-        }
-        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if line_head.is_empty() {
-            continue;
-        }
-        let line_branch = val
-            .pointer("/data/branch")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if !attestation_in_scope(&line_branch, line_head, head_branch, head_sha) {
-            continue;
-        }
+    for val in in_scope_chain(events_text, head_branch, head_sha) {
         let range_base = val
             .pointer("/data/reviewed_base_sha")
             .and_then(|v| v.as_str())
@@ -6000,17 +5993,22 @@ fn local_latest_attestations(
     events_text: &str,
     head_branch: &str,
     head_sha: &str,
-) -> Vec<LocalPass> {
+) -> (
+    Vec<LocalPass>,
+    std::collections::HashSet<(String, Option<String>)>,
+) {
     // (reviewer, attester_session_id) -> (head it attested, branch it named,
-    // was it a pass, the base its range measured). The attester lives in the
-    // key so cross-session attestations join instead of replace. The HEAD is
-    // no longer a filter, it is a RESULT: which head an attestation pinned is
-    // what the freshness predicate needs, and dropping every non-matching
-    // line here is what made a rebase destroy a review.
+    // was it a pass, the base its range measured, was it a retraction). The
+    // attester lives in the key so cross-session attestations join instead of
+    // replace. The HEAD is no longer a filter, it is a RESULT: which head an
+    // attestation pinned is what the freshness predicate needs, and dropping
+    // every non-matching line here is what made a rebase destroy a review.
     let mut latest: std::collections::HashMap<
         (String, Option<String>),
-        (String, String, bool, String),
+        (String, String, bool, String, bool),
     > = std::collections::HashMap::new();
+    let mut raised_findings: std::collections::HashSet<(String, Option<String>)> =
+        std::collections::HashSet::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -6090,7 +6088,7 @@ fn local_latest_attestations(
             .map(|s| !s.is_empty())
             .unwrap_or(false);
         if is_retraction {
-            if let Some((existing_head, _, _, _)) = latest.get(&pair_key) {
+            if let Some((existing_head, _, _, _, _)) = latest.get(&pair_key) {
                 if existing_head != line_head {
                     continue;
                 }
@@ -6104,28 +6102,60 @@ fn local_latest_attestations(
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
+        // x-aecc: a fail that RAISED keyed findings marks its own pair as
+        // answer-capable. Per-pair, never chain-global: a bystander's
+        // findings-free fail must not ride another reviewer's dispositions
+        // (review finding 2), and a retraction line marks nothing. Recorded
+        // BEFORE the insert consumes the key; for a non-retraction line
+        // key_attester IS the line's own attester.
+        if !is_pass && !is_retraction {
+            let carries = val
+                .pointer("/data/findings")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter().any(|p| {
+                        p.get("finding_key")
+                            .and_then(|v| v.as_str())
+                            .map(|k| !k.is_empty())
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false);
+            if carries {
+                raised_findings.insert(pair_key.clone());
+            }
+        }
         latest.insert(
             pair_key,
-            (line_head.to_string(), line_branch, is_pass, reviewed_base),
+            (
+                line_head.to_string(),
+                line_branch,
+                is_pass,
+                reviewed_base,
+                is_retraction,
+            ),
         );
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
         .map(
-            |((reviewer, attester), (head, branch, is_pass, reviewed_base))| LocalPass {
-                reviewer,
-                attester,
-                head,
-                branch,
-                reviewed_base,
-                is_pass,
+            |((reviewer, attester), (head, branch, is_pass, reviewed_base, is_retraction))| {
+                LocalPass {
+                    reviewer,
+                    attester,
+                    head,
+                    branch,
+                    reviewed_base,
+                    is_pass,
+                    is_retraction,
+                }
             },
         )
         .collect();
     out.sort_by(|a, b| {
         (&a.reviewer, &a.attester, &a.head).cmp(&(&b.reviewer, &b.attester, &b.head))
     });
-    out
+    (out, raised_findings)
 }
 
 /// Whether an author login is a KNOWN review App (a BOT_PROFILES login or a
@@ -6250,7 +6280,8 @@ pub fn classify_coverage_tiled(
     pr_author: Option<&str>,
     github_approval_satisfies: bool,
 ) -> CoverageReport {
-    let local_passes = local_latest_attestations(events_text, head_branch, head_sha);
+    let (local_passes, pairs_raising_findings) =
+        local_latest_attestations(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
 
     if github_read_ok {
@@ -6431,11 +6462,12 @@ pub fn classify_coverage_tiled(
         }
     }
 
-    // local_attestation axis: one verdict per distinct latest `pass`, labeled
+    // local_attestation axis: one verdict per distinct latest attestation -
+    // every `pass`, plus (x-aecc, guards below) an ANSWERED `fail` - labeled
     // with whether the authoring session emitted it, and pinned to the head the
     // attestation itself recorded rather than to the head at eval time.
     // A verdict also counts when the branch's attestation CHAIN tiles
-    // base..head and this pass is one of its links: every commit that fixes a
+    // base..head and this attestation is one of its links: every commit that fixes a
     // finding moves the head, so under a single-attestation freshness rule a
     // disciplined fix-and-re-review loop still cannot terminate. Tiling is
     // what makes the later rounds of that loop count.
@@ -6444,13 +6476,20 @@ pub fn classify_coverage_tiled(
     // dispositioned ANSWERS this head and counts exactly like a pass here.
     // The pass condition is answered-at-this-head, never clean-at-this-head,
     // so declining everything terminates the loop instead of demanding the
-    // "reviewer finds nothing" outcome that made it unkillable. Terminality is
-    // read with the pass-only authorship basis; `read_pr_info` re-runs the
-    // disposition scan with a `self_attested_alone` that INCLUDES these fail
-    // verdicts, so a solo author's decline still withholds `reviewed` there -
-    // the corroboration a decline needs is enforced downstream, not skipped
-    // here.
+    // "reviewer finds nothing" outcome that made it unkillable. Three guards
+    // keep the promotion honest (review findings 1-2): the pair's OWN chain
+    // must have raised keyed findings (a bystander's findings-free fail never
+    // rides another reviewer's dispositions), a RETRACTION entry never
+    // promotes (it revokes, it never covers), and terminality is read with
+    // the pass-only authorship basis - `read_pr_info` re-runs the disposition
+    // scan with a `self_attested_alone` that INCLUDES these fail verdicts, so
+    // a solo author's decline still withholds `reviewed` there.
     let rounds_exhausted = tiling.map(|t| t.rounds_exhausted).unwrap_or(false);
+    let answered_fail = |lp: &LocalPass| {
+        !lp.is_pass
+            && !lp.is_retraction
+            && pairs_raising_findings.contains(&(lp.reviewer.clone(), lp.attester.clone()))
+    };
     for lp in local_passes.iter().filter(|lp| lp.is_pass) {
         verdicts.push(local_attestation_verdict(
             lp,
@@ -6459,22 +6498,17 @@ pub fn classify_coverage_tiled(
             author_session,
         ));
     }
-    if local_passes.iter().any(|lp| !lp.is_pass)
-        && fail_chain_carries_findings(events_text, head_branch, head_sha)
-    {
+    if local_passes.iter().any(|lp| answered_fail(lp)) {
+        let chain = in_scope_chain(events_text, head_branch, head_sha);
         let basis = CoverageReport {
             coverage: Coverage::Covered(0),
             verdicts: verdicts.clone(),
             github_approval_satisfies,
         };
-        let blockers = disposition_blockers(
-            events_text,
-            head_branch,
-            head_sha,
-            basis.rests_on_self_attestation_alone(),
-        );
+        let blockers =
+            disposition_blockers_on_chain(&chain, basis.rests_on_self_attestation_alone());
         if !blockers_withhold(&blockers, rounds_exhausted) {
-            for lp in local_passes.iter().filter(|lp| !lp.is_pass) {
+            for lp in local_passes.iter().filter(|lp| answered_fail(lp)) {
                 verdicts.push(local_attestation_verdict(
                     lp,
                     freshness,
@@ -14055,7 +14089,7 @@ mod tests {
         // The pair map keeps every latest verdict, so "the head-2 pass
         // survives" is "a PASS at head2 exists" - an answered fail alone
         // must not satisfy this assertion.
-        let passes = local_latest_attestations(&text, "b", "head2");
+        let (passes, _raised) = local_latest_attestations(&text, "b", "head2");
         assert!(
             passes.iter().any(|p| p.head == "head2" && p.is_pass),
             "the newer head-2 pass must survive a retraction naming head-1: {passes:?}"
@@ -14087,7 +14121,7 @@ mod tests {
             })
             .to_string(),
         );
-        let passes = local_latest_attestations(&text, "b", "h");
+        let (passes, _raised) = local_latest_attestations(&text, "b", "h");
         assert!(
             !passes.iter().any(|p| p.head == "h" && p.is_pass),
             "a same-head retraction must revoke the pass"

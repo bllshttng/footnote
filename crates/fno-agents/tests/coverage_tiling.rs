@@ -1256,3 +1256,154 @@ fn xaecc_cap_files_the_soft_remainder_and_answers() {
     );
     assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
 }
+
+/// A same-head RETRACTION of a pass (review finding 1): the retraction is
+/// the pair's latest fail, the pair's own round-1 fail carried findings that
+/// are all declined, and the chain's blockers are empty - the exact shape a
+/// chain-global guard would read as answered. The retribution it must not
+/// buy: the revoked pass must NOT come back as a Reviewed verdict.
+#[test]
+fn xaecc_r1_a_retraction_never_resurrects_the_revoked_pass() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 2);
+    let k = "a.py:1:correctness";
+    let fail_with_findings = declined_round(
+        &base,
+        &shas[0],
+        serde_json::json!([finding(k, "correctness", None, true)]),
+        serde_json::json!([declined(k)]),
+    );
+    let pass =
+        attestation("code-review", &shas[0], &head, "pass").replace("\"sess-a\"", "\"sess-peer\"");
+    let retraction = serde_json::json!({
+        "ts": "2026-08-26T20:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": head,
+            "verdict": "fail",
+            "session_id": "s-op",
+            "attester_session_id": "sess-op",
+            "retracts_attester": "sess-peer",
+            "branch": BRANCH,
+            "reviewed_file_count": 2,
+            "reviewed_line_count": 20,
+        }
+    })
+    .to_string();
+    let events = events_file(repo, &[fail_with_findings, pass, retraction]);
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    // The pair's latest entry is the retraction: is_pass=false,
+    // is_retraction=true -> no verdict at all, covered nowhere. A `pass`
+    // arm would have counted; the retraction revoked it and nothing may
+    // restore it by decline.
+    assert!(
+        !rep.verdicts
+            .iter()
+            .any(|v| v.producer == CoverageProducer::LocalAttestation),
+        "a retraction revokes; it never covers: {:?}",
+        rep.verdicts
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+    let (unattested, _m) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert_eq!(
+        unattested.len(),
+        1,
+        "the reviewers gate withholds on the retraction too"
+    );
+}
+
+/// A bystander reviewer's findings-free fail (review finding 2): another
+/// reviewer's declined findings must not satisfy it, on the coverage axis or
+/// the reviewers gate.
+#[test]
+fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, _shas, head) = repo_with(repo, 2);
+    let k = "a.py:1:correctness";
+    let events = events_file(
+        repo,
+        &[
+            declined_round(
+                &base,
+                &head,
+                serde_json::json!([finding(k, "correctness", None, true)]),
+                serde_json::json!([declined(k)]),
+            ),
+            attestation("sigma", &base, &head, "fail"),
+        ],
+    );
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    // The findings carrier answers; the bystander does not.
+    assert_eq!(locals.len(), 1, "only the carrier pair promotes");
+    assert_eq!(locals[0].name, "code-review");
+    assert_eq!(locals[0].verdict, CoverageVerdict::Reviewed);
+    let (unattested, _m) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string(), "sigma".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert_eq!(
+        unattested.len(),
+        1,
+        "sigma stays unattested: {unattested:?}"
+    );
+}

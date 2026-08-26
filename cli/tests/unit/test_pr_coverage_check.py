@@ -1521,3 +1521,40 @@ def test_xaecc_cap_files_the_remainder_and_covers_at_the_same_head(monkeypatch, 
     assert state == _coverage_gate.COVERED, refusal
     assert calls == [("a.py:1:correctness",)]
     assert "filed at the round cap (3/2)" in note
+
+
+def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatch, tmp_path):
+    """Review finding 3: when the cap arm files the findings but the row is
+    uncovered on the no_local_pass conjunct, the gate keeps the sized
+    attestation refusal (never an emptied sentence) and the filed node rides
+    the note instead of vanishing."""
+    _specimen_gates(monkeypatch)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
+    stamps = ["2026-08-26T18:00:00Z", "2026-08-26T18:30:00Z", "2026-08-26T19:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    rounds = []
+    for ts, head in zip(stamps, heads):
+        r = _xaecc_fail_round(["a.py:1:correctness"], [])
+        r["ts"] = ts
+        r["data"]["head_sha"] = head
+        r["data"]["reviewed_head_sha"] = head
+        # The reviewer label is a peer, not code-review: the row carries no
+        # code-review local pass, which is the conjunct that must keep its
+        # own remedy.
+        r["data"]["reviewer"] = "peer"
+        rounds.append(r)
+    _xaecc_seed(tmp_path, rounds, _xaecc_row(covered=False))
+    monkeypatch.setattr(
+        _coverage_gate, "file_findings_at_cap", lambda keys, pr_number, repo: ["x-ae02"]
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert refusal, "never an empty refusal sentence"
+    assert "required code-review has no head-pinned local pass" in refusal
+    assert "filed at the round cap (3/2)" in note, "the filed node rides the note"
