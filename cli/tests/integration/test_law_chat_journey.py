@@ -111,9 +111,10 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
     index_rows = [json.loads(line) for line in index.read_text(encoding="utf-8").splitlines() if line]
     assert [event["data"]["decision_id"] for event in events] == [decision_id]
     assert [row["data"]["decision_id"] for row in index_rows] == [decision_id]
-    # A chat approval cannot reach the law lane, so the row reads back in the
-    # unattributed lane a human must consciously trust.
-    _, rows, _ = decide.list_decisions("x-12ba", limit=None, lane="unattributed")
+    # A post-cutover chat approval is the law skill's internal authority proof.
+    # It is not a user-typeable --authority value, so it reaches law without
+    # reopening the agent-authored decision path.
+    _, rows, _ = decide.list_decisions("x-12ba", limit=None, lane="law")
     assert [row["decision_id"] for row in rows] == [decision_id]
 
     with pytest.raises(law.InvalidOperatorConsentError, match="consumed"):
