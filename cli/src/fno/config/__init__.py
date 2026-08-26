@@ -298,6 +298,14 @@ class RenderTargetConfig(BaseModel):
         if not v:
             raise ValueError("backlog.render_targets path must not be empty")
         _check_no_glob(v, "backlog.render_targets path")
+        # The auto-render fires from arbitrary project and agent cwds, so a
+        # relative path would scatter a copy of the public board into each
+        # one. Absolute (or ~/-rooted) only.
+        if not os.path.isabs(os.path.expanduser(v)):
+            raise ValueError(
+                "backlog.render_targets path must be absolute or ~/-rooted "
+                f"(it is written from arbitrary cwds), got: {v!r}"
+            )
         return v
 
     @field_validator("project")

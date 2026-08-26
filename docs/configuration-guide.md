@@ -42,7 +42,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `backlog.id_prefix` | str (optional) | _(none)_ | always | Prefix for minted node IDs (<=7 chars; not cv-/fu-/tgt-). |
 | `backlog.id_hex_width` | int | `8` | advanced | Hex width of minted node IDs (4-8). |
 | `backlog.staleness_days` | int | `21` | advanced | Age (days) before an unmoved ready node is quarantined from selection. |
-| `backlog.render_targets` | list[RenderTargetConfig] | `[]` | advanced | Auto-rendered public projections: every graph mutation re-renders each {path, project, projection=backlog\|roadmap} target through the leak gate. |
+| `backlog.render_targets` | list[RenderTargetConfig] | `[]` | advanced | Auto-rendered public projections (GLOBAL config file only): every graph mutation re-renders each {path, project, projection=backlog\|roadmap} target through the leak gate. |
 | `batch.enabled` | bool | `false` | advanced | Coalesce same-domain nodes into one batch PR (opt-in). |
 | `batch.max_nodes` | int | `3` | advanced | Nodes per batch before it closes (default 3). |
 | `batch.max_loc` | int (optional) | _(none)_ | advanced | Optional cumulative-diff LOC ceiling for a batch (off by default). |

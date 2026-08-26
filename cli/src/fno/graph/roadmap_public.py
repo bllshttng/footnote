@@ -152,6 +152,7 @@ def _configured_targets() -> "list[RenderTargetConfig]":
             read_config_flat,
         )
 
+        out: list[RenderTargetConfig] = []
         for candidate in config_read_candidates([_global_settings_path()]):
             if not candidate.is_file():
                 continue
@@ -165,8 +166,7 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                     "ignoring it",
                     file=sys.stderr,
                 )
-                return []
-            out: list[RenderTargetConfig] = []
+                break
             for row in rows:
                 try:
                     out.append(RenderTargetConfig.model_validate(row))
@@ -175,10 +175,43 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                         f"Warning: skipping malformed backlog.render_targets row: {exc}",
                         file=sys.stderr,
                     )
-            return out
-        return []
+            break
+        _warn_shadowed_local_rows(out)
+        return out
     except Exception:
         return []
+
+
+def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
+    """Warn when load_settings() sees render_targets rows this render ignores.
+
+    This key is honored from the GLOBAL config file only (graph.json is a
+    global artifact; a project-local list would make the render cwd-dependent).
+    load_settings still parses a project-local list, so an operator who puts
+    the rows there gets validation and no rendering - a silent no-op unless
+    this warning fires. Best-effort: a settings chain that cannot load at all
+    stays silent rather than raising into the mutation.
+    """
+    try:
+        from fno.config import load_settings
+
+        def _key(rows: "list[RenderTargetConfig]") -> list[tuple[str, str, str]]:
+            return sorted((r.path, r.project, r.projection) for r in rows)
+
+        local = _key(load_settings().backlog.render_targets)
+        if local and local != _key(honored):
+            print(
+                "Warning: backlog.render_targets is honored from the GLOBAL "
+                "config file only; "
+                + (
+                    f"{len(local)} project-local row(s) ignored"
+                    if not honored
+                    else "a project-local list shadows the global one and is ignored"
+                ),
+                file=sys.stderr,
+            )
+    except Exception:
+        pass
 
 
 def render_configured_targets(entries: list[dict]) -> None:
@@ -187,16 +220,25 @@ def render_configured_targets(entries: list[dict]) -> None:
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
     byte-unchanged and names every offender; it still only skips the target."""
-    from fno.graph.render_html import atomic_write_documents, public_title_leaks
+    from fno.graph.render_html import (
+        atomic_write_documents,
+        public_title_leaks,
+        render_public_sections_html,
+    )
 
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
         try:
             if target.projection == "roadmap":
-                render_set = [
-                    e for items in _columns(entries, target.project).values() for e in items
-                ]
-                html = render_public_roadmap_html(entries, target.project)
+                # One _columns pass feeds both the gate's render set and the
+                # sections; render_public_roadmap_html would derive it again.
+                cols = _columns(entries, target.project)
+                render_set = [e for items in cols.values() for e in items]
+                html = render_public_sections_html(
+                    [(label, cols[column]) for column, label in _PUBLIC_COLUMNS],
+                    title=f"{target.project} roadmap",
+                    projection="roadmap",
+                )
             else:
                 render_set = public_backlog_entries(entries, target.project)
                 html = render_public_backlog_html(entries, target.project)

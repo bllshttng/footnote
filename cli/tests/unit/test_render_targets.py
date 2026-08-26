@@ -128,6 +128,36 @@ def test_render_target_config_defaults_and_typo():
     assert "roadmap" in str(exc.value)
 
 
+def test_relative_target_path_rejected():
+    from fno.config import RenderTargetConfig
+
+    with pytest.raises(Exception) as exc:
+        RenderTargetConfig.model_validate({"path": "fno-backlog.html", "project": "fno"})
+    assert "absolute" in str(exc.value)
+
+
+def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, capsys):
+    global_cfg = tmp_path / "config.toml"
+    global_cfg.write_text("[backlog]\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_cfg))
+    local_cfg = tmp_path / "local-config.toml"
+    local_cfg.write_text(
+        f'[[backlog.render_targets]]\npath = "{_isolate["target"]}"\nproject = "fno"',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(local_cfg))
+    from fno import config as config_mod
+
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+    from fno.graph.roadmap_public import render_configured_targets
+
+    render_configured_targets([])
+    err = capsys.readouterr().err
+    assert "project-local row(s) ignored" in err
+    assert not _isolate["target"].exists()
+    config_mod.load_settings.cache_clear()  # type: ignore[attr-defined]
+
+
 def test_render_targets_table_typo_degrades_to_empty(caplog):
     import logging
 
