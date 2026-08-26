@@ -1906,6 +1906,10 @@ pub enum ServerMsg {
         /// it (a blank lane would be worse) but says it is stale.
         #[serde(default)]
         backlog_stale: bool,
+        /// Positive dead-member candidates from the server's shared sweep
+        /// classifier, used by the sideline menu label.
+        #[serde(default)]
+        sweep_dead_count: usize,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -4330,6 +4334,7 @@ mod tests {
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
+                sweep_dead_count: 0,
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),

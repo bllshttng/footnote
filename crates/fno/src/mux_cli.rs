@@ -1959,7 +1959,14 @@ fn squad_prune(args: &[OsString]) -> i32 {
 
     let evidence = member_evidence();
     let (tabs, live_cwds, server_reachable) = live_tabs();
-    let tab_outcome = prune_live_tabs(&tabs, include_named, dry_run);
+    let tab_outcome = if server_reachable {
+        prune_live_tabs(&tabs, include_named, dry_run)
+    } else {
+        TabPruneOutcome {
+            kept: tabs.len(),
+            ..TabPruneOutcome::default()
+        }
+    };
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
 
     let now = crate::squad_store::now_epoch_secs();
@@ -1987,7 +1994,26 @@ fn squad_prune(args: &[OsString]) -> i32 {
         members_kept_unknown,
         applied,
         notice,
-    ) = if dry_run {
+    ) = if !server_reachable {
+        let loaded = crate::squad_store::load();
+        let detail = match loaded.notice {
+            Some(notice) => {
+                format!("server liveness incomplete; no squad records changed; {notice}")
+            }
+            None => "server liveness incomplete; no squad records changed".into(),
+        };
+        (
+            Vec::new(),
+            loaded.squads.len(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            !dry_run,
+            Some(detail),
+        )
+    } else if dry_run {
         let loaded = crate::squad_store::load();
         let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
         let (mut ku, mut sn, mut kp, mut mr, mut mkl, mut mku) =

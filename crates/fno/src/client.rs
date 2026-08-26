@@ -937,6 +937,8 @@ struct View {
     /// (sessions cannot rename), so the row can never go stale.
     session: String,
     layout: LayoutView,
+    /// Server-authoritative count from the shared dead-member classifier.
+    sweep_dead_count: usize,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
@@ -2478,6 +2480,7 @@ impl View {
             term,
             session,
             layout,
+            sweep_dead_count: 0,
             frames: HashMap::new(),
             panel_on: true,
             density,
@@ -3669,15 +3672,10 @@ impl View {
         self.update_probe_want = true;
     }
 
-    /// Count the same positive-dead rows the server can safely sweep from the
-    /// current layout. Unknown and live rows are excluded; the label must not
-    /// promise removal of an unmeasured worker.
+    /// Read the server's positive-dead count from the same classifier the
+    /// confirmed sweep invokes. Unknown and live rows are excluded.
     fn dead_sweep_count(&self) -> usize {
-        self.layout
-            .agents
-            .iter()
-            .filter(|agent| agent.exited && !agent.unmeasured && !agent.external)
-            .count()
+        self.sweep_dead_count
     }
 
     /// Rebuild an already-open sideline MENU so a landing update probe shows
@@ -10595,6 +10593,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
+                sweep_dead_count,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -10608,6 +10607,7 @@ async fn attach_and_run(
                     backlog_lanes,
                     backlog_stale,
                 });
+                view.sweep_dead_count = sweep_dead_count;
                 break;
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
@@ -11001,8 +11001,9 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, sweep_dead_count }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
+                    view.sweep_dead_count = sweep_dead_count;
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -24831,6 +24832,7 @@ mod tests {
     async fn sideline_sweep_confirm_reuses_centered_action_and_rechecks_count() {
         let mut v = view_with_agents(vec![lifecycle_row("dead", true, false)]);
         v.term = (30, 100);
+        v.sweep_dead_count = 1;
         assert_eq!(v.dead_sweep_count(), 1);
         v.open_sideline_menu(Anchor::Center);
         let sweep = v

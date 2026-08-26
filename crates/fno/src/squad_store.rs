@@ -755,9 +755,6 @@ impl MemberEvidence {
     }
 
     pub fn verdict(&self, member: &StoredMember) -> MemberLiveness {
-        if member.tombstone {
-            return MemberLiveness::Dead;
-        }
         let keys = [
             (!member.attach_id.is_empty()).then_some(member.attach_id.as_str()),
             member.worker.as_deref(),
@@ -769,6 +766,8 @@ impl MemberEvidence {
             .any(|key| self.live.contains(key))
         {
             MemberLiveness::Live
+        } else if member.tombstone {
+            MemberLiveness::Dead
         } else if self.complete_attach_set && !member.attach_id.is_empty()
             || keys
                 .into_iter()

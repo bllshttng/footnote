@@ -6076,6 +6076,25 @@ impl Core {
         crate::squad_store::MemberEvidence::from_sets(live, dead)
     }
 
+    fn dead_sweep_count(&self) -> usize {
+        let mut evidence = self.member_evidence();
+        for entry in self.panes.values() {
+            if let Some(worker) = &entry.refused_worker {
+                evidence.add_dead(worker.clone());
+            }
+        }
+        self.squad_members
+            .values()
+            .flatten()
+            .filter(|member| {
+                matches!(
+                    evidence.verdict(member),
+                    crate::squad_store::MemberLiveness::Dead
+                )
+            })
+            .count()
+    }
+
     fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
         self.squad_members.values().flatten().any(|member| {
             let Some(worker) = member.worker.as_deref() else {
@@ -6350,7 +6369,7 @@ impl Core {
                                     .filter(|facts| {
                                         m.harness
                                             .as_deref()
-                                            .is_none_or(|harness| harness == facts.harness)
+                                            .is_some_and(|harness| harness == facts.harness)
                                     })
                                     .cloned()
                                     .map(|mut facts| {
@@ -7549,6 +7568,7 @@ impl Core {
             backlog: self.routed_backlog(),
             backlog_lanes: self.backlog_lanes.clone(),
             backlog_stale: self.backlog_stale,
+            sweep_dead_count: self.dead_sweep_count(),
         }
     }
 
@@ -9842,6 +9862,18 @@ impl Core {
                         self.worker_pane.remove(&name);
                     }
                 }
+                let stored_member = self
+                    .squad_members
+                    .values()
+                    .flatten()
+                    .find(|member| {
+                        !member.tombstone && member.worker.as_deref() == Some(name.as_str())
+                    })
+                    .cloned();
+                let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
+                    Ok(receipts) => (receipts, None),
+                    Err(error) => (HashMap::new(), Some(error)),
+                };
                 let facts = {
                     let Some(a) = self.agents.iter().find(|a| a.name == name) else {
                         self.notice(client_id, "no such agent");
@@ -9853,10 +9885,26 @@ impl Core {
                     if live_pane || !self.row_resumable_in_session(a) {
                         None // refused; notice below
                     } else {
-                        Self::worker_facts(a)
+                        Self::worker_facts(a).or_else(|| {
+                            let member = stored_member.as_ref()?;
+                            let harness = member.harness.as_deref()?;
+                            let session_id = member.harness_session_id.as_deref()?;
+                            fresh_receipts
+                                .get(session_id)
+                                .filter(|receipt| receipt.harness == harness)
+                                .cloned()
+                                .map(|mut receipt| {
+                                    receipt.name = name.clone();
+                                    receipt
+                                })
+                        })
                     }
                 };
                 let Some(facts) = facts else {
+                    if let Some(error) = receipt_error {
+                        self.notice(client_id, error);
+                        return Flow::Continue;
+                    }
                     self.notice(client_id, "agent is not resumable");
                     return Flow::Continue;
                 };
