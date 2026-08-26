@@ -233,6 +233,14 @@ Two enforcement points:
    degrades to no filtering (the acquire/refuse mutex above is the authoritative
    backstop).
 
+## Task claims: the transition IS the claim (x-09d7 group 3)
+
+Two sessions may share one node's work when the plan declares per-task waves: the node claim guards the node, the task claim guards the task. The key is `task:<node-id>:<task-id>`, a plain claim-key namespace beside `node:`/`dispatch:`/`walker:`/`lane-slot:` - the claim primitive validates a key only for non-emptiness and encoded filename length, so no primitive change and no migration were needed. Task claims are repo-local (the `task:` prefix is not a global-id prefix, like `lane-slot:`), so every worktree of the project's repo coordinates on one store while the rows themselves live in the global graph.
+
+The claim is taken INSIDE the `pending -> in_progress` status transition by `fno backlog task update <node> <task> --status in_progress`, never by a standalone claim call a worker can forget (the shape copied from Claude's own `TaskUpdate` auto-claim). The verb acquires the claim FIRST, outside the graph lock; a peer holder refuses with exit 3 naming the holder, and the row is never touched. On success the row (`status`, `owner`, `claimed_at`) is written in one locked graph mutation, and a graph-write failure releases the claim before re-raising so a failed transition leaves no orphan lock. `--status done` writes the row and releases the claim; `--status pending` is the holder-only give-back that frees a blocked or failed task for the next worker. The `/execute waves` skill claims through this verb before each task dispatch (a held task is logged `[~]` in STATE.md and skipped this round) and the boundary emit settles the claim on every task outcome.
+
+Liveness is pure pid-anchored with no TTL, the `reconcile_lane_slot` shape: the pid is the durable harness session pid from `resolve_session_pid`, so a dead worker's task frees the instant its process is gone and `acquire_claim`'s stale-recovery step archives the corpse and retries - no heartbeat needed. The holder is the FULL harness session id (`resolve_self_session_id`), never a head-8 handle: a codex UUIDv7 head-8 is a ~65.5s clock bucket, so two codex workers spawned in one minute would share a handle and the second would re-acquire the first's task as idempotent.
+
 ## Who writes `node:<id>`, and who can prove it dead
 
 Measured 2026-08-19: nine nodes each named by a live roster worker, and seven read `free`. Two live claimants landed on one node and a third nearly did. The claim is documented as THE work-claim primitive, so four kings read `free` and staffed duplicates onto nodes that already had someone on them.
