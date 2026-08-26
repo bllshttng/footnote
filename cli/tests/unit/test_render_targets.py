@@ -163,6 +163,26 @@ def test_state_file_collision_rejected(_isolate):
             RenderTargetConfig.model_validate({"path": str(state_path), "project": "fno"})
 
 
+def test_unreadable_sibling_no_false_alarm(_isolate, tmp_path, monkeypatch, capsys):
+    """A corrupt legacy settings.yaml under a config.toml that fully defines
+    the rows renders normally and does NOT warn may-be-disabled."""
+    global_yaml = tmp_path / "settings.yaml"
+    global_yaml.write_text("::not yaml at all::\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_yaml))
+    toml_sibling = tmp_path / "config.toml"
+    toml_sibling.write_text(
+        f'[backlog]\n[[backlog.render_targets]]\npath = "{_isolate["target"]}"\nproject = "fno"\n',
+        encoding="utf-8",
+    )
+    _mutate(
+        _isolate["graph"],
+        [_entry("ab-sibling0", title="first title")],
+        "second title",
+    )
+    assert "second title" in _isolate["target"].read_text(encoding="utf-8")
+    assert "may be disabled" not in capsys.readouterr().err
+
+
 def test_bad_row_skipped_good_row_renders(_isolate, tmp_path, monkeypatch, capsys):
     good = tmp_path / "out" / "good.html"
     _write_config(

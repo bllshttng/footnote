@@ -151,14 +151,6 @@ def _configured_targets() -> "list[RenderTargetConfig]":
 
         unreadable: list = []
         backlog = read_global_block("backlog", unreadable=unreadable) or {}
-        if unreadable:
-            # A corrupt global config must not silently disable every target
-            # behind the generic parse warning config_io already logged.
-            print(
-                "Warning: backlog.render_targets may be disabled: global "
-                f"config unreadable: {', '.join(str(p) for p in unreadable)}",
-                file=sys.stderr,
-            )
         rows = backlog.get("render_targets")
         if rows is None:
             rows = []
@@ -169,6 +161,17 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                 file=sys.stderr,
             )
             rows = []
+        if unreadable and not rows:
+            # A corrupt global config must not silently disable every target
+            # behind the generic parse warning config_io already logged. Only
+            # a disability (no usable rows from any readable candidate)
+            # warns - a corrupt legacy settings.yaml under a config.toml that
+            # fully defines the rows is not the render's problem.
+            print(
+                "Warning: backlog.render_targets may be disabled: global "
+                f"config unreadable: {', '.join(str(p) for p in unreadable)}",
+                file=sys.stderr,
+            )
         # Per-row validation, not one atomic model_validate: a single bad row
         # (e.g. a relative path) must not stop every OTHER target rendering.
         out: list[RenderTargetConfig] = []
