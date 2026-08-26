@@ -9986,7 +9986,11 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         let label = if q.is_empty() || label_lower.contains(&q) {
             r.label.clone()
         } else {
-            match r.match_key.split(' ').find(|t| t.contains(&q) && !label_lower.contains(t)) {
+            match r
+                .match_key
+                .split(' ')
+                .find(|t| t.contains(&q) && !label_lower.contains(t))
+            {
                 Some(token) => format!("{} ·{token}", r.label),
                 None => r.label.clone(),
             }
@@ -28398,9 +28402,7 @@ mod tests {
             "the hit is invisible in every matched label - it matched the key"
         );
         assert!(
-            rows("x-6233")
-                .iter()
-                .any(|r| r.label.contains("claude")),
+            rows("x-6233").iter().any(|r| r.label.contains("claude")),
             "the agent row working x-6233 is found by node id via the pane join"
         );
         assert!(

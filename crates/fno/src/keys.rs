@@ -1960,10 +1960,7 @@ mod tests {
         assert_eq!(scan_all(&[b"\x1b[1;", b"7D"]), vec![Event::OpenSelector]);
         // The prefix path reaches the same rung: prefix + Ctrl+Opt+Left is
         // the same event through the same parse.
-        assert_eq!(
-            scan_all(&[b"\x02\x1b[1;7D"]),
-            vec![Event::OpenSelector]
-        );
+        assert_eq!(scan_all(&[b"\x02\x1b[1;7D"]), vec![Event::OpenSelector]);
         // The UNBOUND Ctrl+Opt arrows are not ours: they forward, as before.
         assert_eq!(
             forwarded_only(&scan_all(&[b"\x1b[1;7C"])),
@@ -1998,10 +1995,7 @@ mod tests {
         assert_eq!(forwarded_only(&events), paste);
         assert_eq!(
             scan_all(&[b"\x1b[1;3D\x1b[1;7D"]),
-            vec![
-                Event::Forward(b"\x1b[1;3D".to_vec()),
-                Event::OpenSelector,
-            ]
+            vec![Event::Forward(b"\x1b[1;3D".to_vec()), Event::OpenSelector,]
         );
     }
 
@@ -2171,19 +2165,23 @@ mod tests {
 
     #[test]
     fn repeat_window_esc_disarms_immediately() {
-        // AC5-FR: Esc is the explicit hatch - it disarms and is processed as
-        // today (forwarded), and no resize fires from it.
+        // AC5-FR: Esc is the explicit hatch - it disarms the window and no
+        // resize fires from it. Since x-e10f a lone ESC is also the first
+        // byte of the global chord, so it is HELD until the next byte says
+        // it is not the chord (ChordEsc); it then forwards with that byte,
+        // byte-exact. The disarm itself is unchanged and immediate.
         let mut s = Scanner::default();
         let t0 = Instant::now();
         s.scan(b"\x02K", t0);
         assert_eq!(
             s.scan(b"\x1b", t0 + Duration::from_millis(50)),
-            vec![Event::Forward(b"\x1b".to_vec())]
+            Vec::<Event>::new(),
+            "the lone ESC is held for chord disambiguation, not swallowed"
         );
         assert_eq!(
             s.scan(b"K", t0 + Duration::from_millis(80)),
-            vec![Event::Forward(b"K".to_vec())],
-            "disarmed by Esc: bare K forwards"
+            vec![Event::Forward(b"\x1bK".to_vec())],
+            "disarmed by Esc: the released ESC and the bare K forward, no resize"
         );
     }
 
