@@ -674,15 +674,19 @@ def resolve_owned_identity(
         verdict = prove(identity.harness, identity.session_id) if prove else None
         if verdict is not True:
             owner = collide(identity.harness, identity.session_id) if collide else None
-            rejected = (
-                {
-                    "harness": identity.harness,
-                    "session_id": identity.session_id,
-                    "reason": "owned_by_live_row",
-                    "owner": owner,
-                },
-            ) if owner else ()
-            return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected)
+            canonical_rejected: tuple[dict[str, str], ...] = ()
+            if owner:
+                canonical_rejected = (
+                    {
+                        "harness": identity.harness,
+                        "session_id": identity.session_id,
+                        "reason": "owned_by_live_row",
+                        "owner": owner,
+                    },
+                )
+            return OwnedHarnessIdentity(
+                None, None, present, "ambiguous", canonical_rejected
+            )
         return OwnedHarnessIdentity(
             identity.session_id, identity.harness, present, "canonical"
         )
