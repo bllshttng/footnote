@@ -144,6 +144,26 @@ def test_migrate_difficulty_refuses_non_string_band(tmp_graph):
     assert json.loads(tmp_graph.read_text())["entries"][0].get("difficulty") is None
 
 
+def test_migrate_difficulty_refuses_garbage_canonical_band(tmp_graph):
+    """x-baef round-10: a garbage difficulty under any retired key routes to
+    needs-decision, never drainable - draining blessed the invalid band with
+    a success receipt, and once model_tier is gone no sweep names the row
+    again while every later difficulty writer exits 2 on it."""
+    tmp_graph.write_text(json.dumps({"entries": [
+        {"id": "x-000a", "difficulty": "turbo", "model_tier": 7},
+        {"id": "x-000b", "difficulty": "turbo", "model_tier": "high"},
+        {"id": "x-000c", "difficulty": 5, "model_tier": "high"},
+    ]}))
+    r = runner.invoke(app, ["backlog", "migrate-difficulty", "--apply"])
+    assert r.exit_code == 2, r.output
+    for rid in ("x-000a", "x-000b", "x-000c"):
+        assert rid in r.output
+    rows = {e["id"]: e for e in json.loads(tmp_graph.read_text())["entries"]}
+    # refused before any write: every row keeps both keys
+    assert all("model_tier" in e for e in rows.values())
+    assert rows["x-000a"]["difficulty"] == "turbo"
+
+
 def test_migrate_difficulty_drains_machine_leftovers(tmp_graph):
     """x-baef round-4: the retired --model-tier handler wrote BOTH keys with
     equal bands, so same-band pairs are what machine-created leftovers look

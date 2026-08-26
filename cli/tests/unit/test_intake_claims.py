@@ -746,6 +746,26 @@ def test_intake_refuses_undatable_frontmatter_without_created(
     assert target.get("plan_path") != str(plan)
 
 
+def test_intake_refuses_unparseable_frontmatter_post_gate(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-10: _read_plan_frontmatter fails soft to {} on malformed
+    YAML, and the empty-dict carve-out would mint a bandless node out of a
+    broken block; a PRESENT but unparseable block refuses instead."""
+    plan = tmp_path / "broken-yaml.md"
+    plan.write_text(
+        "---\ncreated: [unclosed\n---\n# Broken\n\n"
+        f"{_SURFACE}\n\nBody.\n"
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    err = capsys.readouterr().err
+    assert "cannot parse frontmatter" in err
+    # Refused before the write: nothing was appended.
+    assert len(_read_entries(fixture_graph)) == 3
+
+
 def test_intake_claim_lane_allows_post_gate_plan_with_difficulty(
     fixture_graph, tmp_path, capsys,
 ):

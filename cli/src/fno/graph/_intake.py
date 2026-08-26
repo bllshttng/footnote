@@ -823,6 +823,22 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
     return data
 
 
+def _has_frontmatter_block(plan_path: str) -> bool:
+    """True when the file OPENS a ``---`` frontmatter block, whatever is in it.
+
+    ``_read_plan_frontmatter`` fails soft to ``{}`` both for a file with no
+    block (a valid state callers route on) and for a block it cannot parse.
+    The difficulty gate must pass the first and refuse the second, so it
+    needs the one bit the ``{}`` return conflates.
+    """
+    try:
+        with open(plan_path, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    return first.strip() == "---"
+
+
 def _list_known_projects() -> set[str]:
     """Return all project names declared across project-local and global settings.yaml.
 
@@ -1181,6 +1197,16 @@ def _prepare_intake(
     from fno.plan.schema import difficulty_gate_error
 
     gate_error = difficulty_gate_error(fm)
+    if gate_error is None and not fm and _has_frontmatter_block(plan_path):
+        # _read_plan_frontmatter conflates "no block" (fine) with "block
+        # present but unparseable"; the second is undatable, and the empty-
+        # dict carve-out would mint a bandless node out of broken YAML.
+        raise ValueError(
+            f"{plan_path}: cannot parse frontmatter; the difficulty gate "
+            "cannot date the plan. Fix the YAML block, then set created: "
+            "<YYYY-MM-DD> and, for post-gate plans, difficulty: "
+            "low, medium, high."
+        )
     if gate_error:
         raise ValueError(f"{plan_path}: {gate_error}")
     resolved_fm, unresolved_fm = _resolve_depends_on(fm_raw, entries, plan_dir)

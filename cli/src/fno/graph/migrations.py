@@ -95,8 +95,9 @@ def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
     same-band pair (the retired ``--model-tier`` handler wrote both keys with
     equal bands, so those are what machine-created leftovers look like), or a
     garbage retired key under a live difficulty. Needs a decision: a divergent
-    pair, or a garbage band with no canonical field - both are fixed by the
-    same one command, `fno backlog update <id> --difficulty <band>`.
+    pair, a garbage band with no canonical field, or a garbage canonical band
+    under any retired key - all fixed by the same one command,
+    `fno backlog update <id> --difficulty <band>`.
     """
     drainable: list[str] = []
     needs_decision: list[str] = []
@@ -108,12 +109,20 @@ def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
         rid = str(row.get("id", "?"))
         band = _retired_band(row)
         current = row.get("difficulty")
+        current_is_band = False
         if isinstance(current, str):
             try:
                 current = normalize_difficulty(current)
+                current_is_band = True
             except ValueError:
-                pass  # garbage canonical band: the needs-decision lane names both
-        if (current is None and band is None) or (
+                pass
+        if current is not None and not current_is_band:
+            # A garbage canonical band needs the same hand-picked decision as
+            # a garbage retired one: draining would bless an invalid band with
+            # a success receipt, and once the retired key is gone no later
+            # sweep names the row again.
+            needs_decision.append(rid)
+        elif (current is None and band is None) or (
             current is not None and band is not None and band != current
         ):
             needs_decision.append(rid)
