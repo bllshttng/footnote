@@ -953,6 +953,11 @@ class ReviewBlock(BaseModel):
     # CI failures, lint failures and rebases are not rounds, and a pass
     # resets the counter. Validated at parse: at least 1.
     max_rounds: int = Field(default=2, ge=1)
+    # Categories a CONFIRMED-free finding may carry and still be non-blocking.
+    # A configured list EXTENDS the shipped default rather than replacing it,
+    # so a project cannot silently narrow the gate by naming one category. The
+    # gate re-derives blocking from this, never from the producer's own count.
+    nonblocking_categories: Optional[list[str]] = None
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:
