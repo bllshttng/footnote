@@ -340,6 +340,20 @@ def coverage_verdict(
             return REFUSED, disposition_text, "", note
         notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
+    # x-aecc: a fail attestation answers this head, so an uncovered row in
+    # that shape is uncovered BECAUSE of the non-terminal findings. Name them
+    # (the disposition sentence carries each finding key) instead of falling
+    # through to the generic "0 reviewed" text - that text taught the loop to
+    # re-review, which is the loop this branch exists to end. The chain is
+    # already branch/head-scoped by ``attestation_chain``, so any non-pass
+    # verdict in it answered this PR.
+    if not covered and disposition_named and any(
+        e.get("verdict") != "pass" for e in chain
+    ):
+        remaining = _rounds_remaining_note(rounds, max_rounds)
+        note = "; ".join(x for x in (recompute_note, remaining) if x)
+        return REFUSED, disposition_text, "", note
+
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
         # fails the count conjunct, but the truer refusal names the policy and
