@@ -774,7 +774,12 @@ def test_resume_heals_an_unregistered_session(_registry_home):
 
     assert result.exit_code == 0
     assert result.exec_argv[0] == "codex"
-    assert result.exec_argv[-2:] == ["resume", CODEX_UUID]
+    # What is under test is that the unregistered session healed and rendered
+    # ITS uuid, not that the uuid is the final token: the codex lane appends
+    # modal-clearing flags after it (--cd, permission_bypass,
+    # --dangerously-bypass-hook-trust), which the codex parser accepts.
+    assert "resume" in result.exec_argv
+    assert result.exec_argv.index("resume") < result.exec_argv.index(CODEX_UUID)
     assert any("writable_roots=" in arg for arg in result.exec_argv)
     assert result.exec_cwd == "/repo/two"
 
