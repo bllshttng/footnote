@@ -40,7 +40,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
@@ -1660,18 +1660,11 @@ def restamp_harness_session_id(
     Returns the updated entry, or ``None`` when there was nothing to do: no row
     under that name, a harness mismatch, or an id that already matches.
 
-    KNOWN LIMIT, deliberately not solved here. If a spawn ever produces two
-    descendants that are BOTH live, they inherit one ``FNO_AGENT_SELF`` and the
-    row ends up naming whichever restamped last. That is still strictly better
-    than the status quo it replaces -- a row pinned to the birth id addresses
-    NONE of them, where this addresses one -- so the fix stands on its own, but
-    it is not fork ownership. No such case has been observed: in the run that
-    reported this, the birth id went silent 35 seconds in while its successor
-    ran for three hours, with a 13/13 identical message prefix, so it was a
-    rename with carry-over. A genuine flap would not be silent either: every
-    correction emits ``session_id_restamped`` with the row name and the id it
-    moved to, so two live descendants read off events.jsonl as one name
-    alternating between two ids.
+    A crowned row is never re-pointed in place: this path has no liveness witness
+    for the predecessor, so it appends an independently addressable branch with
+    no crown and keeps the predecessor's authority on its original session.
+    Uncrowned rows retain the in-place correction because there is no authority
+    to duplicate.
     """
     if not name or not session_id or not harness:
         return None
@@ -1685,6 +1678,47 @@ def restamp_harness_session_id(
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
+            if any(
+                getattr(entry, field) is not None
+                for field in ("crown_level", "crown_scope", "crown_grantor")
+            ):
+                branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
+                if any(candidate.name == branch_name for candidate in entries):
+                    raise ValueError(f"branch name {branch_name!r} already exists")
+                if any(
+                    candidate.harness_session_id == session_id for candidate in entries
+                ):
+                    raise ValueError(
+                        f"branch session {session_id!r} already has a registry row"
+                    )
+                branch = replace(
+                    entry,
+                    name=branch_name,
+                    aliases=[],
+                    harness_session_id=session_id,
+                    predecessor_session_ids=[],
+                    forked_from_session_id=stale or None,
+                    short_id="",
+                    messaging_socket_path=None,
+                    mcp_channel_id=None,
+                    cc_session_id=None,
+                    pid=None,
+                    pid_start_time=None,
+                    log_path="",
+                    last_message_at=None,
+                    last_reconciled_at=None,
+                    inside_leg=None,
+                    screen_state=None,
+                    exited_at=None,
+                    mux=None,
+                    crown_level=None,
+                    crown_scope=None,
+                    crown_grantor=None,
+                    fno_id=session_id,
+                )
+                entries.append(branch)
+                restamped.append(branch)
+                return entries
             if stale and stale not in entry.predecessor_session_ids:
                 entry.predecessor_session_ids.append(stale)
             entry.harness_session_id = session_id

@@ -528,6 +528,38 @@ def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) ->
     assert rows[0].name == "target-x-f0c2"
 
 
+def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id, write_registry
+
+    _spawned_row()
+    row = load_registry()[0]
+    row.crown_level = 1
+    row.crown_scope = "scope-a"
+    row.crown_grantor = "human"
+    write_registry([row])
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert len(rows) == 2
+    predecessor = next(row for row in rows if row.harness_session_id == BIRTH)
+    branch = next(row for row in rows if row.harness_session_id == REMINT)
+    assert predecessor.crown_level == 1
+    assert predecessor.crown_scope == "scope-a"
+    assert predecessor.crown_grantor == "human"
+    assert branch.name == "target-x-f0c2-branch-08054b1d"
+    assert branch.fno_id == REMINT
+    assert branch.forked_from_session_id == BIRTH
+    assert branch.crown_level is None
+    assert branch.crown_scope is None
+    assert branch.crown_grantor is None
+    assert branch.short_id == ""
+
+
 def test_restamp_is_a_noop_when_the_id_already_matches(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import restamp_harness_session_id
