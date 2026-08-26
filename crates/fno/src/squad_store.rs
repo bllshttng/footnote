@@ -140,6 +140,9 @@ pub struct StoredMember {
     /// delete that name before restart restore runs. This durable fallback is
     /// therefore audit and resume identity, never an attach-id prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Full harness session identity captured alongside `harness`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
 }
 
@@ -476,7 +479,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             let can_quarantine = assert_writable().is_ok();
             #[cfg(test)]
             let can_quarantine = true;
-            let quarantined = can_quarantine && std::fs::rename(&path, &aside).is_ok();
+            let quarantined = can_quarantine && std::fs::rename(path, &aside).is_ok();
             return Loaded {
                 notice: Some(if quarantined {
                     format!("quarantined corrupt squads.json to {}", aside.display())
@@ -704,6 +707,204 @@ pub enum PruneDecision {
     Prune,
 }
 
+/// The fail-closed liveness verdict for one stored member. `Dead` requires an
+/// exact positive terminal signal; a missing registry row is `Unknown`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberLiveness {
+    Live,
+    Dead,
+    Unknown,
+}
+
+/// Exact member identities observed by the liveness readers. A member matches
+/// on its attach id, registry worker name, or full harness session id. The
+/// sets are deliberately separate from `PruneDecision`: a live member keeps a
+/// squad alive, while dead members can be removed from that surviving squad.
+#[derive(Debug, Clone, Default)]
+pub struct MemberEvidence {
+    live: std::collections::HashSet<String>,
+    dead: std::collections::HashSet<String>,
+    live_pairs: std::collections::HashSet<(String, String)>,
+    dead_pairs: std::collections::HashSet<(String, String)>,
+    complete_attach_set: bool,
+}
+
+impl MemberEvidence {
+    pub fn from_sets(
+        live: std::collections::HashSet<String>,
+        dead: std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            live,
+            dead,
+            live_pairs: std::collections::HashSet::new(),
+            dead_pairs: std::collections::HashSet::new(),
+            complete_attach_set: false,
+        }
+    }
+
+    /// Build evidence from a successful empty agent system. This is the one
+    /// legacy compatibility case where an unmatched attach id is known dead:
+    /// both registry stores are absent, so no worker identity can be live.
+    pub fn from_complete_live_set(live: std::collections::HashSet<String>) -> Self {
+        Self {
+            live,
+            dead: std::collections::HashSet::new(),
+            live_pairs: std::collections::HashSet::new(),
+            dead_pairs: std::collections::HashSet::new(),
+            complete_attach_set: true,
+        }
+    }
+
+    pub fn add_dead(&mut self, identity: impl Into<String>) {
+        self.dead.insert(identity.into());
+    }
+
+    pub fn add_live(&mut self, identity: impl Into<String>) {
+        self.live.insert(identity.into());
+    }
+
+    pub fn mark_complete_attach_set(&mut self) {
+        self.complete_attach_set = true;
+    }
+
+    pub fn add_live_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
+        self.live_pairs.insert((harness.into(), session_id.into()));
+    }
+
+    pub fn add_dead_pair(&mut self, harness: impl Into<String>, session_id: impl Into<String>) {
+        self.dead_pairs.insert((harness.into(), session_id.into()));
+    }
+
+    pub fn verdict(&self, member: &StoredMember) -> MemberLiveness {
+        if member.harness_session_id.is_some() {
+            let Some(harness) = member.harness.as_deref() else {
+                return if member.tombstone {
+                    MemberLiveness::Dead
+                } else {
+                    MemberLiveness::Unknown
+                };
+            };
+            let session_id = member.harness_session_id.as_deref().expect("checked above");
+            let pair = (harness.to_string(), session_id.to_string());
+            if self.live_pairs.contains(&pair) {
+                return MemberLiveness::Live;
+            }
+            if self.dead_pairs.contains(&pair) || member.tombstone {
+                return MemberLiveness::Dead;
+            }
+            return MemberLiveness::Unknown;
+        }
+        let keys = [
+            (!member.attach_id.is_empty()).then_some(member.attach_id.as_str()),
+            member.worker.as_deref(),
+            member.harness_session_id.as_deref(),
+        ];
+        if keys
+            .into_iter()
+            .flatten()
+            .any(|key| self.live.contains(key))
+        {
+            MemberLiveness::Live
+        } else if member.tombstone
+            || (self.complete_attach_set && !member.attach_id.is_empty())
+            || keys
+                .into_iter()
+                .flatten()
+                .any(|key| self.dead.contains(key))
+        {
+            MemberLiveness::Dead
+        } else {
+            MemberLiveness::Unknown
+        }
+    }
+}
+
+fn legacy_member_liveness(
+    member: &StoredMember,
+    live: Option<&std::collections::HashSet<String>>,
+) -> MemberLiveness {
+    if member.tombstone {
+        // Preserve the legacy API's fail-safe behavior when its live-set read
+        // failed. The evidence-aware API treats a tombstone as independently
+        // positive dead evidence, so it can still reap it without that read.
+        return live
+            .map(|_| MemberLiveness::Dead)
+            .unwrap_or(MemberLiveness::Unknown);
+    }
+    match live {
+        None => MemberLiveness::Unknown,
+        Some(set) => {
+            let keys = [
+                (!member.attach_id.is_empty()).then_some(member.attach_id.as_str()),
+                member.worker.as_deref(),
+                member.harness_session_id.as_deref(),
+            ];
+            if keys.into_iter().flatten().any(|key| set.contains(key)) {
+                MemberLiveness::Live
+            } else {
+                // Preserve the established `prune` API's complete-live-set
+                // semantics. New callers that need absence-safe behavior use
+                // `MemberEvidence` and `prune_with_evidence` below.
+                MemberLiveness::Dead
+            }
+        }
+    }
+}
+
+fn classify_squad_members(
+    squad: &StoredSquad,
+    member_liveness: &impl Fn(&StoredMember) -> MemberLiveness,
+) -> (bool, bool) {
+    let mut unknown = false;
+    for member in &squad.members {
+        match member_liveness(member) {
+            MemberLiveness::Live => return (true, false),
+            MemberLiveness::Unknown => unknown = true,
+            MemberLiveness::Dead => {}
+        }
+    }
+    (false, unknown)
+}
+
+/// The evidence-aware squad predicate. Unlike the legacy live-id wrapper,
+/// absence from an evidence set is not itself death.
+pub fn prune_decision_with_evidence(
+    squad: &StoredSquad,
+    include_named: bool,
+    evidence: &MemberEvidence,
+    live_cwds: &[String],
+    origin_exists: &dyn Fn(&str) -> bool,
+    now_epoch: Option<i64>,
+) -> PruneDecision {
+    if !squad.name.is_empty() && !include_named {
+        return PruneDecision::SkipNamed;
+    }
+    let (has_live, has_unknown) = classify_squad_members(squad, &|m| evidence.verdict(m));
+    if has_live {
+        return PruneDecision::Keep;
+    }
+    if has_unknown {
+        return PruneDecision::KeepUnknown;
+    }
+    if !squad.members.is_empty() {
+        return PruneDecision::Prune;
+    }
+    if empty_squad_past_grace(squad, now_epoch) {
+        return PruneDecision::Prune;
+    }
+    if live_cwds
+        .iter()
+        .any(|cwd| origin_owned(&squad.origins, cwd))
+    {
+        return PruneDecision::Keep;
+    }
+    if squad.origins.iter().any(|o| origin_exists(o.as_str())) {
+        return PruneDecision::KeepUnknown;
+    }
+    PruneDecision::Prune
+}
+
 /// The prune predicate (US2). `live` is the live attach-id set: `Some(set)` when
 /// the off-lock liveness query succeeded, `None` when it failed (then every
 /// non-tombstone member is unknown-liveness and the squad is kept). `live_cwds`
@@ -908,6 +1109,10 @@ pub struct PruneOutcome {
     /// member it finds, so a tombstoned member sitting beside a live one in
     /// the same squad was unreachable by any sweep before this.
     pub members_reaped: usize,
+    /// Members positively observed live and retained in surviving squads.
+    pub members_kept_live: usize,
+    /// Members without a positive live or dead verdict and retained.
+    pub members_kept_unknown: usize,
 }
 
 impl PruneOutcome {
@@ -926,7 +1131,7 @@ pub(crate) fn tombstone_reapable(
     m: &StoredMember,
     live: Option<&std::collections::HashSet<String>>,
 ) -> bool {
-    m.tombstone && live.is_some_and(|set| !set.contains(&m.attach_id))
+    matches!(legacy_member_liveness(m, live), MemberLiveness::Dead)
 }
 
 /// One squad's fate under `decide` and `live`: its prune decision, and -- if
@@ -938,6 +1143,8 @@ pub(crate) fn tombstone_reapable(
 pub struct SquadFate {
     pub decision: PruneDecision,
     pub reaped_if_kept: usize,
+    pub kept_live: usize,
+    pub kept_unknown: usize,
 }
 
 pub fn classify_squad(
@@ -946,17 +1153,51 @@ pub fn classify_squad(
     live: Option<&std::collections::HashSet<String>>,
 ) -> SquadFate {
     let decision = decide(sq);
-    let reaped_if_kept = if matches!(decision, PruneDecision::Prune) {
-        0
-    } else {
-        sq.members
-            .iter()
-            .filter(|m| tombstone_reapable(m, live))
-            .count()
-    };
+    let mut reaped_if_kept = 0;
+    let mut kept_live = 0;
+    let mut kept_unknown = 0;
+    for member in &sq.members {
+        match legacy_member_liveness(member, live) {
+            MemberLiveness::Dead if !matches!(decision, PruneDecision::Prune) => {
+                reaped_if_kept += 1;
+            }
+            MemberLiveness::Live => kept_live += 1,
+            MemberLiveness::Unknown => kept_unknown += 1,
+            MemberLiveness::Dead => {}
+        }
+    }
     SquadFate {
         decision,
         reaped_if_kept,
+        kept_live,
+        kept_unknown,
+    }
+}
+
+/// Evidence-aware twin of [`classify_squad`]. Dry-run and apply callers that
+/// have exact terminal identities use this path so an absent row remains
+/// unknown instead of becoming an accidental deletion candidate.
+pub fn classify_squad_with_evidence(
+    sq: &StoredSquad,
+    decide: &impl Fn(&StoredSquad) -> PruneDecision,
+    evidence: &MemberEvidence,
+) -> SquadFate {
+    let decision = decide(sq);
+    let mut reaped_if_kept = 0;
+    let mut kept_live = 0;
+    let mut kept_unknown = 0;
+    for member in &sq.members {
+        match evidence.verdict(member) {
+            MemberLiveness::Dead => reaped_if_kept += 1,
+            MemberLiveness::Live => kept_live += 1,
+            MemberLiveness::Unknown => kept_unknown += 1,
+        }
+    }
+    SquadFate {
+        decision,
+        reaped_if_kept,
+        kept_live,
+        kept_unknown,
     }
 }
 
@@ -994,6 +1235,44 @@ pub fn prune(
             *counter += 1;
             sq.members.retain(|m| !tombstone_reapable(m, live));
             out.members_reaped += fate.reaped_if_kept;
+            out.members_kept_live += fate.kept_live;
+            out.members_kept_unknown += fate.kept_unknown;
+            kept.push(sq);
+        }
+        sf.squads = kept;
+    })?;
+    Ok(out)
+}
+
+/// Apply the same locked squad/member pass with exact positive liveness
+/// evidence. A dead member is removed only when its own identity is in the
+/// evidence's dead set (or it is already a tombstone); live and unknown
+/// members stay in a surviving squad.
+pub fn prune_with_evidence(
+    decide: impl Fn(&StoredSquad) -> PruneDecision,
+    evidence: &MemberEvidence,
+) -> io::Result<PruneOutcome> {
+    let mut out = PruneOutcome::default();
+    mutate_file(|sf| {
+        let mut kept = Vec::with_capacity(sf.squads.len());
+        for mut sq in sf.squads.drain(..) {
+            let fate = classify_squad_with_evidence(&sq, &decide, evidence);
+            if matches!(fate.decision, PruneDecision::Prune) {
+                out.members_reaped += fate.reaped_if_kept;
+                out.removed.push(PrunedSquad::from(&sq));
+                continue;
+            }
+            match fate.decision {
+                PruneDecision::KeepUnknown => out.kept_unknown += 1,
+                PruneDecision::SkipNamed => out.skipped_named += 1,
+                PruneDecision::Keep => out.kept_protected += 1,
+                PruneDecision::Prune => unreachable!(),
+            }
+            sq.members
+                .retain(|m| !matches!(evidence.verdict(m), MemberLiveness::Dead));
+            out.members_reaped += fate.reaped_if_kept;
+            out.members_kept_live += fate.kept_live;
+            out.members_kept_unknown += fate.kept_unknown;
             kept.push(sq);
         }
         sf.squads = kept;
@@ -1570,6 +1849,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
     }
@@ -1812,6 +2092,7 @@ mod tests {
             tab_name: Some("lane".into()),
             cwd: Some("/repo/wt".into()),
             worker: Some("probe-x5f7f".into()),
+            harness: None,
             harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
@@ -1837,6 +2118,7 @@ mod tests {
             "members":[{
                 "attach_id":"",
                 "worker":"t-x8a01-restore",
+                "harness":"codex",
                 "harness_session_id":"01a03a85-1111-7222-8333-444455556666"
             }]
         }"#;
@@ -1846,6 +2128,7 @@ mod tests {
             encoded["members"][0]["harness_session_id"], "01a03a85-1111-7222-8333-444455556666",
             "the full resume key must survive a squads.json read/write"
         );
+        assert_eq!(encoded["members"][0]["harness"], "codex");
     }
 
     #[test]
@@ -1860,6 +2143,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: Some("a;rm -rf".into()),
+            harness: None,
             harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
@@ -2749,6 +3033,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }];
             assert_eq!(
@@ -2944,6 +3229,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }];
         assert_eq!(
@@ -3100,8 +3386,95 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
+    }
+
+    fn worker_member(name: &str) -> StoredMember {
+        StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some(name.into()),
+            harness: None,
+            harness_session_id: None,
+        }
+    }
+
+    #[test]
+    fn member_reap_drops_dead_worker_members_beside_a_live_member() {
+        // AC1-HP: a live member keeps its squad, while worker members with
+        // positive dead evidence are removed from that surviving squad.
+        let _s = Scratch::new("member-reap-worker-hp");
+        upsert(
+            "",
+            "keeper",
+            &[],
+            &[
+                m("11111111"),
+                worker_member("dead-worker-one"),
+                worker_member("dead-worker-two"),
+            ],
+        )
+        .unwrap();
+
+        let mut live = std::collections::HashSet::new();
+        live.insert("11111111".to_string());
+        let outcome = prune(
+            |sq| prune_decision(sq, false, Some(&live), &[], &|_| true),
+            Some(&live),
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.removed_count(),
+            0,
+            "the live member keeps the squad"
+        );
+        assert_eq!(outcome.members_reaped, 2);
+        let after = load();
+        assert_eq!(after.squads.len(), 1);
+        assert_eq!(after.squads[0].members.len(), 1);
+        assert_eq!(after.squads[0].members[0].attach_id, "11111111");
+    }
+
+    #[test]
+    fn member_reap_with_evidence_keeps_an_unmeasured_worker() {
+        // AC1-ERR: a missing identity verdict is retained, while an exact
+        // terminal verdict in the same surviving squad is reaped.
+        let _s = Scratch::new("member-reap-worker-unknown");
+        upsert(
+            "",
+            "keeper",
+            &[],
+            &[
+                m("11111111"),
+                worker_member("dead-worker"),
+                worker_member("unmeasured-worker"),
+            ],
+        )
+        .unwrap();
+
+        let live = ["11111111".to_string()].into_iter().collect();
+        let dead = ["dead-worker".to_string()].into_iter().collect();
+        let evidence = MemberEvidence::from_sets(live, dead);
+        let outcome = prune_with_evidence(
+            |sq| prune_decision_with_evidence(sq, false, &evidence, &[], &|_| true, None),
+            &evidence,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.removed_count(), 0);
+        assert_eq!(outcome.members_reaped, 1);
+        assert_eq!(outcome.members_kept_live, 1);
+        assert_eq!(outcome.members_kept_unknown, 1);
+        let after = load();
+        assert!(after.squads[0]
+            .members
+            .iter()
+            .any(|m| m.worker.as_deref() == Some("unmeasured-worker")));
     }
 
     #[test]

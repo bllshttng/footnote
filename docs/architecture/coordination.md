@@ -182,6 +182,14 @@ Seven event types route through the existing `events.jsonl` validator
 Emit failure is best-effort: the YAML lock file is the authoritative
 state; the events log is for observability and forensics.
 
+### Mux sideline member identity
+
+The mux squad store uses the exact worker identity pair `(harness, harness_session_id)` for non-Claude members. `attach_id` is a display or legacy Claude roster identity, not a cross-harness binding key, and a short session-id prefix is never sufficient for restore.
+
+The agents lifecycle store at `~/.fno/agents/events.jsonl` owns `agent_spawned` receipts. The repository-local `.fno/events.jsonl` is a project event journal and is not a spawn-receipt source. Persistent thread receipts emit `substrate: thread`; `bg` remains an input alias during the compatibility window, while pane receipts continue to emit `substrate: pane`.
+
+Squad cleanup uses positive member liveness. A tombstone or exact terminal identity is dead, a current exact identity is live, and an unreadable or unjoinable identity is unknown and remains stored. A missing row alone is not proof of death.
+
 ## Contract with gates
 
 Claims and gates are independent. Gates verify "this phase produced

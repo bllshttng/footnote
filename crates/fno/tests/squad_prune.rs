@@ -350,6 +350,57 @@ fn prune_json_dry_run_flag_matches_the_mode() {
 }
 
 #[test]
+fn prune_reaps_dead_workers_and_keeps_the_live_worker() {
+    let s = Scratch::new(
+        "worker-members",
+        r#"{"version":1,"squads":[
+          {"name":"","key":"workers","origins":["__SURVIVES__"],"members":[
+            {"attach_id":"","worker":"live-worker","harness":"codex","harness_session_id":"01abcdef-live"},
+            {"attach_id":"","worker":"dead-worker-one","harness":"codex","harness_session_id":"01abcdef-dead-one"},
+            {"attach_id":"","worker":"dead-worker-two","harness":"claude","harness_session_id":"01abcdef-dead-two"}
+          ],"created_at":""}
+        ]}"#,
+    );
+    std::fs::write(
+        s.dir.join("registry.json"),
+        r#"{"version":1,"agents":[
+          {"name":"live-worker","cwd":"/repo","status":"working","harness":"codex","harness_session_id":"01abcdef-live"}
+        ]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        s.dir.join("events.jsonl"),
+        concat!(
+            r#"{"type":"agent_row_reaped","data":{"name":"dead-worker-one","provider":"codex","harness_session_id":"01abcdef-dead-one"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"dead-worker-two","provider":"claude","harness_session_id":"01abcdef-dead-two"}}"#,
+        ),
+    )
+    .unwrap();
+
+    let (ok, stdout, stderr) = s.run(&["prune", "--json"], false);
+    assert!(ok, "prune exited non-zero: {stderr}\n{stdout}");
+    let receipt: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(receipt["pruned_count"], 0);
+    assert_eq!(receipt["members_reaped"], 2);
+    assert_eq!(receipt["members_kept_live"], 1);
+    assert_eq!(receipt["members_kept_unknown"], 0);
+    let after = s.store();
+    assert!(
+        after.contains("live-worker"),
+        "live worker retained: {after}"
+    );
+    assert!(
+        !after.contains("dead-worker-one"),
+        "dead worker one reaped: {after}"
+    );
+    assert!(
+        !after.contains("dead-worker-two"),
+        "dead worker two reaped: {after}"
+    );
+}
+
+#[test]
 fn prune_refuses_from_a_build_tree_binary_without_agents_home() {
     // AC2-HP, the exec'd-binary half: the compiled binary under target/ with
     // FNO_AGENTS_HOME unset must refuse its OWN prune write (exit non-zero,
