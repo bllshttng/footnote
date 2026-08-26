@@ -80,6 +80,7 @@ A	one-shot-provider-no-persistent-session	py=cli/src/fno/agents/dispatch.py;rs=c
 A	operator_question_closed	py=cli/src/fno/events/__init__.py|cli/src/fno/outstanding/core.py;rs=crates/fno-agents/src/loopcheck.rs|crates/fno-agents/src/needs.rs	# protocol
 A	postmortem_corrections_log	py=cli/src/fno/hermetic.py;rs=crates/fno-agents/src/finalize.rs	# protocol
 A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
+A	permission_mode_requested	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol: receipt key both spawn builders emit byte-identically; it names intent, not outcome
 A	refused-newer-than-transcript	py=cli/src/fno/agents/row_contradiction.py;rs=crates/fno-agents/src/daemon.rs	# protocol
 A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/mux_spawn.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol

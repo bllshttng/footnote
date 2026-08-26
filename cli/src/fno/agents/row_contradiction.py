@@ -176,4 +176,6 @@ def _spawning_outlived_by_a_live_pid(
     now_dt = now or datetime.now(timezone.utc)
     if not isinstance(now_dt, datetime):
         now_dt = _timestamp(now_dt)
+    if now_dt is None:
+        return False
     return (now_dt - created_at) > timedelta(seconds=SPAWN_TIMEOUT_S)
