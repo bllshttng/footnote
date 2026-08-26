@@ -105,6 +105,7 @@ law enact
 law inspect
 law prepare
 law resume
+law set
 lint
 loops
 loops resume-all
