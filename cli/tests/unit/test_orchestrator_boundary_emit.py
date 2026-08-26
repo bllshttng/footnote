@@ -129,6 +129,26 @@ def test_boundary_settlement_is_nonfatal(monkeypatch) -> None:
     assert orch.release_task_claim_at_boundary("x-t1", "1.1", "SUCCESS") is False
 
 
+def test_unknown_outcome_settles_nothing(monkeypatch) -> None:
+    """The outcome vocabulary is closed: an unrecognized spelling (lowercase
+    success, PARTIAL) runs NO subprocess - mapping strays to the give-back
+    would release a finished task's claim mid-flight."""
+    orch = _load_orch()
+    called: list[list[str]] = []
+
+    def fake_run(argv, **kw):
+        called.append(list(argv))
+        return _Result(0)
+
+    monkeypatch.setattr(orch.subprocess, "run", fake_run)
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "PARTIAL") is False
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "success") is False
+    assert called == [], "an unknown outcome must not touch the claim"
+    # Positive control: a known outcome through the same path runs.
+    assert orch.release_task_claim_at_boundary("x-t1", "1.1", "SUCCESS") is True
+    assert called and called[0][-2:] == ["--status", "done"]
+
+
 def test_manifest_graph_node_id_fallback(tmp_path, monkeypatch) -> None:
     """The settle's node fallback reads graph_node_id from the manifest, so
     the documented bare `--emit-boundary task_done --task N.M` (no --node)

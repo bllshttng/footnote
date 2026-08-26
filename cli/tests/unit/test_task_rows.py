@@ -399,6 +399,115 @@ def test_pending_give_back_is_holder_only(
 # -- key validation: refused, never truncated --
 
 
+def test_done_row_cannot_be_reopened(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A finished task is shipped work: the in_progress transition refuses
+    (exit 3) instead of re-dispatching it from stale per-checkout state."""
+    _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done", "--owner", SID_A,
+    )
+
+    reopened = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_B,
+    )
+    assert reopened.exit_code == 3
+    assert "is done" in reopened.output
+    # Positive markers: the row stays done and no claim is left behind.
+    assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
+    assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["state"] == "free"
+
+
+def test_done_by_non_holder_refused(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A peer cannot mark a live worker's task done: the row is holder-guarded
+    like the give-back, so the board never reports in-flight work finished."""
+    _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+
+    stranger = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done", "--owner", SID_B,
+    )
+    assert stranger.exit_code == 3
+    assert SID_A in stranger.output
+    row = _node_row(tmp_graph, "x-t1", "1.1")
+    assert row["status"] == "in_progress" and row["owner"] == SID_A
+
+
+def test_exited_graph_write_releases_the_claim(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """locked_mutate_graph sys.exit()s (does not raise) on a corrupt graph;
+    the transition must release the claim on that path too, or it stays held
+    by the long-lived session pid until the whole session dies."""
+    import fno.graph.store as store
+
+    def _wedge(*a, **k):
+        raise SystemExit(1)
+
+    monkeypatch.setattr(store, "locked_mutate_graph", _wedge)
+    result = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert result.exit_code == 1
+    assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["state"] == "free"
+
+
+def test_malformed_plan_is_a_named_refusal(
+    tmp_path: Path, tmp_graph: Path
+):
+    """A broken Execution Strategy fence refuses by name, never a parser
+    traceback (the stop-not-traceback contract of the task verbs)."""
+    from fno.graph import cli as graph_cli
+
+    plan = tmp_path / "broken.md"
+    plan.write_text(
+        "---\ntitle: broken\nstatus: ready\n---\n\n# broken\n\n"
+        "## Execution Strategy\n\n```yaml\ntasks: [oops\n```\n",
+        encoding="utf-8",
+    )
+    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    entries[0]["plan_path"] = str(plan)
+    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
+    assert result.exit_code == 1
+    assert "plan parse failed" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_idless_plan_poll_never_takes_the_lock(
+    tmp_path: Path, tmp_graph: Path
+):
+    """A plan with no Execution Strategy and no rows exits 2 WITHOUT the
+    locked write: a polling fleet must not churn the graph mutation pipeline
+    on every poll of a task-less node."""
+    from fno.graph import cli as graph_cli
+
+    plan = tmp_path / "empty.md"
+    plan.write_text(
+        "---\ntitle: empty\nstatus: ready\n---\n\n# empty\n", encoding="utf-8"
+    )
+    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    entries[0]["plan_path"] = str(plan)
+    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    before = tmp_graph.read_text(encoding="utf-8")
+
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
+    assert result.exit_code == 2
+    assert "no tasks declared" in result.output
+    assert tmp_graph.read_text(encoding="utf-8") == before
+
+
 def test_overlong_task_key_refused_at_validation(
     tmp_path: Path, tmp_graph: Path, claims_root: Path,
     monkeypatch: pytest.MonkeyPatch,

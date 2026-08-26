@@ -995,20 +995,37 @@ def _shell_fno(argv: List[str], what: str) -> bool:
     return True
 
 
+#: Boundary outcomes that release the claim as done.
+_TERMINAL_OUTCOMES = ("SUCCESS", "DONE_WITH_CONCERNS")
+#: Boundary outcomes that give the task back to pending ("" is the
+#: outcome-less `blocked` event shape).
+_GIVEBACK_OUTCOMES = ("FAILED", "BLOCKED", "")
+
+
 def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
     """Settle the task claim at a task boundary (x-09d7 group 3).
 
     ``done`` after a terminal outcome, ``pending`` (the holder-only give-back)
     after ``blocked``/``FAILED``, so the next ready worker can pick the task
-    up. Non-fatal by the same contract as the emit itself: one stderr note and
-    False on any failure, never an exception. A give-back by a caller that is
-    not the holder is refused (exit 3) by the verb; that refusal lands here as
-    the same non-fatal note.
+    up. The outcome vocabulary is CLOSED: an unrecognized spelling
+    (``success``, ``PARTIAL``) settles NOTHING and says so - mapping strays to
+    the give-back would release a finished task's claim mid-flight. Non-fatal
+    by the same contract as the emit itself: one stderr note and False on any
+    failure, never an exception. A give-back by a caller that is not the
+    holder is refused (exit 3) by the verb; that refusal lands here as the
+    same non-fatal note.
     """
-    if outcome in ("SUCCESS", "DONE_WITH_CONCERNS"):
+    if outcome in _TERMINAL_OUTCOMES:
         status_verb = "done"
-    else:  # FAILED, BLOCKED, empty (the `blocked` event carries no outcome)
+    elif outcome in _GIVEBACK_OUTCOMES:
         status_verb = "pending"
+    else:
+        print(
+            f"orchestrator: note: unknown task outcome {outcome!r}; task claim "
+            "not settled",
+            file=sys.stderr,
+        )
+        return False
     argv = ["fno", "backlog", "task", "update", node, task, "--status", status_verb]
     return _shell_fno(argv, "task claim settle")
 
@@ -1356,15 +1373,18 @@ if __name__ == "__main__":
         )
         # The boundary every outcome already passes through is also the one
         # place the task claim taken at dispatch gets settled (x-09d7 g3):
-        # done releases it, blocked/FAILED gives it back to pending. The node
+        # done releases it, blocked/FAILED gives it back to pending. The event
+        # TYPE is gated, not just trusted: a typo'd type carrying --task must
+        # not reach the give-back and release a live worker's claim. The node
         # falls back to the manifest exactly as the emit envelope does - the
         # documented per-task invocations pass --task only.
-        if b_opts["--task"]:
+        if b_opts["--task"] and b_type in ("task_done", "blocked"):
             settle_node = b_opts["--node"] or manifest_graph_node_id()
             if settle_node:
                 release_task_claim_at_boundary(
-                    settle_node, b_opts["--task"], b_opts["--outcome"]
-                    if b_type == "task_done" else "FAILED",
+                    settle_node,
+                    b_opts["--task"],
+                    b_opts["--outcome"] if b_type == "task_done" else "FAILED",
                 )
         sys.exit(0)
 

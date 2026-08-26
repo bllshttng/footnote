@@ -6515,14 +6515,24 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
 
     Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
-    guard lives on the tracker-owned task verbs that call this. A bound plan
-    that is not a readable file is a named refusal, never a traceback: rows
-    derive from the plan, so an unreadable plan is a stop, not an empty list.
+    guard lives on the tracker-owned task verbs that call this. An unreadable
+    graph is the distinct GRAPH_UNREADABLE_EXIT refusal, never a misread
+    "node does not resolve". A bound plan that is not a readable file is a
+    named refusal, never a traceback: rows derive from the plan, so an
+    unreadable plan is a stop, not an empty list.
     """
     from fno.graph.fuzzy import resolve_node
-    from fno.graph.store import read_graph
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
 
-    entries = read_graph(graph_path)
+    try:
+        entries = read_graph_strict(graph_path)
+    except GraphUnreadableError as e:
+        typer.echo(
+            f"Could not read the graph cleanly, so '{node_token}' cannot be "
+            f"resolved: {e}",
+            err=True,
+        )
+        raise typer.Exit(code=GRAPH_UNREADABLE_EXIT)
     match = resolve_node(node_token, entries)
     if match.kind != "exact":
         typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
@@ -6536,6 +6546,21 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
         typer.echo(f"plan file for {entry.get('id')} is not readable: {plan_path}", err=True)
         raise typer.Exit(code=1)
     return entry["id"], plan_path
+
+
+def _task_ids_or_exit(plan_path: str) -> list[str]:
+    """Plan task ids, or a named exit-1 refusal on a malformed plan.
+
+    A plan with a broken Execution Strategy fence must refuse like every
+    other task-verb failure mode, never exit through a parser traceback.
+    """
+    from fno.graph.tasks import derive_task_ids
+
+    try:
+        return derive_task_ids(Path(plan_path))
+    except Exception as exc:  # noqa: BLE001 - stop-not-traceback contract
+        typer.echo(f"plan parse failed for {plan_path}: {exc}", err=True)
+        raise typer.Exit(code=1)
 
 
 @task_app.command("list")
@@ -6554,10 +6579,10 @@ def cmd_task_list(
     from pathlib import Path
 
     from fno.graph.store import locked_mutate_graph, read_graph
-    from fno.graph.tasks import derive_task_ids, ensure_task_rows
+    from fno.graph.tasks import ensure_task_rows
 
     node_id, plan_path = _task_plan_or_exit(node, _graph_path())
-    ids = derive_task_ids(Path(plan_path))
+    ids = _task_ids_or_exit(plan_path)
 
     def _print(rows: list[dict]) -> None:
         if json_output:
@@ -6567,13 +6592,19 @@ def cmd_task_list(
             typer.echo(f"{r.get('id')}\t{r.get('status')}\t{r.get('owner') or '-'}")
 
     # Fast path: every plan id already has a row -> print without the lock.
+    # An id-less plan with no rows has nothing to materialize on ANY poll, so
+    # it refuses here too rather than paying a full locked write each time.
     for e in read_graph(_graph_path()):
         if isinstance(e, dict) and e.get("id") == node_id:
             rows = [r for r in e.get("tasks") or [] if isinstance(r, dict)]
             known = {r.get("id") for r in rows}
-            if rows and all(i in known for i in ids):
-                _print(rows)
-                return
+            if all(i in known for i in ids):
+                if rows:
+                    _print(rows)
+                    return
+                if not ids:
+                    typer.echo(f"no tasks declared by {plan_path}", err=True)
+                    raise typer.Exit(code=2)
             break
 
     materialized: list[dict] = []
@@ -6628,7 +6659,7 @@ def cmd_task_update(
     from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
     from fno.claims.tasks import acquire_task, release_task, task_key
     from fno.graph.store import locked_mutate_graph
-    from fno.graph.tasks import TASK_STATUSES, derive_task_ids
+    from fno.graph.tasks import TASK_STATUSES
 
     if status not in TASK_STATUSES:
         typer.echo(
@@ -6636,7 +6667,7 @@ def cmd_task_update(
         )
         raise typer.Exit(code=2)
     node_id, plan_path = _task_plan_or_exit(node, _graph_path())
-    ids = derive_task_ids(Path(plan_path))
+    ids = _task_ids_or_exit(plan_path)
     if task_id not in ids:
         typer.echo(
             f"task '{task_id}' not in plan {plan_path}; plan tasks: "
@@ -6725,15 +6756,34 @@ def cmd_task_update(
             typer.echo(f"invalid task claim key {key}: {exc}", err=True)
             raise typer.Exit(code=2)
         claimed_at = datetime.now(timezone.utc).isoformat()
-        try:
-            row = _set_row(
-                lambda row: row.update(
-                    {"status": "in_progress", "owner": holder, "claimed_at": claimed_at}
-                )
+        reopen_refused: list[str] = []
+
+        def _claim_row(row) -> None:
+            # A done row is shipped work; re-opening it from stale per-checkout
+            # state re-dispatches a finished task, so the transition refuses.
+            if row.get("status") == "done":
+                reopen_refused.append(str(row.get("id")))
+                return
+            row.update(
+                {"status": "in_progress", "owner": holder, "claimed_at": claimed_at}
             )
-        except Exception:
+
+        try:
+            row = _set_row(_claim_row)
+        except (Exception, SystemExit):
+            # SystemExit too: locked_mutate_graph exits (does not raise) on a
+            # corrupt graph, and an exited write must release like a raised one
+            # or the claim outlives the failed transition held by the session
+            # pid.
             release_task(node_id, task_id, holder)
             raise
+        if reopen_refused:
+            release_task(node_id, task_id, holder)
+            typer.echo(
+                f"task {task_id} is done; re-offering shipped work is refused",
+                err=True,
+            )
+            raise typer.Exit(code=3)
         if row is None:
             release_task(node_id, task_id, holder)
             typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
@@ -6742,7 +6792,27 @@ def cmd_task_update(
         return
 
     if status == "done":
-        row = _set_row(lambda row: row.update({"status": "done"}))
+        # The row write is holder-guarded like the give-back: a non-holder
+        # marking a live task done leaves the peer working a task the board
+        # reports finished. An UNowned row (never claimed) accepts done from
+        # anyone - there is no in-flight worker to contradict.
+        done_refused: list[str] = []
+
+        def _done_row(row) -> None:
+            owner_now = row.get("owner")
+            if owner_now and owner_now != (holder or ""):
+                done_refused.append(str(owner_now))
+                return
+            row.update({"status": "done"})
+
+        row = _set_row(_done_row)
+        if done_refused:
+            typer.echo(
+                f"task {task_id} held by {done_refused[0]}; only the holder "
+                "can mark it done",
+                err=True,
+            )
+            raise typer.Exit(code=3)
         if row is None:
             typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
             raise typer.Exit(code=1)
