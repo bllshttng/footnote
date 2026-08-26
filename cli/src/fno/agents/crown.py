@@ -109,7 +109,12 @@ def calling_agent_row():
     from fno.agents.self_stamp import resolve_self_identity
 
     ident = resolve_self_identity()
-    if ident.disposition in {"ambiguous", "invalid", "contradiction"}:
+    if ident.disposition in {
+        "ambiguous",
+        "invalid",
+        "contradiction",
+        "name_only",
+    }:
         return REGISTRY_UNREADABLE
     if not ident.session_id or not ident.harness:
         return None

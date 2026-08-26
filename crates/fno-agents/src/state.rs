@@ -809,6 +809,9 @@ impl RegistryEntry {
         branch.harness_session_id = Some(successor_session_id.to_string());
         branch.predecessor_session_ids.clear();
         branch.forked_from_session_id = Some(predecessor_session_id.to_string());
+        branch.crown_level = None;
+        branch.crown_scope = None;
+        branch.crown_grantor = None;
         branch.short_id.clear();
         branch.session_id = None;
         branch.claude_session_uuid = None;
@@ -2101,6 +2104,9 @@ mod tests {
         predecessor.session_id = Some("session-a".into());
         predecessor.codex_session_id = Some("session-a".into());
         predecessor.log_path = Some("/tmp/session-a.log".into());
+        predecessor.crown_level = Some(2);
+        predecessor.crown_scope = Some("scope-a".into());
+        predecessor.crown_grantor = Some("human".into());
         predecessor.mux = Some(MuxRef {
             session: "main".into(),
             pane_id: 4,
@@ -2119,6 +2125,9 @@ mod tests {
         assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-b"));
         assert_eq!(branch.fno_id.as_deref(), Some("thread-c"));
         assert_ne!(predecessor.fno_id, branch.fno_id);
+        assert!(branch.crown_level.is_none());
+        assert!(branch.crown_scope.is_none());
+        assert!(branch.crown_grantor.is_none());
         assert!(branch.short_id.is_empty());
         assert!(branch.session_id.is_none());
         assert!(branch.codex_session_id.is_none());
