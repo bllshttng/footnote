@@ -135,7 +135,11 @@ def legacy_record(
     graduation_ref: Optional[str] = typer.Option(
         None,
         "--graduation-ref",
-        help="Artifact reference for enforced, or node:<id> follow-up.",
+        help=(
+            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
+            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
+            "Follow-up: node:<id>."
+        ),
     ),
 ) -> None:
     """Warn once, then delegate the old spelling to the backlog leaf."""
@@ -335,7 +339,11 @@ def backlog_decide(
     graduation_ref: Optional[str] = typer.Option(
         None,
         "--graduation-ref",
-        help="Artifact reference for enforced, or node:<id> follow-up.",
+        help=(
+            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
+            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
+            "Follow-up: node:<id>."
+        ),
     ),
     origin: Optional[str] = typer.Option(
         None,

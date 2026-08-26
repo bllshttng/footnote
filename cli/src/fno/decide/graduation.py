@@ -155,9 +155,18 @@ def evaluate_graduation(
     prefix, payload = artifact.split(":", 1)
 
     if prefix in {"file", "doc"}:
-        path_text, separator, line_text = payload.rpartition(":")
-        if not separator or not line_text.isdigit():
-            path_text, line_text = payload, ""
+        # A path that still exists proves nothing: the enforcement at that line
+        # can be deleted, replaced, or shifted while the file survives. So this
+        # lane takes the gate lane's contract - name the text that only the
+        # declared behavior produces, and read it back at the pinned location.
+        target, separator, marker = payload.partition("=>marker:")
+        target = target.strip()
+        marker = marker.strip()
+        if not separator or not target or not marker:
+            return _unknown(decision_id, f"artifact_marker_invalid:{artifact}")
+        path_text, line_separator, line_text = target.rpartition(":")
+        if not line_separator or not line_text.isdigit():
+            path_text, line_text = target, ""
         candidate = (root / path_text).resolve()
         try:
             candidate.relative_to(root.resolve())
@@ -165,14 +174,20 @@ def evaluate_graduation(
             return _unknown(decision_id, f"artifact_outside_root:{artifact}")
         if not candidate.is_file():
             return _unknown(decision_id, f"artifact_missing:{artifact}")
+        try:
+            lines = candidate.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as exc:
+            return _unknown(decision_id, f"artifact_unreadable:{type(exc).__name__}")
         if line_text:
-            try:
-                line_count = sum(1 for _ in candidate.open(encoding="utf-8"))
-            except (OSError, UnicodeError) as exc:
-                return _unknown(decision_id, f"artifact_unreadable:{type(exc).__name__}")
-            if int(line_text) > line_count:
+            index = int(line_text) - 1
+            if index < 0 or index >= len(lines):
                 return _unknown(decision_id, f"artifact_line_missing:{artifact}")
-        return _retired(decision_id, f"artifact_present:{artifact}")
+            found = marker in lines[index]
+        else:
+            found = any(marker in line for line in lines)
+        if not found:
+            return _unknown(decision_id, f"marker_missing:{artifact}")
+        return _retired(decision_id, f"marker_present:{artifact}")
 
     if prefix == "gate":
         command, separator, marker = payload.partition("=>marker:")
@@ -206,16 +221,26 @@ def evaluate_graduation(
             return _unknown(decision_id, f"test_failed:{payload}")
         return _retired(decision_id, f"test_passed:{payload}")
 
+    # A key that merely EXISTS is not the declared default: `False` and any
+    # other contradicting value read as present. The declaration carries the
+    # required value, and only that value retires the ruling.
+    key, separator, expected = payload.partition("=")
+    key = key.strip()
+    expected = expected.strip()
+    if not separator or not key or not expected:
+        return _unknown(decision_id, f"default_expectation_missing:{payload}")
     try:
-        completed = run(["fno", "config", "get", payload], cwd=root, timeout=timeout)
+        completed = run(["fno", "config", "get", key], cwd=root, timeout=timeout)
     except (OSError, ValueError) as exc:
         return _unknown(decision_id, f"probe_error:{type(exc).__name__}")
     except subprocess.TimeoutExpired:
         return _unknown(decision_id, f"probe_timeout:{artifact}")
     value = str(completed.stdout or "").strip()
     if completed.returncode != 0 or not value:
-        return _unknown(decision_id, f"default_unknown:{payload}")
-    return _retired(decision_id, f"default_present:{payload}={value}")
+        return _unknown(decision_id, f"default_unknown:{key}")
+    if value != expected:
+        return _unknown(decision_id, f"default_mismatch:{key}={value}")
+    return _retired(decision_id, f"default_present:{key}={value}")
 
 
 __all__ = [
