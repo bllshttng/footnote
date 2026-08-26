@@ -1682,15 +1682,28 @@ def restamp_harness_session_id(
                 getattr(entry, field) is not None
                 for field in ("crown_level", "crown_scope", "crown_grantor")
             ):
-                branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
-                if any(candidate.name == branch_name for candidate in entries):
-                    raise ValueError(f"branch name {branch_name!r} already exists")
-                if any(
-                    candidate.harness_session_id == session_id for candidate in entries
-                ):
+                existing = next(
+                    (
+                        candidate
+                        for candidate in entries
+                        if candidate.harness == harness
+                        and candidate.harness_session_id == session_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.forked_from_session_id == stale:
+                        restamped.append(existing)
+                        return entries
                     raise ValueError(
                         f"branch session {session_id!r} already has a registry row"
                     )
+                branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
+                branch_base = branch_name
+                suffix = 2
+                while any(candidate.name == branch_name for candidate in entries):
+                    branch_name = f"{branch_base}-{suffix}"
+                    suffix += 1
                 branch = replace(
                     entry,
                     name=branch_name,

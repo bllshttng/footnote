@@ -486,6 +486,7 @@ def test_ac7_fr_unreachable_registered_session_orphaned(tmp_path: Path, monkeypa
 
 BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
 REMINT = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"
+REMINT_SAME_PREFIX = "08054b1d-bbbb-47ab-a3d2-4a1e7a87eb4e"
 
 
 def _spawned_row(name: str = "target-x-f0c2", session_id: str = BIRTH):
@@ -558,6 +559,19 @@ def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> Non
     assert branch.crown_scope is None
     assert branch.crown_grantor is None
     assert branch.short_id == ""
+
+    again = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT
+    )
+    assert again is not None
+    assert again.name == branch.name
+
+    second_branch = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT_SAME_PREFIX
+    )
+    assert second_branch is not None
+    assert second_branch.name == "target-x-f0c2-branch-08054b1d-2"
+    assert len(load_registry()) == 3
 
 
 def test_restamp_is_a_noop_when_the_id_already_matches(tmp_path: Path, monkeypatch) -> None:

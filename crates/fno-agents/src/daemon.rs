@@ -6992,15 +6992,22 @@ fn late_bind_codex_sessions_with_transition(
             let current = r
                 .find(&name)
                 .and_then(|entry| entry.harness_session_id.clone());
-            match (current.as_deref(), classification, predecessor_reachable) {
-                (None, None, None) => {
+            match (
+                current.as_deref(),
+                predecessor.as_deref(),
+                classification,
+                predecessor_reachable,
+            ) {
+                (None, None, None, None) => {
                     let Some(e) = r.find_mut(&name) else {
                         return false;
                     };
                     e.harness_session_id = Some(sid.clone());
                     true
                 }
-                (Some(previous), Some(_), Some(reachable)) if previous != sid => {
+                (Some(previous), Some(sampled_predecessor), Some(_), Some(reachable))
+                    if previous == sampled_predecessor && previous != sid =>
+                {
                     match apply_session_transition(
                         r,
                         &name,
@@ -12489,6 +12496,49 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                     .and_then(Value::as_str)
                     == Some("succession")
         }));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_does_not_apply_liveness_sampled_from_a_stale_predecessor() {
+        let home = tmp_home("late-bind-stale-predecessor");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut entry = codex_pane_row("pane-a");
+            entry.pid = Some(me);
+            entry.pid_start_time = Some(my_start);
+            entry.harness_session_id = Some("session-a".into());
+            r.entries.push(entry);
+        })
+        .unwrap();
+
+        let switched = std::cell::Cell::new(false);
+        late_bind_codex_sessions_with_transition(
+            &home,
+            &emitter,
+            &|_| {
+                if !switched.replace(true) {
+                    state::update_registry(&home.registry_json(), |r| {
+                        r.find_mut("pane-a").unwrap().harness_session_id = Some("session-c".into());
+                    })
+                    .unwrap();
+                }
+                Some("session-b".to_string())
+            },
+            &|session| (session == "session-a").then_some(false),
+        )
+        .unwrap();
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries.len(), 1);
+        assert_eq!(
+            reg.find("pane-a").unwrap().harness_session_id.as_deref(),
+            Some("session-c")
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
