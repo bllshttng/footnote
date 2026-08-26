@@ -516,6 +516,13 @@ async fn review_start_round_trip(
     parse_review_start_response(&resp)
 }
 
+fn emit_review_invocation_fields(
+    emitter: &crate::events::EventEmitter,
+    fields: serde_json::Map<String, serde_json::Value>,
+) {
+    let _ = emitter.emit_fields("review_invocation", fields);
+}
+
 #[cfg(test)]
 fn review_start_audit_fields(
     thread_id: &str,
@@ -781,8 +788,10 @@ fn emit_review_invocation_event(
         confirmed,
         receipt,
     );
-    let _ = crate::events::EventEmitter::new(events_path, "daemon")
-        .emit_fields("review_invocation", fields);
+    emit_review_invocation_fields(
+        &crate::events::EventEmitter::new(events_path, "daemon"),
+        fields,
+    );
 }
 
 /// The review-start verb entry: parse CLI, drive the round-trip, print the outcome receipt.

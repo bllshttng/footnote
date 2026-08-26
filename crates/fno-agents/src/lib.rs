@@ -742,6 +742,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // agent_raw_inject records a payload delivered without the <fno_mail>
     // envelope, so the provenance marker survives in the ledger, not transcript.
     "agent_raw_inject",
+    // Review invocation attempt/outcome join (daemon-emitted): the
+    // canonical repo-local event records how a Codex review was fired and
+    // whether its transport confirmed delivery.
+    "review_invocation",
     // Active-backlog mission drain supervisor (daemon-emitted): the drain tick
     // panicked and the supervisor is restarting it with backoff. The drain
     // decision events (active_backlog_dispatched / _parked / _skip) are
