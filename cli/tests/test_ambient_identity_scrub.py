@@ -224,6 +224,31 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
     assert "FNO_REAL_GH" not in explicit_envs[-1]
 
 
+def test_headless_no_markers_without_overlay_stamps_child_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A clean operator shell still gets the canonical child family stamp."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    for marker in ALL_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: dict(base),
+    )
+
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+
+    explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
+    assert explicit_envs
+    child_env = explicit_envs[-1]
+    assert child_env["FNO_HARNESS_NAME"] == "claude"
+    assert "FNO_HARNESS_SESSION_ID" not in child_env
+
+
 # --- the codex adapter crosses the same floor (x-b57a) ------------------------
 # The scrub used to live per adapter: claude's adapter scrubbed, codex's never
 # did, so a codex worker spawned from a claude parent inherited
