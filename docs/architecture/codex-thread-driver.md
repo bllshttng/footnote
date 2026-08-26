@@ -1,10 +1,36 @@
 # Codex thread driver: the measured protocol surface
 
-Why codex has no thread lane today, what a driver must speak, and what earns the capability bit. Measured against `codex-cli 0.149.1` on 2026-08-26.
+Why codex has no thread lane today, what a driver must speak, and what earns the capability bit. Measured against `codex-cli 0.149.1` on 2026-08-26. The fleet table below carries the same reading for the other four harnesses.
 
 A `thread` is an fno-layer construct. fno invents it and implements it over each harness's own resume primitive. No harness ships one. `bg` was only ever a claude subcommand. So this page does not ask whether codex has a thread feature. It answers what fno must build to own a codex thread lifecycle with no PTY.
 
 Read this before you conclude that codex cannot have a thread lane. It can. Nothing has built one.
+
+## The fleet, measured
+
+The bit is per-harness, so the state of the other four is part of reading this page. Measured 2026-08-26 unless a cell says otherwise.
+
+| harness | `thread` | durable store | resume primitive | lane state |
+|---|---|---|---|---|
+| claude | `true` | `~/.claude/jobs`, 82 sessions over 92 days | `claude --resume <uuid>` | shipped. A supervisor daemon forks detached children and reconnects from a roster at startup |
+| opencode | `true` | session store behind `opencode serve` | `opencode --session <id>` | launch only. See the audit note below |
+| codex | `false` | 2,745 rollouts back to 2025-10-16 | `codex resume <uuid>`, plus the 95-RPC app-server | none. The whole of this page |
+| agy | `false` | 63 conversation DBs at `~/.gemini/antigravity-cli/conversations/<uuid>.db` | `agy --conversation <uuid>` | none |
+| gemini | `false` | n/a | `gemini --resume <id>` | the CLI is deprecated upstream. agy is the successor |
+
+Two readings follow, and neither is obvious from the table alone.
+
+**agy has both durable halves, like codex.** Three turns ran on one conversation, each from a fresh process. Turns 2 and 3 both returned a token planted in turn 1. Per-turn wall clock was 7.64s, 4.56s and 4.67s. The `.db` filename equals the `conversation_id` the CLI returns in its own JSON, so the identity join needs no inference. `harness_capabilities.toml` records agy's `interactive_resume` as `kind = "unsupported"`, which understates the CLI. Correcting that row changes what fno will try to run, so it needs its own verification rather than a docs edit.
+
+agy also exposes `--input-format stream-json`, which reads one NDJSON message per line from stdin and runs a turn for each. That is the boot-once, drive-many property `codex exec resume` lacks, and it is the same shape as `provider.rs`'s `claude_stream_json_resume_argv`. So agy's lane plausibly reuses machinery fno already ships for claude.
+
+**opencode's `true` is the one bit not earned to this page's standard.** `harness_map.py`'s `substrate_default` returns `thread` for any harness whose bit is true. So opencode is the only harness routed onto a thread lane by default. Every harness with a false bit defaults to `headless`, a one-shot.
+
+Meanwhile that lane has four gaps. It has no e2e spawn test through the real mux socket. It has no CI-installed binary behind its flag checks. It has no steering surface. Its liveness signal is the detached writer pid. That pid exits at the end of the first turn, while the session keeps working.
+
+That last gap carries a reap hazard behind an opt-in setting rather than a live outage. It is a risk to close, not a fire.
+
+The wider point is the one to take from this page. A single flag is covering two different claims. "Has a durable session lane" and "has a driver fno can steer" are not the same assertion. One flag standing for both is the shape AGENTS.md warns about under *never infer the axis from a value*.
 
 ## The bit stays false, and that is not a formality
 
