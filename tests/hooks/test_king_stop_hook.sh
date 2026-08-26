@@ -10,7 +10,7 @@
 # rather than allowing the stop as if nothing were running.
 #
 # Tests:
-#   K1  claude shim, no manifest at all      -> allow, binary never called
+#   K1  claude shim, no manifest at all      -> resolver miss, allow
 #   K2  claude shim, king manifest, block     -> exit 2, --driver king forwarded
 #   K3  claude shim, king manifest, NoWork    -> exit 0, finalize NOT invoked
 #   K4  claude shim, both manifests present   -> target wins, --driver target
@@ -96,6 +96,13 @@ stub_binary() {
     cat > "$BIN" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${ARGS_LOG}"
+if [[ "\$1" == "manifest-for-session" ]]; then
+    if [[ -f .fno/target-state.md ]]; then
+        printf '%s\n' "\$PWD/.fno/target-state.md"
+        exit 0
+    fi
+    exit 1
+fi
 if [[ "\$1" == "loop-check" ]]; then
     cat <<'JSON'
 ${decision}
@@ -168,14 +175,17 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     cleanup
 }
 
-# ── K1: no manifest at all -> silent allow, binary never called ───────────────
+# ── K1: no manifest at all -> resolver miss, then allow ───────────────────────
 {
     setup_king
     rm -f "${TMP_DIR}/.fno/kings/x-f3d0.md" "${TMP_DIR}/.fno/live-crown-session"
     stub_binary '{"decision":"block","message":"should never run"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
-    if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
-        pass "K1: no manifest is the only safe silent allow"
+    ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 0 ]] \
+        && grep -q '^manifest-for-session' <<< "$ARGS" \
+        && ! grep -q '^loop-check' <<< "$ARGS"; then
+        pass "K1: no target manifest resolves as a visitor"
     else
         fail "K1: rc=$CLAUDE_RC args=$(cat "$ARGS_LOG" 2>/dev/null)"
     fi
@@ -288,7 +298,10 @@ MANIFEST
     king_manifest_naming "some-other-session"
     stub_binary '{"decision":"block","message":"should never run"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
-    if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
+    ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 0 ]] \
+        && grep -q '^manifest-for-session' <<< "$ARGS" \
+        && ! grep -q '^loop-check' <<< "$ARGS"; then
         pass "K7: a stale king manifest naming another session never gates this one"
     else
         fail "K7: rc=$CLAUDE_RC args=$(cat "$ARGS_LOG" 2>/dev/null)"

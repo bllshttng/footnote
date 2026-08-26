@@ -129,7 +129,7 @@ fn fixture_with_manifest(manifest_body: &str) -> Fixture {
 /// without needing the done() world-reads.
 fn fixture() -> Fixture {
     fixture_with_manifest(
-        "---\nsession_id: sess-payload\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_ship: true\n---\n",
+        "---\nsession_id: sess-payload\nharness_session_id: transcript\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_ship: true\n---\n",
     )
 }
 
@@ -368,6 +368,7 @@ fn delivery_finalize_retry_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         "mock-fno-agents",
         r#"
 if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "manifest-for-session" ]; then exit 1; fi
 if [ "$1" = "loop-check" ]; then
   mock_root="${MOCK_ROOT:-.}"
   count=0; [ -f "$mock_root/.fno/loop-count" ] && count=$(cat "$mock_root/.fno/loop-count")
@@ -536,6 +537,7 @@ fn snapshot_failure_does_not_gate_a_legacy_terminal() {
         "legacy-fno-agents",
         r#"
 if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "manifest-for-session" ]; then exit 1; fi
 if [ "$1" = "loop-check" ]; then
   echo '{"decision":"allow","termination_reason":"DoneAdvisory","message":"legacy done"}'
   exit 0
@@ -604,6 +606,7 @@ fn stale_pending_with_live_session_fixture() -> (TempDir, PathBuf, PathBuf, Path
         "collision-fno-agents",
         r#"
 if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "manifest-for-session" ]; then exit 1; fi
 if [ "$1" = "loop-check" ]; then
   touch .fno/live-loopchecked
   echo '{"decision":"block","termination_reason":null,"message":"live session incomplete"}'
@@ -713,7 +716,7 @@ fn agy_foreign_conversation_cannot_judge_a_live_session() {
 #[test]
 fn shim_prints_the_exact_timeout_cause_when_a_read_wedges() {
     let fx = fixture_with_manifest(
-        "---\nsession_id: sess-wedge-e2e\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\n---\n",
+        "---\nsession_id: sess-wedge-e2e\nharness_session_id: transcript\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\n---\n",
     );
     // The shim reads its state from .fno/target-state.md in $PWD.
     fs::copy(&fx.manifest, fx.cwd.join(".fno/target-state.md")).unwrap();

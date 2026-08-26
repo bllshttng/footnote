@@ -111,8 +111,8 @@ TARGET_NO_MATCH=0
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     RESIDENT_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' \
         "$LIVE_STATE_FILE" 2>/dev/null \
-        | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' | tr -d '[:space:]' \
-        | grep -Ev '^(null)?$' | head -1 || true)
+        | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
+        | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
     if [[ -n "$CONVERSATION_ID" && -n "$RESIDENT_HARNESS_ID" \
         && "$RESIDENT_HARNESS_ID" != "$CONVERSATION_ID" ]]; then
         BIN=$(resolve_agents_bin)
