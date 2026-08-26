@@ -77,6 +77,7 @@ pub mod loop_target;
 pub mod loopcheck;
 pub mod mail_inject;
 pub mod manifest;
+pub mod manifest_lookup;
 pub mod model_env_scrub;
 pub mod needs;
 pub mod nudge;
