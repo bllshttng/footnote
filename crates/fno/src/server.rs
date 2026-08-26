@@ -5679,13 +5679,6 @@ impl Core {
             .iter()
             .map(|pane| pane.and_then(|pid| self.pane_tab_name(sid, pid)))
             .collect();
-        let mut worker_facts: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        for facts in self.agents.iter().filter_map(Self::worker_facts) {
-            worker_facts
-                .entry(facts.name)
-                .or_default()
-                .push((facts.harness, facts.harness_session_id));
-        }
         if let Some(list) = self.squad_members.get_mut(&sid) {
             for (m, resolved) in list.iter_mut().zip(names) {
                 // Only overwrite when the member's pane resolved to a tab
@@ -5715,15 +5708,41 @@ impl Core {
             // topology flush. A registry row can publish after placement, so
             // a transient miss preserves the last durable pair rather than
             // erasing it; a hit always replaces both fields authoritatively.
+            let worker_member_counts: HashMap<String, usize> = list
+                .iter()
+                .filter_map(|member| member.worker.clone())
+                .fold(HashMap::new(), |mut counts, worker| {
+                    *counts.entry(worker).or_default() += 1;
+                    counts
+                });
             for member in list.iter_mut() {
                 let Some(worker) = member.worker.as_deref() else {
                     continue;
                 };
-                if let Some(candidates) = worker_facts.get(worker) {
-                    if let [(harness, session_id)] = candidates.as_slice() {
-                        member.harness = Some(harness.clone());
-                        member.harness_session_id = Some(session_id.clone());
+                let named_rows: Vec<&RegistryAgent> = self
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.name == worker)
+                    .collect();
+                let row = match (
+                    member.harness.as_deref(),
+                    member.harness_session_id.as_deref(),
+                ) {
+                    (Some(harness), Some(session_id)) => named_rows.iter().copied().find(|agent| {
+                        agent.harness.as_deref() == Some(harness)
+                            && agent_harness_session_id(agent) == Some(session_id)
+                    }),
+                    (None, None)
+                        if worker_member_counts.get(worker) == Some(&1)
+                            && named_rows.len() == 1 =>
+                    {
+                        named_rows.first().copied()
                     }
+                    _ => None,
+                };
+                if let Some(facts) = row.and_then(Self::worker_facts) {
+                    member.harness = Some(facts.harness);
+                    member.harness_session_id = Some(facts.harness_session_id);
                 }
             }
         }
@@ -5936,6 +5955,9 @@ impl Core {
                 })
             })
             .or_else(|| {
+                if named_rows.len() > 1 {
+                    return None;
+                }
                 let candidates: Vec<usize> = members
                     .iter()
                     .enumerate()
@@ -21360,6 +21382,74 @@ mod tests {
             member.harness.as_deref() == Some("claude")
                 && member.harness_session_id.as_deref() == Some("session-two")
         }));
+    }
+
+    #[test]
+    fn record_worker_member_does_not_collapse_ambiguous_registry_names() {
+        let _s = StoreScratch::new("record-worker-ambiguous-name");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        let first = bg_row("reused-name", "/repo", None);
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        core.record_worker_member(7, "reused-name", 100, "/repo", None);
+        core.record_worker_member(7, "reused-name", 101, "/repo", None);
+
+        assert_eq!(core.squad_members[&7].len(), 2);
+    }
+
+    #[test]
+    fn persist_squad_does_not_copy_one_identity_to_repeated_name_members() {
+        let _s = StoreScratch::new("persist-worker-repeated-name");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        core.squad_members.insert(
+            7,
+            vec![
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("reused-name".into()),
+                    harness: None,
+                    harness_session_id: None,
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("reused-name".into()),
+                    harness: None,
+                    harness_session_id: None,
+                },
+            ],
+        );
+        let mut row = bg_row("reused-name", "/repo", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id = Some("session-one".into());
+        core.agents = vec![row];
+
+        core.persist_squad(7);
+
+        let members = &crate::squad_store::load().squads[0].members;
+        assert!(members
+            .iter()
+            .all(|member| member.harness.is_none() && member.harness_session_id.is_none()));
     }
 
     #[test]
