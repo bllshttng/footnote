@@ -309,6 +309,83 @@ event_types:
                 type: string
     consumers: [fno-agents loop-check]
 
+  - name: review_invocation
+    retention: durable
+    description: >
+      A review was attempted. This uses the canonical type/data envelope, not
+      the legacy flat kind envelope used by older agent-send rows. Sender and
+      reviewer observations may arrive as separate rows joined by
+      invocation_id; a sent row with no later started or attestation row names
+      a lost review without claiming that an absence is a delivery result.
+    sources: [target, hook, daemon, subagent, test]
+    data:
+      required: [invocation_id, stage, verb]
+      properties:
+        invocation_id:
+          type: string
+          description: "Stable join id minted at the earliest observable invocation site."
+        stage:
+          type: string
+          enum: [sent, started]
+          description: "Whether the sender recorded a transport attempt or the reviewer started."
+        verb:
+          type: string
+          description: "Review verb, including its leading slash, as observed by the speaker."
+        args_raw:
+          type: string
+          description: "Everything after the verb, preserved verbatim when observable."
+        level:
+          type: string
+          enum: [low, medium, high, xhigh, max, ultra, unset]
+          description: "Parsed review level; unset means no level was present at this site."
+        level_source:
+          type: string
+          enum: [explicit, ultra_forced, last_used, session_default, fallback]
+          description: "How the level was resolved, without reconstructing an unobservable table."
+        flags:
+          type: array
+          items: { type: string }
+          description: "Parsed flag tokens from the review arguments."
+        transport:
+          type: string
+          enum: [skill_tool, mail_to_self_raw, mail_send_raw, mux_pane_send_raw, codex_rpc, typed_by_human]
+          description: "Transport that fired or received the review invocation."
+        initiator:
+          type: string
+          enum: [self, king, daemon, operator, unknown]
+          description: "Observed initiator role; unknown is used when no role marker exists."
+        initiator_session_id:
+          type: string
+        target_session_id:
+          type: string
+        submit_required:
+          type: boolean
+        submit_key:
+          type: string
+          enum: ['\\r', tab, none]
+        submit_confirmed:
+          type: boolean
+        receipt:
+          type: string
+          description: "Literal transport receipt, deliberately unparsed."
+        model_family:
+          type: string
+        execution_context:
+          type: string
+          enum: [inline, fork]
+        output_contract:
+          type: string
+          enum: [report_findings, json_block]
+        subagent_count:
+          type: integer
+        pr:
+          type: integer
+        head_sha:
+          type: string
+        branch:
+          type: string
+    consumers: [operator, fno doctor]
+
   - name: review_coverage
     retention: gate
     description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the instrument result; review_state is the known outcome when that instrument succeeded. Counts remain diagnostic. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
