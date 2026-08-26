@@ -187,4 +187,3 @@ def parse_review_invocation(raw: str) -> dict[str, Any] | None:
         "level_source": level_source,
         "flags": [arg for arg in args if arg.startswith("--")],
     }
-
