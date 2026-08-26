@@ -6515,7 +6515,9 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
 
     Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
-    guard lives on the tracker-owned task verbs that call this.
+    guard lives on the tracker-owned task verbs that call this. A bound plan
+    that is not a readable file is a named refusal, never a traceback: rows
+    derive from the plan, so an unreadable plan is a stop, not an empty list.
     """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import read_graph
@@ -6530,6 +6532,9 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     if not plan_path:
         typer.echo(f"no plan bound to {entry.get('id')}", err=True)
         raise typer.Exit(code=2)
+    if not Path(plan_path).is_file():
+        typer.echo(f"plan file for {entry.get('id')} is not readable: {plan_path}", err=True)
+        raise typer.Exit(code=1)
     return entry["id"], plan_path
 
 
@@ -6542,32 +6547,49 @@ def cmd_task_list(
 
     The first read of a node with a bound plan writes the missing ``pending``
     rows, so a peer never sees a node whose tasks are invisible until someone
-    starts one.
+    starts one. Once every plan task id has a row, the read is read-only: a
+    polling fleet does not take the graph lock and re-render the board on a
+    steady-state no-op.
     """
     from pathlib import Path
 
-    from fno.graph.store import locked_mutate_graph
-    from fno.graph.tasks import ensure_task_rows
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.tasks import derive_task_ids, ensure_task_rows
 
     node_id, plan_path = _task_plan_or_exit(node, _graph_path())
-    rows: list[dict] = []
+    ids = derive_task_ids(Path(plan_path))
+
+    def _print(rows: list[dict]) -> None:
+        if json_output:
+            typer.echo(json.dumps({"node": node_id, "tasks": rows}, indent=2))
+            return
+        for r in rows:
+            typer.echo(f"{r.get('id')}\t{r.get('status')}\t{r.get('owner') or '-'}")
+
+    # Fast path: every plan id already has a row -> print without the lock.
+    for e in read_graph(_graph_path()):
+        if isinstance(e, dict) and e.get("id") == node_id:
+            rows = [r for r in e.get("tasks") or [] if isinstance(r, dict)]
+            known = {r.get("id") for r in rows}
+            if rows and all(i in known for i in ids):
+                _print(rows)
+                return
+            break
+
+    materialized: list[dict] = []
 
     def mutator(entries):
         for e in entries:
             if isinstance(e, dict) and e.get("id") == node_id:
-                rows.extend(ensure_task_rows(e, Path(plan_path)))
+                materialized.extend(ensure_task_rows(e, Path(plan_path)))
                 break
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
-    if not rows:
+    if not materialized:
         typer.echo(f"no tasks declared by {plan_path}", err=True)
         raise typer.Exit(code=2)
-    if json_output:
-        typer.echo(json.dumps({"node": node_id, "tasks": rows}, indent=2))
-        return
-    for r in rows:
-        typer.echo(f"{r.get('id')}\t{r.get('status')}\t{r.get('owner') or '-'}")
+    _print(materialized)
 
 
 @task_app.command("update")
@@ -6597,11 +6619,15 @@ def cmd_task_update(
     """
     from pathlib import Path
 
-    from fno.agents.self_stamp import resolve_self_session_id
-    from fno.claims.core import ClaimHeldByOther, ClaimValidationError
+    from fno.claims.core import (
+        ClaimContended,
+        ClaimHeldByOther,
+        ClaimValidationError,
+    )
+    from fno.claims.self_identity import resolve_self_identity
     from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
     from fno.claims.tasks import acquire_task, release_task, task_key
-    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.store import locked_mutate_graph
     from fno.graph.tasks import TASK_STATUSES, derive_task_ids
 
     if status not in TASK_STATUSES:
@@ -6619,7 +6645,14 @@ def cmd_task_update(
         )
         raise typer.Exit(code=2)
 
-    holder = owner or resolve_self_session_id()
+    # The claims layer's identity resolver (the same one self_stamp's
+    # resolve_self_session_id delegates to); the graph layer may not import
+    # fno.agents. Same semantics: no session id unless a harness is proven too.
+    if owner:
+        holder: Optional[str] = owner
+    else:
+        _ident = resolve_self_identity()
+        holder = _ident.session_id if (_ident.session_id and _ident.harness) else None
     key = task_key(node_id, task_id)
 
     def _set_row(mutate) -> Optional[dict]:
@@ -6664,6 +6697,17 @@ def cmd_task_update(
             )
             raise typer.Exit(code=4)
         pid = resolve_session_pid()
+        if pid is None:
+            # An unprovable pid would anchor the claim to this short-lived CLI
+            # process: it dies on exit, the claim reads stale, and a peer
+            # steals the task mid-flight - the exact double-dispatch the
+            # transition exists to prevent. Refuse instead of degrading.
+            typer.echo(
+                "cannot prove a session pid for the claim; "
+                "set FNO_SESSION_PID or run inside a harness session",
+                err=True,
+            )
+            raise typer.Exit(code=4)
         harness = resolve_session_harness()
         try:
             acquire_task(node_id, task_id, holder, pid=pid, harness=harness)
@@ -6671,6 +6715,11 @@ def cmd_task_update(
             typer.echo(
                 f"another holder owns {key} ({exc.holder}, pid={exc.pid})", err=True
             )
+            raise typer.Exit(code=3)
+        except ClaimContended as exc:
+            # Recovery-mutex contention, not a live holder: skip this round
+            # like a held task; a later pass re-runs the same command.
+            typer.echo(f"task claim contention on {key}: {exc}", err=True)
             raise typer.Exit(code=3)
         except ClaimValidationError as exc:
             typer.echo(f"invalid task claim key {key}: {exc}", err=True)
@@ -6701,7 +6750,9 @@ def cmd_task_update(
         typer.echo(f"{key} done")
         return
 
-    # pending: the holder-only give-back.
+    # pending: the holder-only give-back. The owner check runs INSIDE the
+    # locked mutation: a check on a pre-read row could clobber a row a peer
+    # claimed between the read and the write, advertising a live task as free.
     if not holder:
         typer.echo(
             "cannot prove a session id for the holder; "
@@ -6709,30 +6760,24 @@ def cmd_task_update(
             err=True,
         )
         raise typer.Exit(code=4)
-    entries = read_graph(_graph_path())
-    current = next(
-        (
-            r
-            for e in entries
-            if isinstance(e, dict) and e.get("id") == node_id
-            for r in e.get("tasks") or []
-            if isinstance(r, dict) and r.get("id") == task_id
-        ),
-        None,
-    )
-    current_owner = (current or {}).get("owner")
-    if current_owner and current_owner != holder:
+    refused_owner: list[str] = []
+
+    def _give_back(row) -> None:
+        owner_now = row.get("owner")
+        if owner_now and owner_now != holder:
+            refused_owner.append(str(owner_now))
+            return
+        row.update({"status": "pending", "owner": None})
+        row.pop("claimed_at", None)
+
+    row = _set_row(_give_back)
+    if refused_owner:
         typer.echo(
-            f"task {task_id} held by {current_owner}; only the holder can give it back",
+            f"task {task_id} held by {refused_owner[0]}; "
+            "only the holder can give it back",
             err=True,
         )
         raise typer.Exit(code=3)
-    row = _set_row(
-        lambda row: (
-            row.update({"status": "pending", "owner": None}),
-            row.pop("claimed_at", None),
-        )
-    )
     if row is None:
         typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
         raise typer.Exit(code=1)

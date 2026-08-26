@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from .core import acquire_claim, claim_status, release_claim
+from .core import acquire_claim, release_claim
 from .types import Claim
 
 #: Task claim key namespace. Not a global-id prefix (see
@@ -46,11 +46,13 @@ def acquire_task(
 ) -> Claim:
     """Claim a task for ``holder``, pid-liveness with no TTL.
 
-    ``pid`` is the durable harness session pid (``resolve_session_pid``);
-    ``None`` degrades to the acquiring process's own pid, which dies with the
-    CLI call - acceptable only for out-of-harness manual runs, whose claim then
-    frees immediately. Raises :class:`fno.claims.core.ClaimHeldByOther` naming
-    the live holder when a peer owns the task.
+    ``pid`` is the durable harness session pid (``resolve_session_pid``). The
+    backlog verb REFUSES an unprovable pid (exit 4) rather than pass ``None``
+    through: core would anchor the claim to the short-lived CLI process, which
+    dies on exit and leaves the claim instantly stealable. Raises
+    :class:`fno.claims.core.ClaimHeldByOther` naming the live holder when a
+    peer owns the task, :class:`fno.claims.core.ClaimContended` when the
+    recovery mutex stays busy past its retry budget.
     """
     return acquire_claim(
         key=task_key(node_id, task_id),
@@ -75,17 +77,4 @@ def release_task(
     release_claim(key=task_key(node_id, task_id), holder=holder, root=root)
 
 
-def task_holder(
-    node_id: str,
-    task_id: str,
-    *,
-    root: Optional[Path] = None,
-) -> Optional[str]:
-    """The live claim's holder, or ``None`` when free/stale/unreadable."""
-    status = claim_status(task_key(node_id, task_id), root=root)
-    if status.get("state") in ("live", "suspect"):
-        return status.get("holder")
-    return None
-
-
-__all__ = ["TASK_PREFIX", "task_key", "acquire_task", "release_task", "task_holder"]
+__all__ = ["TASK_PREFIX", "task_key", "acquire_task", "release_task"]

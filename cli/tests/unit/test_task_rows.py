@@ -228,10 +228,13 @@ def test_in_progress_without_session_id_exits_4(
     tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """Exit 4 (not a silent claim under an unprovable holder)."""
+    from types import SimpleNamespace
+
     from fno.graph import cli as graph_cli
 
     monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_session_id", lambda *a, **k: None
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: SimpleNamespace(session_id=None, harness="claude"),
     )
     result = runner.invoke(
         graph_cli.task_app,
@@ -239,6 +242,80 @@ def test_in_progress_without_session_id_exits_4(
     )
     assert result.exit_code == 4
     assert "pass --owner <full-session-id>" in result.output
+
+
+def test_unprovable_pid_refuses_rather_than_degrading(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A pid-less acquire would anchor to the dying CLI process and leave the
+    claim instantly stealable; the verb refuses (exit 4) and writes nothing."""
+    result = _task_update(
+        monkeypatch, None, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    )
+    assert result.exit_code == 4
+    assert "FNO_SESSION_PID" in result.output
+    # Positive absence proof: the healthy pid on the SAME path creates the
+    # lockfile, so the instrument ran and the refusal was the pid guard.
+    ok = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert ok.exit_code == 0, ok.output
+    assert claim_path(task_key("x-t1", "1.1"), root=claims_root).exists()
+
+
+def test_claim_contention_exits_3_within_the_waves_contract(
+    tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """ClaimContended (recovery-mutex exhaustion) must not escape as a
+    traceback; exit 3 keeps the documented 0/3/4 contract for the waves flow."""
+    from fno.claims.core import ClaimContended
+
+    def boom(*a, **k):
+        raise ClaimContended("recovery mutex busy")
+
+    monkeypatch.setattr("fno.claims.tasks.acquire_task", boom)
+    result = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert result.exit_code == 3
+    assert "contention" in result.output
+
+
+def test_unreadable_plan_is_a_named_refusal(
+    tmp_path: Path, tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A stale plan_path (file gone) exits 1 naming the path, never a
+    FileNotFoundError traceback; the graph is untouched."""
+    from fno.graph import cli as graph_cli
+
+    entries = json.loads(tmp_graph.read_text(encoding="utf-8"))["entries"]
+    entries[0]["plan_path"] = str(tmp_path / "gone.md")
+    tmp_graph.write_text(json.dumps({"entries": entries}), encoding="utf-8")
+    before = tmp_graph.read_text(encoding="utf-8")
+
+    result = runner.invoke(graph_cli.task_app, ["list", "x-t1"])
+    assert result.exit_code == 1
+    assert "not readable" in result.output and "gone.md" in result.output
+    assert tmp_graph.read_text(encoding="utf-8") == before
+
+
+def test_second_list_read_is_read_only(
+    tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Once every plan id has a row, listing re-prints them without a graph
+    write: the file content is byte-identical after the steady-state read."""
+    from fno.graph import cli as graph_cli
+
+    first = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert first.exit_code == 0, first.output
+    settled = tmp_graph.read_text(encoding="utf-8")
+
+    second = runner.invoke(graph_cli.task_app, ["list", "x-t1", "--json"])
+    assert second.exit_code == 0, second.output
+    assert json.loads(second.output) == json.loads(first.output)
+    assert tmp_graph.read_text(encoding="utf-8") == settled
 
 
 # -- AC3: dead-pid recovery --

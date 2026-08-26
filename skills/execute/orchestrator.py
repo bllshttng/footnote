@@ -966,17 +966,28 @@ def emit_status_event(
     for flag, val in (("--run", run), ("--node", node), ("--task", task), ("--outcome", outcome)):
         if val:
             argv += [flag, val]
+    return _shell_fno(argv, f"{event_type} emit")
+
+
+def _shell_fno(argv: List[str], what: str) -> bool:
+    """Run one best-effort ``fno`` subprocess for a boundary side effect.
+
+    The one runner for every non-fatal boundary shell (the event emit, the
+    task-claim settle): missing fno, a raise, and a non-zero exit each log one
+    stderr note and return False. Never raises, so a boundary side effect can
+    never fail the task or the run.
+    """
     try:
         result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
     except FileNotFoundError:
-        print(f"orchestrator: note: fno unavailable, skipped {event_type} emit", file=sys.stderr)
+        print(f"orchestrator: note: fno unavailable, skipped {what}", file=sys.stderr)
         return False
-    except Exception as exc:  # noqa: BLE001 - emission must never wedge the run
-        print(f"orchestrator: note: {event_type} emit failed (non-fatal): {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - a boundary side effect never wedges the run
+        print(f"orchestrator: note: {what} failed (non-fatal): {exc}", file=sys.stderr)
         return False
     if result.returncode != 0:
         print(
-            f"orchestrator: note: {event_type} emit rejected (non-fatal): "
+            f"orchestrator: note: {what} rejected (non-fatal): "
             f"{result.stderr.decode('utf-8', 'replace').strip()}",
             file=sys.stderr,
         )
@@ -999,22 +1010,29 @@ def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
     else:  # FAILED, BLOCKED, empty (the `blocked` event carries no outcome)
         status_verb = "pending"
     argv = ["fno", "backlog", "task", "update", node, task, "--status", status_verb]
+    return _shell_fno(argv, "task claim settle")
+
+
+def manifest_graph_node_id(state_path: str = ".fno/target-state.md") -> str:
+    """The bound node id from the session manifest, or ``""``.
+
+    The same best-effort substring scan the emit CLI's envelope fallback uses
+    (work coordinates fall back to the manifest when the flags are empty), so
+    the documented bare ``--emit-boundary task_done --task N.M`` (no --node)
+    still settles the task claim. A missing or unreadable manifest yields ""
+    and the settle is skipped.
+    """
     try:
-        result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
-    except FileNotFoundError:
-        print("orchestrator: note: fno unavailable, skipped task claim settle", file=sys.stderr)
-        return False
-    except Exception as exc:  # noqa: BLE001 - settling must never wedge the run
-        print(f"orchestrator: note: task claim settle failed (non-fatal): {exc}", file=sys.stderr)
-        return False
-    if result.returncode != 0:
-        print(
-            "orchestrator: note: task claim settle rejected (non-fatal): "
-            f"{result.stderr.decode('utf-8', 'replace').strip()}",
-            file=sys.stderr,
-        )
-        return False
-    return True
+        text = Path(state_path).read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("graph_node_id:"):
+            val = stripped[len("graph_node_id:") :].strip().strip('"').strip()
+            if val and val != "null":
+                return val
+    return ""
 
 
 def get_blocked_tasks_from_state(state_path: str) -> List[str]:
@@ -1338,13 +1356,16 @@ if __name__ == "__main__":
         )
         # The boundary every outcome already passes through is also the one
         # place the task claim taken at dispatch gets settled (x-09d7 g3):
-        # done releases it, blocked/FAILED gives it back to pending. Only a
-        # node-bound boundary (--node AND --task non-empty) carries a claim.
-        if b_opts["--node"] and b_opts["--task"]:
-            release_task_claim_at_boundary(
-                b_opts["--node"], b_opts["--task"], b_opts["--outcome"]
-                if b_type == "task_done" else "FAILED",
-            )
+        # done releases it, blocked/FAILED gives it back to pending. The node
+        # falls back to the manifest exactly as the emit envelope does - the
+        # documented per-task invocations pass --task only.
+        if b_opts["--task"]:
+            settle_node = b_opts["--node"] or manifest_graph_node_id()
+            if settle_node:
+                release_task_claim_at_boundary(
+                    settle_node, b_opts["--task"], b_opts["--outcome"]
+                    if b_type == "task_done" else "FAILED",
+                )
         sys.exit(0)
 
     # Handle --agent flag first (standalone command, no index needed)

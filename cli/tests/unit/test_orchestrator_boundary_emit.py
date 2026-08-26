@@ -127,3 +127,24 @@ def test_boundary_settlement_is_nonfatal(monkeypatch) -> None:
 
     monkeypatch.setattr(orch.subprocess, "run", boom)
     assert orch.release_task_claim_at_boundary("x-t1", "1.1", "SUCCESS") is False
+
+
+def test_manifest_graph_node_id_fallback(tmp_path, monkeypatch) -> None:
+    """The settle's node fallback reads graph_node_id from the manifest, so
+    the documented bare `--emit-boundary task_done --task N.M` (no --node)
+    still settles the claim taken at dispatch."""
+    orch = _load_orch()
+    manifest = tmp_path / "target-state.md"
+    manifest.write_text(
+        "session_id: 2782a6e1-aaaa-bbbb-cccc-dddddddddddd\n"
+        "graph_node_id: x-t9\n"
+        "plan_path: /nowhere.md\n",
+        encoding="utf-8",
+    )
+    assert orch.manifest_graph_node_id(str(manifest)) == "x-t9"
+    # Positive control for the miss case: an existing manifest WITHOUT the
+    # field, plus a missing file, both yield "" (skip, never a wrong node).
+    bare = tmp_path / "bare.md"
+    bare.write_text("session_id: 2782a6e1-aaaa-bbbb-cccc-dddddddddddd\n", encoding="utf-8")
+    assert orch.manifest_graph_node_id(str(bare)) == ""
+    assert orch.manifest_graph_node_id(str(tmp_path / "nope.md")) == ""
