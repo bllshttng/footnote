@@ -115,6 +115,7 @@ def _write_quick_plan(
     *,
     claims: str | None = None,
     difficulty: str | None = None,
+    created: str = "2026-05-05T04:35",
 ) -> Path:
     plan = tmp_path / "plan.md"
     fm_lines = ["---"]
@@ -122,7 +123,7 @@ def _write_quick_plan(
         fm_lines.append(f"claims: {claims}")
     if difficulty:
         fm_lines.append(f"difficulty: {difficulty}")
-    fm_lines += ["created: 2026-05-05T04:35", "---"]
+    fm_lines += [f"created: {created}", "---"]
     body = [f"# {title}", "", _SURFACE, "", "Body."]
     plan.write_text("\n".join(fm_lines + [""] + body) + "\n")
     return plan
@@ -675,6 +676,57 @@ def test_intake_claim_drains_retired_model_tier_key(fixture_graph, tmp_path, cap
     target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
     assert target["difficulty"] == "high"
     assert "model_tier" not in target
+
+
+def test_intake_build_lane_refuses_post_gate_plan_without_difficulty(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-8: intake run directly never reaches fno do plan validate,
+    so the shared date-keyed gate binds on this lane too - a post-gate
+    bandless plan refuses instead of silently minting a bandless node."""
+    plan = _write_quick_plan(tmp_path, title="Bandless post-gate", created="2026-08-27")
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    err = capsys.readouterr().err
+    assert "difficulty is required" in err
+    assert "low, medium, high" in err
+    # Refused before the write: nothing was appended.
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_intake_claim_lane_refuses_post_gate_plan_without_difficulty(
+    fixture_graph, tmp_path, capsys,
+):
+    """x-baef round-8: the claim promotes a plan to ready, so the same gate
+    binds; without it the claim is the silent bandless-node hole."""
+    plan = _write_quick_plan(
+        tmp_path, title="Bandless claim", claims="ab-1dea1234", created="2026-08-27"
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    err = capsys.readouterr().err
+    assert "claim refused" in err
+    assert "difficulty is required" in err
+    # The idea node was not linked or promoted.
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target.get("plan_path") != str(plan)
+
+
+def test_intake_claim_lane_allows_post_gate_plan_with_difficulty(
+    fixture_graph, tmp_path, capsys,
+):
+    """The gate twin: a post-gate plan carrying a band claims normally."""
+    plan = _write_quick_plan(
+        tmp_path, title="Banded claim", claims="ab-1dea1234",
+        difficulty="high", created="2026-08-27",
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    out = capsys.readouterr().out
+    assert "claimed ab-1dea1234" in out
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target["difficulty"] == "high"
 
 
 def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys):
@@ -1420,6 +1472,7 @@ def test_multi_intake_build_refusal_skips_one_file_not_batch(
     captured = capsys.readouterr()
 
     assert "invalid difficulty" in captured.err
+    assert "low, medium, high" in captured.err
     assert "skipped" in captured.err
     assert "1 refused" in captured.out
     # The batch landed: the good plan persisted, no node for the refused one.
@@ -1493,6 +1546,7 @@ def test_multi_intake_dry_run_previews_claim_and_build_refusal(
     assert "(claims ab-1dea1234)" in captured.out
     assert "would skip" in captured.err
     assert "invalid difficulty" in captured.err
+    assert "low, medium, high" in captured.err
     would_lines = [ln for ln in captured.out.splitlines() if "would intake" in ln]
     assert not any("kappa" in ln for ln in would_lines)
     assert not any("lambda" in ln for ln in would_lines)

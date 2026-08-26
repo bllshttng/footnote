@@ -2964,8 +2964,16 @@ def _intake_impl(
                 es, claim_id, plan_path=plan_path, spec=spec, project=project
             )
 
-        locked_mutate_graph(_graph_path(), claim_mutator)
-        typer.echo(f'claimed {claim_id} via {claim_source}: "{spec["title"]}"')
+        try:
+            locked_mutate_graph(_graph_path(), claim_mutator)
+        except ValueError as exc:
+            # The claim mutator's own refusals (the difficulty gate) land as
+            # a clean one-line error, not a traceback out of the lock body.
+            typer.echo(f"error: claim refused: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(
+            f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
+        )
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
         # Routed through the converger so parent_slug is injected consistently.
@@ -2985,7 +2993,14 @@ def _intake_impl(
         es.append(node)
         return es
 
-    locked_mutate_graph(_graph_path(), mutator)
+    try:
+        locked_mutate_graph(_graph_path(), mutator)
+    except ValueError as exc:
+        # Build-time refusals (the difficulty gate, an invalid band) land as
+        # a clean one-line error on the single-file lane; the multi lane
+        # already caught these per-file to skip, not abort, the batch.
+        typer.echo(f"error: intake refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     destination = roadmap_id if roadmap_id else "backlog"
     typer.echo(f'intake {new_id_holder[0]} -> {destination}: "{spec["title"]}"')
 
@@ -12859,6 +12874,14 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
     # one of N paths. Same rule as priority below: the doc only speaks
     # when it declares a real, non-default value.
     frontmatter = _read_plan_frontmatter(plan_path) or {}
+    # The claim promotes a plan to ready, so the same date-keyed gate that
+    # binds `fno do plan validate` and the intake build lane binds here; a
+    # claim that skipped it would be the silent bandless-node hole (x-baef).
+    from fno.plan.schema import difficulty_gate_error
+
+    gate_error = difficulty_gate_error(frontmatter)
+    if gate_error:
+        raise ValueError(f"{plan_path}: {gate_error}")
     claimed_type = normalize_type(frontmatter.get("type"))
     from fno.graph._constants import normalize_difficulty
 
@@ -12885,7 +12908,8 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
                 # dies inside strip()/lower() before the band check; warn and
                 # leave the band unchanged rather than traceback mid-claim.
                 typer.echo(
-                    f"warning: invalid difficulty {raw_difficulty!r}; "
+                    f"warning: invalid difficulty {raw_difficulty!r} "
+                    "(expected one of: low, medium, high); "
                     "difficulty left unchanged",
                     err=True,
                 )
@@ -13104,13 +13128,15 @@ def _do_intake_multi(
                     typer.echo(
                         f'  would claim: "{spec["title"]}"  (plan: {f})  (claims {prep["id"]})'
                     )
-                    _apply_claim_in_place(
-                        preview_entries,
-                        prep["id"],
-                        plan_path=f,
-                        spec=spec,
-                        project=cli_project,
-                    )
+                    try:
+                        _apply_claim_in_place(
+                            preview_entries, prep["id"], plan_path=f,
+                            spec=spec, project=cli_project,
+                        )
+                    except ValueError as exc:
+                        # A gate refusal previews as would-skip, matching the
+                        # build refusal below it.
+                        typer.echo(f"  error: would skip {f}: {exc}", err=True)
                     continue
                 # Grow the preview graph the way the real mutator grows its
                 # entries - the BUILT node, so a later duplicate of this plan

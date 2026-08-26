@@ -1482,6 +1482,14 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     mission_from_msg_id: Optional[str] = fm.get("mission_from_msg_id") or None
 
     raw_difficulty = fm.get("difficulty")
+    # The gate before the band: intake run directly (not via the blueprint
+    # skill's validate-plan.sh) never reaches fno do plan validate, so the
+    # shared helper is what makes the requirement bind on this lane too.
+    from fno.plan.schema import difficulty_gate_error
+
+    gate_error = difficulty_gate_error(fm)
+    if gate_error:
+        raise ValueError(f"{spec['plan_path']}: {gate_error}")
     if raw_difficulty is None and fm.get("model_tier") is not None:
         # The compat read died with the field (x-baef); a plan still spelling
         # the band as model_tier must hear it lost, not lose it silently.
@@ -1497,7 +1505,8 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         # unquoted YAML int or list) dies inside strip()/lower() before the
         # band check and would surface as a traceback, not this message.
         raise ValueError(
-            f"{spec['plan_path']}: invalid difficulty {raw_difficulty!r}"
+            f"{spec['plan_path']}: invalid difficulty {raw_difficulty!r} "
+            "(expected one of: low, medium, high)"
         ) from exc
     blocks_everything = fm.get("blocks_everything") is True or str(
         fm.get("blocks_everything", "")

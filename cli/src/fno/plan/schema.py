@@ -51,8 +51,10 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
     early return in ``fno do plan validate``: validate-plan.sh runs
     ``--execution``, which never reaches ``PlanFrontmatter``, so without
     this shared helper the gate a plan hits at CREATION would drift from the
-    one the model enforces later. An undatable ``created`` returns None -
-    validate-plan.sh's own date fallback refuses that plan separately.
+    one the model enforces later. An ABSENT ``created`` returns None -
+    validate-plan.sh's filename-date fallback owns dating that plan - while
+    a present-but-unreadable one refuses with the cannot-read error, since
+    the execution scope never reaches the model's own date validation.
     """
     created = frontmatter.get("created")
     if isinstance(created, datetime):
