@@ -208,10 +208,10 @@ def _record(
         raise typer.Exit(3)
     except RefusedAuthorityError as exc:
         typer.echo(
-            f"decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record under operator authority. If only the operator can "
-            "settle this, use `fno inbox outstanding ask`. If ruling as an agent, "
-            "drop --authority operator; it records agent coordination.",
+            f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
+            "cannot record decisions. Decisions are operator-authored through "
+            "`fno law`. Append agent findings without replacing node details with "
+            "`fno backlog note <node> <text>`.",
             err=True,
         )
         raise typer.Exit(3)
@@ -219,9 +219,9 @@ def _record(
         typer.echo(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
-            "authority is never inherited by silence. Run it from a terminal, "
-            "join the session so a handle can be stamped, or drop --authority "
-            "operator to record it in the unattributed lane.",
+            "authority is never inherited by silence. Run `fno law` from an "
+            "attended operator terminal. Append agent findings with "
+            "`fno backlog note <node> <text>`.",
             err=True,
         )
         raise typer.Exit(3)
