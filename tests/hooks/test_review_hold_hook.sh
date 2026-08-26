@@ -135,9 +135,10 @@ printf '{"invocation_id":"%s","target_session_id":"sess-join"}' "$SEEDED_ID" \
   > "$JOIN_HOME/review-invocations/sess-join.json"
 : > "$RECORDED"
 : > "$EVENTS"
-printf '%s' "$(jq -nc --arg cwd "$WORK" \
+join_level="medium"
+printf '%s' "$(jq -nc --arg cwd "$WORK" --arg level "$join_level" \
   '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
-    session_id:"sess-join", tool_input:{skill:"/code-review medium --comment"}}')" \
+    session_id:"sess-join", tool_input:{skill:("/code-review " + $level + " --comment")}}')" \
   | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
     FNO_HOME="$JOIN_HOME" bash "$HOOK" acquire >/dev/null 2>&1
 if grep -q "$SEEDED_ID" "$EVENTS" && grep -q "$SEEDED_ID" "$RECORDED"; then
