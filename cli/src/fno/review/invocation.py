@@ -83,17 +83,30 @@ def adopt_pending_invocation(
     *,
     home: Path | None = None,
 ) -> str | None:
-    """Read and consume a pending id, returning ``None`` on any miss."""
+    """Read and consume a pending id, returning ``None`` on any miss.
+
+    The sidecar is ALWAYS consumed when it exists, even on an unparseable
+    read: one corrupt leftover must not block every later join by making the
+    O_EXCL writer fail forever while senders keep minting unjoinable ids.
+    """
     try:
         path = pending_invocation_path(target_session_id, home=home)
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        invocation_id = raw.get("invocation_id") if isinstance(raw, dict) else None
-        if not isinstance(invocation_id, str) or not invocation_id:
-            return None
-        path.unlink()
-        return invocation_id
-    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
+    invocation_id = None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            candidate = raw.get("invocation_id")
+            if isinstance(candidate, str) and candidate:
+                invocation_id = candidate
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    return invocation_id
 
 
 def build_review_invocation_data(

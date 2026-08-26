@@ -3050,6 +3050,7 @@ def _raw_send(
     )
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.review.invocation import (
+        adopt_pending_invocation,
         emit_review_invocation,
         mint_invocation_id,
         parse_review_invocation,
@@ -3208,10 +3209,19 @@ def _raw_send(
     failure_reasons: list[str] = []
     if review and not check:
         invocation_id = mint_invocation_id()
-        write_pending_invocation(
+        if not write_pending_invocation(
             target_session_id=session_id,
             invocation_id=invocation_id,
-        )
+        ):
+            # A stale unconsumed sidecar owns the slot. Consume it and
+            # retry once so this review's id is the one the reviewer-side
+            # hook adopts; without this, the sent row carries a fresh id no
+            # sidecar holds and the join never closes for any later review.
+            adopt_pending_invocation(session_id)
+            write_pending_invocation(
+                target_session_id=session_id,
+                invocation_id=invocation_id,
+            )
 
     def _emit_review_sent(
         *,
@@ -3367,15 +3377,8 @@ def _raw_send(
             if origin is not None:
                 review_kwargs["origin"] = origin
             receipt = _review_start_codex(session_id, target, **review_kwargs)
-            if receipt.get("delivered"):
-                receipt_text = "review/start delivered"
-            else:
-                receipt_text = f"codex review/start failed: {receipt.get('reason') or 'rpc-error'}"
-            _emit_review_sent(
-                transport="codex_rpc",
-                result=bool(receipt.get("delivered")),
-                receipt=receipt_text,
-            )
+            # No Python sent row here by design: the Rust review-start path
+            # owns the one codex_rpc review_invocation event.
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""

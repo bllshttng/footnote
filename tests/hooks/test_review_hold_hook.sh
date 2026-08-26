@@ -127,6 +127,30 @@ else
   fail "review start telemetry: missing parsed fields ($(cat "$EVENTS"))"
 fi
 
+echo "-- a pending sender sidecar is ADOPTED, closing the mail-path join --"
+JOIN_HOME="$TMP/join-home"
+mkdir -p "$JOIN_HOME/review-invocations"
+SEEDED_ID="ri-seededjoin01"
+printf '{"invocation_id":"%s","target_session_id":"sess-join"}' "$SEEDED_ID" \
+  > "$JOIN_HOME/review-invocations/sess-join.json"
+: > "$RECORDED"
+: > "$EVENTS"
+printf '%s' "$(jq -nc --arg cwd "$WORK" \
+  '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
+    session_id:"sess-join", tool_input:{skill:"/code-review medium --comment"}}')" \
+  | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
+    FNO_HOME="$JOIN_HOME" bash "$HOOK" acquire >/dev/null 2>&1
+if grep -q "$SEEDED_ID" "$EVENTS" && grep -q "$SEEDED_ID" "$RECORDED"; then
+  pass "sender sidecar id adopted by event and hold"
+else
+  fail "adoption failed (event=$(cat "$EVENTS") hold=$(cat "$RECORDED"))"
+fi
+if [[ ! -e "$JOIN_HOME/review-invocations/sess-join.json" ]]; then
+  pass "adopted sidecar consumed"
+else
+  fail "sidecar survived adoption and will be re-adopted by the next review"
+fi
+
 echo "-- a name that merely CONTAINS review registers nothing --"
 for verb in code-review-attest pr-review-fixes reviewer brainstorming; do
   run_hook acquire "$(skill_call "$verb")"

@@ -92,8 +92,21 @@ head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
 # be imported by the hook process.
 plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
 helper_path="${plugin_root:+$plugin_root/cli/src}"
+# Adopt the sender's pending id when one exists (the mail-path join: the
+# sent row and this started row then carry ONE id), and only mint-plus-write
+# a fresh sidecar on a miss, so a second review never re-adopts the first
+# one's consumed id.
 invocation_id="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
-  python3 -c 'from fno.review.invocation import mint_invocation_id, write_pending_invocation; import sys; i=mint_invocation_id(); write_pending_invocation(target_session_id=sys.argv[1], invocation_id=i) if sys.argv[1] else None; print(i)' \
+  python3 -c '
+from fno.review.invocation import adopt_pending_invocation, mint_invocation_id, write_pending_invocation
+import sys
+s = sys.argv[1]
+i = adopt_pending_invocation(s) if s else None
+if i is None:
+    i = mint_invocation_id()
+    if s:
+        write_pending_invocation(target_session_id=s, invocation_id=i)
+print(i)' \
   "$session" 2>/dev/null || true)"
 if [[ -z "$invocation_id" ]]; then
   invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"

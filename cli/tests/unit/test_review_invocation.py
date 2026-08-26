@@ -93,6 +93,64 @@ def test_pending_invocation_write_is_fail_open(tmp_path) -> None:
     assert invocation_id.startswith("ri-")
 
 
+def test_adopt_consumes_so_a_second_send_owns_the_slot(tmp_path) -> None:
+    # A stale unconsumed sidecar makes the O_EXCL writer fail forever while
+    # senders mint unjoinable ids. Adoption must consume it so the NEXT
+    # write succeeds and each review keeps its own id.
+    assert write_pending_invocation(
+        target_session_id="target-test-4", invocation_id="ri-old", home=tmp_path
+    )
+    assert (
+        write_pending_invocation(
+            target_session_id="target-test-4", invocation_id="ri-new", home=tmp_path
+        )
+        is False
+    )
+    assert adopt_pending_invocation("target-test-4", home=tmp_path) == "ri-old"
+    assert (
+        write_pending_invocation(
+            target_session_id="target-test-4", invocation_id="ri-new", home=tmp_path
+        )
+        is True
+    )
+
+
+def test_doctor_survives_a_tz_naive_row_and_names_it_lost(tmp_path) -> None:
+    # A naive ts once raised on the cutoff comparison and killed the whole
+    # doctor run; it is read as UTC instead.
+    path = tmp_path / "events.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-25T00:00:00",
+                "type": "review_invocation",
+                "source": "daemon",
+                "data": {
+                    "invocation_id": "ri-naive",
+                    "stage": "sent",
+                    "verb": "/review",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    lines = _review_invocation_report(
+        path, now=datetime(2026, 8, 26, tzinfo=timezone.utc)
+    )
+
+    assert any("ri-naive" in line for line in lines)
+
+
+def test_doctor_reads_a_missing_journal_as_nothing_lost(tmp_path) -> None:
+    lines = _review_invocation_report(
+        tmp_path / "absent-events.jsonl", now=datetime(2026, 8, 26, tzinfo=timezone.utc)
+    )
+
+    assert any("no event journal" in line for line in lines)
+
+
 def test_doctor_names_an_old_sent_attempt_with_transport_and_receipt(tmp_path) -> None:
     path = tmp_path / "events.jsonl"
     path.write_text(

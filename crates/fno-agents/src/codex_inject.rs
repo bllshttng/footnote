@@ -659,19 +659,30 @@ fn review_invocation_sidecar(session_id: &str) -> Option<std::path::PathBuf> {
     {
         return None;
     }
-    let root = crate::paths::AgentsHome::from_env()
-        .root()
-        .parent()
-        .map(std::path::Path::to_path_buf)?;
+    // FNO_HOME first: the Python writer and both shell hooks key the sidecar
+    // off that override, so reading a different root silently breaks the
+    // join on every configured machine.
+    let root = std::env::var_os("FNO_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            crate::paths::AgentsHome::from_env()
+                .root()
+                .parent()
+                .map(std::path::Path::to_path_buf)
+        })?;
     Some(
         root.join("review-invocations")
             .join(format!("{session_id}.json")),
     )
 }
 
+/// Read AND consume a pending id, mirroring the Python adopt: without the
+/// unlink a stale sidecar is re-adopted forever and distinct reviews collapse
+/// into one invocation id.
 fn read_pending_review_invocation(session_id: &str) -> Option<String> {
     let path = review_invocation_sidecar(session_id)?;
-    let raw = std::fs::read_to_string(path).ok()?;
+    let raw = std::fs::read_to_string(&path).ok()?;
+    let _ = std::fs::remove_file(&path);
     let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
     value
         .get("invocation_id")
@@ -793,8 +804,6 @@ fn emit_review_invocation_event(
         fields,
     );
 }
-
-/// The review-start verb entry: parse CLI, drive the round-trip, print the outcome receipt.
 
 /// The `fno-agents review-start` verb entry: parse CLI, drive the round-trip,
 /// print the outcome receipt (or a clean not-delivered reason). The socket
