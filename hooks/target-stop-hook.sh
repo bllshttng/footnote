@@ -46,6 +46,75 @@ HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
 LIVE_STATE_FILE=".fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+
+resolve_agents_bin() {
+    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+        printf '%s' "$FNO_AGENTS_BIN"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
+    elif command -v fno-agents >/dev/null 2>&1; then
+        command -v fno-agents
+    fi
+}
+
+BIN=""
+TARGET_RESOLVE_BROKEN=0
+TARGET_NO_MATCH=0
+if [[ -f "$LIVE_STATE_FILE" ]]; then
+    RESIDENT_SESSION_ID=$(sed -n 's/^fno_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
+        | head -1 | tr -d '[:space:]' || true)
+    [[ -n "$RESIDENT_SESSION_ID" ]] || RESIDENT_SESSION_ID=$(sed -n \
+        's/^session_id:[[:space:]]*//p' "$LIVE_STATE_FILE" 2>/dev/null \
+        | head -1 | tr -d '[:space:]' || true)
+    RESIDENT_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id|claude_transcript_id):' \
+        "$LIVE_STATE_FILE" 2>/dev/null \
+        | sed -E 's/^(harness_session_id|claude_session_id|claude_transcript_id):[[:space:]]*//' \
+        | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    RESIDENT_MATCH=0
+    if [[ -n "$HOOK_HARNESS_ID" && -n "$RESIDENT_HARNESS_ID" ]] \
+        && { [[ "$RESIDENT_HARNESS_ID" == "$HOOK_HARNESS_ID" ]] \
+            || [[ "$HOOK_HARNESS_ID" == *"-$RESIDENT_HARNESS_ID" ]]; }; then
+        RESIDENT_MATCH=1
+    elif [[ -n "$HOOK_HARNESS_ID" && -z "$RESIDENT_HARNESS_ID" \
+        && "$RESIDENT_SESSION_ID" == "$HOOK_HARNESS_ID" ]]; then
+        RESIDENT_MATCH=1
+    fi
+    if [[ "$RESIDENT_MATCH" -ne 1 ]]; then
+        BIN=$(resolve_agents_bin)
+        RESOLVED_STATE=""
+        RESOLVE_RC=2
+        if [[ -n "$BIN" ]]; then
+            RESOLVE_RC=0
+            RESOLVED_STATE=$("$BIN" manifest-for-session \
+                --harness-session-id "$HOOK_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+        fi
+        if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            LIVE_STATE_FILE="$RESOLVED_STATE"
+            STATE_FILE="$RESOLVED_STATE"
+        elif [[ "$RESOLVE_RC" -eq 1 ]]; then
+            echo "loop-check: no manifest names session ${HOOK_HARNESS_ID}; visitor allowed" >&2
+            exit 0
+        else
+            TARGET_RESOLVE_BROKEN=1
+        fi
+    fi
+else
+    BIN=$(resolve_agents_bin)
+    if [[ -n "$BIN" && -n "$HOOK_HARNESS_ID" ]]; then
+        RESOLVE_RC=0
+        RESOLVED_STATE=$("$BIN" manifest-for-session \
+            --harness-session-id "$HOOK_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+        if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            LIVE_STATE_FILE="$RESOLVED_STATE"
+            STATE_FILE="$RESOLVED_STATE"
+        elif [[ "$RESOLVE_RC" -eq 1 ]]; then
+            TARGET_NO_MATCH=1
+        fi
+    fi
+fi
+
 DELIVERY_PENDING_PREFIX=$(git -C "$REPO_ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
     || printf '%s' "${REPO_ROOT}/.fno/.delivery-finalize-pending-")
 case "$DELIVERY_PENDING_PREFIX" in
@@ -167,6 +236,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
         echo "target stop-hook: king manifest resolver unavailable ${KNUM} times (counter ${KCOUNT}); allowing stop (king gate off for this stop)" >&2
         exit 0
     else
+        if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
+            echo "loop-check: no manifest names session ${HOOK_HARNESS_ID}; visitor allowed" >&2
+        fi
         exit 0
     fi
 fi
@@ -222,6 +294,11 @@ unavailable_block_or_allow() {
     exit 0
 }
 
+if [[ "$TARGET_RESOLVE_BROKEN" -eq 1 ]]; then
+    echo "target stop-hook: WARNING: manifest-for-session resolver unavailable" >&2
+    unavailable_block_or_allow
+fi
+
 # ── 3. jq required to parse the payload + decision ────────────────────────────
 # Missing jq for an active session is checker-unavailable, not a safe allow.
 if ! command -v jq >/dev/null 2>&1; then
@@ -275,16 +352,7 @@ if [[ -n "$MANIFEST_CTID" && "$MANIFEST_CTID" != "null" ]]; then
 fi
 
 # ── 5. Resolve the binary ─────────────────────────────────────────────────────
-BIN=""
-if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-    BIN="$FNO_AGENTS_BIN"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-    BIN="${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-    BIN="${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-elif command -v fno-agents >/dev/null 2>&1; then
-    BIN=$(command -v fno-agents)
-fi
+[[ -n "$BIN" ]] || BIN=$(resolve_agents_bin)
 
 # ── 6. Binary missing for an active session: emit event + bounded-block ───────
 # A stale/absent binary must not silently disable the ship gate; emit the
