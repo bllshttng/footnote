@@ -1541,16 +1541,13 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
                     .get("harness")
                     .or_else(|| data.get("provider"))
                     .and_then(|v| v.as_str());
-                let name = data.get("name").and_then(|v| v.as_str());
-                receipts.retain(|(receipt_harness, receipt_session), facts| {
+                receipts.retain(|(receipt_harness, receipt_session), _| {
                     if let (Some(harness), Some(session_id)) = (harness, session_id) {
                         receipt_harness != harness || receipt_session != session_id
-                    } else if session_id.is_some() {
-                        // A session id without a harness cannot identify one
-                        // cross-harness receipt, so it revokes nothing.
-                        true
                     } else {
-                        name != Some(facts.name.as_str())
+                        // An incomplete event cannot identify one receipt.
+                        // Reused names are not lifecycle identity.
+                        true
                     }
                 });
                 continue;
@@ -2064,6 +2061,23 @@ fn restore_worker_refusal_reason(
         return format!("spawn receipt is missing for {harness} session {session_id}");
     }
     format!("{harness} session {session_id} is not resumable")
+}
+
+fn worker_registry_match(
+    member: &crate::squad_store::StoredMember,
+    agent: &RegistryAgent,
+    worker_name: &str,
+) -> bool {
+    match (
+        member.harness.as_deref(),
+        member.harness_session_id.as_deref(),
+    ) {
+        (Some(harness), Some(session_id)) => {
+            agent.harness.as_deref() == Some(harness)
+                && agent.effective_identity() == Some(session_id)
+        }
+        _ => agent.name == worker_name,
+    }
 }
 
 /// The set of attach-ids live NOW, from the raw registry + roster contents
@@ -6384,18 +6398,10 @@ impl Core {
                     let worker_name = m.worker.as_deref().expect("checked above");
                     if hold_workers {
                         members.push(m.clone());
-                        let row = self.agents.iter().find(|agent| {
-                            agent.name == worker_name
-                                || matches!(
-                                    (
-                                        m.harness.as_deref(),
-                                        m.harness_session_id.as_deref(),
-                                    ),
-                                    (Some(harness), Some(session_id))
-                                        if agent.harness.as_deref() == Some(harness)
-                                            && agent.effective_identity() == Some(session_id)
-                                )
-                        });
+                        let row = self
+                            .agents
+                            .iter()
+                            .find(|agent| worker_registry_match(m, agent, worker_name));
                         let held = row
                             .filter(|agent| Self::row_resumable(agent))
                             .and_then(Self::worker_facts)
@@ -9905,7 +9911,12 @@ impl Core {
                     Err(error) => (HashMap::new(), Some(error)),
                 };
                 let facts = {
-                    let Some(a) = self.agents.iter().find(|a| a.name == name) else {
+                    let Some(a) = self.agents.iter().find(|a| {
+                        stored_member
+                            .as_ref()
+                            .map(|member| worker_registry_match(member, a, &name))
+                            .unwrap_or(a.name == name)
+                    }) else {
                         self.notice(client_id, "no such agent");
                         return Flow::Continue;
                     };
@@ -9926,7 +9937,7 @@ impl Core {
                         })
                     }
                 };
-                let Some(facts) = facts else {
+                let Some(mut facts) = facts else {
                     if let Some(error) = receipt_error {
                         self.notice(client_id, error);
                         return Flow::Continue;
@@ -9934,6 +9945,15 @@ impl Core {
                     self.notice(client_id, "agent is not resumable");
                     return Flow::Continue;
                 };
+                if let Some(worker) = stored_member
+                    .as_ref()
+                    .and_then(|member| member.worker.clone())
+                {
+                    // The persisted member remains keyed by its original
+                    // worker name even when the registry display name changed.
+                    // Keep that join key while using the exact pair for lookup.
+                    facts.name = worker;
+                }
                 let sid = self
                     .squad_members
                     .iter()
@@ -17328,6 +17348,19 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_removal_event_cannot_revoke_a_reused_name() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"reused","provider":"codex","harness_session_id":"old-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"reused","provider":"claude","harness_session_id":"new-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"reused","harness_session_id":"old-session"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 2);
+    }
+
+    #[test]
     fn restore_refuses_a_receipt_when_the_stored_harness_is_unknown() {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
@@ -17351,6 +17384,26 @@ mod tests {
             restore_worker_refusal_reason(&member, None, None, &receipts),
             "harness is unknown"
         );
+    }
+
+    #[test]
+    fn worker_restore_match_prefers_the_persisted_identity_pair_over_name() {
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("reused-name".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("old-session".into()),
+        };
+        let mut wrong = bg_row("reused-name", "/repo", None);
+        wrong.harness = Some("codex".into());
+        wrong.harness_session_id = Some("new-session".into());
+        let mut right = wrong.clone();
+        right.harness_session_id = Some("old-session".into());
+        assert!(!worker_registry_match(&member, &wrong, "reused-name"));
+        assert!(worker_registry_match(&member, &right, "reused-name"));
     }
 
     #[test]
