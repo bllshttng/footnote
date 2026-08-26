@@ -646,7 +646,7 @@ def test_intake_claim_warns_on_retired_model_tier_frontmatter(fixture_graph, tmp
     plan = tmp_path / "retired-tier.md"
     plan.write_text(
         "---\nclaims: ab-1dea1234\ncreated: 2026-05-05T04:35\n"
-        "model_tier: high\n---\n# Retired tier\n\nBody.\n"
+        f"model_tier: high\n---\n# Retired tier\n\n{_SURFACE}\n\nBody.\n"
     )
     _intake_impl(plan_paths=[str(plan)])
     captured = capsys.readouterr()
