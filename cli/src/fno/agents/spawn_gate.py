@@ -414,7 +414,20 @@ def census() -> LiveCensus:
             {
                 "status": str(row.status),
                 "created_at": row.created_at,
-                "pid_alive": pid_state is True or session_pid is not None,
+                # `row.pid is None` guards the second disjunct, and the guard is
+                # load-bearing. `resolve_session_pid` FALLS BACK to the recorded
+                # pid: every non-claude harness returns it unchanged, and so does
+                # a claude row that misses the socket map. So a bare
+                # `session_pid is not None` is true whenever `row.pid` is set,
+                # including for a row whose liveness this census just failed to
+                # read and warned about as "process incarnation unreadable"
+                # above. That handed an UNMEASURED pid to the rule as positive
+                # liveness, and the rule then rewrote a parked `spawning` row to
+                # `live` under a basis naming a measurement nobody took. The
+                # rendezvous case this disjunct exists for is the one where no
+                # pid was recorded and the socket map supplied it.
+                "pid_alive": pid_state is True
+                or (row.pid is None and session_pid is not None),
             }
         )
         status_basis = projected.get("basis") if projected.get(

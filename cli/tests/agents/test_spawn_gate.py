@@ -142,6 +142,35 @@ class TestCensus:
         )
         assert by_name["fresh-spawn"].status_basis is None
 
+    def test_unreadable_pid_never_upgrades_to_positive_liveness(self, monkeypatch):
+        """(x-d401) An UNMEASURED pid must not fire the stale-spawning rule.
+
+        `resolve_session_pid` falls back to the recorded pid, so a bare
+        `session_pid is not None` is true for any row carrying a pid. Paired
+        with an unreadable incarnation, that handed the rule positive liveness
+        it never measured, and a parked `spawning` row was rewritten to `live`
+        under a basis naming a measurement nobody took. The census warns
+        "process incarnation unreadable" for exactly these rows, so asserting
+        liveness three lines later contradicts its own warning.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        stale = datetime.now(timezone.utc) - timedelta(hours=13)
+        rows = [_row("unreadable-spawn", status="spawning", pid=ALIVE)]
+        rows[0].created_at = stale.strftime("%Y-%m-%dT%H:%M:%SZ")
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
+        # None = "could not read this incarnation", the case the warning names.
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_a, **_k: None)
+
+        by_name = {w.name: w for w in spawn_gate.census().workers}
+
+        assert by_name["unreadable-spawn"].status == "spawning", (
+            "unknown liveness keeps the token, per the rule's own contract"
+        )
+        assert by_name["unreadable-spawn"].status_basis is None, (
+            "no basis may name a measurement that was never taken"
+        )
+
     def test_unknown_process_incarnation_counts_conservatively(self, monkeypatch):
         row = _row("unreadable-worker", pid=ALIVE)
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
