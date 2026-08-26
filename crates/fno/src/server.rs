@@ -1761,10 +1761,10 @@ struct Core {
     /// session on the same rollout, and `agent_rows()` presents the row
     /// pane-hosted while it lives. Lifetime = pane lifetime, swept on reap,
     /// never persisted.
-    worker_pane: HashMap<String, u64>,
-    /// Full harness session id -> resumed pane. This is the durable join when
-    /// registry cleanup rewrites the display name after process death.
-    worker_session_pane: HashMap<String, u64>,
+    worker_pane: HashMap<String, Vec<u64>>,
+    /// Full `(harness, harness session id)` -> resumed pane. This is the durable
+    /// join when registry cleanup rewrites the display name after process death.
+    worker_session_pane: HashMap<(String, String), u64>,
     /// Restart placeholders keyed by pane. Focusing one consumes the marker
     /// and resumes the persisted harness session into the same tree leaf.
     held_workers: HashMap<u64, HeldWorker>,
@@ -2063,6 +2063,13 @@ fn restore_worker_refusal_reason(
     format!("{harness} session {session_id} is not resumable")
 }
 
+fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
+    agent
+        .harness_session_id
+        .as_deref()
+        .or(agent.claude_session_uuid.as_deref())
+}
+
 fn worker_registry_match(
     member: &crate::squad_store::StoredMember,
     agent: &RegistryAgent,
@@ -2074,7 +2081,7 @@ fn worker_registry_match(
     ) {
         (Some(harness), Some(session_id)) => {
             agent.harness.as_deref() == Some(harness)
-                && agent.effective_identity() == Some(session_id)
+                && agent_harness_session_id(agent) == Some(session_id)
         }
         _ => agent.name == worker_name,
     }
@@ -2984,7 +2991,10 @@ impl Core {
         self.attached.retain(|_, p| *p != pid);
         // (x-5f7f) Same for the worker resume map: the pane died, so the row
         // returns to idle and resumable - never a mapping at a corpse.
-        self.worker_pane.retain(|_, p| *p != pid);
+        self.worker_pane.retain(|_, panes| {
+            panes.retain(|candidate| *candidate != pid);
+            !panes.is_empty()
+        });
         self.worker_session_pane.retain(|_, p| *p != pid);
         self.held_workers.remove(&pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
@@ -5575,9 +5585,14 @@ impl Core {
             });
             tid
         };
-        self.worker_pane.insert(facts.name.clone(), pid);
-        self.worker_session_pane
-            .insert(facts.harness_session_id.clone(), pid);
+        self.worker_pane
+            .entry(facts.name.clone())
+            .or_default()
+            .push(pid);
+        self.worker_session_pane.insert(
+            (facts.harness.clone(), facts.harness_session_id.clone()),
+            pid,
+        );
         self.record_worker_member(
             sid,
             &facts.name,
@@ -5728,7 +5743,8 @@ impl Core {
         pane_owner_names.extend(
             self.worker_pane
                 .iter()
-                .map(|(name, pane)| (*pane, name.clone())),
+                .filter(|(_, panes)| panes.len() == 1)
+                .map(|(name, panes)| (panes[0], name.clone())),
         );
         pane_owner_names.extend(
             self.held_workers
@@ -5882,7 +5898,7 @@ impl Core {
                 let pair_rows: Vec<&RegistryAgent> = named_rows
                     .iter()
                     .copied()
-                    .filter(|a| a.effective_identity() == Some(session_id))
+                    .filter(|a| agent_harness_session_id(a) == Some(session_id))
                     .collect();
                 match pair_rows.as_slice() {
                     [one] => Self::worker_facts(one),
@@ -5943,20 +5959,47 @@ impl Core {
 
     fn member_pane(&self, member: &crate::squad_store::StoredMember) -> Option<u64> {
         if let Some(worker) = member.worker.as_deref() {
-            return self.worker_pane.get(worker).copied().or_else(|| {
-                member
-                    .harness_session_id
-                    .as_deref()
-                    .and_then(|session_id| self.worker_session_pane.get(session_id).copied())
+            if let (Some(harness), Some(session_id)) = (
+                member.harness.as_deref(),
+                member.harness_session_id.as_deref(),
+            ) {
+                return self
+                    .worker_session_pane
+                    .get(&(harness.to_string(), session_id.to_string()))
+                    .copied()
                     .or_else(|| {
-                        self.held_workers.iter().find_map(|(pane, held)| {
-                            (held.name == worker
-                                || member.harness_session_id.as_deref()
-                                    == Some(held.harness_session_id.as_str()))
-                            .then_some(*pane)
-                        })
-                    })
-            });
+                        let matches: Vec<u64> = self
+                            .held_workers
+                            .iter()
+                            .filter(|(_, held)| {
+                                held.harness == harness && held.harness_session_id == session_id
+                            })
+                            .map(|(pane, _)| *pane)
+                            .collect();
+                        matches
+                            .as_slice()
+                            .first()
+                            .copied()
+                            .filter(|_| matches.len() == 1)
+                    });
+            }
+            return self
+                .unique_worker_pane_by_name(worker)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    let matches: Vec<u64> = self
+                        .held_workers
+                        .iter()
+                        .filter(|(_, held)| held.name == worker)
+                        .map(|(pane, _)| *pane)
+                        .collect();
+                    matches
+                        .as_slice()
+                        .first()
+                        .copied()
+                        .filter(|_| matches.len() == 1)
+                });
         }
         self.attached.get(&member.attach_id).copied()
     }
@@ -5968,6 +6011,28 @@ impl Core {
             .iter()
             .find(|t| tree::leaves(&t.root).contains(&pid))?;
         Some(tab.name.clone())
+    }
+
+    fn worker_pane_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
+        if let (Some(harness), Some(session_id)) =
+            (agent.harness.as_deref(), agent_harness_session_id(agent))
+        {
+            return self
+                .worker_session_pane
+                .get(&(harness.to_string(), session_id.to_string()))
+                .copied();
+        }
+        self.worker_pane
+            .get(&agent.name)
+            .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
+    }
+
+    fn unique_worker_pane_by_name(&self, name: &str) -> Result<Option<u64>, ()> {
+        match self.worker_pane.get(name) {
+            None => Ok(None),
+            Some(panes) if panes.len() == 1 => Ok(Some(panes[0])),
+            Some(_) => Err(()),
+        }
     }
 
     /// Write-through a raw upsert from captured fields (used when the in-session
@@ -6111,7 +6176,7 @@ impl Core {
             crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
         for agent in &self.agents {
             if let (Some(harness), Some(session_id)) =
-                (agent.harness.as_deref(), agent.effective_identity())
+                (agent.harness.as_deref(), agent_harness_session_id(agent))
             {
                 match agent.liveness {
                     agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
@@ -7820,14 +7885,7 @@ impl Core {
                                 .and_then(|id| self.attached.get(id))
                                 .copied()
                                 == Some(pid)
-                                || self.worker_pane.get(a.name.as_str()).copied() == Some(pid)
-                                || a.harness_session_id
-                                    .as_deref()
-                                    .or(a.claude_session_uuid.as_deref())
-                                    .and_then(|session_id| {
-                                        self.worker_session_pane.get(session_id).copied()
-                                    })
-                                    == Some(pid)
+                                || self.worker_pane_for_agent(a) == Some(pid)
                         }
                     });
                     // One lookup: liveness AND the bare-pane label read the same
@@ -9534,10 +9592,8 @@ impl Core {
                 let mut focus_pid = pid;
                 if let Some(held) = self.held_workers.get(&pid).cloned() {
                     let current = self.agents.iter().find(|agent| {
-                        agent.name == held.name
-                            || agent.harness_session_id.as_deref()
-                                == Some(held.harness_session_id.as_str())
-                            || agent.claude_session_uuid.as_deref()
+                        agent.harness.as_deref() == Some(held.harness.as_str())
+                            && agent_harness_session_id(agent)
                                 == Some(held.harness_session_id.as_str())
                     });
                     // (x-d401) The SESSION-AWARE gate, the same one
@@ -9910,21 +9966,28 @@ impl Core {
                 // second writer. A stale mapping (the pane died) is dropped
                 // and falls through to a fresh resume. Same reconcile-first
                 // shape as AttachAgent.
-                if let Some(&mapped) = self.worker_pane.get(&name) {
-                    if self.panes.contains_key(&mapped) {
-                        if let Some((sid, ti)) = self.session.find_pane(mapped) {
-                            let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
-                            self.set_view(client_id, sid, tid);
-                            if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                                tab.focus = mapped;
-                            }
-                            self.notice(client_id, "already resumed; focused existing pane");
-                            self.push_layout(true);
-                            return Flow::Continue;
-                        }
-                    } else {
-                        self.worker_pane.remove(&name);
+                match self.unique_worker_pane_by_name(&name) {
+                    Err(()) => {
+                        self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                        return Flow::Continue;
                     }
+                    Ok(Some(mapped)) => {
+                        if self.panes.contains_key(&mapped) {
+                            if let Some((sid, ti)) = self.session.find_pane(mapped) {
+                                let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                                self.set_view(client_id, sid, tid);
+                                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                                    tab.focus = mapped;
+                                }
+                                self.notice(client_id, "already resumed; focused existing pane");
+                                self.push_layout(true);
+                                return Flow::Continue;
+                            }
+                        } else {
+                            self.worker_pane.remove(&name);
+                        }
+                    }
+                    Ok(None) => {}
                 }
                 let stored_members: Vec<_> = self
                     .squad_members
@@ -17316,7 +17379,7 @@ mod tests {
         set_resume_program(&["/bin/cat"]);
         let _resume_guard = ResumeProgramGuard;
         core.command(1, Command::FocusPane(held_pid));
-        let resumed_pid = core.worker_pane["t-codex-one"];
+        let resumed_pid = core.worker_pane["t-codex-one"][0];
         assert_ne!(resumed_pid, held_pid, "focus swaps in the harness process");
         assert!(
             !core.panes.contains_key(&held_pid),
@@ -21167,6 +21230,33 @@ mod tests {
         let member = crate::squad_store::load().squads[0].members[0].clone();
         assert!(member.harness.is_none());
         assert!(member.harness_session_id.is_none());
+    }
+
+    #[test]
+    fn member_pane_uses_harness_session_pair_when_worker_names_repeat() {
+        let mut core = empty_core();
+        core.worker_pane.insert("reused-name".into(), vec![10, 11]);
+        core.worker_session_pane
+            .insert(("codex".into(), "session-one".into()), 10);
+        core.worker_session_pane
+            .insert(("claude".into(), "session-two".into()), 11);
+        let first = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("reused-name".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("session-one".into()),
+        };
+        let second = crate::squad_store::StoredMember {
+            harness: Some("claude".into()),
+            harness_session_id: Some("session-two".into()),
+            ..first.clone()
+        };
+        assert_eq!(core.member_pane(&first), Some(10));
+        assert_eq!(core.member_pane(&second), Some(11));
+        assert!(core.unique_worker_pane_by_name("reused-name").is_err());
     }
 
     #[test]
