@@ -5033,8 +5033,8 @@ mod tests {
             e.harness_session_id.as_deref(),
             Some("c7dc6218-493a-4299-916a-330ec0b0b055")
         );
-        assert_eq!(e.short_id, "c0b0b055");
-        assert_eq!(e.name, "target-c0b0b055");
+        assert_eq!(e.short_id, "c7dc6218");
+        assert_eq!(e.name, "target-c7dc6218");
 
         // Codex-alias-only manifest with no `harness` must not default to claude.
         let codex = ManifestIdentity {
@@ -5056,10 +5056,10 @@ mod tests {
     }
 
     #[test]
-    fn derived_short_id_uses_final_eight() {
+    fn derived_short_id_uses_canonical_head_eight() {
         assert_eq!(
             derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"),
-            "c0b0b055"
+            "c7dc6218"
         );
         assert_eq!(derived_short_id("abc12345"), "abc12345");
         assert_eq!(derived_short_id("short"), "short");
@@ -5237,7 +5237,7 @@ mod tests {
             },
             "t0",
         );
-        existing.name = "dffdeeca".into();
+        existing.name = "01a0152f".into();
         existing.short_id = "transport".into();
         crate::state::update_registry(&home.registry_json(), |registry| {
             registry.entries.push(existing);
@@ -5257,7 +5257,7 @@ mod tests {
             panic!("registry collision must remain an adoption I/O error");
         };
         assert!(message.contains("collides with row"));
-        assert!(message.contains("dffdeeca"));
+        assert!(message.contains("01a0152f"));
     }
 
     #[test]
