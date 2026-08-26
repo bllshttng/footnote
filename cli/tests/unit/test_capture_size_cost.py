@@ -61,7 +61,7 @@ def test_intake_copies_size_from_frontmatter(tmp_path, monkeypatch):
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
     plan.write_text(
-        "---\ncreated: 2026-05-05T04:35\nsize: l\n---\n# Sized plan\n\nBody.\n"
+        "---\ncreated: 2026-05-05T04:35\nsize: l\n---\n# Sized plan\n\nBody.\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
     )
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
@@ -74,7 +74,7 @@ def test_intake_copies_size_from_frontmatter(tmp_path, monkeypatch):
 def test_intake_no_size_frontmatter_leaves_null(tmp_path, monkeypatch):
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Unsized\n\nBody.\n")
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Unsized\n\nBody.\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
@@ -113,7 +113,7 @@ def test_intake_copies_type_from_frontmatter(tmp_path, monkeypatch):
     """AC7-HP: a plan declaring `type: bug` mints a bug node, not a feature."""
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug\n\nBody.\n")
+    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug\n\nBody.\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
@@ -124,7 +124,7 @@ def test_intake_no_type_frontmatter_still_features(tmp_path, monkeypatch):
     """AC7-HP (second half): existing type-less intakes are unchanged."""
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Untyped\n\nBody.\n")
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Untyped\n\nBody.\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output
@@ -142,7 +142,7 @@ def test_intake_non_node_type_falls_back_silently(tmp_path, monkeypatch, declare
     """
     g, _ = _route_graph(tmp_path, monkeypatch)
     plan = tmp_path / "plan.md"
-    plan.write_text(f"---\ncreated: 2026-05-05T04:35\ntype: {declared}\n---\n# Odd\n\nBody.\n")
+    plan.write_text(f"---\ncreated: 2026-05-05T04:35\ntype: {declared}\n---\n# Odd\n\nBody.\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
 
     result = runner.invoke(app, ["backlog", "intake", str(plan)])
     assert result.exit_code == 0, result.output

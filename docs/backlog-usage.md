@@ -47,6 +47,8 @@ Differences:
 All three accept `--details`/`--description`. A node with no `plan_path`
 derives to `status: idea` until a plan is associated.
 
+`fno backlog intake` is the one creation verb that reads a plan file, and the plan's file table is load-bearing downstream: parallel lane fill collision-checks dispatches against it. Intake therefore refuses a plan whose `## Files to Modify` parses empty (exit 2) unless you pass `--allow-no-surface` - such a node cannot be collision-checked and dispatches fail-open. A multi-path intake refuses the whole batch before any write. The plan-less creation verbs above are unaffected.
+
 ## Editing a node
 
 `fno backlog update <id>` edits a node in place. Use this instead of

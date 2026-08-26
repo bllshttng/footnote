@@ -1265,6 +1265,35 @@ def _prepare_intake(
     }
 
 
+def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> None:
+    """Refuse intake of a plan that states no comparable file surface (x-0ae1).
+
+    A plan whose ``## Files to Modify`` parses to an empty set - which is also
+    what a missing or unreadable plan file parses to - cannot be
+    collision-checked, so lane fill dispatches it fail-open
+    (``unevaluated:no-surface``). With the domain guard demoted behind the
+    collision gate, that fail-open class stays bounded only if intake refuses
+    to mint it: every plan-bearing node enters the board with a surface, and
+    the plan-less ``idea``/``add``/``new`` nodes keep the loud fail-open
+    dispatch. Exits 2 naming the first offending path before any graph write.
+    """
+    if allow_no_surface:
+        return
+    import typer
+
+    from fno.graph.collision import has_file_surface, resolve_plan_path
+
+    for p in paths:
+        if has_file_surface(resolve_plan_path(p)):
+            continue
+        typer.echo(
+            f"Error: {p} states no comparable file surface (## Files to Modify "
+            "parses empty); add rows or pass --allow-no-surface",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
 def resolve_git_roots() -> tuple[str | None, str | None]:
     """Return ``(project_name, canonical_root)`` for the current git context.
 

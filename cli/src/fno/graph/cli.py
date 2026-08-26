@@ -2770,6 +2770,7 @@ def _intake_impl(
     batch: bool = False,
     dry_run: bool = False,
     claims: Optional[str] = None,
+    allow_no_surface: bool = False,
 ) -> None:
     """Implementation for the intake verb.
 
@@ -2783,7 +2784,7 @@ def _intake_impl(
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
         _prepare_intake, _build_intake_node,
-        _validate_cli_deps,
+        _refuse_surfaceless_intake, _validate_cli_deps,
     )
 
     # Reject removed --batch flag
@@ -2843,6 +2844,7 @@ def _intake_impl(
         _do_intake_multi(
             args, all_paths,
             roadmap_id=roadmap_id, dry_run=dry_run,
+            allow_no_surface=allow_no_surface,
         )
         return
 
@@ -2886,6 +2888,10 @@ def _intake_impl(
     if prep["status"] == "already":
         typer.echo(f'already intaked: {prep["id"]}')
         return
+
+    # After _prepare_intake validates and before any write, so the refusal
+    # also covers the dry-run preview (x-0ae1: surface is mandatory at intake).
+    _refuse_surfaceless_intake([plan_path], allow_no_surface=allow_no_surface)
 
     spec = prep["node_spec"]
 
@@ -3017,6 +3023,14 @@ def cmd_intake(
             "Beats any frontmatter 'claims:' value."
         ),
     ),
+    allow_no_surface: bool = typer.Option(
+        False,
+        "--allow-no-surface",
+        help=(
+            "Admit a plan whose '## Files to Modify' parses empty. Such a node "
+            "cannot be collision-checked, so lane fill dispatches it fail-open."
+        ),
+    ),
 ) -> None:
     """Pull in an existing plan file as a backlog node."""
     _refuse_create_on_external_backend()
@@ -3033,6 +3047,7 @@ def cmd_intake(
         batch=batch,
         dry_run=dry_run,
         claims=claims,
+        allow_no_surface=allow_no_surface,
     )
 
 
@@ -12525,11 +12540,15 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
     return paths
 
 
-def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None:
+def _do_intake_multi(
+    args, all_paths: list[str], *, roadmap_id, dry_run,
+    allow_no_surface: bool = False,
+) -> None:
     """Multi-path intake flow delegating to intake helpers."""
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
-        _prepare_intake, _build_intake_node, _validate_cli_deps,
+        _prepare_intake, _build_intake_node,
+        _refuse_surfaceless_intake, _validate_cli_deps,
     )
 
     cli_deps: list[str] = (
@@ -12556,6 +12575,12 @@ def _do_intake_multi(args, all_paths: list[str], *, roadmap_id, dry_run) -> None
             err=True,
         )
         raise typer.Exit(code=4)
+
+    # Unlike the per-file refusals inside the mutator (which skip one file and
+    # land the rest), a surface-less plan refuses the WHOLE batch here, before
+    # any write: the rule is knowable up front and a half-landed batch is what
+    # the caller would otherwise have to unwind by hand (x-0ae1).
+    _refuse_surfaceless_intake(concrete_files, allow_no_surface=allow_no_surface)
 
     preview_entries = read_graph(_graph_path())
     if roadmap_id and not args.force_new_roadmap:
