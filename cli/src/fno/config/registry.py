@@ -108,6 +108,12 @@ FIELD_META: dict[str, Meta] = {
         question="Backlog node-ID prefix?", default_source="repo-slug",
     ),
     "backlog.id_hex_width": Meta("advanced", "Hex width of minted node IDs (4-8)."),
+    "backlog.render_targets": Meta(
+        "advanced",
+        "Auto-rendered public projections (GLOBAL config file only): every "
+        "graph mutation re-renders each {path, project, projection=backlog|"
+        "roadmap} target through the leak gate.",
+    ),
     # --- config.batch.* ---
     "batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),
     "batch.max_nodes": Meta("advanced", "Nodes per batch before it closes (default 3)."),
@@ -195,6 +201,15 @@ FIELD_META: dict[str, Meta] = {
     "review.require_corroboration": Meta(
         "advanced", "When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.",
     ),
+    "review.github_approval_satisfies": Meta(
+        "advanced", "When true (default), a non-author human GitHub APPROVED review satisfies coverage on its own and the corroboration term - the one producer a stranger's GitHub project emits with no footnote machinery. The approver's login must differ from the PR author's (GitHub refuses an author's approval server-side; the gate asserts it, and an unreadable PR author excludes fail-closed). Set false to keep today's recorded-but-never-counted behavior. Limit: GitHub's refusal is per identity, not per human - a second account with its own token can still self-approve.",
+    ),
+    "review.max_rounds": Meta(
+        "advanced", "The review-round budget (default 2): a PR merges after one to three reviews and never waits for a round to come back clean. Past this many rounds since the last pass, a finding still open is FILED as a backlog node and the merge proceeds. The exception is a CONFIRMED correctness or security finding, or a truncated remainder. Those keep the IMPOSSIBLE verdict and need a non-author GitHub approval or the coverage-override label. A round is a review VERDICT since the last pass. CI failures, lint failures and rebases are not rounds, and a pass resets the counter. One review stays the floor, so an unreviewed PR is still uncovered. Validated at parse: at least 1.",
+    ),
+    "review.nonblocking_categories": Meta(
+        "advanced", "Categories a finding may carry and still be non-blocking when its verdict is not CONFIRMED (default: docs, formatting, naming, nit, simplification, style, test-coverage, typo). A configured list EXTENDS that default rather than replacing it, so naming one category cannot silently narrow the gate. A CONFIRMED verdict blocks whatever the category says, and a finding missing a required field blocks too. The gate re-derives blocking from this list itself and never reads the producer's own blocking count.",
+    ),
     "review.hold_ttl_minutes": Meta(
         "advanced", "How long a registered review hold blocks a merge before it ages out (default 90). A review that starts registers review:branch:<branch>; fno do pr status and fno do pr merge refuse while it is live, so a merge cannot land on the pre-review code. A wedge bound, not an estimate: an expired hold clears with a receipt rather than holding the lane forever.",
     ),
@@ -228,10 +243,9 @@ FIELD_META: dict[str, Meta] = {
     "target.auto_launch_on_blueprint": Meta(
         "advanced", "Auto-launch a bg /target worker when a node reaches ready via /blueprint.",
     ),
-    "target.handoff.enabled": Meta("advanced", "Enable target self-handoff at pipeline boundaries."),
-    "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a wave-boundary handoff."),
-    "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers a king handoff (below used_pct_trigger)."),
-    "target.handoff.generation_cap": Meta("never", "Max handoff generations before refusing further delegation."),
+    "target.handoff.enabled": Meta("advanced", "Enable explicit target capability escalation."),
+    "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a general-session compact nudge."),
+    "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers an earlier king compact nudge."),
     "target.blast.enabled": Meta("never", "Enable blast-radius routing."),
     "target.blast.downgrade": Meta("never", "Allow token-saving downgrades in blast routing."),
     "target.blast.reuse_loc_manifest": Meta("never", "Include loc-ratchet globs in the blast map."),

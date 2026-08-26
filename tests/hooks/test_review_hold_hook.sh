@@ -49,10 +49,14 @@ git -C "$WORK" checkout -q -b feature/x-a089
 BIN="$TMP/bin"
 mkdir -p "$BIN"
 RECORDED="$TMP/recorded.txt"
+EVENTS="$TMP/events.jsonl"
 cat > "$BIN/fno-stub" <<'STUB'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "do" && "${2:-}" == "pr" && "${3:-}" == "review-hold" ]]; then
   printf '%s\n' "$*" >> "$FNO_RECORD"
+fi
+if [[ "${1:-}" == "doctor" && "${2:-}" == "event" && "${3:-}" == "emit" ]]; then
+  printf '%s\n' "$*" >> "$FNO_EVENTS"
 fi
 exit 0
 STUB
@@ -61,7 +65,8 @@ chmod +x "$BIN/fno-stub"
 run_hook() {
   # $1 = action, $2 = payload JSON
   : > "$RECORDED"
-  printf '%s' "$2" | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" \
+  : > "$EVENTS"
+  printf '%s' "$2" | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
     bash "$HOOK" "$1" >/dev/null 2>&1
 }
 
@@ -95,6 +100,57 @@ run_hook acquire "$(skill_call "/code-review")"
 expect_registered "skill=/code-review"
 run_hook acquire "$(skill_call "/code-review <level> --comment")"
 expect_registered "skill=/code-review with args"
+
+echo "-- a review start records a positive invocation marker and joins the hold --"
+review_level="medium"
+run_hook acquire "$(jq -nc --arg cwd "$WORK" --arg level "$review_level" \
+  '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
+    session_id:"sess-started", tool_input:{skill:("/code-review " + $level + " --comment")}}')"
+expect_registered "review start telemetry: hold"
+if grep -q 'review_invocation' "$EVENTS"; then
+  pass "review start telemetry: invocation event"
+else
+  fail "review start telemetry: no invocation event"
+fi
+event_id="$(grep -o 'ri-[0-9a-f]*' "$EVENTS" | head -1)"
+hold_id="$(grep -o 'ri-[0-9a-f]*' "$RECORDED" | head -1)"
+if [[ -n "$event_id" && "$event_id" == "$hold_id" ]]; then
+  pass "review start telemetry: event and hold share invocation id"
+else
+  fail "review start telemetry: join id mismatch (event=$event_id hold=$hold_id)"
+fi
+if grep -q 'stage.*started' "$EVENTS" && grep -q 'level.*medium' "$EVENTS" \
+  && grep -q 'level_source.*explicit' "$EVENTS" \
+  && grep -q 'transport.*skill_tool' "$EVENTS"; then
+  pass "review start telemetry: parsed level and transport"
+else
+  fail "review start telemetry: missing parsed fields ($(cat "$EVENTS"))"
+fi
+
+echo "-- a pending sender sidecar is ADOPTED, closing the mail-path join --"
+JOIN_HOME="$TMP/join-home"
+mkdir -p "$JOIN_HOME/review-invocations"
+SEEDED_ID="ri-seededjoin01"
+printf '{"invocation_id":"%s","target_session_id":"sess-join"}' "$SEEDED_ID" \
+  > "$JOIN_HOME/review-invocations/sess-join.json"
+: > "$RECORDED"
+: > "$EVENTS"
+join_level="medium"
+printf '%s' "$(jq -nc --arg cwd "$WORK" --arg level "$join_level" \
+  '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
+    session_id:"sess-join", tool_input:{skill:("/code-review " + $level + " --comment")}}')" \
+  | FNO="$BIN/fno-stub" FNO_RECORD="$RECORDED" FNO_EVENTS="$EVENTS" \
+    FNO_HOME="$JOIN_HOME" bash "$HOOK" acquire >/dev/null 2>&1
+if grep -q "$SEEDED_ID" "$EVENTS" && grep -q "$SEEDED_ID" "$RECORDED"; then
+  pass "sender sidecar id adopted by event and hold"
+else
+  fail "adoption failed (event=$(cat "$EVENTS") hold=$(cat "$RECORDED"))"
+fi
+if [[ ! -e "$JOIN_HOME/review-invocations/sess-join.json" ]]; then
+  pass "adopted sidecar consumed"
+else
+  fail "sidecar survived adoption and will be re-adopted by the next review"
+fi
 
 echo "-- a name that merely CONTAINS review registers nothing --"
 for verb in code-review-attest pr-review-fixes reviewer brainstorming; do

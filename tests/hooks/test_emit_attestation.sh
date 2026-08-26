@@ -225,6 +225,58 @@ grep -q -- "--holder" "$ALL_CALLS" \
   && fail "the release passed a holder it cannot reconstruct" \
   || pass "the release names no holder"
 
+# 12. A hold-created invocation id is copied onto both the reviewer observation
+# and the completion attestation. This is the lifecycle join, not a receipt
+# inferred from either command's stdout.
+LINKED="$TMP/linked"
+LINKED_REVIEW="$TMP/linked-review.json"
+LINKED_ATTEST="$TMP/linked-attest.json"
+cat > "$TMP/fno-linked-stub" <<STUB
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "do" && "\${2:-}" == "pr" && "\${3:-}" == "review-hold" && "\${4:-}" == "metadata" ]]; then
+  printf '%s\n' '{"metadata":{"invocation_id":"ri-linked-positive","verb":"/code-review","args_raw":"medium --comment","level":"medium","level_source":"explicit","flags":["--comment"]}}'
+  exit 0
+fi
+if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
+  type=""; data=""
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      -t) type="\$2"; shift 2 ;;
+      -d) data="\$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [[ "\$type" == "review_invocation" ]]; then
+    printf '%s\n' "\$data" > "$LINKED_REVIEW"
+  elif [[ "\$type" == "review_attestation" ]]; then
+    printf '%s\n' "\$data" > "$LINKED_ATTEST"
+  fi
+fi
+exit 0
+STUB
+chmod +x "$TMP/fno-linked-stub"
+rm -f "$LINKED_REVIEW" "$LINKED_ATTEST"
+mkdir -p "$TMP/fno-home/review-invocations/ri-linked-positive.subagents"
+touch "$TMP/fno-home/review-invocations/ri-linked-positive.subagents/subagent-1"
+(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-linked-stub" FNO_HOME="$TMP/fno-home" \
+  bash "$EMITTER" code-review pass shared inline report_findings) >/dev/null 2>&1
+if [[ -s "$LINKED_REVIEW" && -s "$LINKED_ATTEST" ]]; then
+  pass "lifecycle join emits reviewer and attestation markers"
+else
+  fail "lifecycle join did not emit both records"
+fi
+if jq -e '.invocation_id == "ri-linked-positive" and .execution_context == "inline" and .output_contract == "report_findings" and .subagent_count == 1' "$LINKED_REVIEW" >/dev/null 2>&1; then
+  pass "reviewer observation carries id, trigger contract, and depth"
+else
+  fail "reviewer observation lost lifecycle fields: $(cat "$LINKED_REVIEW" 2>/dev/null)"
+fi
+if jq -e '.invocation_id == "ri-linked-positive" and .reviewer == "code-review"' "$LINKED_ATTEST" >/dev/null 2>&1; then
+  pass "review_attestation carries the invocation id"
+else
+  fail "review_attestation lost invocation id: $(cat "$LINKED_ATTEST" 2>/dev/null)"
+fi
+
 # 11. The payload records the diff under review: base (merge-base), head, and
 #     a line count greater than 0. This is the positive control for the
 #     refusal below - a refusal alone cannot separate "zero lines measured"
@@ -308,6 +360,131 @@ RECEIPT_RC=$?
   || fail "unresolvable base emitted anyway (exit $RECEIPT_RC)"
 [[ ! -f "$TMP/last-emit.txt" ]] && pass "unresolvable base writes no event" \
   || fail "unresolvable base wrote an event"
+
+# 14-16. --findings-file (AC2-HP / AC2-ERR / AC2-EDGE). The classify leg runs
+# the REAL classifier from the repo tree (PYTHONPATH, no fno binary), so these
+# cases exercise producer-true classification through the emitter's transport:
+# the merge into the event payload, the refusals, and the no-file byte shape.
+git -C "$REPO" update-ref refs/remotes/origin/main "$BASE_SHA"
+git -C "$REPO" checkout -q feature/x-e601
+
+export CLASSIFY_PYTHONPATH="$REPO_ROOT/cli/src"
+export CLASSIFY_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
+cat > "$TMP/classify-real.sh" <<'CREAL'
+#!/usr/bin/env bash
+f="$1"
+PYTHONPATH="$CLASSIFY_PYTHONPATH" "$CLASSIFY_PYTHON" - "$f" <<'PY'
+import json, sys
+from fno.review.cli import build_emit_record, RecordBuildError
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        payload = json.load(fh)
+except OSError as exc:
+    print(f"classify: cannot read {sys.argv[1]}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+except ValueError as exc:
+    print(f"classify: {sys.argv[1]} is not valid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+try:
+    print(json.dumps(build_emit_record(payload)))
+except RecordBuildError as exc:
+    print(f"classify: {sys.argv[1]}: {exc}", file=sys.stderr)
+    raise SystemExit(2)
+PY
+CREAL
+chmod +x "$TMP/classify-real.sh"
+
+cat > "$TMP/fno-full" <<'FSTUB'
+#!/usr/bin/env bash
+stub_dir="$(cd "$(dirname "$0")" && pwd)"
+if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
+  printf '%s\n' "$@" > "$stub_dir/last-emit.txt"
+  exit 0
+fi
+if [[ "$1" == "do" && "$2" == "review" && "$3" == "classify" ]]; then
+  f=""; shift 3
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --findings-file) f="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  bash "$stub_dir/classify-real.sh" "$f"
+  exit $?
+fi
+exit 0
+FSTUB
+chmod +x "$TMP/fno-full"
+
+emit_ff() { # like emit(), through the dual stub; $1 = extra args string
+  (cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+    FNO="$TMP/fno-full" bash "$EMITTER" code-review pass shared $1) >/dev/null 2>&1
+}
+
+echo "== --findings-file (AC2-HP) =="
+F14="$TMP/findings-hp.json"
+cat > "$F14" <<'J'
+[
+  {"category": "correctness", "file": "a.py", "line": 3, "summary": "off-by-one", "failure_scenario": "wrong total"},
+  {"category": "typo", "file": "b.py", "line": 4, "summary": "teh", "failure_scenario": "reader stumble"},
+  {"category": "nit", "file": "c.py", "line": 5, "summary": "name", "failure_scenario": "none"}
+]
+J
+rm -f "$TMP/last-emit.txt"
+emit_ff "--findings-file $F14"
+[[ -f "$TMP/last-emit.txt" ]] && pass "findings file emits" \
+  || fail "findings file emitted nothing"
+got="$(stored '.findings_blocking')"
+[[ "$got" == "1" ]] && pass "payload carries findings_blocking=1" \
+  || fail "findings_blocking: want 1, got '$got'"
+got="$(stored '.findings_nonblocking')"
+[[ "$got" == "2" ]] && pass "payload carries findings_nonblocking=2" \
+  || fail "findings_nonblocking: want 2, got '$got'"
+got="$(stored '.findings | length')"
+[[ "$got" == "3" ]] && pass "payload carries three finding primitives" \
+  || fail "findings length: want 3, got '$got'"
+got="$(stored '.findings[0].finding_key')"
+[[ "$got" == "a.py:3:correctness" ]] && pass "primitive carries finding_key" \
+  || fail "finding_key: want a.py:3:correctness, got '$got'"
+got="$(stored '.reviewed_base_sha')"
+[[ "$got" == "$BASE_SHA" ]] && pass "reviewed_base_sha unchanged by the record" \
+  || fail "reviewed_base_sha changed: '$got'"
+got="$(stored '.branch')"
+[[ "$got" == "feature/x-e601" ]] && pass "branch unchanged by the record" \
+  || fail "branch changed: '$got'"
+got="$(stored '.reviewer_context')"
+[[ "$got" == "shared" ]] && pass "reviewer_context unchanged by the record" \
+  || fail "reviewer_context changed: '$got'"
+
+echo "== --findings-file refusals (AC2-ERR) =="
+for case in missing invalid notarray; do
+  case "$case" in
+    missing) F15="$TMP/findings-missing.json" ;;
+    invalid) F15="$TMP/findings-invalid.json"; printf 'not json {' > "$F15" ;;
+    notarray) F15="$TMP/findings-notarray.json"; printf '{"oops": true}' > "$F15" ;;
+  esac
+  rm -f "$TMP/last-emit.txt"
+  emit_rc=0
+  (cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+    FNO="$TMP/fno-full" bash "$EMITTER" code-review pass shared --findings-file "$F15") >/dev/null 2>"$TMP/err.txt" || emit_rc=$?
+  [[ $emit_rc -ne 0 ]] && pass "$case findings file refuses (exit $emit_rc)" \
+    || fail "$case findings file emitted anyway"
+  [[ ! -f "$TMP/last-emit.txt" ]] && pass "$case findings file writes no event" \
+    || fail "$case findings file wrote an event"
+  grep -q "$F15" "$TMP/err.txt" && pass "$case refusal names the file" \
+    || fail "$case refusal lacks the file name: $(cat "$TMP/err.txt")"
+done
+
+echo "== no --findings-file stays byte-identical (AC2-EDGE) =="
+rm -f "$TMP/last-emit.txt"
+emit_ff ""
+[[ -f "$TMP/last-emit.txt" ]] && pass "no-file path still emits" \
+  || fail "no-file path stopped emitting"
+for key in findings_blocking findings_nonblocking findings review_round dispositions; do
+  got="$(stored ".$key")"
+  [[ "$got" == "<missing>" ]] && pass "no-file payload omits $key" \
+    || fail "no-file payload carries $key='$got'"
+done
 
 echo ""
 echo "emit-attestation: $PASS passed, $FAIL failed"

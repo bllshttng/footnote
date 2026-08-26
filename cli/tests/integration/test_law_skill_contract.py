@@ -17,9 +17,9 @@ def test_law_skill_is_discoverable_and_permission_bound() -> None:
     assert "requires:" in text
     assert "- \"fno >= 0.3.1\"" in text
     assert "/fno:law" in text
-    assert "fno backlog decisions" in text
-    assert "fno law prepare" in text
-    assert "fno law enact" in text
+    assert "fno inbox decisions" in text
+    assert "fno inbox law prepare" in text
+    assert "fno inbox law enact" in text
     assert "/fno:law resume <proposal-id>" in text
     assert "--authority operator" not in text
     assert "environment" in text.lower()

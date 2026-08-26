@@ -259,6 +259,7 @@ def _ctx_to_jsonable(ctx: AgentContext) -> Dict[str, Any]:
         "session": _normalize(ctx.session) if ctx.session else None,
         "detected_paths": [str(p) for p in ctx.detected_paths],
         "warnings": list(ctx.warnings),
+        "visitor": ctx.visitor,
     }
 
 
@@ -409,6 +410,8 @@ def whoami_command(
         _emit_warnings(state)
         return
     typer.echo(f"project:  {state.project_root}")
+    if state.visitor:
+        typer.echo(f"visitor: {state.visitor}")
     if state.fleet:
         wave = ""
         if state.fleet.wave_current is not None and state.fleet.wave_total is not None:

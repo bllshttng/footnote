@@ -239,7 +239,7 @@ rule), never as `backlog idea` nodes.
 - **PR maps to no node** - `reconcile` closes nothing; still do 3b. Not an error.
 - **Re-run for the same PR** - the verb's legs are individually idempotent. The `post-merge:pr-<N>` comment marker guards the judgment prose/triage, so skip 3b on a re-run once the marker exists.
 - **Empty diff (merge commit with no file changes)** - the verb reports `bar=below`. Treat it as below the bar (no capture work), never an error.
-- **Run from inside the merged PR's own worktree** - the archive leg defers to `fno workspace worktree cleanup --merged --apply` (run from canonical). It never self-removes.
+- **Run from inside the merged PR's own worktree** - the archive leg defers to `fno agents workspace worktree cleanup --merged --apply` (run from canonical). It never self-removes.
 ## See also
 - The verb: `fno do pr ritual` (`cli/src/fno/pr/_ritual.py`) and its command in `cli/src/fno/pr/cli.py`.
 - Plan + locked decisions: `internal/fno/plans/20260723-post-merge-mechanical-core-x-bbde.md`.

@@ -86,3 +86,79 @@ def test_decision_retracted_is_registered_and_carries_target() -> None:
     assert event["type"] == "decision_retracted"
     assert event["data"]["target_decision_id"] == "d-ab12cd34"
     assert event["data"]["reason"] == "the coordination window ended"
+
+
+class TestReviewAttestationFindingRecord:
+    """The optional finding record on review_attestation.
+
+    Optional as a whole, but a PRESENT key must be the right shape: this is
+    the record the coverage gate re-derives blocking from, and a silently
+    malformed one is a forged count one level down.
+    """
+
+    @staticmethod
+    def _event(**data):
+        base = {
+            "ts": "2026-08-25T23:00:00Z",
+            "type": "review_attestation",
+            "source": "hook",
+            "data": {"reviewer": "code-review", "head_sha": "a" * 40, "verdict": "fail", "session_id": "s-1"},
+        }
+        base["data"].update(data)
+        return base
+
+    def test_record_carrying_event_validates(self) -> None:
+        validate(
+            self._event(
+                findings_blocking=1,
+                findings_nonblocking=1,
+                findings=[
+                    {
+                        "category": "correctness",
+                        "verdict": None,
+                        "blocking": True,
+                        "has_required_fields": True,
+                        "finding_key": "a.py:3:correctness",
+                    }
+                ],
+                review_round=2,
+                dispositions=[
+                    {"finding_key": "a.py:3:correctness", "disposition": "declined", "reason": "not applicable"}
+                ],
+            )
+        )
+
+    def test_negative_count_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            validate(self._event(findings_blocking=-1))
+
+    def test_findings_not_primitives_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            validate(self._event(findings=[{"category": "correctness"}]))
+
+    def test_disposition_outside_enum_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            validate(
+                self._event(
+                    dispositions=[
+                        {"finding_key": "a.py:3:correctness", "disposition": "handwaved", "reason": "trust me"}
+                    ]
+                )
+            )
+
+    def test_disposition_without_reason_refused(self) -> None:
+        with pytest.raises(ValidationError):
+            validate(
+                self._event(
+                    dispositions=[
+                        {"finding_key": "a.py:3:correctness", "disposition": "declined", "reason": "  "}
+                    ]
+                )
+            )
+
+    def test_truncated_flag_must_be_boolean(self) -> None:
+        with pytest.raises(ValidationError):
+            validate(self._event(findings_truncated="yes"))
+
+    def test_pre_existing_event_without_record_validates(self) -> None:
+        validate(self._event())

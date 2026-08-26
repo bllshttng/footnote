@@ -519,15 +519,9 @@ def substrate_default(harness: str) -> str:
 
 
 def effort_values(harness: str) -> list[str]:
-    """The reasoning-effort value set for ``harness`` (empty if it has no effort
-    surface). Sourced from the spawn EFFORT validator's table so the two can
-    never drift; a lazy import keeps this leaf free of a load-time dependency."""
-    try:
-        from fno.agents.mux_spawn import _EFFORT_ALLOWED
-
-        return sorted(_EFFORT_ALLOWED.get(harness, ()))
-    except Exception:  # noqa: BLE001 - effort is advisory metadata, never fatal
-        return []
+    """Return no static catalog: effort values belong to the provider/model."""
+    del harness
+    return []
 
 
 _VALID_SUBSTRATES = ("thread", "headless", "pane")

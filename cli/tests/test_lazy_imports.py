@@ -170,9 +170,12 @@ _ADVERTISED_SUBCOMMANDS = [
 
 # A sample of the hidden tier - present under `help --all`, absent from `--help`.
 # Distinctive names only: short verbs (pr/cost/state) are substrings of ordinary
-# help prose, so a raw substring leak-check on them is unreliable.
+# help prose, so a raw substring leak-check on them is unreliable. The old
+# sample (evals/carveout/scoreboard/stub-manifest) was all moved spellings,
+# which render nowhere after d-26002be8; do is unusable for the leak-check
+# (substring of "doctor"), so the hidden REAL roots worth pinning are these.
 _HIDDEN_SUBCOMMANDS = [
-    "evals", "carveout", "scoreboard", "stub-manifest",
+    "inbox", "update",
 ]
 
 
@@ -255,7 +258,7 @@ def test_help_all_never_imports_command_modules(monkeypatch):
     result = runner.invoke(app, ["help", "--all"])
     assert result.exit_code == 0, f"help --all should survive broken modules: {result.output}"
     plain = _strip_ansi(result.output)
-    assert "evals" in plain and "backlog" in plain
+    assert "inbox" in plain and "backlog" in plain
 
 
 # ---------------------------------------------------------------------------

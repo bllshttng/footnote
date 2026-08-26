@@ -81,6 +81,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "mergeable": True,
         "head": {"sha": "abc123def", "ref": "feature/rest-info"},
         "base": {"ref": "main"},
+        "user": {"login": "alice"},
     }
     info, reason = _rest.fetch_pr_info_rest(
         "42", repo="Owner/Repo", runner=_runner(pulls=pulls, calls=calls)
@@ -96,6 +97,7 @@ def test_pr_info_uses_one_rest_request_and_returns_positive_metadata():
         "mergeable": "MERGEABLE",
         "merged_at": None,
         "merge_sha": None,
+        "author": "alice",
     }
     assert calls == [["gh", "api", "repos/Owner/Repo/pulls/42"]]
 

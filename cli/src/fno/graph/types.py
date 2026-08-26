@@ -246,7 +246,7 @@ class Entry(BaseModel):
     spawned_by_cwd: Optional[str] = None
 
     # Append-only lifecycle provenance (x-b6e4): one {phase, harness, session_id,
-    # at} record per phase boundary a session crossed. Unique per
+    # effort, at} record per phase boundary a session crossed. Unique per
     # (phase, harness, session_id); the same session may appear across phases and
     # a takeover appends another entry for the same phase. Written only through
     # store.append_session_record. Empty on legacy nodes.

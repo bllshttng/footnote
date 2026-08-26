@@ -310,22 +310,14 @@ def test_remove_worktree_falls_back_to_legacy_path_when_canonical_missing(tmp_gi
 
 # CLI integration via typer runner
 def test_ac1_hp_worktree_cli_create(tmp_git_repo, monkeypatch):
-    """fno runtime worktree --action create (deprecated shim) works end-to-end."""
+    """`fno runtime ...` is RETIRED (x-6233): the refusal names the replacement.
+
+    The capability lives at `fno agents workspace worktree` now; the module
+    functions below (fno.runtime.worktree) keep their own coverage.
+    """
     monkeypatch.chdir(tmp_git_repo)
 
-    name = _unique_name()
-    try:
-        result = runner.invoke(
-            app,
-            ["runtime", "worktree", "--action", "create", "--name", name, "--json"],
-        )
-        assert result.exit_code == 0, f"Output: {result.output}"
-        # The shim prints its deprecation notice to stderr; the runner merges
-        # streams, so the JSON payload is the first line that opens an object.
-        data = json.loads(
-            next(l for l in result.output.splitlines() if l.startswith("{"))
-        )
-        assert data["status"] in ("created", "already-exists")
-        assert "worktree_path" in data
-    finally:
-        _cleanup_worktree(tmp_git_repo, name)
+    result = runner.invoke(app, ["runtime", "worktree", "--action", "list"])
+    assert result.exit_code == 2, f"Output: {result.output}"
+    assert "was removed" in result.output
+    assert "fno agents workspace" in result.output

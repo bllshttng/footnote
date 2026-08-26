@@ -85,6 +85,84 @@ EVENTS_LIB="${PLUGIN_ROOT}/scripts/lib/events.sh"
 [[ -r "$EVENTS_LIB" ]] && source "$EVENTS_LIB" 2>/dev/null || true
 LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
+TARGET_CWD="$ROOT"
+REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
+WORKTREE_COUNT=$(git -C "$ROOT" worktree list --porcelain 2>/dev/null \
+    | grep -c '^worktree ' || true)
+[[ "$WORKTREE_COUNT" =~ ^[0-9]+$ ]] || WORKTREE_COUNT=0
+OTHER_WORKTREE_PRESENT=0
+(( WORKTREE_COUNT > 1 )) && OTHER_WORKTREE_PRESENT=1
+
+resolve_agents_bin() {
+    if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
+        printf '%s' "$FNO_AGENTS_BIN"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
+    elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
+        printf '%s' "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
+    elif command -v fno-agents >/dev/null 2>&1; then
+        command -v fno-agents
+    fi
+}
+
+BIN=""
+TARGET_RESOLVE_BROKEN=0
+TARGET_NO_MATCH=0
+if [[ -f "$LIVE_STATE_FILE" ]]; then
+    RESIDENT_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' \
+        "$LIVE_STATE_FILE" 2>/dev/null \
+        | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
+        | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    if [[ -n "$CONVERSATION_ID" && -n "$RESIDENT_HARNESS_ID" \
+        && "$RESIDENT_HARNESS_ID" != "$CONVERSATION_ID" ]]; then
+        BIN=$(resolve_agents_bin)
+        RESOLVED_STATE=""
+        RESOLVE_RC=2
+        if [[ -n "$BIN" ]]; then
+            RESOLVE_RC=0
+            RESOLVED_STATE=$("$BIN" manifest-for-session \
+                --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
+        fi
+        RESOLVED_CWD=""
+        if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
+            LIVE_STATE_FILE="$RESOLVED_STATE"
+            STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
+        elif [[ "$RESOLVE_RC" -eq 1 ]]; then
+            TARGET_NO_MATCH=1
+            LIVE_STATE_FILE=""
+            STATE_FILE=""
+        else
+            TARGET_RESOLVE_BROKEN=1
+        fi
+    fi
+else
+    BIN=$(resolve_agents_bin)
+    if [[ -n "$BIN" && -n "$CONVERSATION_ID" ]]; then
+        RESOLVE_RC=0
+        RESOLVED_STATE=$("$BIN" manifest-for-session \
+            --harness-session-id "$CONVERSATION_ID" 2>/dev/null) || RESOLVE_RC=$?
+        RESOLVED_CWD=""
+        if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
+            RESOLVED_CWD=$(cd "$(dirname "$RESOLVED_STATE")/.." 2>/dev/null && pwd -P) || true
+        fi
+        if [[ -n "$RESOLVED_CWD" ]]; then
+            LIVE_STATE_FILE="$RESOLVED_STATE"
+            STATE_FILE="$RESOLVED_STATE"
+            TARGET_CWD="$RESOLVED_CWD"
+        elif [[ "$RESOLVE_RC" -eq 1 ]]; then
+            TARGET_NO_MATCH=1
+        elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+            TARGET_RESOLVE_BROKEN=1
+        fi
+    elif [[ "$OTHER_WORKTREE_PRESENT" -eq 1 ]]; then
+        TARGET_RESOLVE_BROKEN=1
+    fi
+fi
+
 DELIVERY_PENDING_PREFIX=$(git -C "$ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
     || printf '%s' "$ROOT/.fno/.delivery-finalize-pending-")
 case "$DELIVERY_PENDING_PREFIX" in
@@ -97,10 +175,6 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_HARNESS_ID=$(grep '^harness_session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' \
         | grep -Ev '^(null)?$' | head -1 || true)
-    if [[ -n "$CONVERSATION_ID" && -n "$LIVE_HARNESS_ID" \
-        && "$CONVERSATION_ID" != "$LIVE_HARNESS_ID" ]]; then
-        emit '{}'
-    fi
     DELIVERY_RETRY_OWNER="${CONVERSATION_ID:-${LIVE_HARNESS_ID:-harness}}"
     DELIVERY_RETRY_ID="${DELIVERY_RETRY_OWNER}.${LIVE_SESSION_ID:-session}"
     DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${DELIVERY_RETRY_ID}.md"
@@ -173,6 +247,11 @@ unavailable_continue_or_allow() {
     emit '{}'
 }
 
+if [[ "$TARGET_RESOLVE_BROKEN" -eq 1 ]]; then
+    echo "agy stop-hook: WARNING: manifest-for-session resolver unavailable" >&2
+    unavailable_continue_or_allow
+fi
+
 # ── 2. Background tasks still running -> never allow a terminal stop ───────────
 # fullyIdle is jq-only; read it BARE (not `// empty`): jq's `//` is a truthiness
 # alternative, so `.fullyIdle // empty` collapses a meaningful boolean `false` to
@@ -222,6 +301,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
             emit "$(printf '{"decision":"continue","reason":"king manifest present but the king loop is claude-only (%s/%s); this adapter cannot decide its terminal"}' "$king_count" "$MAX_UNAVAIL_RETRIES")"
         fi
         echo "agy stop-hook: king manifest refused ${king_count} times; allowing stop rather than holding this session forever." >&2
+    fi
+    if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
+        echo "loop-check: no manifest names session ${CONVERSATION_ID}; visitor allowed" >&2
     fi
     emit '{}'
 fi
@@ -281,17 +363,7 @@ fi
 trap 'rm -f "$SYNTH" "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
-REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
-BIN=""
-if [[ -n "${FNO_AGENTS_BIN:-}" ]] && [[ -x "${FNO_AGENTS_BIN}" ]]; then
-    BIN="$FNO_AGENTS_BIN"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/release/fno-agents" ]]; then
-    BIN="${REPO_ROOT}/crates/fno-agents/target/release/fno-agents"
-elif [[ -x "${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents" ]]; then
-    BIN="${REPO_ROOT}/crates/fno-agents/target/debug/fno-agents"
-elif command -v fno-agents >/dev/null 2>&1; then
-    BIN=$(command -v fno-agents)
-fi
+[[ -n "$BIN" ]] || BIN=$(resolve_agents_bin)
 
 # ── 6. Binary MISSING for an ACTIVE session: emit event + bounded-continue ─────
 # A stale/absent binary must not silently disable the ship gate. Emit the
@@ -320,7 +392,7 @@ else
     DECISION_JSON=$("$BIN" loop-check \
         --state "$STATE_FILE" \
         --transcript "$SYNTH" \
-        --cwd "$ROOT" \
+        --cwd "$TARGET_CWD" \
         2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
 
     if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
@@ -364,7 +436,7 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     FINALIZE_OUT="$("$BIN" finalize \
         --state "$FINALIZE_STATE" \
         --transcript "$SYNTH" \
-        --cwd "$ROOT" \
+        --cwd "$TARGET_CWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "$ROOT/.fno/finalize.stderr.log" 2>/dev/null || true
     if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then

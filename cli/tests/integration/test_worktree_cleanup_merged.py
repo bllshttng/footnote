@@ -195,6 +195,9 @@ def test_cargo_target_apply_refuses_to_delete_rooted_builder(repo: Path):
 
 def test_setup_worktree_runs_the_same_cargo_target_apply_path():
     text = SETUP_SRC.read_text()
+    # Canonical spelling leads; the retired root one stays for one release as
+    # the deploy-window fallback (repo script newer than the installed fno).
+    assert "fno agents workspace worktree cleanup --cargo-targets --apply" in text
     assert "fno workspace worktree cleanup --cargo-targets --apply" in text
     assert "cargo target cleanup failed" in text
 

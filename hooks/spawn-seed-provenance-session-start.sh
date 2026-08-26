@@ -2,7 +2,7 @@
 # SessionStart hook: attribute the spawn seed (node x-3a64).
 #
 # The seed is the one message that defines a worker's entire task, and it was
-# the one message a worker could not attribute: `fno mail send` wraps every a2a
+# the one message a worker could not attribute: `fno agents mail send` wraps every a2a
 # message in <fno_mail>, while the seed arrived as bare payload text,
 # indistinguishable from the operator typing.
 #

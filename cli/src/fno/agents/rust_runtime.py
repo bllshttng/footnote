@@ -77,7 +77,7 @@ FOLDED_AGENT_SUBCOMMANDS = {
     ),
     "mail": (
         "fno.mail.cli:mail_app",
-        "Alias of `fno mail` (the canonical root spelling): send/unread/ack/reply/drain/status.",
+        "Durable polled mailbox: send/unread/ack/reply/drain/status (canonical spelling; root `fno mail` is the shim).",
         {"hidden": True},
     ),
     "mcp": (
@@ -93,6 +93,14 @@ FOLDED_AGENT_SUBCOMMANDS = {
     "roles": (
         "fno.roles.cli:roles_app",
         "Inspect bounded business-role definitions and resolutions.",
+        {"hidden": True},
+    ),
+    # x-6233 (d-cf2d6fe1): worktree lifecycle folds under agents, which also
+    # resolves the Python/Rust `workspace` collision - root `workspace` then
+    # unambiguously means the mux one. Old spellings stay one-release shims.
+    "workspace": (
+        "fno.workspace.cli:cli",
+        "Worktree lifecycle and worker registration.",
         {"hidden": True},
     ),
     "worker": (
@@ -328,6 +336,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
     # port, so it must never auto-route to the daemon.
     "watchdog",
+    # The citizen-yard read (folded under agents from the retired root verb).
+    # Pure Python: reads the registry + graph archive; no Rust client port, so
+    # it must never auto-route to the daemon.
+    "yard",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs

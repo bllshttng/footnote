@@ -200,7 +200,7 @@ The verb reaches the same destination with none of that exposure.
 ## Why the asymmetries exist
 
 - **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the thread substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
-- **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no thread lane and no attach.
+- **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. fno ships no thread lane for either, so neither has `attach`. For codex that is an unbuilt lane, not a ceiling. Its app-server drives a full no-PTY thread lifecycle over newline-delimited JSON on stdin/stdout: `thread/start`, `thread/resume`, `turn/start`, `turn/steer`, `turn/interrupt`. [codex-thread-driver](architecture/codex-thread-driver.md) records what a driver must speak and the journey test that earns the capability bit. The bit stays `false` until a driver ships. It is never inherited from protocol.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - Codex recovery uses that full thread ID as its only join.
 - `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts, reports both discovered and usable counts, and refuses a short ID or a rollout without readable transcript work.

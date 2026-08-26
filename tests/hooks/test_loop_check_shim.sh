@@ -323,8 +323,9 @@ log "T6: foreign transcript -> exit 0, binary not called"
     MARKER="${TMP_DIR}/stub_was_called"
     STUB="${TMP_DIR}/fno-agents-stub"
     # The marker path must be embedded literally into the stub
-    cat > "$STUB" <<STUB_EOF
+cat > "$STUB" <<STUB_EOF
 #!/usr/bin/env bash
+if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
 touch "${MARKER}"
 printf '{"decision":"block","termination_reason":null,"message":"should not see this","fires":1,"fingerprint":"f"}\n'
 exit 0
@@ -521,8 +522,9 @@ log "T13: codex manifest + claude stop -> exit 0, binary not called"
 
     MARKER="${TMP_DIR}/stub_was_called"
     STUB="${TMP_DIR}/fno-agents-stub"
-    cat > "$STUB" <<STUB_EOF
+cat > "$STUB" <<STUB_EOF
 #!/usr/bin/env bash
+if [[ "\$1" == "manifest-for-session" ]]; then exit 1; fi
 touch "${MARKER}"
 printf '{"decision":"block","termination_reason":null,"message":"not ours to judge","fires":1,"fingerprint":"f"}\n'
 exit 0
@@ -627,6 +629,10 @@ t8() {
     local STUB="$T/fno-agents"
     cat > "$STUB" <<STUBEOF
 #!/bin/sh
+if [ "\$1" = "manifest-for-session" ]; then
+  echo "$T/proj/.fno/target-state.md"
+  exit 0
+fi
 touch "$MARKER"
 echo '{"decision":"allow","termination_reason":null,"message":"ok","fires":1,"fingerprint":null}'
 STUBEOF

@@ -282,6 +282,34 @@ def test_plan_line(tmp_path) -> None:
     assert "stale-reference" in orient._plan_line(str(plan), tmp_path)
 
 
+def test_plan_line_reads_the_nodes_bound_plan_when_the_manifest_carries_none(
+    monkeypatch, tmp_path
+) -> None:
+    """(x-d401 / x-3ae1) AC6-HP: a node whose graph entry binds a plan_path
+    must never report plan: none just because the manifest field is empty -
+    the manifest is a carrier, not the binding's truth."""
+    plan = tmp_path / "p.md"
+    plan.write_text("edits `a/b.py`\n", encoding="utf-8")
+    monkeypatch.setattr(
+        orient, "_graph_entry", lambda node_id, root: {"plan_path": str(plan)}
+    )
+    line = orient._plan_line(None, tmp_path, node_id="x-1")
+    assert "stale-reference" in line, "the bound plan was actually read"
+
+
+def test_plan_line_absence_carries_its_basis(monkeypatch, tmp_path) -> None:
+    """AC6-EDGE: no plan anywhere reads as an absence with a basis, and an
+    unreadable graph reads as unknown - never as a measured none."""
+    monkeypatch.setattr(orient, "_graph_entry", lambda node_id, root: {})
+    assert "no plan bound" in orient._plan_line(None, tmp_path, node_id="x-1")
+
+    def boom(*_args):
+        raise RuntimeError("graph blew up")
+
+    monkeypatch.setattr(orient, "_graph_entry", boom)
+    assert "unknown" in orient._plan_line(None, tmp_path, node_id="x-1")
+
+
 def test_build_report_is_read_only_eight_lines(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(orient, "_graph_entry", lambda *_: None)
     lines = orient.build_report(tmp_path, node_id="x-1", plan_path=None, manifest_raw={})
@@ -359,3 +387,31 @@ def test_load_orientation_node_override(tmp_path, monkeypatch) -> None:
 
 def test_self_check_runs() -> None:
     orient._self_check()
+
+
+def test_build_report_resolves_the_plan_binding_exactly_once(monkeypatch, tmp_path):
+    """(x-d401) One fact, one read.
+
+    `build_report` used to resolve the binding for boundary-reconcile and then
+    let `_plan_line` re-derive it through a second `_bound_plan_path` call, so
+    the same fact was read twice per run. Two reads of one fact can disagree:
+    a concurrent `plan_path` edit between them, or a read that fails on only
+    one, leaves `plan:` and `boundary-reconcile:` describing different plans.
+    That is the drift `_bound_plan_path` was added to remove, reintroduced one
+    call later. Counting the RESOLVER, not `_graph_entry`, because other
+    orient lines read the graph for their own reasons.
+    """
+    calls = []
+    real = orient._bound_plan_path
+
+    def _counting(plan_path, project_root, node_id):
+        calls.append(node_id)
+        return real(plan_path, project_root, node_id)
+
+    monkeypatch.setattr(orient, "_graph_entry", lambda n, r: {"plan_path": ""})
+    monkeypatch.setattr(orient, "_bound_plan_path", _counting)
+    # An EMPTY manifest plan_path is the carrier miss that reaches the
+    # resolver; a populated one short-circuits and proves nothing.
+    orient.build_report(tmp_path, node_id="x-1", plan_path=None)
+
+    assert len(calls) == 1, f"the binding must be resolved once, got {len(calls)}"

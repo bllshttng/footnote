@@ -301,6 +301,21 @@ pub(crate) struct Settings {
     /// an other_session attestation is still not "independent", but it is a
     /// SECOND session, which is what this key demands.
     require_corroboration: Option<bool>,
+    /// config.review.github_approval_satisfies (default true): a non-author
+    /// human GitHub APPROVED review counts toward coverage on its own and
+    /// satisfies the corroboration term. GitHub refuses an author's approval
+    /// of their own PR server-side; the gate still asserts the property
+    /// itself (an unreadable PR author fails closed to "exclude"). The limit:
+    /// GitHub's refusal is per identity, not per human - a second account
+    /// with its own token can still self-approve.
+    github_approval_satisfies: Option<bool>,
+    /// config.review.max_rounds (default 2, clamped at least 1 at read): the
+    /// review-round budget before the gate reports IMPOSSIBLE. More rounds
+    /// than this on the branch since the last pass, with blocking findings
+    /// still non-terminal, means re-reviewing cannot clear it. A round is a
+    /// review VERDICT since the last pass; CI failures, lint failures and
+    /// rebases are not rounds, and a pass resets the counter.
+    max_rounds: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -737,26 +752,25 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
             // stays None -> false here; the Python config loader rejects it,
             // so no config can load green on one side and parse false on the
             // other.
-            s.require_corroboration = v
-                .as_bool()
-                .or_else(|| {
-                    v.as_integer().and_then(|i| match i {
-                        1 => Some(true),
-                        0 => Some(false),
-                        _ => None,
-                    })
-                })
-                .or_else(|| {
-                    v.as_str()
-                        // pydantic's lax bool spellings in full, so one config
-                        // cannot load true on the Python side and parse false
-                        // here (round 2: "t"/"y" and the bare integers).
-                        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
-                            "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
-                            "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
-                            _ => None,
-                        })
-                });
+            s.require_corroboration = lax_bool(v);
+        }
+        if let Some(v) = review.get("github_approval_satisfies") {
+            // Same lax-bool contract as require_corroboration: one coercion
+            // for every config bool, so the two gates cannot disagree on a
+            // config that loads at all. Malformed stays None -> true (the
+            // default-ON direction), matching the Python loader's rejection.
+            s.github_approval_satisfies = lax_bool(v);
+        }
+        if let Some(v) = review.get("max_rounds") {
+            // An integer at least 1, read-side clamped; anything else stays
+            // None -> the default 2, so a typo cannot zero the budget (a
+            // missing cap fires IMPOSSIBLE on every second round).
+            let parsed = v
+                .as_integer()
+                .or_else(|| v.as_str().and_then(|raw| raw.trim().parse::<i64>().ok()));
+            if parsed.is_some_and(|n| n >= 1) {
+                s.max_rounds = parsed;
+            }
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -775,6 +789,30 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
     }
 
     Ok(s)
+}
+
+/// One lax-bool coercion for config booleans: a real bool, a 0/1 integer, or
+/// pydantic's string spellings ("true"/"yes"/"on"/"y"/"t"/"1" and the false
+/// mirror). Anything else is None, so the caller's default decides - the
+/// Python config loader rejects the same shapes, so no config can load green
+/// on one side and parse differently here.
+fn lax_bool(v: &toml::Value) -> Option<bool> {
+    v.as_bool()
+        .or_else(|| {
+            v.as_integer().and_then(|i| match i {
+                1 => Some(true),
+                0 => Some(false),
+                _ => None,
+            })
+        })
+        .or_else(|| {
+            v.as_str()
+                .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                    "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                    _ => None,
+                })
+        })
 }
 
 /// Infallible wrapper: an unparseable file fails CLOSED (unsatisfiable login
@@ -1124,6 +1162,11 @@ struct PrInfo {
     /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
     /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
     coverage: CoverageReport,
+    /// The attestation-chain range tiling computed for this read, carried so
+    /// the standalone verb's stdout payload equals the row read_pr_info
+    /// emitted, field for field (payload parity). Default on every early
+    /// return and test fixture: no chain, no rescue.
+    range_tiling: RangeTiling,
 }
 
 /// The ordering every "you are not reviewed yet" remedy must teach, and the
@@ -1793,7 +1836,7 @@ fn stderr_tail(bytes: &[u8]) -> String {
     }
 }
 
-const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName";
+const PR_VIEW_FIELDS: &str = "state,number,headRefName,headRefOid,mergeable,baseRefName,author";
 
 fn pr_head_oid(pr_json: &Value) -> Option<String> {
     pr_json
@@ -2452,6 +2495,8 @@ fn read_pr_info(
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
     require_corroboration: bool,
+    github_approval_satisfies: bool,
+    max_rounds: i64,
 ) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
@@ -2482,6 +2527,7 @@ fn read_pr_info(
         // No PR yet: world-state, not an error. done() is simply false, and
         // the backstop can resolve a stuck no-PR session as NoProgress.
         return Ok(PrInfo {
+            range_tiling: RangeTiling::default(),
             state: PrState::None,
             number: 0,
             head_oid: String::new(),
@@ -2499,6 +2545,7 @@ fn read_pr_info(
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: Vec::new(),
             },
@@ -2522,6 +2569,15 @@ fn read_pr_info(
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // The PR author's login, for the human-approval counting rule: an
+    // approval counts only when its login provably is not this one. An
+    // absent/unreadable author is None, which the rule reads fail-closed
+    // (exclude the approval from the count, never include it on a guess).
+    let pr_author = pr_json
+        .pointer("/author/login")
+        .and_then(|v| v.as_str())
+        .filter(|a| !a.is_empty())
+        .map(str::to_string);
     // GitHub's mergeable state: "MERGEABLE" | "CONFLICTING" | "UNKNOWN" (still
     // computing). Only "CONFLICTING" is a definitive no; UNKNOWN must not hold
     // the terminal (it clears on its own). Missing field -> "UNKNOWN".
@@ -2543,6 +2599,22 @@ fn read_pr_info(
     let resolver = FreshnessResolver::new(git_bin, cwd, base_ref, head_sha);
     let freshness = |sha: &str| resolver.freshness(sha);
 
+    // The range-tiling answer for this PR's attestation chain, computed ONCE
+    // from the same events.jsonl the local axis reads and shared by every
+    // consumer below (the classify_coverage local axis, the emitted
+    // review_coverage row). Fail-closed inside: any git failure answers
+    // not-tiled and today's single-attestation rule stands alone.
+    let events_text_for_tiling = std::fs::read_to_string(events_path).unwrap_or_default();
+    let tiling = compute_range_tiling(
+        git_bin,
+        cwd,
+        base_ref,
+        &events_text_for_tiling,
+        &head_branch,
+        head_sha,
+        max_rounds,
+    );
+
     // x-8b64 (E): a MERGED PR is terminal. A PR merged out-of-band (GitHub
     // web/mobile, or `gh pr merge`) is done regardless of whether the required
     // bot ever reviewed it or whether CI is still green post-merge - the merge
@@ -2555,6 +2627,7 @@ fn read_pr_info(
     // unshipped work.
     if state == PrState::Merged {
         return Ok(PrInfo {
+            range_tiling: RangeTiling::default(),
             state,
             number,
             head_oid,
@@ -2572,6 +2645,7 @@ fn read_pr_info(
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: Vec::new(),
             },
@@ -2651,6 +2725,7 @@ fn read_pr_info(
         stale_bots,
         unaddressed_findings,
         coverage,
+        impossible,
     ) = if login_skipped {
         // No GitHub logins to poll (nothing configured, or no_external): skip
         // the gh review reads entirely (fewer calls + no spurious gh-error
@@ -2668,7 +2743,7 @@ fn read_pr_info(
         // "uncovered" and an instrument-health receipt for reviews that were
         // never queried. A fresh local pass still rescues it inside
         // classify_coverage (positive evidence).
-        let mut coverage = classify_coverage(
+        let mut coverage = classify_coverage_tiled(
             &[],
             &[],
             &events_text,
@@ -2678,6 +2753,9 @@ fn read_pr_info(
             &freshness,
             &head_branch,
             head_sha,
+            Some(&tiling),
+            pr_author.as_deref(),
+            github_approval_satisfies,
         );
         // Same capture-then-apply order as the external-read arm below: the
         // predicate reads the pre-downgrade report, and the `reviewed` verdict
@@ -2687,15 +2765,22 @@ fn read_pr_info(
         // this arm every time).
         let self_attested_alone = coverage.rests_on_self_attestation_alone();
         coverage.apply_corroboration_policy(require_corroboration);
+        // Locked Decision 1: the pass condition is disposition-complete.
+        // Non-terminal blocking findings withhold `reviewed` here exactly as
+        // the Python merge gate refuses on them.
+        let blockers =
+            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
         (
             "none".to_string(),
             reviewers_ok
-                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone),
+                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
+                && !blockers_withhold(&blockers, tiling.rounds_exhausted),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             coverage,
+            blockers_impossible(&blockers, tiling.rounds_exhausted),
         )
     } else {
         // Read 3: top-level reviews + issue comments
@@ -2901,7 +2986,7 @@ fn read_pr_info(
             }
         }
         // github_read_ok is true here: a failed gh read returned Err above.
-        let mut coverage = classify_coverage(
+        let mut coverage = classify_coverage_tiled(
             reviews_arr,
             comments_arr,
             &events_text,
@@ -2911,6 +2996,9 @@ fn read_pr_info(
             &freshness,
             &head_branch,
             head_sha,
+            Some(&tiling),
+            pr_author.as_deref(),
+            github_approval_satisfies,
         );
         // The predicate reads the pre-downgrade report (the policy below only
         // flips the covered state, preserving verdicts), so capture it first.
@@ -2927,10 +3015,14 @@ fn read_pr_info(
         // this field and never consults coverage, so without this line the
         // loop can finish a PR the merge gate refuses on the same row - the
         // two surfaces this repo keeps unified would split under the flag.
+        // Locked Decision 1, same conjunct as the solo lane arm.
+        let blockers =
+            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
         let reviewed = (info.all_required_passed() || local_recovery)
             && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
-            && reviewers_ok;
+            && reviewers_ok
+            && !blockers_withhold(&blockers, tiling.rounds_exhausted);
         (
             activity_ts,
             reviewed,
@@ -2939,8 +3031,13 @@ fn read_pr_info(
             info.stale_bots,
             unaddressed,
             coverage,
+            blockers_impossible(&blockers, tiling.rounds_exhausted),
         )
     };
+    // The IMPOSSIBLE predicate rides the row beside the raw budget flag, so
+    // the status surface can name it without re-running the disposition scan.
+    let mut tiling = tiling;
+    tiling.impossible = impossible;
 
     // Emit coverage every gate eval so the Python readers (the merge primitive
     // and the polling command) and audit see one coherent, fresh number rather
@@ -2959,11 +3056,19 @@ fn read_pr_info(
             events_path,
             global_events_path,
             "review_coverage",
-            coverage_event_data(number, &coverage, head_sha, repo_slug, author_session),
+            coverage_event_data_tiled(
+                number,
+                &coverage,
+                head_sha,
+                repo_slug,
+                author_session,
+                Some(&tiling),
+            ),
         );
     }
 
     Ok(PrInfo {
+        range_tiling: tiling,
         state,
         number,
         head_oid,
@@ -4358,6 +4463,14 @@ pub(crate) fn login_matches_bot(login: &str, bot: &str) -> bool {
     !bot.is_empty() && login.to_lowercase().contains(&bot.to_lowercase())
 }
 
+/// Exact-login equality, case-insensitive the way GitHub treats logins.
+/// Deliberately NOT `login_matches_bot`'s substring match: "ali" must not
+/// read as the author "alice" when the approval-counting rule asks whether
+/// the approver IS the author.
+fn login_equals(a: &str, b: &str) -> bool {
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
 fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
     if !external_reviewers.is_empty() {
         let login_lower = login.to_lowercase();
@@ -5018,6 +5131,14 @@ pub struct ReviewerVerdict {
     /// One predicate flip in `CoverageReport::coverage_count` includes it.
     #[serde(skip_serializing_if = "is_false")]
     pub human_approval: bool,
+    /// Whether this human approval's login is the PR author's (or the PR
+    /// author could not be read, which asserts the same thing fail-closed).
+    /// Only meaningful alongside `human_approval`: a `false` here is what
+    /// lets a human approval count when `github_approval_satisfies` is on.
+    /// GitHub refuses an author's own approval server-side; this field
+    /// asserts the property the gate depends on rather than inferring it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub author_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
     /// (`SelfAttested`), a different one (`OtherSession`), or that is
     /// unknowable (`Unknown`). `coverage_count` never reads it: a
@@ -5054,11 +5175,24 @@ pub struct ReviewerVerdict {
     pub scope: Option<AttestationScope>,
 }
 
+/// The one counting rule for human GitHub approvals: a `reviewed` verdict
+/// counts when it is not a human approval, or when the resolved flag is on
+/// AND the approver is provably not the PR author (`author_approval` false
+/// requires a read PR author; an unreadable one asserts the exclude side).
+fn human_approval_counts(v: &ReviewerVerdict, flag: bool) -> bool {
+    !v.human_approval || (flag && !v.author_approval)
+}
+
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
 #[derive(Debug, Clone)]
 pub struct CoverageReport {
     pub coverage: Coverage,
     pub verdicts: Vec<ReviewerVerdict>,
+    /// The resolved `config.review.github_approval_satisfies`, captured at
+    /// classify time so every count on this report applies one rule. False on
+    /// the bare `classify_coverage` spelling (today's semantics, for the
+    /// unit-test corpus); the production call sites pass the resolved flag.
+    pub github_approval_satisfies: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -5080,7 +5214,7 @@ impl CoverageReport {
             .iter()
             .filter(|v| {
                 v.verdict == CoverageVerdict::Reviewed
-                    && !v.human_approval
+                    && human_approval_counts(v, self.github_approval_satisfies)
                     && v.attestation_origin == AttestationOrigin::SelfAttested
             })
             .count()
@@ -5103,7 +5237,9 @@ impl CoverageReport {
         let mut counted = 0usize;
         let mut self_attested = 0usize;
         for v in &self.verdicts {
-            if v.verdict != CoverageVerdict::Reviewed || v.human_approval {
+            if v.verdict != CoverageVerdict::Reviewed
+                || !human_approval_counts(v, self.github_approval_satisfies)
+            {
                 continue;
             }
             counted += 1;
@@ -5132,7 +5268,10 @@ impl CoverageReport {
             Coverage::Covered(_) => Some(
                 self.verdicts
                     .iter()
-                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .filter(|v| {
+                        v.verdict == CoverageVerdict::Reviewed
+                            && human_approval_counts(v, self.github_approval_satisfies)
+                    })
                     .count(),
             ),
         }
@@ -5142,11 +5281,10 @@ impl CoverageReport {
         if matches!(self.coverage, Coverage::Unknown) {
             return None;
         }
-        if self
-            .verdicts
-            .iter()
-            .any(|verdict| verdict.verdict == CoverageVerdict::Reviewed && !verdict.human_approval)
-        {
+        if self.verdicts.iter().any(|verdict| {
+            verdict.verdict == CoverageVerdict::Reviewed
+                && human_approval_counts(verdict, self.github_approval_satisfies)
+        }) {
             return Some(ReviewState::Reviewed);
         }
         if self
@@ -5213,6 +5351,520 @@ struct LocalPass {
     /// The branch the attestation named. Empty only for the legacy exact-head
     /// fallback, so the verdict can carry the matching scope label.
     branch: String,
+    /// The merge-base end of the diff the attestation measured
+    /// (`reviewed_base_sha`). Empty on events that predate the field; the
+    /// tiling chain reads it, nothing else does.
+    reviewed_base: String,
+}
+
+/// The union-of-ranges coverage answer over a branch's attestations: whether
+/// the `reviewed_base_sha..reviewed_head_sha` ranges on the branch's
+/// attestations, taken as a CHAIN, tile `merge_base(base, head)..head`.
+///
+/// This is what lets a fix-and-re-review loop terminate: every commit that
+/// fixes a finding moves the head, and under a single-attestation freshness
+/// rule every fix voids the only artifact that can clear the gate. A chain
+/// covers the union of what its members read, so round N+1 only has to cover
+/// the delta round N left behind.
+///
+/// Fail-closed everywhere: an unresolvable sha, a range whose endpoints are
+/// not on the branch (rebased-away history), a git invocation that fails, or
+/// any uncovered commit, all produce `tiled: false` with the gap named by
+/// sha - never a silent "covered".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RangeTiling {
+    /// Whether the chain's ranges cover every commit in `merge_base..head`.
+    pub tiled: bool,
+    /// Uncovered stretches, each named `parent-of-first-uncovered..last-
+    /// uncovered` by sha. Empty iff tiled.
+    pub gaps: Vec<(String, String)>,
+    /// Range head shas dropped from the chain (unresolvable, or off the
+    /// branch's ancestry), reported by sha so the drop is auditable.
+    pub dropped: Vec<String>,
+    /// `reviewed_head_sha` of every range that participated in the chain.
+    /// A local attestation whose head is in this list counts as Reviewed
+    /// when the whole chain tiles, whatever its single-sha freshness says.
+    pub chain_heads: Vec<String>,
+    /// Review rounds since the last pass on this branch (see
+    /// [`rounds_since_last_pass`]). Carried on the chain analysis because it
+    /// reads the same events with the same scoping; computed even on the
+    /// git-failure paths, which answer tiling fail-closed but rounds honestly.
+    pub rounds_used: i64,
+    /// Whether `rounds_used` exceeds the resolved `config.review.max_rounds`.
+    /// Advisory on this struct - the merge gate re-derives before refusing -
+    /// but the status surface reads it to name its own blocker.
+    pub rounds_exhausted: bool,
+    /// Whether the exhausted budget leaves a HARD non-terminal finding (a
+    /// CONFIRMED correctness or security finding): only those keep the
+    /// IMPOSSIBLE verdict. Every other non-terminal finding is filed at the
+    /// cap and the PR merges (the operator's ruling on the round cap).
+    /// Filled by `read_pr_info` after the disposition scan, since it needs
+    /// the corroboration state the arms compute.
+    pub impossible: bool,
+}
+
+// --- The disposition-complete pass condition, Rust gate side ----------------
+//
+// Locked Decision 1: a head is covered when the chain tiles AND every
+// finding in that chain is TERMINAL. Locked Decision 6: the gate re-derives
+// blocking from the per-finding primitives with its own copy of the rule and
+// never trusts the producer's `findings_blocking` count.
+
+/// The gate's own copy of the harmless-category allowlist, held equal to
+/// `DEFAULT_NONBLOCKING_CATEGORIES` on the Python side by tests (Locked
+/// Decision 6: two implementations, one corpus).
+const GATE_NONBLOCKING_CATEGORIES: &[&str] = &[
+    "style",
+    "formatting",
+    "naming",
+    "docs",
+    "typo",
+    "nit",
+    "simplification",
+    "test-coverage",
+];
+
+fn gate_finding_blocks(primitive: &Value) -> bool {
+    if primitive
+        .get("has_required_fields")
+        .and_then(|v| v.as_bool())
+        != Some(true)
+    {
+        return true;
+    }
+    let verdict = primitive
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if verdict.trim().eq_ignore_ascii_case("confirmed") {
+        return true;
+    }
+    let category = primitive
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let lowered = category.trim().to_lowercase();
+    !GATE_NONBLOCKING_CATEGORIES.contains(&lowered.as_str())
+}
+
+/// One non-terminal blocking finding, named by its finding_key plus the axis
+/// that failed, for the block message and the emitted row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DispositionBlocker {
+    pub finding_key: String,
+    /// "open", "fixed-unreviewed", "declined-uncorroborated",
+    /// "declined-without-reason", or "truncated-remainder".
+    pub axis: &'static str,
+    /// A CONFIRMED correctness or security finding (or the truncated
+    /// remainder, which cannot be inspected). At the round cap only a hard
+    /// blocker withholds the merge; the rest are filed as nodes.
+    pub hard: bool,
+}
+
+/// The two categories the round cap can never file away: a finding the
+/// reviewer CONFIRMED as a correctness or security defect. The class gate is
+/// what makes file-the-remainder safe - noise can be filed, a confirmed bug
+/// cannot - so this reads the same primitive fields `gate_finding_blocks`
+/// re-derives from, never the producer's count.
+const HARD_CATEGORIES: &[&str] = &["correctness", "security"];
+
+fn hard_finding(primitive: &Value) -> bool {
+    let verdict = primitive
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !verdict.trim().eq_ignore_ascii_case("confirmed") {
+        return false;
+    }
+    let category = primitive
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    HARD_CATEGORIES.contains(&category.as_str())
+}
+
+/// Whether the blockers still withhold `reviewed`. Under the budget every
+/// blocker withholds. At the cap only a hard one does: the rest are filed by
+/// the merge gate and the PR merges (one review stays the floor - an empty
+/// chain never reaches here with rounds spent).
+pub fn blockers_withhold(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
+    blockers.iter().any(|b| b.hard || !rounds_exhausted)
+}
+
+/// The IMPOSSIBLE predicate: rounds spent AND a hard blocker remains.
+pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
+    rounds_exhausted && blockers.iter().any(|b| b.hard)
+}
+
+/// The non-terminal blocking findings in the PR's attestation chain.
+///
+/// Terminal means: fixed (and a LATER round reviewed the fix delta),
+/// non-blocking by the gate's own re-derivation, or declined WITH
+/// corroboration the author cannot mint alone (`self_attested_alone` is the
+/// coverage row's existing predicate - a disposition pass carries its own
+/// corroboration requirement, independent of
+/// `config.review.require_corroboration`, because a disposition pass can be
+/// gamed by declining and a clean review cannot). Pure: scans the events
+/// text, no IO. An empty chain has no findings and blocks nothing.
+pub fn disposition_blockers(
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+    self_attested_alone: bool,
+) -> Vec<DispositionBlocker> {
+    // Collect the in-scope chain, oldest first, exactly like the tiling
+    // scan: same scoping rule, same admission of both verdicts.
+    let mut chain: Vec<Value> = Vec::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head.is_empty() {
+            continue;
+        }
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        chain.push(val);
+    }
+    if chain.is_empty() {
+        return Vec::new();
+    }
+    let last_round = chain.len().saturating_sub(1);
+
+    let mut findings: Vec<(String, &Value, usize)> = Vec::new(); // key, primitive, raised round
+    let mut dispositions: std::collections::HashMap<String, (&str, &str)> =
+        std::collections::HashMap::new(); // key -> (disposition, reason)
+    let mut truncated = false;
+    for (index, val) in chain.iter().enumerate() {
+        if val
+            .pointer("/data/findings_truncated")
+            .and_then(|v| v.as_bool())
+            == Some(true)
+        {
+            truncated = true;
+        }
+        for primitive in val
+            .pointer("/data/findings")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            if let Some(key) = primitive.get("finding_key").and_then(|v| v.as_str()) {
+                if !key.is_empty() {
+                    if let Some(slot) = findings.iter_mut().find(|(k, _, _)| k == key) {
+                        slot.1 = primitive;
+                        slot.2 = index;
+                    } else {
+                        findings.push((key.to_string(), primitive, index));
+                    }
+                }
+            }
+        }
+        for entry in val
+            .pointer("/data/dispositions")
+            .and_then(|v| v.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[])
+        {
+            let key = entry
+                .get("finding_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let disposition = entry
+                .get("disposition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let reason = entry.get("reason").and_then(|v| v.as_str()).unwrap_or("");
+            if !key.is_empty() {
+                dispositions.insert(key.to_string(), (disposition, reason));
+            }
+        }
+    }
+
+    let mut blockers: Vec<DispositionBlocker> = Vec::new();
+    if truncated {
+        blockers.push(DispositionBlocker {
+            finding_key: "(truncated remainder)".to_string(),
+            axis: "truncated-remainder",
+            hard: true,
+        });
+    }
+    for (key, primitive, raised) in &findings {
+        if !gate_finding_blocks(primitive) {
+            continue; // non-blocking by class: no action clears the gate
+        }
+        match dispositions.get(key) {
+            None => blockers.push(DispositionBlocker {
+                finding_key: key.clone(),
+                axis: "open",
+                hard: hard_finding(primitive),
+            }),
+            Some(("fixed", _)) => {
+                // Terminal only when a LATER round reviewed the fix delta.
+                if *raised >= last_round {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "fixed-unreviewed",
+                        hard: hard_finding(primitive),
+                    });
+                }
+            }
+            Some(("declined", reason)) => {
+                if reason.trim().is_empty() {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "declined-without-reason",
+                        hard: hard_finding(primitive),
+                    });
+                } else if self_attested_alone {
+                    blockers.push(DispositionBlocker {
+                        finding_key: key.clone(),
+                        axis: "declined-uncorroborated",
+                        hard: hard_finding(primitive),
+                    });
+                }
+            }
+            // A "nonblocking" disposition over a gate-blocking finding: the
+            // gate's re-derivation wins (Locked Decision 6).
+            Some(_) => blockers.push(DispositionBlocker {
+                finding_key: key.clone(),
+                axis: "open",
+                hard: hard_finding(primitive),
+            }),
+        }
+    }
+    blockers
+}
+
+/// Run `git rev-list` and return its commit lines, oldest first only when
+/// `--reverse` is in the args. None on any git failure (fail closed).
+fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>> {
+    // Through the bounded runner like every other stop-gate git read: a hung
+    // `rev-list` on a pathological history must read as not-tiled, never
+    // wedge the hook that called it.
+    let mut argv: Vec<&str> = vec!["rev-list"];
+    argv.extend_from_slice(args);
+    let out = git_bounded(git_bin, &argv, cwd)?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    Some(
+        text.lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
+    )
+}
+/// Review rounds since the last pass on this branch, from the attestation
+/// chain. A round is a review VERDICT since the last pass - CI failures, lint
+/// failures and rebases are not rounds - and a pass resets the counter. The
+/// declared `review_round` wins when present (the running max since the last
+/// reset); every event from before the field existed falls back to counting
+/// verdicts. Scoped exactly like the tiling and disposition scans: branch
+/// match, with the legacy exact-head admission. Pure: scans the events text,
+/// no IO. The Python gate-side mirror is `rounds_since_last_pass` in
+/// `_coverage_gate.py`; the two are held equal by the shared corpus.
+pub fn rounds_since_last_pass(events_text: &str, head_branch: &str, head_sha: &str) -> i64 {
+    let mut rounds: i64 = 0;
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head.is_empty() {
+            continue;
+        }
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        if val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass") {
+            rounds = 0;
+            continue;
+        }
+        match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
+            Some(n) if n >= 0 => rounds = rounds.max(n),
+            _ => rounds += 1,
+        }
+    }
+    rounds
+}
+
+/// Compute the range tiling for one PR's attestation chain.
+///
+/// Mechanics, no LLM, no new data: order the ancestry walk
+/// (`git rev-list --ancestry-path --reverse merge_base..head`), mark every
+/// walk commit covered by some in-scope attestation's range, and read the
+/// gap set off the marking. A merge commit from main into the branch is
+/// covered when a range spans it; it is not special-cased.
+pub fn compute_range_tiling(
+    git_bin: &str,
+    cwd: &Path,
+    base_ref: &str,
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+    max_rounds: i64,
+) -> RangeTiling {
+    let mut tiling = RangeTiling::default();
+    // Rounds do not depend on the git walk, so they are computed before the
+    // fail-closed early returns: a merge-base failure answers tiling
+    // not-tiled but the round budget honestly.
+    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha);
+    tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
+    // The merge base decides where coverage must start. An unresolvable one
+    // answers the whole question fail-closed.
+    let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
+    let merge_base = merge_out
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|s| !s.is_empty());
+    let Some(merge_base) = merge_base else {
+        return tiling;
+    };
+    let walk_spec = format!("{merge_base}..{head_sha}");
+    let Some(walk) = git_rev_list(git_bin, cwd, &["--ancestry-path", "--reverse", &walk_spec])
+    else {
+        return tiling;
+    };
+    let mut position: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, sha) in walk.iter().enumerate() {
+        position.insert(sha.as_str(), i);
+    }
+
+    // The in-scope attestation ranges for this PR: same scoping rule the pass
+    // scan uses (branch field, with the legacy exact-head admission). Both
+    // verdicts count - a review that found bugs still READ its range, and the
+    // disposition gate (not coverage) is what its findings must satisfy.
+    let mut ranges: Vec<(String, String)> = Vec::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head.is_empty() {
+            continue;
+        }
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if !attestation_in_scope(&line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        let range_base = val
+            .pointer("/data/reviewed_base_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let range_head = val
+            .pointer("/data/reviewed_head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        if range_base.is_empty() || range_head.is_empty() {
+            continue; // pre-range events carry no tile; they cover nothing here
+        }
+        ranges.push((range_base, range_head));
+    }
+
+    // A valid range's endpoints sit on the branch walk: its head at some
+    // position, and its base either the merge base itself or a walk commit.
+    // Anything else is dropped BY SHA - a rebased-away base, a head that no
+    // longer resolves - so the refusal names what fell out rather than
+    // silently shrinking the chain.
+    let mut valid: Vec<(usize, usize, String)> = Vec::new();
+    for (base, head) in ranges {
+        let head_pos = position.get(head.as_str()).copied();
+        let base_pos = if base == merge_base {
+            Some(usize::MAX) // sentinel: covers the walk from its first commit
+        } else {
+            position.get(base.as_str()).copied()
+        };
+        match (base_pos, head_pos) {
+            (Some(bp), Some(hp)) => {
+                let start = if bp == usize::MAX { 0 } else { bp + 1 };
+                if hp + 1 >= start {
+                    valid.push((start, hp, head));
+                } else {
+                    tiling.dropped.push(head);
+                }
+            }
+            _ => tiling.dropped.push(head),
+        }
+    }
+
+    let mut covered = vec![false; walk.len()];
+    for (start, end, _) in &valid {
+        for i in *start..=*end {
+            if i < covered.len() {
+                covered[i] = true;
+            }
+        }
+    }
+    tiling.tiled = covered.iter().all(|c| *c);
+    tiling.chain_heads = valid
+        .iter()
+        .map(|(_, _, h)| h.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Name each maximal uncovered run `parent-of-first..last` so the remedy
+    // is a range to review, never the head-loops "run the review verb at
+    // HEAD" that produced six rounds on one PR.
+    let mut i = 0usize;
+    while i < covered.len() {
+        if covered[i] {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < covered.len() && !covered[i] {
+            i += 1;
+        }
+        let end = i - 1;
+        let gap_base = if start == 0 {
+            merge_base.clone()
+        } else {
+            walk[start - 1].clone()
+        };
+        tiling.gaps.push((gap_base, walk[end].clone()));
+    }
+    tiling
 }
 
 /// Distinct `(reviewer, attester_session_id)` pairs whose LATEST
@@ -5261,13 +5913,15 @@ fn zero_evidence_attestation(val: &Value) -> bool {
 
 fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
     // (reviewer, attester_session_id) -> (head it attested, branch it named,
-    // was it a pass). The attester lives in the key so cross-session
-    // attestations join instead of replace. The HEAD is no longer a filter, it
-    // is a RESULT: which head an attestation pinned is what the freshness
-    // predicate needs, and dropping every non-matching line here is what made
-    // a rebase destroy a review.
-    let mut latest: std::collections::HashMap<(String, Option<String>), (String, String, bool)> =
-        std::collections::HashMap::new();
+    // was it a pass, the base its range measured). The attester lives in the
+    // key so cross-session attestations join instead of replace. The HEAD is
+    // no longer a filter, it is a RESULT: which head an attestation pinned is
+    // what the freshness predicate needs, and dropping every non-matching
+    // line here is what made a rebase destroy a review.
+    let mut latest: std::collections::HashMap<
+        (String, Option<String>),
+        (String, String, bool, String),
+    > = std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5347,23 +6001,37 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
             .map(|s| !s.is_empty())
             .unwrap_or(false);
         if is_retraction {
-            if let Some((existing_head, _, _)) = latest.get(&pair_key) {
+            if let Some((existing_head, _, _, _)) = latest.get(&pair_key) {
                 if existing_head != line_head {
                     continue;
                 }
             }
         }
-        latest.insert(pair_key, (line_head.to_string(), line_branch, is_pass));
+        // reviewed_base_sha rides along for the tiling chain: a same-pair
+        // re-attest after a push replaces the entry AND its range, so the
+        // chain never reads a superseded range as covering anything.
+        let reviewed_base = val
+            .pointer("/data/reviewed_base_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        latest.insert(
+            pair_key,
+            (line_head.to_string(), line_branch, is_pass, reviewed_base),
+        );
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
-        .filter(|(_, (_, _, pass))| *pass)
-        .map(|((reviewer, attester), (head, branch, _))| LocalPass {
-            reviewer,
-            attester,
-            head,
-            branch,
-        })
+        .filter(|(_, (_, _, pass, _))| *pass)
+        .map(
+            |((reviewer, attester), (head, branch, _, reviewed_base))| LocalPass {
+                reviewer,
+                attester,
+                head,
+                branch,
+                reviewed_base,
+            },
+        )
         .collect();
     out.sort_by(|a, b| {
         (&a.reviewer, &a.attester, &a.head).cmp(&(&b.reviewer, &b.attester, &b.head))
@@ -5414,6 +6082,44 @@ pub fn classify_coverage(
     freshness: &dyn Fn(&str) -> Freshness,
     head_branch: &str,
     head_sha: &str,
+) -> CoverageReport {
+    classify_coverage_tiled(
+        reviews,
+        comments,
+        events_text,
+        github_app_logins,
+        github_read_ok,
+        author_session,
+        freshness,
+        head_branch,
+        head_sha,
+        None,
+        None,
+        false,
+    )
+}
+
+/// [`classify_coverage`] with the range-tiling answer supplied. The two
+/// production call sites compute the tiling once and pass it; the bare
+/// spelling keeps the pre-tiling semantics for the unit-test corpus.
+/// `pr_author` is the PR author's login (None = unreadable, which excludes
+/// human approvals from the count fail-closed); `github_approval_satisfies`
+/// is the resolved config flag (false on the bare spelling = today's
+/// semantics for the unit-test corpus).
+#[allow(clippy::too_many_arguments)]
+pub fn classify_coverage_tiled(
+    reviews: &[Value],
+    comments: &[Value],
+    events_text: &str,
+    github_app_logins: &[String],
+    github_read_ok: bool,
+    author_session: Option<&str>,
+    freshness: &dyn Fn(&str) -> Freshness,
+    head_branch: &str,
+    head_sha: &str,
+    tiling: Option<&RangeTiling>,
+    pr_author: Option<&str>,
+    github_approval_satisfies: bool,
 ) -> CoverageReport {
     let local_passes = local_latest_passes(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
@@ -5511,6 +6217,7 @@ pub fn classify_coverage(
                 name: login.to_string(),
                 verdict,
                 human_approval: false,
+                author_approval: false,
                 attestation_origin: AttestationOrigin::Unknown,
                 reviewed_sha,
                 freshness: fresh,
@@ -5530,6 +6237,7 @@ pub fn classify_coverage(
                         CoverageVerdict::Stale
                     },
                     human_approval: false,
+                    author_approval: false,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
@@ -5566,6 +6274,15 @@ pub fn classify_coverage(
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 let fresh = freshness(oid);
+                // The belt over GitHub's braces: the server refuses an
+                // author's own approval, and this asserts the property the
+                // counting rule depends on instead of inferring it. An
+                // unreadable PR author (None) asserts author_approval - the
+                // fail-closed direction is "do not count", never "count".
+                let author_approval = match pr_author {
+                    Some(pa) => login_equals(pa, author),
+                    None => true,
+                };
                 verdicts.push(ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: author.to_string(),
@@ -5575,6 +6292,7 @@ pub fn classify_coverage(
                         CoverageVerdict::Stale
                     },
                     human_approval: true,
+                    author_approval,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
@@ -5587,17 +6305,26 @@ pub fn classify_coverage(
     // local_attestation axis: one verdict per distinct latest `pass`, labeled
     // with whether the authoring session emitted it, and pinned to the head the
     // attestation itself recorded rather than to the head at eval time.
+    // A verdict also counts when the branch's attestation CHAIN tiles
+    // base..head and this pass is one of its links: every commit that fixes a
+    // finding moves the head, so under a single-attestation freshness rule a
+    // disciplined fix-and-re-review loop still cannot terminate. Tiling is
+    // what makes the later rounds of that loop count.
     for lp in &local_passes {
         let fresh = freshness(&lp.head);
+        let chain_member = tiling
+            .map(|t| t.tiled && t.chain_heads.iter().any(|h| h == &lp.head))
+            .unwrap_or(false);
         verdicts.push(ReviewerVerdict {
             producer: CoverageProducer::LocalAttestation,
             name: lp.reviewer.clone(),
-            verdict: if fresh.counts() {
+            verdict: if fresh.counts() || chain_member {
                 CoverageVerdict::Reviewed
             } else {
                 CoverageVerdict::Stale
             },
             human_approval: false,
+            author_approval: false,
             attestation_origin: classify_attestation_origin(lp.attester.as_deref(), author_session),
             reviewed_sha: lp.head.clone(),
             freshness: Some(fresh),
@@ -5628,12 +6355,19 @@ pub fn classify_coverage(
         Coverage::Covered(
             verdicts
                 .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .filter(|v| {
+                    v.verdict == CoverageVerdict::Reviewed
+                        && human_approval_counts(v, github_approval_satisfies)
+                })
                 .count(),
         )
     };
 
-    CoverageReport { coverage, verdicts }
+    CoverageReport {
+        coverage,
+        verdicts,
+        github_approval_satisfies,
+    }
 }
 
 /// Build the `review_coverage` event payload. The per-reviewer verdicts
@@ -5652,6 +6386,17 @@ fn coverage_event_data(
     head_sha: &str,
     repo: &str,
     author_session: Option<&str>,
+) -> serde_json::Value {
+    coverage_event_data_tiled(pr, rep, head_sha, repo, author_session, None)
+}
+
+fn coverage_event_data_tiled(
+    pr: i64,
+    rep: &CoverageReport,
+    head_sha: &str,
+    repo: &str,
+    author_session: Option<&str>,
+    tiling: Option<&RangeTiling>,
 ) -> serde_json::Value {
     // Three states, not two. `Covered(0)` is a real known zero and
     // `Coverage::is_covered()` has always returned false for it, but the
@@ -5706,6 +6451,28 @@ fn coverage_event_data(
     if !repo.is_empty() {
         data["repo"] = serde_json::json!(repo);
     }
+    // The tiling answer, so the Python readers (which cannot re-run the git
+    // walk the Rust side ran) see the same chain: which ranges covered, which
+    // dropped, and the uncovered stretches named by sha. A refusal that says
+    // only "0 reviewed" cannot tell a never-reviewed PR from a one-gap chain.
+    if let Some(t) = tiling {
+        let gaps: Vec<String> = t.gaps.iter().map(|(a, b)| format!("{a}..{b}")).collect();
+        data["range_tiling"] = serde_json::json!({
+            "tiled": t.tiled,
+            "gaps": gaps,
+            "dropped": t.dropped,
+            "chain_heads": t.chain_heads,
+        });
+        // The round budget, same chain, same scoping. Emitted beside the
+        // tiling (not inside it) because it is a property of the review
+        // loop, not of the ranges: a chain can tile perfectly and still have
+        // burned its rounds. `rounds_exhausted` is the advisory flag the
+        // status surface names its blocker from; the merge gate re-derives
+        // before refusing (Locked Decision 6: never trust a producer count).
+        data["rounds_used"] = serde_json::json!(t.rounds_used);
+        data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
+        data["impossible"] = serde_json::json!(t.impossible);
+    }
     data
 }
 
@@ -5749,7 +6516,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
             let reviewed_names: Vec<&str> = rep
                 .verdicts
                 .iter()
-                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .filter(|v| {
+                    v.verdict == CoverageVerdict::Reviewed
+                        && human_approval_counts(v, rep.github_approval_satisfies)
+                })
                 .map(|v| v.name.as_str())
                 .collect();
             if *n > 0 {
@@ -5771,7 +6541,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
-                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .filter(|v| {
+                        v.verdict == CoverageVerdict::Reviewed
+                            && human_approval_counts(v, rep.github_approval_satisfies)
+                    })
                     .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
                         AttestationOrigin::SelfAttested => (s + 1, o, u),
                         AttestationOrigin::OtherSession => (s, o + 1, u),
@@ -8047,6 +8820,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &repo_slug,
             manifest.harness_session_id.as_deref(),
             settings.require_corroboration.unwrap_or(false),
+            settings.github_approval_satisfies.unwrap_or(true),
+            settings.max_rounds.unwrap_or(2).max(1),
         );
 
         match done_result {
@@ -8901,6 +9676,8 @@ fn run_done(
     repo_slug: &str,
     author_session: Option<&str>,
     require_corroboration: bool,
+    github_approval_satisfies: bool,
+    max_rounds: i64,
 ) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
@@ -8922,6 +9699,8 @@ fn run_done(
         None,
         None,
         require_corroboration,
+        github_approval_satisfies,
+        max_rounds,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -11481,6 +12260,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 let data = coverage_event_data(
                     pr_num,
                     &CoverageReport {
+                        github_approval_satisfies: false,
                         coverage: Coverage::Unknown,
                         verdicts: Vec::new(),
                     },
@@ -11567,6 +12347,8 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         pr.as_deref(),
         prefetched_pr_json,
         inputs.settings.require_corroboration.unwrap_or(false),
+        inputs.settings.github_approval_satisfies.unwrap_or(true),
+        inputs.settings.max_rounds.unwrap_or(2).max(1),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -11596,12 +12378,13 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             }
             (
                 0,
-                coverage_event_data(
+                coverage_event_data_tiled(
                     pr_info.number,
                     &pr_info.coverage,
                     &head_sha,
                     &inputs.repo_slug,
                     author_session.as_deref(),
+                    Some(&pr_info.range_tiling),
                 )
                 .to_string(),
             )
@@ -11630,6 +12413,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 let data = coverage_event_data(
                     pr_num,
                     &CoverageReport {
+                        github_approval_satisfies: false,
                         coverage: Coverage::Unknown,
                         verdicts: Vec::new(),
                     },
@@ -11658,6 +12442,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &head_sha,
                         &head_sha,
                         &CoverageReport {
+                            github_approval_satisfies: false,
                             coverage: Coverage::Unknown,
                             verdicts: Vec::new(),
                         },
@@ -13186,6 +13971,22 @@ mod tests {
     }
 
     #[test]
+    fn github_approval_satisfies_parses_lax_bool_spellings_and_defaults_on() {
+        // Absent -> None -> unwrap_or(true), the default-ON direction; the
+        // pydantic string spellings parse the same way require_corroboration's
+        // do, so one config cannot load true on one gate and false on the other.
+        let absent = parse_settings("[review]\n");
+        assert_eq!(absent.github_approval_satisfies, None);
+        assert_eq!(absent.github_approval_satisfies.unwrap_or(true), true);
+
+        let spelled = parse_settings("[review]\ngithub_approval_satisfies = \"yes\"\n");
+        assert_eq!(spelled.github_approval_satisfies, Some(true));
+
+        let off = parse_settings("[review]\ngithub_approval_satisfies = false\n");
+        assert_eq!(off.github_approval_satisfies, Some(false));
+    }
+
+    #[test]
     fn a_retraction_revokes_the_named_pair_not_the_retractor() {
         // The retraction verb addresses the EVENT, not the identity: an
         // operator session emits a fail carrying retracts_attester naming the
@@ -13527,6 +14328,7 @@ mod tests {
     #[test]
     fn coverage_event_carries_the_repo_slug() {
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
@@ -13551,6 +14353,7 @@ mod tests {
         // must be able to tell "not attributed" from "attributed to nothing",
         // and decline to match it either way.
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Unknown,
             verdicts: vec![],
         };
@@ -13568,6 +14371,7 @@ mod tests {
         let project = dir.path().join("worktree-events.jsonl");
         let global = dir.path().join("global-events.jsonl");
         let rep = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
@@ -14558,6 +15362,7 @@ mod tests {
         // flight; a Pending conclusion must read as "still running", never
         // as the misleading "CI red ... failed" (observed live on PR #455).
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 455,
             head_oid: "abc".to_string(),
@@ -14575,6 +15380,7 @@ mod tests {
             unattested_reviewers: vec![],
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![],
             },
@@ -14593,6 +15399,7 @@ mod tests {
         pr.ci_conclusion = CiConclusion::Success;
         pr.ci_has_pending = false;
         pr.coverage = CoverageReport {
+            github_approval_satisfies: false,
             coverage: Coverage::Unknown,
             verdicts: vec![],
         };
@@ -14614,6 +15421,7 @@ mod tests {
         // harness-tracked watcher with a timeout and emitting <watching>,
         // replacing the old "wait silently" prose.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Pending,
             ci_has_pending: true,
             ..watch_pr()
@@ -14751,6 +15559,7 @@ git_bounded();";
     #[test]
     fn unwatched_async_nudge_missing_review_teaches_arm_and_tag() {
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
@@ -14767,6 +15576,7 @@ git_bounded();";
     /// An open PR whose head matches local HEAD, CI still pending, no findings.
     fn watch_pr() -> PrInfo {
         PrInfo {
+            range_tiling: RangeTiling::default(),
             state: PrState::Open,
             number: 404,
             head_oid: "abc".to_string(),
@@ -14784,6 +15594,7 @@ git_bounded();";
             unattested_reviewers: vec![],
             malformed_attestations: 0,
             coverage: CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![],
             },
@@ -14799,12 +15610,14 @@ git_bounded();";
         let bounced = || {
             let mut pr = watch_pr();
             pr.coverage = CoverageReport {
+                github_approval_satisfies: false,
                 coverage: Coverage::Covered(0),
                 verdicts: vec![ReviewerVerdict {
                     producer: CoverageProducer::GithubApp,
                     name: "chatgpt-codex-connector".to_string(),
                     verdict: CoverageVerdict::Refused,
                     human_approval: false,
+                    author_approval: false,
                     attestation_origin: AttestationOrigin::Unknown,
                     reviewed_sha: String::new(),
                     freshness: None,
@@ -14892,6 +15705,7 @@ git_bounded();";
     fn watch_idle_classifies_awaiting_review() {
         // CI green, no pending checks, and a required GitHub bot has not reviewed.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
@@ -14908,6 +15722,7 @@ git_bounded();";
         // gemini finding: a check has ALREADY concluded red while others run.
         // The agent should debug now, not idle out the remaining pending checks.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Failure(Some("unit".into())),
             ci_has_pending: true,
             ..watch_pr()
@@ -14921,6 +15736,7 @@ git_bounded();";
         // attestation (sigma) or unaddressed-finding gate - no GitHub reviewer
         // will ever post to wake the session, so idling would park it forever.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
@@ -14947,6 +15763,7 @@ git_bounded();";
     }
     fn bot_review_pr(login: &str, nudges: Vec<BotNudge>) -> PrInfo {
         PrInfo {
+            range_tiling: RangeTiling::default(),
             number: 618,
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
@@ -15145,6 +15962,7 @@ git_bounded();";
         // AC14: an unaddressed finding by a known bot names the handle a reply
         // must address, not just "reply in-thread".
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
@@ -15214,6 +16032,7 @@ git_bounded();";
     /// head-pinned attestation. `reviewers_ok` was the sole failing term.
     fn reviewers_gate_pr() -> PrInfo {
         PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Success,
             ci_has_pending: false,
             reviewed: false,
@@ -15292,6 +16111,7 @@ git_bounded();";
         // A session that ran sigma and then pushed must not read "you never
         // ran sigma"; name the head the pass is pinned to.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: Some("0123456789abcdef".to_string()),
@@ -15309,6 +16129,7 @@ git_bounded();";
         // The fallback is only reachable with an EMPTY missing_bots, which
         // async_wait_class refuses to idle. It must not teach the ritual either.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![],
             ..reviewers_gate_pr()
         };
@@ -15322,6 +16143,7 @@ git_bounded();";
         // AC7-adjacent regression: a REAL outstanding GitHub bot, and nothing
         // local outstanding, is a valid async wait and keeps today's message.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             missing_bots: vec!["chatgpt-codex-connector".into()],
             bot_nudges: vec![],
             unattested_reviewers: vec![],
@@ -15340,6 +16162,7 @@ git_bounded();";
         // and the run dies on budget with the gate still unmet - the #618 shape
         // this node exists to delete.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             missing_bots: vec!["chatgpt-codex-connector".into()],
             bot_nudges: vec![],
             ..reviewers_gate_pr()
@@ -15350,6 +16173,7 @@ git_bounded();";
         // Once the local half is attested, the bot wait is the sole blocker and
         // the arm-and-tag message returns.
         let after = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![],
             ..pr
         };
@@ -15459,6 +16283,7 @@ git_bounded();";
         assert_eq!(malformed, 1, "and it is counted, not silently dropped");
 
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             malformed_attestations: malformed,
             ..reviewers_gate_pr()
         };
@@ -15588,6 +16413,7 @@ git_bounded();";
         assert_eq!(short_sha(""), "");
         assert_eq!(short_sha("1234567\u{e9}xyz"), "1234567\u{e9}");
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: Some("1234567\u{e9}abc".to_string()),
@@ -15605,6 +16431,7 @@ git_bounded();";
         // finding, or an open operator finding). The hint is now derived from
         // that same classifier, so the two agree by construction.
         let bot_only = PrInfo {
+            range_tiling: RangeTiling::default(),
             missing_bots: vec!["chatgpt-codex-connector".into()],
             bot_nudges: vec![],
             unattested_reviewers: vec![],
@@ -15621,6 +16448,7 @@ git_bounded();";
             (
                 "bot + unaddressed finding (renders as the finding)",
                 PrInfo {
+                    range_tiling: RangeTiling::default(),
                     missing_bots: vec!["chatgpt-codex-connector".into()],
                     bot_nudges: vec![],
                     unattested_reviewers: vec![],
@@ -15641,6 +16469,7 @@ git_bounded();";
                 // The one that DOES reach `missing_bots` while non-idlable.
                 "bot + open operator finding",
                 PrInfo {
+                    range_tiling: RangeTiling::default(),
                     missing_bots: vec!["chatgpt-codex-connector".into()],
                     bot_nudges: vec![],
                     unattested_reviewers: vec![],
@@ -15664,6 +16493,7 @@ git_bounded();";
         // which supersedes any attestation produced first. Naming the reviewer
         // first would make the session run the panel twice.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unaddressed_findings: vec![Finding {
                 id: 1,
                 author: "codex".into(),
@@ -15680,6 +16510,7 @@ git_bounded();";
         assert!(!reason.contains("reviewers gate unmet"), "got: {reason}");
         // With the finding cleared, the reviewers gate is what is named.
         let after = PrInfo {
+            range_tiling: RangeTiling::default(),
             unaddressed_findings: vec![],
             ..pr
         };
@@ -15694,6 +16525,7 @@ git_bounded();";
         // "reply in-thread" a worker who posted a top-level comment reads as
         // "I did reply" (PR #447, #787 both stalled green PRs this way).
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unaddressed_findings: vec![Finding {
                 id: 1,
                 author: "codex".into(),
@@ -15717,6 +16549,7 @@ git_bounded();";
         // "no head-pinned review_attestation" reads as "you never ran it" to a
         // session that ran the reviewer and was told no.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "sigma".to_string(),
                 superseded_head: None,
@@ -15733,6 +16566,7 @@ git_bounded();";
         // AC5: every surface that prints `declare` says it asserts nothing.
         // The Rust block message is such a surface.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unattested_reviewers: vec![UnattestedReviewer {
                 name: "declare".to_string(),
                 superseded_head: None,
@@ -15772,6 +16606,7 @@ git_bounded();";
         // outstanding, a stray <watching> tag must not park the session on work
         // it could do now.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             missing_bots: vec!["chatgpt-codex-connector".into()],
             bot_nudges: vec![],
             ..reviewers_gate_pr()
@@ -15881,6 +16716,7 @@ git_bounded();";
     /// Shared fixture for the head_is_shipped cases: a PR recording `pr_head`.
     fn shipped_pr(pr_head: &str, state: PrState) -> PrInfo {
         PrInfo {
+            range_tiling: RangeTiling::default(),
             head_oid: pr_head.to_string(),
             state,
             ..reviewers_gate_pr()
@@ -16852,6 +17688,7 @@ git_bounded();";
     fn watch_idle_rejects_ci_red() {
         // AC1-ERR: settled-red CI (no pending) blocks, never idles.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             ci_conclusion: CiConclusion::Failure(Some("unit".into())),
             ci_has_pending: false,
             ..watch_pr()
@@ -16863,6 +17700,7 @@ git_bounded();";
     fn watch_idle_rejects_unaddressed_finding() {
         // AC2-ERR: an unaddressed blocking inline finding is not async-wait.
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             unaddressed_findings: vec![Finding {
                 id: 1,
                 author: "codex".into(),
@@ -16887,6 +17725,7 @@ git_bounded();";
     fn watch_idle_rejects_non_open_pr() {
         // A merged/closed PR is not an async wait (green+merged is DonePRGreen).
         let pr = PrInfo {
+            range_tiling: RangeTiling::default(),
             state: PrState::Merged,
             ..watch_pr()
         };

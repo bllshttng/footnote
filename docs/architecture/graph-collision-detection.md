@@ -130,6 +130,8 @@ having compared against it at all.
 A `high`-severity overlap skips the candidate and logs the node it collides with
 and the shared files.
 
+Guard order in `_classify_lane_candidate`: `peer-lane`, then collision, then domain. Domain was a proxy for "these will not collide". The collision gate is the real measurement, so it runs first and never defers to the proxy. Two same-domain nodes with disjoint file surfaces co-schedule. What remains of domain is a tiebreak. An unevaluated candidate whose domain is already held carries `unevaluated:no-surface+same-domain:<domain>`, so the report still explains the serialized unknown. Intake keeps the unevaluated class plan-less by refusing a plan whose `## Files to Modify` parses empty (`--allow-no-surface` to override).
+
 Two properties are load-bearing:
 
 - **The node stays `ready`, never parked.** Skipping is the reversible option:

@@ -37,7 +37,7 @@ That is the whole job when a backlog node or plan is already bound. `fno do targ
 
 **Which path you are on is a READ, not a guess** - dispatch off the node's real state (`fno backlog get <id>`), never self-classification:
 
-- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. The idea-first work (think, blueprint, discovery) is already done - do not re-open it or load its references. Two things still scale with the run and are NOT skipped: the **size profile** (S/M/L) sets the post-build phases (M adds docs + external; L adds adversarial, browser, clean - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md)), and a **multi-wave** plan invokes the wave-boundary handoff at each wave ([references/self-handoff.md](references/self-handoff.md)). A flat single-file plan (the dominant case) has neither and also skips `ph_write`.
+- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. The idea-first work (think, blueprint, discovery) is already done - do not re-open it or load its references. The **size profile** (S/M/L) still sets the post-build phases (M adds docs + external; L adds adversarial, browser, clean - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md)). Multi-wave plans continue in this session across wave boundaries. A flat single-file plan also skips `ph_write`.
 - **design-rung node** (a plan is bound but its frontmatter still reads `status: design`): take the `/blueprint`-first branch below, then the spine.
 - **bare idea** (no plan): take the `/blueprint`-first branch below, then the spine.
 
@@ -79,7 +79,6 @@ Provider parity is hook-driven. The shared state machine and completion gates st
 
 Environment-specific traps that defy reasonable assumptions. Read these before you hit them.
 
-- **The `fno do target start` receipt can lie** (theme 1, x-39c0). Historically it printed `plan: none` for a node that had a `plan_path`, `node=already-claimed` when the claim was free, and `base=origin/main` when the branch was 10-20 commits stale. Verify the three load-bearing lines against source before trusting them: `fno backlog get <id>` (real `status` + any bound plan), `fno agents claim status node:<id>` (real holder), `git fetch origin main` then `git rev-list --count HEAD..origin/main` (real base distance - the count reads the LOCAL `origin/main` ref, so skipping the fetch makes a stale ref answer 0 for a branch that is dozens of commits behind, and you learn otherwise only when the PR conflicts).
 - **`fno doctor test`, not bare `pytest`.** `fno doctor test [paths...]` pins the worktree `PYTHONPATH`, bypasses the rtk tee wrapper, and returns the real exit code. Bare `pytest` in a worktree imports the wrong `fno` and can report a false green; `cmd | tail` masks the real `$?`.
 - **Read the RESOLVED `auto_merge_approved` from the manifest, never `fno config get auto_merge`.** Init folds config with this run's modifiers. `/target bg` injects `--no-merge` by default. The raw config tells you to merge against an explicit per-run prohibition.
 - **`git checkout -- <file>` destroys uncommitted work** and is NOT stash-recoverable. In a stale-base worktree, `git add -A` can revert an unmerged merge - stage named files, never `-A`.
@@ -278,7 +277,7 @@ fi
 
 ### 4. Execute Pipeline
 
-**Boundary handoff + cross-project routing.** For a multi-wave plan, INVOKE the handoff helper (`handoff.sh --boundary wave`) at every wave boundary (and at the blueprint->do boundary) - always invoke it, never skip it: its pressure probe parks itself when context is low and spawns a fresh-context successor when context is high, so skipping it silently drops that succession and a high-context run barrels into later waves. A legacy `cross_project: true` manifest routes to spawn-into-project rather than a (removed) parallel pipeline. The helper contract, the `RESULT: BLOCKED` claim-wait stop, and the decision-line exit table are in [references/self-handoff.md](references/self-handoff.md) - load it at a boundary. Never invoke a handoff mid-wave or mid-task.
+**Capability escalation + cross-project routing.** Context pressure is handled by compaction and never triggers a fresh session. Continue across blueprint/do and wave boundaries in this session. Only an external operator or supervising king may invoke the explicit capability-escalation transaction after selecting a stronger destination. Its proof and decision-line contract are in [references/self-handoff.md](references/self-handoff.md). A legacy `cross_project: true` manifest still routes foreign work through spawn-into-project rather than a removed parallel pipeline.
 
 ---
 
@@ -384,7 +383,7 @@ Loaded by state — the "read X when Y" load conditions are inline above; this i
 - [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md) - Attended Claude Plan-Mode backfill front door
 - [references/plan-mode-backfill.md](references/plan-mode-backfill.md) - Backfill adapter mechanics (deeper contract)
 - [references/ship-and-promise.md](references/ship-and-promise.md) - Draining reviews + local review gates before `<promise>`
-- [references/self-handoff.md](references/self-handoff.md) - Pipeline-boundary handoff + retired cross-project routing
+- [references/self-handoff.md](references/self-handoff.md) - Explicit capability escalation + retired cross-project routing
 - [references/phase-handoff.md](references/phase-handoff.md) - Best-effort per-phase handoff artifacts (multi-phase only)
 - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md) - Full phase map + compose-don't-hardcode rationale
 - [references/completion-model.md](references/completion-model.md) - Completion internals: manifest, stop-hook shim, loop-check verb, done() reads, backstop, TerminationReason

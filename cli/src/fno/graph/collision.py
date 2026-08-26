@@ -218,7 +218,10 @@ def _scan_one(path: Path) -> set[str]:
     """Read a single markdown file and pull out its files-to-modify set."""
     try:
         text = path.read_text()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # UnicodeDecodeError (a ValueError) escapes a bare OSError catch, so a
+        # single non-UTF-8 byte crashed the caller instead of parsing empty -
+        # the same containment _read_plan_frontmatter already applies.
         print(f"Warning: collision parser cannot read {path}: {exc}", file=sys.stderr)
         return set()
 

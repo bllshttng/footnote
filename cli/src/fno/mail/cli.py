@@ -3049,6 +3049,13 @@ def _raw_send(
         mail_inject_probe,
     )
     from fno.agents.registry import AgentResolutionError, resolve_agent
+    from fno.review.invocation import (
+        adopt_pending_invocation,
+        emit_review_invocation,
+        mint_invocation_id,
+        parse_review_invocation,
+        write_pending_invocation,
+    )
 
     def _refused(reason: str, *, usage: bool = False) -> None:
         # Under --check a refusal about the SESSION is an ANSWER, not an error:
@@ -3137,6 +3144,7 @@ def _raw_send(
         _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
 
     session_id = getattr(entry, "harness_session_id", None) or ""
+    review = parse_review_invocation(stripped)
 
     # 5. Self-send redirect. The transport is send-keys: an unwrapped payload is
     #    text typed at a prompt line, so nothing here can be a capability
@@ -3177,9 +3185,9 @@ def _raw_send(
     #     send here can do nothing and must refuse loud rather than silently
     #     not-deliver. Under --check this refusal is an ANSWER about the
     #     session, the same not-injectable shape as any other no-path verdict.
-    from fno.agents.dispatch import BUS_ONLY_POLICY
+    from fno.agents.dispatch import BUS_ONLY_POLICY, _delivery_policy_refusal
 
-    if getattr(entry, "delivery_policy", None) == BUS_ONLY_POLICY:
+    if _delivery_policy_refusal(entry) == BUS_ONLY_POLICY:
         _refused(
             f"{name!r} has delivery-policy bus-only: prompt-line injection is "
             "forbidden for this recipient. Send wrapped mail instead - it "
@@ -3196,6 +3204,70 @@ def _raw_send(
     transport_sender = resolve_self_handle()
     sender = stamp_from(transport_sender)
     raw_recipient = canonical_handle(session_id)
+
+    invocation_id = None
+    failure_reasons: list[str] = []
+    if review and not check:
+        invocation_id = mint_invocation_id()
+        if not write_pending_invocation(
+            target_session_id=session_id,
+            invocation_id=invocation_id,
+        ):
+            # A stale unconsumed sidecar owns the slot. Consume it and
+            # retry once so this review's id is the one the reviewer-side
+            # hook adopts; without this, the sent row carries a fresh id no
+            # sidecar holds and the join never closes for any later review.
+            adopt_pending_invocation(session_id)
+            write_pending_invocation(
+                target_session_id=session_id,
+                invocation_id=invocation_id,
+            )
+
+    def _emit_review_sent(
+        *,
+        transport: str,
+        result: object,
+        receipt: str | None = None,
+        submit_required: bool = False,
+    ) -> None:
+        if review is None or invocation_id is None:
+            return
+        if transport == "codex_rpc":
+            return
+        confirmed = result is True or result in {"started", "queued"}
+        if receipt is None:
+            receipt = "delivered (hosted)" if confirmed else "live-miss"
+        initiator = "self" if self_ok else "king"
+        if origin == "operator":
+            initiator = "operator"
+        elif origin in {"scheduler", "recovery"}:
+            initiator = "daemon"
+        submit_key = None
+        if submit_required:
+            submit_key = "tab" if getattr(entry, "harness", "") == "codex" and review else "\\r"
+        pr = None
+        explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(str(review.get("args_raw") or ""))
+        if explicit_pr:
+            pr = int(explicit_pr.group("pr"))
+        emit_review_invocation(
+            source="daemon",
+            invocation_id=invocation_id,
+            stage="sent",
+            verb=review["verb"],
+            args_raw=review["args_raw"],
+            level=review["level"],
+            level_source=review["level_source"],
+            flags=review["flags"],
+            transport=transport,
+            initiator=initiator,
+            initiator_session_id=transport_sender,
+            target_session_id=session_id or None,
+            submit_required=submit_required,
+            submit_key=submit_key,
+            submit_confirmed=confirmed if submit_required else None,
+            receipt=receipt,
+            pr=pr,
+        )
 
     def _reserve_raw():
         raw_msg_id = generate_msg_id()
@@ -3305,6 +3377,8 @@ def _raw_send(
             if origin is not None:
                 review_kwargs["origin"] = origin
             receipt = _review_start_codex(session_id, target, **review_kwargs)
+            # No Python sent row here by design: the Rust review-start path
+            # owns the one codex_rpc review_invocation event.
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""
@@ -3433,7 +3507,9 @@ def _raw_send(
             # wall's default, the verb never runs, and codex has no transcript
             # confirm, so the receipt still reads `injected`.
             gate=True,
-            review=review_request,
+            review=review is not None,
+            review_invocation_id=invocation_id,
+            failure_out=failure_reasons,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
@@ -3442,6 +3518,14 @@ def _raw_send(
             sender=transport_sender,
             origin=origin,
         )
+
+    failure_receipt = failure_reasons[-1] if failure_reasons else None
+    _emit_review_sent(
+        transport=("mux_pane_send_raw" if entry.mux else ("mail_to_self_raw" if self_ok else "mail_send_raw")),
+        result=delivered,
+        receipt=(str(delivered) if isinstance(delivered, str) else failure_receipt),
+        submit_required=bool(entry.mux),
+    )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     # The note used to read as a refusal: it named a defect in the argument and
@@ -4872,7 +4956,12 @@ def cmd_hold(
         "--minutes",
         "-m",
         help="Idle minutes before the hold lifts by itself (default 5). The "
-        "window restarts every time you submit a prompt.",
+        "quiet window restarts every prompt and ends at 2x the requested window.",
+    ),
+    for_minutes: int = typer.Option(
+        None,
+        "--for",
+        help="Wall-clock minutes before the hold lifts. The deadline never moves.",
     ),
     off: bool = typer.Option(
         False, "--off", help="Lift the hold now and deliver what it held."
@@ -4885,10 +4974,10 @@ def cmd_hold(
 
     While the hold is on, mail addressed to this session never pastes into the
     prompt line. It queues durable and the sender gets a receipt saying so.
-    The hold lifts by itself after ``--minutes`` of no prompt from you, and the
-    lift DELIVERS - it does not wait for you to type. That is the whole point:
-    a hold whose only drain trigger is the operator converts an interruption
-    into a stall.
+    ``--minutes`` runs the quiet-minutes idle clock and re-arms on every prompt,
+    with an absolute ceiling at twice the requested window. ``--for`` runs a
+    wall clock and never moves its deadline. Either lift DELIVERS without a new
+    prompt, so a hold whose only drain trigger is the operator cannot stall.
 
     The hold reuses the ``delivery_policy = "bus-only"`` flag that already
     exists on the agent row, so every injector lane refuses it before any
@@ -4900,6 +4989,10 @@ def cmd_hold(
     from fno.mail import hold as hold_mod
 
     handle, ident = _self_handle_or_exit()
+
+    if minutes is not None and for_minutes is not None:
+        sys.stderr.write("error: --minutes and --for are mutually exclusive\n")
+        raise typer.Exit(code=2)
 
     if status:
         # Ask the delivery gate, not the clock. A flag stamped by
@@ -4925,7 +5018,11 @@ def cmd_hold(
                 "delivery gate - run `fno agents mail hold --off` to clear it"
             )
         else:
-            print(f"{handle}: holding mail, lifts in {label.lstrip('~')}")
+            clock = hold_mod.read_any(handle)
+            print(
+                f"{handle}: holding mail, {hold_mod.clock_description(clock)}, "
+                f"lifts in {label.lstrip('~')}"
+            )
         return
 
     if off:
@@ -4950,9 +5047,15 @@ def cmd_hold(
             print("hold off: nothing was held")
         return
 
-    window = hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    wall_clock = for_minutes is not None
+    window = (
+        for_minutes
+        if wall_clock
+        else hold_mod.DEFAULT_MINUTES if minutes is None else minutes
+    )
     if window < 1:
-        sys.stderr.write("error: --minutes must be at least 1\n")
+        flag = "--for" if wall_clock else "--minutes"
+        sys.stderr.write(f"error: {flag} must be at least 1\n")
         raise typer.Exit(code=2)
 
     from fno.agents.registry import register_existing_session
@@ -4963,7 +5066,7 @@ def cmd_hold(
         cwd=os.getcwd(),
         delivery_policy="bus-only",
     )
-    clock = hold_mod.arm(handle, window)
+    clock = hold_mod.arm_wall(handle, window) if wall_clock else hold_mod.arm(handle, window)
 
     # The third drain trigger. Detached on purpose: it must outlive this CLI
     # invocation, because the whole contract is that the drain happens with no
@@ -4989,9 +5092,10 @@ def cmd_hold(
             armed = False
 
     until = clock.until or datetime.now(timezone.utc)
+    clock_text = hold_mod.clock_description(clock)
     print(
-        f"busy mode on for {handle}: mail holds until "
-        f"{until.strftime('%H:%M:%S')} UTC ({window}m idle), then delivers itself."
+        f"busy mode on for {handle}: {clock_text}, holds until "
+        f"{until.strftime('%H:%M:%S')} UTC ({window}m), then delivers itself."
     )
     if not armed:
         print(
@@ -5386,12 +5490,11 @@ def cmd_notify_self() -> None:
 
     handle = canonical_handle(ident.session_id)
 
-    # Busy mode (x-481e). This hook fires on every UserPromptSubmit, which is
-    # precisely the "the operator is not idle" signal the hold window resets
-    # on - so one hook is both the suppressor and the idle re-arm, and no new
-    # wiring is needed. A live timed hold renders nothing and pushes its own
-    # deadline out. A lapsed one is tidied here rather than on the send path,
-    # where the gate stays a pure read to avoid a re-entrant registry lock.
+    # Busy mode (x-481e). This hook fires on every UserPromptSubmit. For an idle
+    # hold that is the re-arm signal. For a wall hold it only keeps the policy
+    # live without moving its fixed deadline. A lapsed one is tidied here rather
+    # than on the send path, where the gate stays a pure read to avoid a
+    # re-entrant registry lock.
     # Both calls WRITE, so both are wrapped: a hold that cannot be extended or
     # tidied must degrade to rendering the mail, never to swallowing this
     # turn's delivery. Busy mode is a convenience layered over the bus, and it

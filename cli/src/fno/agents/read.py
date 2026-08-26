@@ -19,9 +19,9 @@ from types import SimpleNamespace
 from typing import Optional
 
 from fno.agents import format as fmt
-from fno.agents.row_contradiction import project_row
 from fno.agents import truth_status
 from fno.agents.reachability import (
+    UNREACHABLE,
     WIRE_STATUS,
     classify_progress,
     classify_reachability,
@@ -210,7 +210,24 @@ def list_agents(
         # ``--all``: a stopped/completed row now arrives in live_map instead
         # of being absent, and without this, its raw supervisor status would
         # silently win over the richer PR/CI-aware truth-status fallback.
-        if live_status is None or str(live_status).lower() in not_blocked_minus_working:
+        # (x-d401, x-d4a6) A FIRED falsifier widens the gate: a stale
+        # non-idle supervisor token standing against a confirmed-gone pid is
+        # a self-contradicting row, so the richer truth reading runs for it
+        # too. The supersession is not silent - the original word rides the
+        # row as an internal input and `project_row` marks the disagreement
+        # (`live_status_basis: contradicted-by-<falsifier>`). An UNMEASURED
+        # verdict (unknown) never widens the gate: Locked Decision 1 keeps a
+        # legitimate harness `working`.
+        falsifier_admits_gate = reach.verdict == UNREACHABLE and (
+            live_status is not None
+            and str(live_status).lower() not in not_blocked_minus_working
+        )
+        superseded_live_status: Optional[str] = None
+        if (
+            live_status is None
+            or str(live_status).lower() in not_blocked_minus_working
+            or reach.verdict == UNREACHABLE
+        ):
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
@@ -220,6 +237,11 @@ def list_agents(
                 )
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
+                    # Stamped HERE, not at the gate: a supersession that never
+                    # happened (no node id in the name, or no truth reading)
+                    # must not mark the surviving stale word as contradicted.
+                    if falsifier_admits_gate:
+                        superseded_live_status = str(live_status)
                     live_status = rendered
         # The verdict travels with the evidence it was reached from. `status`
         # keeps the wire vocabulary its consumers already parse; the three
@@ -236,9 +258,9 @@ def list_agents(
             last_activity_age_s=reach.age_s,
             last_event_at=last_event_at,
             last_message=last_message,
+            status=rendered_status,
+            superseded_live_status=superseded_live_status,
         )
-        row["status"] = rendered_status
-        row = project_row(row)
         rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort

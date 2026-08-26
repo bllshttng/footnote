@@ -98,8 +98,8 @@ def acquire_lane_slot(
 
     ``extra_metadata`` is merged into the slot's stored metadata (under the
     always-present ``lane_id``, which wins on key collision), so a caller can
-    record e.g. the lane's ``domain`` for distinct-domain reasoning across live
-    lanes without a separate node lookup.
+    record e.g. the lane's ``domain`` for the lane-fill domain annotation on
+    later unevaluated candidates, without a separate node lookup.
     """
     if not lane_id:
         raise ClaimValidationError("lane_id must be non-empty")
@@ -192,8 +192,9 @@ def reconcile_lane_slot(
 
     Returns the refreshed :class:`Claim`, or ``None`` when this lane holds no
     slot (every non-parallel run) or ``pid`` is ``None``. Preserves the slot's
-    stored metadata (esp. ``domain``, read by later lane-fill ticks for
-    distinct-domain seeding) - only the liveness anchor changes.
+    stored metadata (esp. ``domain``, read by later lane-fill ticks for the
+    same-domain annotation on unevaluated candidates) - only the liveness
+    anchor changes.
     """
     if not lane_id:
         raise ClaimValidationError("lane_id must be non-empty")

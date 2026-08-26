@@ -177,8 +177,12 @@ def test_permission_mode_reaches_pane_dispatch(runner, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert received["permission_mode"] == "acceptEdits"
-    # Receipt names the applied mode (Locked Decision 5).
-    assert json.loads(result.output)["permission_mode"] == "acceptEdits"
+    # Receipt names the REQUESTED mode (x-74ea / x-d401): the receipt can back
+    # the request, not the outcome - a forced-default environment can ignore
+    # the flag while the old key read as an applied grant.
+    receipt = json.loads(result.output)
+    assert receipt["permission_mode_requested"] == "acceptEdits"
+    assert "permission_mode" not in receipt
 
 
 @pytest.mark.parametrize(
@@ -250,8 +254,11 @@ def test_bg_permission_mode_claude_honored_via_python(runner, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert captured["permission_mode"] == "acceptEdits"
-    # Locked Decision 5 / Rust parity: the fallback bg receipt names the mode.
-    assert json.loads(result.output.splitlines()[0])["permission_mode"] == "acceptEdits"
+    # Locked Decision 5 / Rust parity: the fallback bg receipt names the
+    # REQUESTED mode (x-74ea / x-d401) and carries no outcome-shaped key.
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "acceptEdits"
+    assert "permission_mode" not in receipt
 
 
 def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
@@ -277,7 +284,9 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
         ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg", "--yolo"],
     )
     assert result.exit_code == 0, result.output
-    assert json.loads(result.output.splitlines()[0])["permission_mode"] == "bypassPermissions"
+    receipt = json.loads(result.output.splitlines()[0])
+    assert receipt["permission_mode_requested"] == "bypassPermissions"
+    assert "permission_mode" not in receipt
 
 
 def test_claude_python_build_argv_threads_permission_mode():

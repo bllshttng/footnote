@@ -23,7 +23,7 @@ agents_app = typer.Typer(
     help=(
         "Cross-CLI agent lifecycle (claude / codex / gemini): "
         "spawn / watch / list / logs / stop. "
-        "To message a peer, use `fno mail send <name>` (or the `/mail` skill)."
+        "To message a peer, use `fno agents mail send <name>` (or the `/mail` skill)."
     ),
     no_args_is_help=True,
     # Default Rust runtime (Phase 6 W6 / cv-d28b266a): by default this group
@@ -1014,6 +1014,7 @@ def _stamp_spawned_session_row(
     worker_name: "str | None",
     worker_harness: "str | None",
     worker_session_uuid: "str | None",
+    worker_effort: "str | None" = None,
 ) -> None:
     """Open the node's sessions row for a spawned contributor (x-4342).
 
@@ -1088,6 +1089,7 @@ def _stamp_spawned_session_row(
         if row is not None:
             harness = row.harness
             session_id = row.harness_session_id
+            worker_effort = row.effort or worker_effort
     if not session_id:
         # A pane binds its session uuid after the registry row exists, and a
         # one-shot tears its row down before returning; the receipt's own uuid
@@ -1107,6 +1109,7 @@ def _stamp_spawned_session_row(
         found, _added = append_session_record(
             graph_json(), node_id, phase=phase,
             harness=harness, session_id=session_id, started_at=started,
+            effort=worker_effort,
         )
     except (Exception, SystemExit) as exc:  # noqa: BLE001 - never fail the spawn
         print(f"spawn: session row open skipped for {node_id}: {exc}", file=sys.stderr)
@@ -1332,8 +1335,8 @@ def cmd_spawn(
         None,
         "--effort",
         help=(
-            "Reasoning effort: minimal|low|medium|high|xhigh|max. Values are "
-            "validated against the selected provider; unset uses its default."
+            "Reasoning effort, passed through to the selected provider/model; "
+            "unset uses its default."
         ),
     ),
     resume: str | None = typer.Option(
@@ -2392,15 +2395,20 @@ def cmd_spawn(
                 receipt_obj["readiness"] = pane_result.readiness
             if pane_result.readiness_rule is not None:
                 receipt_obj["readiness_rule"] = pane_result.readiness_rule
-            # Locked Decision 5: name the applied mode so an audit of "why did
-            # this worker have edit rights" has a durable answer. Only when set,
-            # so the unset receipt is unchanged.
+            # Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED
+            # mode so an audit of "why did this worker have edit rights" has a
+            # durable answer - and only as a request, because fno cannot back
+            # the outcome (a forced-default environment ignores the flag while
+            # the old key read as an applied grant). Only when set, so the
+            # unset receipt is unchanged.
             if permission_mode is not None:
-                receipt_obj["permission_mode"] = permission_mode
+                receipt_obj["permission_mode_requested"] = permission_mode
             # x-d012: name the pinned account so a mis-pin is visible at spawn
             # time, not at billing time. Only when set (receipt byte-stable else).
             if account is not None:
                 receipt_obj["account"] = account
+            if dispatch_account is not None:
+                receipt_obj["dispatch_account"] = dispatch_account
             # x-8552: for the composed spawn, which credential fno made live and
             # who is billed - derived from the composed env, never the flags.
             if credential is not None:
@@ -2422,6 +2430,7 @@ def cmd_spawn(
                 node=(prov_env or {}).get("FNO_NODE"), message=message, phase=stamp_phase,
                 worker_name=pane_result.name, worker_harness=pane_result.provider,
                 worker_session_uuid=pane_result.session_uuid,
+                worker_effort=effort,
             )
             # Exit 22 means one thing: a receipt WAS written and something on it
             # is unverified - the seed, or the pane the seed was handed to. Both
@@ -2553,6 +2562,7 @@ def cmd_spawn(
         worker_name=getattr(result, "name", None),
         worker_harness=getattr(result, "provider", None),
         worker_session_uuid=None,
+        worker_effort=effort,
     )
 
     if result.kind == "created":
@@ -2562,13 +2572,18 @@ def cmd_spawn(
         # consumers (name validation blocks backslash already, so this is the
         # only escapable character; sigma-review hardening finding).
         safe_name = result.name.replace('"', '\\"')
-        # Locked Decision 5 / Rust parity: name the applied mode (flag or the
-        # yolo-derived bypassPermissions) so an audit can tell elevated
-        # permissions were applied on this fallback path. Only when set, so the
-        # unset receipt is byte-identical.
+        # Locked Decision 5 / Rust parity, renamed by x-74ea/x-d401: name the
+        # REQUESTED mode (flag or the yolo-derived bypassPermissions) so an
+        # audit can tell elevated permissions were REQUESTED on this fallback
+        # path - fno can back the request, never the applied outcome. Only
+        # when set, so the unset receipt is byte-identical. Full JSON-string
+        # encode (not a bare `"`-escape): nothing validates this value against a
+        # closed set before it lands here, so a config-sourced mode carrying a
+        # backslash or control char would otherwise emit invalid JSON. Matches
+        # Rust's json_string_ascii byte-for-byte for every ordinary mode.
         eff_mode = permission_mode or ("bypassPermissions" if yolo else None)
         perm_field = (
-            f', "permission_mode": "{eff_mode.replace(chr(34), chr(92) + chr(34))}"'
+            f', "permission_mode_requested": {json.dumps(eff_mode)}'
             if eff_mode
             else ""
         )
@@ -4524,7 +4539,7 @@ def cmd_rm(
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with
-    ``fno workspace worktree cleanup --merged --apply``.
+    ``fno agents workspace worktree cleanup --merged --apply``.
     """
     from fno.agents.dispatch import DispatchAskError, rm_agent
 
@@ -4697,3 +4712,55 @@ def cmd_gate(
         file=sys.stderr,
     )
     raise typer.Exit(code=2)
+
+
+@agents_app.command(
+    "yard",
+    hidden=True,
+    help=(
+        "The yard identity fold: species, rarity tier, crown, and first-sighting "
+        "per registry citizen.\n\n"
+        "Read-only over the agent registry and the graph archive. Consumed by "
+        "the mux yard overlay (fail-open shell-out); `--json` is the machine "
+        "surface, the text mode is a one-line-per-citizen summary. Outcome "
+        "only - never the rank, the frequency, or the boundary."
+    ),
+)
+def yard(
+    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the fold as JSON."),
+) -> None:
+    """Fold the fleet into yard citizens (the f[no]nimals)."""
+    import json as _json
+
+    from fno import paths
+    from fno.agents.registry import load_registry
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
+    from fno.yard import RARITY_TIERS, fold
+
+    rows = load_registry()
+    archive_path = paths.graph_archive_json()
+    # Strict on purpose: this is a truth-bound fold, not a browse verb. The
+    # lenient reader turns a corrupt archive into [], which would mark every
+    # citizen a first-sighting - fabricated outcome on the machine surface the
+    # mux renders. Unreadable history fails the fold so the overlay degrades.
+    try:
+        archive = read_graph_strict(archive_path) if archive_path.exists() else []
+    except GraphUnreadableError as exc:
+        typer.secho(f"agents yard: archive unreadable, fold refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    citizens = fold(rows, archive)
+
+    if as_json:
+        typer.echo(_json.dumps({"citizens": citizens}, indent=2))
+        return
+    if not citizens:
+        typer.echo("the yard is empty (no registry rows)")
+        return
+    for c in citizens:
+        mark = " NEW" if c["first_sighting"] else ""
+        crown = f" crown {c['crown_level']}" if c["crown_level"] else ""
+        typer.echo(
+            f"{c['name']:<24} species {c['species']:>2}  {c['rarity']:<9}{crown}{mark}"
+        )
+    n_new = sum(1 for c in citizens if c["first_sighting"])
+    typer.echo(f"{len(citizens)} citizens, {n_new} first sighting(s); tiers: {'/'.join(RARITY_TIERS)}")

@@ -82,6 +82,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         legacy_provider: String::new(),
         provider: Some("anthropic".into()),
         model: None,
+        model_basis: None,
         effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(w.session_id.clone()),

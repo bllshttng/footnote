@@ -5,7 +5,7 @@ DESTROY. A tracked file missing from disk is not that: HEAD holds its content,
 so `git worktree remove` loses nothing and `git restore` brings it back.
 
 That distinction is load-bearing rather than pedantic. Measured 2026-08-13 on
-47 worktrees, `fno workspace worktree cleanup --merged` found 2 eligible and kept 44; the
+47 worktrees, `fno agents workspace worktree cleanup --merged` found 2 eligible and kept 44; the
 largest single blocker was 20 "dirty", and 17 of those were dirty ONLY because
 the same 76 tracked paths were missing from disk. The old predicate ("is
 `git status --porcelain` empty") therefore blocked almost exclusively on the
@@ -18,7 +18,7 @@ Three call sites ask this question and each used to answer it itself:
     crates/fno-agents/src/daemon.rs     the row-GC cleanliness probe
 
 N implementations of one operation is a defect class this repo already
-documents, so they now call `fno workspace worktree reapable` and an equivalence test
+documents, so they now call `fno agents workspace worktree reapable` and an equivalence test
 pins that they agree. When the verb cannot be reached, every caller keeps its
 own fail-closed default, which is today's behaviour exactly.
 """

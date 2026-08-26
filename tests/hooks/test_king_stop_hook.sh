@@ -10,7 +10,7 @@
 # rather than allowing the stop as if nothing were running.
 #
 # Tests:
-#   K1  claude shim, no manifest at all      -> allow, binary never called
+#   K1  claude shim, no manifest at all      -> resolver miss, allow
 #   K2  claude shim, king manifest, block     -> exit 2, --driver king forwarded
 #   K3  claude shim, king manifest, NoWork    -> exit 0, finalize NOT invoked
 #   K4  claude shim, both manifests present   -> target wins, --driver target
@@ -20,6 +20,8 @@
 #   K6  agy adapter, no manifest              -> allow (the refusal is scoped)
 #   K9  conflicting ambient markers omit harness narrowing
 #   K10 a claude transcript beats a lone foreign codex marker
+#   K11 foreign target + matching king still gates the king
+#   K12 agy foreign target + matching king reaches the king refusal
 
 set -uo pipefail
 
@@ -96,6 +98,19 @@ stub_binary() {
     cat > "$BIN" <<STUB
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "${ARGS_LOG}"
+if [[ "\$1" == "manifest-for-session" ]]; then
+    if [[ -f .fno/target-state.md ]]; then
+        requested="\${3:-}"
+        owner=\$(grep -E '^(harness_session_id|claude_session_id):' .fno/target-state.md 2>/dev/null \
+            | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
+            | grep -Ev '^(null)?\$' | head -1 | tr -d '[:space:]')
+        if [[ -n "\$requested" && "\$requested" == "\$owner" ]]; then
+            printf '%s\n' "\$PWD/.fno/target-state.md"
+            exit 0
+        fi
+    fi
+    exit 1
+fi
 if [[ "\$1" == "loop-check" ]]; then
     cat <<'JSON'
 ${decision}
@@ -168,14 +183,17 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     cleanup
 }
 
-# ── K1: no manifest at all -> silent allow, binary never called ───────────────
+# ── K1: no manifest at all -> resolver miss, then allow ───────────────────────
 {
     setup_king
     rm -f "${TMP_DIR}/.fno/kings/x-f3d0.md" "${TMP_DIR}/.fno/live-crown-session"
     stub_binary '{"decision":"block","message":"should never run"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
-    if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
-        pass "K1: no manifest is the only safe silent allow"
+    ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 0 ]] \
+        && grep -q '^manifest-for-session' <<< "$ARGS" \
+        && ! grep -q '^loop-check' <<< "$ARGS"; then
+        pass "K1: no target manifest resolves as a visitor"
     else
         fail "K1: rc=$CLAUDE_RC args=$(cat "$ARGS_LOG" 2>/dev/null)"
     fi
@@ -221,6 +239,7 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
 ---
 session_id: target-test-001
+harness_session_id: transcript
 created_at: 2026-08-18T00:00:00Z
 ---
 MANIFEST
@@ -231,6 +250,57 @@ MANIFEST
         pass "K4: a target manifest outranks a king manifest beside it"
     else
         fail "K4: args=$ARGS"
+    fi
+    cleanup
+}
+
+# ── K11: a foreign target manifest cannot bypass this session's king ─────────
+{
+    setup_king
+    cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
+---
+session_id: foreign-target
+harness_session_id: some-other-session
+created_at: 2026-08-18T00:00:00Z
+---
+MANIFEST
+    stub_binary '{"decision":"block","message":"king still has work"}'
+    run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
+    ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 2 ]] && grep -q -- "--driver king" <<< "$ARGS"; then
+        pass "K11: foreign target falls through to the matching king gate"
+    else
+        fail "K11: foreign target bypassed king (rc=$CLAUDE_RC args=$ARGS)"
+    fi
+    cleanup
+}
+
+# ── K12: agy also reaches its explicit king refusal past a foreign target ────
+{
+    setup_king
+    king_manifest_naming "c1"
+    cat > "${TMP_DIR}/.fno/target-state.md" <<'MANIFEST'
+---
+session_id: foreign-target
+harness_session_id: some-other-session
+created_at: 2026-08-18T00:00:00Z
+---
+MANIFEST
+    stub_binary '{"decision":"block","message":"should not run target"}'
+    AGY_TRANSCRIPT="${TMP_DIR}/agy.jsonl"
+    printf '{"role":"model","parts":[{"text":"x"}]}\n' > "$AGY_TRANSCRIPT"
+    INPUT="{\"transcriptPath\":\"${AGY_TRANSCRIPT}\",\"fullyIdle\":true,\"conversationId\":\"c1\"}"
+    AGY_ERR="${TMP_DIR}/agy.err"
+    AGY_OUT=$(
+        cd "$TMP_DIR" || exit 1
+        env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_AGENTS_BIN="$BIN" \
+            bash "$AGY_HOOK" <<< "$INPUT" 2>"$AGY_ERR"
+    )
+    DECISION="$(printf '%s' "$AGY_OUT" | jq -r '.decision // "<none>"')"
+    if [[ "$DECISION" == "continue" ]] && grep -q ".fno/kings/x-f3d0.md" "$AGY_ERR"; then
+        pass "K12: agy foreign target reaches the matching king refusal"
+    else
+        fail "K12: agy foreign target bypassed king (decision=$DECISION stderr=$(cat "$AGY_ERR"))"
     fi
     cleanup
 }
@@ -288,7 +358,10 @@ MANIFEST
     king_manifest_naming "some-other-session"
     stub_binary '{"decision":"block","message":"should never run"}'
     run_claude_hook "{\"transcript_path\":\"${TRANSCRIPT}\"}"
-    if [[ "$CLAUDE_RC" -eq 0 && ! -f "$ARGS_LOG" ]]; then
+    ARGS="$(cat "$ARGS_LOG" 2>/dev/null)"
+    if [[ "$CLAUDE_RC" -eq 0 ]] \
+        && grep -q '^manifest-for-session' <<< "$ARGS" \
+        && ! grep -q '^loop-check' <<< "$ARGS"; then
         pass "K7: a stale king manifest naming another session never gates this one"
     else
         fail "K7: rc=$CLAUDE_RC args=$(cat "$ARGS_LOG" 2>/dev/null)"

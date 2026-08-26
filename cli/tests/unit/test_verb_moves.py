@@ -298,6 +298,14 @@ def test_every_moved_spelling_is_hidden():
     ctx = click.Context(root)
     for name in VERB_MOVES:
         cmd = root.get_command(ctx, name)
+        # x-6233: `yard` was an eager @app.command, so its release form is a
+        # removed registration rather than a hidden lazy row - forwarding is
+        # owned by VERB_MOVES, not by the registry. Every OTHER moved spelling
+        # keeps a one-release registration, and any registration that exists
+        # must be hidden: an advertised moved name teaches a doomed spelling.
+        if name == "yard":
+            assert cmd is None, "yard's eager registration was removed with the move"
+            continue
         assert cmd is not None, f"moved spelling {name!r} must stay registered"
         assert getattr(cmd, "hidden", False), (
             f"moved spelling {name!r} must be hidden or menu-caps counts it as a root"
@@ -352,19 +360,22 @@ def test_agents_fold_move_table_matches_the_approved_work_order():
 
 
 def test_restored_root_spellings_are_canonical_not_moves():
-    """mail, test, update are root-canonical again (2026-08-22 operator ruling).
+    """update is root-canonical (2026-08-22 ruling, the surviving half).
 
-    The root lazy registrations serve the call directly: no argv rewrite, no
-    "is now" line. A move entry here would re-shadow the canonical spelling,
-    so its absence is the pinned contract, not an omission to backfill.
+    mail and test lost that status at x-6233 (d-b93d7754, d-df6c29a6): both
+    fold like every other root verb, and the nested registrations
+    (agents mail / doctor test) are the canonical spellings. update stays a
+    root verb outright - a move entry on it would re-shadow the canonical
+    spelling, so its absence is the pinned contract.
     """
     from fno.cli import app
 
-    for verb in ("mail", "test", "update"):
-        assert verb not in VERB_MOVES, f"{verb} is root-canonical, not a move"
-        result = runner.invoke(app, [verb, "--help"])
-        assert result.exit_code == 0, (verb, result.output)
-        assert "is now" not in (result.stderr or ""), verb
+    for verb in ("mail", "test"):
+        assert verb in VERB_MOVES, f"{verb} folds (x-6233), it is not root-canonical"
+    assert "update" not in VERB_MOVES, "update is root-canonical, not a move"
+    result = runner.invoke(app, ["update", "--help"])
+    assert result.exit_code == 0, result.output
+    assert "is now" not in (result.stderr or "")
 
 
 def test_restored_root_spellings_stay_hidden_so_menu_caps_hold():
@@ -374,21 +385,19 @@ def test_restored_root_spellings_stay_hidden_so_menu_caps_hold():
 
     root = typer.main.get_command(app)
     ctx = click.Context(root)
-    for verb in ("mail", "test", "update"):
-        cmd = root.get_command(ctx, verb)
-        assert cmd is not None, f"restored spelling {verb!r} must stay registered"
-        assert getattr(cmd, "hidden", False), (
-            f"restored spelling {verb!r} must be hidden or menu-caps counts it as a root"
-        )
+    cmd = root.get_command(ctx, "update")
+    assert cmd is not None, "restored spelling 'update' must stay registered"
+    assert getattr(cmd, "hidden", False), (
+        "restored spelling 'update' must be hidden or menu-caps counts it as a root"
+    )
 
 
 def test_rest_fold_move_table_matches_the_approved_work_order():
     """Unit 6 (x-9d6c): backlog, config, whoami, workspace.
 
-    ``done`` and ``runtime`` are deliberately ABSENT: they are merges whose
-    old flag surface is not arg-compatible with the destination, so they use
-    the decide-style module shim (a notice inside the old module) instead of
-    an argv-rewriting VERB_MOVES entry.
+    ``done`` joined the table at x-6233 once its flag surface ported onto
+    `backlog done` (argv-verbatim forwarding). ``runtime`` stays deliberately
+    ABSENT: it is retired via a tombstone, not moved.
     """
     expected = {
         "annotate": "backlog annotate",
@@ -402,39 +411,51 @@ def test_rest_fold_move_table_matches_the_approved_work_order():
         "scoreboard": "whoami scoreboard",
         "setup": "config setup",
         "status": "whoami status",
-        "worktree": "workspace worktree",
+        "worktree": "agents workspace worktree",
     }
     assert {name: VERB_MOVES[name].to for name in expected} == expected
-    for merged in ("done", "runtime"):
-        assert merged not in VERB_MOVES, (
-            f"{merged} is a module-shim merge; a VERB_MOVES entry would "
-            "rewrite argv onto an incompatible flag surface"
-        )
+    assert "runtime" not in VERB_MOVES, (
+        "runtime is retired (tombstone), not moved; a VERB_MOVES entry would "
+        "keep a removed spelling alive"
+    )
 
 
-def test_help_all_lists_moved_spellings_under_their_own_heading():
+def test_x6233_root_fold_move_table():
+    """x-6233: the root namespace folds to eleven (d-cf2d6fe1, d-b93d7754)."""
+    expected = {
+        "decide": "inbox decide",
+        "done": "backlog done",
+        "law": "inbox law",
+        "mail": "agents mail",
+        "project": "config project",
+        "test": "doctor test",
+        "workspace": "agents workspace",
+        "yard": "agents yard",
+    }
+    assert {name: VERB_MOVES[name].to for name in expected} == expected
+
+
+def test_help_all_renders_no_moved_spellings_block():
+    """x-6233 / d-26002be8: no Moved-spellings block; moved names appear
+    nowhere in the full menu, and every rendered row is a real root."""
     from fno.cli import app
 
     result = runner.invoke(app, ["help", "--all"])
     assert result.exit_code == 0, result.output
     out = result.output
-    assert "Moved spellings" in out
-    assert "now fno inbox outstanding" in out
-    assert "now fno do pr" in out
-    commands_part = out.split("Moved spellings")[0]
+    assert "Moved spellings" not in out
     for name in VERB_MOVES:
-        assert not re.search(rf"^  {re.escape(name)}\s", commands_part, re.MULTILINE), (
+        assert not re.search(rf"^  {re.escape(name)}\s", out, re.MULTILINE), (
             f"moved spelling {name!r} must not render among the roots"
         )
 
 
 def test_help_all_classifies_a_moved_eager_command_too(monkeypatch):
-    """An eager inline command must partition like a lazy entry.
+    """An eager inline command must classify like a lazy entry.
 
-    A later wave moves `cost`, which is an eager @app.command rather than a
-    LAZY_SUBCOMMANDS row. If the full menu classified only lazy entries,
-    `cost` would render among the roots while the --help count line counted
-    it as moved - the two surfaces disagreeing about one name.
+    `cost` is an eager @app.command rather than a LAZY_SUBCOMMANDS row. A
+    moved eager name must render nowhere in the full menu, exactly like a
+    moved lazy one - the two surfaces must not disagree about one name.
     """
     from fno.cli import app
     from fno.verb_moves import Move
@@ -442,9 +463,8 @@ def test_help_all_classifies_a_moved_eager_command_too(monkeypatch):
     monkeypatch.setitem(VERB_MOVES, "cost", Move(kind="deprecated", to="whoami cost"))
     result = runner.invoke(app, ["help", "--all"])
     assert result.exit_code == 0, result.output
-    commands_part, moved_part = result.output.split("Moved spellings")
-    assert not re.search(r"^  cost\s", commands_part, re.MULTILINE)
-    assert re.search(r"^  cost\s+now fno whoami cost", moved_part, re.MULTILINE)
+    assert not re.search(r"^  cost\s", result.output, re.MULTILINE)
+    assert "Moved spellings" not in result.output
 
 
 # ---------------------------------------------------------------------------

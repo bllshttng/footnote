@@ -1,6 +1,6 @@
-# fno project environments: which half is isolated
+# fno config project environments: which half is isolated
 
-`fno project init <id>` gives a checkout its own fno state root. It isolates fno's data. It does not isolate the harness substrate. This page says where that line falls, because a receipt that blurs it has already cost real sessions.
+`fno config project init <id>` gives a checkout its own fno state root. It isolates fno's data. It does not isolate the harness substrate. This page says where that line falls, because a receipt that blurs it has already cost real sessions.
 
 ## Slicing is not isolating
 
@@ -67,7 +67,7 @@ Three failures on one machine in one day, all on the layer-2 vector:
 - A claim recorded a pid belonging to a desktop app's own codex process. That pid stayed alive, so the claim read `state=live` for eleven hours past its expiry. It fenced every merge in the meantime.
 - A model override was inherited from a long-lived daemon. A session then ran on a model nobody had selected for it.
 
-None of these is exotic. Each is an environment variable outliving the process that set it, which is what environment variables do. A receipt reading "isolated environment" rules all three out to anyone who reads it. `fno project init` prints what moved and what did not, so the next person reads a true sentence instead of a reassuring one.
+None of these is exotic. Each is an environment variable outliving the process that set it, which is what environment variables do. A receipt reading "isolated environment" rules all three out to anyone who reads it. `fno config project init` prints what moved and what did not, so the next person reads a true sentence instead of a reassuring one.
 
 The remedy for layer 2 is provenance, not isolation. `resolve_owned_identity` (`cli/src/fno/harness_identity.py`) proves ownership from the process tree instead of picking by precedence order. When it cannot prove one, it refuses rather than guessing. Durable stamp sites reach it through `resolve_self_identity` (`cli/src/fno/claims/self_identity.py`). That function supplies the process-tree prover and nothing else. The registry collider stays at the one init-time verb that owns a registry row. Hoisting it into the shared resolver broke that: a session then refused its own row whenever the walk failed.
 
@@ -88,7 +88,7 @@ Measured, not read off the schema: `config_read_candidates` returns
 
 so a project-local `config.toml` wins per key and deep-merges over the global (`cli/src/fno/config_io.py`, `_prefer_toml`).
 
-`FNO_CONFIG` is the wrong lever for this, and `fno project init` does not use it. When set, it is the ONLY candidate. It discards the operator's global defaults rather than overriding one key.
+`FNO_CONFIG` is the wrong lever for this, and `fno config project init` does not use it. When set, it is the ONLY candidate. It discards the operator's global defaults rather than overriding one key.
 
 ## Where the root lives
 
@@ -100,14 +100,14 @@ The bus derives from `state_dir`, so an isolated environment gets its own. That 
 
 ## The two refusals
 
-`fno project init` refuses rather than half-isolating:
+`fno config project init` refuses rather than half-isolating:
 
 - **A different `state_dir` already pinned** in this repo's `config.toml`. It prints the existing value and the file path, and writes nothing. Overwriting silently moves a live environment's graph, ledger and mail bus.
 - **`config.paths.agents_registry_path` set.** That explicit override is honored ahead of the `state_dir` fallback. The environment then gets its own graph and shares the agent roster. The refusal names the key.
 
 ## Appendix: does `CLAUDE_CONFIG_DIR` give a distinct claude daemon namespace?
 
-Not part of an fno project environment. This is an open question that got measured, recorded here so the next person does not re-derive it. It applies to one edge case: operators who keep two logged-in Claude Code accounts side by side and switch between them. Some people do run that way. It is not a step in setting up a project environment, and nothing below is something `fno project init` does.
+Not part of an fno config project environment. This is an open question that got measured, recorded here so the next person does not re-derive it. It applies to one edge case: operators who keep two logged-in Claude Code accounts side by side and switch between them. Some people do run that way. It is not a step in setting up a project environment, and nothing below is something `fno config project init` does.
 
 **Yes.** Measured 2026-08-21.
 
@@ -128,6 +128,6 @@ Three limits, so nobody reads that as more than it is.
 
 The split is per config dir, not per fno environment. One config dir shared by five project environments still shares one daemon namespace, so this buys nothing on the ordinary path.
 
-A second config dir is an account boundary, not a scratch directory. It is a second login to keep alive. That is a deliberate setup an operator chooses for their own reasons, and it stays theirs to turn on. `fno project init` does not set `CLAUDE_CONFIG_DIR`, does not read it, and claims nothing about it.
+A second config dir is an account boundary, not a scratch directory. It is a second login to keep alive. That is a deliberate setup an operator chooses for their own reasons, and it stays theirs to turn on. `fno config project init` does not set `CLAUDE_CONFIG_DIR`, does not read it, and claims nothing about it.
 
 This changes nothing for codex under either outcome. Those processes belong to ChatGPT.app and a VS Code extension. They are not fno's to namespace.

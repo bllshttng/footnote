@@ -8,10 +8,10 @@
 # so the delegating session's finalize must use reason=delegated (a non-ship
 # reason -> ledger row only).
 #
-# Strategy: drive the real skills/target/scripts/handoff.sh end-to-end in a
-# sandbox with stubbed `fno` (claim/agents/event) and a stub `fno-agents` that
-# records its `finalize` invocation. Then assert handoff committed the
-# delegation AND invoked finalize with --reason delegated --state <archived>.
+# Strategy: drive the real capability-escalation transaction end-to-end in a
+# sandbox with stubbed `fno` (claim/spawn/truth/target/event) and a stub
+# `fno-agents` that records its `finalize` invocation. Then assert handoff
+# committed and finalized against the archived parent manifest.
 
 set -uo pipefail
 
@@ -36,6 +36,10 @@ BIN_DIR="${TMP_DIR}/bin"; mkdir -p "$BIN_DIR"
 
 NODE_ID="ab-deadbeef"
 SID="hsess-001"
+CHILD_SID="00000000-0000-0000-0000-000000abc123"
+CHILD_NAME="target-${NODE_ID}-work-g2"
+CAP_NONCE="ledger-capability-nonce"
+CAP_DIGEST="$(printf '%s\n%s\n%s' "$CAP_NONCE" "$PROJ" "$PROJ" | shasum -a 256 | awk '{print $1}')"
 
 # Plan file (status ready) so the precondition passes.
 PLAN="${PROJ}/plan.md"
@@ -64,9 +68,9 @@ target_claim_holder: "target-session:${SID}"
 target_claim_ttl: "2h"
 MAN
 
-# Stub `fno`: dispatch on the verb words. claim status returns the holder the
-# precondition expects; agents spawn returns a JSON receipt; agents list reports
-# the child live; everything else is a benign success.
+# Stub `fno`: the capability probe returns an exact nonce response. Raw target
+# delivery installs the child claim and manifest, the commit proof handoff.sh
+# requires before it emits delegated.
 cat > "${BIN_DIR}/fno" <<ABIEOF
 #!/usr/bin/env bash
 if [[ "\${1:-} \${2:-}" == "agents claim" ]]; then
@@ -74,13 +78,29 @@ if [[ "\${1:-} \${2:-}" == "agents claim" ]]; then
 fi
 case "\$1 \$2" in
   "claim status")
-    printf '{"holder":"target-session:${SID}","state":"live"}\n' ;;
+    if [[ -f "${TMP_DIR}/child-active" ]]; then
+      printf '{"holder":"target-session:${CHILD_SID}","state":"live"}\n'
+    else
+      printf '{"holder":"target-session:${SID}","state":"live"}\n'
+    fi ;;
   "claim acquire"|"claim release"|"claim refresh") exit 0 ;;
-  "event emit") exit 0 ;;
   "agents spawn")
-    printf '{"name":"tgt-child","short_id":"cx-abc123","provider":"claude","status":"live"}\n' ;;
-  "agents list")
-    printf '{"agents":[{"name":"tgt-${NODE_ID:3:8}-claude-g2","status":"live"}]}\n' ;;
+    printf '{"name":"${CHILD_NAME}","short_id":"abc123","session_id":"${CHILD_SID}","harness":"claude","status":"live","bound":true,"readiness":"ready","model":"opus"}\n' ;;
+  "agents truth")
+    printf '{"state":"your-move","last_message":"FNO_CAPABILITY_READY:${CAP_DIGEST}","observed_model":{"kind":"observed","model":"opus","samples":1}}\n' ;;
+  "agents mail")
+    touch "${TMP_DIR}/child-active"
+    cat > .fno/target-state.md <<'CHILD'
+---
+session_id: child-run
+harness_session_id: ${CHILD_SID}
+---
+# Target Session State
+graph_node_id: ${NODE_ID}
+target_claim_key: "node:${NODE_ID}"
+target_claim_holder: "target-session:${CHILD_SID}"
+CHILD
+    printf 'delivered (hosted) to ${CHILD_SID}\n' ;;
   *) exit 0 ;;
 esac
 ABIEOF
@@ -98,7 +118,7 @@ exit 0
 AGEOF
 chmod +x "${BIN_DIR}/fno-agents"
 
-# Run handoff at the blueprint->do boundary (skips the wave pressure probe).
+# Run one explicit capability escalation.
 OUT=""
 RC=0
 OUT=$(
@@ -107,9 +127,12 @@ OUT=$(
       PATH="${BIN_DIR}:${PATH}" \
       FNO_DIR="$FNO_DIR" \
       FNO_AGENTS_BIN="${BIN_DIR}/fno-agents" \
+      HANDOFF_CAPABILITY_NONCE="$CAP_NONCE" \
+      HANDOFF_CAPABILITY_EXPECTED_CWD="$PROJ" \
+      HANDOFF_CAPABILITY_EXPECTED_ROOT="$PROJ" \
       CLAUDE_CODE_SESSION_ID="hsess-claude" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
-      bash "$HANDOFF" --boundary blueprint-do 2>"${TMP_DIR}/handoff.stderr"
+      bash "$HANDOFF" --harness claude --model opus 2>"${TMP_DIR}/handoff.stderr"
 ) || RC=$?
 
 ARCHIVED="${PLAN}.artifacts/target-state-${SID}.md"
@@ -139,9 +162,10 @@ else
     fail "finalize --state did not point at the archived manifest ($ARCHIVED): $(cat "$FIN_MARKER" 2>/dev/null)"
 fi
 
-# The original manifest must be gone (archived), proving the shim would skip.
-if [[ ! -f "${FNO_DIR}/target-state.md" && -f "$ARCHIVED" ]]; then
-    pass "manifest archived (shim hits the missing-manifest early-exit; no double-write)"
+# The parent manifest is archived while the current path belongs to the child.
+if [[ -f "${FNO_DIR}/target-state.md" && -f "$ARCHIVED" ]] \
+    && grep -q "harness_session_id: ${CHILD_SID}" "${FNO_DIR}/target-state.md"; then
+    pass "parent manifest archived and current manifest belongs to child"
 else
     fail "manifest archival invariant broken"
 fi

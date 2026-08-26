@@ -327,7 +327,7 @@ def test_old_decide_spelling_warns_and_preserves_stdout(
     )
 
     assert result.exit_code == 0, result.output
-    assert "fno decide is now `fno backlog decide`" in result.output
+    assert "fno decide is now `fno inbox decide`" in result.output
     assert result.stdout.strip().splitlines()[-1].startswith("d-")
 
 

@@ -7,6 +7,12 @@ the same commands `fno approvals ls` did. The king board LEAF joins them too
 (ruling d-8c62113b: a leaf places by its own meaning); the king root itself
 stays put here and folds into agents in a later unit, so `board_cmd` is
 registered under both `king` and `inbox` rather than moved.
+
+x-6233 (d-add90c60): the human-authority verbs join the human-facing group.
+`decide`/`decisions` and the whole `law` app mount here; the `fno backlog
+decide` spellings stay registered as silent aliases of the same command
+objects, and the root `fno decide` / `fno law` spellings are VERB_MOVES
+shims.
 """
 
 from __future__ import annotations
@@ -14,18 +20,23 @@ from __future__ import annotations
 import typer
 
 from fno.approvals.cli import approvals_app
+from fno.decide.cli import backlog_decide, backlog_decisions
 from fno.king.cli import board_cmd
+from fno.law import law_app
 from fno.notify.cli import notify_app
 from fno.outstanding.cli import outstanding_app
 
 inbox_app = typer.Typer(
     name="inbox",
     help="What is waiting on a human: approvals, notifications, outstanding "
-    "carve-outs and questions, and the king board.",
+    "carve-outs and questions, the king board, decisions, and law.",
     no_args_is_help=True,
 )
 
 inbox_app.add_typer(approvals_app, name="approvals")
 inbox_app.add_typer(notify_app, name="notify")
 inbox_app.add_typer(outstanding_app, name="outstanding")
+inbox_app.add_typer(law_app, name="law")
 inbox_app.command("board")(board_cmd)
+inbox_app.command("decide")(backlog_decide)
+inbox_app.command("decisions")(backlog_decisions)

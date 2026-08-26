@@ -1470,23 +1470,19 @@ def inject_spawn_defaults(
             # builtin claude. Its first arg is the explicit provider STRING, not
             # argv, and inference reads env markers, not command-line args.
             eff_provider, _ = resolve_dispatch_provider(None, env=env)
-        from fno.agents.mux_spawn import _EFFORT_ALLOWED
+        from fno.agents.mux_spawn import effort_tokens
 
-        allowed = _EFFORT_ALLOWED.get(eff_provider)
-        if allowed and cfg_effort in allowed:
+        reason = None
+        try:
+            effort_tokens(eff_provider, cfg_effort)
+        except Exception as exc:
+            reason = str(exc)
+        else:
             inject += ["--effort", cfg_effort]
             from_config.append(("effort", cfg_effort, f"{effort_rung}.effort"))  # type: ignore[arg-type]
-        else:
-            # Config-sourced effort degrades open on BOTH a no-surface provider
-            # AND a value the resolved provider can't map (e.g. codex + "max"):
-            # an ambient default must never hard-fail a bare spawn. An explicit
-            # --effort keeps x-a0e0's fail-closed exit 2 (has_effort short-circuits
-            # this whole branch).
-            reason = (
-                f"no {eff_provider} effort surface"
-                if not allowed
-                else f"{eff_provider} does not support effort {cfg_effort!r}"
-            )
+        if reason is not None:
+            # Config-sourced effort degrades open on a lane with no effort
+            # surface. Explicit --effort remains fail-closed in cmd_spawn.
             print(
                 f"fno agents spawn: effort skipped ({reason}); "
                 f"{effort_rung}.effort = {cfg_effort!r} ignored",

@@ -273,6 +273,87 @@ class MaintainBlock(BaseModel):
         return v
 
 
+_RENDER_PROJECTIONS = ("backlog", "roadmap")
+
+# Shared with the graph-layer auto-render so the array-of-tables typo warns
+# with one text over both channels (logger at load, stderr at render).
+RENDER_TARGETS_TABLE_TYPO_MSG = (
+    "config.backlog.render_targets is %s, not an array of tables - "
+    "ignoring it (use [[backlog.render_targets]], not "
+    "[backlog.render_targets.<name>])"
+)
+
+
+class RenderTargetConfig(BaseModel):
+    """One auto-rendered public projection (``config.backlog.render_targets[]``).
+
+    Every graph mutation re-renders each configured target through the shared
+    public title leak gate (one renderer, one gate - never a second HTML
+    author). Unknown ``projection`` values raise at load; unknown KEYS warn
+    and are ignored (the module's never-brick rule) so a typo'd key cannot
+    take down every settings-loading command - the row still renders its
+    default projection, visibly, with the warning naming the key.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    project: str
+    projection: str = "backlog"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_unknown_keys(cls, data: object) -> object:
+        if isinstance(data, dict):
+            known = set(cls.model_fields)
+            for key in data:
+                if key not in known:
+                    _LOG.warning(
+                        "config.backlog.render_targets: unknown key %r in row "
+                        "%r - ignoring it (allowed: %s)",
+                        key,
+                        data.get("path"),
+                        ", ".join(sorted(known)),
+                    )
+        return data
+
+    @field_validator("path")
+    @classmethod
+    def _plain_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets path must not be empty")
+        _check_no_glob(v, "backlog.render_targets path")
+        _check_path_max(v, "backlog.render_targets path")
+        # The auto-render fires from arbitrary project and agent cwds, so a
+        # relative path would scatter a copy of the public board into each
+        # one. Absolute (or ~/-rooted) only.
+        if not os.path.isabs(os.path.expanduser(v)):
+            raise ValueError(
+                "backlog.render_targets path must be absolute or ~/-rooted "
+                f"(it is written from arbitrary cwds), got: {v!r}"
+            )
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def _nonempty_project(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets project must not be empty")
+        return v
+
+    @field_validator("projection")
+    @classmethod
+    def _known_projection(cls, v: str) -> str:
+        if v not in _RENDER_PROJECTIONS:
+            raise ValueError(
+                f"unknown backlog.render_targets projection {v!r} "
+                f"(allowed: {', '.join(_RENDER_PROJECTIONS)})"
+            )
+        return v
+
+
 class BacklogBlock(BaseModel):
     """Backlog hygiene settings (nested under 'config.backlog').
 
@@ -295,6 +376,22 @@ class BacklogBlock(BaseModel):
     # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
+    render_targets: list[RenderTargetConfig] = Field(default_factory=list)
+
+    @field_validator("render_targets", mode="before")
+    @classmethod
+    def _coerce_render_targets(cls, v: object) -> object:
+        """Fail-safe container: a non-list ``render_targets`` degrades to [] so
+        a stray scalar never bricks settings load. Present-but-not-a-list (the
+        ``[backlog.render_targets.<name>]`` table typo where the
+        ``[[backlog.render_targets]]`` array belongs) is WARNED, not silently
+        dropped - the operator would otherwise believe their public board is
+        wired. Mirrors ``_coerce_status_sinks``."""
+        if isinstance(v, list):
+            return v
+        if v is not None:
+            _LOG.warning(RENDER_TARGETS_TABLE_TYPO_MSG, type(v).__name__)
+        return []
 
     @field_validator("staleness_days")
     @classmethod
@@ -937,6 +1034,27 @@ class ReviewBlock(BaseModel):
     # changes behavior - flip it only with the doctor's self-attestation report
     # in hand.
     require_corroboration: bool = False
+    # Whether a non-author human GitHub APPROVED review satisfies coverage on
+    # its own (and the corroboration term). DEFAULT TRUE: this is the one
+    # producer a stranger's GitHub project emits with no footnote machinery
+    # at all. GitHub refuses an author's approval of their own PR
+    # server-side; the gate still asserts it (an unreadable PR author
+    # excludes fail-closed). The limit: GitHub's refusal is per identity, not
+    # per human - a second account with its own token can still self-approve.
+    github_approval_satisfies: bool = True
+    # The review-round budget before the gate reports IMPOSSIBLE: with more
+    # review rounds than this on the branch since the last pass AND blocking
+    # findings still non-terminal, re-reviewing cannot clear the gate, and
+    # the refusal says so instead of teaching one more round (the PR-1170
+    # eleven-round shape). A round is a review VERDICT since the last pass;
+    # CI failures, lint failures and rebases are not rounds, and a pass
+    # resets the counter. Validated at parse: at least 1.
+    max_rounds: int = Field(default=2, ge=1)
+    # Categories a CONFIRMED-free finding may carry and still be non-blocking.
+    # A configured list EXTENDS the shipped default rather than replacing it,
+    # so a project cannot silently narrow the gate by naming one category. The
+    # gate re-derives blocking from this, never from the producer's own count.
+    nonblocking_categories: Optional[list[str]] = None
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:
@@ -1268,22 +1386,12 @@ class ReviewBlock(BaseModel):
 
 
 class HandoffBlock(BaseModel):
-    """Self-handoff settings (nested under 'config.target.handoff').
+    """Capability escalation plus the shared context-compact thresholds.
 
-    Controls the sanctioned session-succession protocol (ab-534bcc55) that lets
-    a /target session hand the rest of its pipeline to a fresh-context successor
-    at pipeline boundaries instead of carrying earlier-phase context baggage.
-
-    Locked Decisions 6-8 (plan sec "Locked Decisions"):
-      6. Boundary-agnostic primitive, staged wiring; generation cap 4.
-      7. Transcript-derived context probe is the only pressure source; probe
-         failure = no handoff (fail-safe).
-      8. used_pct_trigger default 50, boundary-only evaluation.
-
-    Shell consumer: skills/target/scripts/handoff.sh reads these via
-    get_config "target.handoff.*" (GENERATION_CAP, USED_PCT_TRIGGER,
-    HANDOFF_ENABLED) with defaults matching these values exactly. Keep both
-    in sync when changing defaults.
+    ``enabled`` gates the explicit escalation transaction. Context pressure is
+    handled by ``hooks/context-nudge.sh`` and compaction, never by succession.
+    The historical generation knob is intentionally absent: one externally
+    selected destination is one escalation rung.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1291,7 +1399,6 @@ class HandoffBlock(BaseModel):
     enabled: bool = True
     used_pct_trigger: int = 50
     king_used_pct_trigger: int = 40
-    generation_cap: int = 4
 
     @field_validator("used_pct_trigger")
     @classmethod
@@ -1317,7 +1424,7 @@ class HandoffBlock(BaseModel):
 
     @model_validator(mode="after")
     def king_trigger_below_teammate_trigger(self) -> "HandoffBlock":
-        """A king hands off EARLIER than a teammate, so an EXPLICITLY-set
+        """A king compacts EARLIER than a teammate, so an EXPLICITLY-set
         king_used_pct_trigger must stay strictly below used_pct_trigger. The
         refusal MESSAGE is the deliverable: the failure mode this prevents is a
         future reader "tidying" 40 up to 50, and the rationale lands in front of
@@ -1338,24 +1445,12 @@ class HandoffBlock(BaseModel):
                 "config.target.handoff.king_used_pct_trigger must be BELOW "
                 "used_pct_trigger "
                 f"(got {self.king_used_pct_trigger}, teammate trigger "
-                f"{self.used_pct_trigger}). A king hands off earlier than a "
+                f"{self.used_pct_trigger}). A king compacts earlier than a "
                 "teammate on purpose: a worker's degradation costs one node, "
                 "a king's propagates into every ruling it issues and every "
                 "worker it routes, and the handoff itself costs context."
             )
         return self
-
-    @field_validator("generation_cap")
-    @classmethod
-    def generation_cap_positive(cls, v: int) -> int:
-        """A cap below 1 would immediately refuse every handoff attempt."""
-        if v < 1:
-            raise ValueError(
-                "config.target.handoff.generation_cap must be >= 1; "
-                f"got {v}"
-            )
-        return v
-
 
 class BlastConfig(BaseModel):
     """Blast-radius router settings (nested under 'config.target.blast', x-518f).

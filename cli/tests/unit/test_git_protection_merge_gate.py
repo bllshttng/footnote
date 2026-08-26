@@ -138,3 +138,67 @@ def test_merge_allowed_authorizes_when_live_switch_armed(gp, monkeypatch, tmp_pa
     monkeypatch.setattr(gp, "_parse_merge_pr", lambda command: 42)
     reason = gp._check_pr_merge_allowed("gh pr merge 42")
     assert reason is not None and "skipped" in reason
+
+
+# ---- the coverage veto's refusal set (AC7-ERR / AC7-EDGE) ----
+#
+# The verified trap: `if proc.returncode != 3: return None` fails OPEN on
+# every exit but 3, so an IMPOSSIBLE verdict (exit 5) would silently permit
+# the exact merge it exists to stop. The set is {3, 5}; the fail-open posture
+# for genuine machinery failure (missing binary, timeout, an older
+# deployment's unknown-command exit) is deliberate and stays.
+
+
+class _Proc:
+    def __init__(self, returncode, stderr=""):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = ""
+
+
+def test_ac7_err_exit_five_denies_with_the_verbs_first_line(gp, monkeypatch):
+    monkeypatch.setattr(
+        gp.subprocess,
+        "run",
+        lambda cmd, **kw: _Proc(
+            5,
+            "review coverage is impossible to satisfy by further review: 3 "
+            "review rounds used (max 2) with blocking finding(s) still "
+            "non-terminal (h.py:302:security)\nsecond line\n",
+        ),
+    )
+    refusal = gp._fno_veto_refusal(["pr", "coverage-check", "42"], timeout=25, fallback="fb")
+    assert refusal is not None
+    assert refusal.startswith("review coverage is impossible to satisfy")
+    assert "3 review rounds used" in refusal
+
+
+def test_ac7_err_exit_three_still_denies(gp, monkeypatch):
+    """The ordinary refusal keeps its behavior - the widening never narrows."""
+    monkeypatch.setattr(
+        gp.subprocess, "run", lambda cmd, **kw: _Proc(3, "uncovered: 0 reviewed\n")
+    )
+    assert gp._fno_veto_refusal(["pr", "coverage-check", "42"], 25, "fb") == (
+        "uncovered: 0 reviewed"
+    )
+
+
+def test_ac7_edge_exit_127_fails_open(gp, monkeypatch):
+    monkeypatch.setattr(gp.subprocess, "run", lambda cmd, **kw: _Proc(127, ""))
+    assert gp._fno_veto_refusal(["pr", "coverage-check", "42"], 25, "fb") is None
+
+
+def test_ac7_edge_timeout_fails_open(gp, monkeypatch):
+    def boom(cmd, **kw):
+        raise gp.subprocess.TimeoutExpired(cmd, 25)
+
+    monkeypatch.setattr(gp.subprocess, "run", boom)
+    assert gp._fno_veto_refusal(["pr", "coverage-check", "42"], 25, "fb") is None
+
+
+def test_ac7_edge_exit_four_stays_an_instrument_failure(gp, monkeypatch):
+    """UNANSWERED is not a verdict; the probe died, so the veto opens."""
+    monkeypatch.setattr(
+        gp.subprocess, "run", lambda cmd, **kw: _Proc(4, "pr head fetch failed\n")
+    )
+    assert gp._fno_veto_refusal(["pr", "coverage-check", "42"], 25, "fb") is None

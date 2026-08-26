@@ -11,3 +11,15 @@
 # act. Only the second is the moment that matters.
 claude rm|fno agents rm, then fno agents adopt <session-id> to reverse it|d-1900e419
 claude stop|fno agents stop|d-1900e419
+# x-6233 root folds: the old root spellings forward for one release, but no
+# caller-facing string may TEACH them. Full two-token paths so the canonical
+# nested spellings (fno backlog done, fno inbox decide, ...) never match.
+fno done|fno backlog done (same flags)|d-9de9f05b
+fno decide|fno inbox decide|d-add90c60
+fno law|fno inbox law|d-add90c60
+fno mail|fno agents mail (the form every skill already teaches)|d-b93d7754
+fno test|fno doctor test|d-df6c29a6
+fno workspace|fno agents workspace|d-cf2d6fe1
+fno project|fno config project|d-344fe242
+fno yard|fno agents yard|x-6233
+fno runtime|fno agents workspace (retired outright, tombstoned)|d-cf2d6fe1

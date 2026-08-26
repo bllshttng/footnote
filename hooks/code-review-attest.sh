@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Emit the code-review attestation when a native review pass reports CLEAN.
+# Emit the code-review attestation with the CLASSIFIED finding record.
 # Claude and Codex expose different structured completion surfaces, so this
 # shared producer handles all reachable paths:
 #
@@ -24,40 +24,67 @@
 # what it printed. Keying on printed shape is what left this branch
 # decorative through six PRs: see the measurement in the branch itself.
 #
-# The clean-pass signal is an empty findings set, matching ReportFindings'
-# own contract ("empty array if nothing survived verification"). The two
-# review protocols spell it differently - an empty fenced JSON array, or a
-# final text that is the bare "(none)" marker and nothing else - and both
-# are accepted, by name, nothing else.
+# The pass condition is no longer clean-only: a review WITH findings emits
+# `fail` carrying the classified record, so a PR whose findings get fixed or
+# dispositioned has a durable record to tile instead of reading as never
+# reviewed. An empty findings set emits `pass` with an explicit zero-finding
+# record - same verdict as before, no longer implicit. Classification is
+# `fno do review classify`, the one shell entry point; this hook never
+# reimplements the rule in bash. A classify failure (a deployment older
+# than the verb) refuses to emit: fail closed, and the stale deployment is
+# the thing to fix.
 #
-# Fail direction: any parse problem, an event this script does not
-# recognize, or a NON-empty findings array emits nothing, so the reviewers
-# gate holds rather than clearing on evidence that never arrived. A review
-# that found bugs emits nothing on purpose: the fixes move HEAD, and the
-# freshness protocol would kill a premature attestation anyway. Re-run the
-# review on the new HEAD; this hook fires on that pass's clean report.
+# Fail direction: any parse problem or an event this script does not
+# recognize emits nothing AND never calls the classifier, so the reviewers
+# gate holds rather than clearing on evidence that never arrived.
 set -euo pipefail
 
 input="$(cat)"
 event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null || true)"
 
-is_clean=0
+# findings_payload: the JSON the classifier reads ([] for an identified
+# clean verdict, the findings array for ReportFindings, the review_output
+# object for codex). Empty string means "no review was identified here" -
+# emit nothing and call no classifier.
+findings_payload=""
+record_review_subagent_marker() {
+  local cwd branch hold_json invocation_id marker_dir marker_name
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
+  [[ -n "$cwd" && -d "$cwd" ]] || return 0
+  branch="$(git -C "$cwd" rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  [[ -n "$branch" && "$branch" != "HEAD" ]] || return 0
+  hold_json="$("${FNO:-fno}" do pr review-hold metadata --branch "$branch" \
+    --repo "$cwd" 2>/dev/null || true)"
+  invocation_id="$(printf '%s' "$hold_json" \
+    | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
+  [[ -n "$invocation_id" ]] || return 0
+  marker_dir="${FNO_HOME:-$HOME/.fno}/review-invocations/${invocation_id}.subagents"
+  marker_name="$(printf '%s' "${agent_transcript:-$$}" \
+    | shasum -a 256 2>/dev/null | awk '{print $1}')"
+  [[ -n "$marker_name" ]] || marker_name="pid-$$"
+  mkdir -p "$marker_dir" 2>/dev/null || return 0
+  : > "$marker_dir/$marker_name" 2>/dev/null || true
+}
 reviewer_context="unknown"
+execution_context="inline"
+output_contract="json_block"
 case "$event" in
   PostToolUse)
     tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
     [[ "$tool_name" == "ReportFindings" ]] || exit 0
-    # A clean pass is the findings key PRESENT and an EMPTY array. Absent is
-    # not clean (assert a positive marker, never an absence): a payload
-    # without the key says nothing about the review outcome and must not
-    # attest.
-    findings="$(printf '%s' "$input" | jq -c '.tool_input.findings? // "absent"' 2>/dev/null || true)"
-    if [[ "$findings" == "[]" ]]; then
-      is_clean=1
-      # ReportFindings is a tool call in the authoring turn. That is positive
-      # same-context evidence, not a guess from who typed the command.
-      reviewer_context="shared"
-    fi
+    # The findings key must be PRESENT and an array (assert a positive
+    # marker, never an absence): a payload without the key says nothing
+    # about the review outcome and must not attest. select() empties the
+    # output for every non-array shape, and the shared empty-payload guard
+    # below turns that into silence before any classifier call.
+    findings_payload="$(printf '%s' "$input" | jq -c '
+      .tool_input.findings? | select(type == "array")
+    ' 2>/dev/null || true)"
+    # ReportFindings is a tool call in the authoring turn. That is positive
+    # same-context evidence, not a guess from who typed the command.
+    reviewer_context="shared"
+    execution_context="inline"
+    output_contract="report_findings"
     ;;
   SubagentStop)
     message="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
@@ -132,7 +159,12 @@ case "$event" in
     [[ "$message" =~ ^[[:space:]]*"## Review findings" ]] && shaped=1
 
     [[ "$described" == "1" || "$forked" == "1" || "$shaped" == "1" ]] || exit 0
+    record_review_subagent_marker
     [[ "$forked" == "1" ]] && reviewer_context="fresh"
+    if [[ "$forked" == "1" ]]; then
+      execution_context="fork"
+      output_contract="json_block"
+    fi
 
     # The clean-pass verdict, positively enumerated over every shape observed
     # live. An empty fenced JSON array is the high-level protocol's marker; a
@@ -162,14 +194,14 @@ for body in fences:
 print("[]")
 ' 2>/dev/null || echo "absent")"
     if [[ "$findings" == "[]" ]]; then
-      is_clean=1
+      findings_payload="[]"
     elif [[ "$findings" == "absent" ]] \
       && [[ "$message" =~ ^[[:space:]]*\(none\)[[:space:]]*$ ]]; then
       # Only when NO array was parsed and the ENTIRE final text is the bare
       # marker - the observed protocol spells its whole verdict that way. A
       # standalone "(none)" line inside longer output, an excuse line above
       # it especially, attests nothing.
-      is_clean=1
+      findings_payload="[]"
     fi
     ;;
   Stop)
@@ -191,7 +223,7 @@ print("[]")
         | if (.payload.type == "item_completed"
               and .payload.item.type == "ExitedReviewMode") then
             .payload.item.review_output
-          elif .payload.type == "exited_review_mode" then
+          elif (.payload.type == "exited_review_mode") then
             .payload.review_output
           else
             empty
@@ -199,26 +231,29 @@ print("[]")
       ]
     ' "$transcript" 2>/dev/null)" || exit 0
 
-    # Exactly one completion with a present array-valued findings key equal to
-    # [] is the positive clean marker. Every other shape stays silent.
+    # Exactly one completion with a present array-valued findings key is the
+    # positive review marker, empty or not: the findings go to the
+    # classifier, which decides pass from fail. Absent findings key or any
+    # other shape stays silent - absence is not a review.
     jq -e '
       length == 1
       and (.[0] | type == "object"
         and has("findings")
-        and (.findings | type == "array")
-        and (.findings == []))
+        and (.findings | type == "array"))
     ' <<<"$review_outputs" >/dev/null 2>&1 || exit 0
-    is_clean=1
+    findings_payload="$(jq -c '.[0]' <<<"$review_outputs")"
     # Codex's Stop payload proves the structured review result, but this hook
     # has no positive evidence that the reviewer ran in a separate context.
     reviewer_context="unknown"
+    execution_context="inline"
+    output_contract="json_block"
     ;;
   *)
     exit 0
     ;;
 esac
 
-[[ "$is_clean" == "1" ]] || exit 0
+[[ -n "$findings_payload" ]] || exit 0
 
 # Emit from the SESSION cwd, not the plugin root: a worktree session pins its
 # own HEAD, and the event log is per-checkout.
@@ -227,4 +262,31 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 cd "$cwd"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review pass "$reviewer_context"
+
+# Classify once, decide the verdict from the blocking count, and hand the
+# SAME payload to the emitter (which re-classifies it into the event record;
+# the rule is pure, so the two invocations cannot disagree).
+payload_file="$(mktemp -t code-review-attest-findings.XXXXXX)"
+trap 'rm -f "$payload_file"' EXIT
+printf '%s' "$findings_payload" > "$payload_file"
+if ! record="$("${FNO:-fno}" do review classify --findings-file "$payload_file" --emit-record)" 2>/dev/null; then
+  echo "code-review-attest: classify refused the findings payload; no event emitted (a deployment without 'do review classify' is too old for this hook)" >&2
+  exit 0
+fi
+blocking="$(jq -r '.findings_blocking // 1' <<<"$record" 2>/dev/null || echo 1)"
+nonblocking="$(jq -r '.findings_nonblocking // 0' <<<"$record" 2>/dev/null || echo 0)"
+total="$(jq -r '(.findings | length) // 0' <<<"$record" 2>/dev/null || echo 0)"
+case "$blocking" in
+  ''|*[!0-9]*) blocking=1 ;;  # an unreadable count is not zero findings
+esac
+if [[ "$blocking" == "0" ]]; then
+  verdict="pass"
+else
+  verdict="fail"
+fi
+# The one positive line naming what was classified: a run where the
+# classifier never fired is visibly different from one that classified zero.
+echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking"
+
+bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
+  "$reviewer_context" "$execution_context" "$output_contract" --findings-file "$payload_file"

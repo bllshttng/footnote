@@ -43,6 +43,9 @@ source "$CARRIER_LIB"
 # empty there.
 EVENT="$(postcompact_read_event)"
 SOURCE="$(printf '%s' "$EVENT" | sed -n 1p)"
+EVENT_SESSION_ID="$(printf '%s' "$EVENT" | sed -n 2p)"
+EVENT_TRANSCRIPT="$(printf '%s' "$EVENT" | sed -n 3p)"
+CALLER_SESSION_ID="$(postcompact_resolve_sid "$EVENT_SESSION_ID" "$EVENT_TRANSCRIPT")"
 
 # Defensive gate: on SessionStart, reinject only for compaction. The matcher
 # ("compact") already enforces this at registration; this check keeps the script
@@ -54,27 +57,13 @@ fi
 
 CARRIER="$(postcompact_carrier "$SOURCE")"
 
-# Guard (c) re-surface: if a handoff was armed pre-compaction (by
-# arm-handoff-precompact.sh), nudge the agent to run it at the next wave
-# boundary. Computed BEFORE the reinject gate below because the armed marker is
-# self-gated (the arm hook already checked liveness + pressure) and
-# session-scoped, so it must surface even when target_is_active is false.
-HANDOFF_NUDGE=""
 if [[ -f "$GUARD_LIB" ]]; then
     # shellcheck source=../scripts/lib/target-guard.sh
     source "$GUARD_LIB"
-    if [[ -f "$STATE_FILE" ]]; then
-        _SID="$(target_state_field session_id "$STATE_FILE" 2>/dev/null || true)"
-        if [[ -n "$_SID" && -f "$FNO_DIR/.handoff-armed-$_SID" ]]; then
-            _NODE="$(target_state_field graph_node_id "$STATE_FILE" 2>/dev/null || true)"
-            HANDOFF_NUDGE="**Handoff armed:** you are past the context-handoff threshold with outstanding work on ${_NODE:-this node}. Run handoff.sh (skills/target/scripts/handoff.sh --boundary wave) at the NEXT wave boundary to hand off to a fresh-context successor - never mid-wave. The marker clears once handoff.sh runs."
-        fi
-    fi
     # Only reinject the goal when target is actively owned by this session. Stale
     # state from a prior session would otherwise inject a dead goal into an
     # unrelated compaction event.
-    if ! target_is_active "$STATE_FILE"; then
-        [[ -n "$HANDOFF_NUDGE" ]] && postcompact_emit "$CARRIER" "$HANDOFF_NUDGE"
+    if ! target_is_active "$STATE_FILE" "$CALLER_SESSION_ID"; then
         exit 0
     fi
 else
@@ -110,10 +99,6 @@ CONTEXT="${CONTEXT}
 
 Progress is not in the manifest. Run \`fno whoami\` then \`fno whoami status\`
 for live phase + completion state (git HEAD, PR/CI, review)."
-
-[[ -n "$HANDOFF_NUDGE" ]] && CONTEXT="${CONTEXT}
-
-${HANDOFF_NUDGE}"
 
 postcompact_emit "$CARRIER" "$CONTEXT"
 

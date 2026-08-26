@@ -94,7 +94,7 @@ def test_intake_fires_birth_hook_once(tmp_path, monkeypatch, capture_born):
     _route_graph(g, tmp_path, monkeypatch)
 
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ntitle: A Plan\n---\n# Body\n")
+    plan.write_text("---\ntitle: A Plan\n---\n# Body\n\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
 
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output

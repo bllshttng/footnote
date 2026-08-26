@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Literal, Optional
 import yaml
 
 from fno.claims.self_identity import resolve_self_identity
+from fno.harness_identity import resolve_harness_identity
 
 Harness = Literal["claude", "gemini", "codex"]
 SessionKind = Literal["target", "session", "override"]
@@ -102,6 +103,7 @@ class AgentContext:
     session: Optional[SessionState] = None
     detected_paths: List[Path] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
+    visitor: Optional[str] = None
 
 
 def _detect_project_root(warnings: List[str]) -> Path:
@@ -318,6 +320,20 @@ def load_agent_context(
     fleet = _load_fleet_state(project_root, warnings, detected)
     walker = _load_walker_state(project_root, warnings, detected)
     session = _load_session_state(project_root, state_file_override, warnings, detected)
+    visitor: Optional[str] = None
+    if session is not None and session.kind == "target":
+        manifest_session_id = _str_or_none(
+            session.raw.get("harness_session_id")
+            or session.raw.get("claude_session_id")
+        )
+        caller_session_id = resolve_harness_identity(os.environ).session_id
+        if (
+            manifest_session_id
+            and caller_session_id
+            and manifest_session_id != caller_session_id
+        ):
+            visitor = f"manifest names session {manifest_session_id}, not this one"
+            session = None
     return AgentContext(
         project_root=project_root,
         harness=harness,
@@ -326,6 +342,7 @@ def load_agent_context(
         session=session,
         detected_paths=detected,
         warnings=warnings,
+        visitor=visitor,
     )
 
 

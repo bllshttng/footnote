@@ -24,7 +24,7 @@ pub const SPECIES_NAMES: [&str; SPECIES_COUNT] = [
     "hare", "trout", "boar", "ram", "wren", "ibex",
 ];
 
-/// frames[species][frame][row]. Original art for the fno yard, drawn
+/// frames[species][frame][row]. Original art for the fno agents yard, drawn
 /// for this repo; the 3x5x12 cell-grid format is the only
 /// inheritance. The eye cells carry `EYE_DEFAULT` ('·');
 /// [`render_frame`] swaps every occurrence for the status eye.
@@ -508,7 +508,7 @@ impl Eye {
 /// yard exists to refuse.
 pub const HAT_CROWN: &str = "   \\^^^/    ";
 
-// No rarity table here: the tier names ride the `fno yard --json` payload as
+// No rarity table here: the tier names ride the `fno agents yard --json` payload as
 // strings, so Python's `fno.yard.RARITY_TIERS` is the one live copy. A Rust
 // mirror would be a second tuple to keep in lockstep for nothing.
 

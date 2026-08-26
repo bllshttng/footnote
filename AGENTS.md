@@ -32,12 +32,12 @@ Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. I
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
 
-### Orienter output, claim snapshots, and liveness probes have all lied
+### Claim snapshots and liveness probes have both lied
 
-Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. `fno do target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno agents claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
+Manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. A manifest's `target_claim_*` fields are an init-time snapshot and can name a respawned supervisor pid. A row's argv-derived fields can outlive the process they describe. Verify ownership against the live lockfile (`fno agents claim status node:<id>`, real holder) and liveness against the transcript, never a stored snapshot.
 
-- specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
-- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) and transcript-keyed liveness.
+- specimens: manifest `target_claim_*` fields are an init-time snapshot, never ownership truth.
+- graduates-to: transcript-keyed liveness.
 - added: 2026-07-23
 
 ### Assert a positive marker, never an absence
@@ -172,7 +172,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 
 - **`fno agents claim`** - the one work-claim primitive; atomic lockfiles under `.fno/claims/`. `target init` already claims the node - never `claim acquire` manually. [coordination](docs/architecture/coordination.md).
 - **`fno agents mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; when refused, `fno agents mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply won't). The code-payload self-review obligation is enforced at the stop gate (`loopcheck.rs`) and `fno do pr merge`; opt out `config.review.self_review_required = false`. [review lanes](docs/architecture/review-lanes.md).
-- **`fno backlog decide`** - records a ruling per subject. `fno backlog decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
+- **`fno inbox decide`** - records a ruling per subject. `fno inbox decisions X` recovers it, newest first. [decision-record](docs/architecture/decision-record.md).
 - **`fno whoami` / `fno whoami status`** - read-only self-introspection; run when confused after compaction.
 - **`fno do target start <node>`** - one-verb worktree cold-start (ensure off `origin/main` -> heal `.fno` symlink -> `target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate** - `fno agents spawn --substrate <pane|thread|headless>`: `pane` default, `thread` persistent, `headless` one-shot. `bg` aliases `thread` for one release.
@@ -181,7 +181,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno doctor footprint`** - measures sustained fleet CPU and process count without load average; see [machine footprint](docs/architecture/machine-footprint.md).
 - **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Five axes, never confuse them: harness (`-H`), provider (vendor, `-P`), model (`-m`), effort (`--effort`), account (`--account`). `opencode` is legally both harness and provider. Never infer the axis from a value. Definitions live in [axis-vocabulary](docs/architecture/axis-vocabulary.md).
 - **Stage table (per-stage axis)** - `config.agents.profiles.<verb>` overlays `agents.defaults`, reaches autonomous dispatch; `route`=vendor/model (`--route`, fail-closed) beside `provider`=harness. [stage table](docs/architecture/role-based-model-routing.md).
-- **Curated CLI menu** - `fno --help` shows ~9 verbs. Most commands are hidden but invocable. `fno help --all` lists everything (`help <group> --all` per group). New verbs default hidden. `fno doctor lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
+- **Curated CLI menu** - `fno --help` shows ~8 verbs (mux and version included). Most commands are hidden but invocable. `fno help --all` lists every real root (`help <group> --all` per group). New verbs default hidden. `fno doctor lint menu-caps` gates the root namespace (cap 12, eleven today) and the advertised surface (10 top-level / 12 per sub-app). Group actions are arguments, not leaves.
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro; follow-ups go to `config.post_merge.parking_lot_path`.
 - **Target self-handoff** - `/target` can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review); two memory-pass checkpoints; stuck terminals write postmortems. [memory-system](docs/architecture/memory-system.md).

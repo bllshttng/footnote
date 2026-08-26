@@ -72,21 +72,15 @@ The key is deliberately not renamed here. A rename breaks every config that set 
 
 ## Effort: one axis, three harness spellings
 
-The caller sets one value on the effort axis. Each harness spells the reasoning-effort parameter differently, and `thinking.type` and `reasoning.effort` are both effort, just spelled differently.
+The caller sets one value on the effort axis. Each harness spells the reasoning-effort parameter differently, and `thinking.type` and `reasoning.effort` are both effort, just spelled differently. fno translates the flag spelling and passes the value through. The provider/model owns the accepted vocabulary, so fno does not keep a per-provider allowlist.
 
 | Harness | Parameter the harness names | How fno emits it |
 |---|---|---|
 | claude | `thinking.type`, `output_config.effort` | `--effort <value>` |
 | codex | `reasoning.effort` | `-c model_reasoning_effort=<value>` |
-| opencode | (accepts the full value set) | no token emitted |
+| opencode | provider/model-defined | no token emitted |
 
-The code that holds this is `_EFFORT_ALLOWED` and `effort_tokens` in `cli/src/fno/agents/mux_spawn.py`. The per-harness value sets, verbatim from `_EFFORT_ALLOWED`, appear below.
-
-| Harness | Allowed effort values |
-|---|---|
-| claude | `low`, `medium`, `high`, `xhigh`, `max` |
-| codex | `minimal`, `low`, `medium`, `high`, `xhigh` |
-| opencode | the full superset |
+`effort_tokens` in `cli/src/fno/agents/mux_spawn.py` owns only this flag translation. Gemini and agy have no fno effort surface and refuse `--effort`. Other harnesses pass the value to their provider CLI.
 
 claude accepts `max`, and codex does not. codex accepts `minimal`, and claude does not. An `--effort` value valid for one harness can be invalid for another, so `effort_tokens` validates against the resolved harness's own set, not the union.
 

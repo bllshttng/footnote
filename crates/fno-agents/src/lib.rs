@@ -77,6 +77,7 @@ pub mod loop_target;
 pub mod loopcheck;
 pub mod mail_inject;
 pub mod manifest;
+pub mod manifest_lookup;
 pub mod model_env_scrub;
 pub mod needs;
 pub mod nudge;
@@ -679,7 +680,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // live-but-unowned PID to exited); this REMOVES the row entirely.
     "agent_row_reaped",
     // Worktree report sweep (daemon-emitted, x-5a30): one line per repo per 24h
-    // saying what `fno workspace worktree cleanup --merged` WOULD archive. Report-only by
+    // saying what `fno agents workspace worktree cleanup --merged` WOULD archive. Report-only by
     // construction, because a timer tick is not proof that work landed; removal
     // stays on the merge-triggered path. Emitted even when the counts are zero,
     // so a quiet repo cannot be mistaken for a sweep that never ran.
@@ -741,6 +742,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // agent_raw_inject records a payload delivered without the <fno_mail>
     // envelope, so the provenance marker survives in the ledger, not transcript.
     "agent_raw_inject",
+    // Review invocation attempt/outcome join (daemon-emitted): the
+    // canonical repo-local event records how a Codex review was fired and
+    // whether its transport confirmed delivery.
+    "review_invocation",
     // Active-backlog mission drain supervisor (daemon-emitted): the drain tick
     // panicked and the supervisor is restarting it with backoff. The drain
     // decision events (active_backlog_dispatched / _parked / _skip) are

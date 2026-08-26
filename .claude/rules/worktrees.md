@@ -28,11 +28,11 @@ The setup script links shared state from canonical: the vault symlink, per-file 
 
 ## Cargo build storage
 
-Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno workspace worktree cleanup --cargo-targets --apply` (inspect first by omitting `--apply`). It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree; protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the wrapper at `scripts/lib/cargo-rustc-wrapper.sh`, gated by `incremental = false`; sccache shares a 10 GiB cache, machines without it run rustc directly.
+Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno agents workspace worktree cleanup --cargo-targets --apply` (inspect first by omitting `--apply`). It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree. Protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the wrapper at `scripts/lib/cargo-rustc-wrapper.sh`, gated by `incremental = false`. Sccache shares a 10 GiB cache, machines without it run rustc directly.
 
 ## Per-project worktree policy
 
-Every code-payload dispatch routes through `fno workspace worktree ensure`, which resolves a `worktree` policy.
+Every code-payload dispatch routes through `fno agents workspace worktree ensure`, which resolves a `worktree` policy.
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
 - **`never`** - launch in place on the canonical checkout (for projects whose working tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.
@@ -41,7 +41,7 @@ Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `c
 
 The per-project policy outranks `worktrees_base`: setting the base alone leaves a claude default where it is, and relocating it also needs `worktree.policy = "external"`. "conductor" is a `worktrees_base` value, not a policy value. A config parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout, so the caller holds rather than auto-isolating on a misconfig.
 
-Both creation paths honor `never`, the hook resolving it through `fno workspace worktree policy` (one resolver, no second precedence impl).
+Both creation paths honor `never`, the hook resolving it through `fno agents workspace worktree policy` (one resolver, no second precedence impl).
 
 ## Forbidden locations (regardless of config)
 

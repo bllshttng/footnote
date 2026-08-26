@@ -750,6 +750,18 @@ struct PaneEntry {
     /// for a mux-spawned pane; a durable pane fact (survives reattach), never
     /// the registry schema (Locked Decision 5).
     account: Option<String>,
+    /// (x-d401) The session id this pane's run argv resumes (parsed at spawn,
+    /// see [`resume_target_from_argv`]). The row-to-pane join for an UNBOUND
+    /// resume pane: the registry row needs no written `fno_id` for the
+    /// disposition to see that its session is already running here.
+    /// `None` for a shell pane or any non-resume run.
+    resume_target: Option<String>,
+    /// (x-d401) When this pane last produced PTY output, stamped on the drain
+    /// path itself so a pane with no `pane wait` watcher still records activity
+    /// (`note_pane_output` returns early with zero subscribers, which is why
+    /// bare-pane rows used to read `last_activity_age_s: None`). Initialized at
+    /// registration so a never-spoken pane has an honest birth time.
+    last_output: Instant,
     /// This pane's monotonic counters. Same `Arc` as the registry row, so the
     /// core loop increments without touching the registry lock.
     stats: Arc<PaneCounters>,
@@ -815,7 +827,10 @@ fn env_assignments_start(argv: &[String]) -> Option<usize> {
             break; // the assignment run (or the command) starts here
         }
     }
-    Some(i)
+    // A trailing bare `-u` / `--unset` advances past the end, and every caller
+    // slices `argv[start..]`, which panics for start > len. Clamp here (one
+    // fix, four call sites) rather than guarding each slice.
+    Some(i.min(argv.len()))
 }
 
 /// Shared scan for a `NAME=` token in the leading `env(1)` assignment run of a
@@ -928,6 +943,41 @@ impl Drop for ResumeProgramGuard {
     fn drop(&mut self) {
         clear_resume_program();
     }
+}
+
+/// (x-d401) The session id a pane-run argv resumes: the token after
+/// `--resume` (claude's flag form) or `resume` (codex's subcommand form).
+/// Anchored past the `env(1)` wrapper to a `claude`/`codex` command, so an
+/// argument that merely mentions the token (`grep --resume file`) never
+/// parses as a resume target. `None` for a shell pane or a run with no
+/// resume form. The row-to-pane join: `row_resume_disposition_in_session`
+/// reads it so a pane visibly running a session makes `BackendNotLive`
+/// unreachable for that session's row.
+fn resume_target_from_argv(argv: &[String]) -> Option<String> {
+    let start = env_assignments_start(argv).unwrap_or(0);
+    let rest = &argv[start..];
+    // The command is the first non-assignment token (same scan as
+    // `cmd_from_argv`); only the two harnesses owning a resume form parse.
+    let cmd_idx = rest.iter().position(|a| !a.contains('='))?;
+    let base = rest[cmd_idx].rsplit('/').next().unwrap_or(&rest[cmd_idx]);
+    if base != "claude" && base != "codex" {
+        return None;
+    }
+    let tokens = &rest[cmd_idx + 1..];
+    tokens
+        .iter()
+        .position(|t| t == "--resume" || t == "resume")
+        .and_then(|i| tokens.get(i + 1))
+        // A FLAG is not a session id. `codex resume --last` resumes the most
+        // recent session without naming it, so the token after `resume` is
+        // `--last` and storing it yields a join key matching no row. The junk
+        // value is harmless; the MISS is not. `pane_resumes_session` is what
+        // keeps a row non-resumable while a pane runs that session, so a pane
+        // started this way leaves its row still offered as resumable, and one
+        // tap opens a SECOND WRITER on a live rollout. That is not
+        // theoretical: it happened in this branch's own review round.
+        .filter(|sid| !sid.is_empty() && !sid.contains('=') && !sid.starts_with('-'))
+        .cloned()
 }
 
 /// The argv resuming `session_id` through its harness's own form (x-5f7f).
@@ -2692,7 +2742,18 @@ impl Core {
         )
         .map_err(|e| e.to_string())?;
         // A shell pane carries no node provenance (no wrapper argv).
-        self.register_pane(id, pty, rows, cols, None, None, cwd.to_string(), None, None);
+        self.register_pane(
+            id,
+            pty,
+            rows,
+            cols,
+            None,
+            None,
+            cwd.to_string(),
+            None,
+            None,
+            None,
+        );
         Ok(id)
     }
 
@@ -2726,6 +2787,7 @@ impl Core {
         let name = agent_self_from_argv(argv);
         let cmd = cmd_from_argv(argv);
         let account = account_from_argv(argv);
+        let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
         let pty = PtyShell::spawn_cmd_with_permit(
@@ -2750,6 +2812,7 @@ impl Core {
             cwd.to_string(),
             cmd,
             account,
+            resume_target,
         );
         Ok(id)
     }
@@ -2802,6 +2865,7 @@ impl Core {
         cwd: String,
         cmd: Option<String>,
         account: Option<String>,
+        resume_target: Option<String>,
     ) {
         self.next_pane_id = self.next_pane_id.max(id.saturating_add(1));
         e2e_log(format_args!("pane {id} registered ({rows}x{cols})"));
@@ -2816,6 +2880,8 @@ impl Core {
                 cwd,
                 cmd,
                 account,
+                resume_target,
+                last_output: Instant::now(),
                 stats: Arc::clone(&stats),
             },
         );
@@ -5159,13 +5225,62 @@ impl Core {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
         }
         if !a.exited {
-            return RowResumeDisposition::NoPane(if a.liveness == agents_view::Liveness::Alive {
-                AgentNoPaneReason::LivePaneless
-            } else {
-                AgentNoPaneReason::BackendNotLive
+            return RowResumeDisposition::NoPane(match a.liveness {
+                agents_view::Liveness::Alive => AgentNoPaneReason::LivePaneless,
+                // (x-d401) BackendNotLive asserts a FALSIFIED backend, so it
+                // fires only on Dead. Unmeasured is the absent reading and
+                // says so itself - the old fold printed "backend is not live"
+                // for rows whose pane was running in this very sideline.
+                agents_view::Liveness::Dead => AgentNoPaneReason::BackendNotLive,
+                agents_view::Liveness::Unmeasured => AgentNoPaneReason::LivenessUnmeasured,
             });
         }
         RowResumeDisposition::Resumable
+    }
+
+    /// (x-d401) The disposition with the pane join applied: a pane in THIS
+    /// session whose run argv resumes the row's session id is direct
+    /// observation that the backend is live, whatever the registry's
+    /// liveness field says (and however stale). The row then reads
+    /// LivePaneless - peek, do not resume; resuming would open a second
+    /// writer on the live rollout. This join is also what removes the need
+    /// for a pane-to-registry bind verb: the pane's own argv names the
+    /// session the registry row carries.
+    fn row_resume_disposition_in_session(&self, a: &RegistryAgent) -> RowResumeDisposition {
+        if self.pane_resumes_session(a) {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless);
+        }
+        Self::row_resume_disposition(a)
+    }
+
+    /// (x-d401) Does any live pane of this session resume this row's session
+    /// id? The comparison uses the same id sources the disposition does.
+    /// Liveness is read from the pane, not assumed from presence: entries
+    /// leave `self.panes` only on kill/reap, so a pane whose child died or
+    /// whose integration markers show the resume command finished must not
+    /// keep answering "backend live". A pane without markers cannot be read
+    /// (`Unmeasured`): the join then keeps protecting the rollout rather
+    /// than guessing the backend dead.
+    fn pane_resumes_session(&self, a: &RegistryAgent) -> bool {
+        let sid = a
+            .harness_session_id
+            .as_deref()
+            .or(a.claude_session_uuid.as_deref())
+            .unwrap_or("");
+        !sid.is_empty()
+            && self.panes.iter().any(|(id, e)| {
+                e.resume_target.as_deref() == Some(sid)
+                    // "of THIS session" is both halves, the same pair the
+                    // `live_pane` check in `agent_rows` uses: a pane can
+                    // outlive its place in the layout, and one that has must
+                    // not keep answering "backend live".
+                    && self.session.find_pane(*id).is_some()
+                    && e.pty.is_child_alive()
+                    && !matches!(
+                        e.vt.shell_activity(),
+                        vt::ShellActivity::Idle | vt::ShellActivity::Empty
+                    )
+            })
     }
 
     /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
@@ -5177,6 +5292,15 @@ impl Core {
     fn row_resumable(a: &RegistryAgent) -> bool {
         matches!(
             Self::row_resume_disposition(a),
+            RowResumeDisposition::Resumable
+        )
+    }
+
+    /// (x-d401) The session-aware twin: a session a pane of this session is
+    /// already resuming is never resumable again from its row.
+    fn row_resumable_in_session(&self, a: &RegistryAgent) -> bool {
+        matches!(
+            self.row_resume_disposition_in_session(a),
             RowResumeDisposition::Resumable
         )
     }
@@ -5201,6 +5325,20 @@ impl Core {
             AgentNoPaneReason::MissingSessionId => "session id is missing",
             AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
             AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
+            AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
+        }
+    }
+
+    /// (x-d401) The session-aware twin used where the sideline renders: the
+    /// pane join can answer LivePaneless where the registry alone would have
+    /// printed a dead-backend verdict.
+    fn row_no_pane_reason_in_session(&self, a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+        if a.attach_id.is_some() && !a.exited {
+            return None;
+        }
+        match self.row_resume_disposition_in_session(a) {
+            RowResumeDisposition::Resumable => None,
+            RowResumeDisposition::NoPane(reason) => Some(reason),
         }
     }
 
@@ -7448,6 +7586,11 @@ impl Core {
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
                                 no_pane_reason: None,
+                                // A registry-hosted pane's badge is its primary
+                                // signal, but the vt reading is still real and
+                                // one field away: keep it so the client can
+                                // show activity when the badge goes quiet.
+                                pane_activity: pane_entry.map(|e| e.vt.shell_activity()),
                             }
                         }
                         None => {
@@ -7480,8 +7623,14 @@ impl Core {
                                 subline: self
                                     .compose_subline(e.map(|e| e.cwd.as_str()).unwrap_or("")),
                                 account: e.and_then(|e| e.account.clone()),
-                                // A bare shell pane is not a registry worker: no
-                                // activity stamp, no claim, no pr, no transcript.
+                                // A bare pane is not a registry worker: no
+                                // claim, no pr, no transcript. But not-in-
+                                // registry is not is-a-shell - it can be a
+                                // full agent with a live workload, so the row
+                                // carries the pane's OWN vt reading and the
+                                // drain-path activity stamp (x-d401).
+                                pane_activity: e.map(|e| e.vt.shell_activity()),
+                                last_activity_age_s: e.map(|e| e.last_output.elapsed().as_secs()),
                                 updated_at: None,
                                 pr: None,
                                 tail: None,
@@ -7490,7 +7639,6 @@ impl Core {
                                 crown_level: None,
                                 crown_scope: None,
                                 basis: None,
-                                last_activity_age_s: None,
                                 resumable: false,
                                 no_pane_reason: None,
                             }
@@ -7522,7 +7670,7 @@ impl Core {
                     // carry `resumable`, so tapping it resumes the session
                     // through the harness's own form instead of dead-ending
                     // on a focus at a pane that no longer exists.
-                    let resumable = Self::row_resumable(a);
+                    let resumable = self.row_resumable_in_session(a);
                     // Attribute the row to the squad holding its recorded
                     // membership FIRST (cwd ownership only as a fallback), so
                     // the panel shows it where ResumeAgent will actually place
@@ -7570,7 +7718,9 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
-                        no_pane_reason: Self::row_no_pane_reason(a),
+                        no_pane_reason: self.row_no_pane_reason_in_session(a),
+                        // Dangling dead: the pane is gone, so no vt reading.
+                        pane_activity: None,
                     })
                 }
                 None => {
@@ -7620,8 +7770,10 @@ impl Core {
                         crown_scope: a.crown_scope.clone(),
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
-                        resumable: Self::row_resumable(a),
-                        no_pane_reason: Self::row_no_pane_reason(a),
+                        resumable: self.row_resumable_in_session(a),
+                        no_pane_reason: self.row_no_pane_reason_in_session(a),
+                        // Watch-only paneless: no PTY, no vt reading.
+                        pane_activity: None,
                     })
                 }
             }
@@ -7673,6 +7825,8 @@ impl Core {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    // A synthesized dead member owns no PTY.
+                    pane_activity: None,
                 })
             }
         }
@@ -7753,6 +7907,8 @@ impl Core {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                // An external-daemon row owns no PTY of this server.
+                pane_activity: None,
             })
         }
         out
@@ -9082,7 +9238,12 @@ impl Core {
                             || agent.claude_session_uuid.as_deref()
                                 == Some(held.harness_session_id.as_str())
                     });
-                    if current.is_some_and(|agent| !Self::row_resumable(agent)) {
+                    // (x-d401) The SESSION-AWARE gate, the same one
+                    // `Command::ResumeAgent` and the sideline render use: a
+                    // pane of this session already running the row's session
+                    // is direct observation the backend is live, and resuming
+                    // under it opens a second writer on the live rollout.
+                    if current.is_some_and(|agent| !self.row_resumable_in_session(agent)) {
                         self.held_workers.remove(&pid);
                         self.write_restore_message(
                             pid,
@@ -9471,8 +9632,8 @@ impl Core {
                     let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                         self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
                     });
-                    if live_pane || !Self::row_resumable(a) {
-                        None
+                    if live_pane || !self.row_resumable_in_session(a) {
+                        None // refused; notice below
                     } else {
                         Self::worker_facts(a)
                     }
@@ -11131,6 +11292,7 @@ fn drain_pty_output(
             if let Some(entry) = core.panes.get_mut(&pid) {
                 let t0 = Instant::now();
                 entry.vt.feed(&bytes);
+                entry.last_output = t0;
                 entry
                     .stats
                     .bytes_in
@@ -13495,6 +13657,50 @@ mod tests {
             live.no_pane_reason,
             Some(AgentNoPaneReason::LivePaneless),
             "registry truth projects the typed live-paneless reason"
+        );
+    }
+
+    #[test]
+    fn bare_pane_row_carries_its_own_activity_and_age() {
+        // (x-d401, x-9d03) A bare pane with no registry row can still be a
+        // full agent running a real workload - not-in-registry is not
+        // is-a-shell. The row must carry the pane's own OSC 133 reading and a
+        // real last_activity_age_s from the drain-path stamp, never the
+        // badge-None-means-idle fold that rendered four working panes and one
+        // idle shell as the same circle.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/w").expect("pane");
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(pid),
+                focus: pid,
+            },
+        );
+        core.agents = vec![];
+        // Feed an open command block (OSC 133 A then C, no D): Running.
+        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        tx.try_send((pid, b"\x1b]133;A\x07\x1b]133;C\x07workload".to_vec()))
+            .unwrap();
+        drop(tx);
+        let mut first_out = HashSet::new();
+        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+        let rows = core.agent_rows();
+        let bare = rows.iter().find(|r| r.pane_id == Some(pid)).unwrap();
+        assert_eq!(
+            bare.pane_activity,
+            Some(vt::ShellActivity::Running),
+            "a bare pane running a command must report Running, not a blind idle"
+        );
+        assert!(
+            bare.last_activity_age_s.is_some(),
+            "a bare pane must report a real activity age from the drain stamp"
         );
     }
 
@@ -17353,6 +17559,12 @@ mod tests {
         );
         assert_eq!(
             Core::row_resume_disposition(&backend_not_live),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
+            "(x-d401) unmeasured names the absent reading, not a dead backend"
+        );
+        backend_not_live.liveness = agents_view::Liveness::Dead;
+        assert_eq!(
+            Core::row_resume_disposition(&backend_not_live),
             RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
         );
         let mut agy = base();
@@ -17399,6 +17611,181 @@ mod tests {
         assert_eq!(
             Core::row_resume_disposition(&no_harness),
             RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
+        );
+    }
+
+    #[test]
+    fn row_resume_disposition_unmeasured_names_the_absent_reading() {
+        // (x-d401, AC2-EDGE) Liveness::Unmeasured is NOT a dead backend, and
+        // must not print one. The old fold returned BackendNotLive for every
+        // non-Alive reading, so a row whose pane was live eight rows down the
+        // same sideline told the operator its backend was not live. The
+        // narrowed BackendNotLive fires only on the falsified case (Dead).
+        let base = || RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: Some("01a027ad".into()),
+            harness: Some("codex".into()),
+            name: "w".into(),
+            cwd: "/w".into(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Alive,
+        };
+        let mut unmeasured = base();
+        unmeasured.exited = false;
+        unmeasured.liveness = agents_view::Liveness::Unmeasured;
+        assert_eq!(
+            Core::row_resume_disposition(&unmeasured),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivenessUnmeasured),
+            "an unmeasured backend must read as no-reading, never as dead"
+        );
+        let mut dead = base();
+        dead.exited = false;
+        dead.liveness = agents_view::Liveness::Dead;
+        assert_eq!(
+            Core::row_resume_disposition(&dead),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive),
+            "a falsified backend keeps the confident verdict"
+        );
+    }
+
+    #[test]
+    fn resume_target_from_argv_parses_both_harness_forms_anchored() {
+        // (x-d401) The row-to-pane join key: the session id a pane-run argv
+        // resumes. Claude's flag form, codex's subcommand form, both behind
+        // the env(1) wrapper; a command that merely mentions the token never
+        // parses.
+        use super::resume_target_from_argv;
+        let argv = |toks: &[&str]| toks.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            resume_target_from_argv(&argv(&["claude", "--resume", "01a03a4e-b862"])),
+            Some("01a03a4e-b862".into())
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["codex", "resume", "f00dcaf3"])),
+            Some("f00dcaf3".into())
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&[
+                "env",
+                "FNO_NODE=x-9d03",
+                "FNO_AGENT_SELF=peer",
+                "claude",
+                "--resume",
+                "01a03a4e-b862"
+            ])),
+            Some("01a03a4e-b862".into())
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["grep", "--resume", "file"])),
+            None,
+            "a non-harness command never parses"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["claude", "--resume"])),
+            None,
+            "a resume flag with no following token parses nothing"
+        );
+        // (x-d401) A FLAG is not a session id. `codex resume --last` names no
+        // session, so storing `--last` yields a join key matching no row, and
+        // `pane_resumes_session` then fails to keep that row non-resumable
+        // while a pane runs it. One tap opens a second writer on a live
+        // rollout, so this filter is a safety guard, not tidiness.
+        assert_eq!(
+            resume_target_from_argv(&argv(&["codex", "resume", "--last"])),
+            None,
+            "a flag is not a session id"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["claude", "--resume", "--foo"])),
+            None,
+            "the claude form rejects a flag too"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["/bin/zsh"])),
+            None,
+            "a shell pane has no resume target"
+        );
+    }
+
+    #[test]
+    fn unbound_pane_running_a_session_makes_backend_not_live_unreachable() {
+        // (x-d401, AC2-HP) A pane in this session whose argv resumes the
+        // row's session id is DIRECT OBSERVATION the backend is live. The
+        // row must read LivePaneless (peek, do not resume - a resume opens a
+        // second writer on the live rollout), whatever the registry's
+        // liveness field says, and BackendNotLive must be unreachable.
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/w").expect("pane");
+        // "of THIS session" is both halves: registered AND placed in the
+        // layout. `spawn_pane` only does the first, so a pane left out of the
+        // layout must not answer the join.
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(pid),
+                focus: pid,
+            },
+        );
+        core.panes.get_mut(&pid).unwrap().resume_target = Some("01a03a4e-b862".into());
+        let mut row = RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: Some("01a03a4e-b862".into()),
+            harness: Some("claude".into()),
+            name: "worker".into(),
+            cwd: "/w".into(),
+            exited: false,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            // The reading that used to print "backend is not live".
+            liveness: agents_view::Liveness::Unmeasured,
+        };
+        assert_eq!(
+            core.row_resume_disposition_in_session(&row),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
+        row.liveness = agents_view::Liveness::Dead;
+        assert_eq!(
+            core.row_resume_disposition_in_session(&row),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless),
+            "the observed pane outranks even a Dead registry reading"
+        );
+        assert!(
+            !core.row_resumable_in_session(&row),
+            "a session a pane is already running must not be resumed again"
+        );
+        // A pane resuming a DIFFERENT session leaves the row's own reading.
+        core.panes.get_mut(&pid).unwrap().resume_target = Some("other-session".into());
+        assert_eq!(
+            core.row_resume_disposition_in_session(&row),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
         );
     }
 
@@ -21518,6 +21905,34 @@ mod tests {
         assert!(
             c.cpu_ns.load(Ordering::Relaxed) > 0,
             "feeding one burst must attribute nonzero handling time"
+        );
+    }
+
+    #[test]
+    fn watcherless_pane_stamps_last_output_on_every_burst() {
+        // (x-d401) `note_pane_output` returns early with no `pane wait`
+        // subscriber, which is why `last_activity_age_s` read None for panes
+        // running real workloads. The stamp lives on the drain path itself:
+        // every fed burst advances it whether or not anyone watches. The
+        // marker is the stamp's recency against a pre-feed Instant - only the
+        // drain path can produce it.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let pid = core.spawn_pane(2, 4, "/tmp").expect("pane");
+        let registered = core.panes[&pid].last_output;
+        let (tx, mut rx) = mpsc::channel::<(u64, Vec<u8>)>(8);
+        let mut first_out = HashSet::new();
+        tx.try_send((pid, b"burst".to_vec())).unwrap();
+        drop(tx);
+        let before = Instant::now();
+        drain_pty_output(&mut core, &mut rx, None, &mut first_out);
+        assert!(
+            core.panes[&pid].last_output >= before,
+            "the drain path must stamp last_output with no watcher attached"
+        );
+        assert!(
+            core.panes[&pid].last_output > registered,
+            "a second burst must advance the registration stamp"
         );
     }
 

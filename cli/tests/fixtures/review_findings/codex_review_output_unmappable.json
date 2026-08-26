@@ -1,0 +1,7 @@
+{
+  "findings": [
+    {"severity": "P1", "title": "unbounded recursion", "body": "resolve() calls itself"},
+    {"severity": "P2", "title": "unclosed file handle", "body": "open() without with"},
+    {"rating": "high", "note": "race on the frontier variable"}
+  ]
+}

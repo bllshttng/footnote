@@ -212,7 +212,8 @@ def test_reconcile_reanchors_slot_to_worker_pid_and_keeps_domain(tmp_path):
     assert len(slots) == 1
     # pure pid-liveness: no TTL clock (frees the instant the worker pid dies).
     assert slots[0].get("expires_at") is None
-    # domain preserved so a later lane-fill still blocks a same-domain co-schedule.
+    # domain preserved so a later lane-fill still annotates an unevaluated
+    # same-domain candidate (the +same-domain tiebreak).
     assert (slots[0].get("metadata") or {}).get("domain") == "code"
 
 

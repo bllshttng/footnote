@@ -153,6 +153,10 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
                 "pid": w.session_pid or w.pid,
                 "rss_mb": tree_rss_mb(w.session_pid or w.pid),
                 "status": w.status,
+                # (x-d401) Why `status` is not the stored token, when it is
+                # not: the contradiction the emitter resolved. Null = the
+                # stored token passed through.
+                "status_basis": w.status_basis,
                 # The orthogonal axis beside `status`: null for a foreign
                 # claude row this view has no harness/route context to judge.
                 "progress": progress.get(w.name),
@@ -450,6 +454,7 @@ def render_top(
             f"{r['substrate']:<10} {r['king'] or '-':<9} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} "
             f"{r['progress'] or '-':<17} {r['status']}"
+            + (f" ({r['status_basis']})" if r.get("status_basis") else "")
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")

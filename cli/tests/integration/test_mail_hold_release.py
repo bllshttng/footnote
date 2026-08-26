@@ -74,7 +74,7 @@ def state(tmp_path, monkeypatch):
     return env, home
 
 
-def _arm_clock(hold_dir, *, seconds_out, window_s=2):
+def _arm_clock(hold_dir, *, seconds_out, window_s=2, clock_kind="idle", ceiling_out=None):
     """Write a hold clock and return the exact epoch deadline it encodes.
 
     Truncates to a whole second BEFORE adding the offset, so the deadline the
@@ -83,15 +83,15 @@ def _arm_clock(hold_dir, *, seconds_out, window_s=2):
     durations.
     """
     deadline = float(int(time.time()) + seconds_out)
-    (hold_dir / f"{HANDLE}.json").write_text(
-        json.dumps(
-            {
-                "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(deadline)),
-                "window_s": window_s,
-            }
-        ),
-        encoding="utf-8",
-    )
+    payload = {
+        "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(deadline)),
+        "window_s": window_s,
+        "clock_kind": clock_kind,
+    }
+    if ceiling_out is not None:
+        ceiling = float(int(time.time()) + ceiling_out)
+        payload["ceiling"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ceiling))
+    (hold_dir / f"{HANDLE}.json").write_text(json.dumps(payload), encoding="utf-8")
     return deadline
 
 
@@ -213,4 +213,57 @@ def test_an_idle_rearm_extends_the_hold_past_the_original_deadline(state):
         if proc.poll() is None:
             proc.kill()
 
+    assert not clock.exists()
+
+
+def test_a_wall_clock_timer_releases_at_the_fixed_deadline(state):
+    env, home = state
+    hold_dir = home / ".fno" / "mail-hold"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    deadline = _arm_clock(hold_dir, seconds_out=2, clock_kind="wall")
+
+    proc = _run_release(env)
+
+    assert proc.returncode == 0, proc.stderr
+    assert time.time() >= deadline - 0.2
+    assert not (hold_dir / f"{HANDLE}.json").exists()
+
+
+def test_an_idle_timer_never_runs_past_its_two_window_ceiling(state):
+    env, home = state
+    hold_dir = home / ".fno" / "mail-hold"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    ceiling = float(int(time.time()) + 4)
+    _arm_clock(hold_dir, seconds_out=2, window_s=2, ceiling_out=4)
+    clock = hold_dir / f"{HANDLE}.json"
+    proc = subprocess.Popen(
+        _FNO_ARGV
+        + ["agents", "mail", "hold-release", "--handle", HANDLE, "--poll-s", "1"],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        while time.time() < ceiling - 0.8:
+            time.sleep(0.6)
+            now = float(int(time.time()))
+            until = min(now + 2, ceiling)
+            clock.write_text(
+                json.dumps(
+                    {
+                        "until": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until)),
+                        "window_s": 2,
+                        "clock_kind": "idle",
+                        "ceiling": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ceiling)),
+                    }
+                ),
+                encoding="utf-8",
+            )
+        stdout, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0, stderr
+    assert time.time() >= ceiling - 0.2, stdout
     assert not clock.exists()

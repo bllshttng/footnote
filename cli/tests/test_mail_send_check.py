@@ -116,6 +116,36 @@ def test_self_on_unguarded_mux_lane_is_injectable(tmp_path):
     assert out.startswith("injectable: mux-pane"), out
 
 
+def test_self_compact_becomes_injectable_after_wall_hold_expiry(tmp_path):
+    """A live wall hold blocks compact, then expiry restores the same lane."""
+    _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID, mux=MUX,
+                                    delivery_policy="bus-only")])
+    hold_dir = tmp_path / ".fno" / "mail-hold"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    (hold_dir / f"{SELF_SID[:8]}.json").write_text(
+        json.dumps({
+            "until": "2099-01-01T00:00:00Z",
+            "window_s": 480,
+            "clock_kind": "wall",
+        })
+    )
+
+    out, code = _run(["/compact", "--to-self", "--raw", "--check"], _self_env(), tmp_path)
+    assert code == 1, out
+    assert "bus-only" in out, out
+
+    (hold_dir / f"{SELF_SID[:8]}.json").write_text(
+        json.dumps({
+            "until": "2000-01-01T00:00:00Z",
+            "window_s": 480,
+            "clock_kind": "wall",
+        })
+    )
+    out, code = _run(["/compact", "--to-self", "--raw", "--check"], _self_env(), tmp_path)
+    assert code == 0, out
+    assert out.startswith("injectable: mux-pane"), out
+
+
 def test_peer_on_mux_lane_is_injectable(tmp_path):
     """A peer can be idle, so the same lane IS a path for a peer."""
     _write_registry(

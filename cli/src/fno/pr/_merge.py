@@ -1802,6 +1802,19 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         # reason whose trailing paren closes an inner clause (a searched list,
         # a truncated sha) would swallow the note into the wrong parenthetical.
         line = _coverage_gate.refusal_line(refusal, note)
+        if state == _coverage_gate.IMPOSSIBLE:
+            # Distinct from the unreviewed receipt: "cannot be cleared by
+            # reviewing" prescribes escalation, not another round, and a
+            # receipt that reads like the ordinary refusal teaches exactly
+            # the loop this state exists to end.
+            _emit(
+                pr_number,
+                "blocked",
+                f"merge refused, coverage impossible: {line}",
+                "none",
+                err=True,
+            )
+            return 2
         if state == _coverage_gate.UNANSWERED:
             # UNANSWERED is an instrument failure, not a review verdict: a
             # receipt that says "unreviewed" about a probe that died sends a

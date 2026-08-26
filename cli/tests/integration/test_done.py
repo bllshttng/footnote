@@ -162,10 +162,10 @@ def test_done_race_collision_stderr_diagnostic(
 ):
     """#28: stderr diagnostic must contain full canonical phrase on collision.
 
-    Format: ``fno done: <id> already done at <ts>; metadata updates applied;
-    collision event emitted`` (or ``... emit failed: <exc>`` on emit failure).
-    Reflects actual emit outcome - the diagnostic prints AFTER the emit
-    completes (per memory feedback_forward_promise_telemetry_lies).
+    Format: ``fno backlog done: <id> already done at <ts>; metadata updates
+    applied; collision event emitted`` (or ``... emit failed: <exc>`` on emit
+    failure). Reflects actual emit outcome - the diagnostic prints AFTER the
+    emit completes (per memory feedback_forward_promise_telemetry_lies).
     """
     first_completed_at = "2026-05-15T10:00:00+00:00"
     _seed(tmp_graph, [{
@@ -182,7 +182,7 @@ def test_done_race_collision_stderr_diagnostic(
 
     combined = result.output + (result.stderr or "")
     expected = (
-        f"fno done: ab-race002 already done at {first_completed_at}; "
+        f"fno backlog done: ab-race002 already done at {first_completed_at}; "
         "metadata updates applied; collision event emitted"
     )
     assert expected in combined, (

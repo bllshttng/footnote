@@ -112,6 +112,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=17.
 // v17 adds predecessor/fork lineage fields; an older writer must refuse rather
 // than erase those fields during a read-modify-write.
+//
+// v17 (x-d401) adds `model_basis`, the requested-vs-verified qualifier on
+// `model`. Same rationale as v16: a pre-v17 binary re-serializes the row from
+// its typed struct and drops the key, and a pre-v17 Python reader would see an
+// unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
 pub const REGISTRY_SCHEMA_VERSION: u32 = 17;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
@@ -416,6 +421,14 @@ pub struct RegistryEntry {
     /// remain lossless when a Python writer adds the axis fields.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    /// flag or route the caller named) or "verified" (read back from a
+    /// verified pane status). A bare model is two facts in one field - the
+    /// x-aa8e shape - so the pair travels together; a row with a model and
+    /// no basis predates this field and reads as unmarked, never as verified.
+    /// Additive-optional like the field it qualifies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_basis: Option<String>,
     /// Reasoning-effort arm used by the lane, when one was selected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
@@ -1707,6 +1720,7 @@ mod tests {
             legacy_provider: String::new(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,

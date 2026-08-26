@@ -477,7 +477,9 @@ validate_event() {
     fi
 
     # review_attestation: verdict enum check (x-e703 trust-core gate event) -
-    # mirrors the Python validator so a producer typo fails loud in both.
+    # mirrors the Python validator so a producer typo fails loud in both. The
+    # dispositions enum carries the same guarantee for the finding record:
+    # a disposition the gate does not know must fail loud in both validators.
     if [[ "$type" == "review_attestation" ]]; then
         local ra_verdict enum_match
         ra_verdict=$(jq -r '.data.verdict // empty' <<<"$payload" 2>/dev/null)
@@ -487,6 +489,20 @@ validate_event() {
                 _ev_warn "unknown verdict: $ra_verdict"
                 return 1
             fi
+        fi
+        local disp_ok
+        disp_ok=$(jq -r '
+            .data.dispositions // [] | all(
+                type == "object"
+                and (.finding_key | type == "string" and test("[^[:space:]]"))
+                and (.disposition == "fixed" or .disposition == "declined"
+                    or .disposition == "nonblocking")
+                and (.reason | type == "string" and test("[^[:space:]]"))
+            )
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$disp_ok" != "true" ]]; then
+            _ev_warn "review_attestation dispositions are malformed"
+            return 1
         fi
     fi
 

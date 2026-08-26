@@ -143,6 +143,13 @@ def test_the_codex_row_really_does_separate_the_key_forms():
     assert HANDLE in hold_mod.addresses(row), "the shared rule must still find it"
 
 
+def test_wall_clock_receipt_has_the_same_clock_label_for_both_harnesses():
+    hold_mod.arm_wall(HANDLE, 5)
+
+    assert "wall clock" in hold_mod.bounce_reason(_claude_row())
+    assert "wall clock" in hold_mod.bounce_reason(_codex_row())
+
+
 def test_the_release_reaches_one_lane_dispatcher_not_a_per_harness_branch():
     """The delivery half of the same question.
 

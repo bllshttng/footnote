@@ -49,7 +49,7 @@ def test_mail_shaped_turn_only_asks_and_leaves_stores_untouched(isolated) -> Non
         {
             "tool_name": "Bash",
             "tool_input": {
-                "command": f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+                "command": f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
             },
             "session_id": "mail-session",
             "permission_mode": "default",
@@ -78,7 +78,7 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
         decision="Merges belong to the operator",
         rationale="The operator owns durable policy.",
     )
-    tool_input = f"fno law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
+    tool_input = f"fno inbox law enact --proposal {proposal['proposal_id']} --hash {proposal['content_hash']}"
     armed = law._arm_proposal_from_hook(
         proposal["proposal_id"],
         content_hash=proposal["content_hash"],

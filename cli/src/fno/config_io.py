@@ -215,3 +215,91 @@ def config_read_candidates(paths: list[Path]) -> list[Path]:
     """config.toml-first read candidates for a list of settings.yaml locations
     (public alias of ``_prefer_toml`` for direct-file readers)."""
     return _prefer_toml(paths)
+
+
+def read_global_block(
+    block: str, *, unreadable: list[Path] | None = None
+) -> dict[str, object] | None:
+    """Read one top-level block from the GLOBAL config files, config.toml first.
+
+    Shared home for the global-only reads that fire inside the graph renders
+    (obsidian vault, kanban wip caps, backlog render targets): each must see
+    the operator's flat ``~/.fno/config.toml`` and not just the legacy
+    ``settings.yaml``, none may raise into a mutation, and none may grow
+    another hand-rolled copy of the candidate walk.
+
+    Candidates are deep-merged per key (config.toml winning), matching
+    ``load_settings`` semantics, so a partial config.toml cannot shadow a key
+    that still lives only in the legacy settings.yaml. The parse is cached
+    per process, keyed by each candidate's (mtime_ns, size): every block
+    reader shares ONE parse per mutation. Caveat: on a filesystem with
+    coarse mtime granularity, a same-size rewrite inside one tick can serve
+    the previous parse until the next size-changing write - bounded
+    staleness, strictly fresher than load_settings' process-lifetime cache.
+    Returns ``None`` when no global file defines the block or the block is
+    not a table (the caller's absent-block path). A caller that must warn on
+    degradation (the render targets) passes ``unreadable`` and receives every
+    candidate that exists but failed to parse, so a corrupt global config is
+    never silent.
+    """
+    try:
+        data, bad = _global_merged_config()
+        if unreadable is not None:
+            unreadable.extend(bad)
+        if block not in data:
+            return None
+        value = data[block]
+        return value if isinstance(value, dict) else None
+    except Exception:
+        return None
+
+
+# Single-slot cache: (stat fingerprint, merged data, unreadable candidates).
+# A long-lived process holds at most one entry; any candidate edit changes
+# the fingerprint and reparses on the next read.
+_GLOBAL_MERGED_CACHE: (
+    tuple[tuple[tuple[str, int, int], ...], dict[str, object], tuple[Path, ...]] | None
+) = None
+
+
+def clear_global_merged_cache() -> None:
+    """Drop the merged-global-config cache.
+
+    Test hook, called by the autouse settings-cache fixture so a test that
+    rewrites a pinned global config cannot be served the previous test's
+    parse. Runtime callers never need it: the (mtime_ns, size) fingerprint
+    reparses on any real edit.
+    """
+    global _GLOBAL_MERGED_CACHE
+    _GLOBAL_MERGED_CACHE = None
+
+
+def _global_merged_config() -> tuple[dict[str, object], tuple[Path, ...]]:
+    global _GLOBAL_MERGED_CACHE
+    candidates = config_read_candidates([_global_settings_path()])
+    fingerprint: list[tuple[str, int, int]] = []
+    for candidate in candidates:
+        try:
+            st = candidate.stat()
+        except OSError:
+            continue
+        fingerprint.append((str(candidate), st.st_mtime_ns, st.st_size))
+    key = tuple(fingerprint)
+    if _GLOBAL_MERGED_CACHE is not None and _GLOBAL_MERGED_CACHE[0] == key:
+        return _GLOBAL_MERGED_CACHE[1], _GLOBAL_MERGED_CACHE[2]
+    # Earlier candidates (config.toml) win: merge each successive file UNDER
+    # the ones before it.
+    merged: dict[str, object] = {}
+    unreadable: list[Path] = []
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        data, ok = _load_raw(candidate)
+        if not ok:
+            unreadable.append(candidate)
+            continue
+        data = _unwrap_config_dict(data)
+        if data:
+            merged = _deep_merge(data, merged)
+    _GLOBAL_MERGED_CACHE = (key, merged, tuple(unreadable))
+    return merged, tuple(unreadable)

@@ -97,18 +97,19 @@ def _shorts_on(path: str) -> set[str]:
 
 
 def test_backlog_done_row_matches_the_command() -> None:
-    """The legend must not hand `backlog done` the deprecated root's flags.
+    """The legend row must match the unified close surface.
 
-    `fno backlog done` closes a node: --skip-stamp / -F --force / -R --reason,
-    and nothing else. The PR-metadata surface (-p pr-number, -l link, -m note,
-    --backfill) belongs to the deprecated root `fno done`, which is a separate
-    command with a separate body. The legend claimed the pair were one row.
+    `fno backlog done` carries both faces after the close-depth union: the
+    canonical close flags (-F --force / -R --reason) and the PR-metadata
+    surface (-p pr-number, -l link, -m note) that used to belong only to the
+    deprecated root `fno done`. That root spelling is now a forwarding shim
+    over the same command, so one legend row covers both.
     """
     from fno.cli import SHORTHAND_LEGEND
 
-    assert _shorts_on("backlog done") == {"-F", "-R"}
+    assert _shorts_on("backlog done") >= {"-F", "-R", "-p", "-l", "-m"}
     assert _shorts_on("done") >= {"-p", "-l", "-m"}
-    assert "fno backlog done  " not in SHORTHAND_LEGEND
+    assert "fno backlog done  " in SHORTHAND_LEGEND
 
 
 def test_agents_ask_row_matches_the_command() -> None:

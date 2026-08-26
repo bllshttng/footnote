@@ -44,6 +44,7 @@ use crate::tree::{Axis, Dir, Rect, TabId};
 use crate::view_store::{
     self, next_view, AgentSort, AgentSortColumn, Density, SectionKey, SectionView, SortDirection,
 };
+use crate::vt::ShellActivity;
 
 /// How long to wait for a just-spawned server to accept.
 const SPAWN_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -262,7 +263,7 @@ pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
 /// (x-c5ee) The top-K live-row cap per rendered squad: attention rows
 /// (Blocked/Working/DoneUnseen) always render, then idle rows fill up to this
-/// many LIVE rows total; the idle overflow folds into one `+N idle` row. Sized
+/// many LIVE rows total; the idle overflow folds into one `+N more` row. Sized
 /// a little above a typical attention set so the common squad emits no fold.
 /// Dead rows sit outside this budget under the section view's control.
 const SQUAD_ROW_CAP: usize = 8;
@@ -834,11 +835,19 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
         } else {
             // The one state vocabulary (pane_state + the nav filter words): a
             // finished-but-unseen member is `done`, not `idle`.
-            match pane_state(a.badge, a.seen) {
+            match pane_state(a.badge, a.seen, a.pane_activity) {
                 PaneState::Blocked => "blocked",
                 PaneState::Working => "working",
                 PaneState::DoneUnseen => "done",
+                // NOT "unread" (x-d401): that word names output nobody has
+                // looked at, which is `DoneUnseen` - a different row, filed
+                // under "done". A filter typed as `unread` would then return
+                // rows with no liveness reading and EXCLUDE every row that
+                // actually has unseen output, which is this branch's own
+                // defect: a word standing in for a fact it does not name.
+                PaneState::Unmeasured => "unmeasured",
                 PaneState::Idle => "idle",
+                PaneState::Empty => "empty",
             }
         };
         let pane = a
@@ -2649,7 +2658,9 @@ impl View {
                     squad: a.squad,
                     tab: a.tab,
                 });
-            } else if !a.exited && pane_state(a.badge, a.seen) == PaneState::DoneUnseen {
+            } else if !a.exited
+                && pane_state(a.badge, a.seen, a.pane_activity) == PaneState::DoneUnseen
+            {
                 rows.push(NeedRow {
                     kind: NeedKind::DoneUnseen,
                     name: a.name.clone(),
@@ -5169,8 +5180,10 @@ impl View {
                 None => Some(PaneState::Blocked),
                 Some(PaneState::Blocked) => Some(PaneState::Working),
                 Some(PaneState::Working) => Some(PaneState::DoneUnseen),
-                Some(PaneState::DoneUnseen) => Some(PaneState::Idle),
-                Some(PaneState::Idle) => None,
+                Some(PaneState::DoneUnseen) => Some(PaneState::Unmeasured),
+                Some(PaneState::Unmeasured) => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::Empty),
+                Some(PaneState::Empty) => None,
             };
             n.cursor = 0;
         }
@@ -5182,8 +5195,10 @@ impl View {
     fn nav_cycle_state_rev(&mut self) {
         if let Some(n) = self.nav.as_mut() {
             n.state_filter = match n.state_filter {
-                None => Some(PaneState::Idle),
-                Some(PaneState::Idle) => Some(PaneState::DoneUnseen),
+                None => Some(PaneState::Empty),
+                Some(PaneState::Empty) => Some(PaneState::Idle),
+                Some(PaneState::Idle) => Some(PaneState::Unmeasured),
+                Some(PaneState::Unmeasured) => Some(PaneState::DoneUnseen),
                 Some(PaneState::DoneUnseen) => Some(PaneState::Working),
                 Some(PaneState::Working) => Some(PaneState::Blocked),
                 Some(PaneState::Blocked) => None,
@@ -5671,7 +5686,7 @@ impl View {
     }
 
     /// (x-c5ee) Toggle a squad's top-K idle expansion: a squad in the set shows
-    /// all its idle rows, one absent folds the overflow behind `+N idle`. A pure
+    /// all its idle rows, one absent folds the overflow behind `+N more`. A pure
     /// local flip, never persisted (the durable layer is [`SectionView`]), then
     /// re-anchor the selector and re-clamp - the row set just changed size under
     /// the cursor, exactly like a section cycle. Idempotent per press.
@@ -7391,7 +7406,7 @@ impl View {
 
     // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
     // function of state: a squad shows its idle overflow only when the operator
-    // toggled its `+N idle` row open (`idle_expanded`). No per-frame,
+    // toggled its `+N more` row open (`idle_expanded`). No per-frame,
     // selector-driven force-expand - that needs to know which row the selector
     // rests on, but the selector is an index INTO this very output, so any
     // attempt to resolve it here is circular: resolving against a rebuilt
@@ -7468,9 +7483,9 @@ impl View {
                 squad_agents = order.into_iter().map(|i| squad_agents[i]).collect();
                 // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
                 // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
-                // idle overflow folds into one `+N idle` row. Dead rows (present
+                // idle overflow folds into one `+N more` row. Dead rows (present
                 // only in Expanded) sit OUTSIDE the budget under the view's
-                // control, so `+N idle` and the header's `✗N` never double-count.
+                // control, so `+N more` and the header's `✗N` never double-count.
                 let attention = squad_agents
                     .iter()
                     .filter(|&a| !a.exited && !is_idle_row(a))
@@ -7486,7 +7501,7 @@ impl View {
                 for &a in &squad_agents {
                     if is_idle_row(a) && !show_all_idle {
                         if idle_shown >= idle_budget {
-                            continue; // folded into the `+N idle` row below
+                            continue; // folded into the `+N more` row below
                         }
                         idle_shown += 1;
                     }
@@ -7511,7 +7526,7 @@ impl View {
                         out.push(DisplayRow::Sub(a.cwd_base.clone().unwrap_or_default()));
                     }
                 }
-                // Emit the fold row whenever there is idle overflow: `+N idle`
+                // Emit the fold row whenever there is idle overflow: `+N more`
                 // when folded, `- fewer` when shown (so the expansion reverses
                 // from the same spot). No row when nothing overflows (no `+0`).
                 if hidden > 0 {
@@ -7980,17 +7995,24 @@ impl View {
                 DisplayRow::TableEmpty => {
                     ("  no agents".to_string(), cell_flags::DIM, Color::Default)
                 }
-                // (x-c5ee) The idle fold: `+N idle` folded, `- fewer` expanded.
+                // (x-c5ee) The idle fold: `+N more` folded, `- fewer` expanded.
                 // Indented 4 cells to sit under the agent rows like a `Sub`, and
                 // DIM as a quiet summary - but it is NOT inert, so the selector's
                 // INVERSE bar still lifts it when the cursor lands on it.
                 DisplayRow::IdleFold {
                     hidden, expanded, ..
                 } => {
+                    // (x-d401) `+N more`, not `+N idle`. The fold now covers
+                    // `Unmeasured` rows as well as `Idle` and `Empty` ones, and
+                    // a row with NO reading counted under the word "idle" is
+                    // this branch's own defect: a label asserting a measurement
+                    // nothing took. `more` states only what is true of every
+                    // folded row - that it is hidden - and pairs with the
+                    // `- fewer` the expanded form already prints.
                     let label = if expanded {
                         "    - fewer".to_string()
                     } else {
-                        format!("    +{hidden} idle")
+                        format!("    +{hidden} more")
                     };
                     (label, cell_flags::DIM, Color::Default)
                 }
@@ -8188,7 +8210,7 @@ enum DisplayRow<'a> {
     /// Unlike the inert rows above it is ACTIONABLE - a click / selector Enter
     /// toggles the squad's idle expansion (the idle sibling of a header's
     /// `CycleSection`), so it is NOT in `row_is_inert` and the cursor can rest
-    /// on it. Folded it paints `+N idle`; expanded it paints `- fewer`.
+    /// on it. Folded it paints `+N more`; expanded it paints `- fewer`.
     IdleFold {
         key: SectionKey,
         hidden: usize,
@@ -8407,12 +8429,12 @@ fn compare_agent_rows(
             let a_state = if a.exited {
                 u8::MAX
             } else {
-                pane_state(a.badge, a.seen) as u8
+                pane_state(a.badge, a.seen, a.pane_activity) as u8
             };
             let b_state = if b.exited {
                 u8::MAX
             } else {
-                pane_state(b.badge, b.seen) as u8
+                pane_state(b.badge, b.seen, b.pane_activity) as u8
             };
             apply_direction(
                 a_state
@@ -8694,6 +8716,10 @@ fn no_pane_notice(a: &AgentRow) -> String {
             "worker {} has no pane here: registry backend is not live; inspect its state before resuming",
             a.name
         ),
+        Some(AgentNoPaneReason::LivenessUnmeasured) => format!(
+            "worker {} has no pane here: liveness reading is absent (neither confirmed dead nor confirmed live); run fno agents peek {} to see before resuming",
+            a.name, a.name
+        ),
         Some(AgentNoPaneReason::MissingHarness) => {
             format!("worker {} has no pane here: no harness recorded", a.name)
         }
@@ -8749,27 +8775,58 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
 /// (x-653d), the squad-row rollup (x-d140), and seen/unseen surfacing (x-4328)
 /// all consume it. Derived, never wire-serialized - computed from [`AgentBadge`]
 /// + the seen bit at render time. The derive orders it `Blocked < Working <
-/// DoneUnseen < Idle`, so a squad rollup is `agents.map(pane_state).min()` (the
-/// worst state wins - x-d140's `min` and this filter agree on the ordering).
+/// DoneUnseen < Unmeasured < Idle < Empty`, so a squad rollup is
+/// `agents.map(pane_state).min()` (the worst state wins - x-d140's `min` and
+/// this filter agree on the ordering). `Unmeasured` (x-d401) ranks worse than
+/// every settled state: a no-reading row deserves a look before an idle one
+/// does. `Empty` (x-d401) is a pristine shell - nothing running, nothing done,
+/// the least severe reading there is.
+///
+/// NOT the same ordering as [`SEVERITY_ORDER`], and neither is "the single
+/// ordering authority" the two comments used to each claim. They answer
+/// different questions and have disagreed since before x-d401: this one
+/// answers WHICH ROW IS WORST, for a `min()` rollup and the navigator filter,
+/// so `Working` outranks `DoneUnseen`. `SEVERITY_ORDER` answers IN WHAT ORDER
+/// A SECTION'S COUNTS ARE LISTED AND TRUNCATED, where a finished-but-unseen
+/// row leads because it is the one asking for a human. Read whichever answers
+/// the question at hand, and change neither to "match" the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaneState {
     Blocked,
     Working,
     DoneUnseen,
+    Unmeasured,
     Idle,
+    Empty,
 }
 
-/// Derive a [`PaneState`] from an agent's badge and whether its output has
-/// been seen (x-4328's `AgentRow.seen`, server-owned): a `Done` badge folds
-/// to `Idle` once seen, else `DoneUnseen` (a finished-but-unviewed agent
-/// stays surfaced).
-fn pane_state(badge: Option<AgentBadge>, seen: bool) -> PaneState {
+/// Derive a [`PaneState`] from an agent's badge, whether its output has been
+/// seen (x-4328's `AgentRow.seen`, server-owned), and the pane's own OSC 133
+/// activity reading (x-d401's `AgentRow.pane_activity`). A present badge wins
+/// (the registry worker's own in-TTL report); a `Done` badge folds to `Idle`
+/// once seen, else `DoneUnseen`. With NO badge the vt reading decides, and an
+/// absent/unmeasured reading renders `Unmeasured` - never a blind `Idle`, the
+/// fold that drew four working panes and thirty empty shells as one circle.
+fn pane_state(badge: Option<AgentBadge>, seen: bool, activity: Option<ShellActivity>) -> PaneState {
     match badge {
         Some(AgentBadge::Blocked) => PaneState::Blocked,
         Some(AgentBadge::Working) => PaneState::Working,
         Some(AgentBadge::Done) if seen => PaneState::Idle,
         Some(AgentBadge::Done) => PaneState::DoneUnseen,
-        None => PaneState::Idle,
+        None => match activity {
+            // ACCEPTED COST, ruled 2026-08-26, do not relitigate: a bare shell
+            // running `less`, `nvim` or a long build also lands here, so it
+            // reads `Working` and holds an attention row it does not need.
+            // That is the cheaper error by design. This epic's founding
+            // measurement was four codex panes carrying `fno_id=-` while
+            // running `cargo test`, `fno doctor test` and `fno do pr wait`.
+            // Over-surfacing a shell costs one row; under-surfacing a working
+            // agent is the defect this branch ships to delete.
+            Some(ShellActivity::Running) => PaneState::Working,
+            Some(ShellActivity::Idle) => PaneState::Idle,
+            Some(ShellActivity::Empty) => PaneState::Empty,
+            Some(ShellActivity::Unmeasured) | None => PaneState::Unmeasured,
+        },
     }
 }
 
@@ -8851,9 +8908,32 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// (x-c5ee) A LIVE idle row - the top-K cap's fold target. Exited is checked
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
-/// into `+N idle`: dead rows are the section view's business, not the cap's.
+/// into `+N more`: dead rows are the section view's business, not the cap's.
+/// (x-d401) The fold takes every NON-ATTENTION state, which after this branch
+/// means three of them, not one. `pane_state` used to answer `Idle` for any
+/// badgeless row; the split sends a pristine shell to `Empty` and a row with
+/// no reading to `Unmeasured`, and `server.rs` hard-codes `pane_activity:
+/// None` on watch-only paneless rows - so a bg `/target` worker between turns
+/// is `Unmeasured`. Testing `== Idle` alone therefore counted every shell AND
+/// every bg worker as `attention`, drove `idle_budget` to zero and killed the
+/// fold outright on any real fleet.
+///
+/// Folding an unmeasured row is safe only because the fold row says `+N more`
+/// rather than `+N idle`. An earlier revision of this comment claimed the `?`
+/// glyph carried the honesty "wherever the row renders", which is exactly
+/// wrong for a row the fold REMOVED: the count would then have stood in for a
+/// measurement nothing took, on the surface this branch exists to fix. The
+/// label carries it instead, and it asserts only that the rows are hidden.
+///
+/// This predicate is display density, not truth. Attention states (`Blocked`,
+/// `Working`, `DoneUnseen`) are enumerated by exclusion on purpose - a state
+/// added later does not fold, so a new signal fails VISIBLE, never hidden.
 fn is_idle_row(a: &AgentRow) -> bool {
-    !a.exited && pane_state(a.badge, a.seen) == PaneState::Idle
+    !a.exited
+        && matches!(
+            pane_state(a.badge, a.seen, a.pane_activity),
+            PaneState::Idle | PaneState::Empty | PaneState::Unmeasured
+        )
 }
 
 /// Why a session needs a human, worst-first (x-feec). Declaration order IS the
@@ -9114,7 +9194,7 @@ fn nav_agent_state(a: &AgentRow) -> PaneState {
     if a.exited {
         PaneState::Idle
     } else {
-        pane_state(a.badge, a.seen)
+        pane_state(a.badge, a.seen, a.pane_activity)
     }
 }
 
@@ -9137,7 +9217,7 @@ fn agent_lattice_state(a: &AgentRow) -> LatticeState {
             LatticeState::Exited
         }
     } else {
-        pane_to_lattice(pane_state(a.badge, a.seen))
+        pane_to_lattice(pane_state(a.badge, a.seen, a.pane_activity))
     }
 }
 
@@ -9772,6 +9852,12 @@ enum LatticeState {
     /// operator's routing decision turns on it - `Exited` means respawn is
     /// safe, `Unmeasured` means look before you spawn.
     Unmeasured,
+    /// (x-d401) A live pane that positively read as nothing-running-yet: OSC
+    /// 133 markers active, no command open, no completed block. Distinct from
+    /// `Idle` (a completed block, the prompt back) and from `Unmeasured` (no
+    /// reading at all): a pristine shell is an honest zero, not a waiting
+    /// worker and not an unknown.
+    Empty,
 }
 
 /// The terminal theme's accent (index 3 = the emulator's own amber/yellow), kept
@@ -9828,6 +9914,11 @@ fn lattice_style(s: LatticeState, accent: Color) -> LatticeStyle {
             flags: cell_flags::DIM,
             fg: Color::Default,
         },
+        LatticeState::Empty => LatticeStyle {
+            glyph: '∅',
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+        },
     }
 }
 
@@ -9840,16 +9931,31 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
 }
 
 /// (x-6851 US2) Severity order for the header rollup strip: most-severe first,
-/// so the strip reads `▲ ✓ ● ○ ✗ ?` and narrow-panel truncation drops from the
-/// least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
+/// so the strip reads `▲ ✓ ● ○ ∅ ✗ ?` and narrow-panel truncation drops from
+/// the least-severe (`?`) end. `Unmeasured` (x-9de7) sits after `Exited`: it is a
 /// sub-case of the same terminal bucket, just less certain, so it never
-/// outranks a live state. The single ordering authority the fold and the
+/// outranks a live state. `Empty` (x-d401) sits after `Idle` and before the
+/// terminal pair: a pristine shell is less severe than any worker state but
+/// still a live pane, not a terminal one. The one ordering the fold and the
 /// truncation share.
-const SEVERITY_ORDER: [LatticeState; 6] = [
+///
+/// NOT the same ordering as [`PaneState`]'s derive, and this comment used to
+/// claim to be "the single ordering authority" beside a sibling claiming the
+/// same thing, which cannot both be true. They answer different questions and
+/// have disagreed since before x-d401, on `Working` versus `DoneUnseen`. This
+/// one answers IN WHAT ORDER A SECTION'S COUNTS ARE LISTED AND TRUNCATED;
+/// `PaneState` answers WHICH ROW IS WORST for a `min()` rollup. A known
+/// consequence of the split, left as is: `Unmeasured` is now reachable for
+/// LIVE rows, and truncation drops from that end, so a narrow panel can keep
+/// a dead `✗` count and drop live `?` rows. Changing that is a display-policy
+/// decision, not a correctness fix - do not "align" the two lists to make it
+/// go away.
+const SEVERITY_ORDER: [LatticeState; 7] = [
     LatticeState::Blocked,
     LatticeState::DoneUnseen,
     LatticeState::Working,
     LatticeState::Idle,
+    LatticeState::Empty,
     LatticeState::Exited,
     LatticeState::Unmeasured,
 ];
@@ -9865,8 +9971,9 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
             LatticeState::DoneUnseen => 1,
             LatticeState::Working => 2,
             LatticeState::Idle => 3,
-            LatticeState::Exited => 4,
-            LatticeState::Unmeasured => 5,
+            LatticeState::Empty => 4,
+            LatticeState::Exited => 5,
+            LatticeState::Unmeasured => 6,
         };
         // The match is exhaustive (a new state breaks the build), but the index
         // mapping is coupled by hand to SEVERITY_ORDER's order; this catches a
@@ -9955,7 +10062,9 @@ fn pane_to_lattice(s: PaneState) -> LatticeState {
         PaneState::Blocked => LatticeState::Blocked,
         PaneState::Working => LatticeState::Working,
         PaneState::DoneUnseen => LatticeState::DoneUnseen,
+        PaneState::Unmeasured => LatticeState::Unmeasured,
         PaneState::Idle => LatticeState::Idle,
+        PaneState::Empty => LatticeState::Empty,
     }
 }
 
@@ -9979,7 +10088,9 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         Some(PaneState::Blocked) => "blocked",
         Some(PaneState::Working) => "working",
         Some(PaneState::DoneUnseen) => "done",
+        Some(PaneState::Unmeasured) => "unmeasured",
         Some(PaneState::Idle) => "idle",
+        Some(PaneState::Empty) => "empty",
     };
     let mut lines = vec![pad_to(
         &format!(" find › {}   [{chip}]", nav.query),
@@ -16167,7 +16278,9 @@ mod tests {
     #[test]
     fn lattice_glyphs_are_pairwise_distinct_and_single_cell() {
         use LatticeState::*;
-        let states = [Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured];
+        let states = [
+            Working, Idle, Blocked, DoneUnseen, Exited, Unmeasured, Empty,
+        ];
         let glyphs: Vec<char> = states.iter().map(|&s| lattice_glyph(s).0).collect();
         // Pairwise distinct: every state pair reads differently by GLYPH alone,
         // so a monochrome/weak-BOLD terminal never collapses two states
@@ -16187,6 +16300,62 @@ mod tests {
                 "lattice glyph {g:?} must not be an astral emoji"
             );
         }
+    }
+
+    #[test]
+    fn pane_activity_folds_to_working_empty_idle_or_unmeasured_never_blind_idle() {
+        // (x-d401, AC1-HP/EDGE) The render fold. With no badge, the pane's own
+        // OSC 133 reading decides: Running -> Working, Idle -> Idle, Empty ->
+        // Empty, and Unmeasured or absent -> Unmeasured. The old `None =>
+        // Idle` fold rendered four working panes and thirty empty shells as
+        // the same circle; the absent reading must render as the marked
+        // absence `?`, never as a measured idle.
+        use crate::vt::ShellActivity as SA;
+        assert_eq!(
+            pane_state(None, false, Some(SA::Running)),
+            PaneState::Working
+        );
+        assert_eq!(pane_state(None, false, Some(SA::Idle)), PaneState::Idle);
+        assert_eq!(pane_state(None, false, Some(SA::Empty)), PaneState::Empty);
+        assert_eq!(
+            pane_state(None, false, Some(SA::Unmeasured)),
+            PaneState::Unmeasured,
+            "an un-integrated pane reads as no-reading, not idle"
+        );
+        assert_eq!(
+            pane_state(None, false, None),
+            PaneState::Unmeasured,
+            "an absent field reads as no-reading, not idle"
+        );
+        // A present badge still wins: the registry worker's own report beats
+        // the vt reading for its row.
+        assert_eq!(
+            pane_state(Some(AgentBadge::Working), false, Some(SA::Idle)),
+            PaneState::Working
+        );
+    }
+
+    #[test]
+    fn unmeasured_pane_renders_the_question_glyph_not_the_idle_circle() {
+        // (x-d401, AC1-EDGE) The positive control: `?` is a marker only the
+        // no-reading outcome produces, and it is pinned as DISTINCT from the
+        // idle glyph it used to be confused with.
+        assert_eq!(lattice_glyph(pane_to_lattice(PaneState::Unmeasured)).0, '?');
+        assert_ne!(
+            lattice_glyph(pane_to_lattice(PaneState::Idle)).0,
+            lattice_glyph(pane_to_lattice(PaneState::Unmeasured)).0,
+            "the no-reading glyph must differ from the idle glyph"
+        );
+    }
+
+    #[test]
+    fn pristine_shell_and_live_workload_render_different_glyphs() {
+        // (x-d401, AC1-ERR) The reported bug as its own assertion: an empty
+        // shell tab and a pane running cargo test must not share a glyph.
+        use crate::vt::ShellActivity as SA;
+        let empty = lattice_glyph(pane_to_lattice(pane_state(None, false, Some(SA::Empty)))).0;
+        let running = lattice_glyph(pane_to_lattice(pane_state(None, false, Some(SA::Running)))).0;
+        assert_ne!(empty, running);
     }
 
     #[test]
@@ -16252,9 +16421,13 @@ mod tests {
 
         // `unmeasured` on a LIVE row (exited: false) is inert - a live row is
         // never rendered Unmeasured just because some upstream sentinel left
-        // the bit set.
+        // the bit set. (x-d401: the row now carries an explicit activity
+        // reading, so this proves the BIT is inert; a live row with NO reading
+        // at all renders Unmeasured for the absence, which is the new
+        // predicate, not the old bug.)
         let live_with_stale_bit = AgentRow {
             unmeasured: true,
+            pane_activity: Some(crate::vt::ShellActivity::Idle),
             ..tab_agent(None, None, false)
         };
         assert_ne!(
@@ -16268,25 +16441,38 @@ mod tests {
         // The x-653d state vocabulary: badge + seen -> PaneState. x-4328 flips
         // the seen bit later; today every Done is called with seen=false.
         assert_eq!(
-            pane_state(Some(AgentBadge::Blocked), false),
+            pane_state(Some(AgentBadge::Blocked), false, None),
             PaneState::Blocked
         );
         assert_eq!(
-            pane_state(Some(AgentBadge::Working), false),
+            pane_state(Some(AgentBadge::Working), false, None),
             PaneState::Working
         );
         assert_eq!(
-            pane_state(Some(AgentBadge::Done), false),
+            pane_state(Some(AgentBadge::Done), false, None),
             PaneState::DoneUnseen
         );
-        assert_eq!(pane_state(Some(AgentBadge::Done), true), PaneState::Idle);
-        assert_eq!(pane_state(None, false), PaneState::Idle);
+        assert_eq!(
+            pane_state(Some(AgentBadge::Done), true, None),
+            PaneState::Idle
+        );
+        // (x-d401) The blind fold is gone: no badge and no activity reading is
+        // a marked absence, never a measured idle.
+        assert_eq!(pane_state(None, false, None), PaneState::Unmeasured);
         // Worst-first ordering (Invariant): the squad rollup takes the `min`, so
         // the worst state must be the Ord-minimum - x-d140's `min` and the
         // navigator filter must agree on this ordering.
         assert!(PaneState::Blocked < PaneState::Working);
         assert!(PaneState::Working < PaneState::DoneUnseen);
         assert!(PaneState::DoneUnseen < PaneState::Idle);
+        assert!(
+            PaneState::Unmeasured < PaneState::Idle,
+            "no-reading outranks settled idle in a worst-wins rollup"
+        );
+        assert!(
+            PaneState::Idle < PaneState::Empty,
+            "a pristine shell is the least severe reading"
+        );
         let rollup = [PaneState::Idle, PaneState::Blocked, PaneState::Working]
             .into_iter()
             .min();
@@ -16325,6 +16511,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         // A pane-hosted row focuses regardless of the active squad.
         assert!(
@@ -16365,6 +16552,7 @@ mod tests {
             name: "t-live-paneless".into(),
             exited: false,
             no_pane_reason: Some(AgentNoPaneReason::LivePaneless),
+            pane_activity: None,
             ..orphan.clone()
         };
         for _ in 0..2 {
@@ -16408,6 +16596,7 @@ mod tests {
                 name: "t-dead-paneless".into(),
                 exited: true,
                 no_pane_reason: Some(reason),
+                pane_activity: None,
                 ..orphan.clone()
             };
             match agent_hit(&dead, 2) {
@@ -16459,6 +16648,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: true,
             no_pane_reason: None,
+            pane_activity: None,
         };
         assert!(matches!(
             agent_hit(&row, 2),
@@ -16472,6 +16662,7 @@ mod tests {
             exited: false,
             resumable: true,
             no_pane_reason: None,
+            pane_activity: None,
             ..row.clone()
         };
         assert!(matches!(
@@ -16513,6 +16704,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         match agent_hit(&row, 1) {
             ChromeHit::OpenAttachPlace { id, squad } => {
@@ -16774,6 +16966,15 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            // (x-d401) A badgeless LIVE row in these fixtures means "an idle
+            // worker"; under the absence predicate that must be SAID (an
+            // explicit Idle reading), not implied by badge absence - absence
+            // now renders Unmeasured.
+            pane_activity: if badge.is_none() && !exited {
+                Some(ShellActivity::Idle)
+            } else {
+                None
+            },
         }
     }
 
@@ -17292,6 +17493,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }
     }
 
@@ -19251,6 +19453,14 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            // (x-d401) A badgeless LIVE row here means "an idle worker"; the
+            // reading is said explicitly, because absence now renders
+            // Unmeasured (`?`), never Idle.
+            pane_activity: if badge.is_none() && !exited {
+                Some(ShellActivity::Idle)
+            } else {
+                None
+            },
         }
     }
 
@@ -19576,7 +19786,7 @@ mod tests {
         assert!(v.peek.is_none(), "the peek closes with its workspace");
     }
 
-    // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N idle`
+    // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N more`
     // -> all idle shown with a `- fewer` affordance -> folded again.
     #[test]
     fn idle_fold_toggles_visibly_and_reversibly() {
@@ -19686,7 +19896,7 @@ mod tests {
     }
 
     // Regression (x-c5ee, codex P1/P2 on #566/#568): the render is a pure
-    // function of state, so resting the selector ON the `+N idle` fold row never
+    // function of state, so resting the selector ON the `+N more` fold row never
     // perturbs it. The earlier per-frame force-expand resolved the selector index
     // against a rebuilt enumeration, which mis-identified the row (fold moved /
     // Enter reported no action) and could collapse a walked-into overflow row.
@@ -19921,6 +20131,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         view_with_agents(vec![
             row("live-a", false),
@@ -20110,6 +20321,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }]);
         let hdr = view
             .display_rows()
@@ -20425,6 +20637,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let mut view = view_with_agents(vec![
             orphan("stray-live", false),
@@ -20481,6 +20694,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let mut view = view_with_agents(vec![orphan("a", false), orphan("b", true)]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -20595,6 +20809,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
@@ -20626,6 +20841,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
@@ -20656,6 +20872,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let mut view = view_with_agents(vec![hosted, bg_attach, bg_plain]);
         view.expand_pull_sections(); // (x-c5ee) ~ elsewhere now defaults Collapsed
@@ -20717,6 +20934,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             })
             .collect();
         let view = view_with_agents(agents);
@@ -21265,6 +21483,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let bg = super::build_row_menu(&mk("bg", None, Some("id"), false), Anchor::Center);
         assert!(bg.actions.contains(&super::MenuAction::NewTab));
@@ -22489,6 +22708,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let mut v = view_with_agents(vec![mk("dup", Some(5)), mk("dup", Some(9))]);
         // Open the menu on the SECOND "dup" (pane 9) and pick Focus.
@@ -24106,6 +24326,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }
     }
 
@@ -24830,6 +25051,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -24859,6 +25081,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -24888,6 +25111,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
             ],
             focus_node: None,
@@ -24973,6 +25197,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             }
         }
         let mut view = two_pane_view();
@@ -25385,6 +25610,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -25414,6 +25640,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
                 AgentRow {
                     spawned_by_session: None,
@@ -25443,6 +25670,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
                 // x-df4c AC1-UI: an EXTERNAL row that is also Blocked - the
                 // load-bearing "attention is never dimmed" branch. The accent
@@ -25475,6 +25703,7 @@ mod tests {
                     last_activity_age_s: None,
                     resumable: false,
                     no_pane_reason: None,
+                    pane_activity: None,
                 },
             ],
             focus_node: None,
@@ -25493,14 +25722,26 @@ mod tests {
             let cell = frame.cells[r * cols + 2];
             (cell.c, cell.flags & cell_flags::DIM == cell_flags::DIM)
         };
-        // x-df4c: idle is now the outline `○` (was the near-invisible `·`); the
-        // external DIM modifier and the exited `✗` precedence are unchanged.
+        // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
+        // moves a badgeless reading-less row to the marked absence `?` - the
+        // mux cannot see an external/fno live row's workload, so it says so.
+        // The external DIM modifier and the no-reading DIM coincide, and this
+        // is a KNOWN, accepted collision, not an oversight: a badgeless local
+        // row and a badgeless external row both paint `?` + DIM, where before
+        // they were a bright `○` and a dim `○`. What the glyph discriminates
+        // is STATE, never external-ness, and DIM only reinforces it - the
+        // earlier wording read as though the glyph told the two rows apart,
+        // which it does not. External-ness reads through the row's ACTIONS.
+        // Restoring the distinction here means giving `external` a channel of
+        // its own; DIM cannot carry it once the state is already dim, which
+        // was already true of `✗` before this branch. The exited precedence
+        // below is unchanged.
         assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
-        assert_eq!(probe("z-external"), ('\u{25cb}', true), "external: ○ + DIM");
+        assert_eq!(probe("z-external"), ('?', true), "external: ? + DIM");
         assert_eq!(
             probe("z-fnolive"),
-            ('\u{25cb}', false),
-            "fno-live: ○ + bright"
+            ('?', true),
+            "fno-live: ? + DIM (no reading; bright-idle is gone)"
         );
         // AC1-UI: external + Blocked renders the amber `▲`, BOLD, and NOT dimmed
         // even though it is external - the accent beats the external DIM.
@@ -25970,6 +26211,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let card = |id: &str, state| BacklogCard {
             id: id.into(),
@@ -26699,6 +26941,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let loading = PeekView {
             cursor: 0,
@@ -27137,6 +27380,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
         let mut v = view_with_agents(vec![tomb]);
         v.set_squad_view(1, SectionView::Expanded);
@@ -27187,6 +27431,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }
     }
 
@@ -28215,6 +28460,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             },
             AgentRow {
                 spawned_by_session: None,
@@ -28244,6 +28490,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             },
         ];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
@@ -28279,8 +28526,11 @@ mod tests {
     #[test]
     fn squad_rollup_bare_pane_folds_to_idle() {
         // x-0090 US4: the pane-union adds bare panes to the agent set; a bare
-        // pane (badge None) folds to Idle so it never overrides a blocked
-        // sibling in the x-d140 collapsed-squad rollup (Ord-min over states).
+        // pane whose vt reads Idle folds to Idle so it never overrides a
+        // blocked sibling in the x-d140 collapsed-squad rollup (Ord-min over
+        // states). (x-d401: a bare pane with NO reading folds to Unmeasured -
+        // that path is covered by pane_activity_folds_*, this one pins the
+        // rollup with a measured idle pane.)
         let row = |name: &str, pane, badge| AgentRow {
             spawned_by_session: None,
             harness_session_id: None,
@@ -28309,8 +28559,12 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         };
-        let bare = row("zsh", 10, None);
+        let bare = AgentRow {
+            pane_activity: Some(ShellActivity::Idle),
+            ..row("zsh", 10, None)
+        };
         let blocked = row("claude", 11, Some(AgentBadge::Blocked));
         assert_eq!(nav_agent_state(&bare), PaneState::Idle);
         let worst = [&bare, &blocked]
@@ -28378,6 +28632,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }];
         let composed = NavView {
             query: "notes".into(),
@@ -28501,6 +28756,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             },
             AgentRow {
                 spawned_by_session: None,
@@ -28530,6 +28786,7 @@ mod tests {
                 last_activity_age_s: None,
                 resumable: false,
                 no_pane_reason: None,
+                pane_activity: None,
             },
         ];
         let rows = v.nav_rows();
@@ -28752,6 +29009,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }];
         let idx = v
             .nav_rows()
@@ -28940,8 +29198,8 @@ mod tests {
         nav_keys(&mut v, b"\x1b[Z", &mut buf).await.unwrap();
         assert_eq!(
             v.nav.as_ref().unwrap().state_filter,
-            Some(PaneState::Idle),
-            "Shift-Tab reverses to [idle]"
+            Some(PaneState::Empty),
+            "Shift-Tab reverses to [empty] (x-d401: the cycle gained empty/unread)"
         );
         assert_eq!(v.nav.as_ref().unwrap().cursor, 0, "cursor re-clamped to 0");
         assert!(buf.is_empty(), "Shift-Tab sends nothing to the pane");
@@ -29212,6 +29470,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }];
         let labels: Vec<String> = v.nav_rows().into_iter().map(|r| r.label).collect();
         assert!(
@@ -29379,6 +29638,7 @@ mod tests {
             last_activity_age_s: None,
             resumable: false,
             no_pane_reason: None,
+            pane_activity: None,
         }
     }
 
@@ -30543,6 +30803,45 @@ mod tests {
         r.badge = badge;
         r.seen = seen;
         r
+    }
+
+    /// (x-d401) The top-K fold's target set after this branch split the old
+    /// blind `Idle` three ways. Every non-attention state must still fold: on
+    /// `origin/main` a badgeless row was `Idle` and folded, so folding only
+    /// `Idle` would strand both a pristine shell AND every badgeless bg
+    /// worker (`server.rs` hard-codes `pane_activity: None` on watch-only
+    /// paneless rows), driving `idle_budget` to zero on any real fleet. The
+    /// `?` glyph, not the fold, is what keeps a no-reading row honest.
+    #[test]
+    fn idle_fold_takes_every_non_attention_state() {
+        let with = |activity: Option<ShellActivity>| {
+            let mut r = agent_row("w", 1, None, true);
+            r.pane_activity = activity;
+            r
+        };
+        assert!(
+            is_idle_row(&with(Some(ShellActivity::Empty))),
+            "a pristine shell folds, else the fold cap dies on a shell-heavy squad"
+        );
+        assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
+        assert!(
+            is_idle_row(&with(Some(ShellActivity::Unmeasured))),
+            "an unmeasured row folds: the `?` glyph carries the honesty, not the cap"
+        );
+        assert!(
+            is_idle_row(&with(None)),
+            "a badgeless bg worker (pane_activity None) folds as it did before the split"
+        );
+        assert!(
+            !is_idle_row(&with(Some(ShellActivity::Running))),
+            "a running pane is attention, not fold"
+        );
+        let mut dead = with(Some(ShellActivity::Empty));
+        dead.exited = true;
+        assert!(
+            !is_idle_row(&dead),
+            "dead rows are the section view's business"
+        );
     }
 
     fn fold_item(kind: &str, name: &str, live: bool) -> crate::needs_overlay::FoldItem {

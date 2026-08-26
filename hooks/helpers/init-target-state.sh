@@ -148,7 +148,7 @@ will block exit in all of them until the target session completes.
 Pick ONE:
 
   1) Worktree (recommended for /target M, L, or cross-project):
-       wt=\$(fno workspace worktree ensure --repo "$REPO_ROOT" --name <slug> --harness <yours>)
+       wt=\$(fno agents workspace worktree ensure --repo "$REPO_ROOT" --name <slug> --harness <yours>)
        cd "\$wt" && bash scripts/setup/setup-worktree.sh  # if present
        # then re-run your target command
 

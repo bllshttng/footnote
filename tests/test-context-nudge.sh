@@ -45,6 +45,7 @@ export FNO_SRC="$REPO_ROOT/cli/src"
 FNO_PYTHON=""
 for _cand in \
   "$REPO_ROOT/cli/.venv/bin/python" \
+  "$(dirname "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")/cli/.venv/bin/python" \
   "$(command -v python3 || true)" \
   "$(command -v python || true)"
 do

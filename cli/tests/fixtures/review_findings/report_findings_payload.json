@@ -1,0 +1,22 @@
+{
+  "hook_event_name": "PostToolUse",
+  "tool_name": "ReportFindings",
+  "tool_input": {
+    "findings": [
+      {
+        "category": "nit",
+        "file": "cli/src/fno/pr/_reviews.py",
+        "line": 88,
+        "summary": "stale comment above the scope check",
+        "failure_scenario": "none; a reader is misled for one line"
+      },
+      {
+        "category": "correctness",
+        "file": "cli/src/fno/pr/_coverage_gate.py",
+        "line": 124,
+        "summary": "head pin compared before the row is read",
+        "failure_scenario": "a TOCTOU window merges a moved head"
+      }
+    ]
+  }
+}

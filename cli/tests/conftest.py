@@ -336,6 +336,14 @@ def _clear_settings_cache() -> None:
     from fno import config as _cfg
     _cfg.load_settings.cache_clear()  # type: ignore[attr-defined]
     _cfg._loaded_from = None  # reset loaded_from tracker (Finding 3)
+    # The merged-global-config cache read_global_block serves from; same
+    # test-isolation rationale as the load_settings reset above.
+    try:
+        from fno.config_io import clear_global_merged_cache
+
+        clear_global_merged_cache()
+    except Exception:
+        pass
     # Also clear paths._settings and resolve_repo_root which have their own @cache
     try:
         import fno.paths as _paths

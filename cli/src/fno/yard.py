@@ -2,7 +2,7 @@
 
 Read-only over two files that already exist - the agent registry and the
 graph archive - and nothing else. The mux's yard overlay shells out to
-``fno yard --json`` and renders what this fold emits. The fold computes no
+``fno agents yard --json`` and renders what this fold emits. The fold computes no
 liveness and no status: the overlay reads those from the roster row it
 already holds, so one status value feeds both the row and the sprite.
 

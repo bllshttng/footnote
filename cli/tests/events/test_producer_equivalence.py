@@ -370,10 +370,16 @@ def test_producer_emits_review_attestation_with_no_second_call(
     assert data["head_sha"] == head
 
 
-def test_a_non_empty_findings_report_emits_nothing() -> None:
-    """The re-report-after-fixes shape (findings non-empty) must not attest:
-    the fixes are about to move HEAD, and an attestation pinned before that
-    move is dead on arrival anyway (sigma's own rule, mirrored here)."""
+def test_a_non_empty_findings_report_attests_fail_with_the_record() -> None:
+    """A review WITH findings emits `fail` carrying the classified record.
+
+    The old rule here emitted nothing, on the reasoning that the fixes were
+    about to move HEAD and the attestation was dead on arrival. Range tiling
+    replaced that reasoning: a review that found problems must leave a durable
+    per-finding record, or the head it reviewed reads as never reviewed and
+    the dispositions have nothing to key on. Silence is the one outcome the
+    gate cannot tell apart from an instrument that never ran.
+    """
     import tempfile
 
     with tempfile.TemporaryDirectory() as td:
@@ -393,7 +399,16 @@ def test_a_non_empty_findings_report_emits_nothing() -> None:
             input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
         )
         assert r.returncode == 0, r.stderr
-        assert _events(repo) == []
+        events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+        assert len(events) == 1, f"expected one review_attestation, got {events}"
+        data = events[0]["data"]
+        assert data["verdict"] == "fail"
+        assert data["findings_blocking"] == 1
+        assert data["findings_nonblocking"] == 0
+        # No line and no category on the fixture, so the key keeps both slots
+        # empty and the fail-closed rule still blocks it.
+        assert [f["finding_key"] for f in data["findings"]] == ["a.py::"]
+        assert data["findings"][0]["blocking"] is True
 
 
 def test_a_different_tool_report_emits_nothing() -> None:

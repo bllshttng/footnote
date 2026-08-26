@@ -49,8 +49,11 @@ case "$1 $2 $3" in
     printf '%s\n' "$*" >> "${SPAWN_ARGS_LOG:-/dev/null}"
     printf '{"short_id":"deadbeef"}\n'; exit 0 ;;
   "claim release "*)       exit 0 ;;
-  "workspace worktree ensure")
-    shift 3  # drop "workspace worktree ensure"; parse "--repo R --name N [--harness H]"
+  "workspace worktree ensure"|"agents workspace worktree")
+    # Drop the matched verb tokens; the canonical spelling is 4 tokens
+    # (agents workspace worktree ensure), the deprecated root one is 3.
+    case "$1" in agents) shift 4 ;; *) shift 3 ;; esac
+    # Parse "--repo R --name N [--harness H]"
     # Record the full arg vector so a test can assert --harness forwarding.
     printf '%s\n' "$*" >> "${ENSURE_ARGS_LOG:-/dev/null}"
     repo=""; wtname=""; harness=""

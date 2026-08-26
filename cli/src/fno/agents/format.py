@@ -27,7 +27,8 @@ from fno.agents.session_truth import STALE_ATTENTION_S
 # v3 (x-f273): adds the additive ``provider`` key, the registry's
 # spawn-stamped model vendor (see the `stored` note in
 # schemas/agents-list-row.json).
-JSON_SCHEMA_VERSION = 3
+# v4 (x-3587): adds the stored reasoning-effort axis.
+JSON_SCHEMA_VERSION = 4
 
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
@@ -137,6 +138,8 @@ def serialize_entry(
     last_activity_age_s: Optional[int] = None,
     last_event_at: Optional[str] = None,
     last_message: Optional[str] = None,
+    status: Optional[str] = None,
+    superseded_live_status: Optional[str] = None,
 ) -> dict:
     """Produce the canonical dict shape for one agent.
 
@@ -175,6 +178,10 @@ def serialize_entry(
         # the transcript-derived answer to what actually answered.
         "harness": entry.harness,
         "provider": entry.provider,
+        # The selected reasoning-effort axis, recorded at spawn and passed
+        # through verbatim. It is not a transcript observation and is not
+        # inferred from harness, provider, or observed_model.
+        "effort": entry.effort,
         # The worker's own session id in its harness's store. Distinct from
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).
@@ -194,8 +201,16 @@ def serialize_entry(
         "last_message_at": entry.last_message_at,
         "last_message_at_basis": None,
         "last_reconciled_at": entry.last_reconciled_at,
-        "status": entry.status,
+        # The caller's rendered word when it has one (the reachability wire
+        # vocabulary), else the registry's stored token. It has to arrive
+        # BEFORE the projection, not be patched on after: the contradiction
+        # rules read `status`, and a caller that patches then re-projects
+        # loses `liveness_origin`, because `pid` is popped below.
+        "status": status if status is not None else entry.status,
         "live_status": live_status,
+        # Internal input to the shared projection rule (popped there, like
+        # `pid`): the non-idle supervisor word a fired falsifier superseded.
+        "superseded_live_status": superseded_live_status,
         # The model the worker is answering as, read from its transcript. A
         # spawn-recorded route would report the INTENDED model in exactly the
         # case an operator suspects a silent fallback; this cannot.

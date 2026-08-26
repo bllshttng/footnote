@@ -11,7 +11,8 @@
 # a liveness check.
 #
 # Functions exposed:
-#   target_is_active [state_file]        — 0 if active in a live session, else 1
+#   target_is_active [state_file] [caller_session_id]
+#                                          — 0 if active and session-owned, else 1
 #   target_state_field <field> [file]    — emit a YAML field value (strips quotes)
 #
 # No side effects. Pure reads. Stop-hook is the only thing that should archive
@@ -67,7 +68,19 @@ target_state_field() {
 # to `fno agents claim status` so this never diverges from the canonical classify().
 target_is_active() {
     local state_file="${1:-.fno/target-state.md}"
+    local caller_session_id="${2:-}"
     [[ -f "$state_file" ]] || return 1
+
+    local manifest_session_id
+    manifest_session_id=$(target_state_field "harness_session_id" "$state_file" || true)
+    if _target_guard_is_empty_yaml "$manifest_session_id"; then
+        manifest_session_id=$(target_state_field "claude_session_id" "$state_file" || true)
+    fi
+    if ! _target_guard_is_empty_yaml "$caller_session_id" \
+        && ! _target_guard_is_empty_yaml "$manifest_session_id" \
+        && [[ "$caller_session_id" != "$manifest_session_id" ]]; then
+        return 1
+    fi
 
     # `|| true` keeps the documented fail-open behavior under a caller's
     # `set -e` + `set -o pipefail`: target_state_field's grep returns non-zero

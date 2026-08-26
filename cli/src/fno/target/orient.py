@@ -673,10 +673,57 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     return line
 
 
-def _plan_line(plan_path: Optional[str], project_root: Path) -> str:
-    if not plan_path:
+def _bound_plan_path(
+    plan_path: Optional[str], project_root: Path, node_id: Optional[str]
+) -> Optional[str]:
+    """The plan the node is actually bound to (x-d401 / x-3ae1).
+
+    An empty manifest field is a CARRIER miss, not an unbound node: when a
+    node is bound, its graph entry's plan_path is the truth. Shared by every
+    line that consumes a plan path, so the plan line and boundary-reconcile
+    cannot answer off two different bindings. Propagates a graph read error;
+    each caller degrades in its own vocabulary.
+    """
+    if plan_path or not node_id:
+        return plan_path
+    entry = _graph_entry(node_id, project_root) or {}
+    return str(entry.get("plan_path") or "").strip() or None
+
+
+#: The plan line when the graph read itself failed. A constant because two
+#: callers render it and a drifting copy would be the exact two-answers-one-
+#: fact defect this module was changed to remove.
+_PLAN_UNREADABLE = "unknown (plan unreadable: graph unreadable)"
+
+
+def _plan_line_from_bound(bound_plan: Optional[str], project_root: Path) -> str:
+    """Render the plan line from an ALREADY-RESOLVED binding.
+
+    Split out so `build_report` resolves the binding ONCE and both the plan
+    line and boundary-reconcile answer off that single read. Resolving twice
+    reintroduced what `_bound_plan_path` was added to remove: two reads of one
+    fact can disagree, and a graph edit or a read that fails on only one of
+    them leaves the two lines describing different plans.
+    """
+    if not bound_plan:
         return "none (no plan bound)"
-    return reconcile_plan(plan_path, project_root).summary()
+    return reconcile_plan(bound_plan, project_root).summary()
+
+
+def _plan_line(
+    plan_path: Optional[str], project_root: Path, node_id: Optional[str] = None
+) -> str:
+    """The plan line, read from the binding's truth (x-d401 / x-3ae1).
+
+    The absences carry their basis - "no plan bound" states the graph's own
+    emptiness, and an unreadable graph reads unknown, never as a measured
+    none. `build_report` does NOT call this; it resolves once and renders
+    through `_plan_line_from_bound`."""
+    try:
+        plan_path = _bound_plan_path(plan_path, project_root, node_id)
+    except Exception:  # noqa: BLE001 - never abort the report
+        return _PLAN_UNREADABLE
+    return _plan_line_from_bound(plan_path, project_root)
 
 
 def _render_boundary(verdicts: list) -> str:
@@ -739,13 +786,23 @@ def build_report(
     manifest_raw: Optional[Dict[str, Any]] = None,
 ) -> List[OrientLine]:
     """Resolve all seven orientation lines. Read-only; never raises."""
+    # boundary-reconcile reads the SAME binding the plan line does: given an
+    # empty manifest field and a graph-bound plan, `_resolve_target` would
+    # otherwise fall back to the node's brief (or nothing) and report a
+    # verdict about a file the plan line just said was the plan.
+    try:
+        bound_plan = _bound_plan_path(plan_path, project_root, node_id)
+        plan_text = _plan_line_from_bound(bound_plan, project_root)
+    except Exception:  # noqa: BLE001 - _boundary_line reports its own basis
+        bound_plan = plan_path
+        plan_text = _PLAN_UNREADABLE
     return [
         OrientLine("node", _node_line(node_id, project_root, manifest_raw)),
         OrientLine("attended", _attended_line(manifest_raw)),
         OrientLine("worktree", _worktree_line(project_root, node_id)),
         OrientLine("tests", _tests_line(project_root)),
-        OrientLine("plan", _plan_line(plan_path, project_root)),
-        OrientLine("boundary-reconcile", _boundary_line(node_id, plan_path, project_root)),
+        OrientLine("plan", plan_text),
+        OrientLine("boundary-reconcile", _boundary_line(node_id, bound_plan, project_root)),
         OrientLine("manifest-live", _manifest_live_line(manifest_raw)),
         OrientLine("done-when", _done_when_line(manifest_raw, project_root)),
     ]

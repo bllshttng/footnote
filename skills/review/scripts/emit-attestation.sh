@@ -26,12 +26,18 @@
 # reviewer name and verdict it is PASSED. Nothing here can tell a real review
 # from a caller that typed the arguments.
 #
-# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context]
+# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context] [execution_context] [output_contract] [--findings-file <path>]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
 #   [reviewer_context]  fresh | shared | unknown (default unknown); positive
 #                       context evidence only, never inferred from the sender
+#   [execution_context] inline (default) | fork; where the review ran
+#   [output_contract]   json_block (default) | report_findings; the contract
+#                       the review's result surfaced under
+#   [--findings-file <path>]  a JSON findings payload; classified by `fno do
+#               review classify` and carried on the event as the finding record.
+#               A malformed or unreadable file is a refusal, never an empty record.
 set -euo pipefail
 
 usage() {
@@ -63,15 +69,51 @@ case "${1:-}" in
     ;;
 esac
 
-reviewer="${1:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
-verdict="${2:-pass}"
-reviewer_context="${3:-unknown}"
+# --findings-file <path> (positionals first, flag after): the classified
+# finding record rides onto the event. The classification itself is `fno do
+# review classify --emit-record`, the one shell entry point, so the blocking
+# rule is never reimplemented in bash. A malformed or unreadable findings
+# file is a refusal, not an empty record: an unmeasurable finding set must
+# not attest as though it classified zero.
+findings_file=""
+prev_arg=""
+positional=()
+for arg in "$@"; do
+  if [[ "$prev_arg" == "--findings-file" ]]; then
+    findings_file="$arg"
+    prev_arg=""
+    continue
+  fi
+  if [[ "$arg" == "--findings-file" ]]; then
+    prev_arg="$arg"
+    continue
+  fi
+  positional+=("$arg")
+done
+[[ -z "$prev_arg" ]] || {
+  echo "emit-attestation: --findings-file needs a path; no event emitted" >&2
+  exit 2
+}
+
+reviewer="${positional[0]:?reviewer name required: a built-in (sigma|code-review|declare) or a config.review.reviewer_registry name}"
+verdict="${positional[1]:-pass}"
+reviewer_context="${positional[2]:-unknown}"
+execution_context="${positional[3]:-inline}"
+output_contract="${positional[4]:-json_block}"
 case "$reviewer_context" in
   fresh|shared|unknown) ;;
   *)
     echo "emit-attestation: reviewer_context must be fresh, shared, or unknown (got '$reviewer_context')" >&2
     exit 2
     ;;
+esac
+case "$execution_context" in
+  inline|fork) ;;
+  *) echo "emit-attestation: execution_context must be inline or fork (got '$execution_context')" >&2; exit 2 ;;
+esac
+case "$output_contract" in
+  report_findings|json_block) ;;
+  *) echo "emit-attestation: output_contract must be report_findings or json_block (got '$output_contract')" >&2; exit 2 ;;
 esac
 while [[ "$reviewer" == /* ]]; do reviewer="${reviewer#/}"; done # strip ALL leading slashes (parity with both parsers' lstrip / trim_start_matches)
 
@@ -187,6 +229,76 @@ if [[ -f "$repo_root/.fno/target-state.md" ]]; then
     | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
 fi
 
+# The review hook owns the attempt, while this script owns the completion
+# marker. Read the hold before releasing it so both records use one join id.
+local_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+hold_json=""
+if [[ -n "$local_branch" ]]; then
+  hold_json="$("${FNO:-fno}" do pr review-hold metadata --branch "$local_branch" \
+    --repo "$repo_root" 2>/dev/null || true)"
+fi
+invocation_id="$(printf '%s' "$hold_json" | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
+if [[ -z "$invocation_id" && -n "$session_id" ]]; then
+  invocation_id="$(jq -r '.invocation_id // empty' \
+    "${FNO_HOME:-$HOME/.fno}/review-invocations/${session_id}.json" \
+    2>/dev/null || true)"
+fi
+if [[ -z "$invocation_id" ]]; then
+  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
+fi
+review_verb="$(printf '%s' "$hold_json" | jq -r '.metadata.verb // "/code-review"' 2>/dev/null || echo /code-review)"
+review_args_raw="$(printf '%s' "$hold_json" | jq -r '.metadata.args_raw // empty' 2>/dev/null || true)"
+review_level="$(printf '%s' "$hold_json" | jq -r '.metadata.level // "unset"' 2>/dev/null || echo unset)"
+review_level_source="$(printf '%s' "$hold_json" | jq -r '.metadata.level_source // "fallback"' 2>/dev/null || echo fallback)"
+review_flags="$(printf '%s' "$hold_json" | jq -c '.metadata.flags // []' 2>/dev/null || echo '[]')"
+[[ -n "$review_verb" ]] || review_verb="/code-review"
+[[ -n "$review_level" ]] || review_level="unset"
+[[ -n "$review_level_source" ]] || review_level_source="fallback"
+[[ -n "$review_flags" ]] || review_flags='[]'
+if ! jq -e 'type == "array" and all(.[]; type == "string")' <<<"$review_flags" >/dev/null 2>&1; then
+  review_flags='[]'
+fi
+review_model_family=""
+if [[ -n "$session_id" ]]; then
+  review_model_family="$(jq -r '.model_family // .model // empty' \
+    "${FNO_HOME:-$HOME/.fno}/attest/${session_id}.json" 2>/dev/null || true)"
+fi
+if [[ "$review_model_family" == "unobserved" ]]; then
+  review_model_family=""
+fi
+count_dir="${FNO_HOME:-$HOME/.fno}/review-invocations/${invocation_id}.subagents"
+subagent_count=0
+if [[ -d "$count_dir" ]]; then
+  for marker in "$count_dir"/*; do
+    [[ -f "$marker" ]] || continue
+    subagent_count=$((subagent_count + 1))
+  done
+fi
+[[ "$subagent_count" =~ ^[0-9]+$ ]] || subagent_count=0
+review_event_data="$(jq -cn \
+  --arg invocation_id "$invocation_id" \
+  --arg stage started \
+  --arg verb "$review_verb" \
+  --arg args_raw "$review_args_raw" \
+  --arg level "$review_level" \
+  --arg level_source "$review_level_source" \
+  --argjson flags "$review_flags" \
+  --arg transport skill_tool \
+  --arg initiator self \
+  --arg target_session_id "$session_id" \
+  --arg head_sha "$head_sha" \
+  --arg branch "$branch" \
+  --arg model_family "$review_model_family" \
+  --arg execution_context "$execution_context" \
+  --arg output_contract "$output_contract" \
+  --argjson subagent_count "$subagent_count" \
+  '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch,execution_context:$execution_context,output_contract:$output_contract,subagent_count:$subagent_count} | if $model_family == "" then . else .model_family=$model_family end' \
+  2>/dev/null || true)"
+# The started row emits ONLY past every refusal point (the findings-file
+# checks below are the last of them): a refused run writes zero events, and
+# a started row with no attestation row is the lost-review marker, so a
+# refusal must not manufacture one. The emit itself sits after those checks.
+
 # Record WHICH MODEL rendered the verdict. Model routing stamps ANTHROPIC_MODEL
 # (and every tier var) for the whole worker process, so a worker routed to a
 # cheap secondary provider renders its own review verdict there - and no
@@ -261,16 +373,44 @@ esac
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno doctor event emit then validates envelope + required
 # fields + the verdict enum before writing.
+# A findings file, when given, contributes its record through the SAME jq
+# build: only the six event-schema keys project across, nulls dropped, so a
+# classify output can never smuggle an unregistered field onto a trust-core
+# event and the no-file path stays byte-identical to today.
+findings_json="null"
+if [[ -n "$findings_file" ]]; then
+  if [[ ! -f "$findings_file" ]]; then
+    echo "emit-attestation: findings file not found: $findings_file; no event emitted" >&2
+    exit 2
+  fi
+  if ! classify_out="$("${FNO:-fno}" do review classify --findings-file "$findings_file" --emit-record)"; then
+    echo "emit-attestation: classify refused the findings file $findings_file; no event emitted" >&2
+    exit 2
+  fi
+  if ! findings_json="$(jq -c '
+    {findings_blocking, findings_nonblocking, findings, findings_truncated, review_round, dispositions}
+    | with_entries(select(.value != null))
+  ' <<<"$classify_out" 2>/dev/null)"; then
+    echo "emit-attestation: classify produced no parsable record for $findings_file; no event emitted" >&2
+    exit 2
+  fi
+fi
+if [[ -n "$review_event_data" ]]; then
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" \
+    --events "$repo_root/.fno/events.jsonl" >/dev/null 2>&1 || true
+fi
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
   --arg reviewer_context "$reviewer_context" \
+  --arg invocation_id "$invocation_id" \
   --arg branch "$branch" \
   --arg reviewed_base_sha "$reviewed_base_sha" \
   --arg reviewed_head_sha "$reviewed_head_sha" \
   --argjson reviewed_line_count "$reviewed_line_count" \
   --argjson reviewed_file_count "$reviewed_file_count" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count}')"
+  --argjson findings "$findings_json" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,reviewer_context:$reviewer_context,invocation_id:$invocation_id,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_line_count:$reviewed_line_count,reviewed_file_count:$reviewed_file_count} + $findings')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" doctor event emit -t review_attestation -s target -d "$data"

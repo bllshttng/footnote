@@ -274,6 +274,10 @@ def fetch_pr_info_rest(
     url = pr_data.get("html_url")
     if url is not None and (not isinstance(url, str) or not url):
         return None, "gh api pulls/<n> carried malformed HTML URL"
+    user = pr_data.get("user")
+    author = user.get("login") if isinstance(user, dict) else None
+    if author is not None and not isinstance(author, str):
+        return None, "gh api pulls/<n> carried malformed author login"
     return (
         {
             "pr": int(pr),
@@ -285,6 +289,7 @@ def fetch_pr_info_rest(
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
             "merged_at": merged_at,
             "merge_sha": merge_sha,
+            "author": author,
         },
         "",
     )
