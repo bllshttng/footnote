@@ -587,12 +587,12 @@ fn fit_review_start_audit_fields(fields: &mut serde_json::Map<String, serde_json
         return;
     }
     for key in [
-        "payload",
+        "reason",
         "target_cwd",
         "sender",
         "origin",
+        "payload",
         "target_session",
-        "reason",
     ] {
         shrink_review_start_audit_field(fields, key);
         if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
@@ -1243,6 +1243,8 @@ mod tests {
         let raw = std::fs::read_to_string(path).unwrap();
         let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(event["type"], "agent_raw_inject");
+        assert_eq!(event["data"]["target_session"], "thread-1");
+        assert_eq!(event["data"]["payload"], "/review --base origin/main");
         assert_eq!(event["data"]["reason_truncated"], true);
         let recorded = event["data"]["reason"].as_str().unwrap();
         assert!(long_reason.starts_with(recorded));
@@ -1276,7 +1278,6 @@ mod tests {
         assert_eq!(event["data"]["origin_truncated"], true);
         assert_eq!(event["data"]["target_session_truncated"], true);
         assert_eq!(event["data"]["reason_truncated"], true);
-        assert!(!event["data"]["reason"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
