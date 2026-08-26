@@ -4815,7 +4815,7 @@ mod tests {
             "missing 'discovered_sessions' key"
         );
         assert_eq!(parsed["discovered_count"], 0);
-        assert_eq!(parsed["schema_version"], 3);
+        assert_eq!(parsed["schema_version"], 4);
         assert_eq!(parsed["count"], 1);
         assert_eq!(
             parsed["fields_omitted"], result["fields_omitted"],
@@ -4854,6 +4854,19 @@ mod tests {
         assert!(row["live_status"].is_null(), "live_status retained as null");
     }
 
+    #[test]
+    fn empty_effort_is_rejected_but_opencode_values_are_passed_through() {
+        assert_eq!(
+            validate_effort_for_spawn("claude", "headless", Some("")),
+            Err("--effort requires a value".to_string())
+        );
+        assert_eq!(
+            validate_effort_for_spawn("codex", "bg", Some("")),
+            Err("--effort requires a value".to_string())
+        );
+        assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
+    }
+
     /// ab-098967b4: render_list_json folds in the discovered lane (additive
     /// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
     #[test]
@@ -4875,7 +4888,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
         assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-        assert_eq!(parsed["schema_version"], 3);
+        assert_eq!(parsed["schema_version"], 4);
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));

@@ -483,6 +483,24 @@ mod tests {
     }
 
     #[test]
+    fn effort_variant_persists_arbitrary_provider_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.json");
+        std::fs::write(&path, r#"{"variant":{"other/model":"low"}}"#).unwrap();
+
+        apply_opencode_variant_at(&path, "opencode/custom-model", "provider-defined-effort")
+            .expect("variant write succeeds");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(value["variant"]["other/model"], "low");
+        assert_eq!(
+            value["variant"]["opencode/custom-model"],
+            "provider-defined-effort"
+        );
+    }
+
+    #[test]
     fn tail_chars_is_utf8_safe_and_bounded() {
         assert_eq!(tail_chars("abcdef", 3), "def");
         assert_eq!(tail_chars("ab", 5), "ab"); // fewer than n -> whole string

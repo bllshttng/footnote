@@ -544,23 +544,7 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
         session_id = holder.split(":", 1)[1].strip()
     if not session_id:
         session_id = (ident.session_id or "").strip()
-    effort = None
-    try:
-        from fno.agents.registry import load_registry
-
-        row = next(
-            (
-                entry
-                for entry in load_registry()
-                if entry.harness == harness
-                and entry.harness_session_id == session_id
-            ),
-            None,
-        )
-        effort = row.effort if row is not None else None
-    except Exception:
-        effort = None
-    return harness, session_id, effort
+    return harness, session_id, _owned_registry_effort(harness, session_id)
 
 
 def _do_row_coordinates(key: str, claim, holder: str, action: str):
@@ -1775,3 +1759,43 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
 
 
 __all__ = ["cli"]
+
+
+def _owned_registry_effort(harness: str, session_id: str) -> "str | None":
+    """Read effort through the platform path without importing runtime agents.
+
+    Claims are core (L1), while the registry is runtime (L5). The registry is
+    an atomic JSON store, so this narrow best-effort read can match only the
+    owned identity; unreadable or malformed state leaves effort unknown.
+    """
+    if not harness or not session_id:
+        return None
+    try:
+        from fno import paths
+
+        raw = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    rows = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return None
+    legacy_session_fields = {
+        "claude": "claude_session_uuid",
+        "codex": "codex_session_id",
+        "gemini": "gemini_session_id",
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_harness = row.get("harness") or row.get("provider")
+        if row_harness != harness:
+            continue
+        row_session = row.get("harness_session_id")
+        if not isinstance(row_session, str) or not row_session:
+            legacy_key = legacy_session_fields.get(harness)
+            row_session = row.get(legacy_key) if legacy_key else None
+        if row_session != session_id:
+            continue
+        value = row.get("effort")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+    return None
