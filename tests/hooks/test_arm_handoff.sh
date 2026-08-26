@@ -119,9 +119,10 @@ EOF
     "$used_tokens" "$last_text" > "$dir/transcript.jsonl"
 }
 
-run_arm() { # dir  -> runs the hook from within dir with transcript on stdin
-  local dir="$1"
-  ( cd "$dir" && printf '{"transcript_path":"%s/transcript.jsonl"}' "$dir" | bash "$ARM" )
+run_arm() { # dir [caller_session_id] -> runs the hook with transcript on stdin
+  local dir="$1" caller_session_id="${2:-}"
+  ( cd "$dir" && printf '{"transcript_path":"%s/transcript.jsonl","session_id":"%s"}' \
+      "$dir" "$caller_session_id" | bash "$ARM" )
 }
 
 # 1. Pressure (80%) + outstanding work -> arm marker written.
@@ -209,6 +210,26 @@ touch "$TMP/g/.fno/.handoff-done-$SID"; rm -f "$TMP/g/.fno/.handoff-armed-$SID"
 OUT="$( cd "$TMP/g" && printf '{"source":"compact","session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
 echo "$OUT" | grep -q "Handoff armed" && fail "still nudging after marker cleared: $OUT" \
   || pass "no nudge once marker cleared"
+
+# 9. A visitor must not arm or receive the resident target's goal after compact.
+setup_ws "$TMP/visitor" 800000 "working"
+printf 'harness_session_id: resident-session\n' >> "$TMP/visitor/.fno/target-state.md"
+run_arm "$TMP/visitor" "visitor-session"
+[[ ! -f "$TMP/visitor/.fno/.handoff-armed-$SID" ]] \
+  && pass "visitor does not arm the resident target" \
+  || fail "visitor armed the resident target"
+OUT="$( cd "$TMP/visitor" && printf '{"source":"compact","session_id":"visitor-session"}' \
+  | bash "$REINJECT" 2>/dev/null )"
+[[ -z "$OUT" ]] && pass "visitor receives no resident goal after compact" \
+  || fail "visitor received resident context: $OUT"
+
+# 10. The manifest owner still follows the existing active path.
+setup_ws "$TMP/owner" 800000 "working"
+printf 'harness_session_id: resident-session\n' >> "$TMP/owner/.fno/target-state.md"
+run_arm "$TMP/owner" "resident-session"
+[[ -f "$TMP/owner/.fno/.handoff-armed-$SID" ]] \
+  && pass "manifest owner still arms normally" \
+  || fail "manifest owner was rejected"
 
 echo ""
 echo "arm-handoff: $PASS passed, $FAIL failed, $SKIP skipped (claim backend: $CLAIM_BACKEND)"

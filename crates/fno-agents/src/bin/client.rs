@@ -41,6 +41,7 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "loop-check",
     "mail-inject",
     "manifest-eval",
+    "manifest-for-session",
     "needs",
     "ping",
     "probe-run",
@@ -111,6 +112,10 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "manifest-eval") {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
+    }
+
+    if matches!(verb, "manifest-for-session") {
+        return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
 
     if matches!(verb, "codex-loaded-threads") {

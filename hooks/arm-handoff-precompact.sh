@@ -21,13 +21,24 @@ GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 # shellcheck source=../scripts/lib/target-guard.sh
 source "$GUARD_LIB" 2>/dev/null || exit 0
 
+HOOK_INPUT=""
+if [ ! -t 0 ]; then
+  HOOK_INPUT="$(cat 2>/dev/null || true)"
+fi
+CALLER_SESSION_ID=""
+TRANSCRIPT=""
+if command -v jq >/dev/null 2>&1; then
+  CALLER_SESSION_ID="$(printf '%s' "$HOOK_INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
+  TRANSCRIPT="$(printf '%s' "$HOOK_INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || true)"
+fi
+
 # Owner liveness, from the shared claim-based helper. This used to gate on
 # `kill -0 owner_pid`, which is the transient `fno do target init` wrapper pid,
 # dead within about a second of init returning - so the hook exited HERE on
 # 100% of real fires and never once reached the probe or armed. owner_pid can
 # only ever prove life, never death; the node claim (session-pid anchored +
 # TTL) is the durable signal, and target_is_active already reads it.
-target_is_active "$STATE_FILE" || exit 0
+target_is_active "$STATE_FILE" "$CALLER_SESSION_ID" || exit 0
 
 # Key markers on the MANIFEST session_id so they share handoff.sh's namespace
 # (handoff.sh writes/clears .handoff-{done,armed}-<manifest_session_id>).
@@ -36,11 +47,6 @@ SESSION_ID="$(target_state_field session_id "$STATE_FILE" 2>/dev/null || true)"
 [[ -f "$FNO_DIR/.handoff-done-$SESSION_ID" ]] && exit 0   # handoff already ran
 [[ -f "$FNO_DIR/.handoff-armed-$SESSION_ID" ]] && exit 0  # already armed
 
-# transcript_path from stdin (PreCompact payload). Skip the read on a TTY.
-TRANSCRIPT=""
-if [ ! -t 0 ] && command -v jq >/dev/null 2>&1; then
-  TRANSCRIPT="$(cat 2>/dev/null | jq -r '.transcript_path // empty' 2>/dev/null || true)"
-fi
 # Unreadable transcript -> outstanding-work is UNKNOWN -> decline (no false handoff).
 [[ -n "$TRANSCRIPT" && -f "$TRANSCRIPT" ]] || exit 0
 

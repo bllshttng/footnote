@@ -10,6 +10,8 @@
 
 This document covers the driver loop AROUND sessions: `crates/fno-agents/src/loop_runtime.rs`, `loop_target.rs`, `loop_dispatch.rs`, and the `scripts/run-target-loop.sh` exec shim. For the stop-hook decision verb that runs INSIDE each session, see [control-plane-loop.md](control-plane-loop.md).
 
+The target stop shims resolve the manifest by harness session id before invoking `loop-check`. When a cwd manifest's `harness_session_id` or legacy alias names the stopping session, the shims keep it. Otherwise, `fno-agents manifest-for-session` scans the repository worktrees. A confirmed miss emits `loop-check: no manifest names session <id>; visitor allowed` and allows the visitor to stop. An unreadable resolver remains checker-unavailable and takes the shim's bounded retry path.
+
 ---
 
 ## The loop primitive

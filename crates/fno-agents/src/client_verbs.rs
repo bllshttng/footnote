@@ -22,6 +22,9 @@
 use crate::claude_ask::{
     family1_truth_state, family1_truth_state_for_resume, liveness_probe, locate_session, ClaudeHome,
 };
+#[cfg(test)]
+use crate::manifest_lookup::parse_manifest_identity;
+use crate::manifest_lookup::{find_manifest_for_session, git_worktree_paths, ManifestIdentity};
 use crate::paths::AgentsHome;
 use crate::state::REGISTRY_SCHEMA_VERSION;
 use serde::Serialize;
@@ -1403,138 +1406,6 @@ fn resolve_entry_with_heal_scoped(
     }
 }
 
-/// Identity parsed from a `.fno/target-state.md` manifest, the durable evidence
-/// source for adopting an orphaned `/target` session by its harness session id
-/// (plan x-0358 US1). Pure (no IO) so the match and the field extraction are
-/// tested without a live manifest. IDENTITY ONLY: the manifest's
-/// `target_claim_*` / `owner_pid` fields are an init-time snapshot and are never
-/// read as ownership or liveness truth (AGENTS.md pitfalls corpus, "Orienter
-/// output, claim snapshots, and liveness probes have all lied").
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct ManifestIdentity {
-    harness: String,
-    harness_session_id: String,
-    claude_session_id: String,
-    codex_thread_id: String,
-    owner_cwd: String,
-    fno_id: String,
-}
-
-impl ManifestIdentity {
-    /// The session-id fields, in canonical-first precedence.
-    fn session_ids(&self) -> [&str; 3] {
-        [
-            self.harness_session_id.as_str(),
-            self.claude_session_id.as_str(),
-            self.codex_thread_id.as_str(),
-        ]
-    }
-
-    /// Does `session_id` equal any harness-session-id the manifest records? The
-    /// legacy `claude_session_id` / `codex_thread_id` aliases are kept for one
-    /// release, so a pre-rename manifest still matches its session.
-    fn matches(&self, session_id: &str) -> bool {
-        let sid = session_id.trim();
-        !sid.is_empty()
-            && self
-                .session_ids()
-                .iter()
-                .any(|f| !f.is_empty() && f.trim() == sid)
-    }
-
-    /// The id an adopted row is keyed on: canonical `harness_session_id` when
-    /// present, else the legacy alias that carries it. init writes
-    /// `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real manifest can
-    /// record the session under `claude_session_id` alone; keying on the
-    /// canonical field alone would mint a row with an empty session id, empty
-    /// short_id and the name `target-`.
-    fn canonical_session_id(&self) -> &str {
-        self.session_ids()
-            .into_iter()
-            .find(|f| !f.is_empty())
-            .unwrap_or("")
-    }
-}
-
-/// First non-empty wins (frontmatter precedes body); never overwrite a real
-/// value with a later blank or an explicit `null`.
-fn set_first(slot: &mut String, val: &str) {
-    if slot.is_empty() && !val.is_empty() && val != "null" {
-        *slot = val.to_string();
-    }
-}
-
-/// Scan manifest content (frontmatter AND body) for the session-identity keys.
-/// Lines inside the multi-line `input` quoted scalar are UNTRUSTED (their keys
-/// never assign) so a `/target` argument containing `harness: ...` cannot forge
-/// an identity field -- the same forgery surface `finalize::parse_manifest_fields`
-/// guards for the merge posture. The manifest is not strict YAML, `fno do target
-/// init` writes quoted scalars, so a line scan matches the writer rather than a
-/// YAML lib. Kept here rather than folded into finalize because finalize owns
-/// completion/merge fields and this owns session-identity fields; the scan is a
-/// handful of lines and the two concerns stay decoupled.
-///
-/// The terminator line is itself untrusted but still ADVANCES the scan rather
-/// than being consumed, exactly as finalize does: for an input ending in a lone
-/// backslash the closing quote is ambiguous and the real terminator is the next
-/// `plan_path: "..."` line. Consuming it (an unconditional skip) would leave the
-/// scalar open to EOF and silently drop every identity key below `input:` --
-/// init writes `input` before `harness`/`harness_session_id`/`owner_cwd`, so
-/// adopt would report "no evidence" for a manifest that matches.
-fn parse_manifest_identity(content: &str) -> ManifestIdentity {
-    let mut m = ManifestIdentity::default();
-    let mut in_input_scalar = false;
-    for line in content.lines() {
-        let line = line.trim();
-        let line_untrusted = in_input_scalar;
-        if in_input_scalar && line_closes_quoted_scalar(line) {
-            in_input_scalar = false;
-        }
-        if line.is_empty() || line.starts_with('#') || line == "---" {
-            continue;
-        }
-        let Some((k, v)) = line.split_once(':') else {
-            continue;
-        };
-        let k = k.trim();
-        let raw = v.trim();
-        // A multi-line `input: "..."` opens the scalar here. `len >= 2` so a bare
-        // opening quote is not read as its own terminator.
-        if !line_untrusted
-            && k == "input"
-            && raw.starts_with('"')
-            && !(raw.len() >= 2 && line_closes_quoted_scalar(raw))
-        {
-            in_input_scalar = true;
-        }
-        if line_untrusted {
-            continue;
-        }
-        let val = raw.trim_matches(|c| c == '"' || c == '\'');
-        match k {
-            "harness" => set_first(&mut m.harness, val),
-            "harness_session_id" => set_first(&mut m.harness_session_id, val),
-            "claude_session_id" => set_first(&mut m.claude_session_id, val),
-            "codex_thread_id" => set_first(&mut m.codex_thread_id, val),
-            "owner_cwd" => set_first(&mut m.owner_cwd, val),
-            "fno_id" => set_first(&mut m.fno_id, val),
-            _ => {}
-        }
-    }
-    m
-}
-
-/// Does `raw` (the text after `input:`) close its quoted scalar on the same
-/// line? Mirrors `finalize::ends_quoted_scalar`: a trailing quote with no
-/// preceding backslash is the terminator, because init prepends exactly one
-/// backslash to every user quote.
-fn line_closes_quoted_scalar(raw: &str) -> bool {
-    let Some(rest) = raw.strip_suffix('"') else {
-        return false;
-    };
-    !rest.ends_with('\\')
-}
-
 // ---------------------------------------------------------------------------
 // adopt: synthesize a registry entry from durable evidence (plan x-0358)
 // ---------------------------------------------------------------------------
@@ -1578,7 +1449,7 @@ fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> P
     if projects.join(&recorded_slug).join(&transcript).exists() {
         return recorded_pb;
     }
-    let candidates: Vec<PathBuf> = git_worktree_paths(Path::new(recorded));
+    let candidates: Vec<PathBuf> = git_worktree_paths(Path::new(recorded)).unwrap_or_default();
     for cand in &candidates {
         let slug = claude_cwd_slug(cand);
         if projects.join(&slug).join(&transcript).exists() {
@@ -1595,79 +1466,6 @@ fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> P
         recorded
     );
     recorded_pb
-}
-
-fn git_worktree_paths(cwd: &Path) -> Vec<PathBuf> {
-    let out = match std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(["worktree", "list", "--porcelain"])
-        .output()
-    {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let stdout = match String::from_utf8(out.stdout) {
-        Ok(s) => s,
-        Err(_) => return Vec::new(),
-    };
-    let mut paths = Vec::new();
-    for record in stdout.split("\n\n") {
-        let mut lines = record.lines();
-        let first = match lines.next() {
-            Some(l) => l,
-            None => continue,
-        };
-        let path_str = match first.strip_prefix("worktree ") {
-            Some(p) => p.trim(),
-            None => continue,
-        };
-        if lines.any(|l| l.trim() == "bare") || path_str.is_empty() {
-            continue;
-        }
-        paths.push(Path::new(path_str).to_path_buf());
-    }
-    paths
-}
-
-fn paths_eq(a: &Path, b: &Path) -> bool {
-    // Both-unresolvable must NOT compare equal (`None == None`): two different
-    // stale paths would read as the same directory.
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => a == b,
-    }
-}
-
-/// Find the `.fno/target-state.md` whose session id matches, scanning the cwd's
-/// git worktrees (and cwd itself). Returns the parsed identity (cwd + fno_id +
-/// the harness-appropriate session id) or `None` when no manifest matches.
-/// Same-project by design; a cross-project orphan is not found here (the row's
-/// `cwd` still links it once adopted by full id another way).
-fn find_manifest_for_session(session_id: &str) -> Option<ManifestIdentity> {
-    let cwd = std::env::current_dir().ok()?;
-    let mut candidates = git_worktree_paths(&cwd);
-    if !candidates.iter().any(|p| paths_eq(p, &cwd)) {
-        candidates.push(cwd);
-    }
-    for wt in &candidates {
-        let manifest = wt.join(".fno").join("target-state.md");
-        let Ok(content) = fs::read_to_string(&manifest) else {
-            continue;
-        };
-        let mut id = parse_manifest_identity(&content);
-        if id.matches(session_id) {
-            // `owner_cwd` is optional in the manifest schema; without it the
-            // minted row has an empty cwd and `resume` refuses ("no recorded
-            // cwd. Run `fno agents rm ...`") on the row it just wrote. The
-            // worktree the manifest was found in IS that cwd.
-            if id.owner_cwd.is_empty() {
-                id.owner_cwd = wt.to_string_lossy().into_owned();
-            }
-            return Some(id);
-        }
-    }
-    None
 }
 
 /// Collision-safe 8-char handle from a session id (the final-eight convention),
@@ -1873,7 +1671,7 @@ fn synthesize_and_adopt(
         return Ok((e.clone(), fno_id, AdoptSource::Registry));
     }
     // 2. Target manifest.
-    if let Some(id) = find_manifest_for_session(session_id) {
+    if let Ok(Some(id)) = find_manifest_for_session(session_id) {
         let fno_id = (!id.fno_id.is_empty()).then(|| id.fno_id.clone());
         let value = persist_manifest_identity(&id, home)?;
         return Ok((value, fno_id, AdoptSource::Manifest));
@@ -1891,7 +1689,7 @@ fn synthesize_and_adopt(
 /// path. Returns the minted row (already upserted), `None` when no manifest
 /// matches, or the actual registry/serialization failure.
 fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Value>, AdoptError> {
-    let Some(id) = find_manifest_for_session(session_id) else {
+    let Ok(Some(id)) = find_manifest_for_session(session_id) else {
         return Ok(None);
     };
     persist_manifest_identity(&id, home).map(Some)

@@ -183,6 +183,33 @@ class TestWhoami:
         assert "walker:" not in result.stdout
         assert "fleet:" not in result.stdout
 
+    def test_positive_manifest_session_mismatch_reports_visitor(
+        self, tmp_path, runner, monkeypatch
+    ):
+        project = _make_workspace(tmp_path, target=True)
+        manifest = project / ".fno" / "target-state.md"
+        manifest.write_text(
+            "---\n"
+            "session_id: resident-run\n"
+            "harness_session_id: resident-session\n"
+            "input: resident-work\n"
+            "plan_path: /tmp/resident-plan.md\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "visitor-session")
+
+        result = _invoke(runner, project, monkeypatch, "whoami")
+
+        assert result.exit_code == 0, result.stdout + result.stderr
+        assert "visitor: manifest names session resident-session, not this one" in result.stdout
+        assert "run:" not in result.stdout
+        payload = json.loads(
+            _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
+        )
+        assert payload["session"] is None
+        assert payload["visitor"] == "manifest names session resident-session, not this one"
+
     def test_ac5_fr_dual_states_picks_target_warns(self, tmp_path, runner, monkeypatch):
         project = _make_workspace(tmp_path, target=True)
         # Add session-state.md alongside target-state.md
