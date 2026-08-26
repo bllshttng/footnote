@@ -485,7 +485,7 @@ def list_cmd(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        metavar="live|expired|superseded|retracted|unscoped|all",
+        metavar="live|retired|expired|superseded|retracted|unscoped|all",
         help="Filter by the derived lifecycle state.",
     ),
     review_list: bool = typer.Option(
@@ -521,7 +521,7 @@ def backlog_decisions(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        metavar="live|expired|superseded|retracted|unscoped|all",
+        metavar="live|retired|expired|superseded|retracted|unscoped|all",
         help="Filter by the derived lifecycle state.",
     ),
     review_list: bool = typer.Option(

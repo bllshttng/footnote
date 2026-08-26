@@ -412,7 +412,7 @@ def record_decision(
         if (
             superseded_row is not None
             and _decision_lane(superseded_row) == "law"
-            and provenance.authority_source != "operator"
+            and provenance.authority_source not in {"operator", "chat_attested"}
         ):
             raise RefusedAuthorityError(provenance.decided_by, origin)
 
@@ -1054,12 +1054,24 @@ def list_decisions(
     record written with no subject at all - what ``fno inbox outstanding clear
     --answer`` writes for a question that names no node.
     """
-    if state not in {None, "live", "expired", "superseded", "retracted", "unscoped", "all"}:
+    if state not in {
+        None,
+        "live",
+        "retired",
+        "expired",
+        "superseded",
+        "retracted",
+        "unscoped",
+        "all",
+    }:
         raise ValueError(
-            "state must be live, expired, superseded, retracted, unscoped, or all"
+            "state must be live, retired, expired, superseded, retracted, "
+            "unscoped, or all"
         )
     rows, damaged = _read_index(_index_path())
     from fno.decide.catalog import load_catalog
+    from fno.decide.graduation import registered_retirement
+    from fno.decide.graduation import registered_retirement
 
     catalog = load_catalog()
     local_decisions = [
@@ -1164,6 +1176,10 @@ def list_decisions(
             row["lifecycle_reason"] = latest_retractions[decision_key].get("reason")
         elif winner:
             lifecycle = "superseded"
+        elif retirement := registered_retirement(decision_key):
+            lifecycle = "retired"
+            row["lifecycle_reason"] = "graduated to enforced artifact"
+            row["lifecycle_evidence"] = retirement
         elif row["lane"] == "coord":
             lifecycle, evidence = _coord_lifecycle(row, graph_entries)
             if evidence:

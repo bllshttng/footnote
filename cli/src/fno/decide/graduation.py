@@ -17,6 +17,19 @@ GRADUATION_KINDS = (
 _ARTIFACT_RE = re.compile(r"^(file|test|doc|gate|default):\S(?:.*\S)?$")
 _FOLLOW_UP_RE = re.compile(r"^node:[a-z][a-z0-9]*-[0-9a-f]+$", re.IGNORECASE)
 
+REGISTERED_GRADUATION_PROBES = (
+    {
+        "decision_id": "d-1ca0e711",
+        "graduation": {
+            "kind": "enforced",
+            "artifact": (
+                "test:cli/tests/integration/test_graph_cli.py::"
+                "test_new_p0_requires_breaking_acknowledgment"
+            ),
+        },
+    },
+)
+
 
 class InvalidGraduationError(ValueError):
     """A decision graduation declaration is missing or malformed."""
@@ -69,6 +82,20 @@ def normalize_graduation(value: dict[str, str] | None) -> dict[str, str]:
     kind = value.get("kind")
     reference = value.get("artifact") or value.get("follow_up")
     return validate_graduation(kind, reference)
+
+
+def registered_retirement(decision_id: str) -> dict[str, str] | None:
+    """Return checked-in retirement evidence for one decision id."""
+    wanted = decision_id.casefold()
+    for row in REGISTERED_GRADUATION_PROBES:
+        if str(row["decision_id"]).casefold() != wanted:
+            continue
+        artifact = str(row["graduation"]["artifact"])
+        return {
+            "artifact": artifact,
+            "marker": f"test_passed:{artifact.removeprefix('test:')}",
+        }
+    return None
 
 
 def _default_run(argv: list[str], *, cwd: Path, timeout: int):
@@ -194,8 +221,10 @@ def evaluate_graduation(
 __all__ = [
     "GRADUATION_KINDS",
     "InvalidGraduationError",
+    "REGISTERED_GRADUATION_PROBES",
     "graduation_or_guidance",
     "evaluate_graduation",
     "normalize_graduation",
+    "registered_retirement",
     "validate_graduation",
 ]

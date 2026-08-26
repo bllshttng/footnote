@@ -779,9 +779,16 @@ def test_backlog_note_missing_node_returns_not_found(tmp_graph):
     assert found is False
 
 
-def test_backlog_note_cli_verb(tmp_graph):
+def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     from typer.testing import CliRunner
     from fno.cli import app
+    from types import SimpleNamespace
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex"),
+    )
 
     _seed(tmp_graph, {"id": "x-9", "title": "t"})
     res = CliRunner().invoke(app, ["backlog", "note", "x-9", "shipped wave 1", "-J"],
@@ -790,6 +797,8 @@ def test_backlog_note_cli_verb(tmp_graph):
     import json as _json
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["note"]["text"] == "shipped wave 1"
+    assert payload["note"]["source_session_id"] == session_id
+    assert payload["note"]["source_harness"] == "codex"
 
 
 def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):

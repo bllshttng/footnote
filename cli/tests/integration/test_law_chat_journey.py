@@ -126,3 +126,67 @@ def test_exact_approval_writes_two_stores_and_replay_is_refused(isolated) -> Non
             events_root=root,
         )
     assert len(index.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_chat_approval_can_supersede_existing_law(isolated) -> None:
+    root, index = isolated
+    from fno import decide, law
+
+    existing_id = "d-12345678"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    index.write_text(
+        json.dumps(
+            {
+                "type": "operator_decision",
+                "ts": "2026-08-25T23:00:00Z",
+                "data": {
+                    "decision_id": existing_id,
+                    "subject": "x-12ba",
+                    "decision": "Old law",
+                    "decided_by": "operator",
+                    "authority_source": "operator",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    proposal = law.prepare_proposal(
+        subject="x-12ba",
+        decision="New law",
+        rationale="The operator replaced the old law.",
+        supersedes=existing_id,
+    )
+    tool_input = (
+        f"fno law enact --proposal {proposal['proposal_id']} "
+        f"--hash {proposal['content_hash']}"
+    )
+    armed = law._arm_proposal_from_hook(
+        proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session",
+        permission_mode="default",
+        tool_input=tool_input,
+    )
+    consent = decide.OperatorConsent(
+        proposal_id=proposal["proposal_id"],
+        content_hash=proposal["content_hash"],
+        session_id="human-session",
+        permission_mode="default",
+        tool_input=armed["armed_tool_input"],
+    )
+
+    recorded = decide.record_decision(
+        subject=proposal["subject"],
+        decision=proposal["decision"],
+        rationale=proposal["rationale"],
+        supersedes=existing_id,
+        authority_source="chat_attested",
+        consent=consent,
+        events_root=root,
+    )
+
+    assert recorded["event"]["data"]["supersedes"] == existing_id
+    _, history, _ = decide.list_decisions("x-12ba", state="all")
+    by_id = {row["decision_id"]: row for row in history}
+    assert by_id[existing_id]["superseded_by"] == recorded["decision_id"]

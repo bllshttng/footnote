@@ -1505,6 +1505,33 @@ def test_list_derives_and_filters_authority_lanes_in_the_engine(
     assert excluded == []
 
 
+def test_registered_graduation_reads_retired_with_positive_evidence(index: Path):
+    from fno.decide import list_decisions
+
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-25T12:41:05Z",
+            "decision_id": "d-1ca0e711",
+            "subject": "priority",
+            "decision": "p0 blocks everything else",
+            "decided_by": "operator",
+            "authority_source": "agent",
+        },
+    )
+
+    _, retired, damaged = list_decisions("priority", state="retired")
+
+    assert damaged == 0
+    assert [row["decision_id"] for row in retired] == ["d-1ca0e711"]
+    assert retired[0]["lifecycle"] == "retired"
+    assert retired[0]["lifecycle_evidence"]["artifact"].endswith(
+        "::test_new_p0_requires_breaking_acknowledgment"
+    )
+    _, live, _ = list_decisions("priority", state="live")
+    assert live == []
+
+
 @pytest.mark.parametrize(
     "authority,ts,question_id,marker",
     [
