@@ -262,6 +262,18 @@ _GLOBAL_MERGED_CACHE: (
 ) = None
 
 
+def clear_global_merged_cache() -> None:
+    """Drop the merged-global-config cache.
+
+    Test hook, called by the autouse settings-cache fixture so a test that
+    rewrites a pinned global config cannot be served the previous test's
+    parse. Runtime callers never need it: the (mtime_ns, size) fingerprint
+    reparses on any real edit.
+    """
+    global _GLOBAL_MERGED_CACHE
+    _GLOBAL_MERGED_CACHE = None
+
+
 def _global_merged_config() -> tuple[dict[str, object], tuple[Path, ...]]:
     global _GLOBAL_MERGED_CACHE
     candidates = config_read_candidates([_global_settings_path()])

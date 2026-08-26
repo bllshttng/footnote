@@ -136,31 +136,75 @@ def test_relative_target_path_rejected():
     assert "absolute" in str(exc.value)
 
 
-def test_misspelled_target_key_rejected():
+def test_misspelled_target_key_warns(caplog):
+    import logging
+
     from fno.config import RenderTargetConfig
 
-    with pytest.raises(Exception) as exc:
-        RenderTargetConfig.model_validate(
+    with caplog.at_level(logging.WARNING, logger="fno.config"):
+        row = RenderTargetConfig.model_validate(
             {"path": "~/v/x.html", "project": "fno", "projectio": "roadmap"}
         )
-    assert "projectio" in str(exc.value)
+    assert row.projection == "backlog"
+    assert "projectio" in caplog.text
 
 
-def test_state_file_collision_rejected(_isolate):
+def test_state_file_collision_skips_target(_isolate, tmp_path, monkeypatch, capsys):
     import fno.graph._constants as gc
-    from fno.config import RenderTargetConfig
 
-    with pytest.raises(Exception) as exc:
-        RenderTargetConfig.model_validate({"path": str(gc.GRAPH_MD), "project": "fno"})
-    assert "collides" in str(exc.value)
+    md = _isolate["md"]
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{md}"\nproject = "fno"',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [_entry("ab-collide0", title="first title")],
+        "second title",
+    )
+    err = capsys.readouterr().err
+    assert "collides with graph state file" in err and "graph.md" in err
+    # The state file keeps its markdown render; public HTML never landed in it.
+    assert "public items" not in md.read_text(encoding="utf-8")
+    # The rest of the family: lock, sidecar, backup, archive, ledger.
     for state_path in (
-        gc.GRAPH_JSON,
+        str(gc.GRAPH_JSON) + ".lock",
+        str(gc.GRAPH_JSON) + ".sha256",
+        str(gc.GRAPH_JSON) + ".bak",
         gc.GRAPH_ARCHIVE_JSON,
         gc.LEDGER_JSON,
-        str(gc.GRAPH_JSON) + ".sha256",
     ):
-        with pytest.raises(Exception):
-            RenderTargetConfig.model_validate({"path": str(state_path), "project": "fno"})
+        _write_config(
+            f'[[backlog.render_targets]]\npath = "{state_path}"\nproject = "fno"',
+            tmp_path,
+            monkeypatch,
+        )
+        _mutate(
+            _isolate["graph"],
+            [_entry("ab-collide1", title="first title")],
+            "second title",
+        )
+        assert "collides with graph state file" in capsys.readouterr().err
+
+
+def test_zero_match_project_leaves_board_unchanged(_isolate, tmp_path, monkeypatch, capsys):
+    target = _isolate["target"]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("PRIOR BOARD BYTES", encoding="utf-8")
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "ghost"',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [_entry("ab-elsewher", title="belongs elsewhere", project="fno")],
+        "still elsewhere",
+    )
+    assert target.read_text(encoding="utf-8") == "PRIOR BOARD BYTES"
+    err = capsys.readouterr().err
+    assert "matches no graph entry" in err and "ghost" in err
 
 
 def test_unreadable_sibling_no_false_alarm(_isolate, tmp_path, monkeypatch, capsys):
@@ -301,7 +345,7 @@ def test_leak_refusal_leaves_target_byte_identical(_isolate, tmp_path, monkeypat
     assert row["priority"] == "p1"
 
 
-def test_empty_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):
+def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monkeypatch, capsys):
     target = tmp_path / "out" / "empty.html"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text("STALE BYTES FROM A DEAD PROJECT", encoding="utf-8")
@@ -312,15 +356,22 @@ def test_empty_project_writes_valid_empty_projection(_isolate, tmp_path, monkeyp
     )
     _mutate(
         _isolate["graph"],
-        [_entry("ab-elsewher", title="belongs elsewhere", project="fno")],
-        "still elsewhere",
+        [
+            # The ghost project EXISTS (a done entry), so its board renders a
+            # valid empty projection instead of keeping stale bytes.
+            _entry(
+                "ab-ghosted0",
+                title="shipped long ago",
+                project="ghost",
+                completed_at="2026-01-02T00:00:00Z",
+            ),
+        ],
+        "shipped long ago",
     )
     text = target.read_text(encoding="utf-8")
     assert "STALE BYTES" not in text
     assert "0 public items" in text
-    # A project matching zero entries is also the typo'd-name signature, so
-    # the empty write carries a loud warning rather than passing silently.
-    assert "matches no graph entry" in capsys.readouterr().err
+    assert "matches no graph entry" not in capsys.readouterr().err
 
 
 def test_unwritable_target_warns_and_completes(_isolate, tmp_path, monkeypatch, capsys):

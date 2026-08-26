@@ -96,13 +96,13 @@ def public_backlog_entries(entries: list[dict], project: str) -> list[dict]:
     ]
 
 
-def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list[dict]]]:
+def _backlog_sections_for(items: list[dict]) -> list[tuple[str, list[dict]]]:
     groups: dict[str, list[dict]] = {}
     status_order = {status: index for index, status in enumerate(PUBLIC_BACKLOG_STATUSES)}
-    for entry in public_backlog_entries(entries, project):
+    for entry in items:
         groups.setdefault(group_for(entry), []).append(entry)
-    for items in groups.values():
-        items.sort(
+    for sorted_items in groups.values():
+        sorted_items.sort(
             key=lambda entry: (
                 status_order.get(str(entry.get("status")), 99),
                 str(entry.get("priority") or "p2"),
@@ -110,6 +110,10 @@ def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list
             )
         )
     return [(name, groups[name]) for name in sorted(groups)]
+
+
+def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list[dict]]]:
+    return _backlog_sections_for(public_backlog_entries(entries, project))
 
 
 def render_public_roadmap_html(
@@ -124,14 +128,51 @@ def render_public_roadmap_html(
     )
 
 
-def render_public_backlog_html(entries: list[dict], project: str) -> str:
+def render_public_backlog_html(
+    entries: list[dict], project: str, backlog_entries: list[dict] | None = None
+) -> str:
     from fno.graph.render_html import render_public_sections_html
 
+    if backlog_entries is None:
+        backlog_entries = public_backlog_entries(entries, project)
     return render_public_sections_html(
-        _backlog_sections(entries, project),
+        _backlog_sections_for(backlog_entries),
         title=f"{project} backlog",
         projection="backlog",
     )
+
+
+def _state_file_collisions(path: Path) -> list[str]:
+    """Graph state files ``path`` resolves onto (empty list = no clash).
+
+    Checked HERE, in the graph layer, not in the pydantic validator: the
+    constants resolve through load_settings(), and resolving them from
+    inside settings validation re-enters the loader recursively. Post-load
+    there is no cycle.
+    """
+    try:
+        from fno.graph import _constants as gc
+
+        resolved = path.resolve()
+        hits = []
+        for state_path in (
+            gc.GRAPH_JSON,
+            gc.GRAPH_MD,
+            gc.GRAPH_HTML,
+            gc.GRAPH_ARCHIVE_JSON,
+            gc.LEDGER_JSON,
+            # the sha256 sidecar, the corruption-recovery backup, and the
+            # flock whose inode an os.replace would swap out from under the
+            # mutation mutex
+            Path(str(gc.GRAPH_JSON) + ".sha256"),
+            Path(str(gc.GRAPH_JSON) + ".bak"),
+            Path(str(gc.GRAPH_JSON) + ".lock"),
+        ):
+            if resolved == Path(state_path).resolve():
+                hits.append(str(state_path))
+        return hits
+    except Exception:
+        return []
 
 
 def _configured_targets() -> "list[RenderTargetConfig]":
@@ -150,8 +191,8 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         from fno.config_io import read_global_block
 
         unreadable: list = []
-        backlog = read_global_block("backlog", unreadable=unreadable) or {}
-        rows = backlog.get("render_targets")
+        block = read_global_block("backlog", unreadable=unreadable)
+        rows = None if block is None else block.get("render_targets")
         if rows is None:
             rows = []
         elif not isinstance(rows, list):
@@ -161,12 +202,12 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                 file=sys.stderr,
             )
             rows = []
-        if unreadable and not rows:
-            # A corrupt global config must not silently disable every target
-            # behind the generic parse warning config_io already logged. Only
-            # a disability (no usable rows from any readable candidate)
-            # warns - a corrupt legacy settings.yaml under a config.toml that
-            # fully defines the rows is not the render's problem.
+        if unreadable and rows == [] and block is not None:
+            # A global config that exists but fails to parse must not silently
+            # disable configured targets behind the generic parse warning
+            # config_io already logged. Fires only where a disability is
+            # possible: a readable [backlog] block exists, no readable file
+            # defines render_targets, and some candidate is unreadable.
             print(
                 "Warning: backlog.render_targets may be disabled: global "
                 f"config unreadable: {', '.join(str(p) for p in unreadable)}",
@@ -177,12 +218,23 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         out: list[RenderTargetConfig] = []
         for row in rows:
             try:
-                out.append(RenderTargetConfig.model_validate(row))
+                target = RenderTargetConfig.model_validate(row)
             except Exception as exc:
                 print(
                     f"Warning: skipping malformed backlog.render_targets row: {exc}",
                     file=sys.stderr,
                 )
+                continue
+            clashes = _state_file_collisions(Path(os.path.expanduser(target.path)))
+            if clashes:
+                print(
+                    f"Warning: skipping render target {target.path}: collides "
+                    f"with graph state file {', '.join(clashes)}; refusing to "
+                    "overwrite it",
+                    file=sys.stderr,
+                )
+                continue
+            out.append(target)
         _warn_shadowed_local_rows(out)
         return out
     except Exception as exc:
@@ -196,6 +248,11 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         return []
 
 
+# The shadow warning repeats on every mutation while misconfigured; dedupe
+# identical states within one process so a long-lived daemon says it once.
+_SHADOW_WARN_STATE: tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]] | None = None
+
+
 def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
     """Warn when load_settings() sees render_targets rows this render ignores.
 
@@ -206,6 +263,7 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
     this warning fires. Best-effort: a settings chain that cannot load at all
     stays silent rather than raising into the mutation.
     """
+    global _SHADOW_WARN_STATE
     try:
         from fno.config import load_settings
 
@@ -213,7 +271,8 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
             return sorted((r.path, r.project, r.projection) for r in rows)
 
         local = _key(load_settings().backlog.render_targets)
-        if local and local != _key(honored):
+        state = (local, _key(honored))
+        if local and local != state[1] and state != _SHADOW_WARN_STATE:
             print(
                 "Warning: backlog.render_targets is honored from the GLOBAL "
                 "config file only; "
@@ -224,6 +283,7 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
                 ),
                 file=sys.stderr,
             )
+            _SHADOW_WARN_STATE = state
     except Exception:
         pass
 
@@ -242,6 +302,18 @@ def render_configured_targets(entries: list[dict]) -> None:
 
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
+        if not any(_project_key(e) == target.project for e in entries):
+            # Zero matching entries is the typo'd-project signature: leave the
+            # operator's last good board byte-unchanged rather than replace it
+            # with an empty projection. A project whose entries exist but are
+            # all done/private still renders its valid empty projection below.
+            print(
+                f"Warning: render target {out} matches no graph entry with "
+                f"project {target.project!r}; target left unchanged "
+                "(check the project name)",
+                file=sys.stderr,
+            )
+            continue
         try:
             if target.projection == "roadmap":
                 # One _columns pass feeds both the gate's render set and the
@@ -251,16 +323,8 @@ def render_configured_targets(entries: list[dict]) -> None:
                 html = render_public_roadmap_html(entries, target.project, cols=cols)
             else:
                 render_set = public_backlog_entries(entries, target.project)
-                html = render_public_backlog_html(entries, target.project)
-            if not any(_project_key(e) == target.project for e in entries):
-                # Almost certainly a typo'd project: the empty projection is
-                # still written (a drained project must not keep a stale
-                # board), but the operator gets a loud signal each mutation.
-                print(
-                    f"Warning: render target {out} matches no graph entry with "
-                    f"project {target.project!r}; wrote an empty projection "
-                    "(check the project name)",
-                    file=sys.stderr,
+                html = render_public_backlog_html(
+                    entries, target.project, backlog_entries=render_set
                 )
             offenders = public_title_leaks(render_set)
             if offenders:

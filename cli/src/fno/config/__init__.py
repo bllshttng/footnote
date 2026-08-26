@@ -289,16 +289,33 @@ class RenderTargetConfig(BaseModel):
 
     Every graph mutation re-renders each configured target through the shared
     public title leak gate (one renderer, one gate - never a second HTML
-    author). Unknown values AND unknown keys raise at config load: a typo'd
-    ``projection`` value or a misspelled ``projectio`` key must be a loud
-    error, never a target that silently renders the wrong projection.
+    author). Unknown ``projection`` values raise at load; unknown KEYS warn
+    and are ignored (the module's never-brick rule) so a typo'd key cannot
+    take down every settings-loading command - the row still renders its
+    default projection, visibly, with the warning naming the key.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     path: str
     project: str
     projection: str = "backlog"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_unknown_keys(cls, data: object) -> object:
+        if isinstance(data, dict):
+            known = set(cls.model_fields)
+            for key in data:
+                if key not in known:
+                    _LOG.warning(
+                        "config.backlog.render_targets: unknown key %r in row "
+                        "%r - ignoring it (allowed: %s)",
+                        key,
+                        data.get("path"),
+                        ", ".join(sorted(known)),
+                    )
+        return data
 
     @field_validator("path")
     @classmethod
@@ -311,46 +328,11 @@ class RenderTargetConfig(BaseModel):
         # The auto-render fires from arbitrary project and agent cwds, so a
         # relative path would scatter a copy of the public board into each
         # one. Absolute (or ~/-rooted) only.
-        expanded = Path(os.path.expanduser(v))
-        if not expanded.is_absolute():
+        if not os.path.isabs(os.path.expanduser(v)):
             raise ValueError(
                 "backlog.render_targets path must be absolute or ~/-rooted "
                 f"(it is written from arbitrary cwds), got: {v!r}"
             )
-        # A target resolving onto a graph state file would os.replace() public
-        # HTML over it on every mutation. Reject at load; resolution itself is
-        # best-effort (a path that cannot resolve skips only this check).
-        try:
-            # importlib, not a direct import: a static fno.config ->
-            # fno.graph edge here creates a mypy import cycle that
-            # degrades _constants' lazy attrs to Path? downstream.
-            import importlib as _il
-
-            _gc = _il.import_module("fno.graph._constants")
-
-            resolved = expanded.resolve()
-            state_paths = (
-                _gc.GRAPH_JSON,
-                _gc.GRAPH_MD,
-                _gc.GRAPH_HTML,
-                _gc.GRAPH_ARCHIVE_JSON,
-                _gc.LEDGER_JSON,
-                # the integrity sidecar _write_sha256_sidecar maintains, and
-                # the corruption-recovery backup _read_json writes and points
-                # operators to restore from
-                Path(str(_gc.GRAPH_JSON) + ".sha256"),
-                Path(str(_gc.GRAPH_JSON) + ".bak"),
-            )
-            for state_path in state_paths:
-                if resolved == Path(state_path).resolve():
-                    raise ValueError(
-                        f"backlog.render_targets path {v!r} collides with the "
-                        f"graph state file {state_path}; refusing to overwrite it"
-                    )
-        except ValueError:
-            raise
-        except Exception:
-            pass
         return v
 
     @field_validator("project")
