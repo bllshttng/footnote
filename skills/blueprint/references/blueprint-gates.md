@@ -221,7 +221,7 @@ child id it creates. No pin present -> write nothing (no `--model` call).
 
 ### Model Routing (difficulty revision, parallel to executor routing)
 
-Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch joins with live provider capacity (pareto routing). This mirrors executor routing: judged once at planning time, honored at every dispatch, and a missing band on a pre-gate plan changes nothing (the provider default).
+Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch joins with live provider capacity (pareto routing). This mirrors executor routing: judged once at planning time and honored at every dispatch. A missing band on a pre-gate plan changes nothing (the provider default).
 
 `difficulty` is required in plan frontmatter for plans created after 2026-08-26, so the transcription below always runs. Assign the band per the task's nature, one line of rationale each:
 
@@ -229,7 +229,7 @@ Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch joi
 - **`medium`** - a standard feature or fix that needs real reasoning but no load-bearing judgment.
 - **`high`** - gate semantics, security, concurrency, migrations, or an architecture decision where a weaker model's error is expensive.
 
-The blueprint phase is the sanctioned second write: the planner has read the code and knows more than the filer did. Record BOTH the filed estimate and the blueprint revision - the intake path appends a `source: "blueprint"` history entry rather than overwriting, because the filed-versus-revised delta is the only signal that eventually says whether filers estimate well.
+The blueprint phase is the sanctioned second write: the planner has read the code and knows more than the filer did. Record BOTH the filed estimate and the blueprint revision. The intake path appends a `source: "blueprint"` history entry rather than overwriting. The filed-versus-revised delta is the only signal that eventually says whether filers estimate well.
 
 Precedence is `model:` (exact) over the provider default. An exact pin on the same task wins. Transcribe the band from frontmatter onto the node (AFTER `$NODE_ID` is minted), idempotently:
 
