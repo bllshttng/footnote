@@ -17,7 +17,7 @@ GRADUATION_KINDS = (
 _ARTIFACT_RE = re.compile(r"^(file|test|doc|gate|default):\S(?:.*\S)?$")
 _FOLLOW_UP_RE = re.compile(r"^node:[a-z][a-z0-9]*-[0-9a-f]+$", re.IGNORECASE)
 
-REGISTERED_GRADUATION_PROBES = (
+REGISTERED_GRADUATION_PROBES: tuple[dict[str, Any], ...] = (
     {
         "decision_id": "d-1ca0e711",
         "graduation": {
