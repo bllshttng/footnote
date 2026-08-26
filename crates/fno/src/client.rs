@@ -15088,14 +15088,20 @@ enum NavKey {
     Esc,
     Up,
     Down,
+    /// (x-e10f) Bare Right: reach the selected row (the Enter/goto arm).
+    Right,
+    /// (x-e10f) Bare Left: close (the Esc arm) - back to the pane you came
+    /// from. The overlay owns every keystroke, so a bare arrow is free.
+    Left,
     ShiftTab,
 }
 
 /// Fold navigator-mode bytes. Identical escape-carry semantics to
 /// [`fold_search_input`] (whole CSI consumed, split sequences carried across
-/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`, and
-/// Shift-Tab `ESC [ Z` finals become [`NavKey::Up`]/[`Down`]/[`ShiftTab`] so the
-/// navigator can move its cursor and reverse-cycle the state chip. A modified
+/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`,
+/// arrow-Right/Left `ESC [ C`/`ESC [ D`, and Shift-Tab `ESC [ Z` finals become
+/// [`NavKey::Up`]/[`Down`]/[`Right`]/[`Left`]/[`ShiftTab`] so the navigator can
+/// move its cursor, goto, close, and reverse-cycle the state chip. A modified
 /// arrow (`ESC [ 1 ; 5 A`) shares the final byte and maps to the same motion -
 /// harmless. All other finals are swallowed, same leak-safety as search.
 fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
@@ -15139,6 +15145,8 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
                         match b {
                             b'A' => keys.push(NavKey::Up),
                             b'B' => keys.push(NavKey::Down),
+                            b'C' => keys.push(NavKey::Right),
+                            b'D' => keys.push(NavKey::Left),
                             b'Z' => keys.push(NavKey::ShiftTab),
                             _ => {}
                         }
@@ -15245,7 +15253,8 @@ async fn search_keys(
 /// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
 /// text, never state keys); Backspace widens; `Tab`/`Shift-Tab` cycle the state
 /// chip forward/back; `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) move the cursor over the
-/// filtered rows (clamped, no wrap); Enter goto's the row; Esc closes. Uses
+/// filtered rows (clamped, no wrap); Enter or bare `Right` goto's the row;
+/// `Esc` or bare `Left` closes (x-e10f). Uses
 /// [`fold_nav_input`]'s split-arrow fold (which surfaces the motion finals while
 /// swallowing every other escape) and a per-key re-read so an Esc mid-chunk
 /// swallows the chunk's remainder (ab-63b44059).
@@ -15264,7 +15273,7 @@ async fn nav_keys(
             break;
         }
         match key {
-            NavKey::Esc => {
+            NavKey::Esc | NavKey::Left => {
                 view.nav = None;
                 view.nav_esc.clear();
                 break;
@@ -15272,6 +15281,10 @@ async fn nav_keys(
             // Arrows mirror Ctrl-p/Ctrl-n; Shift-Tab reverses the state ring.
             NavKey::Up => view.nav_move_cursor(-1),
             NavKey::Down => view.nav_move_cursor(1),
+            // (x-e10f) Bare Right reaches the selected row - the same
+            // nav_goto the Enter arm calls, so substrate behavior (attach a
+            // thread, focus a pane, refuse with a notice) is the same too.
+            NavKey::Right => nav_goto(view, sock_w).await?,
             NavKey::ShiftTab => {
                 view.nav_cycle_state_rev();
                 view.nav_ring_if_empty();
@@ -28763,6 +28776,46 @@ mod tests {
         );
         nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_bare_right_gotos_and_left_closes() {
+        // x-e10f AC9-HP/AC10-ERR: bare Right reaches the selected row through
+        // the same nav_goto Enter uses (a refusal keeps the overlay open and
+        // sends nothing - the Notice path is nav_goto's, not new logic), and
+        // bare Left closes like Esc. Bare arrows never leak to the pane.
+        let mut v = unified_rows_view();
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label.starts_with("x-blk"))
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        v.notice = None;
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[C", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a Notice row sends nothing on Right");
+        assert!(v.notice.is_some(), "the refusal names itself");
+        assert!(v.nav.is_some(), "AC10-ERR: the overlay stays open");
+        nav_keys(&mut v, b"\x1b[D", &mut buf).await.unwrap();
+        assert!(v.nav.is_none(), "bare Left closes, like Esc");
+        assert!(buf.is_empty(), "arrows never leak to the pane");
+        // AC9-HP positive half: Right on an actionable row acts and closes,
+        // exactly like Enter (row 0 is the active squad's SelectSquad row).
+        let mut v = two_pane_view();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[C", &mut buf).await.unwrap();
+        assert!(!buf.is_empty(), "Right on an actionable row acts");
+        assert!(v.nav.is_none(), "and closes the overlay, like Enter");
     }
 
     #[tokio::test]
