@@ -309,6 +309,7 @@ def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
     monkeypatch.setattr(
         _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
     )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "op")
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
@@ -319,6 +320,82 @@ def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
     assert covered_head == HEAD
     assert note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX)
     assert "jane" in note
+
+
+def test_an_override_applied_by_the_pr_author_is_refused(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The author check the approval path always had, on the one bypass
+    beside it. An agent that cannot merge can label its own PR; that is
+    reject-and-attest wearing a label. The refusal NAMES the author, so an
+    operator whose label was refused sees exactly why the valve stayed
+    shut."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "worker-login")
+    )
+    monkeypatch.setattr(
+        _coverage_gate, "_pr_author_login", lambda pr, repo: "worker-login"
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "worker-login" in refusal, "the refusal must name the author: " + refusal
+    assert "the PR author" in refusal
+    assert "cannot override its own review gate" in refusal
+
+
+def test_an_override_with_an_unreadable_actor_fails_closed(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Label held, actor unreadable: the valve stays shut. An unreadable
+    actor is exactly the state a forger produces, and the approval path
+    already fails closed on the same ambiguity."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, None)
+    )
+    # The author read must never even matter: the actor alone is unreadable.
+    monkeypatch.setattr(
+        _coverage_gate,
+        "_pr_author_login",
+        lambda pr, repo: pytest.fail("no author read on an unreadable actor"),
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "labelling actor is unreadable" in refusal
+
+
+def test_an_override_with_an_unreadable_author_fails_closed(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Actor readable, author unreadable: the labeller cannot be proven to
+    differ from the author, so the valve refuses rather than guess."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
+    )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: None)
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "PR author is unreadable" in refusal
 
 
 def test_the_override_reaches_the_merge_verb_and_says_so(
@@ -339,6 +416,8 @@ def test_the_override_reaches_the_merge_verb_and_says_so(
     monkeypatch.setattr(
         _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
     )
+    # The valve now needs a labeller distinct from the author; name one.
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "op")
     fake = FakeRun(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))

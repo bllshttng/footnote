@@ -93,27 +93,70 @@ OVERRIDE_NOTE_PREFIX = "override: "
 NO_LANE_NOTE = "no review lane configured"
 
 
-def _override_note(pr_number: int, repo: str) -> str:
-    """The override note when the PR carries the label, else ``""``.
-
-    ``_reviews`` owns the label reader (one reader, name-matched, never a grep
-    over the raw label JSON). Every failure inside it degrades to "no label":
-    an unreadable label state must not open the valve, because the recovery
-    from a wrong refusal is one command and the recovery from a wrong merge is
-    a revert.
-    """
+def _pr_author_login(pr_number: int, repo: str) -> Optional[str]:
+    """The PR author's login, or None on any read failure. Only read when an
+    override label is held (the one consumer), so a healthy PR never pays
+    for it."""
     try:
-        from fno.pr import _reviews
+        from fno.pr._proc import run
+        from fno.pr._rest import fetch_pr_info_rest
 
+        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+        return str((info or {}).get("author") or "") or None
+    except Exception:  # noqa: BLE001 - an unreadable author fails closed below
+        return None
+
+
+def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
+    """``(valid, note, refusal)`` for the PR's override label.
+
+    The one deliberate bypass, with the same author check the approval path
+    beside it has always had: a label applied by the PR AUTHOR does not open
+    the valve, because an agent that cannot merge can label its own PR, and
+    that is reject-and-attest wearing a label. The actor is unreadable, or
+    the author is, and the valve refuses fail-closed - an unreadable actor is
+    exactly the state a forger produces, and the approval path already fails
+    closed on the same ambiguity. Who applied the label is named in every
+    arm (the receipt survives both verdicts): the recovery from a wrong
+    refusal is one command; the recovery from a wrong merge is a revert.
+    """
+    from fno.pr import _reviews
+
+    try:
         held, actor = _reviews._override_label_actor(pr_number, repo, _reviews.run)
-        if not held:
-            return ""
-        return (
-            f"{OVERRIDE_NOTE_PREFIX}{_reviews.COVERAGE_OVERRIDE_LABEL} "
-            f"label applied by {actor or 'unknown actor'}"
-        )
     except Exception:  # noqa: BLE001 - an unreadable label is not an override
-        return ""
+        return False, "", ""
+    if not held:
+        return False, "", ""
+    if not actor:
+        return (
+            False,
+            "",
+            "coverage-override label present but the labelling actor is "
+            "unreadable; refused (an unreadable actor is not an operator "
+            "waiver)",
+        )
+    author = _pr_author_login(pr_number, repo)
+    if not author:
+        return (
+            False,
+            "",
+            f"coverage-override label applied by {actor} but the PR author is "
+            "unreadable; refused (cannot prove the labeller is not the author)",
+        )
+    if actor == author:
+        return (
+            False,
+            "",
+            f"coverage-override label applied by {actor}, the PR author; "
+            "refused (an author cannot override its own review gate)",
+        )
+    return (
+        True,
+        f"{OVERRIDE_NOTE_PREFIX}{_reviews.COVERAGE_OVERRIDE_LABEL} "
+        f"label applied by {actor}",
+        "",
+    )
 
 
 def covered_conjuncts(
@@ -248,9 +291,11 @@ def coverage_verdict(
     # recompute entirely, and before the attestation branch so the refusal it
     # would have built never runs. It returns the live head as the pin, so
     # `--match-head-commit` still refuses a push that races the merge: an
-    # override waives the review, never the TOCTOU.
-    override = _override_note(pr_number, repo)
-    if override:
+    # override waives the review, never the TOCTOU. A label held but REFUSED
+    # (author-applied, or an unreadable actor) keeps its refusal for the
+    # uncovered answer below, so the operator sees why the valve stayed shut.
+    override_valid, override, override_refusal = _override_valve(pr_number, repo)
+    if override_valid:
         return COVERED, "", head, override
 
     code_review_required = _merge._code_review_attestation_required(repo, pr_number)
@@ -439,6 +484,10 @@ def coverage_verdict(
             _merge._coverage_sources(repo) if cov is None else None,
             self_review_hint=hint,
         )
+    if override_refusal:
+        # The label is present but stayed shut; naming that first beats a
+        # generic uncovered refusal the operator cannot act on.
+        refusal = f"{override_refusal}; {refusal}"
     # The cap arm may already have FILED findings on the way here (the row
     # stayed uncovered on another conjunct): that side effect must ride the
     # receipt, never vanish behind the refusal it did not soften.
