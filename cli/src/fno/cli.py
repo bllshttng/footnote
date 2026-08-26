@@ -77,11 +77,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "The king's board and its session manifest.",
         {"hidden": True},
     ),
-    "runtime": (
-        "fno.runtime.cli:cli",
-        "Deprecated runtime shim; use fno workspace worktree / register-worker.",
-        {"hidden": True},
-    ),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
     "inbox": (
@@ -113,6 +108,9 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Durable polled mailbox: send/unread/ack/reply/drain/status.",
         {"hidden": True},
     ),
+    # x-6233: the entries between this comment and `agents` below whose names
+    # sit in VERB_MOVES are one-release shims kept reachable for muscle
+    # memory; their canonical homes are the move destinations.
     "mcp": (
         "fno.mcp.cli:mcp_app",
         "MCP sidecar client verbs (send an envelope to a channel).",
@@ -136,17 +134,17 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "claim": ("fno.claims.cli:cli", "Work-claim coordination primitive", {"hidden": True}),
     "project": (
         "fno.project:project_app",
-        "Isolated per-project fno environments.",
+        "Isolated per-project fno environments (now `fno config project`).",
         {"hidden": True},
     ),
     "decide": (
         "fno.decide.cli:shim_app",
-        "Deprecated decision shim; use fno backlog decide/decisions.",
+        "Deprecated decision shim; use fno inbox decide / fno inbox decisions.",
         {"hidden": True},
     ),
     "law": (
         "fno.law:law_app",
-        "Compose and enact human-approved project law.",
+        "Compose and enact human-approved project law (now `fno inbox law`).",
         {"hidden": True},
     ),
     "resume": (
@@ -205,7 +203,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "worktree": ("fno.worktree_cli:app", "Worktree management", {"hidden": True}),
     "workspace": (
         "fno.workspace.cli:cli",
-        "Worktree lifecycle and worker registration.",
+        "Worktree lifecycle and worker registration (now `fno agents workspace`).",
         {"hidden": True},
     ),
     "route": (
@@ -264,7 +262,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "done": (
         "fno.done.cli:done_command",
-        "Deprecated done shim; PR-metadata rollup that fno backlog done lacks.",
+        "Deprecated done shim; use `fno backlog done` (its flag surface is now identical).",
         {"hidden": True},
     ),
     "research": (
@@ -279,7 +277,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "test": (
         "fno.test_cmd:test_command",
-        "Run pytest honestly: worktree-pinned PYTHONPATH, rtk-bypassed, real exit code.",
+        "Run pytest honestly (now `fno doctor test`): worktree-pinned PYTHONPATH, rtk-bypassed, real exit code.",
         {"hidden": True},
     ),
     "update": (
@@ -329,7 +327,6 @@ COLLAPSE_KEEP: dict[str, set[str]] = {
     "retro": set(),
     "roles": set(),
     "route": set(),
-    "runtime": set(),
     "setup": set(),
     "skill-diff": set(),
     "state": set(),
@@ -473,10 +470,9 @@ class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[m
         )
         formatter.write_paragraph()
         formatter.write_text(
-            f"Showing {visible} of {len(names) - moved} top-level verbs{moved_note}, "
-            f"plus the Rust front's `mux` and `version`. Hidden verbs are "
-            f"invocable: run `fno help --all` for every command, `fno mux` "
-            f"for pane control."
+            f"Showing {visible} of {len(names) - moved} top-level verbs{moved_note}. "
+            f"`mux` and `version` forward to the Rust front binary. Hidden "
+            f"verbs are invocable: run `fno help --all` for every command."
         )
 
 
@@ -619,7 +615,9 @@ SHORTHAND_POINTER = (
 # them never imports anything). `help --all` merges these with LAZY_SUBCOMMANDS.
 _EAGER_COMMAND_HELP: dict[str, str] = {
     "help": "Show help for the root command or any subcommand.",
+    "mux": "Mux pane control and the web console (forwards to the Rust front).",
     "review": "Run the internal sigma-review panel on the current diff.",
+    "version": "Show the installed fno version(s) (forwards to the Rust front).",
 }
 
 
@@ -633,11 +631,12 @@ def _render_full_menu() -> str:
     the scoped door `fno help <group> --all` instead.
 
     A spelling registered in VERB_MOVES is a signpost, not a root: it forwards
-    to its new home and prints the new spelling on use. Listing it among the
-    roots would make the ten-root taxonomy read as false while the reorg is
-    mid-flight, so moved spellings render under their own trailing heading.
+    to its new home and prints the new spelling on use. Moved spellings render
+    nowhere here (operator ruling via d-26002be8: "they can be discovered in
+    their own subcommands") - each alias prints its new home when used, which
+    is the teaching moment that matters.
     """
-    from fno.verb_moves import Move, destination_is_registered, move_for
+    from fno.verb_moves import destination_is_registered, move_for
 
     # Eager inline commands classify too, not only lazy entries: a later
     # wave moves `cost`, which is an eager @app.command, and a move on an
@@ -647,33 +646,20 @@ def _render_full_menu() -> str:
     for name, entry in LAZY_SUBCOMMANDS.items():
         candidates[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
     rows: dict[str, str] = {}
-    moved_rows: dict[str, tuple[str, Move]] = {}
     for name, short in candidates.items():
         move = move_for(name)
         if move is None or not destination_is_registered(move, candidates):
             rows[name] = short
-        else:
-            moved_rows[name] = (short, move)
     width = max(len(n) for n in rows)
     lines = [
         "fno-py full top-level surface - every fno-py command, including hidden.",
         "The curated menu is `fno --help`; hidden commands are invocable, just not advertised.",
         "For a group's own verbs (hidden included) run `fno help <group> --all` "
         "(e.g. `fno help agents --all`), or `fno <group> --help` for its menu.",
-        "Also: the Rust front (`fno` binary) owns `mux` and `version`, which live "
-        "outside this listing - run `fno mux` / `fno mux --help` for pane control.",
         "",
         "Commands:",
     ]
     lines.extend(f"  {name.ljust(width)}  {rows[name]}" for name in sorted(rows))
-    if moved_rows:
-        mwidth = max(len(n) for n in moved_rows)
-        lines.append("")
-        lines.append("Moved spellings (still work; each prints its new home on use):")
-        lines.extend(
-            f"  {name.ljust(mwidth)}  now fno {moved_rows[name][1].to}"
-            for name in sorted(moved_rows)
-        )
     return "\n".join(lines)
 
 
@@ -799,57 +785,6 @@ def help_command(ctx: typer.Context) -> None:
     from fno._subprocess_util import propagate_returncode
 
     raise typer.Exit(code=propagate_returncode(result.returncode))
-
-
-@app.command(
-    hidden=True,
-    help=(
-        "The yard identity fold: species, rarity tier, crown, and first-sighting "
-        "per registry citizen.\n\n"
-        "Read-only over the agent registry and the graph archive. Consumed by "
-        "the mux yard overlay (fail-open shell-out); `--json` is the machine "
-        "surface, the text mode is a one-line-per-citizen summary. Outcome "
-        "only - never the rank, the frequency, or the boundary."
-    ),
-)
-def yard(
-    as_json: bool = typer.Option(False, "--json", "-J", help="Emit the fold as JSON."),
-) -> None:
-    """Fold the fleet into yard citizens (the f[no]nimals)."""
-    import json as _json
-
-    from fno import paths
-    from fno.agents.registry import load_registry
-    from fno.graph.store import GraphUnreadableError, read_graph_strict
-    from fno.yard import RARITY_TIERS, fold
-
-    rows = load_registry()
-    archive_path = paths.graph_archive_json()
-    # Strict on purpose: this is a truth-bound fold, not a browse verb. The
-    # lenient reader turns a corrupt archive into [], which would mark every
-    # citizen a first-sighting - fabricated outcome on the machine surface the
-    # mux renders. Unreadable history fails the fold so the overlay degrades.
-    try:
-        archive = read_graph_strict(archive_path) if archive_path.exists() else []
-    except GraphUnreadableError as exc:
-        typer.secho(f"yard: archive unreadable, fold refused: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
-    citizens = fold(rows, archive)
-
-    if as_json:
-        typer.echo(_json.dumps({"citizens": citizens}, indent=2))
-        return
-    if not citizens:
-        typer.echo("the yard is empty (no registry rows)")
-        return
-    for c in citizens:
-        mark = " NEW" if c["first_sighting"] else ""
-        crown = f" crown {c['crown_level']}" if c["crown_level"] else ""
-        typer.echo(
-            f"{c['name']:<24} species {c['species']:>2}  {c['rarity']:<9}{crown}{mark}"
-        )
-    n_new = sum(1 for c in citizens if c["first_sighting"])
-    typer.echo(f"{len(citizens)} citizens, {n_new} first sighting(s); tiers: {'/'.join(RARITY_TIERS)}")
 
 
 @app.command(
@@ -1147,6 +1082,58 @@ def review(
         typer.echo(f"findings: {review_result.get('findings', 0)}")
         if review_result.get("cached"):
             typer.echo("cached: true")
+
+
+def _run_rust_front(args: list[str]) -> None:
+    """Exec the Rust front (`fno`) with `args`, propagating its exit code.
+
+    `mux` and `version` are Rust-front verbs promoted into the Python listings
+    (d-cf2d6fe1): a user typing `fno mux ...` never reaches Python (the Rust
+    binary intercepts), but `fno-py mux ...` must still work and the two
+    listings must show real rows rather than footnotes about an absence.
+    """
+    import shutil
+    import subprocess
+
+    from fno._subprocess_util import propagate_returncode
+
+    binary = shutil.which("fno")
+    if binary is None:
+        typer.echo(
+            "fno: the Rust front binary is not on PATH; `mux` and `version` "
+            "live there (install with `fno update` or run the Rust front directly).",
+            err=True,
+        )
+        raise typer.Exit(code=127)
+    result = subprocess.run([binary, *args], check=False)
+    raise typer.Exit(code=propagate_returncode(result.returncode))
+
+
+@app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+    help=(
+        "Mux pane control and the web console (the Rust front's verb).\n\n"
+        "List panes, send keystrokes, manage layouts and the web view. Run "
+        "`fno mux` for the full surface."
+    ),
+)
+def mux(
+    ctx: typer.Context,
+) -> None:
+    """Forward to the Rust front's `mux` (the operator's pane driver)."""
+    _run_rust_front(["mux", *ctx.args])
+
+
+@app.command(
+    help=(
+        "Show the installed fno version(s) (the Rust front's verb).\n\n"
+        "Prints the Rust front's own version report; `fno --version` remains "
+        "the Python package's flag form."
+    )
+)
+def version() -> None:
+    """Forward to the Rust front's `version`."""
+    _run_rust_front(["version"])
 
 
 if __name__ == "__main__":

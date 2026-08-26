@@ -39,11 +39,11 @@ class Move(NamedTuple):
 
 
 VERB_MOVES: dict[str, Move] = {
-    # mail, test, and update are NOT here by design (2026-08-22 operator
-    # ruling, recovered via `fno backlog decisions` on the reorg node): the
-    # root spellings are canonical, and the nested registrations (agents
-    # mail / doctor test / doctor update) are the kept silent aliases -
-    # both resolve the same command objects.
+    # The 2026-08-22 "mail, test, update stay canonical at root" ruling is
+    # superseded (d-b93d7754, d-df6c29a6, x-6233): mail and test fold like
+    # every other root verb, and update remains a root verb outright. The
+    # nested registrations (agents mail / doctor test / doctor update) are
+    # now the canonical spellings; these entries retire the root forms.
     "annotate": Move(kind="deprecated", to="backlog annotate"),
     "approvals": Move(kind="deprecated", to="inbox approvals"),
     "autonomy": Move(kind="deprecated", to="agents autonomy"),
@@ -53,8 +53,10 @@ VERB_MOVES: dict[str, Move] = {
     "claim": Move(kind="deprecated", to="agents claim"),
     "context": Move(kind="deprecated", to="whoami context"),
     "cost": Move(kind="deprecated", to="whoami cost"),
+    "decide": Move(kind="deprecated", to="inbox decide"),
     "delivery": Move(kind="deprecated", to="do delivery"),
     "dispatch": Move(kind="deprecated", to="agents dispatch"),
+    "done": Move(kind="deprecated", to="backlog done"),
     "evals": Move(kind="deprecated", to="doctor evals"),
     "event": Move(kind="deprecated", to="doctor event"),
     "king": Move(
@@ -62,8 +64,10 @@ VERB_MOVES: dict[str, Move] = {
         to="agents king",
         leaf_destinations=(("board", "inbox board"),),
     ),
+    "law": Move(kind="deprecated", to="inbox law"),
     "lint": Move(kind="deprecated", to="doctor lint"),
     "loops": Move(kind="deprecated", to="do loops"),
+    "mail": Move(kind="deprecated", to="agents mail"),
     "mcp": Move(kind="deprecated", to="agents mcp"),
     "notify": Move(kind="deprecated", to="inbox notify"),
     "observer": Move(kind="deprecated", to="doctor observer"),
@@ -71,6 +75,7 @@ VERB_MOVES: dict[str, Move] = {
     "paths": Move(kind="deprecated", to="config paths"),
     "phase": Move(kind="deprecated", to="do phase"),
     "plugins": Move(kind="deprecated", to="config plugins"),
+    "project": Move(kind="deprecated", to="config project"),
     "plan": Move(kind="deprecated", to="do plan"),
     "pr": Move(
         kind="deprecated",
@@ -93,9 +98,12 @@ VERB_MOVES: dict[str, Move] = {
     "stub-manifest": Move(kind="deprecated", to="do pr stub-manifest"),
     "skill-diff": Move(kind="deprecated", to="doctor skill-diff"),
     "target": Move(kind="deprecated", to="do target"),
+    "test": Move(kind="deprecated", to="doctor test"),
     "think": Move(kind="deprecated", to="do think"),
     "worker": Move(kind="deprecated", to="agents worker"),
-    "worktree": Move(kind="deprecated", to="workspace worktree"),
+    "workspace": Move(kind="deprecated", to="agents workspace"),
+    "worktree": Move(kind="deprecated", to="agents workspace worktree"),
+    "yard": Move(kind="deprecated", to="agents yard"),
 }
 
 

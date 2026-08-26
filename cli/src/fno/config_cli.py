@@ -42,6 +42,14 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         "Provider route lanes: ls / set / unset / env (GLM build lane).",
         {"hidden": True},
     ),
+    # x-6233 (d-344fe242): `project init` gives a checkout its own fno state
+    # root, which is state-root configuration - config's territory. Same
+    # lazy+hidden treatment as its siblings above.
+    "project": (
+        "fno.project:project_app",
+        "Isolated per-project fno environments.",
+        {"hidden": True},
+    ),
     "setup": ("fno.setup_cli:app", "Interactive settings.yaml wizard", {"hidden": True}),
 }
 

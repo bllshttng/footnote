@@ -397,21 +397,14 @@ def done_command(
     With `--backfill`, runs the rollup without flipping status - useful for
     reconciling nodes that were marked done before the rollup logic existed.
     """
-    # Deprecation shim (unit 6): `fno backlog done` is the canonical closing
-    # verb, but it is NOT this command. It takes a node id only, and its whole
-    # flag surface is --skip-stamp / -F --force / -R --reason. Six options and
-    # the title-substring / branch-autodetect query live only here, so the
-    # notice names the gap instead of promising a drop-in swap. Removing this
-    # spelling means porting them first. The list is canonical spellings only:
-    # --pr and --url are themselves hidden deprecated aliases, so naming them
-    # here would point a caller at a second doomed spelling. Only this stderr
-    # line is added, because callers parse stdout.
+    # Deprecation shim (unit 6, ported at x-6233): `fno backlog done` is the
+    # canonical closing verb and now carries this command's whole flag surface
+    # (--backfill, --force-overwrite, --pr-number, --pr-url, --link, --note,
+    # title/branch query), so the root spelling forwards argv-verbatim onto
+    # it. Only this stderr line is added, because callers parse stdout.
     typer.echo(
-        "fno done is deprecated; use `fno backlog done <node-id>` to close a "
-        "node. The flag surfaces differ: --backfill, --force-overwrite, "
-        "--pr-number, --pr-url, --link, --note and the title/branch query "
-        "exist only here and have no destination yet, so this spelling stays "
-        "until they are ported.",
+        "fno done is deprecated; use `fno backlog done` - the flag surface "
+        "is identical there.",
         err=True,
     )
     graph_path = _path_graph()

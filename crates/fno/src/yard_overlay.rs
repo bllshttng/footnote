@@ -56,7 +56,10 @@ fn fno_bin() -> PathBuf {
 pub async fn fold_now() -> Option<Vec<YardItem>> {
     let mut command = crate::process_admission::tokio_command(fno_bin());
     command
-        .args(["yard", "--json"])
+        // x-6233: the yard verb lives under `agents` now; the bare root
+        // spelling is a one-release shim whose stderr move-line this call
+        // would otherwise pay on every overlay open.
+        .args(["agents", "yard", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         // Dropped on timeout; kill_on_drop reaps the child so a slow fold

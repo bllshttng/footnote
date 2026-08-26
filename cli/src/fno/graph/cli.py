@@ -8560,7 +8560,10 @@ def _done_via_seam(
     "whose PR merged outside the gate (hidden).",
 )
 def cmd_done(
-    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    task_id: Optional[str] = typer.Argument(
+        None,
+        help="Feature ID (ab-XXXXXXXX), title substring, or omit to auto-detect from the git branch.",
+    ),
     skip_stamp: bool = typer.Option(
         False,
         "--skip-stamp",
@@ -8578,6 +8581,35 @@ def cmd_done(
         "-R",
         help="Required when --force is used. Explains why the cross-check is bypassed.",
     ),
+    pr: Optional[int] = typer.Option(
+        None, "--pr-number", "--pr", "-p", help="PR number (for code-domain completions)."
+    ),
+    pr_url: Optional[str] = typer.Option(
+        None,
+        "--pr-url",
+        help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
+    ),
+    link: Optional[str] = typer.Option(
+        None, "--link", "--url", "-l",
+        help="Artifact URL (Figma/Canva/Obsidian/any) - sets artifact_url.",
+    ),
+    note: Optional[str] = typer.Option(
+        None, "--note", "-m", help="Free-text completion note - sets completion_note."
+    ),
+    backfill: bool = typer.Option(
+        False,
+        "--backfill",
+        help=(
+            "Run ONLY the ledger-rollup (session_id, cost_usd, cost_sessions, "
+            "points). Does not flip status or completed_at. With no TASK_ID, "
+            "sweeps every node with status=done."
+        ),
+    ),
+    force_overwrite: bool = typer.Option(
+        False,
+        "--force-overwrite",
+        help="Overwrite existing rollup fields instead of fill-if-null. Use with --backfill for explicit re-reconciliation of stale rollups.",
+    ),
 ) -> None:
     """Mark a node complete.
 
@@ -8589,6 +8621,12 @@ def cmd_done(
     closing evidence - the node is awaiting merge and closes on the actual
     merge via reconcile / merge-triggered advance. CI state is irrelevant to
     the close decision.
+
+    The rich completion surface (--backfill, --force-overwrite, --pr-number,
+    --pr-url, --link, --note, title/branch query) ported here from the retired
+    root `fno done` spelling (x-6233): those paths delegate to the
+    implementation that already owned them, so the old spelling forwards
+    argv-verbatim onto this one.
 
     Exit codes:
         0  success (node closed)
@@ -8605,6 +8643,56 @@ def cmd_done(
            record a deliberate half-ship.
     """
     from fno.graph._constants import has_node_id_prefix
+
+    # The close flags and the completion flags never mixed on either legacy
+    # spelling, and the delegation below would silently drop --force. Refuse
+    # the combination by name rather than letting a deliberate half-ship
+    # request run ungated.
+    _close_flags = force or reason is not None or skip_stamp
+    _rich_flags = (
+        backfill
+        or force_overwrite
+        or pr is not None
+        or pr_url is not None
+        or link is not None
+        or note is not None
+    )
+    if _close_flags and _rich_flags:
+        typer.echo(
+            "Error: the close flags (--force/--reason/--skip-stamp) and the "
+            "completion flags (--pr/--pr-url/--link/--note/--backfill/"
+            "--force-overwrite) are separate paths. A deliberate half-ship "
+            "closes on the id alone: `fno backlog done <id> --force --reason ...`",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # The rich surface delegates (x-6233): any ported flag, a fuzzy query
+    # (title substring), or a missing id (branch auto-detect) routes to the
+    # implementation that already owns those paths. A bare node id keeps THIS
+    # command's gates, stamp, and dependent cascade - the canonical close.
+    if (
+        backfill
+        or force_overwrite
+        or pr is not None
+        or pr_url is not None
+        or link is not None
+        or note is not None
+        or task_id is None
+        or not has_node_id_prefix(task_id)
+    ):
+        from fno.done.cli import done_command
+
+        done_command(
+            query=task_id,
+            pr=pr,
+            pr_url=pr_url,
+            link=link,
+            note=note,
+            backfill=backfill,
+            force_overwrite=force_overwrite,
+        )
+        return
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import node_pr_refs
