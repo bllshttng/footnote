@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from fno.harness_identity import resolve_owned_identity
+from fno.harness_identity import parse_canonical_identity, resolve_owned_identity
 
 
 def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
@@ -34,4 +34,14 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
 
     true_harness = resolve_session_harness()
     prove = None if true_harness is None else (lambda harness, sid: harness == true_harness)
-    return resolve_owned_identity(env, prove=prove)
+
+    canonical = parse_canonical_identity(env)
+    if canonical.disposition not in {"complete", "name_only"}:
+        return resolve_owned_identity(env, prove=prove)
+
+    def collide(_harness: str, session_id: str) -> Optional[str]:
+        from fno.agents.registry import row_owning_session_id
+
+        return row_owning_session_id(session_id)
+
+    return resolve_owned_identity(env, prove=prove, collide=collide)

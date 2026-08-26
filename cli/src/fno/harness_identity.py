@@ -672,11 +672,24 @@ def resolve_owned_identity(
         if not identity.session_id or not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
+        owner = collide(identity.harness, identity.session_id) if collide else None
+        current_agent = (environ.get("FNO_AGENT_SELF") or "").strip()
+        if owner and owner != current_agent:
+            canonical_rejected = (
+                {
+                    "harness": identity.harness,
+                    "session_id": identity.session_id,
+                    "reason": "owned_by_live_row",
+                    "owner": owner,
+                },
+            )
+            return OwnedHarnessIdentity(
+                None, None, present, "ambiguous", canonical_rejected
+            )
         if verdict is not True:
-            owner = collide(identity.harness, identity.session_id) if collide else None
-            canonical_rejected: tuple[dict[str, str], ...] = ()
+            unproven_rejected: tuple[dict[str, str], ...] = ()
             if owner:
-                canonical_rejected = (
+                unproven_rejected = (
                     {
                         "harness": identity.harness,
                         "session_id": identity.session_id,
@@ -685,7 +698,7 @@ def resolve_owned_identity(
                     },
                 )
             return OwnedHarnessIdentity(
-                None, None, present, "ambiguous", canonical_rejected
+                None, None, present, "ambiguous", unproven_rejected
             )
         return OwnedHarnessIdentity(
             identity.session_id, identity.harness, present, "canonical"
