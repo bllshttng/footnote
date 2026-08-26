@@ -5775,8 +5775,14 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// reviewed commit is one round. No author filter: the codex cloud
 /// connector posts its review objects under the PR author's own login
 /// (measured live - 116 of 117 objects on the spinning specimen), so an
-/// author exclusion deletes the round trace on exactly that lane, and
-/// volume is already neutral because the unit is the distinct commit.
+/// author exclusion deletes the round trace on exactly that lane. Known
+/// bound, accepted: reply volume at ONE commit is neutral, but replies
+/// landed on distinct never-reviewed heads each count as a round. No
+/// discriminator exists in the review-object data (the measured lane's
+/// review bursts and the worker's replies share a login, a state, and a
+/// commit), and over-counting fires the cap on a worker already
+/// push-replying without re-review, where the old under-count spun
+/// forever.
 /// The answer is the MAX of the two, never the sum: a healthy lane leaves
 /// both traces per round and must not count it twice. Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy

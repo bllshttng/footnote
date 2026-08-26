@@ -1645,37 +1645,76 @@ def test_round_budget_no_reviews_evidence_keeps_the_events_only_answer():
     assert _coverage_gate.rounds_since_last_pass(chain, reviews=None) == 2
 
 
+def test_round_budget_naive_pass_timestamp_never_crashes_the_gate():
+    """A pass row whose ts carries no offset, compared against a Z-suffixed
+    review submittedAt, used to raise TypeError out of rounds_since_last_pass
+    and crash the whole coverage verdict. The comparison must answer False
+    (not after), matching the Rust mirror's unparseable-ts answer."""
+    chain = [{"verdict": "pass", "ts": "2026-08-26T12:00:00"}]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T15:00:00Z"),
+    ]
+    # The pass's ts cannot be ordered against either review, so neither is
+    # "after" it: the axis answers 0 rather than raising.
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
+
+
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
-    """The helper reads the REST reviews endpoint (paginated, concatenated
-    arrays) and maps fields into the shape the counter consumes; a failed
-    read answers with no payload so the budget keeps its events-only
-    answer."""
+    """The helper rides the shared _rest_pages reader (page-per-call arrays)
+    and maps the three fields the counter reads; a failed read answers with
+    no payload so the budget keeps its events-only answer."""
     from fno.pr._proc import Result
+
+    # Page one must be a FULL page (100 rows) or _rest_pages stops early.
+    first = [
+        {
+            "user": {"login": "bllshttng"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T11:00:00Z",
+            "commit_id": "c1",
+        },
+        {
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T12:00:00Z",
+            "commit_id": "c2",
+        },
+    ] + [
+        {
+            "user": {"login": "bllshttng"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T12:30:00Z",
+            "commit_id": f"filler-{i}",
+        }
+        for i in range(98)
+    ]
+    pages = [
+        first,
+        [
+            {
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "state": "APPROVED",
+                "submitted_at": "2026-08-26T13:00:00Z",
+                "commit_id": "c3",
+            }
+        ],
+    ]
 
     def fake_run(cmd, **kwargs):
         joined = " ".join(str(c) for c in cmd)
-        if "pulls/42" in joined and cmd[0] == "gh":
-            # Two concatenated pages, the shape gh api --paginate emits.
-            return Result(
-                0,
-                '[{"user":{"login":"bllshttng"},"state":"COMMENTED",'
-                '"submitted_at":"2026-08-26T11:00:00Z","commit_id":"c1"},'
-                '{"user":{"login":"chatgpt-codex-connector[bot]"},'
-                '"state":"COMMENTED",'
-                '"submitted_at":"2026-08-26T12:00:00Z","commit_id":"c2"}]'
-                '[{"user":{"login":"chatgpt-codex-connector[bot]"},'
-                '"state":"APPROVED",'
-                '"submitted_at":"2026-08-26T13:00:00Z","commit_id":"c3"}]',
-                "",
-            )
+        if "pulls/42" in joined:
+            page = pages.pop(0)
+            return Result(0, json.dumps(page), "")
         raise AssertionError(f"unexpected shell call: {cmd}")
 
     monkeypatch.setattr("fno.pr._proc.run", fake_run)
     monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
     reviews = _coverage_gate._pr_reviews(42, "/repo")
-    assert [r["commit"]["oid"] for r in reviews] == ["c1", "c2", "c3"]
-    assert reviews[1]["author"]["login"] == "chatgpt-codex-connector[bot]"
-    assert reviews[2]["submittedAt"] == "2026-08-26T13:00:00Z"
+    oids = [r["commit"]["oid"] for r in reviews]
+    assert oids[:2] == ["c1", "c2"] and oids[-1] == "c3" and len(oids) == 101
+    assert reviews[-1]["submittedAt"] == "2026-08-26T13:00:00Z"
+    assert "author" not in reviews[0], "no reader consumes author; do not map it"
 
     # A failed read fails open to the events-only budget, never an exception.
     def failing_run(cmd, **kwargs):
@@ -1683,3 +1722,59 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
 
     monkeypatch.setattr("fno.pr._proc.run", failing_run)
     assert _coverage_gate._pr_reviews(42, "/repo") is None
+
+
+def test_past_the_cap_the_gate_refusal_names_the_terminal_act(monkeypatch, tmp_path):
+    """The Python mirror of the spent-budget receipt: past the cap the
+    uncovered refusal must not teach the review verb (that instruction is
+    the loop this cap exists to bound) and must name the terminal act. The
+    render itself is asserted first so an unrendered refusal cannot pass
+    the absence checks."""
+    _specimen_gates(monkeypatch)
+    _seed_soft_cap(tmp_path, rounds=3)
+    # Overwrite the coverage row the seed wrote: this PR is UNCOVERED (the
+    # connector lane shape - no verdict ever counted), so after the soft
+    # findings are filed the refusal falls through to the spent-budget arm.
+    rows = []
+    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    for i in range(3):
+        rows.append(json.dumps(_soft_round(stamps[i], heads[i])))
+    rows.append(
+        json.dumps(
+            {
+                "ts": "2026-08-25T22:01:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 42,
+                    "coverage": "uncovered",
+                    "review_state": "unreviewed",
+                    "reviewed_count": 0,
+                    "self_attested_count": 0,
+                    "head_sha": FIXTURE_HEAD,
+                    "verdicts": [],
+                },
+            }
+        )
+    )
+    (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(rows) + "\n")
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "the review round budget is spent (3/2)" in refusal, refusal
+    assert (
+        "decline the remainder, file it with the declining identity and the "
+        "reason, then merge" in refusal
+    ), refusal
+    for needle in ("/code-review", "/review", "/fno:review", "review verb"):
+        assert needle not in refusal, f"past-cap refusal names {needle}: {refusal}"

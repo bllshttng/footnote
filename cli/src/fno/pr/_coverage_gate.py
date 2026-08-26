@@ -292,8 +292,16 @@ def coverage_verdict(
     max_rounds = resolved_max_rounds(repo)
     # The budget counts BOTH evidence axes: a GitHub-App reviewer's rounds
     # leave no attestation row, so the chain alone reads zero on exactly the
-    # lane that spins. A read failure keeps the events-only answer.
-    rounds = rounds_since_last_pass(chain, reviews=_pr_reviews(pr_number, repo))
+    # lane that spins. The reviews read is paid only where it can change the
+    # answer (uncovered, or findings to file/decline); a healthy covered PR
+    # with no open findings keeps the events-only count and skips the
+    # paginated read. A read failure keeps the events-only answer.
+    reviews_payload = (
+        _pr_reviews(pr_number, repo)
+        if (disposition_named or disposition_text or not covered)
+        else None
+    )
+    rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -366,6 +374,21 @@ def coverage_verdict(
         note = "; ".join(x for x in (recompute_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
+    # The spent-budget arm, mirroring the Rust receipt exactly: past the cap
+    # the gate must not teach the review verb - that instruction is the loop
+    # this cap exists to bound, and a worker obeying it here would restart
+    # the loop through the merge-gate channel. It names the terminal act and
+    # the operator lever instead, and names no verb.
+    if rounds > max_rounds:
+        return (
+            REFUSED,
+            f"the review round budget is spent ({rounds}/{max_rounds}) - "
+            "decline the remainder, file it with the declining identity and "
+            "the reason, then merge; the operator lever is "
+            "config.review.max_rounds",
+            "",
+            recompute_note,
+        )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
         # fails the count conjunct, but the truer refusal names the policy and
@@ -720,12 +743,15 @@ IMPOSSIBLE_REMEDIES = (
 def _ts_after(a: str, b: str) -> bool:
     """True iff ``a`` is strictly after ``b``, both RFC3339. Unparseable
     input answers False, matching the Rust-side ``ts_after``: a round is
-    never counted on a timestamp that cannot be read."""
+    never counted on a timestamp that cannot be read. TypeError is caught
+    too: comparing an offset-naive timestamp against an offset-aware one
+    raises instead of answering, and the crash would take the whole
+    coverage verdict down with it."""
     try:
         from datetime import datetime
 
         return datetime.fromisoformat(a) > datetime.fromisoformat(b)
-    except ValueError:
+    except (ValueError, TypeError):
         return False
 
 
@@ -747,11 +773,15 @@ def rounds_since_last_pass(
     author filter: the codex cloud connector posts its review objects
     under the PR author's own login (measured live - 116 of 117 objects on
     the spinning specimen), so an author exclusion deletes the round trace
-    on exactly that lane, and reply volume is already neutral because the
-    unit is the distinct commit. The answer is the MAX of the two axes,
-    never the sum: a healthy lane leaves both traces per round. The
-    Rust-side mirror is ``loopcheck::rounds_since_last_pass``; the two are
-    held equal by the shared corpus.
+    on exactly that lane. Known bound, accepted: reply volume at ONE
+    commit is neutral, but replies landed on distinct never-reviewed heads
+    each count as a round. No discriminator exists in the review-object
+    data, and over-counting fires the cap on a worker already
+    push-replying without re-review, where the old under-count spun
+    forever. The answer is the MAX of the two axes, never the sum: a
+    healthy lane leaves both traces per round. The Rust-side mirror is
+    ``loopcheck::rounds_since_last_pass``; the two are held equal by the
+    shared corpus.
     """
     rounds = 0
     last_pass_ts = ""
@@ -790,44 +820,39 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
     """The PR's review objects for the round budget, or None on any read
     failure.
 
-    One REST pass over the reviews endpoint, paginated (a spun PR carries
-    well over the 100-row page). The field mapping is the one
-    ``_internal_gh._coverage_reviews`` applies, so this mirror sees the
-    same shape the Rust gate does. A read failure answers None: the round
-    budget then keeps its events-only answer rather than guessing - a cap
-    that fires on a broken read would decline review remainder the budget
-    may not have spent.
+    The paginated REST read rides ``_internal_gh._rest_pages`` (the same
+    reader every other gate REST read uses, with its rate-limit-aware
+    failure classification) and the field mapping is the subset of
+    ``_internal_gh._coverage_reviews`` the counter reads. The read is
+    bounded at 30s like the Rust gate's stopgate timeout: a stalled gh must
+    not hang the merge verb. A read failure answers None: the round budget
+    then keeps its events-only answer rather than guessing - a cap that
+    fires on a broken read would decline review remainder the budget may
+    not have spent.
     """
-    import json as _json
-
-    from fno.pr._internal_gh import _login
+    from fno.pr._internal_gh import _rest_pages, _rest_runner
     from fno.pr._proc import run
     from fno.pr._rest import _repo_slug
 
+    def _bounded(cmd, **kwargs):
+        kwargs.setdefault("timeout", 30.0)
+        return run(cmd, **kwargs)
+
     try:
-        slug = _repo_slug(repo, run)
+        rest_runner = _rest_runner("gh", _bounded)
+        slug = _repo_slug(repo, _bounded)
         if not slug:
             return None
-        res = run(
-            ["gh", "api", f"repos/{slug}/pulls/{pr_number}/reviews", "--paginate"],
+        rows, _reason = _rest_pages(
+            f"repos/{slug}/pulls/{pr_number}/reviews",
+            "pull reviews",
             cwd=repo,
+            runner=rest_runner,
         )
-        if not res.ok:
+        if rows is None:
             return None
-        rows: list[dict] = []
-        decoder = _json.JSONDecoder()
-        text = (res.stdout or "").lstrip()
-        pos = 0
-        while pos < len(text):
-            obj, end = decoder.raw_decode(text, pos)
-            if isinstance(obj, list):
-                rows.extend(row for row in obj if isinstance(row, dict))
-            pos = end
-            while pos < len(text) and text[pos] in " \n\r\t":
-                pos += 1
         return [
             {
-                "author": {"login": _login(row)},
                 "state": row.get("state") if isinstance(row.get("state"), str) else "",
                 "submittedAt": (
                     row.get("submitted_at")
