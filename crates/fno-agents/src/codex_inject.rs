@@ -396,11 +396,9 @@ pub fn review_start_request_json(
 /// Parse a `review/start` response into the outcome receipt.
 /// `.result.turn.id` + `.result.reviewThreadId` -> accepted; anything else -> the
 /// reason token (mirrors [`classify_turn_start_response`]'s posture).
-pub fn parse_review_start_response(raw: &str) -> Result<(String, String), &'static str> {
-    let v: serde_json::Value = match serde_json::from_str(raw) {
-        Ok(v) => v,
-        Err(_) => return Err("rpc-error"),
-    };
+pub fn parse_review_start_response(raw: &str) -> Result<(String, String), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(raw).map_err(|_| "invalid-response".to_string())?;
     if let Some(result) = v.get("result") {
         let turn_id = result
             .get("turn")
@@ -415,13 +413,19 @@ pub fn parse_review_start_response(raw: &str) -> Result<(String, String), &'stat
             return Ok((turn_id.to_string(), review_thread.to_string()));
         }
         if !turn_id.is_empty() || !review_thread.is_empty() {
-            return Err("not-confirmed");
+            return Err("not-confirmed".to_string());
         }
     }
-    if v.get("error").is_some() {
-        return Err("rpc-error");
+    if let Some(error) = v.get("error") {
+        let message = error
+            .get("message")
+            .and_then(|message| message.as_str())
+            .filter(|message| !message.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| "unexpected-response".to_string())?;
+        return Err(message);
     }
-    Err("rpc-error")
+    Err("unexpected-response".to_string())
 }
 
 /// Drive a `review/start` over the app-server daemon socket. `Ok((turn_id,
@@ -432,10 +436,10 @@ pub async fn deliver_via_codex_review_start(
     thread_id: &str,
     target: &ReviewTarget,
     delivery: ReviewDelivery,
-) -> Result<(String, String), &'static str> {
+) -> Result<(String, String), String> {
     let sock = codex_app_server_socket_path();
     if !sock.exists() {
-        return Err("no-daemon");
+        return Err("no-daemon".to_string());
     }
     let mut request_in_flight = false;
     match tokio::time::timeout(
@@ -445,8 +449,8 @@ pub async fn deliver_via_codex_review_start(
     .await
     {
         Ok(r) => r,
-        Err(_) if request_in_flight => Err("not-confirmed"),
-        Err(_) => Err("io-error"),
+        Err(_) if request_in_flight => Err("not-confirmed".to_string()),
+        Err(_) => Err("io-error".to_string()),
     }
 }
 
@@ -458,20 +462,22 @@ async fn review_start_round_trip(
     target: &ReviewTarget,
     delivery: ReviewDelivery,
     request_in_flight: &mut bool,
-) -> Result<(String, String), &'static str> {
-    let conn = UnixStream::connect(sock).await.map_err(|_| "io-error")?;
+) -> Result<(String, String), String> {
+    let conn = UnixStream::connect(sock)
+        .await
+        .map_err(|_| "io-error".to_string())?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
-        Err(_) => return Err("handshake-failed"),
+        Err(_) => return Err("handshake-failed".to_string()),
     };
     let (mut sink, mut stream) = ws.split();
     sink.send(Message::Text(initialize_request_json().into()))
         .await
-        .map_err(|_| "io-error")?;
+        .map_err(|_| "io-error".to_string())?;
     read_until_id(&mut stream, &serde_json::json!("init")).await?;
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
-        .map_err(|_| "io-error")?;
+        .map_err(|_| "io-error".to_string())?;
     *request_in_flight = true;
     sink.send(Message::Text(
         review_start_request_json(thread_id, target, delivery).into(),
@@ -480,10 +486,10 @@ async fn review_start_round_trip(
     // A failed SEND is a pre-send wedge (nothing delivered), not a lost
     // response; only the timeout layer's request_in_flight remap and the read
     // below may claim "not-confirmed".
-    .map_err(|_| "io-error")?;
+    .map_err(|_| "io-error".to_string())?;
     let resp = read_until_id(&mut stream, &serde_json::json!(1))
         .await
-        .map_err(|_| "not-confirmed")?;
+        .map_err(|_| "not-confirmed".to_string())?;
     parse_review_start_response(&resp)
 }
 
@@ -495,7 +501,7 @@ fn review_start_audit_fields(
     audit_payload: Option<&str>,
     audit_sender: Option<&str>,
     audit_target_cwd: Option<&str>,
-    confirmed: bool,
+    failure_reason: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     review_start_audit_fields_with_origin(
         thread_id,
@@ -504,7 +510,7 @@ fn review_start_audit_fields(
         audit_payload,
         audit_sender,
         audit_target_cwd,
-        confirmed,
+        failure_reason,
         None,
     )
 }
@@ -516,7 +522,7 @@ fn review_start_audit_fields_with_origin(
     audit_payload: Option<&str>,
     audit_sender: Option<&str>,
     audit_target_cwd: Option<&str>,
-    confirmed: bool,
+    failure_reason: Option<&str>,
     audit_origin: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
@@ -536,7 +542,10 @@ fn review_start_audit_fields_with_origin(
     );
     fields.insert("harness".into(), "codex".into());
     fields.insert("lane".into(), "codex-review-start".into());
-    fields.insert("confirmed".into(), confirmed.into());
+    fields.insert("confirmed".into(), failure_reason.is_none().into());
+    if let Some(reason) = failure_reason {
+        fields.insert("reason".into(), reason.into());
+    }
     if let Some(sender) = audit_sender {
         fields.insert("sender".into(), sender.into());
     }
@@ -633,6 +642,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         }
     };
     let outcome = deliver_via_codex_review_start(&thread_id, &target, delivery).await;
+    let failure_reason = outcome.as_ref().err().map(String::as_str);
 
     // Audit floor: `review/start` is the second unwrapped-fire path this crate
     // ships. It carries no `<fno_mail>` envelope and leaves no agent-authored
@@ -646,7 +656,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         audit_payload.as_deref(),
         audit_sender.as_deref(),
         audit_target_cwd.as_deref(),
-        outcome.is_ok(),
+        failure_reason,
         audit_origin.as_deref(),
     );
     let _ = crate::events::EventEmitter::new(
@@ -1059,15 +1069,24 @@ mod tests {
             parse_review_start_response(raw),
             Ok(("turn-1".into(), "rt-9".into()))
         );
+        let server_error = parse_review_start_response(
+            r#"{"id":1,"error":{"message":"review target must be a base branch"}}"#,
+        )
+        .unwrap_err();
+        let invalid_response = parse_review_start_response("garbage").unwrap_err();
+        let unexpected_response =
+            parse_review_start_response(r#"{"id":1,"result":{}}"#).unwrap_err();
+        assert_eq!(server_error, "review target must be a base branch");
+        assert_eq!(invalid_response, "invalid-response");
+        assert_eq!(unexpected_response, "unexpected-response");
+        assert_ne!(server_error, invalid_response);
+        assert_ne!(server_error, unexpected_response);
+        assert_ne!(invalid_response, unexpected_response);
         assert_eq!(
-            parse_review_start_response(r#"{"id":1,"error":{"message":"no"}}"#),
-            Err("rpc-error")
+            parse_review_start_response(r#"{"id":1,"result":{"turn":{"id":"turn-1"}}}"#)
+                .unwrap_err(),
+            "not-confirmed"
         );
-        assert_eq!(
-            parse_review_start_response(r#"{"id":1,"result":{"turn":{"id":"turn-1"}}}"#),
-            Err("not-confirmed")
-        );
-        assert_eq!(parse_review_start_response("garbage"), Err("rpc-error"));
     }
 
     #[test]
@@ -1079,7 +1098,7 @@ mod tests {
             Some("/review --base origin/main"),
             Some("sender-1"),
             Some("/repo"),
-            true,
+            None,
         );
         assert_eq!(fields["target_session"], "thread-1");
         assert_eq!(fields["payload"], "/review --base origin/main");
@@ -1088,6 +1107,23 @@ mod tests {
         assert_eq!(fields["harness"], "codex");
         assert_eq!(fields["lane"], "codex-review-start");
         assert_eq!(fields["confirmed"], true);
+        assert!(!fields.contains_key("reason"));
+    }
+
+    #[test]
+    fn review_start_audit_carries_failure_reason() {
+        let fields = review_start_audit_fields(
+            "thread-1",
+            "baseBranch:origin/main",
+            ReviewDelivery::Inline,
+            Some("/review --base origin/main"),
+            Some("sender-1"),
+            Some("/repo"),
+            Some("review target must be a base branch"),
+        );
+        assert_eq!(fields["lane"], "codex-review-start");
+        assert_eq!(fields["confirmed"], false);
+        assert_eq!(fields["reason"], "review target must be a base branch");
     }
 
     #[tokio::test]
@@ -1111,7 +1147,7 @@ mod tests {
         .await;
         server.await.unwrap();
         assert!(request_in_flight);
-        assert_eq!(result, Err("not-confirmed"));
+        assert_eq!(result.unwrap_err(), "not-confirmed");
     }
 
     #[test]
