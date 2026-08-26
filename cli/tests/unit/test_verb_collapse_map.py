@@ -153,8 +153,9 @@ def test_live_baseline_matches_the_projected_allocation():
     # law verbs under their new home), -1 for the retired runtime root, which
     # carried main to 127.
     # +1 for `law set`, the direct operator writer baselined in this PR.
+    # +1 for `inbox law set`, the mounted spelling present on current main.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 128
+    assert len(leaves) <= 129
     assert "fno-agents" in leaves
 
 

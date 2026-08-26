@@ -91,6 +91,7 @@ inbox law enact
 inbox law inspect
 inbox law prepare
 inbox law resume
+inbox law set
 inbox notify
 inbox outstanding ask
 inbox outstanding clear !--origin
