@@ -879,7 +879,7 @@ for id in "${NODES[@]}"; do
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
     # so forward it as --harness: a claude bg dispatch lands harness-native at
     # <repo>/.claude/worktrees/, a non-native harness degrades to external.
-    [[ -n "$CANONICAL_ROOT" ]] && wt="$(fno agents workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null)"
+    [[ -n "$CANONICAL_ROOT" ]] && wt="$( (fno agents workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null || fno workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null) )"
     if [[ -n "$wt" ]]; then
       # policy=never returns the repo root: launch in place, but SKIP setup - it
       # links shared state INTO the canonical checkout (Locked Decision 4: guard

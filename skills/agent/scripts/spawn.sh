@@ -370,7 +370,7 @@ maybe_auto_worktree() {
   # --harness: ensure lands a claude payload harness-native at <repo>/.claude/
   # worktrees/, degrades any non-claude (or unexpected) harness to the external base.
   local wt
-  wt="$(fno agents workspace worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null)"
+  wt="$( (fno agents workspace worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null || fno workspace worktree ensure --repo "$top" --name "$NAME" --harness "$PROVIDER" 2>/dev/null) )"
   if [[ -n "$wt" ]]; then
     CWD="$wt"; AUTO_WT="$wt"
     # policy=never launches in place: ensure prints the repo main checkout itself.

@@ -1,4 +1,5 @@
-"""Decision commands for ``fno backlog`` and the one-release old-spelling shim.
+"""Decision commands: canonical at ``fno inbox decide`` (x-6233), silent
+alias at ``fno backlog decide``.
 
 That is the case that loses today: the operator states a ruling in chat, it
 touches no file, emits no event, and dies with the context. This verb is the
@@ -19,8 +20,10 @@ import typer
 
 shim_app = typer.Typer(
     help=(
-        "Deprecated compatibility shim for the decision commands now under "
-        "fno backlog."
+        "One-release root registration for `decide` (x-6233). Unreachable "
+        "via the CLI - VERB_MOVES intercepts the old spelling and prints "
+        "its own notice - kept only so the registry holds a hidden, not a "
+        "phantom, root until the release clock expires."
     ),
 )
 decide_app = shim_app
@@ -44,14 +47,14 @@ def _render_claim_receipt(node_id: str, event: dict) -> None:
         status = claim_status(key, root=claims_root_for(key))
     except Exception as exc:  # noqa: BLE001 - receipt failure cannot undo a ruling
         typer.echo(
-            f"backlog decide: claim {key} unavailable for caller {caller_label}: "
+            f"decide: claim {key} unavailable for caller {caller_label}: "
             f"{exc}; caller comparison unavailable",
             err=True,
         )
         return
 
     state = status.get("state") or "unavailable"
-    line = f"backlog decide: claim {key}; claim state: {state}; caller: {caller_label}"
+    line = f"decide: claim {key}; claim state: {state}; caller: {caller_label}"
     if state == "free":
         typer.echo(line, err=True)
         return
@@ -157,7 +160,7 @@ def _record(
     """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
         typer.echo(
-            "backlog decide: subject and decision are required to record", err=True
+            "decide: subject and decision are required to record", err=True
         )
         raise typer.Exit(1)
 
@@ -176,7 +179,7 @@ def _record(
     # for real rulings.
     if authority is not None and authority not in AUTHORITY_SOURCES:
         typer.echo(
-            f"backlog decide: --authority '{authority}' is not one of "
+            f"decide: --authority '{authority}' is not one of "
             f"{', '.join(AUTHORITY_SOURCES)}. Nothing was recorded. Use 'crown' "
             "for a king ruling inside its own scope; omit the flag to resolve it "
             "from this session.",
@@ -201,11 +204,11 @@ def _record(
             supersedes=supersedes,
         )
     except UnknownOriginError as exc:
-        typer.echo(f"backlog decide: refused. {exc}", err=True)
+        typer.echo(f"decide: refused. {exc}", err=True)
         raise typer.Exit(3)
     except RefusedAuthorityError as exc:
         typer.echo(
-            f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
+            f"decide: refused. This session is agent {exc.agent_handle}, so it "
             "cannot record under operator authority. If only the operator can "
             "settle this, use `fno inbox outstanding ask`. If ruling as an agent, "
             "drop --authority operator; it records agent coordination.",
@@ -214,7 +217,7 @@ def _record(
         raise typer.Exit(3)
     except UnattributedAuthorityError:
         typer.echo(
-            "backlog decide: refused. This process has no session identity and no "
+            "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run it from a terminal, "
             "join the session so a handle can be stamped, or drop --authority "
@@ -227,14 +230,14 @@ def _record(
         # remedy: the durable event HAS landed, so re-running this command
         # mints a second id for one ruling.
         typer.echo(
-            f"backlog decide: recorded {exc.decision_id} to the project journal, but the "
+            f"decide: recorded {exc.decision_id} to the project journal, but the "
             f"recall index write failed: {exc}. Run `fno backlog decide-reindex` to "
             f"recover it. Do NOT re-run decide; that records it twice.",
             err=True,
         )
         raise typer.Exit(1)
     except Exception as exc:  # noqa: BLE001 - a failed capture is never a silent success
-        typer.echo(f"backlog decide: failed to record: {exc}", err=True)
+        typer.echo(f"decide: failed to record: {exc}", err=True)
         raise typer.Exit(1)
 
     did = result["decision_id"]
@@ -247,7 +250,7 @@ def _record(
         _, everything, _ = list_decisions(state="all")
         if supersedes not in {d.get("decision_id") for d in everything}:
             typer.echo(
-                f"backlog decide: warning - no decision {supersedes} is on record, so "
+                f"decide: warning - no decision {supersedes} is on record, so "
                 f"nothing was marked superseded. Check the id with "
                 f"`fno backlog decisions {subject}`.",
                 err=True,
@@ -257,14 +260,14 @@ def _record(
     # recoverable exactly like one that does.
     if result["node_id"] is None:
         typer.echo(
-            f"backlog decide: recorded {did}; subject names no graph node, so no "
+            f"decide: recorded {did}; subject names no graph node, so no "
             f"projection was written (the event and the index are the record). "
             f"Recover with: fno backlog decisions {subject}",
             err=True,
         )
     else:
         typer.echo(
-            f"backlog decide: recorded {did} on {result['node_id']}. "
+            f"decide: recorded {did} on {result['node_id']}. "
             f"Recover with: fno backlog decisions {result['node_id']}",
             err=True,
         )

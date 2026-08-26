@@ -701,6 +701,8 @@ def done_command(
     # Collision tracking: set inside the mutator, read after locked_mutate_graph.
     collision_state: dict = {"detected": False, "first_completed_at": None}
 
+    cascade_closed: list = []
+
     def _mutator(entries_inner):
         for e in entries_inner:
             if e.get("id") != node_id:
@@ -736,6 +738,13 @@ def done_command(
                 e["status"] = "done"
                 e["completed_at"] = now
                 rollup_tags.extend(_apply_rollup(e, rollup, env_session=env_session, force_overwrite=force_overwrite))
+                # Same ancestor cascade as the canonical close (PR 1200
+                # review): a rich-flag close must not skip closing an
+                # all-done epic parent. Function-local import - graph.cli
+                # imports this module, so a top-level import would cycle.
+                from fno.graph.cli import _cascade_close_parents
+
+                cascade_closed.extend(_cascade_close_parents(entries_inner, node_id))
             break
         return entries_inner
 
@@ -773,6 +782,21 @@ def done_command(
         )
         typer.echo(f"fno backlog done: {node_id} -> already done (metadata updated)")
         return
+
+    # The canonical post-close steps (stamp+graduate, projection, retro),
+    # shared with graph.cli's cmd_done so close depth never forks on flags.
+    try:
+        from fno.graph.cli import _canonical_post_close
+
+        _canonical_post_close(
+            node,
+            task_id=node_id,
+            cascade_closed=cascade_closed,
+            skip_stamp=False,
+            evidence_pr_url=pr_url_to_write,
+        )
+    except Exception as exc:  # noqa: BLE001 - post-close is additive, never unwinds the close
+        typer.echo(f"fno backlog done: post-close skipped ({exc})", err=True)
 
     tag_bits: list[str] = [f"domain={domain}"]
     if pr is not None:

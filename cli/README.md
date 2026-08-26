@@ -127,8 +127,10 @@ Run `fno --help` for the full list. The main trees are `state`, `graph`
 ### Backlog commands (top-level)
 
 - `fno backlog done [id-or-title] [--pr N] [--link URL] [--note TEXT] [--backfill]`
-  -- mark a graph node done. Auto-detects from current git branch +
-  `gh pr view` for `domain: code` when no flags are given. For non-code
+  -- mark a graph node done. A bare node id runs the canonical close (gates,
+  plan stamp, epic cascade); the completion surface (no id, or any of the
+  flags) auto-detects from the current git branch + `gh pr view` for
+  `domain: code`. For non-code
   domains (research, design, trading, etc.) pass `--link` for an artifact
   URL or `--note` for a free-text marker. Also rolls up `session_id`,
   `cost_usd`, `cost_sessions`, and `points` from `~/.fno/ledger.json`

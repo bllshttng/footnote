@@ -154,6 +154,19 @@ def _visible_command_names(group: click.Group) -> list[str]:
     return names
 
 
+def _python_root_names() -> list[str]:
+    """Real root names on the Python front alone (shared derivation)."""
+    from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as root_app
+    from fno.verb_moves import VERB_MOVES
+
+    root = typer.main.get_command(root_app)
+    names = set(cast("click.Group", root).list_commands(click.Context(root)))
+    names.update(LAZY_SUBCOMMANDS)
+    names.update(_EAGER_COMMAND_HELP)
+    names.difference_update(VERB_MOVES)
+    return sorted(names)
+
+
 def _root_namespace_names() -> list[str]:
     """Return real root names across the Python and Rust fronts.
 
@@ -163,16 +176,8 @@ def _root_namespace_names() -> list[str]:
     not maintain a second list that can drift from ``crates/fno``.
     """
     from fno import lint_verb_ratchet as ratchet
-    from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as root_app
-    from fno.verb_moves import VERB_MOVES
 
-    root = typer.main.get_command(root_app)
-    # Same cast as _visible_command_names: get_command is typed as bare
-    # Command, and the group methods are what the count needs.
-    names = set(cast("click.Group", root).list_commands(click.Context(root)))
-    names.update(LAZY_SUBCOMMANDS)
-    names.update(_EAGER_COMMAND_HELP)
-    names.difference_update(VERB_MOVES)
+    names = set(_python_root_names())
     try:
         rust_paths, _families = ratchet.scan_rust_source()
     except (OSError, ratchet.VerbRatchetError) as exc:
@@ -326,31 +331,22 @@ def menu_caps() -> None:
         # only producer of this RuntimeError. The gate's job is to catch drift
         # in a repo under development; outside one there is no Rust surface to
         # cap, so degrade to the Python-only count with a warning rather than
-        # failing every bare-install lint run.
+        # failing every bare-install lint run. The cap itself still applies.
         typer.echo(
             f"menu-caps: rust front source unavailable ({exc}); counting "
             "Python roots only",
             err=True,
         )
-        from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as root_app
-        from fno.verb_moves import VERB_MOVES
-
-        _root = typer.main.get_command(root_app)
-        _py = set(cast("click.Group", _root).list_commands(click.Context(_root)))
-        _py.update(LAZY_SUBCOMMANDS)
-        _py.update(_EAGER_COMMAND_HELP)
-        _py.difference_update(VERB_MOVES)
-        root_names = sorted(_py)
-    else:
-        if len(root_names) > MENU_CAP_ROOT_NAMESPACE:
-            over = ", ".join(root_names[MENU_CAP_ROOT_NAMESPACE:])
-            failures.append(
-                f"root namespace has {len(root_names)} real verbs "
-                f"(cap {MENU_CAP_ROOT_NAMESPACE}); over the cap: {over}.\n"
-                "  Remedy 1: fold the verb under an existing root group.\n"
-                "  Remedy 2: retire the verb if it has no distinct root meaning.\n"
-                "  Remedy 3: raise MENU_CAP_ROOT_NAMESPACE in a deliberate one-line diff."
-            )
+        root_names = _python_root_names()
+    if len(root_names) > MENU_CAP_ROOT_NAMESPACE:
+        over = ", ".join(root_names[MENU_CAP_ROOT_NAMESPACE:])
+        failures.append(
+            f"root namespace has {len(root_names)} real verbs "
+            f"(cap {MENU_CAP_ROOT_NAMESPACE}); over the cap: {over}.\n"
+            "  Remedy 1: fold the verb under an existing root group.\n"
+            "  Remedy 2: retire the verb if it has no distinct root meaning.\n"
+            "  Remedy 3: raise MENU_CAP_ROOT_NAMESPACE in a deliberate one-line diff."
+        )
 
     if len(top_visible) > MENU_CAP_TOP_LEVEL:
         over = ", ".join(top_visible[MENU_CAP_TOP_LEVEL:])

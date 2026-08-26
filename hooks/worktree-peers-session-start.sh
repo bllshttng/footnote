@@ -161,7 +161,7 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
     (
       mkdir -p "$(dirname "$_CACHE_FILE")" 2>/dev/null
       tmp="$(mktemp "${_CACHE_FILE}.XXXXXX" 2>/dev/null)" || exit 0
-      if fno agents workspace worktree stranded --json > "$tmp" 2>/dev/null; then
+      if fno agents workspace worktree stranded --json > "$tmp" 2>/dev/null || fno workspace worktree stranded --json > "$tmp" 2>/dev/null; then
         mv -f "$tmp" "$_CACHE_FILE"
       else
         rm -f "$tmp"

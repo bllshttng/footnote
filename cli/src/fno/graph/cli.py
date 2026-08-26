@@ -8812,6 +8812,15 @@ def cmd_done(
             n["cost_usd"] = cost_rollup["cost_usd"]
         if cost_rollup.get("cost_sessions") and not n.get("cost_sessions"):
             n["cost_sessions"] = cost_rollup["cost_sessions"]
+        # Session and points ride the same rollup (PR 1200 review): the
+        # pre-fold rich surface filled them on every close, and losing them
+        # on the canonical spelling forked attribution by spelling.
+        _env_session = os.environ.get("CLAUDECODE_SESSION_ID") or None
+        _sid = _env_session or cost_rollup.get("session_id")
+        if _sid and not n.get("session_id"):
+            n["session_id"] = _sid
+        if cost_rollup.get("points") is not None and n.get("points") is None:
+            n["points"] = cost_rollup["points"]
         # Close any now-all-done ancestor epic (x-33b2): the box is done when its
         # children are, and it carries no PR of its own to close it explicitly.
         cascade_closed_out.extend(_cascade_close_parents(entries, task_id))
@@ -8844,12 +8853,37 @@ def cmd_done(
     except Exception:
         pass
 
-    if plan_path_out[0] and not skip_stamp:
+    _canonical_post_close(
+        node,
+        task_id=task_id,
+        cascade_closed=cascade_closed_out,
+        skip_stamp=skip_stamp,
+        evidence_pr_url=evidence_pr_url,
+    )
+
+
+def _canonical_post_close(
+    node: dict,
+    *,
+    task_id: str,
+    cascade_closed: list,
+    skip_stamp: bool,
+    evidence_pr_url: Optional[str],
+) -> None:
+    """The canonical post-close steps, shared by every close path (PR 1200).
+
+    Stamp+graduate the plan, project the closed node and any cascade-closed
+    epic parents, and fire the retro trigger. The rich completion surface
+    (fno.done.cli) runs the SAME steps so closing depth never forks on which
+    flags or spelling named the node.
+    """
+    plan_path = node.get("plan_path")
+    if plan_path and not skip_stamp:
         # Stamp the plan shipped (against the evidencing PR) THEN graduate, so a
         # plan that never went through target's ship gate still records the ship
         # rather than getting a graduate no-op (ab-bd9f476c).
         _stamp_and_graduate_plan(
-            plan_path_out[0],
+            plan_path,
             url=evidence_pr_url,
             session_id=node.get("session_id"),
         )
@@ -8861,7 +8895,7 @@ def cmd_done(
     # is the cascade-closed epic parents that _stamp_and_graduate_plan skips.
     # --skip-stamp suppresses ALL plan writes, projection included.
     if not skip_stamp:
-        _project_plans_from_graph([task_id, *cascade_closed_out])
+        _project_plans_from_graph([task_id, *cascade_closed])
 
     # A2 (x-122a): retro-at-done lifecycle trigger. Dispatch a `retro` context
     # /think while the closed node's session context is still resolvable. Gated
