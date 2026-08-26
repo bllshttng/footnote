@@ -372,6 +372,29 @@ impl ReviewDelivery {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewStartError {
+    Reason(&'static str),
+    Server(String),
+}
+
+impl std::fmt::Display for ReviewStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Reason(reason) => formatter.write_str(reason),
+            Self::Server(message) => write!(formatter, "server-error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for ReviewStartError {}
+
+impl From<&'static str> for ReviewStartError {
+    fn from(reason: &'static str) -> Self {
+        Self::Reason(reason)
+    }
+}
+
 /// The `review/start` request. `id` is `1` (matched on the response). The
 /// response is an OUTCOME receipt (a `Turn` with a status plus a
 /// `reviewThreadId` to read findings from), strictly better than the inject
@@ -394,11 +417,11 @@ pub fn review_start_request_json(
 }
 
 /// Parse a `review/start` response into the outcome receipt.
-/// `.result.turn.id` + `.result.reviewThreadId` -> accepted; anything else -> the
-/// reason token (mirrors [`classify_turn_start_response`]'s posture).
-pub fn parse_review_start_response(raw: &str) -> Result<(String, String), String> {
+/// `.result.turn.id` + `.result.reviewThreadId` is accepted. Protocol reason
+/// tokens and server-provided messages remain separate error variants.
+pub fn parse_review_start_response(raw: &str) -> Result<(String, String), ReviewStartError> {
     let v: serde_json::Value =
-        serde_json::from_str(raw).map_err(|_| "invalid-response".to_string())?;
+        serde_json::from_str(raw).map_err(|_| ReviewStartError::Reason("invalid-response"))?;
     if let Some(result) = v.get("result") {
         let turn_id = result
             .get("turn")
@@ -413,7 +436,7 @@ pub fn parse_review_start_response(raw: &str) -> Result<(String, String), String
             return Ok((turn_id.to_string(), review_thread.to_string()));
         }
         if !turn_id.is_empty() || !review_thread.is_empty() {
-            return Err("not-confirmed".to_string());
+            return Err(ReviewStartError::Reason("not-confirmed"));
         }
     }
     if let Some(error) = v.get("error") {
@@ -422,10 +445,10 @@ pub fn parse_review_start_response(raw: &str) -> Result<(String, String), String
             .and_then(|message| message.as_str())
             .filter(|message| !message.is_empty())
             .map(str::to_string)
-            .ok_or_else(|| "unexpected-response".to_string())?;
-        return Err(message);
+            .ok_or(ReviewStartError::Reason("unexpected-response"))?;
+        return Err(ReviewStartError::Server(message));
     }
-    Err("unexpected-response".to_string())
+    Err(ReviewStartError::Reason("unexpected-response"))
 }
 
 /// Drive a `review/start` over the app-server daemon socket. `Ok((turn_id,
@@ -436,10 +459,10 @@ pub async fn deliver_via_codex_review_start(
     thread_id: &str,
     target: &ReviewTarget,
     delivery: ReviewDelivery,
-) -> Result<(String, String), String> {
+) -> Result<(String, String), ReviewStartError> {
     let sock = codex_app_server_socket_path();
     if !sock.exists() {
-        return Err("no-daemon".to_string());
+        return Err(ReviewStartError::Reason("no-daemon"));
     }
     let mut request_in_flight = false;
     match tokio::time::timeout(
@@ -449,8 +472,8 @@ pub async fn deliver_via_codex_review_start(
     .await
     {
         Ok(r) => r,
-        Err(_) if request_in_flight => Err("not-confirmed".to_string()),
-        Err(_) => Err("io-error".to_string()),
+        Err(_) if request_in_flight => Err(ReviewStartError::Reason("not-confirmed")),
+        Err(_) => Err(ReviewStartError::Reason("io-error")),
     }
 }
 
@@ -462,22 +485,22 @@ async fn review_start_round_trip(
     target: &ReviewTarget,
     delivery: ReviewDelivery,
     request_in_flight: &mut bool,
-) -> Result<(String, String), String> {
+) -> Result<(String, String), ReviewStartError> {
     let conn = UnixStream::connect(sock)
         .await
-        .map_err(|_| "io-error".to_string())?;
+        .map_err(|_| ReviewStartError::Reason("io-error"))?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
-        Err(_) => return Err("handshake-failed".to_string()),
+        Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
     };
     let (mut sink, mut stream) = ws.split();
     sink.send(Message::Text(initialize_request_json().into()))
         .await
-        .map_err(|_| "io-error".to_string())?;
+        .map_err(|_| ReviewStartError::Reason("io-error"))?;
     read_until_id(&mut stream, &serde_json::json!("init")).await?;
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
-        .map_err(|_| "io-error".to_string())?;
+        .map_err(|_| ReviewStartError::Reason("io-error"))?;
     *request_in_flight = true;
     sink.send(Message::Text(
         review_start_request_json(thread_id, target, delivery).into(),
@@ -486,10 +509,10 @@ async fn review_start_round_trip(
     // A failed SEND is a pre-send wedge (nothing delivered), not a lost
     // response; only the timeout layer's request_in_flight remap and the read
     // below may claim "not-confirmed".
-    .map_err(|_| "io-error".to_string())?;
+    .map_err(|_| ReviewStartError::Reason("io-error"))?;
     let resp = read_until_id(&mut stream, &serde_json::json!(1))
         .await
-        .map_err(|_| "not-confirmed".to_string())?;
+        .map_err(|_| ReviewStartError::Reason("not-confirmed"))?;
     parse_review_start_response(&resp)
 }
 
@@ -543,9 +566,6 @@ fn review_start_audit_fields_with_origin(
     fields.insert("harness".into(), "codex".into());
     fields.insert("lane".into(), "codex-review-start".into());
     fields.insert("confirmed".into(), failure_reason.is_none().into());
-    if let Some(reason) = failure_reason {
-        fields.insert("reason".into(), reason.into());
-    }
     if let Some(sender) = audit_sender {
         fields.insert("sender".into(), sender.into());
     }
@@ -555,7 +575,38 @@ fn review_start_audit_fields_with_origin(
     if let Some(origin) = audit_origin {
         fields.insert("origin".into(), origin.into());
     }
+    insert_review_start_failure_reason(&mut fields, failure_reason);
     fields
+}
+
+fn insert_review_start_failure_reason(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    failure_reason: Option<&str>,
+) {
+    let Some(reason) = failure_reason else {
+        return;
+    };
+    let mut end = reason.len().min(crate::events::MAX_EVENT_PAYLOAD_BYTES);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    if end < reason.len() {
+        fields.insert("reason_truncated".into(), true.into());
+    }
+    loop {
+        fields.insert("reason".into(), reason[..end].into());
+        let payload_len = serde_json::to_string(fields)
+            .map(|payload| payload.len())
+            .unwrap_or(usize::MAX);
+        if payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES || end == 0 {
+            return;
+        }
+        fields.insert("reason_truncated".into(), true.into());
+        end -= 1;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+    }
 }
 
 /// The `fno-agents review-start` verb entry: parse CLI, drive the round-trip,
@@ -642,7 +693,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         }
     };
     let outcome = deliver_via_codex_review_start(&thread_id, &target, delivery).await;
-    let failure_reason = outcome.as_ref().err().map(String::as_str);
+    let failure_reason = outcome.as_ref().err().map(ToString::to_string);
 
     // Audit floor: `review/start` is the second unwrapped-fire path this crate
     // ships. It carries no `<fno_mail>` envelope and leaves no agent-authored
@@ -656,7 +707,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         audit_payload.as_deref(),
         audit_sender.as_deref(),
         audit_target_cwd.as_deref(),
-        failure_reason,
+        failure_reason.as_deref(),
         audit_origin.as_deref(),
     );
     let _ = crate::events::EventEmitter::new(
@@ -674,7 +725,10 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             0
         }
         Err(reason) => {
-            println!("{}", json!({"delivered": false, "reason": reason}));
+            println!(
+                "{}",
+                json!({"delivered": false, "reason": reason.to_string()})
+            );
             1
         }
     }
@@ -1076,16 +1130,30 @@ mod tests {
         let invalid_response = parse_review_start_response("garbage").unwrap_err();
         let unexpected_response =
             parse_review_start_response(r#"{"id":1,"result":{}}"#).unwrap_err();
-        assert_eq!(server_error, "review target must be a base branch");
-        assert_eq!(invalid_response, "invalid-response");
-        assert_eq!(unexpected_response, "unexpected-response");
+        assert!(matches!(
+            &server_error,
+            ReviewStartError::Server(message)
+                if message == "review target must be a base branch"
+        ));
+        assert_eq!(
+            server_error.to_string(),
+            "server-error: review target must be a base branch"
+        );
+        assert_eq!(
+            parse_review_start_response(r#"{"id":1,"error":{"message":"not-confirmed"}}"#)
+                .unwrap_err()
+                .to_string(),
+            "server-error: not-confirmed"
+        );
+        assert_eq!(invalid_response.to_string(), "invalid-response");
+        assert_eq!(unexpected_response.to_string(), "unexpected-response");
         assert_ne!(server_error, invalid_response);
         assert_ne!(server_error, unexpected_response);
         assert_ne!(invalid_response, unexpected_response);
         assert_eq!(
             parse_review_start_response(r#"{"id":1,"result":{"turn":{"id":"turn-1"}}}"#)
                 .unwrap_err(),
-            "not-confirmed"
+            ReviewStartError::Reason("not-confirmed")
         );
     }
 
@@ -1126,6 +1194,32 @@ mod tests {
         assert_eq!(fields["reason"], "review target must be a base branch");
     }
 
+    #[test]
+    fn review_start_audit_truncates_long_reason_without_losing_event() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("events.jsonl");
+        let long_reason = "x".repeat(340);
+        let fields = review_start_audit_fields(
+            "thread-1",
+            "baseBranch:origin/main",
+            ReviewDelivery::Inline,
+            Some("/review --base origin/main"),
+            Some("sender-1"),
+            Some("/repo"),
+            Some(&long_reason),
+        );
+        crate::events::EventEmitter::new(&path, "daemon")
+            .emit_fields("agent_raw_inject", fields)
+            .unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["type"], "agent_raw_inject");
+        assert_eq!(event["data"]["reason_truncated"], true);
+        let recorded = event["data"]["reason"].as_str().unwrap();
+        assert!(long_reason.starts_with(recorded));
+        assert!(recorded.len() < long_reason.len());
+    }
+
     #[tokio::test]
     async fn review_start_close_after_send_is_not_confirmed() {
         let temp = tempfile::tempdir().unwrap();
@@ -1147,7 +1241,10 @@ mod tests {
         .await;
         server.await.unwrap();
         assert!(request_in_flight);
-        assert_eq!(result.unwrap_err(), "not-confirmed");
+        assert_eq!(
+            result.unwrap_err(),
+            ReviewStartError::Reason("not-confirmed")
+        );
     }
 
     #[test]
