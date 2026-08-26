@@ -336,6 +336,10 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # registry/graph joins; apply lanes shell out to fno verbs); no Rust client
     # port, so it must never auto-route to the daemon.
     "watchdog",
+    # The citizen-yard read (folded under agents from the retired root verb).
+    # Pure Python: reads the registry + graph archive; no Rust client port, so
+    # it must never auto-route to the daemon.
+    "yard",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
