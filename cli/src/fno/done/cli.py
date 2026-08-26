@@ -32,6 +32,7 @@ graph.cli's cmd_done; this command owns the rich completion surface
 (--backfill rollups, PR/link/note metadata, fuzzy and branch queries) and is
 reached through cmd_done's delegation and the `fno done` VERB_MOVES shim.
 """
+
 from __future__ import annotations
 
 import json
@@ -63,12 +64,14 @@ from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
 def _path_graph():
     """Re-resolve GRAPH_JSON on each call so monkeypatches land in tests."""
     from fno.graph._constants import GRAPH_JSON
+
     return GRAPH_JSON
 
 
 def _path_ledger():
     """Re-resolve LEDGER_JSON on each call so monkeypatches land in tests."""
     from fno.graph._constants import LEDGER_JSON
+
     return LEDGER_JSON
 
 
@@ -79,7 +82,9 @@ def _current_branch() -> Optional[str]:
     try:
         r = subprocess.run(
             ["git", "branch", "--show-current"],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except OSError:
         return None
@@ -104,11 +109,17 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
     try:
         r = subprocess.run(
             [
-                "gh", "pr", "view",
-                "--json", "number,url",
-                "--jq", r'"\(.number) \(.url)"',
+                "gh",
+                "pr",
+                "view",
+                "--json",
+                "number,url",
+                "--jq",
+                r'"\(.number) \(.url)"',
             ],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
     except OSError as exc:
         if announce_failure:
@@ -123,7 +134,11 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
             # Truncate to first 4 KB so we don't flood the terminal.
             if len(diagnostic) > 4096:
                 diagnostic = diagnostic[:4096] + " [truncated]"
-            msg = f"fno backlog done: gh pr view failed: {diagnostic}" if diagnostic else "fno backlog done: gh pr view failed (no diagnostic available)"
+            msg = (
+                f"fno backlog done: gh pr view failed: {diagnostic}"
+                if diagnostic
+                else "fno backlog done: gh pr view failed (no diagnostic available)"
+            )
             print(msg, file=sys.stderr)
         return None, None
     # rc=0: "no PR for this branch" if stdout is unparseable -- stay silent.
@@ -134,8 +149,6 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
         return int(parts[0]), parts[1]
     except ValueError:
         return None, None
-
-
 
 
 # -- ledger rollup --
@@ -201,7 +214,8 @@ def _rollup_from_ledger(node: Optional[dict]) -> dict:
     target = normalize_plan_path(plan_path)
     ledger_entries = _load_ledger_entries()
     matching = [
-        le for le in ledger_entries
+        le
+        for le in ledger_entries
         if isinstance(le, dict) and normalize_plan_path(le.get("plan_path")) == target
     ]
     if not matching:
@@ -229,11 +243,13 @@ def _rollup_from_ledger(node: Optional[dict]) -> dict:
         except (TypeError, ValueError):
             cost_f = 0.0
         sid = le.get("fno_id") or le.get("session_id") or (sessions[0] if sessions else None)
-        cost_sessions.append({
-            "session_id": sid,
-            "cost_usd": round(cost_f, 4),
-            "timestamp": le.get("completed") or le.get("started"),
-        })
+        cost_sessions.append(
+            {
+                "session_id": sid,
+                "cost_usd": round(cost_f, 4),
+                "timestamp": le.get("completed") or le.get("started"),
+            }
+        )
 
     # Latest session: the most-recent-completed ledger entry, resolved to the
     # SAME scalar the cost row above keys on. Taking the last alias instead put
@@ -336,9 +352,7 @@ def _apply_rollup(
                 added += 1
         if added:
             entry["cost_sessions"] = existing
-            entry["cost_usd"] = round(
-                sum(float(s.get("cost_usd") or 0) for s in existing), 4
-            )
+            entry["cost_usd"] = round(sum(float(s.get("cost_usd") or 0) for s in existing), 4)
             tags.append(f"${entry['cost_usd']:.2f}")
 
     # points: fill only if null, or overwrite when forced
@@ -367,18 +381,26 @@ def done_command(
         None, "--pr-number", "--pr", "-p", help="PR number (for code-domain completions)."
     ),
     pr_url: Optional[str] = typer.Option(
-        None, "--pr-url",
+        None,
+        "--pr-url",
         help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
     ),
     link: Optional[str] = typer.Option(
-        None, "--link", "--url", "-l",
+        None,
+        "--link",
+        "--url",
+        "-l",
         help="Artifact URL (Figma/Canva/Obsidian/any) - sets artifact_url.",
     ),
     note: Optional[str] = typer.Option(
-        None, "--note", "-m", help="Free-text completion note - sets completion_note.",
+        None,
+        "--note",
+        "-m",
+        help="Free-text completion note - sets completion_note.",
     ),
     backfill: bool = typer.Option(
-        False, "--backfill",
+        False,
+        "--backfill",
         help=(
             "Run ONLY the ledger-rollup (session_id, cost_usd, cost_sessions, "
             "points). Does not flip status or completed_at. With no QUERY, "
@@ -386,7 +408,8 @@ def done_command(
         ),
     ),
     force_overwrite: bool = typer.Option(
-        False, "--force-overwrite",
+        False,
+        "--force-overwrite",
         help="Overwrite existing rollup fields instead of fill-if-null. Use with --backfill for explicit re-reconciliation of stale rollups.",
     ),
 ) -> None:
@@ -425,7 +448,8 @@ def done_command(
             match = resolve_id(query, entries, git_branch=branch)
             if match.kind == "none":
                 typer.echo(
-                    f"fno backlog done --backfill: no match for {query!r}", err=True,
+                    f"fno backlog done --backfill: no match for {query!r}",
+                    err=True,
                 )
                 raise typer.Exit(code=2)
             if match.kind == "ambiguous":
@@ -436,17 +460,13 @@ def done_command(
                 )
                 for c in match.candidates:
                     typer.echo(
-                        f"  {c.get('id'):<14} {c.get('status', '?'):<9} "
-                        f"{c.get('title', '')}",
+                        f"  {c.get('id'):<14} {c.get('status', '?'):<9} {c.get('title', '')}",
                         err=True,
                     )
                 raise typer.Exit(code=2)
             target_ids = {match.id}
         else:
-            target_ids = {
-                e.get("id") for e in entries
-                if e.get("status") == "done" and e.get("id")
-            }
+            target_ids = {e.get("id") for e in entries if e.get("status") == "done" and e.get("id")}
 
         if not target_ids:
             typer.echo("fno backlog done --backfill: no done nodes to backfill")
@@ -465,7 +485,12 @@ def done_command(
                 eid = e.get("id")
                 if eid not in target_ids:
                     continue
-                tags = _apply_rollup(e, rollups.get(eid, {}), env_session=env_session, force_overwrite=force_overwrite)
+                tags = _apply_rollup(
+                    e,
+                    rollups.get(eid, {}),
+                    env_session=env_session,
+                    force_overwrite=force_overwrite,
+                )
                 if tags:
                     touched.append((eid, tags))
             return entries_inner
@@ -481,8 +506,7 @@ def done_command(
             for eid, tags in touched:
                 typer.echo(f"  {eid}: {'  '.join(tags)}")
             typer.echo(
-                f"fno backlog done --backfill: updated {len(touched)} / "
-                f"{len(target_ids)} node(s)"
+                f"fno backlog done --backfill: updated {len(touched)} / {len(target_ids)} node(s)"
             )
         return
 
@@ -531,21 +555,18 @@ def done_command(
 
     if match.kind == "ambiguous":
         typer.echo(
-            f"fno done: {len(match.candidates)} candidates for {query!r}:",
+            f"fno backlog done: {len(match.candidates)} candidates for {query!r}:",
             err=True,
         )
         for c in match.candidates:
-            line = (
-                f"  {c.get('id'):<14} {c.get('status', '?'):<9} "
-                f"{c.get('title', '')}"
-            )
+            line = f"  {c.get('id'):<14} {c.get('status', '?'):<9} {c.get('title', '')}"
             typer.echo(line, err=True)
         raise typer.Exit(code=2)
 
     # A url with no number is not a PR link, and silently dropping it would
     # mark the node done while discarding the operator's only evidence.
     if pr_url is not None and pr is None:
-        typer.echo("fno done: --pr-url requires --pr", err=True)
+        typer.echo("fno backlog done: --pr-url requires --pr", err=True)
         raise typer.Exit(code=2)
 
     node_id = match.id
@@ -560,14 +581,9 @@ def done_command(
         pr, auto_url = _current_pr(announce_failure=True)
 
     # Require some completion signal for non-code when nothing resolves.
-    if (
-        domain != "code"
-        and pr is None
-        and link is None
-        and note is None
-    ):
+    if domain != "code" and pr is None and link is None and note is None:
         typer.echo(
-            f"fno done: {node_id} is domain={domain}; "
+            f"fno backlog done: {node_id} is domain={domain}; "
             "pass --link, --note, or --pr to mark it done.",
             err=True,
         )
@@ -603,9 +619,7 @@ def done_command(
 
     merge_status_to_write: Optional[str] = None
     if gate_refs:
-        evidence = resolve_merge_evidence(
-            gate_refs, cwd=node.get("cwd"), query=_gh_query
-        )
+        evidence = resolve_merge_evidence(gate_refs, cwd=node.get("cwd"), query=_gh_query)
         if evidence.outcome == "awaiting_merge":
             typer.echo(
                 f"awaiting merge: PR #{evidence.open_pr_number} is OPEN, not merged. "
@@ -668,7 +682,7 @@ def done_command(
         if pr_url is not None:
             if repo_slug_from_url(pr_url) is None:
                 typer.echo(
-                    f"fno done: --pr-url {pr_url!r} is not a GitHub PR url "
+                    f"fno backlog done: --pr-url {pr_url!r} is not a GitHub PR url "
                     "(expected https://github.com/<owner>/<repo>/pull/<n>)",
                     err=True,
                 )
@@ -676,7 +690,7 @@ def done_command(
             named = pr_number_from_url(pr_url)
             if named != pr:
                 typer.echo(
-                    f"fno done: --pr-url names PR #{named}, not #{pr} - a row "
+                    f"fno backlog done: --pr-url names PR #{named}, not #{pr} - a row "
                     "pointing at two different PRs matches neither.",
                     err=True,
                 )
@@ -688,7 +702,7 @@ def done_command(
         # collide across repos, so a bare number can attribute a foreign PR.
         if pr_url_to_write is None:
             typer.echo(
-                f"fno done: cannot resolve the repo for PR #{pr} - refusing to "
+                f"fno backlog done: cannot resolve the repo for PR #{pr} - refusing to "
                 "stamp an unattributable pr_number. Fix with either "
                 "`gh auth login` or `--pr-url https://github.com/<owner>/<repo>/pull/"
                 f"{pr}`.",
@@ -702,6 +716,10 @@ def done_command(
     collision_state: dict = {"detected": False, "first_completed_at": None}
 
     cascade_closed: list = []
+    # The mutated row, exported so the post-close plan stamp reads the
+    # session_id/points _apply_rollup fills inside the lock; `node` is the
+    # pre-lock snapshot and never sees them.
+    node_after: list = [None]
 
     def _mutator(entries_inner):
         for e in entries_inner:
@@ -733,11 +751,18 @@ def done_command(
                 collision_state["detected"] = True
                 collision_state["first_completed_at"] = e.get("completed_at")
                 if force_overwrite:
-                    rollup_tags.extend(_apply_rollup(e, rollup, env_session=env_session, force_overwrite=True))
+                    rollup_tags.extend(
+                        _apply_rollup(e, rollup, env_session=env_session, force_overwrite=True)
+                    )
             else:
                 e["status"] = "done"
                 e["completed_at"] = now
-                rollup_tags.extend(_apply_rollup(e, rollup, env_session=env_session, force_overwrite=force_overwrite))
+                node_after[0] = e
+                rollup_tags.extend(
+                    _apply_rollup(
+                        e, rollup, env_session=env_session, force_overwrite=force_overwrite
+                    )
+                )
                 # Same ancestor cascade as the canonical close (PR 1200
                 # review): a rich-flag close must not skip closing an
                 # all-done epic parent. Function-local import - graph.cli
@@ -758,6 +783,7 @@ def done_command(
         emit_outcome = "emitted"
         try:
             import fno.events as _ev
+
             _ev.append_event(
                 _ev.done_race_collision(
                     node_id=node_id,
@@ -789,7 +815,7 @@ def done_command(
         from fno.graph.cli import _canonical_post_close
 
         _canonical_post_close(
-            node,
+            node_after[0] or node,
             task_id=node_id,
             cascade_closed=cascade_closed,
             skip_stamp=False,
@@ -862,4 +888,12 @@ def _cli_callback(
 ) -> None:
     if ctx.invoked_subcommand is not None:
         return
-    done_command(query=query, pr=pr, pr_url=pr_url, link=link, note=note, backfill=backfill, force_overwrite=force_overwrite)
+    done_command(
+        query=query,
+        pr=pr,
+        pr_url=pr_url,
+        link=link,
+        note=note,
+        backfill=backfill,
+        force_overwrite=force_overwrite,
+    )

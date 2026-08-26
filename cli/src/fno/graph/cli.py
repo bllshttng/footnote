@@ -10,6 +10,7 @@ Exit codes:
     3  not found
     4  nothing to intake
 """
+
 from __future__ import annotations
 
 import json
@@ -182,10 +183,7 @@ def _container_ids(entries: list[dict]) -> set[str]:
     closure. That replaces the old "walker closes the epic via next" path,
     which conflicted with never building a container.
     """
-    return {
-        p for e in entries
-        if isinstance(e, dict) and isinstance((p := e.get("parent")), str)
-    }
+    return {p for e in entries if isinstance(e, dict) and isinstance((p := e.get("parent")), str)}
 
 
 @cli.callback()
@@ -193,17 +191,20 @@ def _graph_callback(
     ctx: typer.Context,
     json_output: bool = typer.Option(
         False,
-        "--json", "-J",
+        "--json",
+        "-J",
         help="Output structured JSON to stdout. Diagnostics go to stderr.",
     ),
 ) -> None:
     from fno.handoff.output import merge_json_flag
+
     merge_json_flag(ctx, json_output)
 
 
 def _graph_path() -> Path:
     """Return the active graph.json path (monkeypatch-friendly)."""
     from fno.graph._constants import GRAPH_JSON
+
     return GRAPH_JSON
 
 
@@ -269,11 +270,13 @@ def _resolve_entries_or_exit(id: str):
 
 def _archive_path() -> Path:
     from fno.graph._constants import GRAPH_ARCHIVE_JSON
+
     return GRAPH_ARCHIVE_JSON
 
 
 def _briefs_dir() -> Path:
     from fno.graph._constants import BRIEFS_DIR
+
     return BRIEFS_DIR
 
 
@@ -290,13 +293,18 @@ _relatedness_cli = typer.Typer(
 
 def _relatedness_path() -> Path:
     from fno.paths import relatedness_json
+
     return relatedness_json()
 
 
 @_relatedness_cli.command("build")
 def cmd_relatedness_build(
-    project: Optional[str] = typer.Option(None, "--project", "-p", help="Restrict the corpus to this project."),
-    judge: bool = typer.Option(False, "--judge", help="Haiku pairwise refinement (v2, opt-in); v1 is deterministic-only."),
+    project: Optional[str] = typer.Option(
+        None, "--project", "-p", help="Restrict the corpus to this project."
+    ),
+    judge: bool = typer.Option(
+        False, "--judge", help="Haiku pairwise refinement (v2, opt-in); v1 is deterministic-only."
+    ),
     top_k: int = typer.Option(5, "--top-k", "-K", help="Edges persisted per node."),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the built map as JSON."),
 ) -> None:
@@ -310,7 +318,10 @@ def cmd_relatedness_build(
     if judge:
         # Degrade, never abort: v1 has no judge layer, so note and write the
         # deterministic map (AC6 posture - LLM absence never blocks the write).
-        typer.echo("note: --judge (haiku refinement) not implemented in v1; wrote deterministic map.", err=True)
+        typer.echo(
+            "note: --judge (haiku refinement) not implemented in v1; wrote deterministic map.",
+            err=True,
+        )
     path = _relatedness_path()
     _r.write_map(path, mapping)
     if json_output:
@@ -429,8 +440,11 @@ def _epic_events(children: list[dict]) -> list[dict]:
 
     for c in children:
         proj = c.get("project")
-        root = (project_root_from_settings(proj) if proj else None) \
-            or c.get("_resolved_cwd") or c.get("cwd")
+        root = (
+            (project_root_from_settings(proj) if proj else None)
+            or c.get("_resolved_cwd")
+            or c.get("cwd")
+        )
         if not root:
             continue
         _ingest(Path(root) / ".fno" / "events.jsonl")
@@ -508,10 +522,7 @@ def _scope_growth_line(growth) -> str:
             f"scope growth: withheld (origin capture {pct}, below the "
             f"{SCOPE_GROWTH_COVERAGE_FLOOR:.0%} floor)  |  {cost}"
         )
-    return (
-        f"scope growth: {len(growth.follow_up_ids)} follow-ups "
-        f"(origin capture {pct})  |  {cost}"
-    )
+    return f"scope growth: {len(growth.follow_up_ids)} follow-ups (origin capture {pct})  |  {cost}"
 
 
 @_epic_cli.command("status")
@@ -564,15 +575,17 @@ def cmd_epic_status(
         node_id = c["id"]
         worker = _live_worker(node_id)
         pr = c.get("pr_number")
-        rows.append({
-            "id": node_id,
-            "slug": c.get("slug") or "",
-            "project": c.get("project") or "",
-            "status": _status_of(c) or "",
-            "worker": worker,
-            "pr_number": pr,
-            "receipt": _child_note(c, events, worker),
-        })
+        rows.append(
+            {
+                "id": node_id,
+                "slug": c.get("slug") or "",
+                "project": c.get("project") or "",
+                "status": _status_of(c) or "",
+                "worker": worker,
+                "pr_number": pr,
+                "receipt": _child_note(c, events, worker),
+            }
+        )
 
     from fno.graph.rollup import scope_growth
     from fno.graph.store import entries_with_archive
@@ -586,31 +599,38 @@ def cmd_epic_status(
     growth = scope_growth(entries_with_archive(entries), epic_id)
 
     if json_mode(ctx):
-        typer.echo(json.dumps({
-            "epic": epic_id,
-            "slug": epic_node.get("slug"),
-            "children_total": total,
-            "children_done": done,
-            "children": rows,
-            # follow_ups is reported only when coverage clears the floor; the
-            # coverage block ships regardless so a suppressed figure explains
-            # itself instead of just being absent.
-            "scope_growth": {
-                "follow_ups": len(growth.follow_up_ids or ()) if growth.reportable else None,
-                "follow_up_ids": list(growth.follow_up_ids or ()),
-                "reportable": growth.reportable,
-                "coverage": round(growth.coverage, 4),
-                "window_total": growth.window_total,
-                "window_with_origin": growth.window_with_origin,
-                # Origins naming a node the graph no longer has. Excluded from
-                # coverage (they can join nothing) and reported so the gap
-                # between "stamped" and "joinable" stays visible.
-                "window_dangling": growth.window_dangling,
-                "realized_nodes": growth.realized_nodes,
-                "realized_prs": growth.realized_prs,
-                "declared_size": growth.declared_size,
-            },
-        }, indent=2))
+        typer.echo(
+            json.dumps(
+                {
+                    "epic": epic_id,
+                    "slug": epic_node.get("slug"),
+                    "children_total": total,
+                    "children_done": done,
+                    "children": rows,
+                    # follow_ups is reported only when coverage clears the floor; the
+                    # coverage block ships regardless so a suppressed figure explains
+                    # itself instead of just being absent.
+                    "scope_growth": {
+                        "follow_ups": len(growth.follow_up_ids or ())
+                        if growth.reportable
+                        else None,
+                        "follow_up_ids": list(growth.follow_up_ids or ()),
+                        "reportable": growth.reportable,
+                        "coverage": round(growth.coverage, 4),
+                        "window_total": growth.window_total,
+                        "window_with_origin": growth.window_with_origin,
+                        # Origins naming a node the graph no longer has. Excluded from
+                        # coverage (they can join nothing) and reported so the gap
+                        # between "stamped" and "joinable" stays visible.
+                        "window_dangling": growth.window_dangling,
+                        "realized_nodes": growth.realized_nodes,
+                        "realized_prs": growth.realized_prs,
+                        "declared_size": growth.declared_size,
+                    },
+                },
+                indent=2,
+            )
+        )
         return
 
     typer.echo(f"epic: {epic_id} ({epic_node.get('slug') or ''})  {done}/{total} done")
@@ -699,8 +719,11 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
         return
     try:
         append_session_record(
-            _graph_path(), node_id, phase="ship",
-            harness=harness, session_id=session_id,
+            _graph_path(),
+            node_id,
+            phase="ship",
+            harness=harness,
+            session_id=session_id,
             started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
     except (Exception, SystemExit) as exc:
@@ -749,8 +772,11 @@ def _stamp_blueprint_on_plan_link(node_id: str) -> None:
         return
     try:
         append_session_record(
-            _graph_path(), node_id, phase="blueprint",
-            harness=harness, session_id=session_id,
+            _graph_path(),
+            node_id,
+            phase="blueprint",
+            harness=harness,
+            session_id=session_id,
             ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
     except (Exception, SystemExit) as exc:
@@ -921,6 +947,7 @@ def _build_backlog_node(
     so duplicate-ID checks happen against the live snapshot.
     """
     from fno.graph._constants import ID_PREFIX  # noqa: F401
+
     # Parent-edge provenance (x-30f6): stamped from the running session's env +
     # manifest, or from an explicit --source-node. Centralized here so
     # every creator verb (add/idea/decompose) self-describes its origin.
@@ -1061,8 +1088,7 @@ def _create_node_impl(
 
     if priority not in PRIORITY_ORDER:
         typer.echo(
-            f"Error: invalid priority '{priority}'. "
-            f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1095,8 +1121,7 @@ def _create_node_impl(
     # Same set, same message - one vocabulary is the point.
     if type_ not in VALID_NODE_TYPES:
         typer.echo(
-            f"Error: invalid type '{type_}'. Must be one of: "
-            f"{', '.join(sorted(VALID_NODE_TYPES))}",
+            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -1107,6 +1132,7 @@ def _create_node_impl(
     resolved_details = details if details is not None else description
 
     from fno.graph._constants import normalize_tag
+
     try:
         resolved_tags = list(dict.fromkeys(normalize_tag(t) for t in (tags or [])))
     except ValueError as exc:
@@ -1224,15 +1250,16 @@ def _create_node_impl(
                 # A brand-new leaf can neither cycle nor deepen epic nesting,
                 # but honor the same guards the update path applies rather than
                 # trusting that; a refusal falls back to suggest.
-                if target is not None and not _would_exceed_epic_depth(
-                    entries, node, target
-                ) and not _would_create_cycle(entries, node["id"], target["id"]):
+                if (
+                    target is not None
+                    and not _would_exceed_epic_depth(entries, node, target)
+                    and not _would_create_cycle(entries, node["id"], target["id"])
+                ):
                     link_to = target["id"]
                 else:
                     resolution = resolution._replace(kind="suggest")
             index = {
-                e["id"]: e for e in entries
-                if isinstance(e, dict) and isinstance(e.get("id"), str)
+                e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
             }
             # Receipt FIRST, then the edge: an auto-link is only safe because a
             # human reads the receipt and can undo it, so a link must never land
@@ -1306,6 +1333,7 @@ def _create_node_impl(
 
 # -- add --
 
+
 @cli.command(
     "add",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
@@ -1314,11 +1342,17 @@ def cmd_add(
     title: str = typer.Argument(..., help="Feature title"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
-    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
-    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
+    blocks_everything: bool = typer.Option(
+        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
+    ),
+    difficulty: Optional[str] = typer.Option(
+        None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."
+    ),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
+    type_: str = typer.Option(
+        "feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"
+    ),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1461,6 +1495,7 @@ def _fold_candidates(
                     known.add(surface_node_id)
     return out, source
 
+
 @cli.command(
     "idea",
     epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
@@ -1470,8 +1505,12 @@ def cmd_idea(
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
     priority: str = typer.Option("p2", "--priority", "-p", help="p0|p1|p2|p3"),
-    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
-    difficulty: Optional[str] = typer.Option(None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."),
+    blocks_everything: bool = typer.Option(
+        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
+    ),
+    difficulty: Optional[str] = typer.Option(
+        None, "--difficulty", help="Intrinsic work difficulty: low|medium|high."
+    ),
     wave_of: Optional[str] = typer.Option(
         None,
         "--wave-of",
@@ -1484,7 +1523,9 @@ def cmd_idea(
     ),
     blocked_by: Optional[str] = typer.Option(None, "--blocked-by", help="Comma-separated ab-IDs"),
     parent: Optional[str] = typer.Option(None, help="Parent node ab-ID"),
-    type_: str = typer.Option("feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"),
+    type_: str = typer.Option(
+        "feature", "--type", "-t", help="Node type: feature|epic|bug|roadmap"
+    ),
     project: Optional[str] = typer.Option(
         None,
         help=(
@@ -1577,11 +1618,11 @@ def cmd_idea(
             raise typer.Exit(code=2)
 
         from fno.graph._constants import normalize_difficulty
+
         if difficulty is None:
             if not sys.stdin.isatty():
                 typer.echo(
-                    "Error: non-interactive wave filing requires --difficulty "
-                    "(low, medium, high)",
+                    "Error: non-interactive wave filing requires --difficulty (low, medium, high)",
                     err=True,
                 )
                 raise typer.Exit(code=2)
@@ -1733,6 +1774,7 @@ def cmd_idea(
 
 # -- decompose (bounded epic -> group child nodes) --
 
+
 @cli.command("decompose", hidden=True)
 def cmd_decompose(
     ctx: typer.Context,
@@ -1765,7 +1807,8 @@ def cmd_decompose(
     ),
     force: bool = typer.Option(
         False,
-        "--force", "-F",
+        "--force",
+        "-F",
         help="Allow a re-decomposition that orphans an already-shipped group child node.",
     ),
     plans: str = typer.Option(
@@ -1875,9 +1918,7 @@ def cmd_decompose(
                 epic_doc = os.path.join(epic_node.get("cwd") or os.getcwd(), epic_doc)
             max_children = _read_plan_frontmatter(epic_doc).get("max_children", _UNSET)
             try:
-                epic_doc_rel = os.path.relpath(
-                    epic_doc, epic_node.get("cwd") or os.getcwd()
-                )
+                epic_doc_rel = os.path.relpath(epic_doc, epic_node.get("cwd") or os.getcwd())
             except ValueError:
                 epic_doc_rel = os.path.basename(epic_doc)
     except (DecomposeError, GraphUnreadableError, OSError):
@@ -1889,6 +1930,7 @@ def cmd_decompose(
     config_default: Optional[int] = None
     if max_children is _UNSET and explicit_max_prs is None:
         from fno.config import load_settings
+
         try:
             config_default = load_settings().blueprint.max_prs_per_epic
         except Exception as e:
@@ -1918,6 +1960,7 @@ def cmd_decompose(
     #     work under the wrong repo and break spawn-into-project. No project/cwd
     #     -> (None, None) = inherit the epic's repo (the single-repo default).
     from fno.graph._intake import project_root_from_settings
+
     slug_route: dict[str, tuple[Optional[str], Optional[str]]] = {}
     for grp in norm:
         gproj, gcwd = grp["project"], grp["cwd"]
@@ -2128,8 +2171,10 @@ def cmd_decompose(
             _legacy_defer = isinstance(_completed, str) and _completed.startswith(
                 _LEGACY_DEFER_PREFIX
             )
-            if grp["adopt"] and not (bool(_completed) and not _legacy_defer) and (
-                node.get("deferred_at") or node.get("superseded_by") or _legacy_defer
+            if (
+                grp["adopt"]
+                and not (bool(_completed) and not _legacy_defer)
+                and (node.get("deferred_at") or node.get("superseded_by") or _legacy_defer)
             ):
                 _superseder = node.get("superseded_by")
                 # The remedy branches on the cause: `fno backlog undefer` clears
@@ -2162,8 +2207,7 @@ def cmd_decompose(
                 target = _find_node(graph_entries, adopt_id)
                 if target is None:
                     raise DecomposeError(
-                        f"group {grp['slug']!r} adopts {adopt_id}, which resolves "
-                        "to no node",
+                        f"group {grp['slug']!r} adopts {adopt_id}, which resolves to no node",
                         exit_code=3,
                     )
                 if target["id"] == epic_resolved_id:
@@ -2172,8 +2216,7 @@ def cmd_decompose(
                     # past it and would otherwise land on the generic cycle
                     # refusal (exit 2) instead of this one (exit 1).
                     raise DecomposeError(
-                        f"group {grp['slug']!r} adopt names the epic "
-                        f"{epic_resolved_id} itself",
+                        f"group {grp['slug']!r} adopt names the epic {epic_resolved_id} itself",
                         exit_code=1,
                     )
                 prior_slug = adopt_claim.get(target["id"])
@@ -2205,10 +2248,7 @@ def cmd_decompose(
                             "matches the epic doc"
                         )
                     else:
-                        whose = (
-                            "already a group child of another epic "
-                            f"({target.get('plan_path')})"
-                        )
+                        whose = f"already a group child of another epic ({target.get('plan_path')})"
                     raise DecomposeError(
                         f"group {grp['slug']!r} adopts {target['id']}, which is "
                         f"{whose}; demoting a group into a task "
@@ -2254,8 +2294,7 @@ def cmd_decompose(
                 # still gets its specific message rather than the vaguer one.
                 if _would_create_cycle(graph_entries, target["id"], node["id"]):
                     raise DecomposeError(
-                        f"adopting {target['id']} into group {grp['slug']!r} "
-                        "would create a cycle",
+                        f"adopting {target['id']} into group {grp['slug']!r} would create a cycle",
                         exit_code=2,
                     )
                 # An adoptee with descendants (codex P1). Containment is ONE
@@ -2267,7 +2306,8 @@ def cmd_decompose(
                 # of its own, and folding it wholesale into another unit is a
                 # reshape the operator should state explicitly.
                 _kids = [
-                    e.get("id") for e in graph_entries
+                    e.get("id")
+                    for e in graph_entries
                     if isinstance(e, dict) and e.get("parent") == target["id"]
                 ]
                 if _kids:
@@ -2373,9 +2413,7 @@ def cmd_decompose(
             # re-decompose downgrade (contract -> hard) cleans up stale stub
             # metadata and the pure-hard path serializes byte-for-byte unchanged
             # (Invariant). The downgrade reason, if any, is surfaced after the lock.
-            dep, stub_against, cversion, downgrade = classify_group_dep(
-                grp, pinned_versions, base
-            )
+            dep, stub_against, cversion, downgrade = classify_group_dep(grp, pinned_versions, base)
             if dep == "contract":
                 node["dep"] = "contract"
                 node["stub_against"] = stub_against
@@ -2407,9 +2445,7 @@ def cmd_decompose(
         unadopted_box[0] = [
             e.get("id")
             for e in graph_entries
-            if e.get("id")
-            and e.get("parent") == epic_resolved_id
-            and not is_group_child(e)
+            if e.get("id") and e.get("parent") == epic_resolved_id and not is_group_child(e)
         ]
         return graph_entries
 
@@ -2443,6 +2479,7 @@ def cmd_decompose(
     # failure degrades to an empty map (scaffold falls back to today's date, the
     # fan-out step is a no-op) rather than wedging the already-committed mutation.
     from fno.graph.store import read_graph as _read_graph
+
     try:
         by_id = {e.get("id"): e for e in _read_graph(_graph_path())}
     except Exception:  # noqa: BLE001 - never wedge the report on a re-read failure
@@ -2462,9 +2499,7 @@ def cmd_decompose(
     why_digest = ""
     if separate and base_box[0]:
         try:
-            why_digest, why_warn = extract_why_digest(
-                Path(base_box[0]).read_text(encoding="utf-8")
-            )
+            why_digest, why_warn = extract_why_digest(Path(base_box[0]).read_text(encoding="utf-8"))
             if why_warn:
                 typer.echo(f"warning: {why_warn}", err=True)
         except (OSError, UnicodeDecodeError):
@@ -2473,6 +2508,7 @@ def cmd_decompose(
     scaffolded: list[str] = []
     if separate and base_box[0]:
         from fno.graph._intake import repo_root
+
         source_doc = verbatim_base_box[0] or base_box[0]
         id_by_slug = {r["slug"]: r["id"] for r in results}
         for grp in norm:
@@ -2497,14 +2533,12 @@ def cmd_decompose(
             # created_at sources the filename date, so a later-day re-decompose
             # recomputes the SAME path (idempotent). Fall back to the epic cwd
             # then repo_root() only if the re-read lost the node.
-            child_root = (
-                (child.get("cwd") if child else None)
-                or epic_cwd_box[0]
-                or repo_root()
-            )
+            child_root = (child.get("cwd") if child else None) or epic_cwd_box[0] or repo_root()
             canonical = Path(
                 canonical_child_plan_path(
-                    slug, child_id, str(child_root),
+                    slug,
+                    child_id,
+                    str(child_root),
                     child.get("created_at") if child else None,
                 )
             )
@@ -2522,7 +2556,9 @@ def cmd_decompose(
                 ]
                 canonical.write_text(
                     scaffold_separate_plan(
-                        grp, epic_resolved_id, source_doc,
+                        grp,
+                        epic_resolved_id,
+                        source_doc,
                         why_digest=why_digest,
                         adopted=adopted_nodes,
                     ),
@@ -2586,8 +2622,9 @@ def cmd_decompose(
             # independent, which is the only case where handing design to a cold
             # worker beats one warm context writing several coherent siblings.
             wave0_ids: set[str] = set()
-            if think_spawn_on_decompose_wave0(project_root=Path(epic_cwd_box[0])
-                                              if epic_cwd_box[0] else None):
+            if think_spawn_on_decompose_wave0(
+                project_root=Path(epic_cwd_box[0]) if epic_cwd_box[0] else None
+            ):
                 from fno.plan._rollup import compute_waves
 
                 wave_by_id, _ = compute_waves(epic_resolved_id, list(by_id.values()))
@@ -2604,8 +2641,11 @@ def cmd_decompose(
                     # the /think doc to the CHILD's repo (cross-repo routing).
                     child_root = child.get("_resolved_cwd") or child.get("cwd")
                     res = maybe_spawn_think(
-                        child, run_state=born_rs, env=forced_env,
-                        quiet=json_mode(ctx), chain_blueprint=True,
+                        child,
+                        run_state=born_rs,
+                        env=forced_env,
+                        quiet=json_mode(ctx),
+                        chain_blueprint=True,
                         why_digest=why_digest,
                         project_root=Path(child_root) if child_root else None,
                     )
@@ -2618,9 +2658,15 @@ def cmd_decompose(
                     # That is also what makes double-writing impossible (AC9-CON)
                     # - exactly one lane can see `owned: true` for a child.
                     lane = "wave0" if cid in wave0_ids else "needs_think"
-                    fanout.append({"id": cid, "decision": res.decision,
-                                   "reason": res.reason, "lane": lane,
-                                   "owned": res.decision == "spawned"})
+                    fanout.append(
+                        {
+                            "id": cid,
+                            "decision": res.decision,
+                            "reason": res.reason,
+                            "lane": lane,
+                            "owned": res.decision == "spawned",
+                        }
+                    )
                     if res.decision != "spawned" and not json_mode(ctx):
                         typer.echo(
                             f"fan-out /think for {cid} did not spawn "
@@ -2634,9 +2680,9 @@ def cmd_decompose(
             # children needed designing", so a crash here would read as a clean
             # no-op to both the operator and a --json consumer. Name it and say
             # which children fell back to inline-fill.
-            _unowned = [c for c in spec_ids if not any(
-                f["id"] == c and f.get("owned") for f in fanout
-            )]
+            _unowned = [
+                c for c in spec_ids if not any(f["id"] == c and f.get("owned") for f in fanout)
+            ]
             if not json_mode(ctx):
                 typer.echo(
                     f"warning: design fan-out failed ({exc}); "
@@ -2647,24 +2693,23 @@ def cmd_decompose(
 
     # 4b. Report what happened (AC1-UI).
     if json_mode(ctx):
-        typer.echo(json.dumps(
-            {
-                "epic": epic_resolved_id,
-                "groups": results,
-                "orphaned": orphan_ids,
-                "downgrades": downgrades,
-                "packaging": plans,
-                "scaffolded": scaffolded,
-                "fanout": fanout,
-            },
-            default=str,
-        ))
+        typer.echo(
+            json.dumps(
+                {
+                    "epic": epic_resolved_id,
+                    "groups": results,
+                    "orphaned": orphan_ids,
+                    "downgrades": downgrades,
+                    "packaging": plans,
+                    "scaffolded": scaffolded,
+                    "fanout": fanout,
+                },
+                default=str,
+            )
+        )
     else:
         typer.echo(f"epic: {epic_resolved_id}")
-        typer.echo(
-            f"decomposed into {len(results)} group child node(s) "
-            f"(packaging: {plans}):"
-        )
+        typer.echo(f"decomposed into {len(results)} group child node(s) (packaging: {plans}):")
         for r in results:
             waves = f" waves {r['waves']}" if r["waves"] else ""
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
@@ -2675,9 +2720,7 @@ def cmd_decompose(
             # line below does. Empty stays silent, so a spec with no adopt key
             # prints byte-for-byte what it printed before.
             adopted = f" adopted={r['adopted']}" if r.get("adopted") else ""
-            typer.echo(
-                f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}{adopted}"
-            )
+            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}{adopted}")
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
         # Ownership must reach the HUMAN receipt, not just `--json`. The
@@ -2691,16 +2734,11 @@ def cmd_decompose(
             if fo["decision"] == "spawned":
                 typer.echo(f"  fan-out design pass dispatched: {fo['id']}")
         if _owned:
-            typer.echo(
-                f"  fan-out OWNS (do NOT inline-fill): {', '.join(_owned)}"
-            )
-        _unowned_attempts = [
-            fo["id"] for fo in fanout if not fo.get("owned")
-        ]
+            typer.echo(f"  fan-out OWNS (do NOT inline-fill): {', '.join(_owned)}")
+        _unowned_attempts = [fo["id"] for fo in fanout if not fo.get("owned")]
         if _unowned_attempts:
             typer.echo(
-                f"  fan-out did NOT claim (inline-fill these): "
-                f"{', '.join(_unowned_attempts)}"
+                f"  fan-out did NOT claim (inline-fill these): {', '.join(_unowned_attempts)}"
             )
         if orphan_ids:
             typer.echo(
@@ -2757,6 +2795,7 @@ def cmd_decompose(
 
 # -- intake --
 
+
 def _intake_impl(
     plan_paths: Optional[List[str]] = None,
     from_list: Optional[str] = None,
@@ -2783,8 +2822,10 @@ def _intake_impl(
     from fno.graph._constants import PRIORITY_ORDER
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
-        _prepare_intake, _build_intake_node,
-        _refuse_surfaceless_intake, _validate_cli_deps,
+        _prepare_intake,
+        _build_intake_node,
+        _refuse_surfaceless_intake,
+        _validate_cli_deps,
     )
 
     # Reject removed --batch flag
@@ -2842,8 +2883,10 @@ def _intake_impl(
 
     if len(all_paths) > 1:
         _do_intake_multi(
-            args, all_paths,
-            roadmap_id=roadmap_id, dry_run=dry_run,
+            args,
+            all_paths,
+            roadmap_id=roadmap_id,
+            dry_run=dry_run,
             allow_no_surface=allow_no_surface,
         )
         return
@@ -2851,9 +2894,7 @@ def _intake_impl(
     # Single-path flow
     plan_path = all_paths[0]
 
-    cli_deps: list[str] = (
-        [d.strip() for d in deps.split(",") if d.strip()] if deps else []
-    )
+    cli_deps: list[str] = [d.strip() for d in deps.split(",") if d.strip()] if deps else []
 
     # Creation path: the same external-backend refusal every birth path
     # carries (an intake mints new nodes).
@@ -2876,9 +2917,13 @@ def _intake_impl(
 
     try:
         prep = _prepare_intake(
-            plan_path, entries,
-            roadmap_id=roadmap_id, cli_title=title,
-            cli_priority=priority, cli_deps=cli_deps, cli_points=points,
+            plan_path,
+            entries,
+            roadmap_id=roadmap_id,
+            cli_title=title,
+            cli_priority=priority,
+            cli_deps=cli_deps,
+            cli_points=points,
             cli_project=project,
             cli_claim=claims,
         )
@@ -2886,7 +2931,7 @@ def _intake_impl(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(code=1)
     if prep["status"] == "already":
-        typer.echo(f'already intaked: {prep["id"]}')
+        typer.echo(f"already intaked: {prep['id']}")
         return
 
     # After _prepare_intake validates and before any write, so the refusal
@@ -2898,14 +2943,15 @@ def _intake_impl(
     if dry_run:
         verb = "claim" if prep["status"] == "claim" else "intake"
         typer.echo(f"{verb.capitalize()} preview (dry-run, no changes):")
-        target = f' (claims {prep["id"]})' if prep["status"] == "claim" else ""
+        target = f" (claims {prep['id']})" if prep["status"] == "claim" else ""
         typer.echo(f'  would {verb}: "{spec["title"]}"  (plan: {plan_path}){target}')
         if spec["deps"]:
-            typer.echo(f'  blocked_by: {", ".join(spec["deps"])}')
+            typer.echo(f"  blocked_by: {', '.join(spec['deps'])}")
         return
 
     # Emit "not in ledger" warning before mutating
     from fno.graph._intake import _lookup_ledger_entry
+
     if _lookup_ledger_entry(plan_path) is None:
         typer.echo("plan_path not in ledger.json - intake will continue anyway", err=True)
 
@@ -2919,9 +2965,7 @@ def _intake_impl(
             )
 
         locked_mutate_graph(_graph_path(), claim_mutator)
-        typer.echo(
-            f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
-        )
+        typer.echo(f'claimed {claim_id} via {claim_source}: "{spec["title"]}"')
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
         # Routed through the converger so parent_slug is injected consistently.
@@ -2947,6 +2991,7 @@ def _intake_impl(
 
     try:
         from fno.graph._intake import _warn_unknown_project, _find_node
+
         post_entries = read_graph(_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         landed_project = node.get("project") if node else None
@@ -2961,6 +3006,7 @@ def _intake_impl(
     # is reported as itself, not conflated with the project check above.
     try:
         from fno.graph._intake import _find_node, _warn_similar_nodes
+
         post_entries = read_graph(_graph_path())
         node = _find_node(post_entries, new_id_holder[0] or "")
         if node is not None:
@@ -3005,18 +3051,23 @@ def _intake_impl(
 )
 def cmd_intake(
     plan_paths: Optional[List[str]] = typer.Argument(default=None, help="Plan paths"),
-    from_list: Optional[str] = typer.Option(None, "--from", help="Read paths from FILE or '-' for stdin"),
+    from_list: Optional[str] = typer.Option(
+        None, "--from", help="Read paths from FILE or '-' for stdin"
+    ),
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Target roadmap ID"),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Override derived title"),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="p0|p1|p2|p3"),
     deps: Optional[str] = typer.Option(None, help="Comma-separated ab-IDs"),
     points: Optional[int] = typer.Option(None, help="Story point estimate"),
-    project: Optional[str] = typer.Option(None, "--project", help="Override the project field (beats frontmatter and cwd inference)"),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="Override the project field (beats frontmatter and cwd inference)"
+    ),
     force_new_roadmap: bool = typer.Option(False, "--force-new-roadmap"),
     batch: bool = typer.Option(False, "--batch", hidden=True),
     dry_run: bool = typer.Option(False, "--dry-run", "-N"),
     claims: Optional[str] = typer.Option(
-        None, "--claims",
+        None,
+        "--claims",
         help=(
             "ab-XXXXXXXX of an existing idea-state node this plan implements. "
             "Updates the node in place rather than creating a new one. "
@@ -3053,13 +3104,12 @@ def cmd_intake(
 
 # -- update --
 
+
 @cli.command("note", hidden=True)
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
-    json_output: bool = typer.Option(
-        False, "--json", "-J", help="Emit the appended note as JSON."
-    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended note as JSON."),
 ) -> None:
     """Append a timestamped progress note to a backlog node (append-only).
 
@@ -3089,19 +3139,27 @@ def cmd_note(
 @cli.command("update")
 def cmd_update(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
-    locked_by: Optional[str] = typer.Option(None, "--locked-by", help="Lock owner id ('null' to release)"),
-    locked_by_harness: Optional[str] = typer.Option(None, "--locked-by-harness", help="Holder's harness/provider (claude|codex|gemini). 'null' clears."),
-    locked_by_harness_session: Optional[str] = typer.Option(None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."),
+    locked_by: Optional[str] = typer.Option(
+        None, "--locked-by", help="Lock owner id ('null' to release)"
+    ),
+    locked_by_harness: Optional[str] = typer.Option(
+        None,
+        "--locked-by-harness",
+        help="Holder's harness/provider (claude|codex|gemini). 'null' clears.",
+    ),
+    locked_by_harness_session: Optional[str] = typer.Option(
+        None, "--locked-by-harness-session", help="Holder's harness session UUID. 'null' clears."
+    ),
     has_brief: Optional[str] = typer.Option(None, "--has-brief", help="Set has_brief flag"),
     plan_path: Optional[str] = typer.Option(
         None, "--plan-path", help="Plan directory path. 'null' clears."
     ),
-    pr_number: Optional[str] = typer.Option(
-        None, "--pr-number", help="PR number. 'null' clears."
-    ),
+    pr_number: Optional[str] = typer.Option(None, "--pr-number", help="PR number. 'null' clears."),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
-    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    blocks_everything: bool = typer.Option(
+        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
+    ),
     title: Optional[str] = typer.Option(None, "--title", "-t", help="Update display title"),
     details: Optional[str] = typer.Option(
         None,
@@ -3148,9 +3206,15 @@ def cmd_update(
         help="Free-text brief carried to the worker via TARGET_BRIEF env at cold-start (US3), never the command line. Capped at 8 KB at dispatch. Pass 'null' to clear.",
     ),
     type_: Optional[str] = typer.Option(None, "--type", help="Update node type (feature|epic|bug)"),
-    public: Optional[bool] = typer.Option(None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"),
-    project: Optional[str] = typer.Option(None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"),
-    cwd: Optional[str] = typer.Option(None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"),
+    public: Optional[bool] = typer.Option(
+        None, "--public/--no-public", help="Mark node for the public roadmap (fno backlog roadmap)"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "--project", help="Reproject this node (use for migrating wrong-scope nodes)"
+    ),
+    cwd: Optional[str] = typer.Option(
+        None, "--cwd", "-c", help="Update cwd (pair with --project for migration)"
+    ),
     source_node: Optional[str] = typer.Option(
         None,
         "--source-node",
@@ -3168,9 +3232,15 @@ def cmd_update(
             "that does not resolve."
         ),
     ),
-    blocked_by: Optional[List[str]] = typer.Option(None, "--blocked-by", help="Replace blocked_by list"),
-    add_blocker: Optional[List[str]] = typer.Option(None, "--add-blocker", help="Append blocker IDs"),
-    remove_blocker: Optional[List[str]] = typer.Option(None, "--remove-blocker", help="Remove blocker IDs"),
+    blocked_by: Optional[List[str]] = typer.Option(
+        None, "--blocked-by", help="Replace blocked_by list"
+    ),
+    add_blocker: Optional[List[str]] = typer.Option(
+        None, "--add-blocker", help="Append blocker IDs"
+    ),
+    remove_blocker: Optional[List[str]] = typer.Option(
+        None, "--remove-blocker", help="Remove blocker IDs"
+    ),
     acknowledge_collisions: Optional[str] = typer.Option(
         None,
         "--acknowledge-collisions",
@@ -3256,13 +3326,14 @@ def cmd_update(
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
 
     if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     if priority is not None and priority not in PRIORITY_ORDER:
         typer.echo(
-            f"Error: invalid priority '{priority}'. "
-            f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -3305,8 +3376,7 @@ def cmd_update(
 
     if type_ is not None and type_ not in VALID_NODE_TYPES:
         typer.echo(
-            f"Error: invalid type '{type_}'. Must be one of: "
-            f"{', '.join(sorted(VALID_NODE_TYPES))}",
+            f"Error: invalid type '{type_}'. Must be one of: {', '.join(sorted(VALID_NODE_TYPES))}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -3329,6 +3399,7 @@ def cmd_update(
     derived_cwd_for_update: Optional[str] = None
     if project is not None and cwd is None:
         from fno.graph._intake import project_root_from_settings
+
         workmap_root = project_root_from_settings(project)
         if workmap_root is not None:
             derived_cwd_for_update = workmap_root
@@ -3506,9 +3577,7 @@ def cmd_update(
                 []
                 if tokens == ["null"]
                 else [
-                    _resolve_asserted_id(
-                        t, entries, flag="--related", self_id=node["id"]
-                    )
+                    _resolve_asserted_id(t, entries, flag="--related", self_id=node["id"])
                     for t in tokens
                 ]
             )
@@ -3583,7 +3652,7 @@ def cmd_update(
                         f"error: plan {plan_path} is already the delivery unit of {owner}\n"
                         f"  a plan is one PR is one node; binding it to {node['id']} would arm both\n"
                         f"  to record that {node['id']} ships inside that PR: "
-                        f"fno backlog decompose ... \"adopt\": [\"{node['id']}\"]\n"
+                        f'fno backlog decompose ... "adopt": ["{node["id"]}"]\n'
                         f"  to repoint deliberately: --force",
                         err=True,
                     )
@@ -3623,9 +3692,7 @@ def cmd_update(
         # one transition; the stamp itself runs after the lock releases, because
         # append_session_record takes its own lock and calling it here would
         # deadlock. Best-effort + idempotent, never fails the update.
-        if isinstance(node.get("pr_number"), int) and not isinstance(
-            _pr_number_before, int
-        ):
+        if isinstance(node.get("pr_number"), int) and not isinstance(_pr_number_before, int):
             ship_stamp_node[0] = node["id"]
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
@@ -3641,9 +3708,7 @@ def cmd_update(
             if orphan_ok.lower() == "null":
                 node["orphan_ok"] = None
             elif not orphan_ok.strip():
-                typer.echo(
-                    "Error: --orphan-ok needs a reason (or 'null' to clear)", err=True
-                )
+                typer.echo("Error: --orphan-ok needs a reason (or 'null' to clear)", err=True)
                 raise typer.Exit(code=2)
             else:
                 node["orphan_ok"] = orphan_ok
@@ -3659,9 +3724,7 @@ def cmd_update(
         # ALREADY-p0 node (the migrate-priorities ack spelling); on anything
         # else it is a loud error, never a silent no-op.
         if blocks_everything:
-            effective_priority = (
-                priority if priority is not None else node.get("priority")
-            )
+            effective_priority = priority if priority is not None else node.get("priority")
             if effective_priority == "p0":
                 node["blocks_everything"] = True
             else:
@@ -3768,7 +3831,8 @@ def cmd_update(
         if remove_pr is not None:
             existing_list = list(node.get("additional_prs") or [])
             node["additional_prs"] = [
-                item for item in existing_list
+                item
+                for item in existing_list
                 if not (isinstance(item, dict) and item.get("number") == int(remove_pr))
             ]
         if caused_by is not None:
@@ -3870,9 +3934,7 @@ def cmd_update(
         # P1), so a combined --type epic --parent <x> is covered by whichever ran.
         if type_ is not None and node.get("type") == "epic" and node.get("parent"):
             parent_node = _find_node(entries, node["parent"])
-            if parent_node is not None and _would_exceed_epic_depth(
-                entries, node, parent_node
-            ):
+            if parent_node is not None and _would_exceed_epic_depth(entries, node, parent_node):
                 typer.echo(
                     f"Error: making {node['id']} an epic under {parent_node['id']} "
                     f"would exceed the {EPIC_NEST_MAX_DEPTH}-level cap (mission -> "
@@ -3906,9 +3968,7 @@ def cmd_update(
         stored_pr = stored_node.get("pr_number")
         stored_status = stored_node.get("status") or "unknown"
         ready_effect = (
-            "still offered by ready"
-            if stored_status == "ready"
-            else "not offered by ready"
+            "still offered by ready" if stored_status == "ready" else "not offered by ready"
         )
         typer.echo(
             f"ownership: node={stored_node.get('id', task_id)} "
@@ -4112,6 +4172,7 @@ def cmd_unclaim(
 
 # -- next --
 
+
 def _starvation_receipts(
     entries: list[dict],
     project_filter: Optional[str],
@@ -4176,9 +4237,7 @@ def _starvation_receipts(
         # container and a descendant may carry no plan of its own, but the
         # actionable reason every dispatcher must report is the attributable
         # hold on their shared delivery ancestry.
-        hold_guard = selection_guards(
-            e, by_id, now, staleness_days=staleness_days
-        )
+        hold_guard = selection_guards(e, by_id, now, staleness_days=staleness_days)
         if hold_guard and hold_guard.startswith("dispatch-hold"):
             reason = hold_guard
         elif not e.get("plan_path"):
@@ -4199,9 +4258,7 @@ def _starvation_receipts(
             # backlog of nothing but undesigned children prints a bare `null`
             # instead of naming what each one is waiting on.
             reason = e["status"]
-        elif e.get("status") == "ready" and (
-            _has_unmerged_open_pr(e) or _is_batched_member(e)
-        ):
+        elif e.get("status") == "ready" and (_has_unmerged_open_pr(e) or _is_batched_member(e)):
             continue  # in review / batched - handled, not starved
         else:
             g = hold_guard
@@ -4292,17 +4349,13 @@ def _joined_open_candidates() -> list[dict]:
     try:
         candidates = tracker.list_open()
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed
-        raise _ExternalSelectionError(
-            f"tracker {tracker.name!r} list_open failed: {exc}"
-        ) from exc
+        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
     joined: list[dict] = []
     for c in candidates:
         try:
             sc = sidecar_store.load(c.id)
         except Exception as exc:  # noqa: BLE001 - name the id, fail closed
-            raise _ExternalSelectionError(
-                f"sidecar read failed for {c.id}: {exc}"
-            ) from exc
+            raise _ExternalSelectionError(f"sidecar read failed for {c.id}: {exc}") from exc
         row = {
             "id": c.id,
             "title": c.title,
@@ -4374,8 +4427,11 @@ def cmd_next(
 ) -> None:
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
-        detect_project, filter_by_project, make_selection_sort_key,
-        descendants_of, _find_node,
+        detect_project,
+        filter_by_project,
+        make_selection_sort_key,
+        descendants_of,
+        _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
@@ -4439,9 +4495,9 @@ def cmd_next(
         # decompose stub (Rung.IDEA) is NOT admitted here - it needs warm
         # inline-fill and stays behind --include-ideas.
         candidates = [
-            e for e in entries
-            if (e.get("status") in allowed or is_cold_dispatchable(e))
-            and not e.get("completed_at")
+            e
+            for e in entries
+            if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
         ]
         if roadmap_id:
             candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
@@ -4472,8 +4528,7 @@ def cmd_next(
         # for them and the originally-observed bug node (ready + open PR) is
         # still caught.
         candidates = [
-            e for e in candidates
-            if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
+            e for e in candidates if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
         ]
         # Containers are never directly buildable (x-33b2): an epic's work lives
         # in its decomposed children, so `next` must never return it - it
@@ -4500,10 +4555,9 @@ def cmd_next(
         guard_stale = _guard_staleness_days()
         guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
         candidates = [
-            e for e in candidates
-            if not selection_guards(
-                e, guard_by_id, guard_now, staleness_days=guard_stale
-            )
+            e
+            for e in candidates
+            if not selection_guards(e, guard_by_id, guard_now, staleness_days=guard_stale)
         ]
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
@@ -4515,10 +4569,14 @@ def cmd_next(
         return {
             # slug leads (ab-f82e8083); `id` stays the canonical key right after.
             "slug": e.get("slug"),
-            "id": e["id"], "title": e.get("title"),
-            "priority": e.get("priority"), "domain": e.get("domain"),
-            "project": e.get("project"), "cwd": e.get("cwd"),
-            "size": e.get("size"), "plan_path": e.get("plan_path"),
+            "id": e["id"],
+            "title": e.get("title"),
+            "priority": e.get("priority"),
+            "domain": e.get("domain"),
+            "project": e.get("project"),
+            "cwd": e.get("cwd"),
+            "size": e.get("size"),
+            "plan_path": e.get("plan_path"),
             "difficulty": e.get("difficulty") or e.get("model_tier"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
@@ -4546,6 +4604,7 @@ def cmd_next(
         read_planned_unclaimed,
         read_planned_unclaimed_from_entries,
     )
+
     try:
         if _external:
             assert pre_entries is not None
@@ -4675,6 +4734,7 @@ def cmd_next(
                 result[0] = _node_summary(winner)
                 break
         else:
+
             def mutator(entries):
                 candidates = _with_observer(_pick_ready(entries), entries)
                 if candidates:
@@ -4683,6 +4743,7 @@ def cmd_next(
                     winner["claimed_at"] = datetime.now(timezone.utc).isoformat()
                     result[0] = _node_summary(winner)
                 return entries
+
             locked_mutate_graph(_graph_path(), mutator)
     else:
         if _external:
@@ -4704,15 +4765,18 @@ def cmd_next(
             from fno.backlog.advance import _guard_staleness_days
 
             recv_entries = (
-                pre_entries if _external
-                else (read_graph(_graph_path()) if claim else entries)
+                pre_entries if _external else (read_graph(_graph_path()) if claim else entries)
             ) or []
             scope_ids = (
                 descendants_of(recv_entries, parent_target_id)
-                if parent_target_id is not None else None
+                if parent_target_id is not None
+                else None
             )
             for nid, reason in _starvation_receipts(
-                recv_entries, project_filter, all_, scope_ids,
+                recv_entries,
+                project_filter,
+                all_,
+                scope_ids,
                 _live_claimed_node_ids(),
                 datetime.now(timezone.utc),
                 _guard_staleness_days(),
@@ -4727,6 +4791,7 @@ def cmd_next(
 
 
 # -- undispatched --
+
 
 @cli.command("undispatched", hidden=True)
 def cmd_undispatched(
@@ -4775,6 +4840,7 @@ def cmd_undispatched(
 
 # -- ready --
 
+
 @cli.command("ready", hidden=True)
 def cmd_ready(
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
@@ -4811,7 +4877,10 @@ def cmd_ready(
 ) -> None:
     from fno.graph.store import read_graph
     from fno.graph._intake import (
-        filter_by_project, make_selection_sort_key, descendants_of, _find_node,
+        filter_by_project,
+        make_selection_sort_key,
+        descendants_of,
+        _find_node,
     )
     from fno.graph.ladder import is_cold_dispatchable
     from fno.tracker import active_backend_name
@@ -4840,9 +4909,9 @@ def cmd_ready(
     # idea is cold-dispatchable and surfaces alongside ready work; a linked
     # Rung.IDEA stub stays behind --include-ideas.
     ready = [
-        e for e in entries
-        if (e.get("status") in allowed or is_cold_dispatchable(e))
-        and not e.get("completed_at")
+        e
+        for e in entries
+        if (e.get("status") in allowed or is_cold_dispatchable(e)) and not e.get("completed_at")
     ]
     ready = filter_by_project(ready, project, all_)
     if roadmap_id:
@@ -4874,10 +4943,7 @@ def cmd_ready(
     # Scoped to status "ready" so an explicitly --include-deferred / -ideas
     # paused PR-bearing node still lists (the defer contract resurfaces those
     # on request; codex PR #516 P2).
-    ready = [
-        e for e in ready
-        if e.get("status") != "ready" or not _has_unmerged_open_pr(e)
-    ]
+    ready = [e for e in ready if e.get("status") != "ready" or not _has_unmerged_open_pr(e)]
     # Containers are never actionable work (x-33b2 / codex P2 on PR #69): drop
     # epics so `fno backlog ready` - and the `dispatch-node.sh --all-ready` bulk
     # path that enumerates it - never presents/launches the box instead of its
@@ -4904,45 +4970,50 @@ def cmd_ready(
     _guard_stale = _guard_staleness_days()
     _guard_by_id = {e.get("id"): e for e in entries if e.get("id")}
     ready = [
-        e for e in ready
-        if not selection_guards(
-            e, _guard_by_id, _guard_now, staleness_days=_guard_stale
-        )
+        e
+        for e in ready
+        if not selection_guards(e, _guard_by_id, _guard_now, staleness_days=_guard_stale)
     ]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
     ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
 
-    output = [{
-        # slug leads (ab-f82e8083) so a `ready` list / clipboard is readable.
-        "slug": e.get("slug"),
-        "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
-        "domain": e.get("domain"), "project": e.get("project"),
-        "cwd": e.get("cwd"), "parent": e.get("parent"),
-        "difficulty": e.get("difficulty") or e.get("model_tier"),
-        # select_lane_fill's dispatch-time collision gate compares plan file
-        # surfaces; without this it has nothing to read.
-        "plan_path": e.get("plan_path"),
-        # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
-        # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
-        # model_tier rides alongside so the tier resolver sees the annotation.
-        "model": e.get("model"),
-        "model_tier": e.get("model_tier"),
-    } for e in ready]
+    output = [
+        {
+            # slug leads (ab-f82e8083) so a `ready` list / clipboard is readable.
+            "slug": e.get("slug"),
+            "id": e["id"],
+            "title": e.get("title"),
+            "priority": e.get("priority"),
+            "domain": e.get("domain"),
+            "project": e.get("project"),
+            "cwd": e.get("cwd"),
+            "parent": e.get("parent"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
+            # select_lane_fill's dispatch-time collision gate compares plan file
+            # surfaces; without this it has nothing to read.
+            "plan_path": e.get("plan_path"),
+            # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
+            # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
+            # model_tier rides alongside so the tier resolver sees the annotation.
+            "model": e.get("model"),
+            "model_tier": e.get("model_tier"),
+        }
+        for e in ready
+    ]
 
     typer.echo(json.dumps(output, indent=2))
 
 
 # -- lane-fill --
 
+
 @cli.command("lane-fill", hidden=True)
 def cmd_lane_fill(
     max_lanes: Optional[int] = typer.Option(
         None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
     ),
-    project: Optional[str] = typer.Option(
-        None, "--project", "-p", help="Filter by project name"
-    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
     mission: Optional[str] = typer.Option(
         None, "--mission", help="Restrict selection to this mission's nodes."
     ),
@@ -4966,6 +5037,7 @@ def cmd_lane_fill(
 
     if max_lanes is None:
         from fno.config import load_settings
+
         max_lanes = load_settings().parallel.max_lanes
 
     selected = select_lane_fill(max_lanes, project, mission=mission, claim=claim)
@@ -4976,23 +5048,25 @@ def cmd_lane_fill(
 
 # -- dispatch-lanes --
 
+
 @cli.command("dispatch-lanes", hidden=True)
 def cmd_dispatch_lanes(
     max_lanes: Optional[int] = typer.Option(
         None, "--max", help="Max lanes (default: config.parallel.max_lanes)."
     ),
-    project: Optional[str] = typer.Option(
-        None, "--project", "-p", help="Filter by project name"
-    ),
+    project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project name"),
     mission: Optional[str] = typer.Option(
         None, "--mission", help="Restrict dispatch to this mission's nodes."
     ),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m",
+        None,
+        "--model",
+        "-m",
         help="Pin a model for every lane spawned this run, overriding node annotations.",
     ),
     provider: Optional[str] = typer.Option(
-        None, "--provider",
+        None,
+        "--provider",
         help="Pin a provider for every lane. (No -p short: it is --project here.)",
     ),
 ) -> None:
@@ -5021,6 +5095,7 @@ def cmd_dispatch_lanes(
 
     if max_lanes is None:
         from fno.config import load_settings
+
         max_lanes = load_settings().parallel.max_lanes
 
     receipts = dispatch_lanes(max_lanes, project, mission=mission, model=model, provider=provider)
@@ -5028,6 +5103,7 @@ def cmd_dispatch_lanes(
 
 
 # -- groom --
+
 
 @cli.command("groom", hidden=True)
 def cmd_groom(
@@ -5113,6 +5189,7 @@ def cmd_groom(
 
 # -- lanes --
 
+
 @cli.command("lanes", hidden=True)
 def cmd_lanes(
     json_output: bool = typer.Option(False, "--json", "-J", help="JSON rollup."),
@@ -5140,9 +5217,7 @@ def cmd_lanes(
         from fno.graph.store import read_graph
 
         nodes = {
-            e["id"]: e
-            for e in read_graph(_graph_path())
-            if isinstance(e, dict) and e.get("id")
+            e["id"]: e for e in read_graph(_graph_path()) if isinstance(e, dict) and e.get("id")
         }
     except Exception:  # noqa: BLE001 - rollup degrades to claims-only rows
         pass
@@ -5187,7 +5262,9 @@ _BOARD_SECTIONS = (
 
 
 def _board_unreadable_graph_payload(reason: str) -> dict:
-    return {key: {"rows": [], "more": 0, "note": None, "unknown": reason} for key, _ in _BOARD_SECTIONS}
+    return {
+        key: {"rows": [], "more": 0, "note": None, "unknown": reason} for key, _ in _BOARD_SECTIONS
+    }
 
 
 def _print_board(board: dict) -> None:
@@ -5273,6 +5350,7 @@ def cmd_board(
 
 
 # -- get --
+
 
 def _read_time_status_external(
     state: str, pr_number: Optional[int], plan_path: Optional[str]
@@ -5367,6 +5445,7 @@ def cmd_get(
     if match.kind == "exact":
         e = match.candidates[0]
         from fno.graph._intake import project_root_from_settings
+
         root = project_root_from_settings(e["project"]) if e.get("project") else None
         e["_resolved_cwd"] = root or e.get("cwd")
         if field:
@@ -5423,9 +5502,12 @@ def cmd_get(
 
 # -- project-root (work-map resolution; null-for-unmapped) --
 
+
 @cli.command("project-root", hidden=True)
 def cmd_project_root(
-    project: str = typer.Argument(..., help="Project name to resolve against config.work.workspaces."),
+    project: str = typer.Argument(
+        ..., help="Project name to resolve against config.work.workspaces."
+    ),
 ) -> None:
     """Print a project's work-map root, or exit 1 (empty stdout) if unmapped.
 
@@ -5582,12 +5664,17 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
                 lines.append(f"{head} in progress (since {st})")
             else:
                 lines.append(head.rstrip())
-            phases.append({
-                "phase": ph, "recorded": True,
-                "harness": row.get("harness"), "session_id": row.get("session_id"),
-                "start": st, "end": en,
-                "duration_seconds": dur,
-            })
+            phases.append(
+                {
+                    "phase": ph,
+                    "recorded": True,
+                    "harness": row.get("harness"),
+                    "session_id": row.get("session_id"),
+                    "start": st,
+                    "end": en,
+                    "duration_seconds": dur,
+                }
+            )
         if phase_has_window:
             phases_with_window += 1
 
@@ -5642,16 +5729,24 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
             return None
 
     birth_result = (
-        resolve_transcript(sc.source_harness, sc.source_session_id,
-                           sc.source_cwd or sc.cwd,
-                           projects_root=_DEFAULT_PROJECTS_ROOT)
-        if sc.source_session_id else None
+        resolve_transcript(
+            sc.source_harness,
+            sc.source_session_id,
+            sc.source_cwd or sc.cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+        if sc.source_session_id
+        else None
     )
     spawn_result = (
-        resolve_transcript(sc.spawned_by_harness, sc.spawned_by_session,
-                           sc.spawned_by_cwd,
-                           projects_root=_DEFAULT_PROJECTS_ROOT)
-        if sc.spawned_by_session else None
+        resolve_transcript(
+            sc.spawned_by_harness,
+            sc.spawned_by_session,
+            sc.spawned_by_cwd,
+            projects_root=_DEFAULT_PROJECTS_ROOT,
+        )
+        if sc.spawned_by_session
+        else None
     )
 
     # Spawned walk over the sidecar origin index (source_node_id edges),
@@ -5698,10 +5793,7 @@ def _render_external_provenance(id: str, spawned: bool, json_out: bool) -> None:
         }
         if spawned:
             output["spawned"] = {
-                "nodes": [
-                    {"depth": d, "id": nid, "title": _title_of(nid)}
-                    for d, nid in walk_rows
-                ],
+                "nodes": [{"depth": d, "id": nid, "title": _title_of(nid)} for d, nid in walk_rows],
                 "cycle_detected": False,
                 "truncated_at_depth": None,
             }
@@ -5770,7 +5862,9 @@ def cmd_provenance(
     birth_result = None
     if birth_session:
         birth_result = resolve_transcript(
-            birth_harness, birth_session, birth_cwd,
+            birth_harness,
+            birth_session,
+            birth_cwd,
             projects_root=_DEFAULT_PROJECTS_ROOT,
         )
 
@@ -5781,7 +5875,9 @@ def cmd_provenance(
     spawn_result = None
     if spawn_session:
         spawn_result = resolve_transcript(
-            spawn_harness, spawn_session, spawn_cwd,
+            spawn_harness,
+            spawn_session,
+            spawn_cwd,
             projects_root=_DEFAULT_PROJECTS_ROOT,
         )
 
@@ -5843,8 +5939,7 @@ def cmd_provenance(
         if spawned:
             output["spawned"] = {
                 "nodes": [
-                    {"depth": d, "id": n.get("id"), "title": n.get("title")}
-                    for d, n in walk_rows
+                    {"depth": d, "id": n.get("id"), "title": n.get("title")} for d, n in walk_rows
                 ],
                 "cycle_detected": walk_cycle,
                 "truncated_at_depth": _SPAWNED_MAX_DEPTH if walk_truncated else None,
@@ -5962,13 +6057,17 @@ def cmd_session_add(
         ..., "--phase", help="Lifecycle phase: think|blueprint|do|review|ship."
     ),
     pr: Optional[int] = typer.Option(
-        None, "--pr-number", help="Resolve the UNIQUE node carrying this PR number instead "
-                                  "of passing NODE (rejects 0 or multiple matches; never fans out)."
+        None,
+        "--pr-number",
+        help="Resolve the UNIQUE node carrying this PR number instead "
+        "of passing NODE (rejects 0 or multiple matches; never fans out).",
     ),
     repo: Optional[str] = typer.Option(
-        None, "--repo", help="Scope --pr-number resolution to an <owner>/<repo> slug "
-                             "(pr_number is not unique across repos in a cross-project graph). "
-                             "Omit and the verb resolves the current checkout's slug itself."
+        None,
+        "--repo",
+        help="Scope --pr-number resolution to an <owner>/<repo> slug "
+        "(pr_number is not unique across repos in a cross-project graph). "
+        "Omit and the verb resolves the current checkout's slug itself.",
     ),
     harness: Optional[str] = typer.Option(
         None, "--harness", help="Override harness (default: ambient session identity)."
@@ -5980,23 +6079,31 @@ def cmd_session_add(
         None, "--effort", help="Selected reasoning effort, passed through verbatim."
     ),
     ended_at: Optional[str] = typer.Option(
-        None, "--ended-at", "--at",
+        None,
+        "--ended-at",
+        "--at",
         help="ISO-8601 UTC instant the phase ended. Omit when there is no honest end "
-              "to record (a row opened mid-session); explicit for backfill of completed work."
+        "to record (a row opened mid-session); explicit for backfill of completed work.",
     ),
     started_at: Optional[str] = typer.Option(
-        None, "--started-at", "--claimed-at",
+        None,
+        "--started-at",
+        "--claimed-at",
         help="ISO-8601 UTC instant the work began; lands on the "
-             "row so it bounds the window with --ended-at. Honest for every "
-             "phase (a think row starts but claims nothing)."
+        "row so it bounds the window with --ended-at. Honest for every "
+        "phase (a think row starts but claims nothing).",
     ),
     require_session: Optional[str] = typer.Option(
-        None, "--require-session", help="Skip (exit 0) unless the ambient session id equals "
-                                        "this. Identity-continuity guard for stale manifests."
+        None,
+        "--require-session",
+        help="Skip (exit 0) unless the ambient session id equals "
+        "this. Identity-continuity guard for stale manifests.",
     ),
     guard_plan: Optional[str] = typer.Option(
-        None, "--guard-plan", help="Skip (exit 0) if this plan's frontmatter `claims:` names "
-                                   "a DIFFERENT node. Requires NODE (not --pr-number)."
+        None,
+        "--guard-plan",
+        help="Skip (exit 0) if this plan's frontmatter `claims:` names "
+        "a DIFFERENT node. Requires NODE (not --pr-number).",
     ),
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit the result as JSON."),
 ) -> None:
@@ -6043,11 +6150,19 @@ def cmd_session_add(
     def _skip(reason: str, node_id: "str | None" = None) -> None:
         typer.echo(f"session add: {reason} (target={who} phase={phase}). Skipped.", err=True)
         if json_out:
-            typer.echo(json.dumps({
-                "node_id": node_id, "status": "skipped", "reason": reason,
-                "phase": phase, "harness": eff_harness, "session_id": eff_session,
-                "added": False,
-            }))
+            typer.echo(
+                json.dumps(
+                    {
+                        "node_id": node_id,
+                        "status": "skipped",
+                        "reason": reason,
+                        "phase": phase,
+                        "harness": eff_harness,
+                        "session_id": eff_session,
+                        "added": False,
+                    }
+                )
+            )
 
     from fno.claims.self_identity import resolve_self_identity
 
@@ -6083,9 +6198,7 @@ def cmd_session_add(
             raise typer.Exit(code=2)
         ambient = (ident.session_id or "").strip()
         if ambient != require_session.strip():
-            return _skip(
-                f"ambient session {ambient!r} != required {require_session.strip()!r}"
-            )
+            return _skip(f"ambient session {ambient!r} != required {require_session.strip()!r}")
 
     # After the identity guard: resolution shells out to git and possibly gh, and
     # a run with no identity is about to skip anyway.
@@ -6110,9 +6223,15 @@ def cmd_session_add(
     try:
         if pr is not None:
             node_id, status = stamp_session_for_pr(
-                _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
-                effort=effort, started_at=started_at, repo=repo,
+                _graph_path(),
+                pr,
+                phase=phase,
+                harness=eff_harness,
+                session_id=eff_session,
+                ended_at=ended_at,
+                effort=effort,
+                started_at=started_at,
+                repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
@@ -6137,11 +6256,19 @@ def cmd_session_add(
                     err=True,
                 )
                 if json_out:
-                    typer.echo(json.dumps({
-                        "node_id": None, "status": status, "phase": phase,
-                        "harness": eff_harness, "session_id": eff_session,
-                        "added": False, "candidates": cands,
-                    }))
+                    typer.echo(
+                        json.dumps(
+                            {
+                                "node_id": None,
+                                "status": status,
+                                "phase": phase,
+                                "harness": eff_harness,
+                                "session_id": eff_session,
+                                "added": False,
+                                "candidates": cands,
+                            }
+                        )
+                    )
                 return
             added = status == "added"
         else:
@@ -6175,9 +6302,14 @@ def cmd_session_add(
                         node_id=node_id,
                     )
             found, added = append_session_record(
-                _graph_path(), node_id, phase=phase,
-                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
-                effort=effort, started_at=started_at,
+                _graph_path(),
+                node_id,
+                phase=phase,
+                harness=eff_harness,
+                session_id=eff_session,
+                ended_at=ended_at,
+                effort=effort,
+                started_at=started_at,
             )
             if not found:
                 typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)
@@ -6187,11 +6319,18 @@ def cmd_session_add(
         raise typer.Exit(code=2)
 
     if json_out:
-        typer.echo(json.dumps({
-            "node_id": node_id, "status": "added" if added else "duplicate",
-            "phase": phase, "harness": eff_harness,
-            "session_id": eff_session, "added": added,
-        }))
+        typer.echo(
+            json.dumps(
+                {
+                    "node_id": node_id,
+                    "status": "added" if added else "duplicate",
+                    "phase": phase,
+                    "harness": eff_harness,
+                    "session_id": eff_session,
+                    "added": added,
+                }
+            )
+        )
     else:
         state = "recorded" if added else "already recorded"
         typer.echo(f"{state} {phase} {eff_harness}:{eff_session} on {node_id}")
@@ -6205,7 +6344,9 @@ def cmd_session_close(
     harness: Optional[str] = typer.Option(None, "--harness"),
     session_id: Optional[str] = typer.Option(None, "--session-id"),
     started_at: Optional[str] = typer.Option(None, "--started-at"),
-    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the completion receipt as JSON."),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the completion receipt as JSON."
+    ),
 ) -> None:
     """Close the blueprint phase with one identity-guarded completion receipt.
 
@@ -6242,8 +6383,13 @@ def cmd_session_close(
     ended_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, added = append_session_record(
-            _graph_path(), node_id, phase="blueprint", harness=eff_harness,
-            session_id=eff_session, ended_at=ended_at, started_at=started_at,
+            _graph_path(),
+            node_id,
+            phase="blueprint",
+            harness=eff_harness,
+            session_id=eff_session,
+            ended_at=ended_at,
+            started_at=started_at,
         )
     except ValueError as exc:
         typer.echo(f"session close: {exc}", err=True)
@@ -6320,12 +6466,17 @@ def cmd_session_reap_open(
         for row in rows
     )
     remaining = sum(is_open_do_row(row) for row in rows)
-    higher_precedence = any(
-        rebound.get(field)
-        for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
-    ) or rebound.get("status") == "blocked"
+    higher_precedence = (
+        any(
+            rebound.get(field)
+            for field in ("completed_at", "superseded_by", "deferred_at", "pr_number")
+        )
+        or rebound.get("status") == "blocked"
+    )
     expected_in_progress = bool(rebound.get("locked_by")) or remaining > 0
-    status_ok = higher_precedence or ((rebound.get("status") == "in_progress") == expected_in_progress)
+    status_ok = higher_precedence or (
+        (rebound.get("status") == "in_progress") == expected_in_progress
+    )
     if matching_open or not status_ok:
         typer.echo(
             f"session reap-open: read-back did not settle {node_id} "
@@ -6335,12 +6486,14 @@ def cmd_session_reap_open(
         )
         raise typer.Exit(code=1)
 
-    receipt.update({
-        "node_id": node_id,
-        "settled": True,
-        "status_after": rebound.get("status"),
-        "remaining_open_do": remaining,
-    })
+    receipt.update(
+        {
+            "node_id": node_id,
+            "settled": True,
+            "status_after": rebound.get("status"),
+            "remaining_open_do": remaining,
+        }
+    )
     if json_out:
         typer.echo(json.dumps(receipt, sort_keys=True))
     else:
@@ -6357,6 +6510,7 @@ cli.add_typer(session_app, name="session", hidden=True)
 # -- backfill-slugs --
 
 # -- view --
+
 
 @cli.command("view")
 def cmd_view() -> None:
@@ -6413,6 +6567,7 @@ def cmd_view() -> None:
 
 # -- bases (canonical epic/mission progress Bases) --
 
+
 @cli.command("bases", hidden=True)
 def cmd_bases(
     out: Optional[str] = typer.Option(
@@ -6430,9 +6585,7 @@ def cmd_bases(
     from fno.graph._bases import BASES, write_base
     from fno.graph._intake import repo_root
 
-    out_dir = (
-        Path(out) if out else Path(repo_root()) / "internal" / "fno" / "backlog"
-    )
+    out_dir = Path(out) if out else Path(repo_root()) / "internal" / "fno" / "backlog"
     for name, content in BASES.items():
         target = out_dir / name
         action = write_base(target, content)
@@ -6441,6 +6594,7 @@ def cmd_bases(
 
 # -- roadmap (public, curated) --
 
+
 @cli.command("roadmap", hidden=True)
 def cmd_roadmap(
     project: Optional[str] = typer.Option(
@@ -6448,8 +6602,12 @@ def cmd_roadmap(
         "--project",
         help="Project to render (defaults to the project mapped to the cwd).",
     ),
-    out: Optional[str] = typer.Option(None, "--out", help="Write markdown to this path instead of stdout."),
-    html: Optional[str] = typer.Option(None, "--html", help="Also write a standalone HTML file to this path."),
+    out: Optional[str] = typer.Option(
+        None, "--out", help="Write markdown to this path instead of stdout."
+    ),
+    html: Optional[str] = typer.Option(
+        None, "--html", help="Also write a standalone HTML file to this path."
+    ),
     backlog_html: Optional[str] = typer.Option(
         None,
         "--backlog-html",
@@ -6558,9 +6716,7 @@ def _build_live_snapshot(tracker=None) -> dict:
     try:
         candidates = tracker.list_open()
     except Exception as exc:  # noqa: BLE001 - name the backend, fail closed like selection
-        raise _ExternalSelectionError(
-            f"tracker {tracker.name!r} list_open failed: {exc}"
-        ) from exc
+        raise _ExternalSelectionError(f"tracker {tracker.name!r} list_open failed: {exc}") from exc
     open_ids = {c.id for c in candidates}
 
     # Tombstones for closed dependencies referenced by open items. An
@@ -6690,10 +6846,11 @@ def cmd_status(
             typer.echo(f"Project: {proj_name}")
             roadmaps = [e for e in proj_entries if e.get("type") == "roadmap"]
             if roadmaps:
-                typer.echo(f"Roadmap: {roadmaps[0].get('roadmap_id', '?')} ({roadmaps[0].get('title', '?')})")
+                typer.echo(
+                    f"Roadmap: {roadmaps[0].get('roadmap_id', '?')} ({roadmaps[0].get('title', '?')})"
+                )
             ideas_suffix = (
-                f" | ideas: {ideas} (use 'fno backlog ready --ideas' to list)"
-                if ideas else ""
+                f" | ideas: {ideas} (use 'fno backlog ready --ideas' to list)" if ideas else ""
             )
             # Active-most → inactive-most ordering: done | claimed | ready
             # | ideas | blocked | deferred. Deferred is the only state that
@@ -6701,7 +6858,8 @@ def cmd_status(
             # belongs at the tail.
             deferred_suffix = (
                 f" | deferred: {deferred} (use 'fno backlog ready --include-deferred' to list)"
-                if deferred else ""
+                if deferred
+                else ""
             )
             typer.echo(
                 f"Progress: {done}/{total} done | {claimed} claimed | {ready} ready"
@@ -6730,6 +6888,7 @@ def cmd_status(
 # -- validate --
 
 # -- cost --
+
 
 @cli.command("cost", hidden=True)
 def cmd_cost(
@@ -6764,7 +6923,9 @@ def cmd_cost(
         raise click.UsageError("Missing option '--session-id'.")
 
     if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     try:
@@ -6788,6 +6949,7 @@ def cmd_cost(
 
 
 # -- remove --
+
 
 @cli.command(
     "remove",
@@ -6830,7 +6992,9 @@ def cmd_remove(
     from fno.graph._intake import _find_node, _find_dependents
 
     if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     entries = read_graph(_graph_path())
@@ -6841,6 +7005,7 @@ def cmd_remove(
         raise typer.Exit(code=1)
 
     _freed_box: list[list] = [[]]
+
     def mutator(entries):
         node = _find_node(entries, task_id)
         if not node:
@@ -6884,6 +7049,7 @@ def cmd_remove(
 # auto-migrates the prefix to the new schema, so callers should never see
 # the old shape after one mutation.
 
+
 @cli.command(
     "defer",
     epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
@@ -6895,7 +7061,8 @@ def cmd_defer(
     ),
     reason: str = typer.Option(
         ...,
-        "--reason", "-R",
+        "--reason",
+        "-R",
         help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
     ),
 ) -> None:
@@ -6914,7 +7081,9 @@ def cmd_defer(
         raise typer.Exit(code=1)
     for tid in ids:
         if not has_node_id_prefix(tid):
-            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            typer.echo(
+                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
+            )
             raise typer.Exit(code=1)
 
     # Strip and validate the reason at the CLI boundary so direct invocation
@@ -6976,6 +7145,7 @@ def cmd_defer(
 #
 # Cleared automatically by ``cmd_done``; reversible via ``unqueue``.
 
+
 def _expand_id_args(raw_ids: list[str]) -> list[str]:
     """Flatten a list of CLI args into individual node IDs.
 
@@ -7018,18 +7188,26 @@ def cmd_queued(
         return
 
     entries = read_graph(_graph_path())
-    queued = [e for e in entries
-              if e.get("queued_at")
-              and not e.get("completed_at")
-              and not e.get("deferred_at")]
+    queued = [
+        e
+        for e in entries
+        if e.get("queued_at") and not e.get("completed_at") and not e.get("deferred_at")
+    ]
     queued = filter_by_project(queued, project, all_)
     queued.sort(key=_graph_sort_key_fn)
 
-    output = [{
-        "id": e["id"], "title": e.get("title"), "priority": e.get("priority"),
-        "project": e.get("project"), "queued_at": e.get("queued_at"),
-        "queued_reason": e.get("queued_reason"), "status": e.get("status"),
-    } for e in queued]
+    output = [
+        {
+            "id": e["id"],
+            "title": e.get("title"),
+            "priority": e.get("priority"),
+            "project": e.get("project"),
+            "queued_at": e.get("queued_at"),
+            "queued_reason": e.get("queued_reason"),
+            "status": e.get("status"),
+        }
+        for e in queued
+    ]
     typer.echo(json.dumps(output, indent=2))
 
 
@@ -7045,7 +7223,8 @@ def cmd_queue(
     ),
     reason: Optional[str] = typer.Option(
         None,
-        "--reason", "-R",
+        "--reason",
+        "-R",
         help="Why these nodes are being queued (applies to all). Free text, surfaced on the card.",
     ),
 ) -> None:
@@ -7064,7 +7243,9 @@ def cmd_queue(
         raise typer.Exit(code=1)
     for tid in ids:
         if not has_node_id_prefix(tid):
-            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            typer.echo(
+                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
+            )
             raise typer.Exit(code=1)
 
     cleaned_reason = (reason or "").strip() or None
@@ -7113,7 +7294,9 @@ def cmd_unqueue(
         raise typer.Exit(code=1)
     for tid in ids:
         if not has_node_id_prefix(tid):
-            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            typer.echo(
+                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
+            )
             raise typer.Exit(code=1)
 
     not_queued: list[str] = []
@@ -7172,7 +7355,7 @@ def _pick_format_line(entry: dict, id_to_entry: dict[str, dict] | None = None) -
         marker = "[ ]"
     kind = "plan" if entry.get("plan_path") else "idea"
     prio = entry.get("priority") or "p2"
-    project = (entry.get("project") or "-")
+    project = entry.get("project") or "-"
     if len(project) > 22:
         project = project[:21] + "."
     title = (entry.get("title") or "").replace("\n", " ").strip() or "(untitled)"
@@ -7281,7 +7464,9 @@ NR == FNR {
 @cli.command("pick", hidden=True)
 def cmd_pick(
     project: Optional[str] = typer.Option(None, help="Filter by project name"),
-    all_: bool = typer.Option(False, "--all", "-A", help="Show all projects (default: current cwd)"),
+    all_: bool = typer.Option(
+        False, "--all", "-A", help="Show all projects (default: current cwd)"
+    ),
     include_ideas: bool = typer.Option(
         True,
         "--ideas/--no-ideas",
@@ -7295,7 +7480,8 @@ def cmd_pick(
     ),
     reason: Optional[str] = typer.Option(
         None,
-        "--reason", "-R",
+        "--reason",
+        "-R",
         help="Reason applied to every newly-queued node (optional).",
     ),
 ) -> None:
@@ -7359,13 +7545,13 @@ def cmd_pick(
 
     # Sort queued rows to the TOP, then by priority within each cluster.
     currently_queued = {e["id"] for e in candidates if e.get("queued_at")}
-    candidates.sort(
-        key=lambda e: (0 if e["id"] in currently_queued else 1, _graph_sort_key_fn(e))
-    )
+    candidates.sort(key=lambda e: (0 if e["id"] in currently_queued else 1, _graph_sort_key_fn(e)))
 
     vault = _load_obsidian_vault()
-    open_cmd = "open" if platform.system() == "Darwin" else (
-        shutil.which("xdg-open") or shutil.which("wslview") or "xdg-open"
+    open_cmd = (
+        "open"
+        if platform.system() == "Darwin"
+        else (shutil.which("xdg-open") or shutil.which("wslview") or "xdg-open")
     )
 
     # Tempfiles:
@@ -7391,9 +7577,7 @@ def cmd_pick(
                     built = _obsidian_url(vault, e["plan_path"])
                     if built:
                         url = built
-                blockers = ",".join(
-                    b for b in (e.get("blocked_by") or []) if isinstance(b, str)
-                )
+                blockers = ",".join(b for b in (e.get("blocked_by") or []) if isinstance(b, str))
                 row_fields = [
                     e["id"],
                     _tsv_safe(e.get("title") or ""),
@@ -7421,35 +7605,46 @@ def cmd_pick(
             "Markers update in-place as you press keys: [ ] not queued  [Q] queued  [B] blocked  [Q!] queued+blocked",
         ]
         if not vault:
-            header_lines.append(
-                "(set config.obsidian.vault in settings.yaml to enable 'o' opener)"
-            )
+            header_lines.append("(set config.obsidian.vault in settings.yaml to enable 'o' opener)")
         header = "\n".join(header_lines)
 
         # Initial row set: run the renderer once with empty pending.
         initial = subprocess.run(
             [awk_bin, "-f", awk_path, pend_path, cand_path],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         ).stdout
 
         proc = subprocess.run(
             [
                 fzf,
                 "--no-multi",
-                "--delimiter", "\t",
-                "--with-nth", "3..",
-                "--nth", "3..",
+                "--delimiter",
+                "\t",
+                "--with-nth",
+                "3..",
+                "--nth",
+                "3..",
                 # Q/U/T keybinds: append intent line to pending.txt, then
                 # reload the row list from awk. Cursor preserves via fzf's
                 # default reload behavior; +down advances to next row.
-                "--bind", f"q:execute-silent(printf 'Q %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
-                "--bind", f"u:execute-silent(printf 'U %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
-                "--bind", f"space:execute-silent(printf 'T %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
-                "--bind", "enter:accept",
-                "--bind", f"o:execute-silent(u={{1}}; [[ -n \"$u\" ]] && {open_cmd} \"$u\")",
-                "--header", header,
-                "--prompt", "pick> ",
-                "--height", "85%",
+                "--bind",
+                f"q:execute-silent(printf 'Q %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
+                "--bind",
+                f"u:execute-silent(printf 'U %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
+                "--bind",
+                f"space:execute-silent(printf 'T %s\\n' {{2}} >> {qp})+reload({render_cmd})+down",
+                "--bind",
+                "enter:accept",
+                "--bind",
+                f'o:execute-silent(u={{1}}; [[ -n "$u" ]] && {open_cmd} "$u")',
+                "--header",
+                header,
+                "--prompt",
+                "pick> ",
+                "--height",
+                "85%",
                 "--reverse",
                 "--no-sort",
             ],
@@ -7558,9 +7753,7 @@ def cmd_pick(
     for tid in unqueued_applied:
         typer.echo(f"Unqueued {tid}")
     if queued_applied or unqueued_applied:
-        typer.echo(
-            f"({len(queued_applied)} queued, {len(unqueued_applied)} unqueued)"
-        )
+        typer.echo(f"({len(queued_applied)} queued, {len(unqueued_applied)} unqueued)")
     else:
         typer.echo("(no changes)")
 
@@ -7589,7 +7782,9 @@ def cmd_undefer(
         raise typer.Exit(code=1)
     for tid in ids:
         if not has_node_id_prefix(tid):
-            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            typer.echo(
+                f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True
+            )
             raise typer.Exit(code=1)
 
     was_deferred: list[tuple[str, bool]] = []
@@ -7631,8 +7826,11 @@ def cmd_undefer(
 
 # -- done --
 
+
 def _project_plans_from_graph(
-    node_ids: list[str], *, mirror_type_for: str | None = None,
+    node_ids: list[str],
+    *,
+    mirror_type_for: str | None = None,
     force_status_off_terminal_for: str | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
@@ -7663,7 +7861,9 @@ def _project_plans_from_graph(
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
     project_graph_nodes(
-        entries, ids, mirror_type_for=mirror_type_for,
+        entries,
+        ids,
+        mirror_type_for=mirror_type_for,
         force_status_off_terminal_for=force_status_off_terminal_for,
     )
 
@@ -7775,8 +7975,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     is depth-capped against a malformed parent cycle.
     """
     id_to_entry = {
-        e["id"]: e for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
     children_by_parent: dict[str, list[dict]] = {}
     for e in entries:
@@ -7986,8 +8185,7 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
     reader can interpret.
     """
     unit = next(
-        (e for e in entries
-         if isinstance(e, dict) and e.get("id") == node_id),
+        (e for e in entries if isinstance(e, dict) and e.get("id") == node_id),
         {},
     )
     pr = unit.get("pr_number")
@@ -8028,10 +8226,7 @@ def _strandable_contained_ids(entries: list[dict]) -> set[str]:
     prevents still has to be swept out of graphs that already carry it. Once
     migrated this returns empty and the sweep is a no-op.
     """
-    by_id = {
-        e["id"]: e for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
-    }
+    by_id = {e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
     out: set[str] = set()
     for e in entries:
         if not isinstance(e, dict) or e.get("completed_at"):
@@ -8064,9 +8259,7 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
     if not stranded:
         return []
     owners = {
-        e.get("contained_in")
-        for e in entries
-        if isinstance(e, dict) and e.get("id") in stranded
+        e.get("contained_in") for e in entries if isinstance(e, dict) and e.get("id") in stranded
     }
     closed: list[str] = []
     for owner_id in sorted(o for o in owners if isinstance(o, str) and o):
@@ -8089,8 +8282,7 @@ def _strandable_epic_ids(entries: list[dict]) -> set[str]:
         if isinstance(e, dict) and isinstance(e.get("parent"), str):
             children_by_parent.setdefault(e["parent"], []).append(e)
     id_to_entry = {
-        e["id"]: e for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
     out: set[str] = set()
     for pid, kids in children_by_parent.items():
@@ -8115,8 +8307,7 @@ def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
     this is a no-op once migrated.
     """
     id_to_entry = {
-        e["id"]: e for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
     closed: list[str] = []
     for _ in range(64):  # fixpoint, depth-capped against a malformed cycle
@@ -8253,12 +8444,18 @@ def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, 
     would break pipelines that call decompose for a best-effort stamp).
     """
     import subprocess
+
     try:
         result = subprocess.run(
             [
-                sys.executable, "-m", "fno.plan._stamp", "set-expected",
-                "--plan-path", plan_path,
-                "--count", str(count),
+                sys.executable,
+                "-m",
+                "fno.plan._stamp",
+                "set-expected",
+                "--plan-path",
+                plan_path,
+                "--count",
+                str(count),
             ],
             check=False,
             capture_output=True,
@@ -8282,9 +8479,11 @@ def _set_expected_count(plan_path: str, count: int) -> tuple[SetExpectedStatus, 
 # -- gh cross-check helpers (injectable for tests) --
 # These module-level callables are replaced by test stubs via monkeypatch.
 
+
 def _done_gh_query(pr_number, **kwargs):
     """Query gh for PR merge state. Delegates to reconcile's canonical helper."""
     from fno.graph._reconcile import query_pr_merge_state
+
     return query_pr_merge_state(pr_number, **kwargs)
 
 
@@ -8327,9 +8526,7 @@ def _done_gate_pipeline(
 
         # Shared with `done_command` so the two paths cannot drift apart on what
         # counts as evidence.
-        evidence = resolve_merge_evidence(
-            refs, cwd=node.get("cwd"), query=_done_gh_query
-        )
+        evidence = resolve_merge_evidence(refs, cwd=node.get("cwd"), query=_done_gh_query)
         evidence_found = evidence.outcome == "merged"
         if evidence_found:
             evidence_pr_url = evidence.pr_url
@@ -8362,6 +8559,7 @@ def _done_gate_pipeline(
             # Emit refusal event (best-effort)
             try:
                 from fno import events as _evts
+
                 event = _evts.backlog_done_refused(
                     node_id=task_id,
                     pr_number=first_pr_number,
@@ -8394,6 +8592,7 @@ def _done_gate_pipeline(
         # Emit forced-close event (best-effort)
         try:
             from fno import events as _evts
+
             event = _evts.backlog_done_forced(
                 node_id=task_id,
                 force_reason=reason,
@@ -8415,9 +8614,7 @@ def _done_gate_pipeline(
     # work all ship". Skipped under --force so a deliberate half-ship stays a
     # journaled line (the backlog_done_forced event above) rather than silence.
     if not force:
-        promise = resolve_promise_evidence(
-            node, cwd=node.get("cwd"), query=_done_gh_query
-        )
+        promise = resolve_promise_evidence(node, cwd=node.get("cwd"), query=_done_gh_query)
         if promise.outcome == "promise_unmet":
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
@@ -8461,9 +8658,7 @@ def _cascade_close_external_parents(tracker, child_id: str) -> list[str]:
     return closed
 
 
-def _done_via_seam(
-    task_id: str, *, skip_stamp: bool, force: bool, reason: Optional[str]
-) -> None:
+def _done_via_seam(task_id: str, *, skip_stamp: bool, force: bool, reason: Optional[str]) -> None:
     """Rich completion under an external backend (task 4.1, AC7/AC8).
 
     The same shared gate pipeline runs first; footnote-owned rollups persist
@@ -8488,18 +8683,20 @@ def _done_via_seam(
 
     tracker = get_tracker()
     row = {
-        "id": task_id, "title": tnode.title, "cwd": sc.cwd,
-        "plan_path": sc.plan_path, "pr_number": sc.pr_number,
-        "pr_url": sc.pr_url, "additional_prs": sc.additional_prs,
+        "id": task_id,
+        "title": tnode.title,
+        "cwd": sc.cwd,
+        "plan_path": sc.plan_path,
+        "pr_number": sc.pr_number,
+        "pr_url": sc.pr_url,
+        "additional_prs": sc.additional_prs,
         "sessions": sc.sessions,
         # The rollup reads containment off the node (a contained child claims
         # no cost); dropping it here would double-count the delivery unit.
         "contained_in": sc.contained_in,
     }
     refs = node_pr_refs(row)
-    evidence_pr_url = _done_gate_pipeline(
-        task_id, row, refs, force=force, reason=reason
-    )
+    evidence_pr_url = _done_gate_pipeline(task_id, row, refs, force=force, reason=reason)
 
     # Footnote-owned rollups BEFORE the close (one physical owner: the sidecar).
     try:
@@ -8590,7 +8787,10 @@ def cmd_done(
         help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
     ),
     link: Optional[str] = typer.Option(
-        None, "--link", "--url", "-l",
+        None,
+        "--link",
+        "--url",
+        "-l",
         help="Artifact URL (Figma/Canva/Obsidian/any) - sets artifact_url.",
     ),
     note: Optional[str] = typer.Option(
@@ -8672,10 +8872,12 @@ def cmd_done(
     # and then closes CANONICALLY on the resolved id: the close depth must
     # not fork on which resolvable form named the node (PR 1200 review -
     # a bare-hex close of an epic child skipped the cascade and stamp that
-    # the prefixed form ran). The rich surface still delegates wholesale;
+    # the prefixed form ran). The rich surface still delegates wholesale
+    # (and resolves inside the delegate, so no resolve happens here);
     # an unresolvable query delegates so ITS error rendering answers.
     if (
         not _close_flags
+        and not _rich_flags
         and task_id is not None
         and not has_node_id_prefix(task_id)
     ):
@@ -8774,15 +8976,17 @@ def cmd_done(
     # backends run the identical evidence/promise pipeline before any close.
     # The return is the PR url that evidences the close, captured so the plan
     # stamp records the actual ship; None when there is no PR ref / no evidence.
-    evidence_pr_url = _done_gate_pipeline(
-        task_id, node, refs, force=force, reason=reason
-    )
-
+    evidence_pr_url = _done_gate_pipeline(task_id, node, refs, force=force, reason=reason)
 
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]
     already_holder: list = [False]
     cascade_closed_out: list = []
+    # The mutated row, exported so post-close steps (the plan stamp) read the
+    # session_id/points the mutator just filled rather than the pre-lock
+    # snapshot `node` still holds - locked_mutate_graph re-reads the graph
+    # inside the lock, so those fills are invisible to `node`.
+    node_after_out: list = [None]
 
     # Cost stamp (Wave 2.2): the ledger has per-plan cost the node never captured
     # (2-3 fills). Aggregate it outside the lock; ledger absent/rowless -> null,
@@ -8805,6 +9009,7 @@ def cmd_done(
         if existing:
             already_holder[0] = True
             return entries
+        node_after_out[0] = n
         _apply_completion_fields(n, merge_status="merged" if evidence_pr_url else None)
         # Fill-only: never overwrite a cost a richer path (e.g. the done root)
         # already stamped, and don't drop rows appended during the run.
@@ -8854,7 +9059,7 @@ def cmd_done(
         pass
 
     _canonical_post_close(
-        node,
+        node_after_out[0] or node,
         task_id=task_id,
         cascade_closed=cascade_closed_out,
         skip_stamp=skip_stamp,
@@ -8911,6 +9116,7 @@ def _canonical_post_close(
 
 # -- reconcile (close merged-PR drift) --
 
+
 def _run_advance_epic(
     epic: str,
     *,
@@ -8935,8 +9141,12 @@ def _run_advance_epic(
 
     try:
         result = advance_epic(
-            epic, stop=stop, max_dispatch=max_dispatch,
-            verbose=verbose, model=model, provider=provider,
+            epic,
+            stop=stop,
+            max_dispatch=max_dispatch,
+            verbose=verbose,
+            model=model,
+            provider=provider,
             continuation=continuation,
         )
     except Exception as exc:  # noqa: BLE001 - the epic advance itself is non-fatal per-child
@@ -8944,19 +9154,28 @@ def _run_advance_epic(
         raise typer.Exit(code=0)
 
     if json_out:
-        typer.echo(json.dumps({
-            "epic_id": result.epic_id,
-            "error": result.error,
-            "activated": result.activated,
-            "deactivated": result.deactivated,
-            "all_done": result.all_done,
-            "dispatched": list(result.dispatched),
-            "children": [
-                {"node_id": r.node_id, "decision": r.decision, "reason": r.reason,
-                 "short_id": r.short_id}
-                for r in result.child_results
-            ],
-        }, indent=2))
+        typer.echo(
+            json.dumps(
+                {
+                    "epic_id": result.epic_id,
+                    "error": result.error,
+                    "activated": result.activated,
+                    "deactivated": result.deactivated,
+                    "all_done": result.all_done,
+                    "dispatched": list(result.dispatched),
+                    "children": [
+                        {
+                            "node_id": r.node_id,
+                            "decision": r.decision,
+                            "reason": r.reason,
+                            "short_id": r.short_id,
+                        }
+                        for r in result.child_results
+                    ],
+                },
+                indent=2,
+            )
+        )
     else:
         if result.error:
             typer.echo(f"epic {result.epic_id}: {result.error}", err=True)
@@ -9060,8 +9279,7 @@ def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str
     Walks up under the same 64-deep cap the close path uses, for the same reason.
     """
     id_to_entry = {
-        e["id"]: e for e in entries
-        if isinstance(e, dict) and isinstance(e.get("id"), str)
+        e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
     reopened: list[str] = []
     warned: list[str] = []
@@ -9207,9 +9425,7 @@ def cmd_reopen(
     # to find the risky reopens.
     bypassed_merged = False
     if refs:
-        evidence = resolve_merge_evidence(
-            refs, cwd=node.get("cwd"), query=_done_gh_query
-        )
+        evidence = resolve_merge_evidence(refs, cwd=node.get("cwd"), query=_done_gh_query)
         # Pair the number with the state it describes. The aggregate outcome can
         # come from any ref, so recording refs[0] beside a MERGED read from
         # additional_prs[0] would name PR #41 as the merge evidence when #42 is
@@ -9229,8 +9445,8 @@ def cmd_reopen(
                     f"Refused: a referenced PR is MERGED, so {task_id}'s work is in "
                     f"main{f' ({merged_url})' if merged_url else ''}. "
                     f"Reopening would make the graph assert that shipped work did not ship.\n"
-                    f"  If work remains, file it: fno backlog idea \"<what is left>\"\n"
-                    f"  If the close itself was wrong: reopen --force --reason \"...\"",
+                    f'  If work remains, file it: fno backlog idea "<what is left>"\n'
+                    f'  If the close itself was wrong: reopen --force --reason "..."',
                     err=True,
                 )
                 raise typer.Exit(code=3)
@@ -9292,7 +9508,7 @@ def cmd_reopen(
     for pid in warned_out:
         typer.echo(
             f"warning: parent {pid} is done on its own evidence and now has an open "
-            f"child; `fno backlog reopen {pid} --reason \"...\"` if that is wrong",
+            f'child; `fno backlog reopen {pid} --reason "..."` if that is wrong',
             err=True,
         )
     typer.echo(
@@ -9349,24 +9565,24 @@ def cmd_advance(
         help="With --epic: K2 daemon-drain mode - never (re)activate the mission; retire an already-inactive one (dispatches nothing, reports deactivated).",
     ),
     max_dispatch: Optional[int] = typer.Option(
-        None, "--max",
+        None,
+        "--max",
         help="With --epic: cap the total workers this epic advance dispatches (per-project cap is config.parallel.max_lanes).",
     ),
     project: Optional[str] = typer.Option(
         None, "--project", "-p", help="Restrict next-node selection to this project."
     ),
-    json_out: bool = typer.Option(
-        False, "--json", "-J", help="Emit the decision as JSON."
-    ),
-    verbose: bool = typer.Option(
-        False, "--verbose", help="Print the dispatch decision to stderr."
-    ),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the decision as JSON."),
+    verbose: bool = typer.Option(False, "--verbose", help="Print the dispatch decision to stderr."),
     model: Optional[str] = typer.Option(
-        None, "--model", "-m",
+        None,
+        "--model",
+        "-m",
         help="Pin a model for the dispatched worker(s), overriding node annotations.",
     ),
     provider: Optional[str] = typer.Option(
-        None, "--provider",
+        None,
+        "--provider",
         help="Pin a provider for the dispatched worker(s). (No -p short: it is --project here.)",
     ),
 ) -> None:
@@ -9407,8 +9623,13 @@ def cmd_advance(
             typer.echo("advance: --epic and --closed are mutually exclusive", err=True)
             raise typer.Exit(code=2)
         _run_advance_epic(
-            epic, stop=stop, max_dispatch=max_dispatch, json_out=json_out,
-            verbose=verbose, model=model, provider=provider,
+            epic,
+            stop=stop,
+            max_dispatch=max_dispatch,
+            json_out=json_out,
+            verbose=verbose,
+            model=model,
+            provider=provider,
             continuation=continuation,
         )
         return
@@ -9436,8 +9657,11 @@ def cmd_advance(
 
     try:
         result = _advance(
-            closed_node_id=closed, project=project, verbose=verbose,
-            model=model, provider=provider,
+            closed_node_id=closed,
+            project=project,
+            verbose=verbose,
+            model=model,
+            provider=provider,
         )
         # G1 (AC5-FR): follow this node's blocked_by edges into OTHER projects.
         # Only meaningful with --closed (an edge source); the project-scoped
@@ -9446,13 +9670,17 @@ def cmd_advance(
         # reconcile sweep and this explicit verb dispatches at most once.
         if closed:
             _advance_deps(
-                closed_node_id=closed, closed_project=closed_project, verbose=verbose,
-                model=model, provider=provider,
+                closed_node_id=closed,
+                closed_project=closed_project,
+                verbose=verbose,
+                model=model,
+                provider=provider,
             )
             # G4: route the closed node's contract dependents to a reconcile pass
             # (or a pending sentinel). Shares the dispatch:<id> dedup with the two
             # advance paths so a node seen by all three dispatches at most once.
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+
             dispatch_reconcile_for_blocker(closed_node_id=closed, verbose=verbose)
     except Exception as exc:  # noqa: BLE001 - the contract is "always exits 0"
         # advance() is designed non-fatal (every path emits + returns), but the
@@ -9523,9 +9751,7 @@ def cmd_reconcile_findings(
         typer.echo(f"{f.node_id}  PR #{f.pr_number}  comment {f.comment_id}  ({f.signal})")
 
     if not apply:
-        typer.echo(
-            f"\n{len(findings)} node(s) would close. Re-run with --apply to close them."
-        )
+        typer.echo(f"\n{len(findings)} node(s) would close. Re-run with --apply to close them.")
         return
 
     closed = 0
@@ -9534,9 +9760,7 @@ def cmd_reconcile_findings(
             f"addressed on PR #{f.pr_number} ({f.signal}); retro reconcile-findings "
             f"re-check - fix landed without the thread being resolved/replied"
         )
-        proc = subprocess.run(
-            ["fno", "backlog", "done", f.node_id, "--force", "--reason", reason]
-        )
+        proc = subprocess.run(["fno", "backlog", "done", f.node_id, "--force", "--reason", reason])
         if proc.returncode == 0:
             closed += 1
         else:
@@ -9557,7 +9781,8 @@ def cmd_reconcile_findings(
 def cmd_reconcile(
     dry_run: bool = typer.Option(
         False,
-        "--dry-run", "-N",
+        "--dry-run",
+        "-N",
         help="Report candidates only; mutate nothing (graph stays byte-identical).",
     ),
     node: Optional[str] = typer.Option(
@@ -9567,7 +9792,8 @@ def cmd_reconcile(
     ),
     json_out: bool = typer.Option(
         False,
-        "--json", "-J",
+        "--json",
+        "-J",
         help="Emit structured JSON instead of a human summary.",
     ),
     pr_number: Optional[int] = typer.Option(
@@ -9644,7 +9870,10 @@ def cmd_reconcile(
     _full_sweep = node is None and pr_number is None
 
     def _pr_touch_ids(
-        _entries: list[dict], _pr_number: int, _claims: list[str], _our_repo: Optional[str],
+        _entries: list[dict],
+        _pr_number: int,
+        _claims: list[str],
+        _our_repo: Optional[str],
     ) -> set[str]:
         """Every node id ``_pr_number`` could possibly close: the trailer's
         own claims, any node already carrying ``_pr_number`` as a ref
@@ -9713,8 +9942,11 @@ def cmd_reconcile(
         return ids
 
     def _bind_and_report(
-        _entries: list[dict], _pr_number: int, _pr_url: Optional[str],
-        _claims: list[str], _repo: Optional[str],
+        _entries: list[dict],
+        _pr_number: int,
+        _pr_url: Optional[str],
+        _claims: list[str],
+        _repo: Optional[str],
     ) -> tuple[Optional[str], list[str]]:
         """Bind ``_claims`` to ``_pr_number`` against ``_entries``.
 
@@ -9729,7 +9961,11 @@ def cmd_reconcile(
 
         if dry_run:
             result = bind_closure_claims(
-                _entries, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+                _entries,
+                _claims,
+                pr_number=_pr_number,
+                pr_url=_pr_url,
+                repo=_repo,
             )
             return (result.refusal, list(result.bound_ids))
 
@@ -9737,7 +9973,11 @@ def cmd_reconcile(
 
         def _mutator(entries2):
             result = bind_closure_claims(
-                entries2, _claims, pr_number=_pr_number, pr_url=_pr_url, repo=_repo,
+                entries2,
+                _claims,
+                pr_number=_pr_number,
+                pr_url=_pr_url,
+                repo=_repo,
             )
             if result.outcome == "refused":
                 _box["refusal"] = result.refusal
@@ -9759,7 +9999,11 @@ def cmd_reconcile(
     supersession_files_by_pr: dict[int, list[str]] = {}
     entries = read_graph(_graph_path())
     if pr_number is not None:
-        from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
+        from fno.pr.closure import (
+            ClosureQueryError,
+            fetch_pr_closure_context,
+            parse_closure_trailer,
+        )
 
         try:
             pr_ctx = fetch_pr_closure_context(pr_number, repo=repo)
@@ -9788,12 +10032,11 @@ def cmd_reconcile(
             # ref-based scan below - flagging that as a refusal read a
             # fully successful run as failed (round-8 review fix).
             if parse_closure_trailer(pr_ctx.body):
-                closure_refused = (
-                    f"PR #{pr_number} is not merged (state={pr_ctx.state})"
-                )
+                closure_refused = f"PR #{pr_number} is not merged (state={pr_ctx.state})"
                 if not json_out:
                     typer.echo(
-                        f"warning: reconcile --pr-number: {closure_refused}", err=True,
+                        f"warning: reconcile --pr-number: {closure_refused}",
+                        err=True,
                     )
             pr_ctx = None
 
@@ -9802,7 +10045,11 @@ def cmd_reconcile(
             closure_claims = parse_closure_trailer(pr_ctx.body)
             if closure_claims:
                 closure_refused, closure_bound = _bind_and_report(
-                    entries, pr_number, pr_ctx.url, closure_claims, repo,
+                    entries,
+                    pr_number,
+                    pr_ctx.url,
+                    closure_claims,
+                    repo,
                 )
                 if not dry_run:
                     entries = read_graph(_graph_path())  # real bind just persisted
@@ -9814,8 +10061,7 @@ def cmd_reconcile(
                     )
                 elif closure_bound and not json_out:
                     typer.echo(
-                        f"reconcile --pr-number {pr_number}: bound "
-                        f"{', '.join(closure_bound)}",
+                        f"reconcile --pr-number {pr_number}: bound {', '.join(closure_bound)}",
                         err=True,
                     )
 
@@ -9834,9 +10080,7 @@ def cmd_reconcile(
             node_pr_refs,
         )
 
-        _open_heals, open_binding_advisories = collect_open_binding_heals(
-            entries, node_id=node
-        )
+        _open_heals, open_binding_advisories = collect_open_binding_heals(entries, node_id=node)
         if _open_heals:
 
             def _open_fill(_entries: list[dict]) -> list[dict]:
@@ -9844,9 +10088,7 @@ def cmd_reconcile(
                 heal_counts: dict[str, int] = {}
                 for candidate in _open_heals:
                     if isinstance(candidate.node_id, str):
-                        heal_counts[candidate.node_id] = (
-                            heal_counts.get(candidate.node_id, 0) + 1
-                        )
+                        heal_counts[candidate.node_id] = heal_counts.get(candidate.node_id, 0) + 1
                 for h in _open_heals:
                     if not isinstance(h.node_id, str) or heal_counts.get(h.node_id) != 1:
                         continue
@@ -9857,22 +10099,20 @@ def cmd_reconcile(
                     if current is None or not node_is_open(current) or node_pr_refs(current):
                         continue
                     result = bind_pr_rows(
-                        _entries, [h.node_id],
-                        pr_number=h.pr_number, pr_url=h.pr_url,
+                        _entries,
+                        [h.node_id],
+                        pr_number=h.pr_number,
+                        pr_url=h.pr_url,
                     )
                     if result.outcome == "bound" and result.bound_ids:
-                        _kept.append(
-                            {"node": h.node_id, "pr": h.pr_number, "url": h.pr_url}
-                        )
+                        _kept.append({"node": h.node_id, "pr": h.pr_number, "url": h.pr_url})
                 return _kept
 
             if dry_run:
                 # In-memory only (same contract as _bind_and_report's dry-run):
                 # the forward-scan preview below sees the healed rows, disk
                 # never moves.
-                open_bound = [
-                    dict(fill, would=True) for fill in _open_fill(entries)
-                ]
+                open_bound = [dict(fill, would=True) for fill in _open_fill(entries)]
             else:
                 _box: list[dict] = []
 
@@ -9905,9 +10145,7 @@ def cmd_reconcile(
     elif pr_number is not None:
         from fno.graph._reconcile import repo_slug_from_url as _repo_slug_from_url
 
-        _our_repo = repo or (
-            _repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None
-        )
+        _our_repo = repo or (_repo_slug_from_url(pr_ctx.url) if pr_ctx is not None else None)
         if _our_repo is None and not json_out:
             # _pr_touch_ids refuses to repo-scope a bare-number ref match
             # when it cannot resolve OUR OWN repo (avoiding a false cross-repo
@@ -9939,7 +10177,11 @@ def cmd_reconcile(
     # discovering totally unrelated merged PRs is this bare sweep's job (it
     # auto-fires often), not a side effect of every single merge event.
     if _full_sweep:
-        from fno.pr.closure import ClosureQueryError, fetch_pr_closure_context, parse_closure_trailer
+        from fno.pr.closure import (
+            ClosureQueryError,
+            fetch_pr_closure_context,
+            parse_closure_trailer,
+        )
         from fno.graph._reconcile import repo_slug_from_url, resolve_current_repo_slug
 
         # One record per discovered PR (not just the number): each record
@@ -9990,9 +10232,8 @@ def cmd_reconcile(
             # never scope an unrelated discovered PR. Neither resolving: skip
             # rather than guess, since a same-numbered PR can exist in the wrong
             # repo and a fresh (no-existing-ref) node would bind to it blind.
-            _repo_for_pr = (
-                repo_slug_from_url(_rec.pr_url)
-                or (resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None)
+            _repo_for_pr = repo_slug_from_url(_rec.pr_url) or (
+                resolve_current_repo_slug(_rec.cwd) if _rec.cwd else None
             )
             if _repo_for_pr is None:
                 continue
@@ -10057,9 +10298,7 @@ def cmd_reconcile(
                 # gate that skipped itself must still leave a trace.
                 typer.echo(f"warning: {verdict.warning}", err=True)
             if verdict.warning:
-                promise_warnings.append(
-                    {"node_id": record.node_id, "warning": verdict.warning}
-                )
+                promise_warnings.append({"node_id": record.node_id, "warning": verdict.warning})
             if verdict.outcome == "promise_unmet":
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.
@@ -10265,11 +10504,13 @@ def cmd_reconcile(
                             _cascade_close_contained(entries, record.node_id)
                         )
                     except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
-                        contained_errors_acc.append({
-                            "owner": record.node_id,
-                            "stage": "merge-cascade",
-                            "error": str(_cc_exc)[:200],
-                        })
+                        contained_errors_acc.append(
+                            {
+                                "owner": record.node_id,
+                                "stage": "merge-cascade",
+                                "error": str(_cc_exc)[:200],
+                            }
+                        )
                         typer.echo(
                             f"warning: closed {record.node_id} but the contained-node "
                             f"cascade failed: {_cc_exc}; any node with "
@@ -10279,9 +10520,7 @@ def cmd_reconcile(
                         )
                     # Cascade-close now-all-done ancestor epics (x-33b2), uniform
                     # across projects (follows the parent edge, not a filter).
-                    cascade_closed_acc.extend(
-                        _cascade_close_parents(entries, record.node_id)
-                    )
+                    cascade_closed_acc.extend(_cascade_close_parents(entries, record.node_id))
                     actually_closed.append(record)
             # Self-heal pre-existing stranded all-done epics (codex P2): close any
             # open epic whose children are already all done, even with no drift
@@ -10302,15 +10541,15 @@ def cmd_reconcile(
                 # every genuine PR-drift close with it. Strictly worse than the
                 # stale rows it exists to clean up.
                 try:
-                    contained_closed_acc.extend(
-                        _sweep_close_stranded_contained(entries)
-                    )
+                    contained_closed_acc.extend(_sweep_close_stranded_contained(entries))
                 except Exception as _sw_exc:  # noqa: BLE001 - never abort the sweep
-                    contained_errors_acc.append({
-                        "owner": None,
-                        "stage": "stranded-heal",
-                        "error": str(_sw_exc)[:200],
-                    })
+                    contained_errors_acc.append(
+                        {
+                            "owner": None,
+                            "stage": "stranded-heal",
+                            "error": str(_sw_exc)[:200],
+                        }
+                    )
                     typer.echo(
                         "warning: the stranded-contained self-heal failed: "
                         f"{_sw_exc}; nodes whose delivery unit already merged "
@@ -10356,6 +10595,7 @@ def cmd_reconcile(
             from fno.backlog.advance import advance as _advance
             from fno.backlog.advance import advance_dependents as _advance_deps
             from fno.backlog.reconcile_dispatch import dispatch_reconcile_for_blocker
+
             _advance(closed_node_id=node_id, project=project, project_root=root)
             _advance_deps(closed_node_id=node_id, closed_project=project, project_root=root)
             dispatch_reconcile_for_blocker(closed_node_id=node_id, project_root=root)
@@ -10379,9 +10619,7 @@ def cmd_reconcile(
             # later records. Warn and continue, mirroring _graduate_plan.
             sentinel_str = None
             try:
-                sentinel_str = str(
-                    write_retro_sentinel(record, sentinel_dir=retro_pending_dir())
-                )
+                sentinel_str = str(write_retro_sentinel(record, sentinel_dir=retro_pending_dir()))
             except OSError as exc:
                 typer.echo(
                     f"warning: closed {record.node_id} but failed to write its "
@@ -10436,6 +10674,7 @@ def cmd_reconcile(
             if record.cwd:
                 try:
                     from fno.config import load_settings_for_repo
+
                     _settings = load_settings_for_repo(Path(record.cwd))
                     # The review block lives under `config:` (SettingsModel ->
                     # config.review), NOT at the top level - reading
@@ -10446,20 +10685,20 @@ def cmd_reconcile(
                     # reviewed is NOT counted here. That under-reports (fail-safe
                     # direction) and is acceptable for a Tier-1 metric - dead-bot
                     # is the recurring escape this catches.
-                    _required_bots = list(
-                        _settings.review.github_apps or []
-                    )
+                    _required_bots = list(_settings.review.github_apps or [])
                 except Exception:
                     _required_bots = []  # fail open: unresolvable config -> no emit
             emit_gate_escape_for_record(record, required_bots=_required_bots)
 
-            closed.append({
-                "node_id": record.node_id,
-                "pr_number": record.pr_number,
-                "pr_url": record.pr_url,
-                "plan_stamped": stamped,
-                "sentinel": sentinel_str,
-            })
+            closed.append(
+                {
+                    "node_id": record.node_id,
+                    "pr_number": record.pr_number,
+                    "pr_url": record.pr_url,
+                    "plan_stamped": stamped,
+                    "sentinel": sentinel_str,
+                }
+            )
 
             # Merge-triggered auto-continue (ab-3cd195b6 / task 2.1): now that
             # this node's close has committed (AC1-RACE ordering: advance runs
@@ -10498,9 +10737,7 @@ def cmd_reconcile(
         # Project every closed node (records + cascade-closed epic parents) onto
         # its plan (forward-only, stamps done_at). The per-record stamp above
         # only touches directly-closed records; the epic parents need this.
-        _project_plans_from_graph(
-            [r.node_id for r in actually_closed] + list(cascade_closed_acc)
-        )
+        _project_plans_from_graph([r.node_id for r in actually_closed] + list(cascade_closed_acc))
 
         # x-33b2: a cascade-closed parent epic unblocks its OWN dependents (a node
         # blocked_by the epic). The per-record loop above only dispatched the
@@ -10552,9 +10789,7 @@ def cmd_reconcile(
                 # previews - and `contained_errors` stayed [] in the --json
                 # payload, asserting no errors for a leg that never completed.
                 try:
-                    _sim_contained.extend(
-                        _cascade_close_contained(_sim, record.node_id)
-                    )
+                    _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
                 except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
                     typer.echo(
                         f"warning: dry-run contained cascade for "
@@ -10562,11 +10797,13 @@ def cmd_reconcile(
                         "under-reports contained closes",
                         err=True,
                     )
-                    contained_errors.append({
-                        "owner": record.node_id,
-                        "stage": "merge-cascade (dry-run)",
-                        "error": str(_sc_exc)[:200],
-                    })
+                    contained_errors.append(
+                        {
+                            "owner": record.node_id,
+                            "stage": "merge-cascade (dry-run)",
+                            "error": str(_sc_exc)[:200],
+                        }
+                    )
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
         if _full_sweep:
             try:
@@ -10577,11 +10814,13 @@ def cmd_reconcile(
                     f"{_ss_exc}; the preview under-reports contained closes",
                     err=True,
                 )
-                contained_errors.append({
-                    "owner": None,
-                    "stage": "stranded-heal (dry-run)",
-                    "error": str(_ss_exc)[:200],
-                })
+                contained_errors.append(
+                    {
+                        "owner": None,
+                        "stage": "stranded-heal (dry-run)",
+                        "error": str(_ss_exc)[:200],
+                    }
+                )
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
@@ -10607,6 +10846,7 @@ def cmd_reconcile(
                 merged_prs = []
             pairs = detect_reverted_nodes(merged_prs, entries)
             if pairs and not dry_run:
+
                 def _stamp_reverts(entries2):
                     for nid, _rpr in pairs:
                         n = _find_node(entries2, nid)
@@ -10615,9 +10855,7 @@ def cmd_reconcile(
                     return entries2
 
                 locked_mutate_graph(_graph_path(), _stamp_reverts)
-            reverted_stamped = [
-                {"node_id": nid, "revert_pr": rpr} for nid, rpr in pairs
-            ]
+            reverted_stamped = [{"node_id": nid, "revert_pr": rpr} for nid, rpr in pairs]
         except Exception as exc:  # noqa: BLE001 - never abort the sweep
             typer.echo(f"warning: revert detection skipped: {exc}", err=True)
 
@@ -10727,7 +10965,8 @@ def cmd_reconcile(
             if _epic is None or not node_is_open(_epic):
                 continue  # unknown, or already closed/superseded - nothing outstanding
             _outstanding = sorted(
-                e["id"] for e in _ew_entries
+                e["id"]
+                for e in _ew_entries
                 if isinstance(e, dict) and e.get("parent") == _eid and node_is_open(e)
             )
             if _outstanding:
@@ -10802,9 +11041,7 @@ def cmd_reconcile(
             # PR whose plan promised work that has not all shipped. In the JSON
             # payload because the SessionStart hook reads --json and discards
             # stderr - a held-open node that prints only to stderr is invisible.
-            "promise_unmet": [
-                {"node_id": nid, "reason": reason} for nid, reason in promise_unmet
-            ],
+            "promise_unmet": [{"node_id": nid, "reason": reason} for nid, reason in promise_unmet],
             "promise_warnings": promise_warnings,
             "supersession_evidence_failures": owed_evidence_failures,
         }
@@ -10833,9 +11070,7 @@ def cmd_reconcile(
 
     if dry_run:
         if closeable:
-            typer.echo(
-                f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):"
-            )
+            typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
         if contained_closed:
@@ -10849,8 +11084,7 @@ def cmd_reconcile(
             )
         if healed_epics:
             typer.echo(
-                f"Would self-heal {len(healed_epics)} container epic(s): "
-                + ", ".join(healed_epics)
+                f"Would self-heal {len(healed_epics)} container epic(s): " + ", ".join(healed_epics)
             )
     else:
         # Suppressed ONLY on a heal-only sweep (no drift candidates at all),
@@ -10872,8 +11106,7 @@ def cmd_reconcile(
             _whose = "those PRs" if closed else "already-merged delivery units"
             typer.echo(
                 f"{_lead} {len(contained_closed)} contained node(s) shipped "
-                f"inside {_whose} (cost stays on the delivery unit): "
-                + ", ".join(contained_closed)
+                f"inside {_whose} (cost stays on the delivery unit): " + ", ".join(contained_closed)
             )
         if healed_epics:
             typer.echo(
@@ -10928,6 +11161,7 @@ def cmd_reconcile(
 
 # -- maintain (recurring backlog + kanban hygiene sweep) --
 
+
 def _validity_rg_search(symbol: str) -> Optional[int]:
     """Bounded git-grep file count for a named symbol under the repo root.
 
@@ -10947,7 +11181,9 @@ def _validity_rg_search(symbol: str) -> Optional[int]:
     try:
         proc = subprocess.run(
             ["git", "-C", root, "grep", "-l", "--fixed-strings", "-e", symbol],
-            capture_output=True, text=True, timeout=_maintain_source_timeout(),
+            capture_output=True,
+            text=True,
+            timeout=_maintain_source_timeout(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -10998,7 +11234,9 @@ def _fetch_retro_comment(
     try:
         proc = subprocess.run(
             ["gh", "api", path, "--paginate", "--slurp"],
-            capture_output=True, text=True, cwd=root,
+            capture_output=True,
+            text=True,
+            cwd=root,
             timeout=_maintain_source_timeout(),
         )
     except (OSError, subprocess.SubprocessError):
@@ -11060,7 +11298,9 @@ def _read_merged_region(root: str, path: str, line: object) -> str:
     try:
         proc = subprocess.run(
             ["git", "-C", root, "show", f"HEAD:{path}"],
-            capture_output=True, text=True, timeout=_maintain_source_timeout(),
+            capture_output=True,
+            text=True,
+            timeout=_maintain_source_timeout(),
         )
         if proc.returncode == 0:
             content = proc.stdout
@@ -11133,7 +11373,8 @@ def cmd_maintain(
     ),
     json_out: bool = typer.Option(
         False,
-        "--json", "-J",
+        "--json",
+        "-J",
         help="Emit structured JSON instead of a human summary.",
     ),
     recheck: bool = typer.Option(
@@ -11189,11 +11430,15 @@ def cmd_maintain(
         # the claim check and every other detector below - it reads and
         # prints only, so it needs none of their machinery.
         reverts = _maintain.detect_suspect_reverts(entries)
-        typer.echo(f"reversals: {len(reverts)} of the drained pile carry evidence of a human decision")
+        typer.echo(
+            f"reversals: {len(reverts)} of the drained pile carry evidence of a human decision"
+        )
         for r in reverts:
             title = r.title[:60]
             typer.echo(f"  {r.node_id}  {r.priority}  {r.deferred_at[:10]}  {r.signal}  {title}")
-        typer.echo("(read-only: no node was changed. Rule on these yourself with `fno backlog undefer <id>...`)")
+        typer.echo(
+            "(read-only: no node was changed. Rule on these yourself with `fno backlog undefer <id>...`)"
+        )
         return
 
     # Apply legs must never touch a node a live target session is driving.
@@ -11244,9 +11489,7 @@ def cmd_maintain(
     stale_ready_cands = _maintain.detect_stale_ready(entries, ready_staleness_days)
     stale_ready_truncated = 0
     if len(stale_ready_cands) > _maintain.AUTO_DEFER_BLAST_CAP:
-        stale_ready_cands = sorted(
-            stale_ready_cands, key=lambda s: (-s.age_days, s.node_id)
-        )
+        stale_ready_cands = sorted(stale_ready_cands, key=lambda s: (-s.age_days, s.node_id))
         stale_ready_truncated = len(stale_ready_cands) - _maintain.AUTO_DEFER_BLAST_CAP
         stale_ready_cands = stale_ready_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
 
@@ -11288,9 +11531,7 @@ def cmd_maintain(
         # not per node (Domain Pitfall). Each item is guarded so one failure
         # never strands the rest (AC1-ERR).
         def mutator(ents):
-            current_claimed = claimed | _require_live_claimed_node_ids(
-                "backlog maintain --apply"
-            )
+            current_claimed = claimed | _require_live_claimed_node_ids("backlog maintain --apply")
             applied_rescope.clear()
             applied_prune.clear()
             applied_defers.clear()
@@ -11311,9 +11552,7 @@ def cmd_maintain(
                     n["cwd"] = fix.new_cwd
                     applied_rescope.append(fix.node_id)
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: re-scope of {fix.node_id} failed: {exc}", err=True
-                    )
+                    typer.echo(f"warning: re-scope of {fix.node_id} failed: {exc}", err=True)
             for nid in prune_ids:
                 if nid in current_claimed:
                     skipped_claimed.append(nid)
@@ -11339,9 +11578,7 @@ def cmd_maintain(
                     if not n or n.get("pr_url") or n.get("pr_number") != fix.pr_number:
                         continue
                     n["pr_url"] = fix.pr_url
-                    applied_pr_urls.append(
-                        {"node_id": fix.node_id, "pr_url": fix.pr_url}
-                    )
+                    applied_pr_urls.append({"node_id": fix.node_id, "pr_url": fix.pr_url})
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                     typer.echo(
                         f"warning: pr_url backfill of {fix.node_id} failed: {exc}",
@@ -11381,9 +11618,7 @@ def cmd_maintain(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
                     )
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
-                    typer.echo(
-                        f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True
-                    )
+                    typer.echo(f"warning: auto-defer of {cand.node_id} failed: {exc}", err=True)
             # G1 stale-ready quarantine (x-3236): the reversible defer for a ready
             # node abandoned past the threshold. Same in-lock re-sample as the
             # failure leg (a node claimed/done/deferred since the read is left
@@ -11413,11 +11648,13 @@ def cmd_maintain(
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
-                    applied_stale_ready.append({
-                        "node_id": cand.node_id,
-                        "age_days": cand.age_days,
-                        "reason": _maintain.STALE_QUARANTINE_REASON,
-                    })
+                    applied_stale_ready.append(
+                        {
+                            "node_id": cand.node_id,
+                            "age_days": cand.age_days,
+                            "reason": _maintain.STALE_QUARANTINE_REASON,
+                        }
+                    )
                 except Exception as exc:  # noqa: BLE001 - one bad row must not abort
                     typer.echo(
                         f"warning: stale-ready defer of {cand.node_id} failed: {exc}",
@@ -11449,6 +11686,7 @@ def cmd_maintain(
             _deck_dir = None
 
         if _deck_dir is not None:
+
             def _exists_factory(node):
                 root = node.get("cwd")
                 if not isinstance(root, str) or not os.path.isdir(root):
@@ -11562,16 +11800,13 @@ def cmd_maintain(
             "skipped_claimed": skipped_claimed,
             "auto_defer": {
                 "applied": applied_defers if apply else [],
-                "candidates": [
-                    {"node_id": c.node_id, "streak": c.streak} for c in defer_cands
-                ],
+                "candidates": [{"node_id": c.node_id, "streak": c.streak} for c in defer_cands],
                 "truncated": defer_truncated,
             },
             "stale_ready": {
                 "applied": applied_stale_ready if apply else [],
                 "candidates": [
-                    {"node_id": c.node_id, "age_days": c.age_days}
-                    for c in stale_ready_cands
+                    {"node_id": c.node_id, "age_days": c.age_days} for c in stale_ready_cands
                 ],
                 "truncated": stale_ready_truncated,
             },
@@ -11607,9 +11842,7 @@ def cmd_maintain(
             f"pr-url unresolvable {len(pr_url_unresolvable)}"
         )
     for f in pr_url_unresolvable:
-        typer.echo(
-            f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})"
-        )
+        typer.echo(f"  unresolvable pr_url {f.node_id} (PR #{f.pr_number}, cwd={f.cwd or 'unset'})")
 
     if apply:
         typer.echo(
@@ -11659,8 +11892,7 @@ def cmd_maintain(
     if apply:
         for d in applied_stale_ready:
             typer.echo(
-                f"  stale-ready deferred {d['node_id']} ({d['age_days']}d "
-                f"unmoved): {d['reason']}"
+                f"  stale-ready deferred {d['node_id']} ({d['age_days']}d unmoved): {d['reason']}"
             )
     else:
         for sc in stale_ready_cands:
@@ -11699,8 +11931,7 @@ def cmd_maintain(
         ages = sorted(s.age_days for s in stale)
         oldest = sorted(stale, key=lambda s: s.age_days, reverse=True)[:10]
         typer.echo(
-            f"  stale ideas: {len(stale)} (age {ages[0]}-{ages[-1]}d) - "
-            f"drain in one locked write:"
+            f"  stale ideas: {len(stale)} (age {ages[0]}-{ages[-1]}d) - drain in one locked write:"
         )
         for s in oldest:
             typer.echo(f"    {s.node_id} ({s.age_days}d)")
@@ -11721,8 +11952,7 @@ def cmd_maintain(
         )
     if skipped_claimed:
         typer.echo(
-            f"  skipped {len(skipped_claimed)} live-claimed node(s): "
-            f"{', '.join(skipped_claimed)}"
+            f"  skipped {len(skipped_claimed)} live-claimed node(s): {', '.join(skipped_claimed)}"
         )
 
     if validity_result is not None:
@@ -11745,24 +11975,28 @@ def cmd_maintain(
 
 # -- reprioritize --
 
+
 @cli.command("reprioritize", hidden=True)
 def cmd_reprioritize(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     priority: str = typer.Argument(..., help="New priority: p0|p1|p2|p3"),
-    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    blocks_everything: bool = typer.Option(
+        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
+    ),
 ) -> None:
     from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, validate_priority_write
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
     if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     if priority not in PRIORITY_ORDER:
         typer.echo(
-            f"Error: invalid priority '{priority}'. "
-            f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -11792,7 +12026,9 @@ def cmd_reprioritize(
 @cli.command("migrate-priorities", hidden=True)
 def cmd_migrate_priorities(
     apply: bool = typer.Option(False, "--apply", help="Apply the idempotent p0 to p1 migration."),
-    rollback: bool = typer.Option(False, "--rollback", help="Restore rows changed by the migration."),
+    rollback: bool = typer.Option(
+        False, "--rollback", help="Restore rows changed by the migration."
+    ),
 ) -> None:
     """Dry-run or apply the explicit legacy p0 re-band migration."""
     from fno.graph.migrations import migrate_legacy_p0, rollback_legacy_p0
@@ -11813,6 +12049,7 @@ def cmd_migrate_priorities(
     elif not apply:
         receipt = migrate_legacy_p0(read_graph(_graph_path()), apply=False)
     else:
+
         def mutator(entries: list[dict]) -> list[dict]:
             holder.append(migrate_legacy_p0(entries, apply=True))
             return entries
@@ -11824,12 +12061,11 @@ def cmd_migrate_priorities(
 
 # -- rank --
 
+
 @cli.command("rank")
 def cmd_rank(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX) to rank"),
-    top: bool = typer.Option(
-        False, "--top", help="Pin to the front of its (column, project) lane"
-    ),
+    top: bool = typer.Option(False, "--top", help="Pin to the front of its (column, project) lane"),
     bottom: bool = typer.Option(
         False, "--bottom", help="Send to the back of the ranked band in its lane"
     ),
@@ -11858,7 +12094,9 @@ def cmd_rank(
     from fno.graph.render import make_kanban_column, _project_key
 
     if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     chosen = [
@@ -11874,15 +12112,16 @@ def cmd_rank(
     ]
     if len(chosen) != 1:
         typer.echo(
-            "Error: pass exactly one of --top / --bottom / --before <id> / "
-            "--after <id> / --clear",
+            "Error: pass exactly one of --top / --bottom / --before <id> / --after <id> / --clear",
             err=True,
         )
         raise typer.Exit(code=1)
 
     anchor_id = before if before is not None else after
     if anchor_id is not None and not has_node_id_prefix(anchor_id):
-        typer.echo(f"Error: anchor must be a <prefix>-<4..8 hex> node id, got '{anchor_id}'", err=True)
+        typer.echo(
+            f"Error: anchor must be a <prefix>-<4..8 hex> node id, got '{anchor_id}'", err=True
+        )
         raise typer.Exit(code=1)
 
     result: dict = {}
@@ -11905,8 +12144,7 @@ def cmd_rank(
             column_for = make_kanban_column(entries, strict_claims=True)
         except Exception as exc:
             typer.echo(
-                "Error: live claim state is unavailable; rank refused without "
-                "changing the graph.",
+                "Error: live claim state is unavailable; rank refused without changing the graph.",
                 err=True,
             )
             raise typer.Exit(code=1) from exc
@@ -11935,9 +12173,7 @@ def cmd_rank(
         target_lane = _lane(node)
         # Lane peers exclude the target; ranked peers (anchor included) sorted
         # ascending give us the band to insert into.
-        peers = [
-            e for e in entries if e.get("id") != tid and _lane(e) == target_lane
-        ]
+        peers = [e for e in entries if e.get("id") != tid and _lane(e) == target_lane]
         ranked = sorted((e for e in peers if _is_ranked(e)), key=lambda e: e["rank"])
 
         if top:
@@ -12085,9 +12321,7 @@ def cmd_archive(
         # Guard against the FULL graph so an open node in another roadmap that
         # references one of these terminal nodes (blocker/parent/supersede) is
         # still protected; only the archive SET is roadmap-restricted.
-        to_archive, _remaining_pool, skipped = partition_for_archive(
-            entries, older_than_days, now
-        )
+        to_archive, _remaining_pool, skipped = partition_for_archive(entries, older_than_days, now)
         if roadmap_id:
             to_archive = [e for e in to_archive if e.get("roadmap_id") == roadmap_id]
             # `skipped` is restricted with the same predicate so the receipt's
@@ -12157,9 +12391,7 @@ def cmd_archive(
         # ids from staying nodes' related lists / source_node_id, so the working
         # graph never keeps a soft pointer at an archived id. One write, under
         # the same lock as everything else here.
-        arch_ids = {
-            e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")
-        }
+        arch_ids = {e["id"] for e in to_archive if isinstance(e, dict) and e.get("id")}
         remaining, stripped = release_soft_edges(remaining, arch_ids)
         receipt["stripped"] = stripped
 
@@ -12229,7 +12461,8 @@ def cmd_archive_dedupe_ids(
 
     if not apply:
         working_ids = {
-            nid for e in read_graph(_graph_path())
+            nid
+            for e in read_graph(_graph_path())
             if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         _, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
@@ -12250,8 +12483,7 @@ def cmd_archive_dedupe_ids(
         # a pre-lock read would go stale under that race and the write below
         # would clobber whatever the concurrent sweep just archived.
         working_ids = {
-            nid for e in entries
-            if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
+            nid for e in entries if isinstance(e, dict) and isinstance(nid := e.get("id"), str)
         }
         patched, remap = remint_archive_collisions(working_ids, _read_archive_or_exit())
         remap_holder.update(remap)
@@ -12319,7 +12551,10 @@ def cmd_album(
     # The album renders the local archive's shipped work: guarded local-store
     # display, refused (named) under an external selection.
     if active_backend_name() != "graph":
-        typer.echo("fno backlog album: the album renders the local archive; unavailable under an external tracker backend", err=True)
+        typer.echo(
+            "fno backlog album: the album renders the local archive; unavailable under an external tracker backend",
+            err=True,
+        )
         raise typer.Exit(code=2)
 
     from fno.graph.store import read_graph
@@ -12333,10 +12568,7 @@ def cmd_album(
             # Terminal facts, not the persisted field: legacy archived rows
             # predate status stamping and carry only completed_at, which the
             # archive subsystem itself treats as done (archive._is_done).
-            and (
-                str(e.get("status") or "") == "done"
-                or bool(e.get("completed_at"))
-            )
+            and (str(e.get("status") or "") == "done" or bool(e.get("completed_at")))
             # Superseded is derived from superseded_by (graph/types.py), so a
             # row can carry both; the album shows shipped work only.
             and not e.get("superseded_by")
@@ -12498,11 +12730,7 @@ def cmd_unarchive(
             # this, `get` resolved the id one command earlier and `unarchive`
             # - the remedy the dedupe verb names - refused it.
             row = next(
-                (
-                    e
-                    for e in archived
-                    if isinstance(e, dict) and e.get("previous_id") == task_id
-                ),
+                (e for e in archived if isinstance(e, dict) and e.get("previous_id") == task_id),
                 None,
             )
         if row is None:
@@ -12560,9 +12788,7 @@ def cmd_unarchive(
 # -- Internal helpers for intake / update (avoid circular imports) --
 
 
-def _apply_claim_in_place(
-    es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]
-):
+def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, project: Optional[str]):
     """Update a claimed idea node in place: attach the plan, merge the
     doc-declared fields, promote idea -> ready.
 
@@ -12586,6 +12812,7 @@ def _apply_claim_in_place(
     frontmatter = _read_plan_frontmatter(plan_path) or {}
     claimed_type = normalize_type(frontmatter.get("type"))
     from fno.graph._constants import normalize_difficulty
+
     raw_difficulty = frontmatter.get("difficulty")
     if raw_difficulty is None:
         raw_difficulty = frontmatter.get("model_tier")
@@ -12608,25 +12835,18 @@ def _apply_claim_in_place(
                         "ts": datetime.now(timezone.utc).isoformat(),
                     }
                 )
-        if (
-            claimed_type != DEFAULT_NODE_TYPE
-            and entry.get("type") != claimed_type
-        ):
+        if claimed_type != DEFAULT_NODE_TYPE and entry.get("type") != claimed_type:
             # `add` and `update` both refuse a write that would make a
             # third epic level; a doc-frontmatter lane that skips the cap
             # would be the decorative guard this whole change is about.
             # It SKIPS rather than refuses, unlike those two: there the
             # operator typed `--type` and deserves a hard error, here the
             # doc is advisory and the claim itself is still valid.
-            parent_node = (
-                _find_node(es, entry["parent"]) if entry.get("parent") else None
-            )
+            parent_node = _find_node(es, entry["parent"]) if entry.get("parent") else None
             if (
                 claimed_type == "epic"
                 and parent_node is not None
-                and _would_exceed_epic_depth(
-                    es, {**entry, "type": "epic"}, parent_node
-                )
+                and _would_exceed_epic_depth(es, {**entry, "type": "epic"}, parent_node)
             ):
                 typer.echo(
                     f"warning: plan declares type: epic but {claim_id} sits "
@@ -12638,9 +12858,7 @@ def _apply_claim_in_place(
             else:
                 entry["type"] = claimed_type
         if spec["deps"]:
-            merged = list(
-                dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]])
-            )
+            merged = list(dict.fromkeys([*entry.get("blocked_by", []), *spec["deps"]]))
             entry["blocked_by"] = merged
         # Only override priority if the plan supplied a non-default one.
         if spec.get("priority") and spec["priority"] != "p2":
@@ -12655,7 +12873,9 @@ def _apply_claim_in_place(
         # Only fills nulls; never overwrites existing values.
         if entry.get("project") is None or entry.get("cwd") is None:
             resolved_project, resolved_cwd, _ = resolve_node_project_and_cwd(
-                plan_path, project, es,
+                plan_path,
+                project,
+                es,
             )
             if entry.get("project") is None and resolved_project:
                 entry["project"] = resolved_project
@@ -12674,6 +12894,7 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
     if from_list:
         if from_list == "-":
             import sys
+
             raw = sys.stdin.read()
         else:
             try:
@@ -12698,14 +12919,20 @@ def _collect_intake_paths_typer(plan_paths: list[str], from_list: Optional[str])
 
 
 def _do_intake_multi(
-    args, all_paths: list[str], *, roadmap_id, dry_run,
+    args,
+    all_paths: list[str],
+    *,
+    roadmap_id,
+    dry_run,
     allow_no_surface: bool = False,
 ) -> None:
     """Multi-path intake flow delegating to intake helpers."""
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import (
-        _prepare_intake, _build_intake_node,
-        _refuse_surfaceless_intake, _validate_cli_deps,
+        _prepare_intake,
+        _build_intake_node,
+        _refuse_surfaceless_intake,
+        _validate_cli_deps,
     )
 
     cli_deps: list[str] = (
@@ -12754,10 +12981,7 @@ def _do_intake_multi(
         target = Path(f).expanduser()
         if not target.is_absolute():
             spellings.append(str(target.resolve()))
-        return all(
-            plan_path_owner_conflict(preview_entries, None, s) is None
-            for s in spellings
-        )
+        return all(plan_path_owner_conflict(preview_entries, None, s) is None for s in spellings)
 
     _refuse_surfaceless_intake(
         [f for f in concrete_files if _unbound(f)],
@@ -12789,9 +13013,12 @@ def _do_intake_multi(
                 # exactly that, never as would-intake.
                 try:
                     prep = _prepare_intake(
-                        f, preview_entries,
-                        roadmap_id=roadmap_id, cli_title=args.title,
-                        cli_priority=args.priority, cli_deps=cli_deps,
+                        f,
+                        preview_entries,
+                        roadmap_id=roadmap_id,
+                        cli_title=args.title,
+                        cli_priority=args.priority,
+                        cli_deps=cli_deps,
                         cli_points=args.points,
                         cli_project=cli_project,
                     )
@@ -12799,19 +13026,19 @@ def _do_intake_multi(
                     typer.echo(f"  error: would skip {f}: {exc}", err=True)
                     continue
                 if prep["status"] == "already":
-                    typer.echo(
-                        f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})'
-                    )
+                    typer.echo(f'  already intaked {prep["id"]}: "{prep["title"]}"  ({f})')
                     continue
                 spec = prep["node_spec"]
                 if prep["status"] == "claim":
                     typer.echo(
-                        f'  would claim: "{spec["title"]}"  (plan: {f})'
-                        f'  (claims {prep["id"]})'
+                        f'  would claim: "{spec["title"]}"  (plan: {f})  (claims {prep["id"]})'
                     )
                     _apply_claim_in_place(
-                        preview_entries, prep["id"], plan_path=f,
-                        spec=spec, project=cli_project,
+                        preview_entries,
+                        prep["id"],
+                        plan_path=f,
+                        spec=spec,
+                        project=cli_project,
                     )
                     continue
                 # Grow the preview graph the way the real mutator grows its
@@ -12851,9 +13078,12 @@ def _do_intake_multi(
                 # from inside the lock and persisted nothing.
                 try:
                     prep = _prepare_intake(
-                        f, es,
-                        roadmap_id=roadmap_id, cli_title=args.title,
-                        cli_priority=args.priority, cli_deps=cli_deps,
+                        f,
+                        es,
+                        roadmap_id=roadmap_id,
+                        cli_title=args.title,
+                        cli_priority=args.priority,
+                        cli_deps=cli_deps,
                         cli_points=args.points,
                         cli_project=cli_project,
                     )
@@ -12871,14 +13101,16 @@ def _do_intake_multi(
                     # node beside an unclaimed idea (the duplicate the claim
                     # mechanism exists to prevent).
                     _apply_claim_in_place(
-                        es, prep["id"], plan_path=f,
-                        spec=prep["node_spec"], project=cli_project,
+                        es,
+                        prep["id"],
+                        plan_path=f,
+                        spec=prep["node_spec"],
+                        project=cli_project,
                     )
                     tallies["claimed"] += 1
                     claimed_ids.append(prep["id"])
                     typer.echo(
-                        f'  claim {prep["id"]} via {prep["claim_source"]}: '
-                        f'"{prep["title"]}"  ({f})'
+                        f'  claim {prep["id"]} via {prep["claim_source"]}: "{prep["title"]}"  ({f})'
                     )
                     continue
                 try:
@@ -12911,6 +13143,7 @@ def _do_intake_multi(
     # resembles an existing one. Fresh post-write read; non-fatal.
     try:
         from fno.graph._intake import _find_node, _warn_similar_nodes
+
         post_entries = read_graph(_graph_path())
         for nid in new_ids:
             node = _find_node(post_entries, nid)
@@ -12920,17 +13153,17 @@ def _do_intake_multi(
         _safe_stderr_warn(f"warning: post-intake dedup check skipped: {e}\n")
 
     from fno.graph._intake import _warn_unknown_project, _list_known_projects
+
     known = _list_known_projects()
     for proj in sorted(landed_projects):
         _warn_unknown_project(proj, known=known)
 
     missing = sum(1 for r in resolved if r["status"] == "missing")
     typer.echo(
-        f'\n{tallies["intaked"]} newly intaked, '
-        f'{tallies["claimed"]} claimed, '
-        f'{tallies["already"]} already intaked, '
-        f'{missing} skipped.'
-        + (f' {tallies["invalid"]} refused.' if tallies["invalid"] else '')
+        f"\n{tallies['intaked']} newly intaked, "
+        f"{tallies['claimed']} claimed, "
+        f"{tallies['already']} already intaked, "
+        f"{missing} skipped." + (f" {tallies['invalid']} refused." if tallies["invalid"] else "")
     )
     if tallies["intaked"] + tallies["claimed"] + tallies["already"] == 0:
         raise typer.Exit(code=4)
@@ -12941,7 +13174,9 @@ def _do_intake_multi(
 
 @cli.command("find")
 def cmd_find(
-    query: str = typer.Argument(..., help="ab-id / id-prefix / slug / bare-hex / free-text description"),
+    query: str = typer.Argument(
+        ..., help="ab-id / id-prefix / slug / bare-hex / free-text description"
+    ),
     domain: Optional[str] = typer.Option(None, "--domain", "-d", help="Filter by domain"),
     project: Optional[str] = typer.Option(None, "--project", "-p", help="Filter by project"),
     status: Optional[str] = typer.Option(None, "--status", "-s", help="Filter by status"),
@@ -13004,11 +13239,7 @@ def cmd_find(
 
         # The archive is default-backend storage; no read-through behind an
         # external selection (stale local rows are the leak the seam closes).
-        archive_path = (
-            graph_archive_json()
-            if active_backend_name() == "graph"
-            else None
-        )
+        archive_path = graph_archive_json() if active_backend_name() == "graph" else None
         if archive_path is not None and archive_path.exists():
             # Guard the whole read + resolve + filter: a corrupt archive OR a
             # malformed archived entry must degrade to a miss, never propagate a
@@ -13036,13 +13267,15 @@ def cmd_find(
         # Lead with the slug-forward handle (`slug (ab-id)`, or `(ab-id)` when
         # unslugged); the canonical hex stays present and copyable (ab-f82e8083).
         typer.echo(
-            "\t".join([
-                format_handle(e),
-                e.get("status", "?"),
-                e.get("domain", "?"),
-                e.get("project", "-") or "-",
-                e.get("title", ""),
-            ])
+            "\t".join(
+                [
+                    format_handle(e),
+                    e.get("status", "?"),
+                    e.get("domain", "?"),
+                    e.get("project", "-") or "-",
+                    e.get("title", ""),
+                ]
+            )
         )
 
 
@@ -13058,26 +13291,38 @@ def cmd_new(
     title: str = typer.Argument(..., help="Title of the new entry"),
     domain: str = typer.Option("code", "--domain", help="Domain (fuzzy-suggested against history)"),
     project: Optional[str] = typer.Option(
-        None, "--project",
+        None,
+        "--project",
         help="Project name. Defaults to current git repo's basename; pass --unscoped to skip auto-scope.",
     ),
     priority: str = typer.Option("p2", "--priority", help="p0|p1|p2|p3"),
-    blocks_everything: bool = typer.Option(False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."),
+    blocks_everything: bool = typer.Option(
+        False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
+    ),
     unscoped: bool = typer.Option(
-        False, "--unscoped",
+        False,
+        "--unscoped",
         help="Create with project=null and cwd=null. Default auto-scopes to current git repo.",
     ),
     force_domain: bool = typer.Option(
-        False, "--force-domain",
+        False,
+        "--force-domain",
         help="Skip the fuzzy domain suggestion and use --domain verbatim.",
     ),
     source_kind: str = typer.Option(
-        "organic", "--source-kind",
+        "organic",
+        "--source-kind",
         help="organic|from_inbox|from_observation|from_supervisor",
     ),
-    source_project: Optional[str] = typer.Option(None, "--source-project", help="Source project name"),
-    source_session_id: Optional[str] = typer.Option(None, "--source-session-id", help="Source session ID"),
-    source_inbox_msg: Optional[str] = typer.Option(None, "--source-inbox-msg", help="Source inbox message ID"),
+    source_project: Optional[str] = typer.Option(
+        None, "--source-project", help="Source project name"
+    ),
+    source_session_id: Optional[str] = typer.Option(
+        None, "--source-session-id", help="Source session ID"
+    ),
+    source_inbox_msg: Optional[str] = typer.Option(
+        None, "--source-inbox-msg", help="Source inbox message ID"
+    ),
 ) -> None:
     """Create a new graph entry without a plan file.
 
@@ -13101,8 +13346,7 @@ def cmd_new(
 
     if priority not in PRIORITY_ORDER:
         typer.echo(
-            f"Error: invalid priority '{priority}'. "
-            f"Must be: {', '.join(PRIORITY_ORDER.keys())}",
+            f"Error: invalid priority '{priority}'. Must be: {', '.join(PRIORITY_ORDER.keys())}",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -13141,10 +13385,12 @@ def cmd_new(
     resolved_cwd: Optional[str] = None
     if project is not None:
         from fno.graph._intake import project_root_from_settings
+
         resolved_cwd = project_root_from_settings(project)
         # resolved_project stays as-is (the explicit flag value)
     if resolved_cwd is None and not unscoped:
         from fno.graph._intake import resolve_git_roots
+
         derived_name, canonical_root = resolve_git_roots()
         if canonical_root:
             resolved_cwd = canonical_root
@@ -13225,6 +13471,7 @@ def cmd_new(
 
 # -- rehash --
 
+
 @cli.command("rehash", hidden=True)
 def cmd_rehash(
     revert: bool = typer.Option(
@@ -13247,9 +13494,7 @@ def cmd_rehash(
         # Find the most-recent .bak.* file
         backups = sorted(path.parent.glob(f"{path.name}.bak.*"))
         if not backups:
-            typer.echo(
-                f"No backups found for {path}. Cannot revert.", err=True
-            )
+            typer.echo(f"No backups found for {path}. Cannot revert.", err=True)
             raise typer.Exit(code=1)
         latest_backup = backups[-1]
         # Atomic restore: temp + rename
@@ -13296,9 +13541,13 @@ collisions_app = typer.Typer(
 def cmd_collisions_check(
     plan_path: Path = typer.Argument(..., help="Plan file or folder to check"),
     self_id: Optional[str] = typer.Option(
-        None, "--self-id", help="Skip this node ID when comparing (excludes self-collision)",
+        None,
+        "--self-id",
+        help="Skip this node ID when comparing (excludes self-collision)",
     ),
-    json_output: bool = typer.Option(False, "--json", "-J", help="Emit structured JSON instead of human text"),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit structured JSON instead of human text"
+    ),
 ) -> None:
     """Check a plan against all pending nodes for file collisions.
 
@@ -13323,10 +13572,15 @@ def cmd_collisions_check(
             d = asdict(c)
             d.pop("_other_created_at", None)
             payload.append(d)
-        typer.echo(json.dumps({
-            "status": "ok" if evaluated else "unevaluated",
-            "collisions": payload,
-        }, indent=2))
+        typer.echo(
+            json.dumps(
+                {
+                    "status": "ok" if evaluated else "unevaluated",
+                    "collisions": payload,
+                },
+                indent=2,
+            )
+        )
         return
 
     if not evaluated:
@@ -13358,7 +13612,7 @@ cli.add_typer(collisions_app, name="collisions", hidden=True)
 
 
 _SUPERSEDE_EXAMPLE = (
-    'fno backlog supersede <new> --replaces <old> '
+    "fno backlog supersede <new> --replaces <old> "
     '--cause "<what the old node was for>" --surface <path/it/owned>'
 )
 
@@ -13375,7 +13629,10 @@ def cmd_supersede(
     ),
     reason: Optional[str] = typer.Option(None, "--reason", "-R", help="Optional human rationale"),
     force: bool = typer.Option(
-        False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
+        False,
+        "--force",
+        "-F",
+        help="Supersede even if the target still has live children (orphaning them)",
     ),
 ) -> None:
     """Record that ``new_id`` proposes to replace ``replaces``.
@@ -13395,7 +13652,9 @@ def cmd_supersede(
         typer.echo(f"Error: new_id must be a <prefix>-<4..8 hex> node id, got '{new_id}'", err=True)
         raise typer.Exit(code=1)
     if not has_node_id_prefix(replaces):
-        typer.echo(f"Error: --replaces must be a <prefix>-<4..8 hex> node id, got '{replaces}'", err=True)
+        typer.echo(
+            f"Error: --replaces must be a <prefix>-<4..8 hex> node id, got '{replaces}'", err=True
+        )
         raise typer.Exit(code=1)
     if new_id == replaces:
         typer.echo("Error: cannot supersede self", err=True)
@@ -13426,7 +13685,11 @@ def cmd_supersede(
     for raw_surface in surface:
         candidate = str(raw_surface).strip().replace("\\", "/")
         parts = candidate.split("/")
-        if not candidate or candidate.startswith("/") or any(part in ("", ".", "..") for part in parts):
+        if (
+            not candidate
+            or candidate.startswith("/")
+            or any(part in ("", ".", "..") for part in parts)
+        ):
             typer.echo(
                 f"Error: --surface must be a non-empty repo-relative path: {raw_surface!r}",
                 err=True,
@@ -13437,6 +13700,7 @@ def cmd_supersede(
     _freed_box: list[list] = [[]]
     _parent_freed_box: list[list] = [[]]
     _proj_kids_box: list[list] = [[]]
+
     def mutator(entries):
         new_node = _find_node(entries, new_id)
         old_node = _find_node(entries, replaces)
@@ -13554,8 +13818,7 @@ def cmd_supersede(
         owner_plan = old_node.get("plan_path")
         by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
         _proj_kids_box[0] = [
-            k for k in parent_freed
-            if (by_id.get(k, {}).get("plan_path") != owner_plan)
+            k for k in parent_freed if (by_id.get(k, {}).get("plan_path") != owner_plan)
         ]
         return entries
 
@@ -13696,7 +13959,7 @@ def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
         scope.add(root)
         stack = [root]
         while stack:  # up: transitive blocked_by ancestors
-            for dep in (by_id[stack.pop()].get("blocked_by") or []):
+            for dep in by_id[stack.pop()].get("blocked_by") or []:
                 if dep in by_id and dep not in scope:
                     scope.add(dep)
                     stack.append(dep)
@@ -13711,7 +13974,7 @@ def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
                 if v and v in by_id and v not in scope:
                     scope.add(v)
                     changed = True
-                for ev in (e.get("requires_evidence") or []):
+                for ev in e.get("requires_evidence") or []:
                     for src, se in by_id.items():
                         if src not in scope and ev in (se.get("produces_evidence") or []):
                             scope.add(src)
@@ -13726,8 +13989,13 @@ def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
 
 def _exec_liveness(state: str) -> str:
     """Map a claim_status state to the ExecNode liveness enum."""
-    return {"live": "live", "suspect": "unknown", "stale": "unknown",
-            "corrupted": "unknown", "free": ""}.get(state, "")
+    return {
+        "live": "live",
+        "suspect": "unknown",
+        "stale": "unknown",
+        "corrupted": "unknown",
+        "free": "",
+    }.get(state, "")
 
 
 # -- task 4.2: the external-backend verb classification -----------------------
@@ -13743,47 +14011,113 @@ def _exec_liveness(state: str) -> str:
 # refuses it externally; misclassifying a mutation as footnote-owned is the
 # dangerous direction, so unsure verbs sit tracker-owned.
 
-_TRACKER_OWNED_VERBS = frozenset({
-    # node lifecycle + creation
-    "add", "idea", "new", "intake", "decompose", "update", "note", "remove", "migrate-priorities",
-    "reopen", "supersede", "unsupersede",
-    # board/rank/queue state
-    "rank", "reprioritize", "defer", "undefer", "queue", "unqueue", "pick",
-    "unclaim",
-    # storage + sweep machinery
-    "archive", "unarchive", "archive-dedupe-ids", "rehash", "maintain",
-    "groom",
-    # orchestration that stamps nodes
-    "advance", "reconcile", "reconcile-findings", "lanes", "lane-fill",
-    "dispatch-lanes",
-    # footnote-owned DATA with a graph-resident write path (refused until the
-    # write moves to the sidecar seam)
-    "cost", "session add", "session close", "session reap-open", "decide", "decisions",
-    "decide-retract", "decide-reindex",
-    # sub-app mutations
-    "triage apply", "capture promote",
-    "batch join", "batch prepare", "batch ship", "batch ship-closeable",
-})
+_TRACKER_OWNED_VERBS = frozenset(
+    {
+        # node lifecycle + creation
+        "add",
+        "idea",
+        "new",
+        "intake",
+        "decompose",
+        "update",
+        "note",
+        "remove",
+        "migrate-priorities",
+        "reopen",
+        "supersede",
+        "unsupersede",
+        # board/rank/queue state
+        "rank",
+        "reprioritize",
+        "defer",
+        "undefer",
+        "queue",
+        "unqueue",
+        "pick",
+        "unclaim",
+        # storage + sweep machinery
+        "archive",
+        "unarchive",
+        "archive-dedupe-ids",
+        "rehash",
+        "maintain",
+        "groom",
+        # orchestration that stamps nodes
+        "advance",
+        "reconcile",
+        "reconcile-findings",
+        "lanes",
+        "lane-fill",
+        "dispatch-lanes",
+        # footnote-owned DATA with a graph-resident write path (refused until the
+        # write moves to the sidecar seam)
+        "cost",
+        "session add",
+        "session close",
+        "session reap-open",
+        "decide",
+        "decisions",
+        "decide-retract",
+        "decide-reindex",
+        # sub-app mutations
+        "triage apply",
+        "capture promote",
+        "batch join",
+        "batch prepare",
+        "batch ship",
+        "batch ship-closeable",
+    }
+)
 
-_FOOTNOTE_OWNED_VERBS = frozenset({
-    # seam reads / renders
-    "get", "status", "view", "find", "next", "ready", "queued", "provenance",
-    "roadmap", "bases", "album", "project-root", "board", "undispatched",
-    # completion works on any backend by design (task 4.1)
-    "done",
-    # footnote-owned sidecar files, no graph write
-    "relatedness build", "relatedness get", "epic status",
-    # capture-pile file machinery (no graph writes; promote is tracker-owned)
-    "capture add", "capture archive", "capture capture-pass", "capture dismiss",
-    "capture empty-pass", "capture list", "capture scan", "capture tidy",
-    # triage read/propose surfaces (apply is tracker-owned)
-    "triage consistency", "triage context", "triage health", "triage projects",
-    "triage propose", "triage rank", "triage trend", "triage validate",
-    # batch read surfaces
-    "batch open", "batch status", "batch metrics",
-    # graph-store integrity check (read-only)
-    "collisions check",
-})
+_FOOTNOTE_OWNED_VERBS = frozenset(
+    {
+        # seam reads / renders
+        "get",
+        "status",
+        "view",
+        "find",
+        "next",
+        "ready",
+        "queued",
+        "provenance",
+        "roadmap",
+        "bases",
+        "album",
+        "project-root",
+        "board",
+        "undispatched",
+        # completion works on any backend by design (task 4.1)
+        "done",
+        # footnote-owned sidecar files, no graph write
+        "relatedness build",
+        "relatedness get",
+        "epic status",
+        # capture-pile file machinery (no graph writes; promote is tracker-owned)
+        "capture add",
+        "capture archive",
+        "capture capture-pass",
+        "capture dismiss",
+        "capture empty-pass",
+        "capture list",
+        "capture scan",
+        "capture tidy",
+        # triage read/propose surfaces (apply is tracker-owned)
+        "triage consistency",
+        "triage context",
+        "triage health",
+        "triage projects",
+        "triage propose",
+        "triage rank",
+        "triage trend",
+        "triage validate",
+        # batch read surfaces
+        "batch open",
+        "batch status",
+        "batch metrics",
+        # graph-store integrity check (read-only)
+        "collisions check",
+    }
+)
 
 
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:

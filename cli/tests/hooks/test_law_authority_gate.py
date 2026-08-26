@@ -72,6 +72,37 @@ def test_exact_enact_command_asks_and_binds_preview_fields() -> None:
     ]
 
 
+def test_pre_fold_enact_spelling_arms_identically() -> None:
+    """The one-release `fno law enact` root spelling must arm like the canonical.
+
+    Both spellings stay live for the shim's release, so a consent armed under
+    either must bind and reach "ask". Without this, a future tightening of
+    _parse_command to the canonical form ships silently and refuses consent
+    armed under the still-registered old spelling.
+    """
+    gate = _gate()
+    legacy = f"fno law enact --proposal {PROPOSAL_ID} --hash {CONTENT_HASH}"
+    seen: list[dict[str, str]] = []
+
+    result = gate.evaluate(
+        _payload(command=legacy),
+        arm=lambda **kwargs: (seen.append(kwargs), {
+            "proposal_id": PROPOSAL_ID,
+            "subject": "x-12ba",
+            "decision": "Merges belong to the operator",
+            "rationale": "Durable policy needs approval.",
+            "options": ["operator", "agent"],
+            "supersedes": None,
+            "approval_receipt": "receipt-1",
+            "armed_tool_input": f"{legacy} --receipt receipt-1",
+        })[1],
+    )
+
+    assert result["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert seen and seen[0]["tool_input"] == legacy
+    assert seen[0]["proposal_id"] == PROPOSAL_ID
+
+
 def test_non_prompting_modes_deny_without_arming() -> None:
     gate = _gate()
     calls: list[dict[str, str]] = []
