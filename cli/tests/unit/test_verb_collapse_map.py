@@ -150,9 +150,11 @@ def test_live_baseline_matches_the_projected_allocation():
     # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
     # inspect), each baselined in this PR.
     # x-6233 folds: +6 for the inbox mounts (decide, decisions, and the four
-    # law verbs under their new home), -1 for the retired runtime root.
+    # law verbs under their new home), -1 for the retired runtime root, which
+    # carried main to 127.
+    # +1 for `law set`, the direct operator writer baselined in this PR.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 127
+    assert len(leaves) <= 128
     assert "fno-agents" in leaves
 
 
