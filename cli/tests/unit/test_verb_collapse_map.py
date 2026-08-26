@@ -64,7 +64,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 526, (        f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
+    assert len(mapped) == 524, (        f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
 
@@ -124,7 +124,7 @@ def test_allocation_projects_no_more_than_99_registered_leaves():
     groups_with_dispatch = {row["current-leaf"].split()[0] for row in rows if row["tier"] == "T1"}
     kept = Counter(row["current-leaf"].split()[0] for row in rows if row["tier"] == "KEEP")
     projected = len(groups_with_dispatch) + sum(kept.values())
-    assert projected == 80
+    assert projected == 79
     assert projected <= 99
 
 
@@ -148,8 +148,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # merged tree carries both rows, so both counts include it.
     # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
     # inspect), each baselined in this PR.
+    # x-6233 folds: +6 for the inbox mounts (decide, decisions, and the four
+    # law verbs under their new home), -1 for the retired runtime root.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 122
+    assert len(leaves) <= 127
     assert "fno-agents" in leaves
 
 

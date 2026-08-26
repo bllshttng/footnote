@@ -467,8 +467,6 @@ route env	T1	route env	4
 route ls	T1	route ls	3
 route set	T1	route set	4
 route unset	T1	route unset	1
-runtime register-worker	T1	runtime register-worker	1
-runtime worktree	T1	runtime worktree	3
 scoreboard	KEEP	scoreboard	13	single-leaf group
 setup cli-hooks	T1	setup cli-hooks	8
 setup cli-hooks-codex	T1	setup cli-hooks-codex	4
