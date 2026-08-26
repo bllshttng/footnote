@@ -1041,20 +1041,15 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         _write_json(entries, path)
         # Write SHA256 sidecar atomically after every successful mutation.
         _write_sha256_sidecar(path)
-        # Resolve the .md/.html render targets. For the canonical graph.json
-        # (the one `fno backlog view` and serve_board.py read) render to the
-        # canonical GRAPH_MD/GRAPH_HTML so the served/opened board reflects
-        # mutations even when config.paths.graph_json points outside
-        # state_dir. For any other path -- a tmp graph.json in tests -- render
-        # the siblings next to it so test runs never clobber the real
-        # ~/.fno/graph.html the board server serves.
-        from fno.graph._constants import GRAPH_HTML, GRAPH_JSON, GRAPH_MD
+        # Resolve the Markdown target. HTML is rendered below through the
+        # configured target list; temporary graphs still get a sibling HTML
+        # artifact so tests never touch the operator's canonical board.
+        from fno.graph._constants import GRAPH_JSON, GRAPH_MD
         try:
             is_canonical = path.resolve() == GRAPH_JSON.resolve()
         except OSError:
             is_canonical = False
         md_target = GRAPH_MD if is_canonical else path.with_name("graph.md")
-        html_target = GRAPH_HTML if is_canonical else path.with_name("graph.html")
         # Emit Obsidian Kanban scaffolding only when an Obsidian vault is
         # configured; otherwise the frontmatter is inert noise (ab-917f813e).
         # Fail open: graph.json is already written by here, so a malformed
@@ -1067,7 +1062,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         # recompute_statuses (above) does not derive `blocked` - it is a
         # read-time overlay - so re-apply it here before rendering, or a
         # mutation that newly blocks/unblocks a sibling renders stale in
-        # graph.md/graph.html until the next explicit read.
+        # graph.md until the next explicit read.
         _apply_readiness_overlay(entries)
         try:
             render_graph_md(entries, md_target, obsidian=_obsidian)
@@ -1077,11 +1072,14 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # instead of silently producing a stale graph.md.
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
         _archived = entries_with_archive(entries)
-        try:
-            from fno.graph.render_html import render_graph_html
-            render_graph_html(_archived, html_target)
-        except OSError as e:
-            print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
+        if not is_canonical:
+            # Test and temporary graphs retain a sibling HTML artifact without
+            # ever touching the operator's configured targets.
+            try:
+                from fno.graph.render_html import render_graph_html
+                render_graph_html(_archived, path.with_name("graph.html"))
+            except OSError as e:
+                print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
         # produced a fresh ready node. Best-effort; the daemon's poll floor is the
         # guarantee, so a failed touch is harmless and never wedges the mutation.
@@ -1097,10 +1095,10 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     # mutexes never hold the graph lock (see the closure hook above).
     for entry_id, rung in closure_releases:
         release_node_claim_at_closure(entry_id, rung=rung)
-    # Operator-configured project-scoped public projections (x-9415), through
-    # the same leak gate as the manual roadmap verb. CANONICAL ONLY: a tmp
-    # graph.json in a test must never write the operator's real public
-    # targets. Runs AFTER the flock drops, unlike the state_dir renders above:
+    # Operator-configured backlog projections (x-9415), through the shared
+    # renderer and public leak gate where applicable. CANONICAL ONLY: a tmp
+    # graph.json in a test must never write the operator's configured targets.
+    # Runs AFTER the flock drops, unlike the state_dir Markdown render above:
     # these paths are operator-chosen, and a stalled (not erroring) target
     # filesystem - a cloud-synced vault - must never hold the graph lock every
     # backlog verb in the fleet waits on. Tradeoff: two concurrent mutations

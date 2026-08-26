@@ -110,9 +110,9 @@ FIELD_META: dict[str, Meta] = {
     "backlog.id_hex_width": Meta("advanced", "Hex width of minted node IDs (4-8)."),
     "backlog.render_targets": Meta(
         "advanced",
-        "Auto-rendered public projections (GLOBAL config file only): every "
-        "graph mutation re-renders each {path, project, projection=backlog|"
-        "roadmap} target through the leak gate.",
+        "Auto-rendered projections (GLOBAL config file only): every graph "
+        "mutation re-renders each {path, scope, projection=local|backlog|roadmap} "
+        "target; public targets use the leak gate and local is full-detail.",
     ),
     # --- config.batch.* ---
     "batch.enabled": Meta("advanced", "Coalesce same-domain nodes into one batch PR (opt-in)."),

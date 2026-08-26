@@ -374,7 +374,11 @@ def _card_html(
         card_classes.append(flag_class)
 
     parts: list[str] = []
-    parts.append(f'<article class="{" ".join(card_classes)}" data-id="{eid}">')
+    project_attr = html.escape(project, quote=True)
+    parts.append(
+        f'<article class="{" ".join(card_classes)}" data-id="{eid}" '
+        f'data-project="{project_attr}">'
+    )
     header_parts = [
         f'<header><span class="prio prio-{priority}">{priority}</span>',
         f'<span class="chip" style="background:{chip_color}">{chip_label}</span>',
@@ -597,10 +601,36 @@ def _projected_card_html(entry: dict, projection: str) -> str:
         status = esc(str(entry.get("status") or "idea"))
         header_parts.append(f'<span class="flag">{status}</span>')
     header_parts.append("</header>")
+    project = html.escape(_project_key(entry), quote=True)
     return (
-        '<article class="card">'
+        f'<article class="card" data-project="{project}">'
         + "".join(header_parts)
         + f'<h3 class="title">{title}</h3></article>'
+    )
+
+
+def _project_order(projects: Counter) -> list[str]:
+    """Return deterministic project order with the unscoped bucket last."""
+    ordered = [project for project, _ in projects.most_common() if project != UNSCOPED_LABEL]
+    if UNSCOPED_LABEL in projects:
+        ordered.append(UNSCOPED_LABEL)
+    return ordered
+
+
+def _project_filter_html(projects: list[str]) -> str:
+    options = []
+    for project in projects:
+        options.append(
+            '<label class="project-option">'
+            f'<input type="checkbox" data-project-option="{html.escape(project, quote=True)}" checked>'
+            f'{html.escape(project)}'
+            "</label>"
+        )
+    return (
+        '<fieldset class="project-filter" id="project-filter">'
+        "<legend>Projects</legend>"
+        + "".join(options)
+        + "</fieldset>"
     )
 
 
@@ -613,6 +643,11 @@ def render_public_sections_html(
     """Render public sections with shared document and card primitives."""
     css = _CSS.replace("__NCOLS__", str(max(1, len(sections))))
     total = sum(len(entries) for _label, entries in sections)
+    projects = Counter(
+        _project_key(entry)
+        for _label, section_entries in sections
+        for entry in section_entries
+    )
     parts = [
         '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width, initial-scale=1">',
@@ -620,7 +655,9 @@ def render_public_sections_html(
         f"<title>{html.escape(title)}</title>",
         f"<style>{css}</style></head><body>",
         f'<header class="page"><h1>{html.escape(title)}</h1>',
-        f'<div class="stats"><span>{total} public items</span></div></header>',
+        f'<div class="stats"><span>{total} public items</span></div>',
+        _project_filter_html(_project_order(projects)),
+        "</header>",
         '<div class="cols">',
     ]
     for label, entries in sections:
@@ -668,6 +705,14 @@ header.page h1 { font-size: 1rem; margin: 0; flex: 0 0 auto }
           background: #fff; border: 1px solid #ddd; border-radius: 5px;
           font-size: 13px; min-height: 36px }
 .toggle input { margin: 0; width: 18px; height: 18px }
+.project-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.55rem;
+                  margin: 0; padding: 0.25rem 0.5rem; border: 1px solid #ddd;
+                  border-radius: 5px; background: #fff; font-size: 12px }
+.project-filter legend { padding: 0 0.25rem; color: #777; font-size: 11px }
+.project-option { display: inline-flex; align-items: center; gap: 0.25rem; cursor: pointer;
+                  white-space: nowrap }
+.project-option input { margin: 0; width: 15px; height: 15px }
+.project-hidden { display: none !important }
 
 details.board-section, details.project { margin: 0.6rem 0; background: #fff;
                                           border: 1px solid #e2e2e2; border-radius: 6px }
@@ -829,6 +874,53 @@ _JS = """\
     saveColState(state);
   }, true);
 
+  var PROJECT_KEY = 'fno-kanban-project-state';
+  function loadProjectState() {
+    try {
+      var state = JSON.parse(localStorage.getItem(PROJECT_KEY) || '{}');
+      return state && typeof state === 'object' && !Array.isArray(state) ? state : {};
+    } catch (e) { return {}; }
+  }
+  function saveProjectState(state) {
+    try { localStorage.setItem(PROJECT_KEY, JSON.stringify(state)); }
+    catch (e) { /* private mode, full disk, whatever - swallow */ }
+  }
+  var projectOptions = Array.from(document.querySelectorAll('[data-project-option]'));
+  var projectState = loadProjectState();
+  var queryProject = new URLSearchParams(window.location.search).get('project');
+  var queryMatches = queryProject && projectOptions.some(function (option) {
+    return option.dataset.projectOption === queryProject;
+  });
+  function applyProjectFilter() {
+    var selected = new Set();
+    projectOptions.forEach(function (option) {
+      var project = option.dataset.projectOption;
+      if (queryMatches && queryProject) option.checked = project === queryProject;
+      else if (Object.prototype.hasOwnProperty.call(projectState, project)) {
+        option.checked = projectState[project] !== false;
+      }
+      if (option.checked) selected.add(project);
+    });
+    document.querySelectorAll('.card[data-project]').forEach(function (card) {
+      card.classList.toggle('project-hidden', !selected.has(card.dataset.project));
+    });
+  }
+  function persistProjectFilter() {
+    projectState = {};
+    projectOptions.forEach(function (option) {
+      projectState[option.dataset.projectOption] = option.checked;
+    });
+    saveProjectState(projectState);
+  }
+  projectOptions.forEach(function (option) {
+    option.addEventListener('change', function () {
+      queryMatches = false;
+      applyProjectFilter();
+      persistProjectFilter();
+    });
+  });
+  applyProjectFilter();
+
   var toggle = document.getElementById('show-done');
   if (toggle) {
     // Sync checkbox to current Done state on load.
@@ -882,7 +974,9 @@ _JS = """\
 """
 
 
-def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
+def render_graph_html(
+    entries: list[dict], path: Path | None = None, project: str | None = None
+) -> None:
     """Render graph.json entries as a self-contained HTML kanban file.
 
     Layout: master kanban (all entries) + per-project collapsible
@@ -896,6 +990,8 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     patch this module's import-cached reference.
     """
     entries = [e for e in entries if isinstance(e, dict)]
+    if project and project not in ("all", "*"):
+        entries = [e for e in entries if _project_key(e) == project]
     if path is None:
         from fno.graph._constants import GRAPH_HTML as _CURRENT_GRAPH_HTML
         path = _CURRENT_GRAPH_HTML
@@ -923,6 +1019,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
         parts.append(f"<span>{html.escape(str(status))} {n}</span>")
     parts.append("</div>")
     parts.append('<label class="toggle"><input type="checkbox" id="show-done"> Show done</label>')
+    parts.append(_project_filter_html(_project_order(projects)))
     parts.append("</header>")
 
     master = _bucket(entries)
@@ -936,9 +1033,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     )
     parts.append("</details>")
 
-    project_order = [p for p, _ in projects.most_common() if p != UNSCOPED_LABEL]
-    if UNSCOPED_LABEL in projects:
-        project_order.append(UNSCOPED_LABEL)
+    project_order = _project_order(projects)
 
     # Computed over the FULL graph, then handed to each project slice: the
     # per-project sort and the card flags must agree about who is an orphan.

@@ -128,6 +128,21 @@ def test_render_target_config_defaults_and_typo():
     assert "roadmap" in str(exc.value)
 
 
+def test_render_target_config_accepts_scope_and_local_projection():
+    from fno.config import RenderTargetConfig
+
+    global_target = RenderTargetConfig.model_validate(
+        {"path": "~/vault/global.html", "scope": "all", "projection": "local"}
+    )
+    project_target = RenderTargetConfig.model_validate(
+        {"path": "~/vault/fno.html", "scope": "fno", "projection": "local"}
+    )
+    assert global_target.scope == "all"
+    assert project_target.scope == "fno"
+    assert global_target.project == "all"
+    assert project_target.project == "fno"
+
+
 def test_relative_target_path_rejected():
     from fno.config import RenderTargetConfig
 
@@ -436,6 +451,44 @@ def test_roadmap_projection_target(_isolate, tmp_path, monkeypatch):
     text = target.read_text(encoding="utf-8")
     assert "fno roadmap" in text
     assert "shipped work" in text
+
+
+def test_local_targets_support_global_and_project_scopes_without_public_gate(
+    _isolate, tmp_path, monkeypatch, capsys
+):
+    global_target = tmp_path / "out" / "global.html"
+    project_target = tmp_path / "out" / "fno.html"
+    public_target = tmp_path / "out" / "public.html"
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{global_target}"\nscope = "all"\nprojection = "local"\n'
+        f'[[backlog.render_targets]]\npath = "{project_target}"\nscope = "fno"\nprojection = "local"\n'
+        f'[[backlog.render_targets]]\npath = "{public_target}"\nscope = "fno"\nprojection = "backlog"\n',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [
+            _entry(
+                "ab-private0",
+                title="x-1234 private marker",
+                project="fno",
+                plan_path="/Users/me/private-plan.md",
+            ),
+            _entry("ab-other000", title="other project", project="other"),
+        ],
+        "x-1234 private marker",
+    )
+
+    global_text = global_target.read_text(encoding="utf-8")
+    project_text = project_target.read_text(encoding="utf-8")
+    assert "ab-private0" in global_text and "ab-other000" in global_text
+    assert "/Users/me/private-plan.md" in global_text
+    assert "ab-private0" in project_text
+    assert "ab-other000" not in project_text
+    assert "/Users/me/private-plan.md" in project_text
+    assert not public_target.exists()
+    assert "leak gate refused" in capsys.readouterr().err
 
 
 def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkeypatch, capsys):

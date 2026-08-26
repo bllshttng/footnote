@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 # Public-facing column set + labels. Active work is folded into Now and the
 # internal Triage column is folded into Later; Done is relabeled "Shipped".
 _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done", "Shipped"))
+ALL_PROJECTS = "all"
+
+
+def _scope_matches(entry: dict, scope: str) -> bool:
+    return scope in (ALL_PROJECTS, "*") or _project_key(entry) == scope
 
 
 def _public_entries(entries: list[dict], project: str) -> list[dict]:
@@ -28,7 +33,7 @@ def _public_entries(entries: list[dict], project: str) -> list[dict]:
         e for e in entries
         if isinstance(e, dict)
         and e.get("public") is not False
-        and _project_key(e) == project
+        and _scope_matches(e, project)
     ]
 
 
@@ -236,6 +241,19 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                 continue
             out.append(target)
         _warn_shadowed_local_rows(out)
+        from fno.graph._constants import GRAPH_HTML
+        if not any(
+            Path(os.path.expanduser(target.path)).resolve() == Path(GRAPH_HTML).resolve()
+            for target in out
+        ):
+            # The legacy global board is now an ordinary local/all target. Keep
+            # it as the default row for installs that have no explicit replacement.
+            out.insert(
+                0,
+                RenderTargetConfig(
+                    path=str(GRAPH_HTML), scope=ALL_PROJECTS, projection="local"
+                ),
+            )
         return out
     except Exception as exc:
         # Every other degradation in this module warns; a silent [] here would
@@ -268,7 +286,10 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
         from fno.config import load_settings
 
         def _key(rows: "list[RenderTargetConfig]") -> list[tuple[str, str, str]]:
-            return sorted((r.path, r.project, r.projection) for r in rows)
+            return sorted(
+                (r.path, r.scope or r.project or ALL_PROJECTS, r.projection)
+                for r in rows
+            )
 
         local = _key(load_settings().backlog.render_targets)
         state = (local, _key(honored))
@@ -289,7 +310,7 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
 
 
 def render_configured_targets(entries: list[dict]) -> None:
-    """Render every configured public projection (x-9415). Called from
+    """Render every configured backlog projection (x-9415). Called from
     ``locked_mutate_graph`` AFTER graph.json is written, so it must never
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
@@ -300,31 +321,41 @@ def render_configured_targets(entries: list[dict]) -> None:
         public_title_leaks,
     )
 
+    from fno.graph.render_html import render_graph_html
+
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
-        if not any(_project_key(e) == target.project for e in entries):
+        scope = target.scope or target.project or ALL_PROJECTS
+        scoped_entries = [e for e in entries if _scope_matches(e, scope)]
+        if scope != ALL_PROJECTS and not scoped_entries:
             # Zero matching entries is the typo'd-project signature: leave the
             # operator's last good board byte-unchanged rather than replace it
             # with an empty projection. A project whose entries exist but are
             # all done/private still renders its valid empty projection below.
             print(
                 f"Warning: render target {out} matches no graph entry with "
-                f"project {target.project!r}; target left unchanged "
+                f"project {scope!r}; target left unchanged "
                 "(check the project name)",
                 file=sys.stderr,
             )
             continue
         try:
+            if target.projection == "local":
+                # Local is the explicit private projection: it keeps ids,
+                # details, plan paths, and Obsidian links and never enters the
+                # public title gate.
+                render_graph_html(entries, out, project=scope)
+                continue
             if target.projection == "roadmap":
                 # One _columns pass feeds both the gate's render set and the
                 # renderer (the manual verb derives it internally).
-                cols = _columns(entries, target.project)
+                cols = _columns(entries, scope)
                 render_set = [e for items in cols.values() for e in items]
-                html = render_public_roadmap_html(entries, target.project, cols=cols)
+                html = render_public_roadmap_html(entries, scope, cols=cols)
             else:
-                render_set = public_backlog_entries(entries, target.project)
+                render_set = public_backlog_entries(entries, scope)
                 html = render_public_backlog_html(
-                    entries, target.project, backlog_entries=render_set
+                    entries, scope, backlog_entries=render_set
                 )
             offenders = public_title_leaks(render_set)
             if offenders:

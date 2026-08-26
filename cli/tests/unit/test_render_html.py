@@ -1,6 +1,7 @@
 """Unit tests for fno.graph.render_html - HTML kanban rendering."""
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -398,6 +399,60 @@ def test_render_html_unscoped_grouped_last(tmp_path: Path):
     assert UNSCOPED_LABEL in text
     # alpha summary should appear before the unscoped summary in source order.
     assert text.index(">alpha<") < text.index(UNSCOPED_LABEL)
+
+
+def test_render_html_project_filter_keeps_cards_and_lists_every_project(tmp_path: Path):
+    entries = [
+        _entry("alpha-card", project="alpha"),
+        _entry("beta-card", project="beta"),
+        _entry("unscoped-card", project=None),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    options = re.findall(r'data-project-option="([^"]+)"', text)
+    assert options == ["alpha", "beta", UNSCOPED_LABEL]
+    for entry_id, project in (
+        ("alpha-card", "alpha"),
+        ("beta-card", "beta"),
+        ("unscoped-card", UNSCOPED_LABEL),
+    ):
+        assert text.count(f'data-id="{entry_id}"') == 2
+        assert f'data-project="{project}"' in text
+    assert "project-hidden" in text
+    assert "classList.toggle('project-hidden'" in text
+
+
+def test_render_html_project_filter_persists_and_supports_web_scope(tmp_path: Path):
+    out = tmp_path / "graph.html"
+    render_graph_html([_entry("alpha-card", project="alpha")], out)
+
+    text = out.read_text()
+    assert "fno-kanban-project-state" in text
+    assert "localStorage.getItem(PROJECT_KEY)" in text
+    assert "localStorage.setItem(PROJECT_KEY" in text
+    assert "new URLSearchParams(window.location.search)" in text
+    assert "data-project-option" in text
+
+
+def test_public_projection_never_emits_private_plan_links():
+    from fno.graph.roadmap_public import render_public_backlog_html, render_public_roadmap_html
+
+    entry = _entry(
+        "public-marker",
+        project="fno",
+        title="clean public title",
+        plan_path="/Users/me/private-plan.md",
+    )
+    roadmap = render_public_roadmap_html([entry], "fno")
+    backlog = render_public_backlog_html([entry], "fno")
+
+    for document in (roadmap, backlog):
+        assert "clean public title" in document
+        assert "/Users/me/private-plan.md" not in document
+        assert "obsidian://" not in document
 
 
 # ---------------------------------------------------------------------------

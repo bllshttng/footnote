@@ -273,7 +273,7 @@ class MaintainBlock(BaseModel):
         return v
 
 
-_RENDER_PROJECTIONS = ("backlog", "roadmap")
+_RENDER_PROJECTIONS = ("backlog", "roadmap", "local")
 
 # Shared with the graph-layer auto-render so the array-of-tables typo warns
 # with one text over both channels (logger at load, stderr at render).
@@ -285,20 +285,18 @@ RENDER_TARGETS_TABLE_TYPO_MSG = (
 
 
 class RenderTargetConfig(BaseModel):
-    """One auto-rendered public projection (``config.backlog.render_targets[]``).
+    """One auto-rendered backlog projection (``config.backlog.render_targets[]``).
 
-    Every graph mutation re-renders each configured target through the shared
-    public title leak gate (one renderer, one gate - never a second HTML
-    author). Unknown ``projection`` values raise at load; unknown KEYS warn
-    and are ignored (the module's never-brick rule) so a typo'd key cannot
-    take down every settings-loading command - the row still renders its
-    default projection, visibly, with the warning naming the key.
+    Public projections use the shared title leak gate; ``local`` is explicitly
+    private and retains full-detail links. ``scope`` names one project or
+    ``all``. ``project`` remains accepted as a compatibility spelling.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     path: str
-    project: str
+    project: str | None = None
+    scope: str | None = None
     projection: str = "backlog"
 
     @model_validator(mode="before")
@@ -335,13 +333,28 @@ class RenderTargetConfig(BaseModel):
             )
         return v
 
-    @field_validator("project")
+    @field_validator("project", "scope")
     @classmethod
-    def _nonempty_project(cls, v: str) -> str:
+    def _nonempty_scope(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
         v = v.strip()
         if not v:
-            raise ValueError("backlog.render_targets project must not be empty")
+            raise ValueError("backlog.render_targets scope must not be empty")
+        if v == "*":
+            return "all"
         return v
+
+    @model_validator(mode="after")
+    def _normalize_scope(self) -> "RenderTargetConfig":
+        if self.scope is not None and self.project is not None and self.scope != self.project:
+            raise ValueError(
+                "backlog.render_targets scope and project must name the same value"
+            )
+        value = self.scope or self.project or "all"
+        self.scope = value
+        self.project = value
+        return self
 
     @field_validator("projection")
     @classmethod
