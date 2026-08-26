@@ -38,6 +38,12 @@ HOOK_INPUT=$(cat)
 HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
     's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
+RESOLVE_HARNESS_ID="$HOOK_HARNESS_ID"
+if [[ -n "${CODEX_THREAD_ID:-}" ]] \
+    && { [[ "$HOOK_HARNESS_ID" == "$CODEX_THREAD_ID" ]] \
+        || [[ "$HOOK_HARNESS_ID" == *"-$CODEX_THREAD_ID" ]]; }; then
+    RESOLVE_HARNESS_ID="$CODEX_THREAD_ID"
+fi
 
 # ── 2. State file: the active-session discriminator ───────────────────────────
 # No state file -> no target session here -> nothing to gate. This is the ONLY
@@ -88,13 +94,13 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
         if [[ -n "$BIN" ]]; then
             RESOLVE_RC=0
             RESOLVED_STATE=$("$BIN" manifest-for-session \
-                --harness-session-id "$HOOK_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+                --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
         fi
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
         elif [[ "$RESOLVE_RC" -eq 1 ]]; then
-            echo "loop-check: no manifest names session ${HOOK_HARNESS_ID}; visitor allowed" >&2
+            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
             exit 0
         else
             TARGET_RESOLVE_BROKEN=1
@@ -102,10 +108,10 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     fi
 else
     BIN=$(resolve_agents_bin)
-    if [[ -n "$BIN" && -n "$HOOK_HARNESS_ID" ]]; then
+    if [[ -n "$BIN" && -n "$RESOLVE_HARNESS_ID" ]]; then
         RESOLVE_RC=0
         RESOLVED_STATE=$("$BIN" manifest-for-session \
-            --harness-session-id "$HOOK_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
+            --harness-session-id "$RESOLVE_HARNESS_ID" 2>/dev/null) || RESOLVE_RC=$?
         if [[ "$RESOLVE_RC" -eq 0 && -n "$RESOLVED_STATE" && -f "$RESOLVED_STATE" ]]; then
             LIVE_STATE_FILE="$RESOLVED_STATE"
             STATE_FILE="$RESOLVED_STATE"
@@ -237,7 +243,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         exit 0
     else
         if [[ "$TARGET_NO_MATCH" -eq 1 ]]; then
-            echo "loop-check: no manifest names session ${HOOK_HARNESS_ID}; visitor allowed" >&2
+            echo "loop-check: no manifest names session ${RESOLVE_HARNESS_ID}; visitor allowed" >&2
         fi
         exit 0
     fi

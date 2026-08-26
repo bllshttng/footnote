@@ -38,6 +38,7 @@ cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
   manifest-for-session)
+    [[ -n "${RESOLVER_ID_RECORD:-}" ]] && printf '%s\n' "$3" > "$RESOLVER_ID_RECORD"
     [[ "${RESOLVER_RC:-0}" == "0" ]] && printf '%s\n' "$SELECTED_STATE"
     exit "${RESOLVER_RC:-0}"
     ;;
@@ -131,6 +132,24 @@ if [[ "$(printf '%s' "$AGY_STDOUT" | jq -r '.decision // empty')" == "continue" 
     pass "agy resolver failure takes the bounded-continue path"
 else
     fail "agy resolver failure was not bounded (stdout=$AGY_STDOUT stderr=$AGY_STDERR)"
+fi
+
+CODEX_TRANSCRIPT="$TMP/rollout-2026-08-25T21-00-00-session-a.jsonl"
+printf '{"message":{"role":"assistant","content":"working"}}\n' > "$CODEX_TRANSCRIPT"
+rm -f "$TMP/resolver-id" "$TMP/state-record"
+CODEX_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" CODEX_THREAD_ID="session-a" FNO_AGENTS_BIN="$STUB" \
+        SELECTED_STATE="$TMP/a/.fno/target-state.md" RESOLVER_RC=0 \
+        RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" \
+        bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$CODEX_TRANSCRIPT\"}"
+) >/dev/null 2>/dev/null || CODEX_RC=$?
+if [[ "$CODEX_RC" -eq 2 && "$(cat "$TMP/resolver-id" 2>/dev/null)" == "session-a" \
+    && "$(cat "$TMP/state-record" 2>/dev/null)" == "$TMP/a/.fno/target-state.md" ]]; then
+    pass "target shim resolves a Codex rollout basename by bare thread id"
+else
+    fail "target shim sent the prefixed Codex basename (rc=$CODEX_RC resolver=$(cat "$TMP/resolver-id" 2>/dev/null))"
 fi
 
 mv "$TMP/b/.fno/target-state.md" "$TMP/b/.fno/target-state.md.bak"
