@@ -740,7 +740,7 @@ def select_lane_fill(
                 if reason is not None and (
                     inflight
                     or selected
-                    or "+same-domain:" in reason
+                    or _SAME_DOMAIN_ANNOTATION in reason
                     or (
                         not (node.get("domain") or _DOMAIN_UNSET)
                         and _DOMAIN_UNSET in used_domains
@@ -825,6 +825,12 @@ _INITIAL_LIVE_CAP = 2
 # it). Shared so the two prefix checks cannot drift if the token is ever renamed.
 _UNEVALUATED_PREFIX = "unevaluated:"
 
+# The domain-tiebreak annotation appended to an unevaluated token. A shared
+# constant for the same reason as the two prefixes below: the classifier
+# builds it and select_lane_fill's warning arm matches it, so two literals
+# could drift apart and silently disarm the loud warning.
+_SAME_DOMAIN_ANNOTATION = "+same-domain:"
+
 # Same reasoning for the file-overlap token: the producer builds it and
 # select_lane_fill matches it to decide how loudly to log the skip.
 _HIGH_COLLISION_PREFIX = "high-collision:"
@@ -878,7 +884,9 @@ def _classify_lane_candidate(
     # The domain tiebreak as ONE suffix, appended to either unevaluated token
     # (an unset domain never annotates, so no bare `+same-domain:` is emitted).
     domain_suffix = (
-        f"+same-domain:{domain}" if domain and domain in used_domains else ""
+        f"{_SAME_DOMAIN_ANNOTATION}{domain}"
+        if domain and domain in used_domains
+        else ""
     )
     # Unknown file state is its own verdict, not a silent pass: a node whose plan
     # states no comparable surface cannot be collision-checked, so its safety is

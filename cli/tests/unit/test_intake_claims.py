@@ -424,6 +424,39 @@ def test_multi_intake_exempts_bound_surfaceless_plan_across_roadmaps(
     assert any("Cross roadmap fresh" in (t or "") for t in titles)
 
 
+def test_multi_intake_exemption_matches_absolute_graph_spelling(
+    fixture_graph, tmp_path, capsys, monkeypatch
+):
+    """A graph-stored ABSOLUTE plan_path probed with a CLI-RELATIVE spelling:
+    the exemption must still see the binding (normpath alone cannot), or the
+    batch refuses a file this run was a no-op for."""
+    from types import SimpleNamespace
+
+    (tmp_path / "bound3").mkdir()
+    plan = tmp_path / "bound3" / "no-surface.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Bound abs\n\nBody.\n")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-abs00001", title="Owner abs spelling", plan_path=str(plan),
+              status="ready")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh3").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh3", title="Relative spelling fresh")
+
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, ["bound3/no-surface.md", str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    assert "no comparable file surface" not in captured.err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Relative spelling fresh" in (t or "") for t in titles)
+
+
 # -- _resolve_claim --
 
 

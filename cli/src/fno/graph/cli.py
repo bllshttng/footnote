@@ -12589,11 +12589,23 @@ def _do_intake_multi(
     # name a remedy - add file rows - that cannot fix the real blocker.
     from fno.graph.store import plan_path_owner_conflict
 
+    def _unbound(f: str) -> bool:
+        # plan_path_owner_conflict compares normpath-only, so a CLI-relative
+        # spelling never matches a graph-stored absolute plan_path. Probe the
+        # absolute spelling too - the mutator's per-file verdicts have the
+        # same view, and a false refusal blames a file this run was a no-op
+        # for (the reviewer's divergent-spelling batch case).
+        spellings = [f]
+        target = Path(f).expanduser()
+        if not target.is_absolute():
+            spellings.append(str(target.resolve()))
+        return all(
+            plan_path_owner_conflict(preview_entries, None, s) is None
+            for s in spellings
+        )
+
     _refuse_surfaceless_intake(
-        [
-            f for f in concrete_files
-            if plan_path_owner_conflict(preview_entries, None, f) is None
-        ],
+        [f for f in concrete_files if _unbound(f)],
         allow_no_surface=allow_no_surface,
     )
 
