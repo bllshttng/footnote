@@ -4367,7 +4367,7 @@ mod tests {
             "--once".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        assert_eq!(params["substrate"], "bg");
+        assert_eq!(params["substrate"], "thread");
     }
 
     #[test]
@@ -4513,7 +4513,7 @@ mod tests {
             "--headless".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        assert_eq!(params["substrate"], "bg");
+        assert_eq!(params["substrate"], "thread");
     }
 
     #[test]
