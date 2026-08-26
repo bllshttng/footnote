@@ -151,7 +151,12 @@ def test_task_list_materializes_pending_rows(tmp_graph: Path):
 def test_task_list_no_plan_refuses_and_writes_nothing(
     tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """AC1-ERR: no plan bound -> exit 2, message names the node, graph intact.
+    """AC1-ERR: no plan bound -> exit 6, message names the node, graph intact.
+
+    6, not 2: waves.md 3e reads 2 as a stop, and a node with no bound plan has
+    no task grain to guard, so the wave dispatches unguarded rather than
+    halting. About one live node in five carries no plan_path, so a stop there
+    would halt waves that ran fine before task rows existed.
 
     The byte-identical check is only half the proof; the paired positive
     control (a node WITH a plan gets rows written by the same verb) proves the
@@ -162,7 +167,8 @@ def test_task_list_no_plan_refuses_and_writes_nothing(
 
     before = tmp_graph.read_text(encoding="utf-8")
     result = runner.invoke(graph_cli.task_app, ["list", "x-t2"])
-    assert result.exit_code == 2
+    assert result.exit_code == graph_cli.TASK_NO_GRAIN_EXIT
+    assert result.exit_code != 2, "2 halts the wave"
     assert "no plan bound to x-t2" in result.output
     assert tmp_graph.read_text(encoding="utf-8") == before
 
@@ -653,3 +659,91 @@ def test_duplicate_plan_ids_make_one_row(tmp_path: Path):
     entry: dict = {"id": "x-t1"}
     rows = ensure_task_rows(entry, plan)
     assert [r["id"] for r in rows] == ["1.1", "1.2"]
+
+
+# -- review round 4 --
+
+
+def test_malformed_rows_survive_materialization(tmp_path: Path):
+    """A row this writer cannot read is kept, not pruned.
+
+    The returned list is written back over entry["tasks"], so filtering the
+    unreadable row out of it DELETES it from graph.json. read_graph and
+    locked_mutate_graph both keep what they cannot migrate.
+    """
+    from fno.graph.tasks import ensure_task_rows
+
+    plan = _plan_with(tmp_path)
+    entry: dict = {"id": "x-t1", "tasks": ["not-a-row", {"id": "1.1", "status": "done"}]}
+    readable = ensure_task_rows(entry, plan)
+
+    assert "not-a-row" in entry["tasks"], "an unreadable row must survive the write"
+    assert "not-a-row" not in readable, "but it is never handed to a row reader"
+    assert [r["id"] for r in readable] == ["1.1", "1.2"]
+    assert readable[0]["status"] == "done", "an existing row is kept verbatim"
+
+
+def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """acquire_task succeeds idempotently for the current holder, so the
+    done-row refusal must not release a claim this call never took.
+
+    Otherwise a holder whose row went done out of band is left running the
+    task with nobody holding it, and a peer claims the same task.
+    """
+    lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+    assert _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    ).exit_code == 0
+    assert lock.exists()
+
+    # The row goes done underneath the live holder (a peer reconcile, an
+    # operator), leaving the claim in place.
+    data = json.loads(tmp_graph.read_text(encoding="utf-8"))
+    for e in data["entries"]:
+        if e.get("id") == "x-t1":
+            for r in e["tasks"]:
+                if r["id"] == "1.1":
+                    r["status"] = "done"
+    tmp_graph.write_text(json.dumps(data) + "\n", encoding="utf-8")
+
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    )
+    assert refused.exit_code == 3
+    assert lock.exists(), "the claim this call did not take must survive its refusal"
+    assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["holder"] == SID_A
+
+
+def test_manifest_node_resolves_from_a_subdirectory(tmp_path, monkeypatch):
+    """The emit resolves .fno through the repo root, so a bare relative read
+    from a subdirectory found nothing and skipped the settle in silence,
+    stranding the claim."""
+    import importlib.util
+
+    root = tmp_path / "repo"
+    (root / ".fno").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-t1\n", encoding="utf-8"
+    )
+    sub = root / "cli" / "src"
+    sub.mkdir(parents=True)
+
+    spec = importlib.util.spec_from_file_location(
+        "orch_sub", Path("skills/execute/orchestrator.py").resolve()
+    )
+    orch = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(orch)
+
+    monkeypatch.chdir(sub)
+    assert orch.manifest_graph_node_id() == "x-t1"
+
+    monkeypatch.chdir(tmp_path)
+    assert orch.manifest_graph_node_id() == "", (
+        "positive control: outside the repo there is still no node"
+    )

@@ -977,8 +977,14 @@ def _shell_fno(argv: List[str], what: str) -> bool:
     stderr note and return False. Never raises, so a boundary side effect can
     never fail the task or the run.
     """
+    # 15s bounds an append-only event emit. The task-claim settle is a full
+    # graph mutation behind the fleet-wide flock (recompute, JSON write,
+    # sha256 sidecar, whole-board render), and a SIGKILL mid-settle strands a
+    # pid-anchored claim that never goes stale, so the row reads peer-held for
+    # the rest of the run. Give a settle the longer bound.
+    timeout = 120 if "task" in argv[:4] else 15
     try:
-        result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
+        result = subprocess.run(argv, check=False, capture_output=True, timeout=timeout)
     except FileNotFoundError:
         print(f"orchestrator: note: fno unavailable, skipped {what}", file=sys.stderr)
         return False
@@ -1032,6 +1038,30 @@ def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
     return _shell_fno(argv, "task claim settle")
 
 
+def _manifest_path(state_path: str) -> Path:
+    """``state_path`` if it is absolute or already resolves from cwd, else the
+    first hit walking up to the repo root.
+
+    The emit CLI resolves its own ``.fno`` through ``resolve_repo_root()``. A
+    bare relative default only agrees with it when cwd IS the root, so from a
+    subdirectory the emit still stamped the node while the settle read nothing
+    and skipped - leaving the row in_progress under a claim nothing releases,
+    which every later pass then reads as peer-held. This module is stdlib-only
+    by design (it shells out to fno), so the walk stands in for the import.
+    """
+    given = Path(state_path)
+    if given.is_absolute() or given.exists():
+        return given
+    here = Path.cwd().resolve()
+    for parent in (here, *here.parents):
+        candidate = parent / given
+        if candidate.exists():
+            return candidate
+        if (parent / ".git").exists():
+            break
+    return given
+
+
 def manifest_graph_node_id(state_path: str = ".fno/target-state.md") -> str:
     """The bound node id from the session manifest, or ``""``.
 
@@ -1042,7 +1072,7 @@ def manifest_graph_node_id(state_path: str = ".fno/target-state.md") -> str:
     and the settle is skipped.
     """
     try:
-        text = Path(state_path).read_text(encoding="utf-8")
+        text = _manifest_path(state_path).read_text(encoding="utf-8")
     except (OSError, ValueError):
         # UnicodeDecodeError is a ValueError and escapes a bare OSError catch,
         # so one non-UTF-8 byte in the manifest would raise out of the
@@ -1390,6 +1420,14 @@ if __name__ == "__main__":
                     settle_node,
                     b_opts["--task"],
                     b_opts["--outcome"] if b_type == "task_done" else "FAILED",
+                )
+            else:
+                # Silence here reads exactly like a settle that succeeded,
+                # while the claim is still held.
+                print(
+                    f"orchestrator: note: no node for task {b_opts['--task']}; "
+                    "task claim not settled",
+                    file=sys.stderr,
                 )
         sys.exit(0)
 

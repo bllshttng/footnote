@@ -356,6 +356,7 @@ Branch on `TASK_CLAIM_RC`. Every nonzero code means you did NOT take the claim, 
 - **Exit 0**: the claim is yours (idempotent re-acquire if you already hold it). Dispatch as planned.
 - **Exit 1**: the plan bound to the node is unreadable, or the row vanished between the read and the write. A stop, not a skip: the rows derive from the plan, so no task of this node can be claimed until it is readable.
 - **Exit 2**: the task id is not in the plan, or `--status` was misspelled. A stop: the wave and the plan disagree about what a task is.
+- **Exit 6**: this node has no task grain. Either no plan is bound to it, or the project runs a non-graph tracker backend that has no task rows at all. Dispatch unguarded, exactly as the no-bound-node case below. It is its own code because it is common rather than exceptional: about one live node in five carries no `plan_path`, and a tracker-backend project carries none anywhere, so reading it as a stop would halt waves that ran fine before task rows existed.
 - **Exit 3**: a peer session holds the task, or the task is already `done`. The message says which. For a peer holder, log `task <id> held by <holder>, skipping this round`, write `- [~] <id>: held by <holder>` to STATE.md, and move to the next task in the wave, the same shape as lane-fill leaving a peer-lane node ready. `get_completed_tasks_from_state` matches only `[x]`, so a `[~]` task is re-offered on a later pass once the peer releases it. For a `done` row there is no holder and no later pass that changes the answer: write `- [x] <id>` and never re-offer it, or the wave spins on shipped work forever.
 - **Exit 4**: no provable session id or session pid for the claim. A stop, not a skip: emit `<help reason="task claim needs a session id" evidence="task <id> of node <node>">`.
 - **Exit 5**: the graph itself is unreadable. A stop for the whole wave, never a skip. This code is distinct from 3 on purpose: reading a corrupt graph as "a peer holds it" would make every task in the wave skip silently and log a holder that does not exist.
@@ -426,8 +427,10 @@ python3 "${SKILL_DIR:-skills/execute}/orchestrator.py" --emit-boundary blocked \
 `--run`/`--node` fall back to the manifest. Never gate on the emit; a failure
 prints one stderr note and the wave continues.
 
-The same emit releases the task claim taken in 3e: when `--node` and `--task`
-are both present, it runs `fno backlog task update <node> <task> --status done`
+The same emit releases the task claim taken in 3e. It fires on `--task` alone,
+with `--node` falling back to the manifest the same way the emit envelope
+does, so omitting `--node` does not suppress the settle. It runs
+`fno backlog task update <node> <task> --status done`
 after a `task_done` with outcome `SUCCESS` or `DONE_WITH_CONCERNS`, and
 `--status pending` (the holder-only give-back) after `blocked` or a `FAILED`
 outcome, so the next ready worker can pick the task up. Non-fatal like the

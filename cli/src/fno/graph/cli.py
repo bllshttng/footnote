@@ -6515,6 +6515,13 @@ def _task_callback() -> None:
 #: reads as "a peer holds it, skip this round" (see waves.md 3e).
 TASK_GRAPH_UNREADABLE_EXIT = 5
 
+#: This node has no task grain to guard, so the caller dispatches unguarded
+#: exactly as a run with no bound node does. A node with no bound plan and a
+#: non-graph tracker backend both land here. Neither is a stop: the first is
+#: one live node in five, and the second is every node in a tracker-backend
+#: project, so reading either as a refusal halts a wave that used to run.
+TASK_NO_GRAIN_EXIT = 6
+
 
 def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
@@ -6548,8 +6555,11 @@ def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
     entry = match.candidates[0]
     plan_path = entry.get("plan_path") or ""
     if not plan_path:
-        typer.echo(f"no plan bound to {entry.get('id')}", err=True)
-        raise typer.Exit(code=2)
+        typer.echo(
+            f"no plan bound to {entry.get('id')}; no task grain to guard",
+            err=True,
+        )
+        raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
     # The graph stores plan_path absolute, `~`-prefixed, or repo-relative, so a
     # raw Path() read refuses two of the three forms and the caller dispatches
     # unclaimed - the double-dispatch these verbs exist to close.
@@ -6752,6 +6762,20 @@ def cmd_task_update(
             )
             raise typer.Exit(code=4)
         harness = resolve_session_harness()
+        # acquire_task succeeds idempotently for a caller that ALREADY holds
+        # the key, so releasing on a later refusal would drop a claim this
+        # call never took and leave a live worker unclaimed.
+        from fno.claims.core import claim_status as _claim_status
+
+        try:
+            held_before = _claim_status(key).get("holder") == holder
+        except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
+            held_before = False
+
+        def _release_if_taken() -> None:
+            if not held_before:
+                release_task(node_id, task_id, holder)
+
         try:
             acquire_task(node_id, task_id, holder, pid=pid, harness=harness)
         except ClaimHeldByOther as exc:
@@ -6787,17 +6811,17 @@ def cmd_task_update(
             # corrupt graph, and an exited write must release like a raised one
             # or the claim outlives the failed transition held by the session
             # pid.
-            release_task(node_id, task_id, holder)
+            _release_if_taken()
             raise
         if reopen_refused:
-            release_task(node_id, task_id, holder)
+            _release_if_taken()
             typer.echo(
                 f"task {task_id} is done; re-offering shipped work is refused",
                 err=True,
             )
             raise typer.Exit(code=3)
         if row is None:
-            release_task(node_id, task_id, holder)
+            _release_if_taken()
             typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
             raise typer.Exit(code=1)
         typer.echo(f"{key} in_progress holder={holder}")
@@ -14588,6 +14612,12 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
 )
 
 
+#: Tracker-owned verbs whose refusal a caller must read as "no grain here",
+#: not as a stop. Under a non-graph backend there are no task rows at all, so
+#: a wave has nothing to guard and dispatches exactly as it did before.
+_NO_GRAIN_ON_EXTERNAL_BACKEND = frozenset({"task list", "task update"})
+
+
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:
     """The shared external-backend refusal for a tracker-owned backlog verb.
 
@@ -14604,6 +14634,8 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
             f"tracker by its id.",
             err=True,
         )
+        if label in _NO_GRAIN_ON_EXTERNAL_BACKEND:
+            raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
         raise typer.Exit(code=1)
 
 

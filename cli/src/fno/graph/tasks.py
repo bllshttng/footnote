@@ -48,11 +48,18 @@ def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
     ``in_progress`` row stays ``in_progress``), new plan ids gain
     ``{'id', 'status': 'pending', 'owner': None}``, and rows whose id left the
     plan are left alone (a replan mid-run must not drop a live claim's row).
-    Returns the entry's row list.
+    Returns the READABLE rows: a row that is not a dict stays in
+    ``entry['tasks']`` but is never handed to a caller that would read it.
     """
-    rows = entry.get("tasks")
-    rows = [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
-    known = {r.get("id") for r in rows}
+    raw = entry.get("tasks")
+    raw = raw if isinstance(raw, list) else []
+    # Keep what cannot be read rather than dropping it: this list is written
+    # back over entry["tasks"], so filtering non-dict rows out here DELETES
+    # them from graph.json. read_graph and locked_mutate_graph both preserve
+    # what they cannot migrate; a row writer skipping a row it cannot parse is
+    # the containment, not a silent prune.
+    rows = list(raw)
+    known = {r.get("id") for r in rows if isinstance(r, dict)}
     for task_id in derive_task_ids(Path(plan_path)):
         if task_id not in known:
             rows.append({"id": task_id, "status": "pending", "owner": None})
@@ -62,7 +69,7 @@ def ensure_task_rows(entry: dict, plan_path: Path) -> list[dict]:
             # 2.1 and 2.10 collide.
             known.add(task_id)
     entry["tasks"] = rows
-    return rows
+    return [r for r in rows if isinstance(r, dict)]
 
 
 __all__ = ["TASK_STATUSES", "derive_task_ids", "ensure_task_rows"]
