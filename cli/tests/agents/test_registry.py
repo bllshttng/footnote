@@ -697,7 +697,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 16
+    assert SCHEMA_VERSION == 17
 
 
 def test_v15_model_provider_round_trips_without_collapsing_harness(

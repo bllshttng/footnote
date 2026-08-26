@@ -109,7 +109,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // 2026-08-20: 0 of 37 live rows carried either key. The bump is what turns a
 // pre-v16 binary's SILENT erasure into a loud refusal, which is the same
 // reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=16.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 16;
+//
+// v17 (x-d401) adds `model_basis`, the requested-vs-verified qualifier on
+// `model`. Same rationale as v16: a pre-v17 binary re-serializes the row from
+// its typed struct and drops the key, and a pre-v17 Python reader would see an
+// unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 17;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 

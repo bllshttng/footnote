@@ -827,7 +827,10 @@ fn env_assignments_start(argv: &[String]) -> Option<usize> {
             break; // the assignment run (or the command) starts here
         }
     }
-    Some(i)
+    // A trailing bare `-u` / `--unset` advances past the end, and every caller
+    // slices `argv[start..]`, which panics for start > len. Clamp here (one
+    // fix, four call sites) rather than guarding each slice.
+    Some(i.min(argv.len()))
 }
 
 /// Shared scan for a `NAME=` token in the leading `env(1)` assignment run of a
@@ -5257,8 +5260,13 @@ impl Core {
             .or(a.claude_session_uuid.as_deref())
             .unwrap_or("");
         !sid.is_empty()
-            && self.panes.values().any(|e| {
+            && self.panes.iter().any(|(id, e)| {
                 e.resume_target.as_deref() == Some(sid)
+                    // "of THIS session" is both halves, the same pair the
+                    // `live_pane` check in `agent_rows` uses: a pane can
+                    // outlive its place in the layout, and one that has must
+                    // not keep answering "backend live".
+                    && self.session.find_pane(*id).is_some()
                     && e.pty.is_child_alive()
                     && !matches!(
                         e.vt.shell_activity(),
@@ -17694,6 +17702,20 @@ mod tests {
         core.session_name = "main".into();
         core.shells = vec!["/bin/cat".into()];
         let pid = core.spawn_pane(2, 4, "/w").expect("pane");
+        // "of THIS session" is both halves: registered AND placed in the
+        // layout. `spawn_pane` only does the first, so a pane left out of the
+        // layout must not answer the join.
+        core.session.add_squad(
+            1,
+            vec!["/w".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(pid),
+                focus: pid,
+            },
+        );
         core.panes.get_mut(&pid).unwrap().resume_target = Some("01a03a4e-b862".into());
         let mut row = RegistryAgent {
             spawned_by_session: None,

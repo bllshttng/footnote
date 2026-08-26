@@ -4809,6 +4809,16 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// `now` is injected so the fixture's fixed clock and production's wall clock
 /// assert the same rules.
 fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<chrono::Utc>) {
+    // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
+    // `basis`. Python's `_supervisor_contradicted` reads the input mapping, so
+    // reading the mutated map here would name a different falsifier than the
+    // twin for the same row, and the shared fixture has no case where two
+    // rules fire together to catch it.
+    let incoming_basis = row
+        .get("basis")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let event_at = row_timestamp(row.get("last_event_at"));
     let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
     let terminal = matches!(
@@ -4868,19 +4878,11 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         });
     let contradicted = superseded
         && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
-        && row
-            .get("basis")
-            .and_then(Value::as_str)
-            .is_some_and(|f| !f.is_empty());
-    let basis_word = row
-        .get("basis")
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        && !incoming_basis.is_empty();
     row.insert(
         "live_status_basis".into(),
         if contradicted {
-            json!(format!("contradicted-by-{basis_word}"))
+            json!(format!("contradicted-by-{incoming_basis}"))
         } else {
             Value::Null
         },

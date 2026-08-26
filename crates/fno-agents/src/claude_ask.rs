@@ -2958,8 +2958,11 @@ pub fn dispatch_claude_spawn(
     // reached only without a route flag, so no route twin exists here.
     // Absent when none was named: the honest absence, never a defaulted name
     // that reads as a measurement.
+    // Placed before `status`, where Python's cmd_spawn puts it, and encoded
+    // with the same full JSON-string encode Python's `json.dumps` applies -
+    // a `"`-only escape diverges on a backslash and can emit invalid JSON.
     let model_field = match model.filter(|m| !m.is_empty()) {
-        Some(m) => format!(r#", "model": "{}""#, m.replace('"', "\\\"")),
+        Some(m) => format!(", \"model\": {}", json_string_ascii(m)),
         None => String::new(),
     };
     // x-85fe: append the effective launch dir on the default canonical move
@@ -2979,7 +2982,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "{receipt_status}"{model_field}{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude"{model_field}, "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,

@@ -19,7 +19,6 @@ from types import SimpleNamespace
 from typing import Optional
 
 from fno.agents import format as fmt
-from fno.agents.row_contradiction import project_row
 from fno.agents import truth_status
 from fno.agents.reachability import (
     UNREACHABLE,
@@ -223,12 +222,12 @@ def list_agents(
             live_status is not None
             and str(live_status).lower() not in not_blocked_minus_working
         )
+        superseded_live_status: Optional[str] = None
         if (
             live_status is None
             or str(live_status).lower() in not_blocked_minus_working
             or reach.verdict == UNREACHABLE
         ):
-            superseded_live_status = str(live_status) if falsifier_admits_gate else None
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
@@ -238,9 +237,12 @@ def list_agents(
                 )
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
+                    # Stamped HERE, not at the gate: a supersession that never
+                    # happened (no node id in the name, or no truth reading)
+                    # must not mark the surviving stale word as contradicted.
+                    if falsifier_admits_gate:
+                        superseded_live_status = str(live_status)
                     live_status = rendered
-        else:
-            superseded_live_status = None
         # The verdict travels with the evidence it was reached from. `status`
         # keeps the wire vocabulary its consumers already parse; the three
         # reachability fields carry what `status` alone cannot say, which is
@@ -256,11 +258,9 @@ def list_agents(
             last_activity_age_s=reach.age_s,
             last_event_at=last_event_at,
             last_message=last_message,
+            status=rendered_status,
+            superseded_live_status=superseded_live_status,
         )
-        row["status"] = rendered_status
-        if superseded_live_status is not None:
-            row["superseded_live_status"] = superseded_live_status
-        row = project_row(row)
         rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort

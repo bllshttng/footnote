@@ -282,6 +282,23 @@
       "expected": {
         "live_status_basis": null
       }
+    },
+    {
+      "name": "a contradiction names the falsifier that ARRIVED, not one a later rule wrote",
+      "row": {
+        "status": "orphaned",
+        "basis": "process-gone",
+        "reachability": "unreachable",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "last_event_at": "2026-08-21T00:59:30Z",
+        "last_reconciled_at": "2026-08-21T00:50:00Z"
+      },
+      "expected": {
+        "status": "unknown",
+        "basis": "stale-verdict-fresher-event",
+        "live_status_basis": "contradicted-by-process-gone"
+      }
     }
   ]
 }

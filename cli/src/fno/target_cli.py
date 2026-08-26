@@ -30,7 +30,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import typer
 
@@ -2317,10 +2317,11 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
 def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
     """Verified remote default-branch ref used by native target bootstrap."""
     if fetch:
-        if not _refresh_remote(cwd, "origin"):
+        ok, err = _refresh_remote(cwd, "origin")
+        if not ok:
             typer.echo(
                 "fno do target start: could not refresh remote base: "
-                "git fetch origin failed",
+                f"{err or 'git fetch origin failed'}",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -2349,15 +2350,21 @@ def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
 _REFRESHED_REMOTES: set = set()
 
 
-def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> bool:
-    """One fetch per (repo, remote) per process (x-3ae1).
+def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
+    """One fetch per (repo, remote, refspec) per process (x-3ae1).
 
     Shared by the base-ref resolution and the truthful-base measurement so a
     start that already refreshed origin never pays a second network round
-    trip for the same information. Returns whether the fetch succeeded."""
-    key = (str(cwd), remote)
-    if key in _REFRESHED_REMOTES:
-        return True
+    trip for the same information. The REFSPEC is part of the key, and the
+    subsumption runs ONE way: a whole-remote `fetch origin` satisfies a later
+    `fetch origin main`, never the reverse. Keying on the remote alone let a
+    narrow fetch suppress a broad one, which resolves the base against a ref
+    only one branch was fetched into. Returns ``(ok, stderr)`` - git's own
+    message, because "fetch failed" cannot tell auth from DNS from a typo."""
+    key = (str(cwd), remote, refspec)
+    whole_remote = (str(cwd), remote, ())
+    if key in _REFRESHED_REMOTES or whole_remote in _REFRESHED_REMOTES:
+        return True, ""
     try:
         fetched = subprocess.run(
             ["git", "-C", str(cwd), "fetch", "--quiet", remote, *refspec],
@@ -2365,12 +2372,12 @@ def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> bool:
             text=True,
             timeout=60,
         )
-    except (OSError, subprocess.SubprocessError):
-        return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
     if fetched.returncode != 0:
-        return False
+        return False, (fetched.stderr or "").strip()
     _REFRESHED_REMOTES.add(key)
-    return True
+    return True, ""
 
 
 def _truthful_base(cwd: Path, base_label: str) -> str:
@@ -2390,7 +2397,7 @@ def _truthful_base(cwd: Path, base_label: str) -> str:
     bare = base_label.rpartition("@")[0] or base_label
     remote = bare.split("/", 1)[0] if "/" in bare else "origin"
     branch = bare.split("/", 1)[1] if "/" in bare else "main"
-    if not _refresh_remote(cwd, remote, branch):
+    if not _refresh_remote(cwd, remote, branch)[0]:
         return f"{base_label} behind=unmeasured (fetch failed)"
     count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")
     count = (count or "").strip()
