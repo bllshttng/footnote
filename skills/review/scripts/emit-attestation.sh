@@ -26,12 +26,15 @@
 # reviewer name and verdict it is PASSED. Nothing here can tell a real review
 # from a caller that typed the arguments.
 #
-# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context] [--findings-file <path>]
+# Usage: emit-attestation.sh <reviewer> [verdict] [reviewer_context] [execution_context] [output_contract] [--findings-file <path>]
 #   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
 #   [reviewer_context]  fresh | shared | unknown (default unknown); positive
 #                       context evidence only, never inferred from the sender
+#   [execution_context] inline (default) | fork; where the review ran
+#   [output_contract]   json_block (default) | report_findings; the contract
+#                       the review's result surfaced under
 #   [--findings-file <path>]  a JSON findings payload; classified by `fno do
 #               review classify` and carried on the event as the finding record.
 #               A malformed or unreadable file is a refusal, never an empty record.
