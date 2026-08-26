@@ -3180,10 +3180,11 @@ def cmd_update(
         "--model",
         help="Pin the model dispatchers launch this node's worker on (x-571f), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
     ),
-    model_tier: Optional[str] = typer.Option(
+    _model_tier_tombstone: Optional[str] = typer.Option(
         None,
         "--model-tier",
-        help="Pin a minimum quality tier (high|medium|low) resolved to the cheapest reachable model at dispatch from the benchmark snapshot. Outranked by an exact --model. Pass 'null' to clear.",
+        hidden=True,
+        help="Retired: the work-difficulty axis is --difficulty.",
     ),
     batch: Optional[str] = typer.Option(
         None,
@@ -3308,6 +3309,7 @@ def cmd_update(
         ),
     ),
 ) -> None:
+    from fno._flag_aliases import refuse_retired_model_tier
     from fno.graph._constants import (
         PRIORITY_ORDER,
         has_node_id_prefix,
@@ -3324,6 +3326,8 @@ def cmd_update(
         _would_exceed_epic_depth,
     )
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
+
+    refuse_retired_model_tier(_model_tier_tombstone)
 
     if not has_node_id_prefix(task_id):
         typer.echo(
@@ -3773,26 +3777,6 @@ def cmd_update(
                 )
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
-        if model_tier is not None:
-            typer.echo(
-                "warning: --model-tier is deprecated; use --difficulty",
-                err=True,
-            )
-            if model_tier.lower() == "null":
-                node["model_tier"] = None
-                node["difficulty"] = None
-            else:
-                try:
-                    band = normalize_difficulty(model_tier)
-                except ValueError:
-                    typer.echo(
-                        f"fno backlog update: invalid --model-tier {model_tier!r}; "
-                        "expected high, medium, or low.",
-                        err=True,
-                    )
-                    raise typer.Exit(code=2)
-                node["model_tier"] = band
-                node["difficulty"] = band
         if type_ is not None:
             node["type"] = type_
         if public is not None:
