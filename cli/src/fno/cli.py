@@ -81,13 +81,14 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
     "inbox": (
         "fno.inbox.cli:inbox_app",
-        "What is waiting on a human: approvals, notify, outstanding, king board.",
+        "What is waiting on a human: approvals, notify, outstanding, king board, decisions, law.",
         {"hidden": True},
     ),
     # Moved to `inbox` (VERB_MOVES). The old top-level registration stays for
     # one release - unreachable via resolve_command (the move intercepts
-    # first), kept only so `fno help --all` can list it under "Moved
-    # spellings" and menu-caps still sees a hidden, not a phantom, root.
+    # first) so menu-caps sees a hidden, not a phantom, root; the
+    # moved-spellings block no longer renders (x-6233), so the row teaches
+    # nothing and exists only for the release clock.
     "approvals": (
         "fno.approvals.cli:approvals_app",
         "Inspect and decide pending approvals for consequential effects.",
@@ -1126,15 +1127,16 @@ def mux(
 
 
 @app.command(
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     help=(
         "Show the installed fno version(s) (the Rust front's verb).\n\n"
         "Prints the Rust front's own version report; `fno --version` remains "
         "the Python package's flag form."
-    )
+    ),
 )
-def version() -> None:
-    """Forward to the Rust front's `version`."""
-    _run_rust_front(["version"])
+def version(ctx: typer.Context) -> None:
+    """Forward to the Rust front's `version` (flags included)."""
+    _run_rust_front(["version", *ctx.args])
 
 
 if __name__ == "__main__":

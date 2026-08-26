@@ -8667,16 +8667,42 @@ def cmd_done(
         )
         raise typer.Exit(code=2)
 
-    # The rich surface delegates (x-6233): any ported flag, a fuzzy query
-    # (title substring), or a missing id (branch auto-detect) routes to the
-    # implementation that already owns those paths - and only when NO close
-    # flag is set, because the delegate has no --force/--reason/--skip-stamp
-    # and would drop them. A bare node id keeps THIS command's gates, stamp,
-    # and dependent cascade - the canonical close.
+    # A query that is not a bare node id (title substring, bare hex, slug,
+    # `next`) resolves through the same fuzzy resolver the rich surface uses
+    # and then closes CANONICALLY on the resolved id: the close depth must
+    # not fork on which resolvable form named the node (PR 1200 review -
+    # a bare-hex close of an epic child skipped the cascade and stamp that
+    # the prefixed form ran). The rich surface still delegates wholesale;
+    # an unresolvable query delegates so ITS error rendering answers.
+    if (
+        not _close_flags
+        and task_id is not None
+        and not has_node_id_prefix(task_id)
+    ):
+        from fno.tracker import active_backend_name
+
+        if active_backend_name() == "graph":
+            from fno.done.cli import _current_branch
+            from fno.graph.fuzzy import resolve_id
+            from fno.graph.store import read_graph as _read_graph_for_resolve
+
+            _match = resolve_id(
+                task_id,
+                _read_graph_for_resolve(_graph_path()),
+                git_branch=_current_branch(),
+            )
+            if _match.kind in ("exact", "fuzzy", "branch_derived"):
+                task_id = _match.id
+            # none/ambiguous fall through to the delegate for its messages.
+
+    # The rich surface delegates (x-6233): any ported flag or a missing id
+    # (branch auto-detect) routes to the implementation that already owns
+    # those paths - and only when NO close flag is set, because the delegate
+    # has no --force/--reason/--skip-stamp and would drop them. A node id
+    # (given or resolved above) keeps THIS command's gates, stamp, and
+    # dependent cascade - the canonical close.
     _delegate = not _close_flags and (
-        _rich_flags
-        or task_id is None
-        or not has_node_id_prefix(task_id)
+        _rich_flags or task_id is None or not has_node_id_prefix(task_id)
     )
     if _delegate:
         from fno.done.cli import done_command

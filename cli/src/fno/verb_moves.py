@@ -53,7 +53,15 @@ VERB_MOVES: dict[str, Move] = {
     "claim": Move(kind="deprecated", to="agents claim"),
     "context": Move(kind="deprecated", to="whoami context"),
     "cost": Move(kind="deprecated", to="whoami cost"),
-    "decide": Move(kind="deprecated", to="inbox decide"),
+    "decide": Move(
+        kind="deprecated",
+        to="inbox decide",
+        leaf_destinations=(
+            ("list", "inbox decisions"),
+            ("reindex", "backlog decide-reindex"),
+            ("retract", "backlog decide-retract"),
+        ),
+    ),
     "delivery": Move(kind="deprecated", to="do delivery"),
     "dispatch": Move(kind="deprecated", to="agents dispatch"),
     "done": Move(kind="deprecated", to="backlog done"),

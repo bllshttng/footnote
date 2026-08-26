@@ -132,7 +132,7 @@ _nested_count=${#_nested_paths[@]}
 # (`fno agents workspace worktree policy`); its `never` receipt is exactly `never` (non-never adds a
 # `base=` line), so exact-match needs no `head`/pipe. Fail CLOSED (empty != never).
 if [[ "$_verdict" == "canonical-protected" ]] && command -v fno >/dev/null 2>&1; then
-  if [[ "$(fno agents workspace worktree policy --repo "$_root" 2>/dev/null)" == "never" ]]; then
+  if [[ "$(fno agents workspace worktree policy --repo "$_root" 2>/dev/null || fno workspace worktree policy --repo "$_root" 2>/dev/null)" == "never" ]]; then
     _verdict="ok"
   fi
 fi

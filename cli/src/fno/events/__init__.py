@@ -649,7 +649,7 @@ def validate(event: dict[str, Any]) -> None:
                     f"{data.get(field)!r} (allowed: {allowed})"
                 )
 
-    # worktree_overlap_observed is the recurrence key for `fno workspace worktree
+    # worktree_overlap_observed is the recurrence key for `fno agents workspace worktree
     # overlaps`: an empty or non-list peer_session_ids would record an overlap
     # with no peers, a self-contradiction that must fail loud at the chokepoint
     # (the generic emit CLI is a writer here) rather than land and inflate or

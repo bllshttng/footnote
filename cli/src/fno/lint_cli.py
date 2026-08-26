@@ -322,7 +322,25 @@ def menu_caps() -> None:
     try:
         root_names = _root_namespace_names()
     except RuntimeError as exc:
-        failures.append(f"root namespace could not be measured: {exc}")
+        # A bare install (pip, no checkout) has no crates/ tree to scan - the
+        # only producer of this RuntimeError. The gate's job is to catch drift
+        # in a repo under development; outside one there is no Rust surface to
+        # cap, so degrade to the Python-only count with a warning rather than
+        # failing every bare-install lint run.
+        typer.echo(
+            f"menu-caps: rust front source unavailable ({exc}); counting "
+            "Python roots only",
+            err=True,
+        )
+        from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as root_app
+        from fno.verb_moves import VERB_MOVES
+
+        _root = typer.main.get_command(root_app)
+        _py = set(cast("click.Group", _root).list_commands(click.Context(_root)))
+        _py.update(LAZY_SUBCOMMANDS)
+        _py.update(_EAGER_COMMAND_HELP)
+        _py.difference_update(VERB_MOVES)
+        root_names = sorted(_py)
     else:
         if len(root_names) > MENU_CAP_ROOT_NAMESPACE:
             over = ", ".join(root_names[MENU_CAP_ROOT_NAMESPACE:])

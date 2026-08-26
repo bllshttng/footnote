@@ -3111,7 +3111,7 @@ def start(
     origin/main -> phantom-deletion PRs) live only in agent memory - into one
     idempotent verb with a printed receipt, so a memory-less agent succeeds.
 
-    Composes: ``fno workspace worktree ensure`` (create/reuse off origin/main, never local
+    Composes: ``fno agents workspace worktree ensure`` (create/reuse off origin/main, never local
     HEAD) -> heal ``.fno`` + link shared state -> ``fno do target init`` (writes the
     manifest, claims the node exactly once) -> receipt. Run from INSIDE a valid
     worktree it is a no-op.
@@ -3332,7 +3332,7 @@ def start(
                     remedy = (
                         " No automatic path re-marks this worktree available; "
                         "a human must clear it (fno agents watchdog for the "
-                        "fleet sweep, fno workspace worktree cleanup for "
+                        "fleet sweep, fno agents workspace worktree cleanup for "
                         "merged leftovers) and retry."
                     )
                 typer.echo(

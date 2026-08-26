@@ -189,7 +189,7 @@ def test_scenario3_hp_non_code_link(tmp_graph, monkeypatch):
         "status": "ready",
         "domain": "research",
     }])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     result = runner.invoke(
         app,
         ["done", "Q2 outreach", "--link", "obsidian://vault/myvault/q2"],
@@ -208,7 +208,7 @@ def test_scenario4_err_ambiguous_query_exits_2(tmp_graph, monkeypatch):
         {"id": "ab-plan00001", "title": "Plan 01: one", "status": "ready", "domain": "code"},
         {"id": "ab-plan00002", "title": "Plan 02: two", "status": "ready", "domain": "code"},
     ])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     before = _read(tmp_graph)
     result = runner.invoke(app, ["done", "plan"])
     assert result.exit_code == 2
@@ -221,7 +221,7 @@ def test_scenario5_err_no_match_exits_2(tmp_graph, monkeypatch):
     _seed(tmp_graph, [
         {"id": "ab-aa000001", "title": "something else", "status": "ready", "domain": "code"},
     ])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     before = _read(tmp_graph)
     result = runner.invoke(app, ["done", "xyzzy"])
     assert result.exit_code == 2
@@ -238,9 +238,9 @@ def test_scenario6_err_non_code_no_artifact_exits_2(tmp_graph, monkeypatch):
         "status": "ready",
         "domain": "research",
     }])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     before = _read(tmp_graph)
-    result = runner.invoke(app, ["done", "Research task"])
+    result = runner.invoke(app, ["done"])
     assert result.exit_code == 2
     combined = result.stdout + (result.stderr or "")
     assert "research" in combined
@@ -315,7 +315,7 @@ def test_note_is_preserved(tmp_graph, monkeypatch):
         "status": "ready",
         "domain": "trading",
     }])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     result = runner.invoke(
         app,
         ["done", "ab-tr000001", "--note", "closed AAPL $180 strangle"],
@@ -336,7 +336,7 @@ def test_link_and_note_both_set(tmp_graph, monkeypatch):
         "status": "ready",
         "domain": "design",
     }])
-    _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
+    _stub_subprocess(monkeypatch, branch="research-task", pr_view_rc=1)
     result = runner.invoke(
         app,
         [
@@ -726,12 +726,12 @@ def test_ac4_hp_current_pr_success_no_stderr(tmp_graph, monkeypatch):
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
-        branch="feat/thing",
+        branch="feat/hp-target",
         pr_view_stdout="123 https://github.com/x/y/pull/123",
         pr_view_rc=0,
         pr_view_stderr="",
     )
-    result = runner.invoke(app, ["done", "HP target"])
+    result = runner.invoke(app, ["done"])
     assert result.exit_code == 0, result.output
     entry = _read(tmp_graph)[0]
     assert entry["status"] == "done"
@@ -752,16 +752,16 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
     }])
     _stub_subprocess_with_stderr(
         monkeypatch,
-        branch="feat/thing",
+        branch="feat/err-target",
         pr_view_stdout="",
         pr_view_rc=1,
         pr_view_stderr="gh: not authenticated",
     )
-    result = runner.invoke(app, ["done", "ERR target"], catch_exceptions=False)
+    result = runner.invoke(app, ["done"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # stderr must contain the prefix and the captured gh error.
     combined_err = result.output  # CliRunner mixes stderr into output by default
-    assert "fno done: gh pr view failed:" in combined_err
+    assert "fno backlog done: gh pr view failed:" in combined_err
     assert "not authenticated" in combined_err
     # Node is still marked done (no pr_number since gh failed).
     entry = _read(tmp_graph)[0]

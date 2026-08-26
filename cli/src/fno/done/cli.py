@@ -1,11 +1,11 @@
-"""`fno done` - mark a backlog node as done.
+"""`fno backlog done` rich completion surface - mark a backlog node as done.
 
 For `domain: code` with no explicit flags, auto-detects the node from the
 current git branch and fills pr_number/pr_url/merge_status from `gh pr view`.
 For any domain, populates user-supplied fields (--pr, --link, --note) and
 always sets `status: done` + `completed_at`.
 
-Beyond the direct flags, `fno done` ALSO rolls up ledger-sourced lifecycle
+Beyond the direct flags, `fno backlog done` ALSO rolls up ledger-sourced lifecycle
 fields so a "done" graph entry reflects everything we know about the
 completed feature, not just the PR trio:
 
@@ -21,7 +21,7 @@ changes), for sweeping already-done nodes that were marked done before
 this logic existed. Pair with --force-overwrite for explicit re-reconciliation
 of stale rollups (e.g. session_id or points changed since the node was marked done).
 
-When a second `fno done` call races a node that is already done, the status
+When a second close call races a node that is already done, the status
 and completed_at are preserved. User-supplied --pr/--link/--note are still applied.
 A done_race_collision event is emitted to events.jsonl for forensic audit.
 
@@ -92,7 +92,7 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
 
     When `announce_failure=True` and `gh pr view` exits non-zero (or the
     subprocess raises), the captured stderr is printed to sys.stderr prefixed
-    with ``fno done: gh pr view failed:``.  This surface is omitted when the
+    with ``fno backlog done: gh pr view failed:``.  This surface is omitted when the
     caller has an explicit --pr/--link/--note (the caller gate short-circuits
     before reaching this function in that case).
 
@@ -113,7 +113,7 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
     except OSError as exc:
         if announce_failure:
             print(
-                f"fno done: gh pr view failed: {exc}",
+                f"fno backlog done: gh pr view failed: {exc}",
                 file=sys.stderr,
             )
         return None, None
@@ -123,7 +123,7 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
             # Truncate to first 4 KB so we don't flood the terminal.
             if len(diagnostic) > 4096:
                 diagnostic = diagnostic[:4096] + " [truncated]"
-            msg = f"fno done: gh pr view failed: {diagnostic}" if diagnostic else "fno done: gh pr view failed (no diagnostic available)"
+            msg = f"fno backlog done: gh pr view failed: {diagnostic}" if diagnostic else "fno backlog done: gh pr view failed (no diagnostic available)"
             print(msg, file=sys.stderr)
         return None, None
     # rc=0: "no PR for this branch" if stdout is unparseable -- stay silent.
@@ -309,7 +309,7 @@ def _apply_rollup(
     #     ledger so first-time marking captures the current session id even
     #     before the ledger rolls up.
     #   - force_overwrite=True (explicit re-reconciliation): trust the ledger
-    #     exclusively. Otherwise `fno done --backfill --force-overwrite` from
+    #     exclusively. Otherwise `fno backlog done --backfill --force-overwrite` from
     #     an active session (CLAUDECODE_SESSION_ID set) would mass-rewrite
     #     every reconciled node's session_id to the CURRENT session id instead
     #     of the historical ledger attribution, defeating the flag's purpose.
@@ -399,16 +399,6 @@ def done_command(
     With `--backfill`, runs the rollup without flipping status - useful for
     reconciling nodes that were marked done before the rollup logic existed.
     """
-    # Deprecation shim (unit 6, ported at x-6233): `fno backlog done` is the
-    # canonical closing verb and now carries this command's whole flag surface
-    # (--backfill, --force-overwrite, --pr-number, --pr-url, --link, --note,
-    # title/branch query), so the root spelling forwards argv-verbatim onto
-    # it. Only this stderr line is added, because callers parse stdout.
-    typer.echo(
-        "fno done is deprecated; use `fno backlog done` - the flag surface "
-        "is identical there.",
-        err=True,
-    )
     graph_path = _path_graph()
     env_session = os.environ.get("CLAUDECODE_SESSION_ID") or None
 
@@ -423,7 +413,7 @@ def done_command(
 
         if active_backend_name() != "graph":
             typer.echo(
-                "fno done --backfill: refused - the sweep reads and writes "
+                "fno backlog done --backfill: refused - the sweep reads and writes "
                 "the graph store, which is not selected (rollups live in the "
                 "footnote sidecar under an external backend)",
                 err=True,
@@ -435,12 +425,12 @@ def done_command(
             match = resolve_id(query, entries, git_branch=branch)
             if match.kind == "none":
                 typer.echo(
-                    f"fno done --backfill: no match for {query!r}", err=True,
+                    f"fno backlog done --backfill: no match for {query!r}", err=True,
                 )
                 raise typer.Exit(code=2)
             if match.kind == "ambiguous":
                 typer.echo(
-                    f"fno done --backfill: {len(match.candidates)} candidates "
+                    f"fno backlog done --backfill: {len(match.candidates)} candidates "
                     f"for {query!r}:",
                     err=True,
                 )
@@ -459,7 +449,7 @@ def done_command(
             }
 
         if not target_ids:
-            typer.echo("fno done --backfill: no done nodes to backfill")
+            typer.echo("fno backlog done --backfill: no done nodes to backfill")
             return
 
         # Pre-compute rollups outside the mutator (ledger I/O stays unlocked).
@@ -484,14 +474,14 @@ def done_command(
 
         if not touched:
             typer.echo(
-                f"fno done --backfill: scanned {len(target_ids)} node(s); "
+                f"fno backlog done --backfill: scanned {len(target_ids)} node(s); "
                 "nothing to fill (all fields already set or ledger silent)."
             )
         else:
             for eid, tags in touched:
                 typer.echo(f"  {eid}: {'  '.join(tags)}")
             typer.echo(
-                f"fno done --backfill: updated {len(touched)} / "
+                f"fno backlog done --backfill: updated {len(touched)} / "
                 f"{len(target_ids)} node(s)"
             )
         return
@@ -512,7 +502,7 @@ def done_command(
         # sidecar's stored refs. Refuse rather than silently drop them.
         if pr or pr_url or link or note:
             typer.echo(
-                "fno done: --pr/--pr-url/--link/--note record graph-backend "
+                "fno backlog done: --pr/--pr-url/--link/--note record graph-backend "
                 "completion metadata and cannot be recorded under an external "
                 "tracker backend",
                 err=True,
@@ -520,7 +510,7 @@ def done_command(
             raise typer.Exit(code=2)
         if not query:
             typer.echo(
-                "fno done: an external tracker backend needs an explicit node "
+                "fno backlog done: an external tracker backend needs an explicit node "
                 "id (branch auto-detect is footnote-metadata-based)",
                 err=True,
             )
@@ -534,7 +524,7 @@ def done_command(
 
     if match.kind == "none":
         msg_target = query or branch or "<no input>"
-        typer.echo(f"fno done: no match for {msg_target!r}", err=True)
+        typer.echo(f"fno backlog done: no match for {msg_target!r}", err=True)
         if match.note:
             typer.echo(f"  ({match.note})", err=True)
         raise typer.Exit(code=2)
@@ -777,11 +767,11 @@ def done_command(
         # to avoid an awkward "already done at ;" diagnostic.
         at_msg = f" at {first_completed_at}" if first_completed_at else ""
         typer.echo(
-            f"fno done: {node_id} already done{at_msg}; "
+            f"fno backlog done: {node_id} already done{at_msg}; "
             f"metadata updates applied; collision event {emit_outcome}",
             err=True,
         )
-        typer.echo(f"fno done: {node_id} -> already done (metadata updated)")
+        typer.echo(f"fno backlog done: {node_id} -> already done (metadata updated)")
         return
 
     tag_bits: list[str] = [f"domain={domain}"]
@@ -793,7 +783,7 @@ def done_command(
     if note is not None:
         tag_bits.append(f"note={note!r}")
     tag_bits.extend(rollup_tags)
-    typer.echo(f"fno done: {node_id} -> done  " + "  ".join(tag_bits))
+    typer.echo(f"fno backlog done: {node_id} -> done  " + "  ".join(tag_bits))
 
     # Operator-authority matrix (LD3/LD29): the top-level `fno done` verb is an
     # allowed action during a drive window, but audit-tag it so the trail

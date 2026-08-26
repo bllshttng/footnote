@@ -4,7 +4,7 @@ Isolation is not invented here. A project-local ``<repo>/.fno/config.toml``
 already wins per key and deep-merges over the per-user global, and every
 ``paths.*`` derives from one ``state_dir``, so writing that one key moves the
 graph, the ledger, the briefs, the agent registry and the mail bus together.
-``fno project init`` writes that file through the same writer ``fno config set``
+``fno config project init`` writes that file through the same writer ``fno config set``
 uses; it adds no second resolution path.
 
 ``FNO_CONFIG`` is deliberately not the lever: it is the ONLY candidate when set,
@@ -105,7 +105,7 @@ def init(
     # Normalize BEFORE anything derives from it. `backlog.id_prefix` is
     # lowercased by its own validator at read time, so an id typed `WEB` mints
     # `web-` nodes while this file says `WEB` and the root sits at
-    # `.../projects/WEB`. Worse, `fno project init web` afterwards trips the
+    # `.../projects/WEB`. Worse, `fno config project init web` afterwards trips the
     # already-pinned refusal and dead-ends someone who only changed the case.
     project_id = project_id.strip().lower()
 

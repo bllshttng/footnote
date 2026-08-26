@@ -4716,6 +4716,7 @@ def cmd_gate(
 
 @agents_app.command(
     "yard",
+    hidden=True,
     help=(
         "The yard identity fold: species, rarity tier, crown, and first-sighting "
         "per registry citizen.\n\n"

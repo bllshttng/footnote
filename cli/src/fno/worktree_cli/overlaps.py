@@ -371,5 +371,5 @@ def render_overlaps_text(report: dict) -> str:
             f"  recurrence reached {n}/{report.get('recurrence_threshold', RECURRENCE_THRESHOLD)}: "
             "a Stage 3 worktree-write-lock design node is now warranted."
         )
-    lines.append("  report: fno workspace worktree overlaps --since 28 --json")
+    lines.append("  report: fno agents workspace worktree overlaps --since 28 --json")
     return "\n".join(lines)
