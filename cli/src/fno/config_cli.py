@@ -737,6 +737,18 @@ def get_cmd(
         ok, node = _traverse(key[len("config.") :])
     if not ok and not key.startswith("config."):
         ok, node = _traverse(f"config.{key}")
+    if not ok and (
+        key.startswith("providers.")
+        or key.startswith("config.providers.")
+        or key == "providers"
+        or key == "config.providers"
+    ):
+        aliased = key.replace("providers", "accounts", 1)
+        ok, node = _traverse(aliased)
+        if not ok and aliased.startswith("config."):
+            ok, node = _traverse(aliased[len("config.") :])
+        if not ok and not aliased.startswith("config."):
+            ok, node = _traverse(f"config.{aliased}")
     if not ok:
         typer.echo(f"error: unknown config key '{key}'", file=sys.stderr)
         raise typer.Exit(code=1)
@@ -749,6 +761,15 @@ def get_cmd(
     is_leaf = not isinstance(node, (BaseModel, dict))
     if is_leaf:
         source = resolve_source(key)
+        if source is None and (
+            key.startswith("providers.")
+            or key.startswith("config.providers.")
+            or key == "providers"
+            or key == "config.providers"
+        ):
+            # The value resolved through the rename; provenance must too, or a
+            # file that DOES set the key reports "source: default".
+            source = resolve_source(key.replace("providers", "accounts", 1))
         if source is not None:
             decider, overridden = source
         else:
@@ -854,6 +875,33 @@ def set_cmd(
                 raise typer.Exit(code=2)
             k, _, v = tok.partition("=")
             items.append((k, v))
+
+    # A dangling accounts.active bricks every loader call (and every accounts
+    # verb loads first), so the pointer is validated against declared record
+    # ids here rather than repaired after the fact. Scope-aware: a GLOBAL
+    # pointer must name a globally declared record (a local-only id would
+    # brick every other project), while a project pointer may name anything
+    # the merged view resolves.
+    for k, v in items:
+        normalized = k[len("config."):] if k.startswith("config.") else k
+        if normalized in ("accounts.active", "providers.active"):
+            from fno.adapters.providers.loader import (
+                known_account_ids,
+                load_scope_config,
+            )
+
+            if scope == "global":
+                ids = {r.id for r in load_scope_config("global").records}
+            else:
+                ids = known_account_ids()
+            if v not in ids:
+                known = ", ".join(sorted(ids)) if ids else "(no records configured)"
+                typer.echo(
+                    f"error: account {v!r} is not a configured record id "
+                    f"(known: {known}); add the record first",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=1)
 
     try:
         results = set_config_values(items, scope=scope)

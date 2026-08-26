@@ -273,6 +273,10 @@ pub fn prefix() -> u8 {
 /// a genuine pause. Locked 2: this literal lives here and nowhere else.
 pub const REPEAT_WINDOW: Duration = Duration::from_millis(500);
 
+/// The hold grace for pane identity reveal. It covers the initial terminal
+/// autorepeat delay while keeping a tap transient.
+pub const PANE_IDS_REPEAT_WINDOW: Duration = Duration::from_millis(750);
+
 /// Bracketed-paste markers, as the terminal emits them.
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
@@ -313,6 +317,8 @@ pub enum Event {
     ToggleAgentSort,
     /// Show/hide the status row (prefix+s). Client-local (US4, AC4-FR).
     ToggleStatus,
+    /// Reveal each visible pane's stable id while the key repeats.
+    ShowPaneIds,
     /// Show the full key-table overlay (prefix+?). The next keypress
     /// dismisses it (US4, AC4-EDGE).
     ShowKeys,
@@ -371,17 +377,30 @@ enum State {
 #[derive(Debug)]
 pub struct Scanner {
     state: State,
-    /// When a resize repeat window is open, the instant it lapses. `None` when
-    /// idle. Repeat is resize-only (Locked 3): a future focus-repeat would add
-    /// a discriminant here, so this is deliberately not a bare bool.
-    repeat_until: Option<Instant>,
+    /// The repeatable action and its deadline. Keeping the action beside the
+    /// deadline prevents a pane-id pulse from being mistaken for resize input.
+    repeat: Option<RepeatState>,
+    keymap: Keymap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepeatAction {
+    Resize,
+    ShowPaneIds,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepeatState {
+    action: RepeatAction,
+    until: Instant,
 }
 
 impl Default for Scanner {
     fn default() -> Self {
         Scanner {
             state: State::Normal(0),
-            repeat_until: None,
+            repeat: None,
+            keymap: keymap().clone(),
         }
     }
 }
@@ -411,26 +430,42 @@ impl Scanner {
         for &b in bytes {
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
-                    if b == prefix() {
+                    if b == self.keymap.prefix {
                         // Prefix disarms first, then chords normally (Locked 5);
                         // a prefix+resize re-arms at its emission site below.
-                        self.repeat_until = None;
+                        self.repeat = None;
                         flush(&mut plain, &mut out);
                         self.state = State::Prefix;
-                    } else if let (true, Event::Cmd(Command::ResizeDir(dir))) =
-                        (self.repeat_armed(now), chord(b))
-                    {
+                    } else if self.repeat_armed(RepeatAction::Resize, now) {
+                        let Event::Cmd(Command::ResizeDir(dir)) = self.chord(b) else {
+                            self.repeat = None;
+                            plain.push(b);
+                            let idx = roll(open_idx, b, PASTE_OPEN);
+                            self.state = if idx == PASTE_OPEN.len() {
+                                State::Paste(0)
+                            } else {
+                                State::Normal(idx)
+                            };
+                            continue;
+                        };
                         // Bare resize key inside an open window: repeat the
                         // resize and extend the window (no prefix needed).
                         flush(&mut plain, &mut out);
                         out.push(Event::Cmd(Command::ResizeDir(dir)));
-                        self.repeat_until = Some(now + REPEAT_WINDOW);
+                        self.arm_repeat(now);
+                        self.state = State::Normal(0);
+                    } else if self.repeat_armed(RepeatAction::ShowPaneIds, now)
+                        && self.chord(b) == Event::ShowPaneIds
+                    {
+                        flush(&mut plain, &mut out);
+                        out.push(Event::ShowPaneIds);
+                        self.arm_show_pane_ids(now);
                         self.state = State::Normal(0);
                     } else {
                         // Any non-repeat byte disarms (a no-op when idle) and is
                         // then processed exactly as if no window existed (Locked
                         // 5): forwarded immediately, rolling the paste-open match.
-                        self.repeat_until = None;
+                        self.repeat = None;
                         plain.push(b);
                         let idx = roll(open_idx, b, PASTE_OPEN);
                         self.state = if idx == PASTE_OPEN.len() {
@@ -455,8 +490,8 @@ impl Scanner {
                     if b == 0x1b {
                         self.state = State::PrefixEsc(vec![0x1b]);
                     } else {
-                        let ev = chord(b);
-                        self.arm_if_resize(&ev, now);
+                        let ev = self.chord(b);
+                        self.arm_if_repeat(&ev, now);
                         out.push(ev);
                     }
                 }
@@ -478,7 +513,7 @@ impl Scanner {
                     } else {
                         match esc_chord(&seq) {
                             EscScan::Complete(ev) => {
-                                self.arm_if_resize(&ev, now);
+                                self.arm_if_repeat(&ev, now);
                                 out.push(ev);
                             }
                             EscScan::Partial => self.state = State::PrefixEsc(seq),
@@ -498,9 +533,10 @@ impl Scanner {
         matches!(self.state, State::Prefix | State::PrefixEsc(_))
     }
 
-    /// True while a resize repeat window is open at `now`.
-    fn repeat_armed(&self, now: Instant) -> bool {
-        self.repeat_until.is_some_and(|until| now < until)
+    /// True while the selected repeat action's window is open at `now`.
+    fn repeat_armed(&self, action: RepeatAction, now: Instant) -> bool {
+        self.repeat
+            .is_some_and(|state| state.action == action && now < state.until)
     }
 
     /// Open (or extend) the repeat window to `now + REPEAT_WINDOW`. Public so a
@@ -508,7 +544,17 @@ impl Scanner {
     /// through its own path) arms the window the same as a typed resize would,
     /// keeping the modal's execution parity with directly-typed chords.
     pub fn arm_repeat(&mut self, now: Instant) {
-        self.repeat_until = Some(now + REPEAT_WINDOW);
+        self.repeat = Some(RepeatState {
+            action: RepeatAction::Resize,
+            until: now + REPEAT_WINDOW,
+        });
+    }
+
+    fn arm_show_pane_ids(&mut self, now: Instant) {
+        self.repeat = Some(RepeatState {
+            action: RepeatAction::ShowPaneIds,
+            until: now + PANE_IDS_REPEAT_WINDOW,
+        });
     }
 
     /// Close the repeat window now. Public so an input path that bypasses `scan`
@@ -517,16 +563,30 @@ impl Scanner {
     /// refocused a pane could be followed by a bare `H/J/K/L` that silently
     /// resizes.
     pub fn disarm_repeat(&mut self) {
-        self.repeat_until = None;
+        self.repeat = None;
     }
 
-    /// Open the repeat window iff the just-emitted event is a resize; every
-    /// resize emission funnels through here so the window arms the same way
-    /// whether it fired from a letter chord or a Ctrl-arrow.
-    fn arm_if_resize(&mut self, ev: &Event, now: Instant) {
-        if matches!(ev, Event::Cmd(Command::ResizeDir(_))) {
-            self.arm_repeat(now);
+    /// Open the matching repeat window for an emitted repeatable event. Resize
+    /// emission funnels through here so letter and Ctrl-arrow paths agree.
+    pub fn arm_if_repeat(&mut self, ev: &Event, now: Instant) {
+        match ev {
+            Event::Cmd(Command::ResizeDir(_)) => self.arm_repeat(now),
+            Event::ShowPaneIds => self.arm_show_pane_ids(now),
+            _ => {}
         }
+    }
+
+    #[cfg(test)]
+    fn with_keymap(map: Keymap) -> Self {
+        Scanner {
+            state: State::Normal(0),
+            repeat: None,
+            keymap: map,
+        }
+    }
+
+    fn chord(&self, byte: u8) -> Event {
+        chord_for(&self.keymap, byte)
     }
 }
 
@@ -794,6 +854,13 @@ fn default_bindings() -> Vec<KeyBinding> {
             "sort table columns",
         ),
         b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
+        b(
+            b'\\',
+            "show-pane-ids",
+            ShowPaneIds,
+            Panes,
+            "hold to show pane ids",
+        ),
         b(b'?', "show-keys", ShowKeys, Global, "this key table"),
         b(
             b'g',
@@ -814,8 +881,12 @@ fn default_bindings() -> Vec<KeyBinding> {
 /// specials handled in `chord()` and shown by [`meta_rows`], so they are
 /// deliberately absent here and refused as rebind targets.
 pub fn key_bindings() -> Vec<KeyBinding> {
+    bindings_for(keymap())
+}
+
+fn bindings_for(map: &Keymap) -> Vec<KeyBinding> {
     let mut rows = default_bindings();
-    for (action, byte) in &keymap().rebinds {
+    for (action, byte) in &map.rebinds {
         if let Some(kb) = rows.iter_mut().find(|kb| kb.action == action) {
             kb.key = *byte;
             kb.disp = key_disp(*byte);
@@ -842,6 +913,78 @@ fn disp_for(action_id: &str, bindings: &[KeyBinding]) -> Option<String> {
         .iter()
         .find(|kb| kb.action == action_id)
         .map(|kb| kb.disp.clone())
+}
+
+/// One in-menu accelerator: the byte that selects an entry while a context
+/// menu is OPEN, under the same stable action-id vocabulary the prefix table
+/// uses. A SEPARATE scope, not a rebind: prefix chords read a byte only after
+/// the prefix, menu keys read it bare inside a popup, so the two layers never
+/// consult each other's tables (ruling d-a5e7569d - `x` stays kill-pane after
+/// a prefix and becomes the destructive verb inside a menu).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuKeyBinding {
+    pub action: &'static str,
+    pub key: u8,
+}
+
+/// The shipped in-menu accelerator table: app vocabulary inside the open menu
+/// (`r` renames, `x` is the destructive verb, `n` and the angle brackets drive
+/// the tab verbs). One byte MAY serve two action ids here (`close-tab` and
+/// `remove-row` never share a popup), so collision rules live with the caller,
+/// which knows which menu is open. A static slice: lookups run per popup row
+/// at build time and per offered action on every in-menu keypress.
+pub const MENU_BINDINGS: &[MenuKeyBinding] = &[
+    MenuKeyBinding {
+        action: "rename-tab",
+        key: b'r',
+    },
+    MenuKeyBinding {
+        action: "rename-workspace",
+        key: b'r',
+    },
+    MenuKeyBinding {
+        action: "close-tab",
+        key: b'x',
+    },
+    MenuKeyBinding {
+        action: "remove-row",
+        key: b'x',
+    },
+    MenuKeyBinding {
+        action: "new-tab",
+        key: b'n',
+    },
+    MenuKeyBinding {
+        action: "move-tab-left",
+        key: b'<',
+    },
+    MenuKeyBinding {
+        action: "move-tab-right",
+        key: b'>',
+    },
+];
+
+/// The one resolver both menu-scope projections read: the binding registered
+/// for `action_id`, when the menu scope carries one.
+fn menu_binding_for(action_id: &str) -> Option<&'static MenuKeyBinding> {
+    MENU_BINDINGS.iter().find(|mb| mb.action == action_id)
+}
+
+/// The display glyph for `action_id` in menu scope: what the popup draws
+/// beside the entry, i.e. the byte that RUNS it in-menu. Unlike [`key_for`]
+/// (the prefix chord) this describes the input path the reader is actually
+/// on. `None` when the menu scope does not bind the action - a prefix-only
+/// action renders no menu key rather than advertising a chord the open menu
+/// would dismiss on (the LD9 lie this node closes).
+pub fn menu_key_for(action_id: &str) -> Option<String> {
+    menu_binding_for(action_id).map(|mb| key_disp(mb.key))
+}
+
+/// The dispatch half of [`menu_key_for`]: the byte that executes `action_id`
+/// in-menu, for the popup key handler to match a typed byte against the
+/// actions the OPEN menu actually offers.
+pub fn menu_byte_for(action_id: &str) -> Option<u8> {
+    menu_binding_for(action_id).map(|mb| mb.key)
 }
 
 /// The one-line teaser shown while a prefix is pending, built from the LIVE
@@ -988,11 +1131,15 @@ pub fn resolve_chord(byte: u8) -> Event {
 }
 
 fn chord(b: u8) -> Event {
+    chord_for(keymap(), b)
+}
+
+fn chord_for(map: &Keymap, b: u8) -> Event {
     match b {
         // prefix-prefix = one literal prefix byte, whatever the prefix now is.
-        _ if b == prefix() => Event::Forward(vec![b]),
+        _ if b == map.prefix => Event::Forward(vec![b]),
         b'1'..=b'9' => Event::SelectTabIdx((b - b'1') as usize),
-        _ => key_bindings()
+        _ => bindings_for(map)
             .into_iter()
             .find(|kb| kb.key == b)
             .map(|kb| kb.event)
@@ -1643,6 +1790,47 @@ mod tests {
     }
 
     #[test]
+    fn menu_accelerators_round_trip_and_stay_out_of_the_prefix_scope() {
+        // x-91a1 AC1: every menu binding resolves to a glyph and back to the
+        // same byte/action pair, the prefix table keeps its own meanings
+        // untouched (menu `x` did not rebind prefix+x), and a prefix-only
+        // action has no menu key to advertise.
+        for mb in MENU_BINDINGS {
+            assert_eq!(
+                menu_key_for(mb.action),
+                Some(key_disp(mb.key)),
+                "{}",
+                mb.action
+            );
+            assert_eq!(menu_byte_for(mb.action), Some(mb.key), "{}", mb.action);
+        }
+        // The tab verbs read as this app in both scopes (menu n and angle
+        // brackets beside the prefix chords); Diff stays prefix-only - a
+        // row-menu action with no settled menu meaning renders no key.
+        assert!(
+            menu_key_for("diff-pane").is_none(),
+            "prefix-only: no menu key"
+        );
+        let rows = key_bindings();
+        let byte_of = |action: &str| {
+            rows.iter()
+                .find(|kb| kb.action == action)
+                .map(|kb| kb.key)
+                .unwrap_or_else(|| panic!("prefix table lost {action}"))
+        };
+        assert_eq!(byte_of("close-pane"), b'x', "prefix+x still kills a pane");
+        assert_eq!(byte_of("new-tab"), b'c', "prefix+c still opens a tab");
+        assert_eq!(byte_of("rename-tab"), b',');
+        assert_eq!(byte_of("close-tab"), b'&');
+        assert_eq!(byte_of("move-tab-left"), b'<');
+        assert_eq!(byte_of("move-tab-right"), b'>');
+        // The two scopes reuse `x` on purpose: menu close/remove can never
+        // co-occur with the prefix layer, which reads a byte only after the
+        // prefix byte.
+        assert!(MENU_BINDINGS.iter().any(|mb| mb.key == b'x'));
+    }
+
+    #[test]
     fn client_keys_arrows_and_ctrl_arrows_split_across_reads() {
         // A prefix+arrow chord arriving one byte per read still lands.
         assert_eq!(
@@ -1929,5 +2117,37 @@ mod tests {
                 vec![Event::Cmd(Command::ResizeDir(Dir::Left))]
             );
         }
+    }
+
+    #[test]
+    fn pane_id_chord_is_rebindable_and_repeats_without_prefix() {
+        assert_eq!(format!("{:?}", resolve_chord(b'\\')), "ShowPaneIds");
+
+        let (map, warnings) = resolve_keymap(None, &[("show-pane-ids".into(), ";".into())]);
+        assert!(
+            warnings.is_empty(),
+            "rebind should be accepted: {warnings:?}"
+        );
+        let t0 = Instant::now();
+        let mut scanner = Scanner::with_keymap(map);
+        assert_eq!(format!("{:?}", scanner.scan(b"\x02\\", t0)), "[Bell]");
+        assert_eq!(format!("{:?}", scanner.scan(b"\x02;", t0)), "[ShowPaneIds]");
+        assert_eq!(
+            format!("{:?}", scanner.scan(b";", t0 + Duration::from_millis(40))),
+            "[ShowPaneIds]"
+        );
+        assert_eq!(
+            format!("{:?}", scanner.scan(b";", t0 + Duration::from_millis(791))),
+            "[Forward([59])]"
+        );
+    }
+
+    #[test]
+    fn pane_id_chord_does_not_fire_inside_bracketed_paste() {
+        let mut input = PASTE_OPEN.to_vec();
+        input.extend_from_slice(b"\\");
+        input.extend_from_slice(PASTE_CLOSE);
+        let mut scanner = Scanner::default();
+        assert_eq!(forwarded_only(&scanner.scan(&input, Instant::now())), input);
     }
 }

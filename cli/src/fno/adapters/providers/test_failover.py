@@ -50,6 +50,17 @@ def _seed_settings(
     return settings_path
 
 
+@pytest.fixture(autouse=True)
+def _pin_fno_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point provider-config discovery at the per-test seed file.
+
+    The storm cap is read from the merged config candidates (local over
+    global), not the controller's pinned settings_path, so each test pins
+    FNO_CONFIG to the file _seed_settings writes (tmp_path/config.toml) to
+    stay hermetic and keep controlling the cap through the seed."""
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "config.toml"))
+
+
 class TestStormCap:
     def test_hp1_first_swap_allowed(self, tmp_path: Path):
         from fno.adapters.providers.failover import (

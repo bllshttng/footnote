@@ -63,7 +63,7 @@ def _by_id(g: Path, node_id: str) -> dict:
 def test_ac1_hp_explicit_source_node_stamps_the_origin(tmp_graph):
     """AC1-HP: --source-node on a filing verb stamps exactly that origin."""
     result = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa"]
+        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low"]
     )
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
@@ -84,7 +84,7 @@ def test_ac1_err_unresolvable_source_node_refuses_and_writes_nothing(tmp_graph):
     """AC1-ERR: fail closed - non-zero, the token named, and no node created."""
     before = len(_entries(tmp_graph))
     result = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-zzzz"]
+        app, ["backlog", "idea", "follow-up", "--source-node", "x-zzzz", "--difficulty", "low"]
     )
     assert result.exit_code != 0
     assert "x-zzzz" in result.output
@@ -103,7 +103,7 @@ def test_ac2_err_update_rejects_a_self_reference(tmp_graph):
 
 def test_update_sets_and_clears_the_origin(tmp_graph):
     """--source-node on update sets it; 'null' clears it, matching the flag idiom."""
-    created = runner.invoke(app, ["backlog", "idea", "follow-up"])
+    created = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
     new_id = json.loads(created.stdout)["id"]
 
     assert runner.invoke(
@@ -129,7 +129,7 @@ def test_ac3_edge_stale_env_origin_degrades_through_the_real_filing_path(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
     monkeypatch.setenv("FNO_NODE", "x-deleted")
 
-    result = runner.invoke(app, ["backlog", "idea", "orphaned follow-up"])
+    result = runner.invoke(app, ["backlog", "idea", "orphaned follow-up", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     node = _by_id(tmp_graph, json.loads(result.stdout)["id"])
     assert node["source_node_id"] is None
@@ -141,7 +141,7 @@ def test_ac2_hp_env_origin_is_stamped_when_it_resolves(tmp_graph, monkeypatch):
     monkeypatch.setenv("CODEX_SESSION_ID", "sess-codex")
     monkeypatch.setenv("FNO_NODE", "x-aaaa")
 
-    result = runner.invoke(app, ["backlog", "idea", "codex-filed follow-up"])
+    result = runner.invoke(app, ["backlog", "idea", "codex-filed follow-up", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     node = _by_id(tmp_graph, json.loads(result.stdout)["id"])
     assert node["source_harness"] == "codex"
@@ -162,7 +162,7 @@ def test_ac3_err_ambient_failure_prints_no_traceback_on_either_stream(
     (tmp_graph.parent / ".fno" / "target-state.md").write_bytes(b"\xff\xfe not utf8")
     monkeypatch.chdir(tmp_graph.parent)
 
-    result = runner.invoke(app, ["backlog", "idea", "follow-up"])
+    result = runner.invoke(app, ["backlog", "idea", "follow-up", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     assert "Traceback" not in result.output
     assert _by_id(tmp_graph, json.loads(result.stdout)["id"])["source_node_id"] is None
@@ -174,11 +174,11 @@ def test_a_stamped_origin_is_named_but_a_signalless_filing_is_quiet(tmp_graph):
     An always-on line would be noise on the most-used verb in the CLI, and it
     lands in the mixed output stream that callers parse as JSON.
     """
-    quiet = runner.invoke(app, ["backlog", "idea", "no signal at all"])
+    quiet = runner.invoke(app, ["backlog", "idea", "no signal at all", "--difficulty", "low", "--separate"])
     assert "origin:" not in quiet.output
 
     named = runner.invoke(
-        app, ["backlog", "idea", "with an origin", "--source-node", "x-aaaa"]
+        app, ["backlog", "idea", "with an origin", "--source-node", "x-aaaa", "--difficulty", "low", "--separate"]
     )
     assert "origin: x-aaaa" in named.output
 
@@ -188,7 +188,7 @@ def test_a_dropped_stale_origin_is_reported_not_swallowed(tmp_graph, monkeypatch
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-stale")
     monkeypatch.setenv("FNO_NODE", "x-deleted")
 
-    result = runner.invoke(app, ["backlog", "idea", "orphaned"])
+    result = runner.invoke(app, ["backlog", "idea", "orphaned", "--difficulty", "low"])
     assert result.exit_code == 0, result.output
     assert "dropped 'x-deleted'" in result.output
 

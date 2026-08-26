@@ -271,7 +271,14 @@ fn default_true() -> bool {
 /// index, so a captured `--tab <n>` selector changes meaning across the
 /// bump; the handshake is what tells an old client to restart. New variants
 /// are not additive-tolerant either.
-pub const PROTO_VERSION: u32 = 52;
+/// v55 (guarded tab close): `ControlVerb::TabClose` and the target-specific
+/// `ServerMsg::TabClosed` receipt.
+///
+/// v56 (hover affordance): `ClientMsg::LinkHover` + `ServerMsg::LinkHover` -
+/// the sequenced, initiator-only hover lookup for clickable URLs. New
+/// variants, so an unbumped peer cannot decode the pair; the handshake is
+/// what stops the skew.
+pub const PROTO_VERSION: u32 = 56;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -372,6 +379,20 @@ pub enum ClientMsg {
     /// Shift-modified events are the native-selection escape hatch and are
     /// never captured, so they never reach this variant (AC3-EDGE).
     Mouse { pane: u64, event: MouseEvent },
+    /// (v56, hover affordance) Ask which cells of `pane` belong to the link
+    /// under pane-local `(row, col)`, for the client's hover underline.
+    /// Read-only and initiator-only: the reply is one
+    /// [`ServerMsg::LinkHover`] to THIS client - co-viewers see nothing, pane
+    /// state and the frame stream are untouched. `seq` is a client-local
+    /// monotonic counter echoed on the reply so a result for a target the
+    /// pointer has already left is dropped client-side (the same A->B->A
+    /// guard `PeekAgent` uses).
+    LinkHover {
+        pane: u64,
+        row: u16,
+        col: u16,
+        seq: u64,
+    },
     /// (v8) Walk the pane's OSC 133 command blocks, moving the shared per-pane
     /// scroll so `dir`'s adjacent block anchors at the viewport top. A pane with
     /// no blocks replies with a `Notice` and no scroll change.
@@ -687,6 +708,15 @@ pub enum ControlVerb {
         tab: TabSel,
         name: String,
     },
+    /// Close one whole tab through the same cascade as the interactive
+    /// `Command::CloseTab`. An unforced close guards every pane against a
+    /// fresh registry row whose worker is not positively dead.
+    TabClose {
+        squad: PaneTarget,
+        tab: TabSel,
+        #[serde(default)]
+        force: bool,
+    },
     /// Dump a layout scope's nested tree + per-pane geometry ->
     /// [`ServerMsg::LayoutTree`] (structure + rects, so templates/reconcile can
     /// diff topology - Locked Decision 5). `workers` (v51, x-1499) additionally
@@ -919,6 +949,21 @@ pub struct AnchoredLayoutSpec {
     pub slots: Vec<LayoutSlot>,
 }
 
+/// Why a paneless registry-backed agent cannot take the third row-action branch.
+/// The client renders this only after pane focus, daemon attach, and dead-row
+/// resume have all been ruled out. Missing fields from pre-v53 rows remain the
+/// generic compatibility notice. The enum is additive only within v54; older
+/// peers are rejected by the protocol handshake before they decode this row.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNoPaneReason {
+    LivePaneless,
+    MissingHarness,
+    MissingSessionId,
+    UnsupportedHarness,
+    BackendNotLive,
+}
+
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
 /// server's off-loop registry reader joins registry rows to panes via the
 /// `mux` ref and derives the 3-tier fact-badge lattice: `exited` (pane-exit
@@ -1103,6 +1148,13 @@ pub struct AgentRow {
     /// v48 reader wire-tolerant (defaults false = today's behavior).
     #[serde(default)]
     pub resumable: bool,
+    /// (v54) Why the row reaches the final paneless notice branch. This is
+    /// derived from the registry's authoritative harness/session fields on
+    /// the server; `None` means the row is pane-hosted, attachable, synthetic,
+    /// external, or came from a pre-v54 peer. `#[serde(default)]` keeps the
+    /// additive field wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub no_pane_reason: Option<AgentNoPaneReason>,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -1900,6 +1952,16 @@ pub enum ServerMsg {
     /// server; the client checks again before exec rather than trusting the
     /// wire. Reliable - a dropped click is a dead-feeling button.
     OpenLink { url: String },
+    /// (v56, hover affordance) The initiator-only answer to a
+    /// [`ClientMsg::LinkHover`]: the visible pane-local cells to underline for
+    /// the requester's current pointer target. `cells` empty means no link (or
+    /// a pane/cell the requester cannot view); the URL never rides this reply,
+    /// so the affordance leaks no pane text. Reliable.
+    LinkHover {
+        pane_id: u64,
+        seq: u64,
+        cells: Vec<(u16, u16)>,
+    },
     /// (v12, x-e780) The initiator-only result of a `SearchOpen`/`SearchStep`:
     /// `total` matches in the snapshot and the `current` 1-based position after
     /// the jump. `total == 0` means no matches (the client shows "no matches" +
@@ -2011,6 +2073,13 @@ pub enum ServerMsg {
         /// The tab's focused pane - where `mux view` moves the operator.
         focus: u64,
         panes: Vec<TabPaneOccupant>,
+    },
+    /// Answer to [`ControlVerb::TabClose`]. The receipt names the exact stable
+    /// tab and every pane reaped; `forced` records the explicit guard override.
+    TabClosed {
+        tab_id: TabId,
+        pane_ids: Vec<u64>,
+        forced: bool,
     },
 }
 
@@ -3824,7 +3893,10 @@ mod tests {
         // reachability triple (x-4bf0) 47 -> 48; the worker resume gesture
         // (x-5f7f) 48 -> 49; the lineage pair (x-132c) bumped it 49 -> 50;
         // the tab dictionary (x-1499) bumped it 50 -> 51; pane identity
-        // receipts (x-588a) bumped it 51 -> 52.
+        // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
+        // reason bumps it 52 -> 53; backend-not-live classification bumps it
+        // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
+        // message pair bumps it 55 -> 56.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3833,7 +3905,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 52);
+        assert_eq!(PROTO_VERSION, 56);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -3845,19 +3917,31 @@ mod tests {
             !row.unmeasured,
             "missing unmeasured => false (v46 reader stays wire-tolerant)"
         );
+        assert_eq!(
+            row.no_pane_reason, None,
+            "missing no_pane_reason => generic compatibility fallback"
+        );
         // A crowned row round-trips losslessly.
         let mut crowned = row.clone();
         crowned.crown_level = Some(1);
         crowned.crown_scope = Some("epic-x".into());
+        crowned.no_pane_reason = Some(AgentNoPaneReason::LivePaneless);
         let wire = serde_json::to_string(&crowned).unwrap();
         let back: AgentRow = serde_json::from_str(&wire).unwrap();
         assert_eq!(back.crown_level, Some(1));
         assert_eq!(back.crown_scope.as_deref(), Some("epic-x"));
+        assert_eq!(back.no_pane_reason, Some(AgentNoPaneReason::LivePaneless));
         // An un-crowned row omits the keys on the wire (skip_serializing_if), so
         // a pre-41 reader never sees an unknown field.
         assert!(
             !serde_json::to_string(&row).unwrap().contains("crown_level"),
             "un-crowned row omits crown on the wire"
+        );
+        assert!(
+            !serde_json::to_string(&row)
+                .unwrap()
+                .contains("no_pane_reason"),
+            "generic row omits the typed reason on the wire"
         );
     }
 
@@ -4143,6 +4227,7 @@ mod tests {
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
+                        no_pane_reason: None,
                     },
                     AgentRow {
                         spawned_by_session: None,
@@ -4171,6 +4256,7 @@ mod tests {
                         basis: None,
                         last_activity_age_s: None,
                         resumable: false,
+                        no_pane_reason: None,
                     },
                 ],
                 focus_node: Some("x-66e8".into()),
@@ -4762,6 +4848,11 @@ mod tests {
                 },
                 workers: false,
             },
+            ControlVerb::TabClose {
+                squad: PaneTarget::SquadId(1),
+                tab: TabSel::Id(27),
+                force: true,
+            },
         ];
         for v in verbs {
             let bytes = serde_json::to_vec(&v).unwrap();
@@ -4826,6 +4917,14 @@ mod tests {
             focused,
             serde_json::from_slice::<ServerMsg>(&bytes).unwrap()
         );
+
+        let closed = ServerMsg::TabClosed {
+            tab_id: 27,
+            pane_ids: vec![35, 36],
+            forced: false,
+        };
+        let bytes = serde_json::to_vec(&closed).unwrap();
+        assert_eq!(closed, serde_json::from_slice::<ServerMsg>(&bytes).unwrap());
     }
 
     #[test]

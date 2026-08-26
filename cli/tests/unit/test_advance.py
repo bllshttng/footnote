@@ -425,6 +425,161 @@ def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     assert captured["model"] == "glm-4.7"  # STATIC_TIERS['low'][0]
 
 
+def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
+    """A canonical difficulty must not become a Claude model pin upstream."""
+    captured = {}
+
+    def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
+        captured.update(model=model)
+        return "sid"
+
+    node = {**NODE, "difficulty": "high"}
+    monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr(adv, "_spawn_worker", spawn)
+    res = adv.advance(project="fno", events_path=iso)
+    assert res.decision == "dispatched"
+    assert captured["model"] is None
+
+
+def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
+    """The deferral has a receiving end: an unpinned difficulty node picks its
+    harness/model at the spawn seam via the capacity grid, because the spawned
+    argv's explicit --harness can never trigger the spawn-CLI grid."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-grid1"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    sid = adv._spawn_worker(
+        "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
+    )
+    # codex has no bg lane: the resolver sends it headless, whose clean exit IS
+    # the launch proof (no short_id receipt to parse).
+    assert sid == "headless"
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "codex"
+    assert "gpt-5.5" in cmd
+
+
+def test_spawn_worker_explicit_pins_beat_grid(monkeypatch):
+    """An explicit provider (or model) stays operator authority: the grid is a
+    default route only."""
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "sid-pin1"}')
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+    adv._spawn_worker(
+        "x-pin1", None, "pin-slug", provider="claude",
+        node={"difficulty": "high", "priority": "p1"},
+    )
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "claude"
+    assert "gpt-5.5" not in cmd
+
+
+def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_path):
+    """Worktree placement is harness-keyed (claude-native vs external base), so
+    the grid must decide BEFORE _ensure_lane_worktree runs: placement and spawn
+    are one decision, never two."""
+    captured = {}
+    node = {"id": "x-grid2", "slug": "grid-two", "difficulty": "high", "priority": "p1"}
+
+    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
+    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim", lambda *a, **k: object()
+    )
+
+    def fake_ensure(node_id, *, canonical_root, harness="claude"):
+        captured["harness"] = harness
+        return tmp_path
+
+    monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)
+    monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
+    monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
+    monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **k: _FakeProc(stdout='{"short_id": "s"}')
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda: {"claude": "exhausted", "codex": "ok"},
+    )
+
+    receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
+    assert receipts and receipts[0]["status"] == "dispatched"
+    assert captured["harness"] == "codex"
+
+
+def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
+    monkeypatch, tmp_path
+):
+    """A grid DECLINE at placement still pins the spawn. The spawn seam
+    re-consults the grid for an unpinned spawn, so a capacity change between
+    placement and spawn must not land the worker on a different harness than
+    the one the worktree was keyed for: one decision, never two."""
+    captured = {}
+    node = {"id": "x-dec1", "slug": "decline-pin", "difficulty": "high", "priority": "p1"}
+    capacity = {"claude": "exhausted", "codex": "exhausted"}
+
+    monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
+    monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
+    monkeypatch.setattr(adv, "_canonical_root", lambda: tmp_path)
+    monkeypatch.setattr(adv, "_base_project_id", lambda root: "fno")
+    monkeypatch.setattr(adv, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setattr(
+        "fno.claims.core.acquire_claim", lambda *a, **k: object()
+    )
+
+    def fake_ensure(node_id, *, canonical_root, harness="claude"):
+        captured["placement_harness"] = harness
+        # Capacity changes AFTER the placement decision: codex frees up in the
+        # window between _ensure_lane_worktree and _spawn_worker.
+        capacity["codex"] = "ok"
+        return tmp_path
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _FakeProc(stdout='{"short_id": "s"}')
+
+    monkeypatch.setattr(adv, "_ensure_lane_worktree", fake_ensure)
+    monkeypatch.setattr(adv, "_seed_lane_local_settings", lambda *a, **k: None)
+    monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
+    monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda: dict(capacity))
+
+    receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
+
+    assert receipts and receipts[0]["status"] == "dispatched"
+    # The grid declined at placement (all lanes exhausted), so the worktree was
+    # keyed claude-native...
+    assert captured["placement_harness"] == "claude"
+    # ...and the spawn argv must carry that same harness - not the codex lane
+    # the freed capacity would hand a grid re-consult at the spawn seam.
+    cmd = captured["cmd"]
+    i = cmd.index("--harness")
+    assert cmd[i + 1] == "claude"
+
+
 def test_advance_cli_pin_overrides_node(iso, monkeypatch):
     """Locked Decision 1: a dispatch-time model/provider outranks node annotations."""
     captured = {}
@@ -928,6 +1083,40 @@ def test_advance_result_rejects_invalid_pair():
     """AdvanceResult guards against a mismatched (decision, event) pair."""
     with pytest.raises(ValueError):
         adv.AdvanceResult("dispatched", "advance_skipped")
+
+
+def test_lane_ready_frontier_recovers_observer_miss_and_records_divergence(
+    tmp_path, monkeypatch
+):
+    event_path = tmp_path / "events.jsonl"
+    normal = {"id": "x-p2-normal", "priority": "p2", "domain": "code"}
+    observer = {
+        "source": "fno backlog undispatched --json",
+        "entries_scanned": 2,
+        "claims_scanned": 0,
+        "rows": [
+            {
+                "id": "x-p0-missed",
+                "priority": "p0",
+                "domain": "code",
+                "plan_path": "/plans/p0.md",
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        adv.subprocess,
+        "run",
+        lambda *args, **kwargs: _FakeProc(0, json.dumps([normal])),
+    )
+    monkeypatch.setattr(adv, "_undispatched_nodes", lambda project, mission: observer, raising=False)
+    monkeypatch.setattr(adv, "_dispatch_safe_observer", lambda receipt: receipt)
+
+    rows = adv._ready_nodes("fno", events_path=event_path)
+
+    assert [row["id"] for row in rows] == ["x-p0-missed", "x-p2-normal"]
+    events = [json.loads(line) for line in event_path.read_text().splitlines()]
+    assert events[0]["type"] == "dispatch_selection_diverged"
+    assert events[0]["data"]["node_id"] == "x-p0-missed"
 
 
 # ---------------------------------------------------------------------------

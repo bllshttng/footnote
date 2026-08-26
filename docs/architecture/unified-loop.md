@@ -192,13 +192,13 @@ After `next()` returns the unit and `close()` is called, subsequent `next()` cal
 
 A target driver asks whether its one deliverable shipped. A king has no PR, so pointing the target driver at one can never reach a clean terminal state. `done_probes` are additive only. A plan can add conjuncts and can never silence the PR, CI, and review conjuncts underneath. The run burns to `NoProgress` or `Budget` while looking like it is working. The king driver asks the king's question instead, which is whether the board is clean.
 
-`fno inbox board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted.
+`fno inbox board --json` reads seven queues through verbs that already exist and computes nothing they already answer. Every queue carries the literal shell command that produced it, so board emptiness is reproducible by a third party rather than asserted. The `undispatched` queue has an independent source. `fno backlog undispatched --json` scans graph entries and the complete node-claim snapshot. It does not reuse the ranked dispatch selector, so a selector omission is nameable rather than an empty queue.
 
 | Queue | Read | King can shrink it |
 |---|---|---|
 | `operator_lane` | `cat ~/.fno/my-priorities.md` | yes, by filing a node or parking with a reason |
-| `undispatched` | `fno backlog ready --json` + `fno agents claim list -J` | yes, by spawning a worker |
-| `stalled_holder` | the same two, plus the holder's activity reading | yes, by one wake per node |
+| `undispatched` | `fno backlog undispatched --json` | yes, by spawning a worker |
+| `stalled_holder` | `fno agents claim list -J` + `fno backlog get <id>` + `fno agents peek <holder>` | yes, by one wake per node |
 | `mergeable_pr` | `gh pr list` | only under `config.king.autonomous_merge` |
 | `stale_claim` | `fno agents claim list -J --include-stale` | yes, by `fno agents claim reap` |
 | `operator_question` | `fno inbox outstanding --json` | no, a human answers it |
@@ -291,11 +291,11 @@ The reachable merge paths it governs:
 | `fno do pr status` | reports the `review_coverage` field (advisory) |
 | `gh pr merge`, the web button, raw REST, the auto-merge queue | the server refuses an uncovered head once the merge ruleset is applied; the verdict is published as the `fno/review-coverage` status from the same source |
 
-The verdict is also published where GitHub can see it. The stop hook, the standalone review-coverage verb, and a covered `fno do pr merge` all publish it. Each posts the `fno/review-coverage` commit status on the PR head. The status carries the same predicate the merge gate enforces.
+The verdict is published where GitHub can see it as two contexts on the PR head. `fno/review-coverage` is the required merge predicate. `fno/review-coverage-unavailable` is diagnostic instrument health and is never required by the ruleset. An unknown read sets both contexts to pending and tells the operator to retry the review verb. A computed covered or uncovered result preserves the required success/failure verdict and clears the diagnostic context to success.
 
 `review-coverage-gate.yml` refreshes the status on the events only GitHub sees. A push invalidates the head. The `coverage-override` label arms or withdraws the release valve, naming its actor.
 
-`apply-merge-ruleset.sh` makes `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice.
+`apply-merge-ruleset.sh` makes only `fno/review-coverage` and `stacked-base-guard` required on the default branch. The bypass list is empty, so every client path is refused by GitHub itself rather than by advice. The diagnostic context remains outside the required ruleset so an instrument outage cannot be rendered as a code verdict.
 
 One source also has to mean one *location*.
 
@@ -345,7 +345,7 @@ It also already gated `gh pr merge` with its own two-factor check, so omitting l
 
 The residual hole was a human typing gh in a terminal. The required status context closes it, and the ruleset now commits that requirement as data.
 
-The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
+The repo commits the ruleset as data: `scripts/ci/merge-ruleset.json` plus `scripts/ci/apply-merge-ruleset.sh`. The applier makes `stacked-base-guard` and only `fno/review-coverage` required on the default branch. The bypass list is empty, and the applier refuses to apply a file where it is not.
 
 Applying it is an operator step: run `--apply` once, after a PR proves a green status on its own head.
 One precondition before taking it: a `pull_request` event from a fork gets a read-only `GITHUB_TOKEN` regardless of the workflow's `permissions:` block, so the status POST fails and the context is never created for that PR.

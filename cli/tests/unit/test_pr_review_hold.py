@@ -207,6 +207,72 @@ def test_head_conjunct_is_skipped_without_a_pr_head(tmp_path: Path):
     assert activity.blocked is False
 
 
+def test_matching_worktree_reads_live_manifest_owner(tmp_path: Path):
+    worktree = tmp_path / "pr-worktree"
+    state_dir = worktree / ".fno"
+    state_dir.mkdir(parents=True)
+    manifest = state_dir / "target-state.md"
+    manifest.write_text("---\nharness_session_id: OWNER-SESSION\n---\n", encoding="utf-8")
+    runner = _fake_git(
+        {
+            "worktree": _worktree_list([(str(worktree), "abc123", "feature/x")]),
+            "status": Result(returncode=0, stdout="", stderr=""),
+        }
+    )
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=runner
+    )
+
+    assert activity.worktree["manifest_path"] == str(manifest)
+    assert activity.worktree["harness_session_id"] == "OWNER-SESSION"
+    assert activity.worktree["authority_note"] == "live target manifest"
+
+
+def test_matching_worktree_reads_newest_terminal_manifest(tmp_path: Path):
+    worktree = tmp_path / "pr-worktree"
+    state_dir = worktree / ".fno"
+    state_dir.mkdir(parents=True)
+    older = state_dir / "target-state.terminal.20260824T120000Z.md"
+    newer = state_dir / "target-state.terminal.20260825T120000Z.md"
+    older.write_text("---\nharness_session_id: OLD-SESSION\n---\n", encoding="utf-8")
+    newer.write_text("---\nharness_session_id: NEW-SESSION\n---\n", encoding="utf-8")
+    runner = _fake_git(
+        {
+            "worktree": _worktree_list([(str(worktree), "abc123", "feature/x")]),
+            "status": Result(returncode=0, stdout="", stderr=""),
+        }
+    )
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=runner
+    )
+
+    assert activity.worktree["manifest_path"] == str(newer)
+    assert activity.worktree["harness_session_id"] == "NEW-SESSION"
+    assert activity.worktree["authority_note"] == "newest archived target manifest"
+
+
+def test_matching_worktree_reports_missing_manifest_owner(tmp_path: Path):
+    worktree = tmp_path / "pr-worktree"
+    worktree.mkdir()
+    runner = _fake_git(
+        {
+            "worktree": _worktree_list([(str(worktree), "abc123", "feature/x")]),
+            "status": Result(returncode=0, stdout="", stderr=""),
+        }
+    )
+
+    activity = _review_hold.review_activity(
+        "feature/x", pr_head="abc123", repo=str(tmp_path), root=tmp_path, runner=runner
+    )
+
+    assert activity.worktree["path"] == str(worktree)
+    assert activity.worktree["manifest_path"] is None
+    assert activity.worktree["harness_session_id"] is None
+    assert "no readable target manifest" in activity.worktree["authority_note"]
+
+
 @pytest.mark.parametrize(
     "failure",
     [

@@ -437,3 +437,55 @@ def get_related(path: Path, node_id: str, k: Optional[int] = None) -> list[dict[
     if not isinstance(edges, list):
         edges = []
     return edges[:k] if k is not None else edges
+
+
+def filing_candidates(entries: list[Entry], sidecar: Path) -> tuple[list[Entry], str]:
+    """Return live filing candidates from the last sidecar plus today's delta.
+
+    A missing or malformed sidecar is an evidence failure, not an empty result:
+    the caller receives every live row and a source marker naming the fallback.
+    """
+    live = [
+        e for e in entries
+        if isinstance(e, dict)
+        and not e.get("completed_at")
+        and e.get("status") not in {"done", "superseded", "deferred"}
+        and isinstance(e.get("id"), str)
+    ]
+    try:
+        mapping = json.loads(sidecar.read_text(encoding="utf-8"))
+        if not isinstance(mapping, dict):
+            raise ValueError("relatedness sidecar is not an object")
+        snapshot_ids: set[str] = set()
+        for key, edges in mapping.items():
+            if isinstance(key, str):
+                snapshot_ids.add(key)
+            if isinstance(edges, list):
+                snapshot_ids.update(
+                    [
+                        edge["id"]
+                        for edge in edges
+                        if isinstance(edge, dict) and isinstance(edge.get("id"), str)
+                    ]
+                )
+        groom_mtime = sidecar.stat().st_mtime
+    except (OSError, ValueError, TypeError):
+        return live, "fallback:all-live"
+
+    def newer_than_groom(entry: Entry) -> bool:
+        raw = entry.get("touched_at") or entry.get("created_at")
+        if not isinstance(raw, str):
+            return False
+        try:
+            from datetime import datetime
+
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp() > groom_mtime
+        except (TypeError, ValueError, OverflowError):
+            return False
+
+    by_id = {e["id"]: e for e in live}
+    selected = [by_id[nid] for nid in snapshot_ids if nid in by_id]
+    selected_ids = {e["id"] for e in selected}
+    selected.extend(e for e in live if e["id"] not in selected_ids and newer_than_groom(e))
+    selected.sort(key=lambda e: str(e.get("id")))
+    return selected, "sidecar+since-groom"

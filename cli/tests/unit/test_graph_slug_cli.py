@@ -28,6 +28,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # Seam readers (guarded metadata/display reads) resolve paths.graph_json
     # at call time; pin the resolver to the same hermetic file.
     monkeypatch.setattr("fno.paths.graph_json", lambda: g)
+    monkeypatch.setattr("fno.paths.graph_archive_json", lambda: tmp_path / "graph-archive.json")
     return g
 
 
@@ -246,7 +247,9 @@ def test_roadmap_only_public_no_leaks(tmp_graph):
          "priority": "p1", "size": "M", "project": "fno", "public": True,
          "plan_path": "internal/fno/plans/secret.md", "cwd": "/private/x"},
         {"id": "ab-22222222", "title": "Private thing", "slug": "priv", "status": "ready",
-         "priority": "p2", "project": "fno"},  # not public -> excluded
+         "priority": "p2", "project": "fno"},  # absent public flag -> included
+        {"id": "ab-22222223", "title": "Explicitly private", "slug": "private", "status": "ready",
+         "priority": "p2", "project": "fno", "public": False},
         {"id": "ab-33333333", "title": "Other project pub", "slug": "op", "status": "ready",
          "priority": "p1", "project": "other", "public": True},  # wrong project -> excluded
     ])
@@ -254,7 +257,8 @@ def test_roadmap_only_public_no_leaks(tmp_graph):
     assert result.exit_code == 0, result.output
     out = result.stdout
     assert "Public feature" in out
-    assert "Private thing" not in out
+    assert "Private thing" in out
+    assert "Explicitly private" not in out
     assert "Other project pub" not in out
     # No internal fields leak.
     assert "ab-11111111" not in out
@@ -262,6 +266,169 @@ def test_roadmap_only_public_no_leaks(tmp_graph):
     assert "/private/x" not in out
     # Grouped under the Now column (p1).
     assert "## Now" in out
+
+
+def test_roadmap_writes_both_public_views_from_one_clean_gate(tmp_graph, tmp_path):
+    _seed(tmp_graph, [
+        {"id": "ab-11111111", "title": "Roadmap now marker", "status": "ready",
+         "priority": "p1", "size": "M", "project": "fno",
+         "details": "PRIVATE-DETAIL-MARKER", "plan_path": "/Users/alice/private.md",
+         "session_id": "PRIVATE-SESSION-MARKER"},
+        {"id": "ab-22222222", "title": "Backlog idea marker", "status": "idea",
+         "priority": "p2", "size": "S", "project": "fno"},
+        {"id": "ab-33333333", "title": "Deferred marker", "status": "deferred",
+         "priority": "p2", "project": "fno"},
+    ])
+    roadmap = tmp_path / "roadmap.html"
+    backlog = tmp_path / "backlog.html"
+
+    result = runner.invoke(
+        app,
+        ["backlog", "roadmap", "--project", "fno", "--html", str(roadmap),
+         "--backlog-html", str(backlog)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert f"written public roadmap: {roadmap}" in result.stdout
+    assert f"written public backlog: {backlog}" in result.stdout
+    assert "Roadmap now marker" in roadmap.read_text()
+    for private_value in (
+        "ab-11111111",
+        "PRIVATE-DETAIL-MARKER",
+        "/Users/alice/private.md",
+        "PRIVATE-SESSION-MARKER",
+    ):
+        assert private_value not in roadmap.read_text()
+    public_body = backlog.read_text()
+    assert "Roadmap now marker" in public_body
+    assert "Backlog idea marker" in public_body
+    assert "Deferred marker" not in public_body
+    assert "ready" in public_body and "idea" in public_body
+    for private_value in (
+        "ab-11111111",
+        "PRIVATE-DETAIL-MARKER",
+        "/Users/alice/private.md",
+        "PRIVATE-SESSION-MARKER",
+    ):
+        assert private_value not in public_body
+
+
+def test_roadmap_includes_archive_only_shipped_row(tmp_graph, tmp_path):
+    _seed(tmp_graph, [
+        {"id": "ab-live0001", "title": "Live marker", "status": "ready",
+         "priority": "p1", "project": "fno"},
+    ])
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(
+        json.dumps({"entries": [
+            {"id": "ab-done0001", "title": "Archive shipped marker", "status": "done",
+             "priority": "p2", "project": "fno",
+             "completed_at": "2026-08-20T00:00:00Z"},
+        ]}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"])
+
+    assert result.exit_code == 0, result.output
+    assert "## Shipped" in result.stdout
+    assert "Archive shipped marker" in result.stdout
+
+
+def test_view_refuses_named_when_canonical_loader_is_unreadable(tmp_graph, monkeypatch):
+    def _unreadable(*_args):
+        raise RuntimeError("READ-FAIL-MARKER")
+
+    monkeypatch.setattr("fno.graph.render_html.load_render_entries", _unreadable)
+
+    result = runner.invoke(app, ["backlog", "view"])
+
+    assert result.exit_code != 0
+    assert "canonical graph read failed: READ-FAIL-MARKER" in (
+        result.stdout + (result.stderr or "")
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["backlog", "view"],
+        ["backlog", "roadmap", "--project", "fno"],
+    ],
+)
+def test_html_views_refuse_stale_local_graph_under_external_tracker(
+    tmp_graph, monkeypatch, argv
+):
+    _seed(tmp_graph, [
+        {"id": "ab-local001", "title": "STALE-LOCAL-MARKER", "status": "ready",
+         "priority": "p1", "project": "fno"},
+    ])
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    output = result.stdout + (result.stderr or "")
+    assert "stale local" in output.lower() or "external" in output.lower()
+    assert "STALE-LOCAL-MARKER" not in output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["backlog", "view"],
+        ["backlog", "roadmap", "--project", "fno"],
+    ],
+)
+def test_html_views_refuse_corrupt_live_graph_even_with_healthy_archive(
+    tmp_graph, tmp_path, argv
+):
+    tmp_graph.write_text("{broken", encoding="utf-8")
+    (tmp_path / "graph-archive.json").write_text(
+        json.dumps({"entries": [
+            {"id": "ab-archive1", "title": "ARCHIVE-ONLY-SUCCESS-MARKER",
+             "status": "done", "priority": "p2", "project": "fno"},
+        ]}),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code != 0
+    output = result.stdout + (result.stderr or "")
+    assert "canonical graph read failed" in output
+    assert "ARCHIVE-ONLY-SUCCESS-MARKER" not in output
+
+
+def test_public_title_gate_reports_every_class_and_preserves_both_files(
+    tmp_graph, tmp_path
+):
+    dirty_title = (
+        "PR #123 x-deadbeef /Users/alice/secret "
+        "01a03a85-c6b7-7f43-9bc4-ce4ca02f07fe"
+    )
+    _seed(tmp_graph, [
+        {"id": "ab-11111111", "title": dirty_title, "status": "ready",
+         "priority": "p1", "project": "fno", "details": dirty_title},
+    ])
+    roadmap = tmp_path / "roadmap.html"
+    backlog = tmp_path / "backlog.html"
+    roadmap.write_text("ROADMAP-SENTINEL", encoding="utf-8")
+    backlog.write_text("BACKLOG-SENTINEL", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        ["backlog", "roadmap", "--project", "fno", "--html", str(roadmap),
+         "--backlog-html", str(backlog)],
+    )
+
+    assert result.exit_code != 0
+    diagnostic = result.stdout + (result.stderr or "")
+    assert "ab-11111111" in diagnostic
+    for leak_class in ("pr-reference", "node-id", "home-path", "session-id"):
+        assert leak_class in diagnostic
+    assert roadmap.read_text() == "ROADMAP-SENTINEL"
+    assert backlog.read_text() == "BACKLOG-SENTINEL"
 
 
 def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):

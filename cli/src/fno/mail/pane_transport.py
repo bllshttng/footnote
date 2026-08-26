@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import dataclass
 from typing import Callable, Optional
 
 #: How many lines of the pane frame the prompt gate reads. Matches the spawn
@@ -34,6 +35,45 @@ GATE_FRAME_LINES = 40
 
 class PaneSendRefused(Exception):
     """The pane send must not proceed; ``str(exc)`` names why."""
+
+
+@dataclass(frozen=True)
+class PaneIdentity:
+    """One registry row's identity for a pane, resolved as a single snapshot.
+
+    The budget keys the pair on ``session_id`` (the full id, collision-proof
+    for time-ordered codex siblings), the envelope addresses ``handle``, and
+    the identity gate pins ``name``/``fno_id``. Resolving them together from
+    ONE registry read is what makes a pane reassignment between resolve and
+    gate a refusal instead of a stale-attribution send.
+    """
+
+    name: Optional[str]
+    fno_id: Optional[str]
+    session_id: Optional[str]
+    handle: Optional[str]
+
+
+def resolve_pane_identity(session: str, pane_id: int) -> Optional[PaneIdentity]:
+    """The occupant's identity snapshot for ``session:pane_id``, or None."""
+    from fno.harness_identity import canonical_handle
+
+    entry = _pane_entry(session, pane_id)
+    if entry is None:
+        return None
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    return PaneIdentity(
+        name=getattr(entry, "name", None),
+        fno_id=(
+            getattr(entry, "fno_id", None)
+            or getattr(entry, "harness_session_id", None)
+            or getattr(entry, "session_id", None)
+        ),
+        session_id=session_id,
+        handle=canonical_handle(session_id) if session_id else None,
+    )
 
 
 def _already_wrapped(text: str) -> bool:
@@ -275,7 +315,13 @@ def prompt_refusal(
     return None
 
 
-def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -> str:
+def wrap(
+    text: str,
+    *,
+    sender: Optional[str] = None,
+    to: Optional[str] = None,
+    msg_id: Optional[str] = None,
+) -> str:
     """Wrap ``text`` in the ``<fno_mail>`` envelope, or return it unchanged when
     it already carries one.
 
@@ -283,6 +329,10 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
     ``None``, which routes to the process-tree prover. Never
     ``resolve_harness_identity`` and never ``--from-self``: both stamp the shared
     ambient id.
+
+    ``msg_id`` lets a caller that also charges the word budget share ONE
+    identity between the envelope and the ledger entry; unset, an id is minted
+    here.
     """
     if _already_wrapped(text):
         return text
@@ -309,8 +359,8 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
         return wrap_fno_mail(
             text,
             from_=stamp_from(sender),
-            # "cli" is the honest no-harness value: harness_for_provider defaults
-            # a MISSING provider to claude-code, a guess this path avoids.
+            # "cli" is the honest no-harness value: harness_for_provider renders
+            # a MISSING provider as "unknown", never a vendor guess.
             harness=harness_for_provider(sender_harness) if sender_harness else "cli",
             model=resolve_self_model(),
             to=to,
@@ -325,7 +375,7 @@ def wrap(text: str, *, sender: Optional[str] = None, to: Optional[str] = None) -
             # `from_session` first, so the recovered address is the collision-safe
             # one. The mail lane never reaches here -- it mints its own id and
             # hands this function an already-wrapped body.
-            id=generate_msg_id(),
+            id=msg_id or generate_msg_id(),
         )
     except ForgedEnvelopeError as exc:
         raise PaneSendRefused(str(exc)) from exc
@@ -339,6 +389,7 @@ def prepare(
     harness: Optional[str] = None,
     sender: Optional[str] = None,
     to: Optional[str] = None,
+    msg_id: Optional[str] = None,
     gate: bool = True,
     wrap_body: bool = True,
     runner: Optional[Callable[..., "subprocess.CompletedProcess[str]"]] = None,
@@ -365,6 +416,24 @@ def prepare(
             f"pane {pane_id} hosts no registered agent, so there is no peer to "
             f"attribute this to. Use --raw to type keystrokes at it."
         )
+    if wrap_body and not text.strip() and not _already_wrapped(text):
+        # Hoisted ABOVE the gate and wrap so the advice can name the target
+        # harness: a bare CR does not submit every harness's composer, and
+        # advice that names a form the pane cannot consume is the defect this
+        # module's refusal exists not to commit.
+        from fno.agents.harness_map import capabilities
+
+        if capabilities(resolved).get("submit_keys") == ["unsupported"]:
+            raise PaneSendRefused(
+                f"empty payload: there is nothing to attribute, and "
+                f"{resolved} has no programmable submit key. Type the payload "
+                f"with --raw and submit it in that pane's own UI."
+            )
+        raise PaneSendRefused(
+            "empty payload: there is nothing to attribute. Use --raw --submit "
+            "for a bare submit keystroke; its 'submitted' marker or exit 22 "
+            "reports whether the pane took it."
+        )
     if gate:
         refusal = prompt_refusal(
             session=session,
@@ -379,4 +448,4 @@ def prepare(
             raise PaneSendRefused(refusal)
     if not wrap_body:
         return text
-    return wrap(text, sender=sender, to=to)
+    return wrap(text, sender=sender, to=to, msg_id=msg_id)

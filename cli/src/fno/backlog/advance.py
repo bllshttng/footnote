@@ -47,6 +47,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -141,6 +142,7 @@ EVENT_FAILED = "advance_failed"
 EVENT_FAILOVER = "dispatch_failover"
 EVENT_CLAIM_OBSERVED = "dispatch_claim_observed"
 EVENT_DEAD_FAILURE_LIMIT = "dispatch_dead_failure_limit"
+EVENT_SELECTION_DIVERGED = "dispatch_selection_diverged"
 _EVENT_SOURCE = "backlog"
 
 
@@ -507,13 +509,78 @@ def _high_collision(node: dict, inflight: list[dict]):
     return None
 
 
-def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[dict]:
-    """Ordered ready-node summaries via ``fno backlog ready`` (JSON list).
+def _undispatched_nodes(
+    project: Optional[str], mission: Optional[str] = None
+) -> dict:
+    """Read the independent planned-unclaimed observer receipt."""
+    cmd = [*_subprocess_util.fno_py_cmd(), "backlog", "undispatched", "--json"]
+    if project:
+        cmd += ["--project", project]
+    if mission:
+        cmd += ["--mission", mission]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"fno backlog undispatched exited {proc.returncode}: {proc.stderr.strip()[:200]}"
+        )
+    out = (proc.stdout or "").strip()
+    try:
+        receipt = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"fno backlog undispatched returned invalid JSON: {out[:200]}") from exc
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("status") != "ok"
+        or not isinstance(receipt.get("entries_scanned"), int)
+        or not isinstance(receipt.get("rows"), list)
+    ):
+        raise RuntimeError("fno backlog undispatched returned an unreadable receipt")
+    return receipt
 
-    Reuses the SAME selection surface as ``fno backlog next``: claim-filtered,
-    open-PR-filtered, container-filtered, and rank-sorted. Lane-fill therefore
-    never diverges from the single-node dispatch path. Raises on a garbled
-    response so the caller skips rather than guessing (Failure Modes: Errors).
+
+def _dispatch_safe_observer(receipt: dict) -> dict:
+    """Reapply selector-only safety guards before lane-fill recovery."""
+    rows = receipt.get("rows", [])
+    if not rows:
+        return receipt
+    from fno import paths
+    from fno.graph.store import read_graph_strict
+
+    try:
+        entries = read_graph_strict(paths.graph_json())
+    except Exception as exc:  # noqa: BLE001 - unknown safety state refuses recovery
+        raise RuntimeError(f"observer safety graph unreadable: {exc}") from exc
+    by_id = {entry.get("id"): entry for entry in entries}
+    now = datetime.now(timezone.utc)
+    staleness_days = _guard_staleness_days()
+    safe: list[dict] = []
+    for row in rows:
+        entry = by_id.get(row.get("id"))
+        if entry is None:
+            continue
+        facts = row.get("facts")
+        if not isinstance(facts, dict):
+            raise RuntimeError(f"observer row {row.get('id')!r} has no predicate facts")
+        if facts.get("has_pr") or facts.get("batch_owner") or facts.get("completed"):
+            continue
+        if selection_guards(entry, by_id, now, staleness_days=staleness_days):
+            continue
+        safe.append(row)
+    return {**receipt, "rows": safe}
+
+
+def _ready_nodes(
+    project: Optional[str],
+    mission: Optional[str] = None,
+    *,
+    events_path: Optional[Path] = None,
+) -> list[dict]:
+    """Ordered ready-node summaries with independent omission recovery.
+
+    The normal ranked list remains the selector. The independent observer is
+    compared with it so a named omission is recovered before lane-fill applies
+    its existing claim, domain, collision, and spawn guards. Raises on a
+    garbled response so the caller skips rather than guessing.
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
     """
@@ -529,11 +596,35 @@ def _ready_nodes(project: Optional[str], mission: Optional[str] = None) -> list[
         )
     out = (proc.stdout or "").strip()
     if not out or out == "null":
-        return []
-    nodes = json.loads(out)
-    if not isinstance(nodes, list):
-        raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
-    return [n for n in nodes if isinstance(n, dict) and n.get("id")]
+        normal = []
+    else:
+        nodes = json.loads(out)
+        if not isinstance(nodes, list):
+            raise RuntimeError(f"fno backlog ready returned an unexpected shape: {out[:200]}")
+        normal = [n for n in nodes if isinstance(n, dict) and n.get("id")]
+    observer = _dispatch_safe_observer(_undispatched_nodes(project, mission))
+    from fno.backlog.undispatched import prepend_missed_rows
+
+    merged, missed = prepend_missed_rows(normal, observer)
+    if missed:
+        scope = f"project={project or '*'}"
+        if mission:
+            scope += f",mission={mission}"
+        ev_path = events_path if events_path is not None else _events_path(None)
+        for row in missed:
+            _emit(
+                EVENT_SELECTION_DIVERGED,
+                {
+                    "node_id": row["id"],
+                    "selector_command": "fno backlog ready --json",
+                    "observer_command": "fno backlog undispatched --json",
+                    "scope": scope,
+                    "selector_entries_scanned": len(normal),
+                    "observer_entries_scanned": observer["entries_scanned"],
+                },
+                ev_path,
+            )
+    return merged
 
 
 def select_lane_fill(
@@ -1048,6 +1139,7 @@ def _spawn_worker(
     brief: Optional[str] = None,
     extra_env: Optional[dict] = None,
     permission_mode: Optional[str] = None,
+    node: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget autonomous ``/target`` (or ``dispatch_verb``) worker.
 
@@ -1081,6 +1173,23 @@ def _spawn_worker(
     # per-node or dispatch-time pin overrides the claude default. Layer-separate
     # from `harness` (the record's cli, which drives the resolver's substrate).
     prov = (provider or "").strip() or "claude"
+
+    # Capacity-grid deferral receiving end: the automatic dispatch callers pass
+    # resolve_difficulty=False to node_model precisely so difficulty picks the
+    # lane HERE, at the seam that can read live capacity - the spawned argv
+    # always carries an explicit --harness, so the spawn-CLI grid can never fire
+    # on this path. See _grid_lane_for; harness-keyed placement sites resolve
+    # there instead and arrive already pinned - on a grid decline the pin is the
+    # placement harness. An explicit harness therefore skips this consult: under
+    # it the grid could pick a harness the caller's placement did not key for.
+    if harness is None:
+        grid_harness, grid_model = _grid_lane_for(node, model=model, provider=provider)
+        if grid_harness is not None:
+            prov = grid_harness
+            model = grid_model
+            # The resolver must see the grid's harness or it resolves a
+            # claude substrate/command for a codex spawn (bg is claude-only).
+            harness = grid_harness
 
     # x-4391/x-4be1: merge posture from config.auto_merge.grant, read with the
     # node_cwd precedence so a cross-project dispatch reads the DEPENDENT node's
@@ -1289,6 +1398,39 @@ def _base_project_id(canonical_root: Path) -> str:
 # value - a claude ACCOUNT record (ccm/ccr), z.ai/glm, an empty/None - runs under
 # the claude harness, so it maps to claude for the worktree-native decision.
 _NON_CLAUDE_HARNESSES = frozenset({"codex", "gemini", "agy", "opencode"})
+
+
+def _grid_lane_for(
+    node: Optional[dict], *, model: Optional[str], provider: Optional[str]
+) -> tuple[Optional[str], Optional[str]]:
+    """``(harness, model)`` the capacity grid picks for an UNPINNED spawn, else ``(None, None)``.
+
+    The receiving end of the difficulty deferral: dispatch callers resolve
+    difficulty to nothing precisely so it picks the lane HERE, where live
+    capacity is readable - the spawned argv's explicit --harness can never
+    trigger the spawn-CLI grid. Only a fully unpinned spawn defers (an explicit
+    model or provider stays operator authority); unknown capacity falls back to
+    the caller's defaults (Locked 10: routing degrades, never blocks a spawn).
+    Dispatch sites that make HARNESS-KEYED decisions before spawning (lane
+    worktree placement) must call this first and thread the result through
+    both decisions, so placement and spawn always agree.
+    """
+    if model is not None or (provider or "").strip() or node is None:
+        return None, None
+    try:
+        from fno import route_resolve
+
+        capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
+        candidate, _chain = route_resolve.resolve_grid(
+            node.get("difficulty") or node.get("model_tier"),
+            node.get("priority"),
+            capacity,
+        )
+    except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
+        return None, None
+    if candidate is None:
+        return None, None
+    return candidate["harness"], candidate["model"]
 
 
 def _lane_harness(eff_provider: Optional[str]) -> str:
@@ -1534,8 +1676,24 @@ def dispatch_lanes(
         # failure path below.
         try:
             eff_provider = provider if provider is not None else node.get("provider")
+            resolved_model = _route_resolve.node_model(
+                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+            )
+            # The grid must decide BEFORE the worktree is placed: placement is
+            # harness-keyed (claude-native vs external base), so it has to agree
+            # with the harness the spawn will actually use. Threading the result
+            # into both decisions keeps placement and spawn one decision. A
+            # DECLINE pins too: an unpinned spawn re-consults the grid at the
+            # spawn seam, and a capacity change in between could land the worker
+            # on a harness the worktree was not keyed for.
+            lane_grid_harness, lane_grid_model = _grid_lane_for(
+                node, model=resolved_model, provider=eff_provider
+            )
+            lane_placement_harness = _lane_harness(lane_grid_harness or eff_provider)
             worktree = _ensure_lane_worktree(
-                node_id, canonical_root=canonical, harness=_lane_harness(eff_provider)
+                node_id,
+                canonical_root=canonical,
+                harness=lane_placement_harness,
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
@@ -1546,10 +1704,15 @@ def dispatch_lanes(
                 node_id,
                 str(worktree),
                 slug,
-                model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
-                provider=eff_provider,
+                model=lane_grid_model or resolved_model,
+                provider=lane_grid_harness or eff_provider,
+                # The placement value unconditionally: a grid pick is always a
+                # fixed point of _lane_harness today, and if that ever stops
+                # holding, the raw pick would reopen the split this pins shut.
+                harness=lane_placement_harness,
                 verb=node.get("dispatch_verb"),
                 brief=_brief,
+                node=node,
             )
         except Exception as exc:  # noqa: BLE001 - one lane's failure never aborts the fleet
             # Release BOTH the boot-window reservation and the dispatch-time lane
@@ -1947,10 +2110,13 @@ def advance(
             node_id,
             node_cwd,
             node.get("slug") or node.get("title"),
-            model=_route_resolve.node_model(node, explicit=model, provider=eff_provider),
+            model=_route_resolve.node_model(
+                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+            ),
             provider=eff_provider,
             harness=failover_harness,
             extra_env=failover_env,
+            node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,
         )
@@ -2033,7 +2199,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     Reads the graph (``read_graph`` recomputes ``status`` at read), so a
     dependent whose only open blocker was the just-closed node already reads
     ``ready`` here. Returns minimal dicts
-    ``{id, project, slug, cwd, model, model_tier, cross_project}``.
+    ``{id, project, slug, cwd, model, difficulty, cross_project}``.
 
     RC1 (x-33b2): returns BOTH same-project and cross-project dependents, each
     tagged with ``cross_project = (project != closed_project)``. The caller routes
@@ -2105,8 +2271,9 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             "slug": e.get("slug") or e.get("title"),
             "cwd": e.get("cwd"),
             # x-571f: carry the model pin so _dispatch_one_dependent threads it.
-            # model_tier rides alongside so the tier resolver sees the annotation.
+            # difficulty rides alongside so the grid resolver sees the work axis.
             "model": e.get("model"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
             "model_tier": e.get("model_tier"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })
@@ -2250,10 +2417,13 @@ def _converge_one(
             node_id,
             root,
             slug,
-            model=_route_resolve.node_model(node_meta, explicit=model, provider=eff_provider),
+            model=_route_resolve.node_model(
+                node_meta, explicit=model, provider=eff_provider, resolve_difficulty=False
+            ),
             provider=eff_provider,
             verb=node_meta.get("dispatch_verb"),
             brief=_brief,
+            node=node_meta,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)

@@ -162,7 +162,7 @@ FAILED_LEG_SCOPES=""
 if [[ $RETRY_FAILED -eq 1 && -r "$LEG_RECORD" ]]; then
     while read -r _leg_line; do
         [[ -z "$_leg_line" ]] && continue
-        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno squads-leak-guard:fno tracker-gates:fno " in
+        case " smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e squads-leak-guard:fno tracker-gates:fno " in
             *" $_leg_line "*)
                 case " $FAILED_LEG_SCOPES " in
                     *" $_leg_line "*) ;;
@@ -1003,7 +1003,7 @@ exit_if_void() {
         REQUIRED_SCOPE="$(_json_array "$VOID_SCOPE_NAME")"
         EXECUTED_COUNT=1
     else
-        REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+        REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e)
         [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
         # The tracker gates leg is independent of the squads guard: it runs on
         # every full pass, so it is a required scope whenever it executed
@@ -1084,7 +1084,12 @@ if [[ -n "$CHANGED_BASE" ]]; then
     echo ""
     echo "preflight: === changed packet (CHANGED SUBSET - partial, never the gate) ==="
     c0="$SECONDS"
-    run_hermetic uv run --project cli fno-py doctor test smoke --changed \
+    # Same cap as the smoke leg below, and for a sharper reason. The changed
+    # selector maps the stress script to ITSELF, so editing that script makes
+    # this leg - the earliest actionable signal preflight produces - spend a
+    # cold build plus twenty 35.9s trials before the real gate has started.
+    # cli-ci pins its own changed-smoke step to 1 for exactly this.
+    run_hermetic env STRESS_TRIALS=1 uv run --project cli fno-py doctor test smoke --changed \
         --base "$CHANGED_BASE" --head "$CANDIDATE_SHA"
     creq=$?
     case $creq in
@@ -1131,7 +1136,13 @@ if retry_run_leg smoke; then
     # PATH until uv syncs the cli project (uv auto-syncs). The attestation
     # logic below is unchanged: a FULL GREEN records, a RED deletes, a subset
     # mints nothing.
-    run_hermetic uv run --project cli fno-py doctor test smoke "${SMOKE_ARGS[@]}"
+    # The smoke registry auto-discovers scripts/tests/stress-rust-e2e-concurrency.sh
+    # and its default is 20 trials, which is 12 minutes by its own measured
+    # 35.9s/trial. Preflight already runs those same binaries serialized in the
+    # cargo-test e2e legs below, so the full denominator here is duplication on
+    # a pre-push gate. One trial proves the harness still runs; rust-ci owns the
+    # 20.
+    run_hermetic env STRESS_TRIALS=1 uv run --project cli fno-py doctor test smoke "${SMOKE_ARGS[@]}"
     sreq=$?
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
     [[ $sreq -eq 0 ]] && record_leg smoke "smoke suite" pass $(( SECONDS - s0 )) || { record_leg smoke "smoke suite" fail $(( SECONDS - s0 )); FAIL=1; }
@@ -1171,6 +1182,20 @@ fi
 # rust-ci legs (pinned fmt, cargo test, advisory audit) ----------------------
 have_pinned_fmt() { rustup toolchain list 2>/dev/null | grep "^$PINNED_FMT" >/dev/null; }
 
+# `--test '*'` selects every integration target in tests/, and NOTHING else:
+# verified 2026-08-25, the glob resolves to exactly the 30 fno-agents and 16 fno
+# targets on disk, with no lib or bin unittests (`--tests` would pull those four
+# in and re-run the unit suite serially). The enumeration these replaced was
+# hand-maintained in four places - here twice and in rust-ci.yml twice - and had
+# already dropped run_outcome, run_state and mux_config_e2e, 18 tests that ran
+# nowhere while every job stayed green. A glob cannot drop a file.
+#
+# The quotes are load-bearing: run_rust_leg evaluates this through `bash -c`
+# with the crate as cwd, so an unquoted `*` would glob against the crate's own
+# directory listing.
+FNO_AGENTS_INTEGRATION_TARGETS="--test '*'"
+FNO_INTEGRATION_TARGETS="--test '*'"
+
 run_rust_leg() { # scope  name  cwd  cmd...
     local scope="$1" name="$2" cwd="$3"; shift 3
     echo ""
@@ -1206,15 +1231,21 @@ else
     record_leg "rustfmt:fno-agents rustfmt:fno" "cargo fmt --check (+$PINNED_FMT MISSING)" fail 0; FAIL=1
 fi
 
-if retry_run_leg cargo-test:fno-agents; then
-    run_rust_leg cargo-test:fno-agents "cargo test --all-targets (fno-agents)" "crates/fno-agents" "cargo test --all-targets"
+if retry_run_leg cargo-test:fno-agents-unit; then
+    run_rust_leg cargo-test:fno-agents-unit "cargo test --lib --bins (fno-agents)" "crates/fno-agents" "cargo test --lib --bins"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
 else
-    skip_rust_leg cargo-test:fno-agents "cargo test --all-targets (fno-agents)"
+    skip_rust_leg cargo-test:fno-agents-unit "cargo test --lib --bins (fno-agents)"
+fi
+if retry_run_leg cargo-test:fno-agents-e2e; then
+    run_rust_leg cargo-test:fno-agents-e2e "cargo test explicit integration targets --test-threads=1 (fno-agents)" "crates/fno-agents" "cargo test $FNO_AGENTS_INTEGRATION_TARGETS -- --test-threads=1"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+else
+    skip_rust_leg cargo-test:fno-agents-e2e "cargo test explicit integration targets --test-threads=1 (fno-agents)"
 fi
 
 # squads.json leak guard (x-e447 US3): snapshot the REAL store mtime around the
-# crates/fno cargo test leg. A test that bypasses run_hermetic's HOME redirect and
+# crates/fno real-process integration leg. A test that bypasses run_hermetic's HOME redirect and
 # writes the real ~/.fno/squads.json would otherwise stay green; this is the
 # class-level assertion (PR #589's assert_writable closed the build-tree binary
 # arm; this catches every other path at once). Read-only, stdlib, degrade-to-skip
@@ -1266,50 +1297,77 @@ else:
     print('absent')
 " 2>/dev/null
 }
-# The leak guard snapshots the real store around the crates/fno cargo test leg,
-# so the pair runs together: selecting either scope runs both.
-RUN_FNO_CARGO=0
-retry_run_leg cargo-test:fno && RUN_FNO_CARGO=1
-retry_run_leg squads-leak-guard:fno && RUN_FNO_CARGO=1
-if [[ $RUN_FNO_CARGO -eq 1 ]]; then
+# The leak guard snapshots the real store around BOTH crates/fno test legs.
+# The pairing is ONE-WAY and the comment used to claim otherwise: selecting the
+# squads scope pulls in the e2e leg, but selecting the e2e leg alone does NOT
+# pull in the guard. A `--retry-leg cargo-test:fno-e2e` therefore runs with no
+# mtime window and records no guard in the receipt scope, which is correct for
+# the receipt (the guard is an optional leg) and is a coverage gap on that
+# retry path worth knowing before reading a retry as a clean run.
+RUN_FNO_UNIT=0
+RUN_FNO_E2E=0
+RUN_FNO_SQUADS=0
+retry_run_leg cargo-test:fno-unit && RUN_FNO_UNIT=1
+retry_run_leg cargo-test:fno-e2e && RUN_FNO_E2E=1
+retry_run_leg squads-leak-guard:fno && RUN_FNO_SQUADS=1
+[[ $RUN_FNO_SQUADS -eq 1 ]] && RUN_FNO_E2E=1
+
+# Sampled BEFORE the unit leg, not between the two. The guard asserts a class
+# ("no crates/fno test writes the real squads.json"), and the leg split put
+# `cargo test --lib --bins` ahead of it: a lib test that bypasses the HOME
+# redirect ran outside the mtime window entirely and the guard still recorded a
+# pass. The window has to open before the first test in the pair runs.
+if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
     _squads_before="$(_real_squads_state || printf '%s' unavailable)"
     case "$_squads_before" in
         absent|unavailable|present:*) ;;
         *) _squads_before=unavailable ;;
     esac
-    run_rust_leg cargo-test:fno "cargo test --all-targets (fno)" "crates/fno" "cargo test --all-targets"
+fi
+
+if [[ $RUN_FNO_UNIT -eq 1 ]]; then
+    run_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)" "crates/fno" "cargo test --lib --bins"
     REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-    _squads_after="$(_real_squads_state || printf '%s' unavailable)"
-    case "$_squads_after" in
-        absent|unavailable|present:*) ;;
-        *) _squads_after=unavailable ;;
-    esac
-    SQUADS_INCLUDED=1
-    if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
-        SQUADS_INCLUDED=0
-        record_leg "" "squads.json leak guard (fno)" "not configured (no real store)" 0
-        SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
-        emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
-            || echo "preflight: WARN could not append squads not-configured receipt" >&2
-    elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        RECEIPT_UNAVAILABLE=1
-        FAIL=1
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" unavailable 0
-    elif [[ "$_squads_after" != "$_squads_before" ]]; then
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno cargo test" \
-             "(mtime $_squads_before -> $_squads_after)" >&2
-        echo "  if a real mux session is running concurrently it is a valid writer;" >&2
-        echo "  otherwise a crates/fno doctor test bypassed the HOME redirect and leaked." >&2
-        FAIL=1
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
-    else
-        REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
-        record_leg squads-leak-guard:fno "squads.json leak guard (fno)" pass 0
+else
+    skip_rust_leg cargo-test:fno-unit "cargo test --lib --bins (fno)"
+fi
+
+if [[ $RUN_FNO_E2E -eq 1 ]]; then
+    run_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)" "crates/fno" "cargo test $FNO_INTEGRATION_TARGETS -- --test-threads=1"
+    REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+    if [[ $RUN_FNO_SQUADS -eq 1 ]]; then
+        _squads_after="$(_real_squads_state || printf '%s' unavailable)"
+        case "$_squads_after" in
+            absent|unavailable|present:*) ;;
+            *) _squads_after=unavailable ;;
+        esac
+        SQUADS_INCLUDED=1
+        if [[ "$_squads_before" == "absent" && "$_squads_after" == "absent" ]]; then
+            SQUADS_INCLUDED=0
+            record_leg "" "squads.json leak guard (fno)" "not configured (no real store)" 0
+            SQUADS_SCOPE="$(_json_array squads-leak-guard:fno)"
+            emit_verification_receipt advisory not_configured "$SQUADS_SCOPE" 1 0 "$RECEIPT_STARTED_AT" "no real squads store" \
+                || echo "preflight: WARN could not append squads not-configured receipt" >&2
+        elif [[ "$_squads_before" == "unavailable" || "$_squads_after" == "unavailable" ]]; then
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            RECEIPT_UNAVAILABLE=1
+            FAIL=1
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" unavailable 0
+        elif [[ "$_squads_after" != "$_squads_before" ]]; then
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            echo "preflight: FAIL real ~/.fno/squads.json changed during crates/fno explicit integration tests" \
+                 "(mtime $_squads_before -> $_squads_after)" >&2
+            echo "  if a real mux session is running concurrently it is a valid writer;" >&2
+            echo "  otherwise a crates/fno doctor test bypassed the HOME redirect and leaked." >&2
+            FAIL=1
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" fail 0
+        else
+            REQUIRED_EXECUTED=$((REQUIRED_EXECUTED + 1))
+            record_leg squads-leak-guard:fno "squads.json leak guard (fno)" pass 0
+        fi
     fi
 else
-    skip_rust_leg cargo-test:fno "cargo test --all-targets (fno)"
+    skip_rust_leg cargo-test:fno-e2e "cargo test explicit integration targets --test-threads=1 (fno)"
 fi
 
 # advisory: never flips the exit code
@@ -1390,7 +1448,7 @@ write_leg_record() {
 }
 write_leg_record
 
-REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents cargo-test:fno)
+REQUIRED_SCOPE_NAMES=(smoke rustfmt:fno-agents rustfmt:fno cargo-test:fno-agents-unit cargo-test:fno-agents-e2e cargo-test:fno-unit cargo-test:fno-e2e)
 [[ "$SQUADS_INCLUDED" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(squads-leak-guard:fno)
 [[ "${TG_INCLUDED:-0}" -eq 1 ]] && REQUIRED_SCOPE_NAMES+=(tracker-gates:fno)
 REQUIRED_COUNT=${#REQUIRED_SCOPE_NAMES[@]}

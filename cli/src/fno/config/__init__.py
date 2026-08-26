@@ -53,6 +53,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from pydantic import ValidationError as _PydValidationError
 
 # Pure file-reader leaf, extracted to break the config<->graph cycle. Re-exported
 # here so every existing `from fno.config import read_config_flat` (etc.) caller
@@ -642,6 +643,23 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         # target. opencode stays bare for the same reason: its flag grammar is
         # unverified against its docs, and an appended guess is the codex trap
         # in a new coat. agy has no native verb, so it takes the fno do review.
+        #
+        # `--comment` is kept though a measured run ignored it, and the
+        # measurement names where the loss lives so nobody re-derives it
+        # (2026-08-20, PR 994, re-verified 2026-08-25 from the fork's
+        # transcript): the flag survives every transport - the rendered string
+        # carries it, the Skill tool_use input carries
+        # args="high --comment --fix" verbatim, and the forked skill's own
+        # opening prompt contains the expanded sections "The `--comment` flag
+        # was passed" and "The `--fix` flag was passed". What failed is inside
+        # the harness skill's execution: the fork closed with "No `--comment`
+        # or `--fix` flag was indicated" - contradicting its own prompt - and
+        # behaved per the wrong belief (no comments posted). No fno-side layer
+        # drops the flag, so no fno code can fix this; the invocation keeps
+        # asking for it because the flag works whenever the harness honors its
+        # own expansion, and the operator-typed path is unaffected. The
+        # one-line symptom to watch for in a worker's report is the fork
+        # quoting the flag as not indicated.
         invocations={
             "claude": "/code-review <level> --comment",
             "codex": "/review",
@@ -800,6 +818,33 @@ class ApprovalsBlock(BaseModel):
     authorized_principals: dict[str, list[str]] = Field(default_factory=dict)
 
 
+#: The optional-reviewer logins an UNSET `review.optional_apps` resolves to.
+#: One default, read by both sides that measure optional lanes - Python
+#: (`fno.pr._reviews.optional_reviewer_names`) and the Rust gate
+#: (`resolved_optional_bots`) - so `fno do pr status` and the loop gate cannot
+#: measure different lanes on one PR, which is what a remedy printed by one and
+#: refused by the other looked like. Parity is pinned against the shared golden
+#: file cli/tests/config/optional_apps_default.json.
+DEFAULT_OPTIONAL_APPS: tuple[str, ...] = ("gemini-code-assist", "chatgpt-codex-connector")
+
+
+def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
+    """The effective optional-login list: unset resolves to the built-in
+    default, an explicit ``[]`` is a real opt-out, and a non-empty list
+    EXTENDS the default (a partial list named extra honored logins since
+    before the default existed; dropping a built-in from it would silently
+    stop counting that login's blocking findings)."""
+    if review.optional_apps is None:
+        return list(DEFAULT_OPTIONAL_APPS)
+    if not review.optional_apps:
+        return []
+    resolved = list(DEFAULT_OPTIONAL_APPS)
+    for login in review.optional_apps:
+        if login not in resolved:
+            resolved.append(login)
+    return resolved
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -848,7 +893,12 @@ class ReviewBlock(BaseModel):
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
     # never waits for them (their absence never blocks - kills the App-bot
     # usage-limit wedge), but a blocking finding from one still holds the gate.
-    optional_apps: list[str] = Field(default_factory=list)
+    # None (unset) resolves to DEFAULT_OPTIONAL_APPS via resolved_optional_apps;
+    # an explicit [] is a real opt-out and wins over the default; a non-empty
+    # list EXTENDS the default rather than replacing it. The RAW field
+    # stays None-vs-list because truthiness of it doubles as the "is a review
+    # lane configured" probe in the merge path, which the default must not flip.
+    optional_apps: Optional[list[str]] = None
     # Per-login bot-review nudge overrides, as `[review.nudge.<login>]` tables
     # ({review_handle, wait_minutes, ceiling, enabled}). Consumed by the Rust
     # stop gate (loop-check), which resolves it against its built-in bot
@@ -881,6 +931,12 @@ class ReviewBlock(BaseModel):
     # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
     # into the merge primitive so the two agree.
     self_review_required: bool = True
+    # When true, a PR whose only coverage is the author's own (self_attested)
+    # local attestation reads as uncovered; a second session's attestation or a
+    # GitHub App review satisfies it. DEFAULT FALSE so no existing install
+    # changes behavior - flip it only with the doctor's self-attestation report
+    # in hand.
+    require_corroboration: bool = False
     # How long a registered review hold (`review:branch:<branch>`, taken where a
     # review is DISPATCHED) protects a PR from a merge before it ages out. A
     # review is unbounded, so this is a wedge bound rather than an estimate:
@@ -945,10 +1001,11 @@ class ReviewBlock(BaseModel):
         A bare string (`optional_apps: chatgpt-codex-connector`) coerces to a
         one-item list. Unlike the required gate, degrading a malformed optional
         list to [] is safe: it only drops honored-if-present reviewers, never
-        weakens a REQUIRED gate.
+        weakens a REQUIRED gate. `None` stays None: it means the key was never
+        set, which resolves to the built-in default rather than to empty.
         """
         if v is None:
-            return []
+            return None
         if isinstance(v, list):
             return v
         # A scalar login coerces to a one-item list (parity with the Rust text
@@ -1690,6 +1747,30 @@ class ProviderBudget(BaseModel):
                 return None
             return n if n >= 1 else None
         return None
+
+
+class ProcessAdmissionBlock(BaseModel):
+    """Fail-closed native process admission, expressed only in OS processes."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_processes: int = 400
+
+    @field_validator("max_processes", mode="before")
+    @classmethod
+    def _coerce_max_processes(cls, v: object) -> int:
+        """Invalid values keep the measured process-unit default; never disable."""
+        if isinstance(v, bool):
+            return 400
+        if isinstance(v, int) and v >= 1:
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = int(v.strip())
+            except ValueError:
+                return 400
+            return parsed if parsed >= 1 else 400
+        return 400
 
 
 class AgentsBlock(BaseModel):
@@ -3581,6 +3662,64 @@ class ContextBlock(BaseModel):
     artifacts: dict[str, ArtifactConfig] = Field(default_factory=dict)
 
 
+class QuotaBlock(BaseModel):
+    """Quota-aware dispatch configuration (nested under 'config.accounts.quota')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    defer_dispatch: bool = False
+    defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
+    probe_ttl_seconds: int = Field(default=300, ge=1)
+    defer_horizon_minutes: int = Field(default=60, ge=0)
+    pick_on_launch: bool = False
+
+
+class FailoverBlock(BaseModel):
+    """Provider rotation failover configuration (nested under 'config.accounts.failover')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    max_swaps_per_phase: int = Field(default=5, ge=1)
+
+
+class ComboBlock(BaseModel):
+    """Named combo specification (nested under 'config.accounts.combos.<name>')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    strategy: Literal["fallback", "round_robin"] = "fallback"
+    sticky_limit: int = 1
+    providers: list[str] = Field(default_factory=list)
+
+
+class AccountsBlock(BaseModel):
+    """Account rotation and provider configuration (nested under 'config.accounts')."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    active: Optional[str] = None
+    auto_switch: bool = False
+    active_combo: Optional[str] = None
+    records: list[dict[str, Any]] = Field(default_factory=list)
+    combos: dict[str, ComboBlock] = Field(default_factory=dict)
+    quota: QuotaBlock = Field(default_factory=QuotaBlock)
+    failover: Optional[FailoverBlock] = None
+
+    @field_validator("quota", mode="before")
+    @classmethod
+    def _coerce_quota(cls, v: object) -> object:
+        if isinstance(v, (dict, QuotaBlock)):
+            return v
+        return {}
+
+    @field_validator("failover", mode="before")
+    @classmethod
+    def _coerce_failover(cls, v: object) -> object:
+        if isinstance(v, (dict, FailoverBlock)):
+            return v
+        return None
+
+
 class KingBlock(BaseModel):
     """The king loop (nested under 'config.king').
 
@@ -3650,6 +3789,9 @@ class ConfigBlock(BaseModel):
     done_probes: list[str] = Field(default_factory=list)
     target: TargetConfig = Field(default_factory=TargetConfig)
     agents: AgentsBlock = Field(default_factory=AgentsBlock)
+    process_admission: ProcessAdmissionBlock = Field(
+        default_factory=ProcessAdmissionBlock
+    )
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
@@ -3674,6 +3816,7 @@ class ConfigBlock(BaseModel):
     status_sinks: list[StatusSinkConfig] = Field(default_factory=list)
     status_fanout: StatusFanoutConfig = Field(default_factory=StatusFanoutConfig)
     king: KingBlock = Field(default_factory=KingBlock)
+    accounts: AccountsBlock = Field(default_factory=AccountsBlock)
 
     @field_validator("status_sinks", mode="before")
     @classmethod
@@ -3916,6 +4059,27 @@ class ConfigBlock(BaseModel):
         if isinstance(v, (dict, ParallelBlock)):
             return v
         return {}
+
+    @field_validator("accounts", mode="before")
+    @classmethod
+    def _coerce_accounts(cls, v: object) -> object:
+        """Fail-safe: a non-mapping or invalid ``accounts:`` degrades to empty.
+
+        The provider loaders treat the same data leniently (a bad quota leaf
+        logs and degrades), so the settings model must not be the stricter
+        reader: an out-of-range quota value in config.toml would otherwise
+        fail EVERY command at load_settings. Invalid accounts data is
+        dropped from the settings view only; the loaders read the file
+        directly and report the problem through doctor.
+        """
+        if isinstance(v, AccountsBlock):
+            return v
+        if isinstance(v, dict):
+            try:
+                return AccountsBlock(**v)
+            except _PydValidationError:
+                return AccountsBlock()
+        return AccountsBlock()
 
     @field_validator("state_dir", "plans_dir", mode="before")
     @classmethod
@@ -4487,6 +4651,14 @@ def _alias_legacy_keys(raw: dict[str, object]) -> dict[str, object]:
     if _alias_am_grant(raw) or (had_config and _alias_am_grant(config)):
         if had_config:
             raw["config"] = config
+
+    # --- top-level providers -> accounts -----------------------------------
+    # `config.providers` is the pre-rename name for `config.accounts`.
+    if "accounts" not in raw and "providers" in raw:
+        raw["accounts"] = raw["providers"]
+    if had_config and "accounts" not in config and "providers" in config:
+        config["accounts"] = config["providers"]
+        raw["config"] = config
 
     return raw
 

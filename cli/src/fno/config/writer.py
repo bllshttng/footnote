@@ -103,6 +103,8 @@ def _resolve_parent_block(
     """
     if parts and parts[0] == "config":
         parts = parts[1:]
+    if parts and parts[0] == "providers":
+        parts = ["accounts"] + parts[1:]
     if not parts:
         # A bare `config` key (parts == ["config"]) strips to empty; there is no
         # leaf to resolve. Return None so the caller raises a clean unknown-key
@@ -128,7 +130,10 @@ def _storage_parts(parts: list[str]) -> list[str]:
     """The dotted path a key is STORED at in config.toml: flat (top-level
     blocks, no ``config:`` wrapper). A ``config.``-prefixed key and its bare flat
     form both map to the same flat location, so the file stays single-shape."""
-    return parts[1:] if parts and parts[0] == "config" else list(parts)
+    stored = parts[1:] if parts and parts[0] == "config" else list(parts)
+    if stored and stored[0] == "providers":
+        stored = ["accounts"] + stored[1:]
+    return stored
 
 
 def _coerce(value: str, ann: Any) -> Any:
@@ -544,6 +549,9 @@ def _model_default(parts: list[str]) -> Any:
     if parts and parts[0] == "config":
         # Flat model: a legacy `config.` prefix resolves against the top level.
         parts = parts[1:]
+    if parts and parts[0] == "providers":
+        # Pre-rename spelling: the default lives under `accounts`.
+        parts = ["accounts"] + parts[1:]
     node: Any = SettingsModel()
     for part in parts:
         if isinstance(node, BaseModel) and part in type(node).model_fields:
@@ -574,6 +582,14 @@ def unset_config_value(
 
     default = _model_default(parts)
     store_parts = _storage_parts(parts)
+    # A key that resolves through the providers->accounts rename may still be
+    # stored under the pre-rename [providers] block; unset removes both
+    # spellings so the legacy copy cannot keep the value alive.
+    legacy_parts = (
+        ["providers"] + store_parts[1:]
+        if store_parts and store_parts[0] == "accounts"
+        else None
+    )
     target = _target_path(scope, repo_root)
     real_target = Path(os.path.realpath(target)) if target.is_symlink() else target
 
@@ -588,6 +604,11 @@ def unset_config_value(
 
     def _mutate(existing: dict[str, Any]) -> dict[str, Any]:
         new, was, present = _deep_unset(existing, store_parts)
+        if legacy_parts is not None:
+            new, legacy_was, legacy_present = _deep_unset(new, legacy_parts)
+            if legacy_present:
+                present = True
+                was = was if was is not None else legacy_was
         captured["was"] = was
         captured["present"] = present
         return new
@@ -642,4 +663,12 @@ def read_scope_value(
         ) from exc
     if not isinstance(data, dict):
         return None
-    return _get_nested(data, _storage_parts(key.split(".")))
+    stored = _storage_parts(key.split("."))
+    value = _get_nested(data, stored)
+    if value is not None:
+        return value
+    # Same rename fallback as unset: a value may still live under the
+    # pre-rename [providers] block.
+    if stored and stored[0] == "accounts":
+        return _get_nested(data, ["providers"] + stored[1:])
+    return None

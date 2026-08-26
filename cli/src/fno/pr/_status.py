@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional, Sequence
+from typing import Any, Collection, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
 from fno.pr._reviews import (
     _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
+    COVERAGE_STATUS_CONTEXTS,
     read_optional_review_state,
     read_review_coverage,
 )
@@ -51,6 +52,25 @@ _FAIL_STATES = {
 # reached a verdict, so the answer to "wait or act" is still "wait for, or
 # trigger, a newer run". They stay in _FAIL_STATES because the verdict is red.
 _SETTLED_STATES = _PASS_STATES | (_FAIL_STATES - {"CANCELLED", "STALE"})
+
+# The canonical collection lives in _reviews (the publisher); the parity
+# script pins its consts against the Rust twin, so this is a name, not a
+# second spelling.
+
+
+def without_coverage_statuses(
+    rollup: Sequence[dict], contexts: Collection[str] = COVERAGE_STATUS_CONTEXTS
+) -> list[dict]:
+    """Remove review-coverage projections before classifying generic CI.
+
+    `contexts` parameterizes the drop so the merge verdict's ignore set reuses
+    this one filter instead of re-spelling it inline.
+    """
+    return [
+        check
+        for check in rollup
+        if check.get("context") not in contexts and check.get("name") not in contexts
+    ]
 
 
 def _alt(*vals: Any) -> Any:
@@ -187,8 +207,10 @@ def verdict_for(rollup: Sequence[dict]) -> tuple[str, int, dict]:
     `counts["statuses"]` split that total, because a reader who compares
     `total` against `gh api .../check-runs` sees a phantom gap otherwise: that
     endpoint never returns statuses. Measured 2026-08-20 - the tally said 15,
-    the check-runs endpoint named 13 jobs, and the 2-row gap was
-    fno's own statuses (stacked-base-guard, fno/review-coverage). The two
+    the check-runs endpoint named 13 jobs, and the gap was fno's own statuses.
+    The coverage-context filter (`without_coverage_statuses`) feeds this
+    function, so the two review-coverage StatusContexts are already absent
+    from every count here. The two
     sub-counts need not sum to `total`: a rollup row carrying neither key is
     counted in neither (it is also never deduped).
 
@@ -471,6 +493,7 @@ def _ready_blockers(
     code_review_required: bool = False,
     mergeable: Optional[str] = None,
     counts: Optional[dict] = None,
+    repo: str = "",
 ) -> list[str]:
     """Which conjuncts of ``ready`` fail, in a stable order.
 
@@ -559,12 +582,71 @@ def _ready_blockers(
         if cov_word == "unknown":
             blockers.append("review_coverage_unknown")
         else:
-            from fno.pr._coverage_gate import covered_conjuncts
+            from fno.pr._coverage_gate import _corroboration_refusal, covered_conjuncts
 
             ok, failed = covered_conjuncts(coverage, head, code_review_required)
-            if not ok:
+            # The corroboration policy is the merge gate's own refusal, read
+            # through the same helper - one copy, never a restatement - so
+            # `ready` cannot pass a row `fno do pr merge` refuses on the
+            # authorship conjunct either. On the policy-rewritten shape
+            # (0 counted, self-attestation preserved) it is the truer
+            # blocker, exactly as the merge verb ranks it, because re-running
+            # your own review can never satisfy the policy.
+            corroboration = _corroboration_refusal(coverage, repo) if repo else None
+            if corroboration and (ok or failed == "uncovered"):
+                blockers.append("review_coverage_corroboration")
+            elif not ok:
                 blockers.append(f"review_coverage_{failed}")
     return blockers
+
+
+def _review_owner_guidance(coverage: dict, worktree: dict) -> Optional[dict]:
+    """Explain a counted local review whose author differs from this session."""
+    from fno.pr._reviews import _COUNTED_FRESHNESS
+
+    verdicts = coverage.get("verdicts")
+    if not isinstance(verdicts, list):
+        return None
+    counted_other_session = any(
+        isinstance(verdict, dict)
+        and verdict.get("producer") == "local_attestation"
+        and verdict.get("name") == "code-review"
+        and verdict.get("verdict") == "reviewed"
+        and verdict.get("freshness") in _COUNTED_FRESHNESS
+        and verdict.get("attestation_origin") == "other_session"
+        for verdict in verdicts
+    )
+    if not counted_other_session:
+        return None
+    raw_event_owner = coverage.get("author_session_id")
+    event_owner = (
+        raw_event_owner
+        if isinstance(raw_event_owner, str) and raw_event_owner
+        else None
+    )
+    live_owner = worktree.get("harness_session_id")
+    if event_owner and live_owner == event_owner:
+        authority_note = (
+            f"{worktree.get('authority_note') or 'target manifest'}; "
+            "matches coverage event author"
+        )
+    elif event_owner:
+        authority_note = (
+            "coverage event author; current worktree manifest owner differs"
+        )
+    else:
+        authority_note = (
+            "coverage event lacks author_session_id; current manifest is not "
+            "historical evidence"
+        )
+    return {
+        "attestation_origin": "other_session",
+        "counts": True,
+        "harness_session_id": event_owner,
+        "worktree_path": worktree.get("path"),
+        "manifest_path": worktree.get("manifest_path"),
+        "authority_note": authority_note,
+    }
 
 
 def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int:
@@ -601,7 +683,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         return 4
 
     rollup = pr_json.get("statusCheckRollup") or []
-    verdict, code, counts = verdict_for(rollup)
+    generic_rollup = without_coverage_statuses(rollup)
+    verdict, code, counts = verdict_for(generic_rollup)
     green = verdict == "green"
 
     # x-c124 / d-bdb035b6: a red verdict must name WHICH check failed and, so
@@ -622,7 +705,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             # read as a diagnosed defect that does not exist.
             failing_rows = [
                 c
-                for c in _latest_per_name(rollup)
+                for c in _latest_per_name(generic_rollup)
                 if _classify(c) == "fail" and _has_settled_marker(c)
             ]
             failures = collect_failures(failing_rows, cwd)
@@ -741,6 +824,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # above - a merged/closed PR's mergeable field is stale and must not
         # hold a report that changes nothing.
         mergeable=None if is_terminal else pr_json.get("mergeable"),
+        repo=cwd or os.getcwd(),
         counts=counts,
     )
     if hold_reason:
@@ -757,24 +841,55 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if not is_terminal and review_lane:
         from fno.pr import _reviews
 
-        posted_state = next(
-            (
-                check.get("state")
-                for check in _latest_per_name(rollup)
-                if check.get("context") == _reviews.COVERAGE_STATUS_CONTEXT
-            ),
-            None,
-        )
-        wanted_state = (
+        posted_states = {
+            check.get("context"): str(check.get("state") or "").upper()
+            for check in _latest_per_name(rollup)
+            if check.get("context") in COVERAGE_STATUS_CONTEXTS
+        }
+        # The wanted states below read a KNOWN coverage word only; the
+        # known_word guard on the trigger keeps that honest.
+        required_state = (
             "FAILURE"
             if any(blocker.startswith("review_coverage_") for blocker in blockers)
             else "SUCCESS"
         )
-        if posted_state is not None and str(posted_state).upper() != wanted_state:
+        unavailable_state = "SUCCESS"
+        wanted_states = {
+            context: (
+                required_state
+                if context == _reviews.COVERAGE_STATUS_CONTEXT
+                else unavailable_state
+            )
+            for context in COVERAGE_STATUS_CONTEXTS
+        }
+        # The publisher stamps the head the coverage row pins, so when that is
+        # a DIFFERENT head than this one, comparing this head's posted states
+        # can never converge - each republish lands on the pinned head and the
+        # next run reads the same absent rows here. The moved head gets its
+        # stamp from the refresher invalidate arm or the next review at it.
+        covered_head = str(coverage.get("head_sha") or "")
+        read_head = str(pr_json.get("headRefOid") or "")
+        converges_here = not (covered_head and read_head and covered_head != read_head)
+        # An unknown coverage word has no derivable wanted state: the publisher
+        # answers a missing row REFUSED (posts FAILURE) and a dead head fetch
+        # UNANSWERED (posts PENDING), and this read cannot tell which - a
+        # guessed PENDING against a posted FAILURE republishes forever. The
+        # stamp for an unknown read comes from the publisher's own arms.
+        known_word = coverage.get("coverage") != "unknown"
+        if known_word and converges_here and any(
+            # Absent stays absent: the status read is deliberately not the
+            # FIRST coverage-status writer (a PR no publisher has touched gets
+            # its contexts from a publisher, not from a read). Only a POSTED
+            # state that disagrees with the wanted one triggers the republish.
+            posted_states.get(context) is not None
+            and posted_states.get(context) != wanted
+            for context, wanted in wanted_states.items()
+        ):
             posted, note = _reviews.publish_coverage_status(
                 int(pr), head=pr_json.get("headRefOid"), cwd=cwd
             )
             coverage_status_repost = "reposted" if posted else f"repost failed: {note}"
+    owner_guidance = _review_owner_guidance(coverage, activity.worktree)
     payload = {
         "pr": pr,
         # The commit this verdict describes, so a caller can pin the
@@ -825,6 +940,8 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "ready": not blockers,
         "ready_blockers": blockers,
     }
+    if owner_guidance is not None:
+        payload["review_owner_guidance"] = owner_guidance
     if coverage_status_repost is not None:
         payload["coverage_status_repost"] = coverage_status_repost
     # The human line precedes the JSON write on stderr: stdout is a machine
@@ -843,7 +960,9 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # unsettled entries that are all still-running settles as `pending`, not
     # `red`, and the note must not claim otherwise.
     if counts.get("unsettled"):
-        unsettled_now = [c for c in _latest_per_name(rollup) if not _has_settled_marker(c)]
+        unsettled_now = [
+            c for c in _latest_per_name(generic_rollup) if not _has_settled_marker(c)
+        ]
         absent = [
             c for c in unsettled_now if str(c.get("status") or "").upper() in ("", "COMPLETED")
         ]
@@ -911,6 +1030,26 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
             f"{str(v.get('reviewed_sha') or 'an unknown commit')[:8]}, whose code no longer "
             "matches HEAD - that verdict does not count. Ask it to re-read.\n"
         )
+    if owner_guidance is not None:
+        owner = owner_guidance.get("harness_session_id")
+        worktree_path = owner_guidance.get("worktree_path")
+        authority_note = owner_guidance.get("authority_note")
+        if owner and worktree_path:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"Self-attestation owner is {owner}; PR worktree is {worktree_path}.\n"
+            )
+        elif worktree_path:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"Matched PR worktree {worktree_path}; harness_session_id unavailable: "
+                f"{authority_note}.\n"
+            )
+        else:
+            sys.stderr.write(
+                "note: attestation_origin other_session counts toward review coverage. "
+                f"PR worktree unavailable: {authority_note}; harness_session_id unavailable.\n"
+            )
     if coverage.get("review_state") == "reviewer_refused":
         raw_verdicts = coverage.get("verdicts")
         verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []

@@ -7,7 +7,7 @@
 //! (US6, AC6-EDGE); here the OSC 52 write is treated as best-effort success.
 
 use std::io::Write;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// Where a copy landed, for the client's status feedback.
 #[derive(Debug, PartialEq, Eq)]
@@ -68,13 +68,13 @@ where
 /// non-zero is a failure - fall through to the next, then to OSC 52.
 fn copy_via_tool(text: &str) -> Option<&'static str> {
     for (name, args) in TOOLS {
-        let Ok(mut child) = Command::new(name)
+        let mut command = crate::process_admission::std_command(name);
+        command
             .args(*args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+            .stderr(Stdio::null());
+        let Ok(mut child) = crate::process_admission::std_spawn(&mut command) else {
             continue; // not on PATH
         };
         let wrote = child

@@ -111,6 +111,75 @@ class TestLoadProvidersValid:
         assert primary.auth == "oauth_dir"
         assert primary.priority == 10
 
+    def test_unknown_record_metadata_loads_warns_and_round_trips(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        """AC1-HP: route-backed records retain unknown metadata on round trips."""
+        from fno.adapters.providers.loader import load_providers, save_providers
+
+        block = {
+            "config": {
+                "accounts": {
+                    "active": "zai-primary",
+                    "records": [
+                        {
+                            "id": "zai-primary",
+                            "name": "Zai Primary",
+                            "harness": "claude",
+                            "auth": "api_key",
+                            "route": "zai/glm-5.3[1m]",
+                            "operator_note": "route-owned",
+                        }
+                    ],
+                }
+            }
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+
+        with caplog.at_level(logging.WARNING, logger="fno.adapters.providers.loader"):
+            result = load_providers(repo_root=tmp_path)
+
+        record = result.by_id["zai-primary"]
+        assert record.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert record.model_dump()["operator_note"] == "route-owned"
+        assert "zai-primary" in caplog.text
+        assert "operator_note" in caplog.text
+
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.chdir(tmp_path)
+        save_providers(result, scope="project")
+        round_tripped = load_providers(repo_root=tmp_path).by_id["zai-primary"]
+        assert round_tripped.model_dump()["route"] == "zai/glm-5.3[1m]"
+        assert round_tripped.model_dump()["operator_note"] == "route-owned"
+
+    def test_unknown_metadata_does_not_relax_known_harness(self, tmp_path: Path):
+        """AC1-ERR: an invalid known field still rejects a metadata-bearing record."""
+        from fno.adapters.providers.loader import load_providers
+        from fno.adapters.providers.model import ProviderConfigError
+
+        block = {
+            "config": {
+                "accounts": {
+                    "records": [
+                        {
+                            "id": "bad-harness",
+                            "name": "Bad Harness",
+                            "harness": "zai",
+                            "auth": "api_key",
+                            "env": {"ANTHROPIC_AUTH_TOKEN": "secret"},
+                            "route": "zai/glm-5.3[1m]",
+                        }
+                    ]
+                }
+            }
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, block)
+
+        with pytest.raises(ProviderConfigError, match="bad-harness"):
+            load_providers(repo_root=tmp_path)
+
     def test_auto_switch_defaults_false(self, tmp_path: Path):
         """US3: config.providers.auto_switch defaults False when the key is absent."""
         from fno.adapters.providers.loader import load_providers
@@ -351,7 +420,7 @@ class TestLoadProvidersInvalidRecord:
 
 class TestLoadProvidersProjectLocalOverride:
     def test_project_local_overrides_global(self, tmp_path: Path, monkeypatch):
-        """Project-local config.providers block entirely replaces global block."""
+        """Local records overlay global by id; local leaves (active) win."""
         from fno.adapters.providers.loader import load_providers
 
         # Global: two records
@@ -405,9 +474,9 @@ class TestLoadProvidersProjectLocalOverride:
 
         result = load_providers(repo_root=project_root)
 
-        # Project-local should win: only local-record present
-        assert len(result.records) == 1
-        assert result.records[0].id == "local-record"
+        # Records merge by id (global-record survives so global combos and
+        # pins keep resolving); local leaves win.
+        assert {r.id for r in result.records} == {"local-record", "global-record"}
         assert result.active == "local-record"
 
     def test_global_used_when_no_local(self, tmp_path: Path, monkeypatch):
@@ -769,12 +838,14 @@ class TestLoadProvidersDuplicateIds:
 # ---------------------------------------------------------------------------
 
 class TestPWDRespected:
-    """load_providers and save_providers must use PWD env var when repo_root is None,
-    matching the pattern used by _resolve_cwd in cli.py for test isolation."""
+    """Anchor discovery with repo_root=None: save_providers uses PWD (the
+    legacy write anchor); load_providers resolves the repo root, the anchor
+    `config set --local` writes through."""
 
     def test_load_providers_uses_pwd_env_var(self, tmp_path: Path, monkeypatch):
-        """load_providers(repo_root=None) must use PWD over os.getcwd() so test
-        isolation via PWD override is consistent with cli.py's _resolve_cwd."""
+        """load_providers(repo_root=None) resolves the repo root via
+        fno.paths.resolve_repo_root (FNO_REPO_ROOT is its test hook), so reads
+        share one anchor with `config set --local` writes."""
         from fno.adapters.providers.loader import load_providers
 
         settings = tmp_path / ".fno" / "config.toml"
@@ -798,15 +869,20 @@ class TestPWDRespected:
             },
         )
 
-        # Point PWD at tmp_path (settings lives there); keep real cwd elsewhere
-        # so we can confirm which one is used.
-        monkeypatch.setenv("PWD", str(tmp_path))
-        monkeypatch.chdir(tmp_path.parent)  # cwd != PWD
+        # Pin the repo root at tmp_path (settings lives there). Readers anchor
+        # on resolve_repo_root - the same resolver `config set --local` writes
+        # through - and FNO_REPO_ROOT is its test hook.
+        from fno import paths as fno_paths
 
-        config = load_providers()  # repo_root=None - must fall back to PWD
-        assert "claude-pwd-test" in config.by_id, (
-            "load_providers with repo_root=None must discover settings via PWD, not cwd"
-        )
+        monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+        fno_paths.resolve_repo_root.cache_clear()
+        try:
+            config = load_providers()  # repo_root=None - resolves FNO_REPO_ROOT
+            assert "claude-pwd-test" in config.by_id, (
+                "load_providers with repo_root=None must discover settings via the repo root"
+            )
+        finally:
+            fno_paths.resolve_repo_root.cache_clear()
 
     def test_save_providers_uses_pwd_env_var(self, tmp_path: Path, monkeypatch):
         """save_providers(scope='project') must write to PWD/.fno/settings.yaml,

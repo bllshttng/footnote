@@ -36,13 +36,13 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use crate::agents_view::{self, RegistryAgent};
 use crate::backlog_view;
 use crate::proto::{
-    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge, AgentRow,
-    AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel, CardState, ClientMsg,
-    Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot, LayoutSpec,
-    LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo, PaneMeta,
-    PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement, ServerMsg,
-    SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout, TabMeta,
-    TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    bind_or_probe, check_attach_version, err_code, read_msg, write_msg, AgentBadge,
+    AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
+    CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
+    LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement,
+    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -361,6 +361,18 @@ enum CoreMsg {
         pane: u64,
         event: MouseEvent,
     },
+    /// (v56, hover affordance) One link-span lookup for the requester's hover
+    /// underline. Read-only and initiator-only: the core resolves the pane's
+    /// link match and answers THIS client with coordinates alone, so it is not
+    /// in the passive-observer mutation gate (a passive viewer already sees
+    /// the pane's frames; which cells form a link adds nothing they lack).
+    LinkHover {
+        id: u64,
+        pane: u64,
+        row: u16,
+        col: u16,
+        seq: u64,
+    },
     /// (v8) Walk a pane's OSC 133 blocks: jump the shared scroll or move the
     /// block-scoped selection. `id` is the requesting client (for a "no blocks"
     /// notice); the scroll/selection is shared, so the broadcast reaches every
@@ -524,6 +536,15 @@ enum CoreMsg {
         squad: PaneTarget,
         tab: TabSel,
         name: String,
+        reply: ControlReply,
+    },
+    TabClose {
+        squad: PaneTarget,
+        tab: TabSel,
+        force: bool,
+        /// Fresh registry rows for the unforced occupancy guard. `None` is
+        /// either an unreadable registry or the deliberate forced bypass.
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     LayoutGet {
@@ -1383,10 +1404,9 @@ const TRUTH_PROBE_EVERY: Duration = Duration::from_secs(10);
 /// Rows whose probe fields are null still enter the map: a probe that did not
 /// answer for one row is that row's absence, not the fleet's.
 fn probe_truth_map() -> Option<HashMap<String, TruthReading>> {
-    let out = std::process::Command::new("fno")
-        .args(["agents", "list", "--json"])
-        .output()
-        .ok()?;
+    let mut command = crate::process_admission::std_command("fno");
+    command.args(["agents", "list", "--json"]);
+    let out = crate::process_admission::std_output(&mut command).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -1961,13 +1981,13 @@ pub(crate) fn config_get(key: &str) -> Option<String> {
         .collect();
     let out_path = dir.join(format!("config-{}-{safe_key}.out", std::process::id()));
     let out_file = std::fs::File::create(&out_path).ok()?;
-    let mut child = match std::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::std_command(fno_bin());
+    command
         .args(["config", "get", key])
         .stdin(std::process::Stdio::null())
         .stdout(out_file)
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
+        .stderr(std::process::Stdio::null());
+    let mut child = match crate::process_admission::std_spawn(&mut command) {
         Ok(c) => c,
         Err(_) => {
             let _ = std::fs::remove_file(&out_path);
@@ -2031,12 +2051,13 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
         args.push("--account");
         args.push(a);
     }
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(dispatch_timeout, fut).await {
         Err(_) => "grab work: timed out".to_string(),
         Ok(Err(_)) => "grab work: dispatch unavailable".to_string(),
@@ -2063,13 +2084,15 @@ async fn run_dispatch_one(session: &str, node: Option<&str>, account: Option<&st
 /// mutation. `verb` is always a fixed literal; the argv is never a shell string.
 async fn run_agent_action(verb: &str, name: &str) -> String {
     const AGENT_ACTION_TIMEOUT: Duration = Duration::from_secs(20);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args([verb, name])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_status(&mut command);
     let past = if verb == "stop" { "stopped" } else { "removed" };
     match tokio::time::timeout(AGENT_ACTION_TIMEOUT, fut).await {
         Err(_) => format!("{verb} {name}: timed out"),
@@ -2129,11 +2152,12 @@ async fn run_mail_send(name: &str, text: &str) -> String {
     const MAIL_TIMEOUT: Duration = Duration::from_secs(20);
     // `--` ends option parsing so operator text starting with `-` (e.g. a reply
     // of `--help`) is delivered as the message, not consumed as a CLI flag.
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(["agents", "mail", "send", "--", name, text])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(MAIL_TIMEOUT, fut).await {
         Err(_) => format!("mail {name}: timed out"),
         Ok(Err(_)) => format!("mail {name}: unavailable"),
@@ -2156,11 +2180,12 @@ async fn run_mail_send(name: &str, text: &str) -> String {
 async fn run_backlog_verb(node: &str, verb: crate::proto::BacklogVerb) -> String {
     const VERB_TIMEOUT: Duration = Duration::from_secs(5);
     let label = verb.label();
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(verb.args(node))
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(VERB_TIMEOUT, fut).await {
         Err(_) => format!("{label} {node}: timed out"),
         Ok(Err(_)) => format!("{label} {node}: unavailable"),
@@ -2214,11 +2239,12 @@ async fn run_respawn(name: &str, uuid: &str, cwd: &str, account: Option<&str>) -
         args.push("--account");
         args.push(acct);
     }
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(RESPAWN_TIMEOUT, fut).await {
         Err(_) => format!("respawn {name}: timed out"),
         Ok(Err(_)) => format!("respawn {name}: unavailable"),
@@ -2245,11 +2271,12 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
     // rather than wedging the overlay on "loading…" forever.
     const PEEK_TIMEOUT: Duration = Duration::from_secs(5);
     const PEEK_LINES: &str = "20";
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(["agents", "peek", name, "-n", PEEK_LINES])
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let body = match tokio::time::timeout(PEEK_TIMEOUT, fut).await {
         Err(_) => format!("peek timed out ({}s)", PEEK_TIMEOUT.as_secs()),
         Ok(Err(_)) => "peek unavailable (fno not on server PATH?)".to_string(),
@@ -2280,12 +2307,14 @@ async fn run_agent_peek(name: &str) -> Vec<String> {
 /// 0`), else a bounded failure notice. The argv is a fixed literal.
 async fn run_reap() -> String {
     const REAP_TIMEOUT: Duration = Duration::from_secs(20);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args(["reap", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     match tokio::time::timeout(REAP_TIMEOUT, fut).await {
         Err(_) => "reap: timed out".to_string(),
         Ok(Err(_)) => "reap: unavailable".to_string(),
@@ -2305,7 +2334,7 @@ async fn run_claude_lifecycle(
     config_dir: Option<std::path::PathBuf>,
 ) -> (bool, Option<String>) {
     const CLAUDE_TIMEOUT: Duration = Duration::from_secs(20);
-    let mut cmd = tokio::process::Command::new("claude");
+    let mut cmd = crate::process_admission::tokio_command("claude");
     cmd.args([verb, attach_id]);
     // (x-c914) Route the lifecycle action at the row's own daemon: an isolated
     // account lives in its own CLAUDE_CONFIG_DIR, so a bare `claude stop|rm`
@@ -2313,12 +2342,11 @@ async fn run_claude_lifecycle(
     if let Some(dir) = config_dir {
         cmd.env("CLAUDE_CONFIG_DIR", dir);
     }
-    let fut = cmd
-        .stdin(std::process::Stdio::null())
+    cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .status();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_status(&mut cmd);
     match tokio::time::timeout(CLAUDE_TIMEOUT, fut).await {
         Err(_) => (false, Some(format!("{verb} timed out"))),
         Ok(Err(_)) => (false, Some("claude unavailable".to_string())),
@@ -2335,12 +2363,13 @@ async fn run_claude_agents_all(
     tracked: &std::collections::HashSet<String>,
 ) -> Option<HashMap<String, crate::agents_view::ObservedExternal>> {
     const AGENTS_TIMEOUT: Duration = Duration::from_secs(10);
-    let fut = tokio::process::Command::new("claude")
+    let mut command = crate::process_admission::tokio_command("claude");
+    command
         .args(["agents", "--json", "--all"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(AGENTS_TIMEOUT, fut).await.ok()?.ok()?;
     if !output.status.success() {
         return None;
@@ -2384,14 +2413,16 @@ fn e2e_log(msg: std::fmt::Arguments<'_>) {
 /// single flaky tick never downgrades an in-flight card.
 async fn run_claim_sweep() -> Option<HashMap<String, String>> {
     const SWEEP_TIMEOUT: Duration = Duration::from_millis(800);
-    let fut = tokio::process::Command::new(crate::digest_overlay::fno_agents_bin())
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
         .args(["claim", "sweep", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         // On timeout the future is dropped; kill_on_drop reaps the child so a
         // hung sweep can't accumulate an orphan per tick.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SWEEP_TIMEOUT, fut).await.ok()?.ok()?;
     if !output.status.success() {
         return None;
@@ -2501,6 +2532,12 @@ fn dispatch_notice(stdout: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowResumeDisposition {
+    Resumable,
+    NoPane(AgentNoPaneReason),
+}
+
 impl Core {
     /// The view-scoped smallest-client clamp (Locked 1): a tab's content
     /// area is the elementwise min over the dims of every client currently
@@ -2565,6 +2602,18 @@ impl Core {
         cols: u16,
         cwd: &str,
     ) -> Result<u64, String> {
+        let permit = crate::process_admission::admit_fleet().map_err(|e| e.to_string())?;
+        self.spawn_pane_cmd_with_permit(argv, rows, cols, cwd, permit)
+    }
+
+    fn spawn_pane_cmd_with_permit(
+        &mut self,
+        argv: &[String],
+        rows: u16,
+        cols: u16,
+        cwd: &str,
+        permit: crate::process_admission::AdmissionPermit,
+    ) -> Result<u64, String> {
         if argv.is_empty() {
             return Err("pane run needs a command (empty argv)".into());
         }
@@ -2574,7 +2623,7 @@ impl Core {
         let account = account_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
-        let pty = PtyShell::spawn_cmd(
+        let pty = PtyShell::spawn_cmd_with_permit(
             argv,
             rows,
             cols,
@@ -2583,6 +2632,7 @@ impl Core {
             id,
             self.out_tx.clone(),
             self.exit_tx.clone(),
+            permit,
         )
         .map_err(|e| e.to_string())?;
         self.register_pane(
@@ -2930,6 +2980,35 @@ impl Core {
         }
     }
 
+    fn placement_pane_count(&self, dest: Option<u64>, placement: &PanePlacement) -> usize {
+        if matches!(placement.tab, Some(TabSel::New))
+            || (placement.split.is_none() && placement.at.is_none() && placement.tab.is_none())
+        {
+            return 0;
+        }
+        let Some(sid) = dest else {
+            return 0;
+        };
+        let Some(squad) = self.session.squad(sid) else {
+            return 0;
+        };
+        let tab_index = if let Some(anchor) = placement.at {
+            self.session
+                .find_pane(anchor)
+                .and_then(|(found_sid, ti)| (found_sid == sid).then_some(ti))
+        } else if let Some(selector) = placement.tab.as_ref() {
+            self.resolve_tab_index(sid, selector).ok()
+        } else if squad.tabs.is_empty() {
+            None
+        } else {
+            Some(squad.active_tab.min(squad.tabs.len() - 1))
+        };
+        tab_index
+            .and_then(|index| squad.tabs.get(index))
+            .map(|tab| tree::leaves(&tab.root).len())
+            .unwrap_or(0)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn run_pane(
         &mut self,
@@ -2942,6 +3021,10 @@ impl Core {
         placement: PanePlacement,
         worker: Option<String>,
     ) -> Result<u64, (u32, String)> {
+        let mut placement = placement;
+        placement.max_panes = Some(crate::process_admission::configured_pane_group_max(
+            placement.max_panes,
+        ));
         // (x-5f7f) The worker name reaches the store and later keys a resume,
         // so the SERVER re-validates it before any pane exists - the CLI gate
         // covers one caller, the control socket is reachable by any client.
@@ -2983,8 +3066,11 @@ impl Core {
                 (dest, None)
             }
         };
+        let pane_count = self.placement_pane_count(dest, &placement);
+        let permit = crate::process_admission::admit_pane(pane_count, placement.max_panes)
+            .map_err(|e| (err_code::SPAWN_FAILED, e.to_string()))?;
         let pid = self
-            .spawn_pane_cmd(&argv, rows, cols, &cwd)
+            .spawn_pane_cmd_with_permit(&argv, rows, cols, &cwd, permit)
             .map_err(|e| (err_code::SPAWN_FAILED, e))?;
         if claim {
             // Writer-claim ELIGIBILITY, set only at agent spawn (Locked 5).
@@ -3410,6 +3496,93 @@ impl Core {
         }
         self.push_layout(true);
         Ok(())
+    }
+
+    /// Close one resolved tab after every pre-mutation guard has passed. This
+    /// is the single cascade used by both the interactive command and the
+    /// script control verb, so reaping, member cleanup, persistence cleanup,
+    /// template cleanup, and viewer re-anchoring cannot drift.
+    fn close_tab_cascade(
+        &mut self,
+        sid: u64,
+        ti: usize,
+    ) -> Option<(TabId, Vec<u64>, RemoveOutcome)> {
+        let (tid, pids) = {
+            let sq = self.session.squad(sid)?;
+            let tab = sq.tabs.get(ti)?;
+            (tab.id, tree::leaves(&tab.root))
+        };
+        let ctxs: Vec<_> = pids
+            .iter()
+            .filter_map(|&pid| self.member_ctx(pid))
+            .collect();
+        let ident = self.squad_identity(sid);
+        for &pid in &pids {
+            self.reap_pane(pid);
+        }
+        let outcome = self.session.remove_tab(sid, ti);
+        for ctx in ctxs {
+            self.reconcile_member_close(Some(ctx), false);
+        }
+        if matches!(
+            outcome,
+            RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
+        ) {
+            self.squad_members.remove(&sid);
+            if let Some((name, key)) = ident {
+                self.persist_remove(&name, &key);
+            }
+        }
+        self.tab_areas.remove(&tid);
+        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+            self.template_specs.remove(&tid);
+            return Some((tid, pids, outcome));
+        }
+        if self.template_specs.remove(&tid).is_some() {
+            self.persist_template_specs(sid);
+        }
+        self.reanchor_views();
+        self.push_layout(true);
+        Some((tid, pids, outcome))
+    }
+
+    /// Resolve and guard a script close before entering the shared mutation
+    /// helper. A worker is safe to ignore only when its fresh row is
+    /// positively `Dead`; `Alive` and `Unmeasured` both refuse.
+    fn tab_close(
+        &mut self,
+        squad: &PaneTarget,
+        sel: &TabSel,
+        force: bool,
+        agents: Option<&[RegistryAgent]>,
+    ) -> Result<(TabId, Vec<u64>, RemoveOutcome), (u32, String)> {
+        let sid = self.resolve_squad(squad)?;
+        let ti = self
+            .resolve_tab_index(sid, sel)
+            .map_err(|e| (err_code::BAD_REQUEST, e))?;
+        let pids = self
+            .session
+            .squad(sid)
+            .and_then(|sq| sq.tabs.get(ti))
+            .map(|tab| tree::leaves(&tab.root))
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))?;
+        if !force {
+            let Some(rows) = agents else {
+                return Err((
+                    err_code::REGISTRY_UNAVAILABLE,
+                    "agent registry unavailable".into(),
+                ));
+            };
+            let blockers = tab_close_blockers(&self.session_name, &pids, rows);
+            if !blockers.is_empty() {
+                return Err((
+                    err_code::BAD_REQUEST,
+                    format!("tab contains protected worker(s): {}", blockers.join(", ")),
+                ));
+            }
+        }
+        self.close_tab_cascade(sid, ti)
+            .ok_or((err_code::BAD_REQUEST, "selected tab vanished".into()))
     }
 
     /// The nested tree + per-pane geometry of one tab (Locked Decision 5).
@@ -4851,26 +5024,57 @@ impl Core {
         }
     }
 
-    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
-    /// row: a live session has a process writing its state (its own harness
-    /// process, or claude's daemon), and resuming under it would open a
-    /// second writer on the same session. Needs a harness that owns a resume
-    /// form plus the session id it resumes. A live claude bg row with a jobId
-    /// is doubly excluded - its daemon owns the session, and the existing
-    /// attach path is the correct gesture.
-    fn row_resumable(a: &RegistryAgent) -> bool {
+    /// (v53) Classify the registry facts once so resumability and the final
+    /// paneless notice cannot disagree about harness/session/liveness truth.
+    fn row_resume_disposition(a: &RegistryAgent) -> RowResumeDisposition {
         let Some(h) = a.harness.as_deref() else {
-            return false;
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness);
         };
-        if !a.exited || Self::resume_form(h).is_none() {
-            return false;
+        if Self::resume_form(h).is_none() {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness);
         }
         let has_sid = a
             .harness_session_id
             .as_deref()
             .or(a.claude_session_uuid.as_deref())
             .is_some_and(|s| !s.is_empty());
-        has_sid && !(h == "claude" && a.attach_id.is_some() && !a.exited)
+        if !has_sid {
+            return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId);
+        }
+        if !a.exited {
+            return RowResumeDisposition::NoPane(if a.liveness == agents_view::Liveness::Alive {
+                AgentNoPaneReason::LivePaneless
+            } else {
+                AgentNoPaneReason::BackendNotLive
+            });
+        }
+        RowResumeDisposition::Resumable
+    }
+
+    /// (x-5f7f) Can this registry row be resumed into a pane? Only a DEAD
+    /// row: a live session has a process writing its state (its own harness
+    /// process, or claude's daemon), and resuming under it would open a
+    /// second writer on the same session. A live claude bg row with a jobId
+    /// is doubly excluded - its daemon owns the session, and the existing
+    /// attach path is the correct gesture.
+    fn row_resumable(a: &RegistryAgent) -> bool {
+        matches!(
+            Self::row_resume_disposition(a),
+            RowResumeDisposition::Resumable
+        )
+    }
+
+    /// A live attachable row has a higher-priority client action, so it carries
+    /// no registry refusal reason. Every other registry-backed paneless row can
+    /// expose the classification that explains its branch-four notice.
+    fn row_no_pane_reason(a: &RegistryAgent) -> Option<AgentNoPaneReason> {
+        if a.attach_id.is_some() && !a.exited {
+            return None;
+        }
+        match Self::row_resume_disposition(a) {
+            RowResumeDisposition::Resumable => None,
+            RowResumeDisposition::NoPane(reason) => Some(reason),
+        }
     }
 
     /// (x-5f7f) The registry names that still exist, for restore's ghost
@@ -6831,6 +7035,7 @@ impl Core {
                                 basis: self.truth_basis(&a.name),
                                 last_activity_age_s: self.truth_age(&a.name),
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                         None => {
@@ -6875,6 +7080,7 @@ impl Core {
                                 basis: None,
                                 last_activity_age_s: None,
                                 resumable: false,
+                                no_pane_reason: None,
                             }
                         }
                     };
@@ -6952,6 +7158,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable,
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
                 None => {
@@ -7002,6 +7209,7 @@ impl Core {
                         basis: self.truth_basis(&a.name),
                         last_activity_age_s: self.truth_age(&a.name),
                         resumable: Self::row_resumable(a),
+                        no_pane_reason: Self::row_no_pane_reason(a),
                     })
                 }
             }
@@ -7052,6 +7260,7 @@ impl Core {
                     basis: None,
                     last_activity_age_s: None,
                     resumable: false,
+                    no_pane_reason: None,
                 })
             }
         }
@@ -7131,6 +7340,7 @@ impl Core {
                 basis: None,
                 last_activity_age_s: None,
                 resumable: false,
+                no_pane_reason: None,
             })
         }
         out
@@ -7367,6 +7577,54 @@ impl Core {
         if c.reliable_tx.try_send(ServerMsg::OpenLink { url }).is_err() {
             eprintln!(
                 "fno mux: client {client_id} reliable channel wedged on OpenLink; dropping it"
+            );
+            self.clients.retain(|c| c.id != client_id);
+            self.push_layout(true);
+        }
+    }
+
+    /// (v56, hover affordance) One link-span lookup for the requesting client
+    /// only: resolve the link under pane-local `(row, col)` and reply with its
+    /// visible cells. The guards mirror the click path's ownership rule: the
+    /// pane must be in the requester's live view, and a plain left click must
+    /// be MUX-owned - a pane whose app negotiated mouse reporting gets no
+    /// hover affordance, because its grid interaction belongs to the app.
+    /// Coordinates only, never text; every miss (non-link cell, invisible
+    /// pane, app-owned click) answers an EMPTY cell list so the client clears
+    /// the underline instead of waiting. No pane state changes, no broadcast:
+    /// co-viewers never see another viewer's hover.
+    fn link_hover(&mut self, client_id: u64, pane: u64, row: u16, col: u16, seq: u64) {
+        // Bind the requester once: the visibility check and the reply send
+        // name the same client, and two independent finds are two places to
+        // drift. The wedge path mutates `clients`, so it runs after the
+        // borrows drop.
+        let wedged = {
+            let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
+                return;
+            };
+            let cells = match self.panes.get(&pane) {
+                Some(e)
+                    if route_mouse(e.vt.modes(), MouseKind::Release(MouseButton::Left))
+                        == MouseAction::SelectRelease
+                        && c.visible.contains(&pane) =>
+                {
+                    e.vt.link_span(row, col)
+                        .map(|span| span.cells)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            c.reliable_tx
+                .try_send(ServerMsg::LinkHover {
+                    pane_id: pane,
+                    seq,
+                    cells,
+                })
+                .is_err()
+        };
+        if wedged {
+            eprintln!(
+                "fno mux: client {client_id} reliable channel wedged on LinkHover; dropping it"
             );
             self.clients.retain(|c| c.id != client_id);
             self.push_layout(true);
@@ -7729,7 +7987,7 @@ impl Core {
             })
             .to_string();
             const TOUCH_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
-            let mut cmd = tokio::process::Command::new(fno_bin());
+            let mut cmd = crate::process_admission::tokio_command(fno_bin());
             cmd.args([
                 "doctor",
                 "event",
@@ -7749,7 +8007,11 @@ impl Core {
                 cmd.current_dir(dir);
             }
             let ok = matches!(
-                tokio::time::timeout(TOUCH_EMIT_TIMEOUT, cmd.status()).await,
+                tokio::time::timeout(
+                    TOUCH_EMIT_TIMEOUT,
+                    crate::process_admission::tokio_status(&mut cmd),
+                )
+                .await,
                 Ok(Ok(s)) if s.success()
             );
             if !ok {
@@ -7819,27 +8081,28 @@ impl Core {
         let failures = Arc::clone(&self.pane_stats_emit_failures);
         tokio::spawn(async move {
             const PANE_STATS_EMIT_TIMEOUT: Duration = Duration::from_secs(10);
+            let mut command = crate::process_admission::tokio_command(fno_bin());
+            command
+                .args([
+                    "doctor",
+                    "event",
+                    "emit",
+                    "--type",
+                    "mux_pane_counters",
+                    "--source",
+                    "daemon",
+                    "--global",
+                    "--data",
+                    &data,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
             let ok = matches!(
                 tokio::time::timeout(
                     PANE_STATS_EMIT_TIMEOUT,
-                    tokio::process::Command::new(fno_bin())
-                        .args([
-                            "doctor",
-                            "event",
-                            "emit",
-                            "--type",
-                            "mux_pane_counters",
-                            "--source",
-                            "daemon",
-                            "--global",
-                            "--data",
-                            &data,
-                        ])
-                        .stdin(std::process::Stdio::null())
-                        .stdout(std::process::Stdio::null())
-                        .stderr(std::process::Stdio::null())
-                        .kill_on_drop(true)
-                        .status(),
+                    crate::process_admission::tokio_status(&mut command),
                 )
                 .await,
                 Ok(Ok(s)) if s.success()
@@ -8370,55 +8633,12 @@ impl Core {
                 let Some((sid, ti)) = self.session.find_tab(view.1) else {
                     return Flow::Continue;
                 };
-                let pids =
-                    tree::leaves(&self.session.squad(sid).expect("live squad").tabs[ti].root);
-                // De-recruit any member panes in this tab (AC3-EDGE), captured
-                // before the reaps clear them; reconciled AFTER remove_tab so
-                // squad-survival (survives vs de-persist) reflects reality.
-                let ctxs: Vec<_> = pids
-                    .iter()
-                    .filter_map(|&pid| self.member_ctx(pid))
-                    .collect();
-                // The squad's store identity before the reap, for the
-                // de-persist below: a memberless workspace yields no ctxs, so
-                // reconcile_member_close alone cannot clear its row.
-                let ident = self.squad_identity(sid);
-                for pid in pids {
-                    self.reap_pane(pid);
-                }
-                let outcome = self.session.remove_tab(sid, ti);
-                for ctx in ctxs {
-                    self.reconcile_member_close(Some(ctx), false);
-                }
-                if matches!(
-                    outcome,
-                    RemoveOutcome::SquadRemoved | RemoveOutcome::SessionEmpty
-                ) {
-                    // The whole workspace left the session - de-persist it on
-                    // EVERY path, not only the member one. SessionEmpty counts:
-                    // closing the last tab of the last workspace still dismissed
-                    // it. `persist_remove` no-ops when reconcile already ran.
-                    self.squad_members.remove(&sid);
-                    if let Some((name, key)) = ident {
-                        self.persist_remove(&name, &key);
-                    }
-                }
+                let Some((_, _, outcome)) = self.close_tab_cascade(sid, ti) else {
+                    return Flow::Continue;
+                };
                 match outcome {
                     RemoveOutcome::SessionEmpty => Flow::Shutdown,
-                    _ => {
-                        // Everyone who viewed the dead tab (sender included)
-                        // re-anchors in this same mutation (AC2-ERR).
-                        self.tab_areas.remove(&view.1);
-                        // (x-c4d4) A closed template tab must drop its stored spec
-                        // so restore never resurrects it (persist rewrites the
-                        // squad's whole list from the tabs that still exist).
-                        if self.template_specs.remove(&view.1).is_some() {
-                            self.persist_template_specs(sid);
-                        }
-                        self.reanchor_views();
-                        self.push_layout(true);
-                        Flow::Continue
-                    }
+                    _ => Flow::Continue,
                 }
             }
             Command::SelectSquad(id) => {
@@ -8582,7 +8802,22 @@ impl Core {
                     // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
                     let (acct, cd) = self.attach_account_ctx(&id);
                     let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
-                    let new_pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
+                    let pane_count = self
+                        .viewed_tab(view)
+                        .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
+                        .unwrap_or(0);
+                    let permit =
+                        match crate::process_admission::admit_pane(pane_count, placement.max_panes)
+                        {
+                            Ok(permit) => permit,
+                            Err(error) => {
+                                self.notice(client_id, format!("attach failed: {error}"));
+                                return Flow::Continue;
+                            }
+                        };
+                    let new_pid = match self
+                        .spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit)
+                    {
                         Ok(p) => p,
                         Err(e) => {
                             self.notice(client_id, format!("attach failed: {e}"));
@@ -8694,13 +8929,24 @@ impl Core {
                 };
                 let (acct, cd) = self.attach_account_ctx(&id);
                 let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
-                let pid = match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        self.notice(client_id, format!("attach failed: {e}"));
+                let permit = match crate::process_admission::admit_pane(
+                    self.placement_pane_count(dest, &effective),
+                    effective.max_panes,
+                ) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        self.notice(client_id, format!("attach failed: {error}"));
                         return Flow::Continue;
                     }
                 };
+                let pid =
+                    match self.spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.notice(client_id, format!("attach failed: {e}"));
+                            return Flow::Continue;
+                        }
+                    };
                 self.name_attached_pane(pid, &id, cd.as_deref());
                 // Place through the shared v41 helper: it honors the anchored
                 // drop's `tab`/`at` (a split beside the exact drop pane), and
@@ -9715,6 +9961,16 @@ impl Core {
                 self.mouse(id, pane, event);
                 Flow::Continue
             }
+            CoreMsg::LinkHover {
+                id,
+                pane,
+                row,
+                col,
+                seq,
+            } => {
+                self.link_hover(id, pane, row, col, seq);
+                Flow::Continue
+            }
             CoreMsg::BlockNav { id, pane, op } => {
                 self.block_nav(id, pane, op);
                 Flow::Continue
@@ -10096,6 +10352,32 @@ impl Core {
                 };
                 let _ = reply.send(msg);
                 Flow::Continue
+            }
+            CoreMsg::TabClose {
+                squad,
+                tab,
+                force,
+                agents,
+                reply,
+            } => {
+                let result = self.tab_close(&squad, &tab, force, agents.as_deref());
+                let (msg, flow) = match result {
+                    Ok((tab_id, pane_ids, outcome)) => (
+                        ServerMsg::TabClosed {
+                            tab_id,
+                            pane_ids,
+                            forced: force,
+                        },
+                        if matches!(outcome, RemoveOutcome::SessionEmpty) {
+                            Flow::Shutdown
+                        } else {
+                            Flow::Continue
+                        },
+                    ),
+                    Err((code, msg)) => (ServerMsg::Err { code, msg }, Flow::Continue),
+                };
+                let _ = reply.send(msg);
+                flow
             }
             CoreMsg::LayoutGet {
                 scope,
@@ -11240,6 +11522,34 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// Return every pane/worker pair that blocks an unforced tab close. Matching
+/// is exact on the server session and pane id, and every joined row whose
+/// liveness is not positively `Dead` is destructive-risk evidence. Rows that
+/// have not received an effective identity yet use their registry name in the
+/// diagnostic instead of being silently treated as empty.
+fn tab_close_blockers(session: &str, pane_ids: &[u64], rows: &[RegistryAgent]) -> Vec<String> {
+    let mut blockers = Vec::new();
+    for &pane_id in pane_ids {
+        for row in rows.iter().filter(|row| {
+            row.mux.as_ref().is_some_and(|(row_session, row_pane)| {
+                row_session == session && *row_pane == pane_id
+            })
+        }) {
+            if row.liveness != agents_view::Liveness::Dead {
+                let (label, value) = match row.effective_identity() {
+                    Some(identity) => ("fno_id", identity),
+                    None => ("worker", row.name.as_str()),
+                };
+                blockers.push(format!(
+                    "pane {pane_id} {label}={value} liveness={:?}",
+                    row.liveness
+                ));
+            }
+        }
+    }
+    blockers
+}
+
 fn pane_id_floor(persisted: u64, agents: &[RegistryAgent]) -> u64 {
     let registry_floor = agents
         .iter()
@@ -11505,6 +11815,22 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::TabClose { squad, tab, force } => {
+            let agents = if force {
+                None
+            } else {
+                read_guard_agents().await
+            };
+            core_tx
+                .send(CoreMsg::TabClose {
+                    squad,
+                    tab,
+                    force,
+                    agents,
+                    reply: reply_tx,
+                })
+                .await
+        }
         ControlVerb::LayoutGet { scope, workers } => {
             let agents = read_guard_agents().await;
             core_tx
@@ -11745,6 +12071,26 @@ async fn client_reader(mut r: OwnedReadHalf, core_tx: mpsc::Sender<CoreMsg>, id:
             Ok(ClientMsg::Mouse { pane, event }) => {
                 if core_tx
                     .send(CoreMsg::Mouse { id, pane, event })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(ClientMsg::LinkHover {
+                pane,
+                row,
+                col,
+                seq,
+            }) => {
+                if core_tx
+                    .send(CoreMsg::LinkHover {
+                        id,
+                        pane,
+                        row,
+                        col,
+                        seq,
+                    })
                     .await
                     .is_err()
                 {
@@ -12519,6 +12865,77 @@ mod tests {
     }
 
     #[test]
+    fn tab_close_guard_requires_positive_dead_liveness() {
+        let mut alive = agent_in("main", 7, None, false);
+        alive.session_id = Some("alive-worker".into());
+        let mut unmeasured = agent_in("main", 8, None, true);
+        unmeasured.session_id = Some("uncertain-worker".into());
+        unmeasured.liveness = agents_view::Liveness::Unmeasured;
+        let mut dead = agent_in("main", 9, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let mut foreign = agent_in("other", 7, None, false);
+        foreign.session_id = Some("foreign-worker".into());
+        let mut identity_less = agent_in("main", 10, None, false);
+        identity_less.name = "identity-less-worker".into();
+
+        let blockers = tab_close_blockers(
+            "main",
+            &[7, 8, 9, 10],
+            &[alive, unmeasured, dead, foreign, identity_less],
+        );
+        assert_eq!(blockers.len(), 3);
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 7") && b.contains("alive-worker")));
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("pane 8") && b.contains("uncertain-worker")));
+        assert!(
+            !blockers.iter().any(|b| b.contains("dead-worker")),
+            "positive Dead allows close"
+        );
+        assert!(
+            !blockers.iter().any(|b| b.contains("foreign-worker")),
+            "a different mux session cannot guard this tab"
+        );
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.contains("pane 10") && b.contains("identity-less-worker")),
+            "an identity-less live row still blocks destructive cleanup"
+        );
+    }
+
+    #[test]
+    fn tab_close_unreadable_registry_refuses_before_mutation() {
+        let (mut core, pane) = template_core();
+        let result = core.tab_close(&PaneTarget::SquadId(1), &TabSel::Id(5), false, None);
+        assert!(matches!(result, Err((code, _)) if code == err_code::REGISTRY_UNAVAILABLE));
+        assert!(core.panes.contains_key(&pane));
+        assert!(core.session.find_tab(5).is_some());
+    }
+
+    #[test]
+    fn tab_close_allows_positive_dead_row_and_returns_exact_receipt_data() {
+        let (mut core, pane) = template_core();
+        let mut dead = agent_in("test", pane, None, true);
+        dead.session_id = Some("dead-worker".into());
+        let result = core
+            .tab_close(
+                &PaneTarget::SquadId(1),
+                &TabSel::Id(5),
+                false,
+                Some(&[dead]),
+            )
+            .unwrap();
+        assert_eq!(result.0, 5);
+        assert_eq!(result.1, vec![pane]);
+        assert_eq!(result.2, RemoveOutcome::SessionEmpty);
+        assert!(!core.panes.contains_key(&pane));
+        assert!(!core.tab_areas.contains_key(&5));
+    }
+
+    #[test]
     fn pane_send_refuses_when_registry_name_disagrees_with_pane_identity() {
         let (mut core, pane) = template_core();
         core.session_name = "sess".into();
@@ -12621,6 +13038,29 @@ mod tests {
                 liveness: agents_view::Liveness::Alive,
                 harness: None,
             },
+            // A live codex worker with a session identity but no pane or attach
+            // target must project the typed branch-four recovery reason.
+            RegistryAgent {
+                spawned_by_session: None,
+                session_id: None,
+                harness_session_id: Some("codex-live-id".into()),
+                name: "live-paneless".into(),
+                cwd: "/live".into(),
+                exited: false,
+                badge: None,
+                reason: None,
+                mux: None,
+                answerable: None,
+                attach_id: None,
+                external: false,
+                account: None,
+                claude_session_uuid: None,
+                updated_at: None,
+                crown_level: None,
+                crown_scope: None,
+                liveness: agents_view::Liveness::Alive,
+                harness: Some("codex".into()),
+            },
         ];
         let rows = core.agent_rows();
         assert!(
@@ -12641,6 +13081,16 @@ mod tests {
             bg.attach_id.as_deref(),
             Some("c19cd2c3"),
             "the claude jobId must carry through so the sideline can attach it"
+        );
+        assert_eq!(bg.no_pane_reason, None, "attachable rows carry no reason");
+        let live = rows
+            .iter()
+            .find(|r| r.name == "live-paneless")
+            .expect("the live paneless row must surface");
+        assert_eq!(
+            live.no_pane_reason,
+            Some(AgentNoPaneReason::LivePaneless),
+            "registry truth projects the typed live-paneless reason"
         );
     }
 
@@ -16190,10 +16640,10 @@ mod tests {
         // The mirror is checked against the TOML that owns the tokens, not
         // against this crate's own literals (Rust checked against Rust proves
         // nothing). Codex resumes through its own interactive form; a claude
-        // row that reaches the resume arm is dead (no daemon owns it), so the
-        // headless resume token is the honest mirror - the interactive form
-        // is `claude attach`, which is the live-row gesture that already
-        // exists. No override is installed, so the REAL argv is asserted.
+        // row that reaches the mux resume arm uses the saved interactive
+        // transcript form. The headless form is reserved for one-shot and
+        // stream-json workers, while `claude attach` is the live-row gesture.
+        // No override is installed, so the REAL argv is asserted.
         clear_resume_program();
         let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/src/fno/agents/harness_capabilities.toml");
@@ -16216,7 +16666,7 @@ mod tests {
                 .collect()
         };
         let codex_form = token("codex/resume_strategy/forms/interactive_resume");
-        let claude_form = token("claude/resume_strategy/forms/headless_resume");
+        let claude_form = token("claude/resume_strategy/forms/interactive_resume");
         assert_eq!(
             codex_form,
             vec![
@@ -16251,10 +16701,10 @@ mod tests {
     }
 
     #[test]
-    fn row_resumable_gates_on_harness_form_and_session_id() {
-        // The row-level predicate: needs a harness with a resume form plus
-        // the session id it resumes; a LIVE claude bg row with a jobId is
-        // excluded (attach owns that gesture); agy has no form here.
+    fn row_resume_disposition_gates_on_harness_form_and_session_id() {
+        // One table of registry facts owns both the dead-row resume decision
+        // and the branch-four reason. A LIVE claude bg row with a jobId still
+        // uses attach, but its disposition remains live-paneless.
         let base = || RegistryAgent {
             spawned_by_session: None,
             session_id: None,
@@ -16274,18 +16724,44 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            liveness: agents_view::Liveness::Dead,
+            liveness: agents_view::Liveness::Alive,
         };
+        assert_eq!(
+            Core::row_resume_disposition(&base()),
+            RowResumeDisposition::Resumable
+        );
         assert!(Core::row_resumable(&base()), "a dead codex row resumes");
         let mut live_codex = base();
         live_codex.exited = false;
+        assert_eq!(
+            Core::row_resume_disposition(&live_codex),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_codex),
             "a live codex row has a process writing its rollout: resuming under it opens a second writer"
         );
+        let mut backend_not_live = base();
+        backend_not_live.exited = false;
+        backend_not_live.liveness = agents_view::Liveness::Unmeasured;
+        assert!(
+            !matches!(
+                Core::row_resume_disposition(&backend_not_live),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+            ),
+            "an unmeasured backend must not be labeled live"
+        );
+        assert_eq!(
+            Core::row_resume_disposition(&backend_not_live),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::BackendNotLive)
+        );
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&agy),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+        );
         assert!(
             !Core::row_resumable(&agy),
             "no resume form and no session id: no Resume offered"
@@ -16294,6 +16770,10 @@ mod tests {
         live_claude.harness = Some("claude".into());
         live_claude.exited = false;
         live_claude.attach_id = Some("c19cd2c3".into());
+        assert_eq!(
+            Core::row_resume_disposition(&live_claude),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::LivePaneless)
+        );
         assert!(
             !Core::row_resumable(&live_claude),
             "a live claude bg row attaches; its daemon owns the session"
@@ -16306,9 +16786,19 @@ mod tests {
         );
         let mut no_sid = base();
         no_sid.harness_session_id = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_sid),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId)
+        );
         assert!(
             !Core::row_resumable(&no_sid),
             "no session id means nothing to resume"
+        );
+        let mut no_harness = base();
+        no_harness.harness = None;
+        assert_eq!(
+            Core::row_resume_disposition(&no_harness),
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness)
         );
     }
 

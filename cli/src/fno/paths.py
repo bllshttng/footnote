@@ -545,6 +545,18 @@ def decisions_jsonl() -> Path:
     return ledger_json().parent / "decisions.jsonl"
 
 
+def law_proposals_dir(project_root: Optional[Path] = None) -> Path:
+    """Return the worktree-owned directory for staged law proposals.
+
+    A proposal is an inert, short-lived input to the operator approval path. It
+    is deliberately next to the target worktree's ``.fno`` state rather than in
+    the machine-wide decision index, so preparing a proposal cannot look like
+    recording law.
+    """
+    root = resolve_repo_root() if project_root is None else Path(project_root)
+    return root / ".fno" / "law-proposals"
+
+
 def questions_jsonl() -> Path:
     """Return the permanent machine-wide operator-question index."""
     return ledger_json().parent / "questions.jsonl"

@@ -44,6 +44,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -208,6 +209,69 @@ _BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
 _BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
 
 
+def classify_origin(explicit_origin: str | None = None) -> str:
+    """Classify the sender once, before a mail lane can narrow behavior."""
+    from fno.agents.self_stamp import resolve_self_identity
+    from fno.decide import MAIL_ORIGINS, enforce_origin_floor
+
+    ident = resolve_self_identity()
+    agent_identity = bool(ident.session_id and ident.harness)
+    if explicit_origin is not None:
+        if explicit_origin not in MAIL_ORIGINS:
+            raise ValueError(
+                f"unknown mail origin {explicit_origin!r}; expected one of "
+                f"{', '.join(MAIL_ORIGINS)}"
+            )
+        # An origin above peer is a claim about the channel, and an ambient
+        # agent identity cannot make that claim. Downgrade to peer rather
+        # than honoring the flag: least authority by default cannot be
+        # forged, and a process with no session identity (a real scheduler,
+        # a recovery sweep) still declares its origin honestly.
+        floored = enforce_origin_floor(explicit_origin)
+        if floored != explicit_origin:
+            typer.echo(
+                f"mail origin {explicit_origin!r} downgraded to 'peer': an "
+                "agent session cannot declare an origin above peer",
+                err=True,
+            )
+        return floored
+
+    if agent_identity:
+        return "peer"
+    try:
+        attended = bool(sys.stdin.isatty())
+    except (AttributeError, OSError, ValueError):
+        attended = False
+    return "operator" if attended else "unknown"
+
+
+def _record_mail_origin(
+    *,
+    origin: str,
+    lane: str,
+    sender: str | None = None,
+    target_session: str | None = None,
+) -> None:
+    """Best-effort positive measurement of the classified send origin."""
+    try:
+        from fno.agents import events
+        from fno.events import append_event, mail_origin_classified
+
+        append_event(
+            mail_origin_classified(
+                origin=origin,
+                lane=lane,
+                presumed_human=origin == "operator",
+                sender=sender,
+                target_session=target_session,
+            ),
+            events.daemon_lifecycle_log(),
+            lock_timeout_seconds=2,
+        )
+    except Exception:
+        pass
+
+
 def _enforce_body_cap(body: str, *, usage: bool = False) -> None:
     """Warn over WARN bytes, refuse over REFUSE bytes.
 
@@ -297,6 +361,8 @@ def _reserve_budget(
     body: str,
     msg_id: str,
     allow_reason: str | None = None,
+    sender_key: str | None = None,
+    recipient_key: str | None = None,
 ):
     """Reserve the authored count after both pair identities are canonical."""
     from fno import style
@@ -311,6 +377,8 @@ def _reserve_budget(
             words=words,
             msg_id=msg_id,
             enforce=not exempt,
+            sender_key=sender_key,
+            recipient_key=recipient_key,
         )
     except budget.BudgetRefused as exc:
         print(
@@ -614,6 +682,70 @@ def _is_job_name(name: Optional[str]) -> bool:
     return bool(is_job_token(name))
 
 
+def _ruling_graph_path(workdir: Path) -> Path:
+    """Resolve the graph configured by an explicit mail ``--cwd``."""
+    from fno.config import load_settings_for_repo
+
+    repo_root = workdir
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(workdir), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+            timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            repo_root = Path(result.stdout.strip()).resolve()
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        pass
+    settings = load_settings_for_repo(repo_root)
+    override = settings.paths.graph_json
+    raw = override if override is not None else settings.state_dir
+    resolved = paths.resolve_configured_path(
+        raw, project_root=repo_root, settings=settings
+    )
+    return resolved if override is not None else resolved / "graph.json"
+
+
+def _append_ruling_to_node(subject: str, body: str, *, graph_path: Path) -> str:
+    """Append one dated ruling block to an exact working-graph node."""
+    from fno.graph import store as graph_store
+    from fno.graph.fuzzy import resolve_node
+
+    block = f"### Ruling ({datetime.now(timezone.utc).date().isoformat()})\n\n{body}"
+    node_id: str | None = None
+
+    def mutator(current: list[dict]) -> list[dict]:
+        nonlocal node_id
+        match = resolve_node(subject, current)
+        if match.kind != "exact" or not match.id:
+            raise ValueError(f"ruling node not found: {subject!r}")
+        node_id = match.id
+        for entry in current:
+            if not isinstance(entry, dict) or entry.get("id") != node_id:
+                continue
+            details = entry.get("details")
+            existing = details.rstrip() if isinstance(details, str) else ""
+            entry["details"] = f"{existing}\n\n{block}" if existing else block
+            break
+        return current
+
+    try:
+        graph_store.locked_mutate_graph(graph_path, mutator)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    assert node_id is not None
+    print(
+        f"ruling appended to {node_id} before transport; if transport fails, "
+        "retry the mail without --ruling",
+        file=sys.stderr,
+    )
+    return node_id
+
+
 def _refuse_unsafe_short_address(
     token: Optional[str], *, self_addressed: bool = False
 ) -> None:
@@ -687,6 +819,7 @@ def _reply_to_name_handle(
     require_resolution: bool = False,
     style_exception: Optional[str] = None,
     sender_session: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -714,6 +847,7 @@ def _reply_to_name_handle(
             resolved=resolved,
             reply_to=to_msg,
             style_exception=style_exception,
+            origin=origin,
         )
     else:
         try:
@@ -784,6 +918,7 @@ def _reply_to_name_handle(
                     token=chosen,
                     reply_to=to_msg,
                     style_exception=style_exception,
+                    origin=origin,
                 )
                 return
             raise typer.BadParameter(
@@ -800,6 +935,7 @@ def _reply_to_name_handle(
                 token=target,
                 reply_to=to_msg,
                 style_exception=style_exception,
+                origin=origin,
             )
             return
         if require_resolution:
@@ -817,6 +953,7 @@ def _reply_to_name_handle(
             recipient=target,
             reply_to=to_msg,
             style_exception=style_exception,
+            origin=origin,
         )
 
 
@@ -877,6 +1014,11 @@ def cmd_reply(
     _refuse_forged_envelope(body_text)
     _enforce_body_cap(body_text)
     _enforce_style(body_text, allow_reason=style_exception)
+    classified_origin = classify_origin()
+    _record_mail_origin(origin=classified_origin, lane="reply", sender=from_project)
+    mail_origin: str | None = (
+        None if classified_origin == "unknown" else classified_origin
+    )
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else
@@ -934,6 +1076,7 @@ def cmd_reply(
             require_resolution=require_resolution,
             style_exception=style_exception,
             sender_session=sender_session,
+            origin=mail_origin,
         )
         return
     if orig is None:
@@ -953,6 +1096,7 @@ def cmd_reply(
                 to_msg=to_msg,
                 style_exception=style_exception,
                 sender_session=sender_session,
+                origin=mail_origin,
             )
             return
         # AC1-ERR / LD4: the name lane cannot invent a target from nothing. An id
@@ -997,6 +1141,7 @@ def cmd_reply(
                 body_text,
                 msg_id=reply_id,
                 word_count=authored_words,
+                origin=mail_origin,
             )
         except Exception:
             _release_budget(reservation)
@@ -1018,6 +1163,7 @@ def cmd_reply(
             replies_to=to_msg,
             refs=refs,
             word_count=authored_words,
+            origin=mail_origin,
         )
     except Exception:
         _release_budget(reservation)
@@ -1295,6 +1441,11 @@ def cmd_pane_prepare(
         None, "--harness",
         help="Harness hosting the pane (default: resolved from the agent registry).",
     ),
+    style_exception: Optional[str] = typer.Option(
+        None, "--style-exception",
+        help="Reasoned one-send exception to the style and word-budget gates "
+        "on enveloped prose (a --raw send never enters them).",
+    ),
 ) -> None:
     """Gate and envelope a pane payload read from stdin; print it on stdout.
 
@@ -1305,10 +1456,13 @@ def cmd_pane_prepare(
 
     Exit 0 prints the bytes to type. Exit 3 refuses and names why on stderr: the
     pane is showing an option prompt, hosts no registered agent, or the body
-    cannot be attributed.
+    cannot be attributed. Exit 1 refuses on the style, body-cap, or word-budget
+    gates the mail verbs enforce: this is the sole renderer every non-raw pane
+    send passes through, so a sender refused by mail must not deliver the
+    identical prose here instead.
     """
     from fno._flag_aliases import merge_deprecated_alias
-    from fno.mail.pane_transport import PaneSendRefused, prepare
+    from fno.mail.pane_transport import PaneSendRefused, prepare, resolve_pane_identity
 
     session = merge_deprecated_alias(
         session, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
@@ -1355,11 +1509,65 @@ def cmd_pane_prepare(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    # The relay contract's two gates, at the one choke point every non-raw pane
+    # send fails closed through. A `--raw` send never reaches this process, so
+    # its exemption is structural, and `--style-exception` keeps the mail
+    # verbs' one escape shape.
+    _enforce_body_cap(body)
+    _enforce_style(body, allow_reason=style_exception)
+    # ONE registry snapshot drives everything downstream: the envelope's `to`,
+    # the identity the prompt gate pins, and the budget key. Resolving the
+    # recipient here and letting `prepare` re-resolve it was a TOCTOU - a pane
+    # reassigned between the two reads rendered an envelope addressed to the
+    # old occupant while the gate validated the new one. The captured
+    # name/fno_id now pin the gate, so a reassigned pane refuses instead.
+    from fno.agents.self_stamp import resolve_self_session_id, stamp_from
+    from fno.inbox.store import generate_msg_id
+
+    sender = stamp_from(None)
+    identity = resolve_pane_identity(session, pane)
+    msg_id = generate_msg_id()
     try:
-        print(prepare(body, session=session, pane_id=pane, harness=harness), end="")
+        rendered = prepare(
+            body,
+            session=session,
+            pane_id=pane,
+            harness=harness,
+            sender=sender,
+            to=identity.handle if identity else None,
+            msg_id=msg_id,
+            expected_name=identity.name if identity else None,
+            expected_fno_id=identity.fno_id if identity else None,
+        )
     except PaneSendRefused as exc:
         print(f"pane send refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=3) from exc
+    # Reserved only after attribution, prompt gating, and envelope construction
+    # succeeded, so a refused send charges nothing. A later Rust transport
+    # failure can leave a charge that expires with the window; that bounded
+    # overcharge is the safe direction, because this renderer cannot learn
+    # whether its parent delivered.
+    #
+    # The LEDGER keys on full session ids, both ends: an eight-hex handle
+    # collides for codex siblings spawned inside one ~65s bucket, which fused
+    # two distinct workers into one pair and refused normal parallel fanout.
+    # The inbound-reset lookup keeps the display handles (bus envelopes carry
+    # handles). A row without a session id still gets a budget, keyed on the
+    # pane address rather than skipped.
+    pane_address = f"pane {session}:{pane}"
+    recipient = identity.handle if identity and identity.handle else pane_address
+    _reserve_budget(
+        sender=sender,
+        recipient=recipient,
+        body=body,
+        msg_id=msg_id,
+        allow_reason=style_exception,
+        sender_key=resolve_self_session_id() or sender,
+        recipient_key=(
+            identity.session_id if identity and identity.session_id else recipient
+        ),
+    )
+    print(rendered, end="")
 
 
 @mail_app.command("lint", hidden=True)
@@ -1931,6 +2139,7 @@ def _name_lane_send(
     token: Optional[str] = None,
     style_exception: Optional[str] = None,
     force: bool = False,
+    origin: Optional[str] = None,
 ) -> None:
     """Name-lane delivery core, shared by ``mail send <name>`` and a name-lane
     ``mail reply`` -- the ONE choke point every delivery ladder rung lives in.
@@ -2078,13 +2287,14 @@ def _name_lane_send(
         # vocabulary is claude-code, and stamping a raw "claude" here made the
         # name lane the one producer disagreeing with dispatch, the relay, and
         # the Rust contract. "cli" survives as the honest no-harness value: the
-        # mapper defaults a MISSING provider to claude-code, a guess we avoid.
+        # mapper renders a MISSING provider as "unknown", never a vendor guess.
         harness=harness_for_provider(sender_harness) if sender_harness else "cli",
         model=sender_model,
         to=recipient,
         id=msg_id,
         reply_to=reply_to,
         from_session=sender_session,
+        origin=origin,
     )
 
     # --force (node x-3a64): change the TRANSPORT, keep every mail semantic. The
@@ -2249,7 +2459,14 @@ def _name_lane_send(
                 # pane and reports hosted -- suppressing the durable copy the
                 # real recipient still needs.
                 if entry.status == "live":
-                    injected = _mux_pane_send(entry, wrapped, guarded=False, confirm=True)
+                    # The mail lane holds the boolean contract; only the review
+                    # lane consumes the widened "started"/"queued"/"unconfirmed".
+                    # Name the failure values, never bool(): bool("unconfirmed")
+                    # would read an unclassified frame as delivered.
+                    delivered = _mux_pane_send(
+                        entry, wrapped, guarded=False, confirm=True
+                    )
+                    injected = delivered not in (False, "unconfirmed")
 
     live = f" [live {resolved.agent} session {resolved.handle}]" if resolved is not None else ""
     corr = f" re:{reply_to}" if reply_to else ""
@@ -2343,6 +2560,7 @@ def _name_lane_send(
             # address exactly as a live one does (node x-3a64).
             from_session=sender_session,
             word_count=authored_words,
+            origin=origin,
         )
     except (OSError, ValueError, RuntimeError) as exc2:
         if not injected:
@@ -2413,6 +2631,7 @@ def _job_lane_send(
     *,
     from_name: Optional[str],
     style_exception: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> None:
     """Deliver to a JOB address (``node:<id>`` / ``pr:<n>``), resolved to whoever
     holds the claim RIGHT NOW (x-8f8c part 2).
@@ -2503,6 +2722,7 @@ def _job_lane_send(
         node=job.node_id,
         id=msg_id,
         from_session=sender_session,
+        origin=origin,
     )
 
     # Live-inject to the current holder's session. Inject targets the session id
@@ -2563,6 +2783,7 @@ def _job_lane_send(
             to_kind="node",
             owner=owner.value,
             from_session=sender_session,
+            origin=origin,
             word_count=authored_words,
         )
     except (OSError, ValueError, RuntimeError) as exc:
@@ -2721,6 +2942,10 @@ def _escalate_to_human(
 
 _CODEX_REVIEW_VERBS = frozenset({"/review", "/code-review"})
 _COMMIT_SHA = re.compile(r"[0-9a-fA-F]{7,64}")
+_EXPLICIT_PR_REVIEW = re.compile(
+    r"^HEAD (?P<head>[0-9a-fA-F]{7,64}) of PR (?P<pr>[1-9][0-9]*) "
+    r"against origin/(?P<base>[A-Za-z0-9][A-Za-z0-9._/-]*)$"
+)
 
 
 def _codex_default_review_base(cwd: str | None) -> str | None:
@@ -2759,6 +2984,16 @@ def _codex_review_target(
         target = f"baseBranch:{default_base}" if default_base else None
         return target, False
     remainder = parts[1].strip()
+    explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(remainder)
+    if explicit_pr:
+        # The PR/HEAD identity remains in the raw payload for the author and
+        # audit trail. Codex review/start receives the PR's explicit base scope,
+        # which is the diff it must inspect rather than its ambient cwd.
+        return f"baseBranch:origin/{explicit_pr.group('base')}", False
+    if remainder.startswith("HEAD "):
+        # A malformed explicit target must not fall through to
+        # uncommittedChanges, which would review a different diff.
+        return None, False
     base = remainder.split()
     if base[0] == "--base":
         # A named base is an explicit scope request: a malformed form (dangling
@@ -2784,6 +3019,8 @@ def _raw_send(
     self_ok: bool,
     check: bool = False,
     style_exception: Optional[str] = None,
+    review_request: bool = False,
+    origin: Optional[str] = None,
 ) -> None:
     """``fno agents mail send --raw``: fire a verb in a peer by injecting ``payload``
     UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
@@ -2885,8 +3122,13 @@ def _raw_send(
     # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
     #    resolution (a registry this fno cannot read) is not a miss: it is the
     #    unmeasurable answer, kept apart from "resolved, and there is no path".
+    lookup_name = name
+    if self_ok:
+        from fno.agents.self_stamp import resolve_self_session_id
+
+        lookup_name = resolve_self_session_id() or name
     try:
-        entry = resolve_agent(name).entry
+        entry = resolve_agent(lookup_name).entry
     except AgentResolutionError as exc:
         if exc.unavailable:
             _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
@@ -3055,13 +3297,14 @@ def _raw_send(
                 )
             assert target is not None
             raw_msg_id, reservation, authored_words = _reserve_raw()
-            receipt = _review_start_codex(
-                session_id,
-                target,
-                audit_payload=stripped[:512],
-                audit_sender=transport_sender,
-                audit_target_cwd=getattr(entry, "cwd", None),
-            )
+            review_kwargs = {
+                "audit_payload": stripped[:512],
+                "audit_sender": transport_sender,
+                "audit_target_cwd": getattr(entry, "cwd", None),
+            }
+            if origin is not None:
+                review_kwargs["origin"] = origin
+            receipt = _review_start_codex(session_id, target, **review_kwargs)
             if receipt.get("delivered"):
                 _record_raw(raw_msg_id, authored_words)
                 note = " (unrecognized remainder ignored)" if ignored_remainder else ""
@@ -3178,6 +3421,7 @@ def _raw_send(
             guarded=False,
             confirm=True,
             sender=transport_sender,
+            origin=origin,
             # raw: this lane exists to make the REPL slash parser fire, which an
             # envelope defeats.
             raw=True,
@@ -3189,12 +3433,14 @@ def _raw_send(
             # wall's default, the verb never runs, and codex has no transcript
             # confirm, so the receipt still reads `injected`.
             gate=True,
+            review=review_request,
         )
     else:  # claude control.sock - the only other keystroke lane
         delivered = _mail_inject_claude(
             session_id,
             stripped,
             sender=transport_sender,
+            origin=origin,
         )
 
     # 8. Four-state receipt (never a boolean; never a durable write).
@@ -3211,8 +3457,11 @@ def _raw_send(
     # the advice, the same shape the unconfirmed branch below already uses. The
     # advice survives as retrospective ("would have"), which is what it is:
     # nothing here is actionable for the send that just happened.
-    if delivered:
+    if delivered is True or delivered in {"started", "queued"}:
         _record_raw(raw_msg_id, authored_words)
+        if review_request and isinstance(delivered, str):
+            print(delivered)
+            raise typer.Exit(code=0)
         note = ""
         if stripped == "/compact":
             note = (
@@ -3221,6 +3470,12 @@ def _raw_send(
                 "at ~100% context has no headroom left to summarize."
             )
         print(f"injected.{note}" if note else "injected")
+        raise typer.Exit(code=0)
+    if review_request and delivered == "unconfirmed":
+        print(
+            "unconfirmed (review request was not positively classified; do not retry blindly)",
+            file=sys.stderr,
+        )
         raise typer.Exit(code=0)
     # not-confirmed: the transport returns one bool for two different worlds --
     # poll-budget exhaustion on a paste that DID land, and a clean send failure
@@ -3270,6 +3525,20 @@ def cmd_send(
             "Identity advertised in the envelope (must be XML-attribute-safe). "
             "Unset defaults to 'fno' for an agent send, or the working "
             "dir's project for an inbox-kind send."
+        ),
+    ),
+    origin: str | None = typer.Option(
+        None,
+        "--origin",
+        hidden=True,
+        help="Stamped machine mail origin: operator, peer, scheduler, or recovery.",
+    ),
+    ruling: str | None = typer.Option(
+        None,
+        "--ruling",
+        help=(
+            "Append this authored message to the governed node's details as a "
+            "dated ruling block before named-worker transport."
         ),
     ),
     from_self: bool = typer.Option(
@@ -3427,7 +3696,43 @@ def cmd_send(
 
     refuse_retired_provider(_provider_tombstone)
 
+    if ruling is not None:
+        if raw or kind is not None or to_project is not None or to_self:
+            print(
+                "error: --ruling supports only send <worker> <message>; drop "
+                "--raw, --kind, --to-project, or --to-self",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if not name or message is None or _is_job_name(name):
+            print(
+                "error: --ruling supports only send <worker> <message>",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
+
+    try:
+        classified_origin = classify_origin(origin)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        raise typer.Exit(code=2) from exc
+    _record_mail_origin(
+        origin=classified_origin,
+        lane="raw" if raw else "inbox" if kind is not None else "project" if to_project else "peer",
+        sender=from_name,
+        # Under --to-self the positional parks the payload, so `name` is not
+        # a handle at this point; recording it wrote the payload into the
+        # audit row. The self target resolves below.
+        target_session=name if raw and not to_self else None,
+    )
+    # Unknown is an explicit audit result, not a wire authority. Legacy
+    # carriers omit the attribute so a law gate cannot mistake silence for an
+    # operator origin.
+    mail_origin: str | None = (
+        None if classified_origin == "unknown" else classified_origin
+    )
 
     # --to-self: the recipient is THIS session, derived from ambient identity, so
     # the positional parks the payload (positional #1) exactly as under
@@ -3536,6 +3841,7 @@ def cmd_send(
             self_ok=to_self,
             check=check,
             style_exception=style_exception,
+            origin=mail_origin,
         )
         return
     if check:
@@ -3755,6 +4061,7 @@ def cmd_send(
                 refs=refs or None,
                 msg_id=msg_id,
                 word_count=authored_words,
+                origin=mail_origin,
             )
         except ValueError as exc:
             _release_budget(reservation)
@@ -3820,6 +4127,7 @@ def cmd_send(
                 provider=harness,
                 cwd=workdir,
                 from_name=stamp_from(from_name),
+                origin=mail_origin,
                 any_=any_live,
                 budget_enforce=_budget_enforced(
                     content, allow_reason=style_exception
@@ -3892,6 +4200,7 @@ def cmd_send(
                 name,
                 from_name=stamp_from(from_name),
                 style_exception=style_exception,
+                origin=mail_origin,
             )
             return
 
@@ -3907,6 +4216,10 @@ def cmd_send(
     _refuse_forged_envelope(message)
     _enforce_body_cap(message)
     _enforce_style(message, allow_reason=style_exception)
+
+    if ruling is not None:
+        ruling_graph = _ruling_graph_path(workdir) if cwd else paths.graph_json()
+        _append_ruling_to_node(ruling, message, graph_path=ruling_graph)
 
     # --force routes into the shared name-lane choke point with the ladder
     # skipped. Intercepted here rather than threaded through `dispatch_send`
@@ -3930,6 +4243,7 @@ def cmd_send(
                 provider=harness,
                 style_exception=style_exception,
                 force=True,
+                origin=mail_origin,
             )
         except AmbiguousTokenError as amb:
             # Discovery is liveness-gated, so a registered worker whose listing
@@ -3976,6 +4290,7 @@ def cmd_send(
             provider=harness,
             cwd=workdir,
             from_name=stamp_from(from_name),
+            origin=mail_origin,
             budget_enforce=_budget_enforced(
                 message, allow_reason=style_exception
             ),
@@ -4014,6 +4329,7 @@ def cmd_send(
                 from_name=from_name,
                 resolved=resolved,
                 style_exception=style_exception,
+                origin=mail_origin,
             )
             return
 
@@ -4043,6 +4359,7 @@ def cmd_send(
                 resolved=None,
                 token=name,
                 style_exception=style_exception,
+                origin=mail_origin,
             )
         except AmbiguousTokenError as amb:
             print(
@@ -4740,7 +5057,6 @@ def cmd_drain_self(
     from fno.bus.cursor import advance_cursor, scan_unread
     from fno.agents.self_stamp import IdentityAmbiguousError, require_self_identity
     from fno.harness_identity import canonical_handle, legacy_suffix_handle, session_identity_key
-    from fno.mail.envelope import FNO_MAIL_TRAILER
 
     try:
         ident = require_self_identity()
@@ -4811,25 +5127,23 @@ def cmd_drain_self(
     # A live-injected send stores the full paired envelope durably (body
     # ends `...trailer\n</fno_mail>`), so recognizing "already stamped"
     # needs both shapes: the bare trailer, and the trailer immediately
-    # before a terminal close tag.
-    _trailer_then_close = f"{FNO_MAIL_TRAILER}\n</fno_mail>"
+    # before a terminal close tag. The trailer comes from the record's own
+    # origin field (d-b2dbf5ad): gated at write time by classify_origin,
+    # trustworthy at drain time. A forged trailer in the body never
+    # suppresses the stamp - only the record's exact trailer dedups, and a
+    # mismatch gets the real one appended beneath it.
+    from fno.mail.envelope import render_body_with_record_trailer
 
-    def _render_body(body: str) -> str:
-        # A durable heads-up body is sender-controlled, so a plain `in`
-        # check is satisfiable by embedding the trailer text mid-body and
-        # placing an outward-action instruction after it: the render would
-        # then treat the body as already stamped and skip the real
-        # terminal trailer. Require the stripped body to END with it.
-        text = body.rstrip("\n")
-        if text.endswith(FNO_MAIL_TRAILER) or text.endswith(_trailer_then_close):
-            return text
-        return f"{text}\n{FNO_MAIL_TRAILER}"
+    def _render_body(m) -> str:
+        return render_body_with_record_trailer(
+            m.body, getattr(m, "origin", None)
+        )
 
     if json_out:
         out = [
             {
                 "id": m.id, "from": m.from_, "to": m.to,
-                "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
+                "kind": m.kind, "ts": m.ts, "body": _render_body(m),
             }
             for m in to_print
         ]
@@ -4837,7 +5151,7 @@ def cmd_drain_self(
             out.append(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
-                    "kind": m.kind, "ts": m.ts, "body": _render_body(m.body),
+                    "kind": m.kind, "ts": m.ts, "body": _render_body(m),
                     "job": job_addr or "",
                 }
             )
@@ -4847,12 +5161,12 @@ def cmd_drain_self(
             print(f"[fno agents mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m.body))
+                print(_render_body(m))
         if job_to_print:
             print(f"\n[fno agents mail] {len(job_to_print)} job message(s) for {job_addr}:")
             for m in job_to_print:
                 print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-                print(_render_body(m.body))
+                print(_render_body(m))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.

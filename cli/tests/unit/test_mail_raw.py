@@ -70,7 +70,7 @@ def _seed_claude(mailbox, monkeypatch):
     injected = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",
-        lambda s, t, sender=None: injected.append((s, t, sender)) or True,
+        lambda s, t, sender=None, **_kwargs: injected.append((s, t, sender)) or True,
     )
     return injected
 
@@ -272,6 +272,32 @@ def test_raw_maps_explicit_codex_review_targets(
     assert exc.value.exit_code == 0
     assert calls == [(SID_CODEX, target)]
     assert f"target={target}" in capsys.readouterr().out
+
+
+def test_raw_maps_named_pr_head_review_to_the_pr_base(
+    mailbox, monkeypatch, capsys
+):
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    calls = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *args, **kwargs: calls.append((args, kwargs))
+        or {
+            "delivered": True,
+            "turn_id": "turn-pr",
+            "review_thread_id": "review-pr",
+        },
+    )
+    payload = "/review HEAD abc1234 of PR 123 against origin/main"
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", payload, self_ok=False)
+
+    assert exc.value.exit_code == 0
+    assert calls[0][0][1] == "baseBranch:origin/main"
+    assert calls[0][1]["audit_payload"] == payload
+    assert "target=baseBranch:origin/main" in capsys.readouterr().out
 
 
 def test_raw_bare_codex_review_requires_a_resolvable_default_base(
@@ -999,7 +1025,8 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     from fno.mail.cli import _raw_send
 
     monkeypatch.setattr(
-        "fno.agents.dispatch._mail_inject_claude", lambda s, t, sender=None: False
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda s, t, sender=None, **_kwargs: False,
     )
     register_existing_session(
         provider="claude", session_id=SID_CLAUDE, cwd=str(mailbox), name="claudepeer"

@@ -86,6 +86,18 @@ def test_promote_rejects_invalid_priority_override(tmp_path: Path) -> None:
     assert f"- [ ] {item['id']}" in inbox.read_text(encoding="utf-8")
 
 
+def test_promote_p0_requires_blocks_everything_ack(tmp_path: Path) -> None:
+    """AC9-ERR: capture promotion cannot mint an unacknowledged p0."""
+    from fno.backlog.capture import promote_item, InboxValidationError
+
+    item = _seed_item(tmp_path, priority="p0")
+    inbox = tmp_path / "inbox.md"
+    gp = tmp_path / "graph.json"
+    with pytest.raises(InboxValidationError, match="p0 blocks everything else"):
+        promote_item(inbox, item["id"], graph_path=gp)
+    assert not gp.exists() or '"priority": "p0"' not in gp.read_text(encoding="utf-8")
+
+
 def test_promote_unknown_id_raises(tmp_path: Path) -> None:
     """AC4-ERR: unknown fu-id is rejected."""
     from fno.backlog.capture import promote_item, InboxValidationError

@@ -368,7 +368,11 @@ def run_verify_merged(
     # not-green without the misleading "failing" label. Judging pending here
     # would make verify refuse what `fno do pr merge` merges.
     if _auto_merge().require_checks_pass:
-        failing = _failing_required(pr_json.get("statusCheckRollup") or [])
+        from fno.pr._status import without_coverage_statuses
+
+        failing = _failing_required(
+            without_coverage_statuses(pr_json.get("statusCheckRollup") or [])
+        )
         if failing:
             failing_csv = ",".join(failing)
             _emit_audit(
@@ -377,6 +381,29 @@ def run_verify_merged(
             )
             sys.stdout.write(f"required_checks_failing: {failing_csv}\n")
             return 1
+
+    # The coverage gate the unfiltered rollup enforced accidentally: filtering
+    # the projections out of the checks precondition removed the only local
+    # refusal an uncovered PR had on this path, and the server-side ruleset is
+    # an opt-in operator step a fresh install has not applied. The merge
+    # verb's own gate, not a second truth table; no review lane configured
+    # reads COVERED inside the gate itself.
+    from fno.pr import _coverage_gate
+
+    gate_state, gate_refusal, _gate_head, gate_note = _coverage_gate.coverage_verdict(
+        int(pr_number), repo, recompute=True
+    )
+    if gate_state != _coverage_gate.COVERED:
+        line = _coverage_gate.refusal_line(gate_refusal, gate_note)
+        _emit_audit(
+            repo_root,
+            state_file,
+            pr_number,
+            "coverage_gate_refused",
+            {"line": line},
+        )
+        sys.stdout.write(f"coverage_gate_refused: {line}\n")
+        return 1
 
     # All preconditions clean.
     if remediation == "verify_only":
@@ -397,13 +424,17 @@ def run_verify_merged(
 
 
 def _failing_required(rollup: Sequence[dict]) -> List[str]:
-    """Failing checks (whole rollup), classified by the SAME truth table the
-    merge verb uses - a second hand-built state table is how verify ends up
-    refusing what `fno do pr merge` merges (round 12). _latest_per_name drops
-    superseded runs; _classify reads pass/fail/pending with the shared
-    semantics (a REQUESTED or empty-conclusion check is pending, not failing).
-    No isRequired filter - `gh pr view` never emits that key (see
-    _merge._checks_verdict), so with require_checks_pass every check counts."""
+    """Failing checks, classified by the SAME truth table the merge verb uses -
+    a second hand-built state table is how verify ends up refusing what
+    `fno do pr merge` merges (round 12). Callers pass the rollup through
+    `without_coverage_statuses`, so the coverage projections the merge verb's
+    covered path ignores are ignored here too; a stale coverage FAILURE beside
+    a flipped-covered row must not read as required_checks_failing.
+    _latest_per_name drops superseded runs; _classify reads pass/fail/pending
+    with the shared semantics (a REQUESTED or empty-conclusion check is
+    pending, not failing). No isRequired filter - `gh pr view` never emits
+    that key (see _merge._checks_verdict), so with require_checks_pass every
+    check counts."""
     from fno.pr._status import _classify, _latest_per_name
 
     failing: List[str] = []
@@ -489,8 +520,18 @@ def _bounded_remediation(
 
     if auto_merge.require_checks_pass:
         try:
+            from fno.pr import _reviews as _reviews_mod
+
+            # The SECOND merge path (a guard on one of N reachable paths is
+            # decorative): the do-merge path ignores the coverage projections
+            # it published itself, and the remediation merge must agree, or a
+            # pending diagnostic holds a covered PR here while bef2c16's fix
+            # lets the same PR through there. The ruleset still enforces the
+            # required context server-side.
             verdict, _counts, head_read = _merge_mod._checks_verdict(
-                int(pr_number), cwd
+                int(pr_number),
+                cwd,
+                ignore_contexts=tuple(_reviews_mod.COVERAGE_STATUS_CONTEXTS),
             )
         except ToolMissing:
             # _checks_verdict deliberately propagates it (the module contract

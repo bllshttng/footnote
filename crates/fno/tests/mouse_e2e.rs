@@ -279,6 +279,95 @@ fn mouse_click_off_a_url_opens_nothing_and_a_drag_still_copies() {
     );
 }
 
+// -- v56, hover affordance: the lookup reaches the requester only -------------
+
+#[test]
+fn hover_link_lookup_returns_the_span_to_the_requester_only() {
+    let scratch = Scratch::new("hover-link");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
+
+    a.wait_prompt(pane);
+    // "link " is 5 chars, so the URL occupies cols 5..=35.
+    let row = echo_line(&mut a, pane, "link https://example.com/pr/700 end");
+
+    // Positive: a probe over the URL answers its whole visible span.
+    a.link_hover(pane, row, 10, 1);
+    let (_, _, cells) = a.wait(10, "hover span", |c| c.link_hovers.first().cloned());
+    assert_eq!(
+        cells.first(),
+        Some(&(row, 5)),
+        "the span starts at the URL's first cell"
+    );
+    assert_eq!(cells.len(), 26, "https://example.com/pr/700 is 26 cells");
+    assert!(cells.contains(&(row, 30)) && !cells.contains(&(row, 4)));
+
+    // Negative with a positive control in the same fixture: the "link" word
+    // answers EMPTY cells (a miss clears the underline, it never wedges).
+    a.link_hover(pane, row, 2, 2);
+    let (_, _, miss) = a.wait(10, "hover miss", |c| {
+        c.link_hovers.iter().find(|(_, s, _)| *s == 2).cloned()
+    });
+    assert!(
+        miss.is_empty(),
+        "a non-link cell answers no cells: {miss:?}"
+    );
+
+    // Same causal barrier the click test uses: a (buggy) broadcast would have
+    // arrived before this marker frame on b's ordered socket.
+    a.input(b"echo no-stray-hover#\r");
+    b.wait_pane_text(15, pane, |t| t.contains("no-stray-hover#"));
+    assert!(
+        b.link_hovers.is_empty(),
+        "the hover span must reach the requester only; b got {:?}",
+        b.link_hovers
+    );
+}
+
+#[test]
+fn hover_link_refuses_a_pane_whose_app_owns_the_mouse() {
+    // The click-ownership rule, applied to the affordance: once the pane's
+    // app negotiated mouse reporting, its grid interaction belongs to the
+    // app and the mux offers no hover affordance over it. Positive control
+    // FIRST (same fixture, same cell): before the app takes the mouse, the
+    // probe answers a span - so the refusal is the ownership verdict, not a
+    // dead lookup.
+    let scratch = Scratch::new("hover-mouse");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    a.wait_prompt(pane);
+    let row = echo_line(&mut a, pane, "link https://example.com/pr/700 end");
+
+    a.link_hover(pane, row, 10, 1);
+    let (_, _, before) = a.wait(10, "span before", |c| c.link_hovers.first().cloned());
+    assert!(!before.is_empty(), "control: the same cell yields a span");
+
+    // Take the mouse in-app (?1000 clicks + ?1006 SGR), then re-probe. Key on
+    // the printf's OUTPUT line (echo_line's trick), not a prompt: the screen
+    // already ends in a prompt, so a prompt wait returns on the stale
+    // pre-printf frame. The output marker only exists after the escapes were
+    // parsed.
+    a.input(b"printf '\\033[?1000h\\033[?1006h'; echo mouse-on#\r");
+    a.wait_pane_text(15, pane, |t| t.lines().any(|l| l.starts_with("mouse-on#")));
+    a.link_hover(pane, row, 10, 2);
+    let (_, _, after) = a.wait(10, "span after", |c| {
+        c.link_hovers.iter().find(|(_, s, _)| *s == 2).cloned()
+    });
+    assert!(after.is_empty(), "an app-owned grid answers no hover cells");
+}
+
 // -- AC2-HP: drag + release auto-copies to the initiating client only ---------
 
 #[test]

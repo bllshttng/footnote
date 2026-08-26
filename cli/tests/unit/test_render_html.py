@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from fno.graph.render_html import (
     UNSCOPED_LABEL,
     _project_color,
@@ -108,17 +110,56 @@ def test_render_html_columns_are_collapsible_details(tmp_path: Path):
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
     text = out.read_text()
-    # All columns render as <details class="col col-...">, incl. Triage.
-    for col_lower in ("now", "next", "later", "triage", "done"):
-        assert f'class="col col-{col_lower}"' in text
-        assert f'data-col="{col_lower.capitalize()}"' in text
+    # All columns render as collapsible details with slugged CSS classes.
+    for col, col_class in (
+        ("In Progress", "in-progress"),
+        ("Now", "now"),
+        ("Next", "next"),
+        ("Later", "later"),
+        ("Triage", "triage"),
+        ("Done", "done"),
+    ):
+        assert f'class="col col-{col_class}"' in text
+        assert f'data-col="{col}"' in text
     # Done + Triage ship CLOSED by default; others ship OPEN.
     assert '<details class="col col-done" data-col="Done">' in text
     assert '<details class="col col-triage" data-col="Triage">' in text
+    assert '<details class="col col-in-progress" data-col="In Progress" open>' in text
     assert '<details class="col col-now" data-col="Now" open>' in text
     # localStorage persistence key + capture-phase toggle listener present.
     assert "fno-kanban-col-state" in text
     assert "addEventListener('toggle'" in text
+
+
+def test_render_html_separates_active_and_status_only_done(tmp_path: Path):
+    entries = [
+        _entry("active", title="ActiveCard", status="in_progress", priority="p3"),
+        _entry(
+            "done",
+            title="DoneCard",
+            status="done",
+            priority="p1",
+            pr_url="https://github.com/acme/widgets/pull/7",
+        ),
+        _entry(
+            "timestamped-done",
+            title="TimestampedDoneCard",
+            status="done",
+            completed_at="2026-08-25T00:00:00Z",
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    active_body = text.split('data-col="In Progress"', 1)[1].split("</details>", 1)[0]
+    done_body = text.split('data-col="Done"', 1)[1].split("</details>", 1)[0]
+    assert 'class="col col-in-progress"' in text
+    assert "ActiveCard" in active_body
+    assert "DoneCard" in done_body
+    assert "https://github.com/acme/widgets/pull/7" in done_body
+    assert "DoneCard" not in active_body
 
 
 def test_render_html_basic(tmp_path: Path):
@@ -139,14 +180,12 @@ def test_render_html_basic(tmp_path: Path):
     assert "<html" in text
     assert "ab-aaaa1111" in text
     assert "ab-bbbb2222" in text
-    # 3 section-level <details> (master + 2 projects) + 5 column-level
-    # <details> inside each (Now/Next/Later/Triage/Done) = 3 + 3*5 = 18 total.
-    assert text.count("<details ") == 18
+    # 3 section-level details plus 6 columns inside each section.
+    assert text.count("<details ") == 21
     assert ">alpha<" in text and ">beta<" in text
     # Master section is a <details> with id="master" so JS can collapse on mobile.
     assert 'id="master"' in text
-    # All four columns rendered in the master board.
-    for col in ("Now", "Next", "Later", "Done"):
+    for col in ("In Progress", "Now", "Next", "Later", "Triage", "Done"):
         assert f">{col} <" in text
 
 
@@ -214,7 +253,7 @@ def test_render_html_emits_copy_button_with_data_copy_attr(tmp_path: Path):
     assert 'aria-label="Copy ab-cccc9999 to clipboard"' in text
     # JS handler is present.
     assert "navigator.clipboard" in text
-    assert ".eid[data-copy]" in text
+    assert "[data-copy]" in text
 
 
 def test_obsidian_url_non_markdown_path_returns_none():
@@ -278,10 +317,10 @@ def test_render_html_mobile_viewport_and_breakpoint(tmp_path: Path):
     # Without the viewport meta tag, mobile browsers render at desktop width.
     assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in text
     # Mobile-first: cols default to one-column; desktop breakpoint upgrades to
-    # one track per column (len(COLUMNS), now 5 with Triage).
+    # one track per column (len(COLUMNS), now 6 with In Progress).
     assert ".cols { display: grid; grid-template-columns: 1fr;" in text
     assert "@media (min-width: 768px)" in text
-    assert "grid-template-columns: repeat(5, 1fr)" in text
+    assert "grid-template-columns: repeat(6, 1fr)" in text
     # The grid count is derived from COLUMNS, not hardcoded - no stale token.
     assert "__NCOLS__" not in text
 
@@ -296,7 +335,7 @@ def test_render_html_done_hidden_default(tmp_path: Path):
     text = out.read_text()
     # Done <details> rendered WITHOUT the `open` attribute so it starts collapsed.
     assert '<details class="col col-done" data-col="Done">' in text
-    # Other columns (Now/Next/Later) ship with `open`.
+    # Active and priority columns ship with `open`.
     assert '<details class="col col-now" data-col="Now" open>' in text
 
 
@@ -617,3 +656,102 @@ def test_html_render_does_not_need_claims_for_status_placement(tmp_path: Path):
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)
     assert out.exists()
+
+
+def test_load_render_entries_uses_canonical_reader_and_archive_overlay(monkeypatch):
+    import fno.graph.store as store
+    from fno.graph.render_html import load_render_entries
+
+    calls: list[str] = []
+    live = [{"id": "x-live", "title": "live"}]
+    archive = [{"id": "x-archive", "title": "archive"}]
+    monkeypatch.setattr(
+        store,
+        "read_graph_with_archive",
+        lambda: calls.extend(["read_graph", "entries_with_archive"])
+        or [*live, *archive],
+    )
+
+    rows = load_render_entries()
+
+    assert calls == ["read_graph", "entries_with_archive"]
+    assert [row["id"] for row in rows] == ["x-live", "x-archive"]
+
+
+def test_local_card_renders_details_relationships_and_literal_copy_payloads(
+    tmp_path: Path, monkeypatch
+):
+    import fno.graph.render_html as rh
+
+    monkeypatch.setattr(rh, "_load_obsidian_vault", lambda: "c3po")
+    plan = "/Users/bb16/c3po/internal/fno/plans/private-plan.md"
+    entries = [
+        _entry(
+            "x-main",
+            title="Main marker",
+            project="fno",
+            details="  private   details\nwith whitespace ",
+            blocked_by=["x-blocker"],
+            plan_path=plan,
+        ),
+        _entry("x-blocker", title="Blocker marker", project="fno"),
+        _entry(
+            "x-successor",
+            title="Successor marker",
+            project="fno",
+            blocked_by=["x-main"],
+        ),
+    ]
+    out = tmp_path / "graph.html"
+
+    render_graph_html(entries, out)
+
+    body = out.read_text()
+    obsidian = "obsidian://open?vault=c3po&file=internal/fno/plans/private-plan"
+    assert "private details with whitespace" in body
+    assert "x-blocker (Blocker marker)" in body
+    assert "x-successor (Successor marker)" in body
+    assert plan in body
+    assert f'data-copy="{plan}"' in body
+    assert f'data-copy="{obsidian.replace("&", "&amp;")}"' in body
+    assert f'href="{obsidian.replace("&", "&amp;")}"' in body
+    assert "[data-copy]" in body
+
+
+def test_roadmap_public_delegates_html_card_authoring_to_renderer():
+    import inspect
+    from fno.graph import roadmap_public
+
+    source = inspect.getsource(roadmap_public)
+    assert "def _public_card_html" not in source
+    assert "render_public_sections_html" in source
+
+
+def test_renderer_modules_do_not_open_or_parse_graph_json_directly():
+    import ast
+    import inspect
+    from fno.graph import render_html, roadmap_public
+
+    for module in (render_html, roadmap_public):
+        source = inspect.getsource(module)
+        tree = ast.parse(source)
+        assert not any(
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            and any(alias.name == "json" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        assert not any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "open"
+            for node in ast.walk(tree)
+        )
+
+
+@pytest.mark.parametrize("title", ["PR-657 renderer fix", "PR-48 guard repair"])
+def test_public_title_gate_catches_hyphenated_pr_references(title):
+    from fno.graph.render_html import public_title_leaks
+
+    offenders = public_title_leaks([{"id": "x-test", "title": title}])
+
+    assert offenders == [("x-test", title, ("pr-reference",))]

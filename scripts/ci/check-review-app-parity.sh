@@ -8,7 +8,7 @@
 #
 #   - Rust  : BOT_PROFILES              in crates/fno-agents/src/loopcheck.rs
 #             (the gate's review classifier, refusal detection, nudging)
-#   - Python: _OPTIONAL_BOTS            in cli/src/fno/pr/_reviews.py
+#   - Python: DEFAULT_OPTIONAL_APPS            in cli/src/fno/pr/_reviews.py
 #             (the optional-review signal on `fno do pr status`)
 #   - Python: _KNOWN_REVIEW_APP_LOGINS  in cli/src/fno/review_capability.py
 #             (the init capability refusal: an unknown configured app is a typo)
@@ -35,7 +35,7 @@
 #
 # Flags:
 #   --rust-file PATH           override the Rust source    (default: canonical)
-#   --optional-file PATH       override _OPTIONAL_BOTS src (default: canonical)
+#   --optional-file PATH       override DEFAULT_OPTIONAL_APPS src (default: canonical)
 #   --capability-file PATH     override _KNOWN_REVIEW_APP_LOGINS src
 #   --selftest                 run built-in fixtures proving the check detects
 #                              match / added-login / drifted-login / no-markers
@@ -46,7 +46,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 RUST_FILE="${REPO_ROOT}/crates/fno-agents/src/loopcheck.rs"
-OPTIONAL_FILE="${REPO_ROOT}/cli/src/fno/pr/_reviews.py"
+OPTIONAL_FILE="${REPO_ROOT}/cli/src/fno/config/__init__.py"
 CAPABILITY_FILE="${REPO_ROOT}/cli/src/fno/review_capability.py"
 SELFTEST=0
 
@@ -177,11 +177,11 @@ def extract_rust(src, path):
 
 
 rust_src = read(rust_path, "Rust")
-optional_src = read(optional_path, "_OPTIONAL_BOTS")
+optional_src = read(optional_path, "DEFAULT_OPTIONAL_APPS")
 capability_src = read(capability_path, "_KNOWN_REVIEW_APP_LOGINS")
 
 rust = extract_rust(rust_src, rust_path)
-optional = extract_string_container(optional_src, optional_path, "_OPTIONAL_BOTS", "_OPTIONAL_BOTS")
+optional = extract_string_container(optional_src, optional_path, "DEFAULT_OPTIONAL_APPS", "DEFAULT_OPTIONAL_APPS")
 capability = extract_string_container(capability_src, capability_path, "_KNOWN_REVIEW_APP_LOGINS", "_KNOWN_REVIEW_APP_LOGINS")
 
 if not rust:
@@ -193,7 +193,7 @@ for login in logins:
     if login not in rust:
         problems.append(f"  {login}: in Python, missing from Rust BOT_PROFILES")
     if login not in optional:
-        problems.append(f"  {login}: in Rust, missing from Python _OPTIONAL_BOTS")
+        problems.append(f"  {login}: in Rust, missing from Python DEFAULT_OPTIONAL_APPS")
     if login not in capability:
         problems.append(f"  {login}: in Rust, missing from Python _KNOWN_REVIEW_APP_LOGINS")
 
@@ -202,7 +202,7 @@ if problems:
     print("\n".join(problems), file=sys.stderr)
     print(
         f"  Rust  : BOT_PROFILES in {rust_path}\n"
-        f"  Python: _OPTIONAL_BOTS in {optional_path}\n"
+        f"  Python: DEFAULT_OPTIONAL_APPS in {optional_path}\n"
         f"  Python: _KNOWN_REVIEW_APP_LOGINS in {capability_path}\n"
         "  A login on only one side is an App one path honors and another cannot "
         "explain (a bot the gate sees but `fno do pr status` does not, or vice versa).",
@@ -248,7 +248,7 @@ EOF
 
     _optional() { # file, extra-login-or-empty
         cat > "$1" <<EOF
-_OPTIONAL_BOTS = ("gemini-code-assist", "chatgpt-codex-connector"$2)
+DEFAULT_OPTIONAL_APPS = ("gemini-code-assist", "chatgpt-codex-connector"$2)
 EOF
     }
 
@@ -292,7 +292,7 @@ EOF
 
     # extra login on python optional side
     _optional "$tmp/o2.py" ', "stray-bot"'
-    _case "extra login in _OPTIONAL_BOTS" 1 "$tmp/r.rs" "$tmp/o2.py" "$tmp/c.py"
+    _case "extra login in DEFAULT_OPTIONAL_APPS" 1 "$tmp/r.rs" "$tmp/o2.py" "$tmp/c.py"
 
     # extra login on rust side only
     _rust "$tmp/r3.rs" 2>/dev/null || true
@@ -301,9 +301,9 @@ EOF
     _optional "$tmp/o3.py" ', "chatgpt-codex-connector"'
     # build optional with only codex (drops gemini) -> rust has gemini, optional lacks
     cat > "$tmp/o3.py" <<'EOF'
-_OPTIONAL_BOTS = ("chatgpt-codex-connector",)
+DEFAULT_OPTIONAL_APPS = ("chatgpt-codex-connector",)
 EOF
-    _case "login missing from _OPTIONAL_BOTS" 1 "$tmp/r.rs" "$tmp/o3.py" "$tmp/c.py"
+    _case "login missing from DEFAULT_OPTIONAL_APPS" 1 "$tmp/r.rs" "$tmp/o3.py" "$tmp/c.py"
 
     # capability missing a login
     cat > "$tmp/c4.py" <<'EOF'

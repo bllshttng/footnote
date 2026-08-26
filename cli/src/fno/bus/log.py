@@ -116,6 +116,11 @@ class Envelope:
     # The send lane supplies it so the row, Rule 7, and the rolling budget all
     # carry the count of the SAME string -- the raw body, not the wire wrapper.
     word_count: Optional[int] = None
+    # Provenance axis for the authority trailer (ruling d-b328d8c4): the drain
+    # render stamps mail_trailer(origin) from the record itself, never from
+    # body text. Additive: a row written before this field existed reads back
+    # through the legacy meta fallback and renders with the peer trailer.
+    origin: Optional[str] = None
 
     @classmethod
     def new(
@@ -138,6 +143,7 @@ class Envelope:
         from_model: Optional[str] = None,
         to_kind: Optional[str] = None,
         word_count: Optional[int] = None,
+        origin: Optional[str] = None,
     ) -> "Envelope":
         mid = id or new_msg_id()
         return cls(
@@ -158,6 +164,7 @@ class Envelope:
             from_model=from_model,
             to_kind=to_kind,
             word_count=word_count,
+            origin=origin,
         )
 
 
@@ -175,7 +182,7 @@ def _now_iso() -> str:
 _ALWAYS = ("v", "id", "ts", "thread", "from", "to", "kind")
 _OPTIONAL = (
     "provider_from", "provider_to", "request_id", "in_reply_to", "delivery",
-    "from_session", "from_model", "to_kind", "word_count", "meta",
+    "from_session", "from_model", "to_kind", "word_count", "origin", "meta",
 )
 
 
@@ -210,6 +217,8 @@ def to_json_line(env: Envelope) -> str:
         obj["from_model"] = env.from_model
     if env.to_kind:
         obj["to_kind"] = env.to_kind
+    if env.origin:
+        obj["origin"] = env.origin
     # `is not None`, not truthiness: a genuine zero-word body (a pasted log
     # masks to nothing) must serialize as 0, not vanish and read back as legacy.
     if env.word_count is not None:
@@ -248,6 +257,10 @@ def from_json_line(line: str) -> Envelope:
         from_model=obj.get("from_model"),
         to_kind=obj.get("to_kind"),
         word_count=_wc if isinstance((_wc := obj.get("word_count")), int) else None,
+        # Legacy rows carried origin inside meta only; prefer the field, fall
+        # back to meta so pre-existing lines still render their provenance.
+        origin=obj.get("origin")
+        or (_meta.get("origin") if isinstance(_meta, dict) else None),
     )
 
 

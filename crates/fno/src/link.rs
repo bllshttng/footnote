@@ -214,13 +214,14 @@ where
 /// The real exec. One argv element for the URL, no shell, stdio detached so a
 /// chatty `xdg-open` cannot scribble over the client's alternate screen.
 fn spawn_opener(opener: &str, url: &str) -> Result<std::process::ExitStatus, std::io::Error> {
-    use std::process::{Command, Stdio};
-    Command::new(opener)
+    use std::process::Stdio;
+    let mut command = crate::process_admission::std_command(opener);
+    command
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
+        .stderr(Stdio::null());
+    crate::process_admission::std_status(&mut command)
 }
 
 // ── open plan (LD3) ─────────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ Verified facts (2026-07-13):
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from copy import deepcopy
 from importlib.resources import files
@@ -143,10 +144,14 @@ _RESPONSE_ACTIONS = {"allow_once", "allow_always", "deny"}
 _SESSION_LANES = {
     "interactive_create",
     "interactive_resume",
+    "interactive_attach",
     "headless_create",
     "headless_resume",
 }
 _RESUME_KINDS = {"flag", "subcommand", "session_flag", "unsupported"}
+_MODEL_SWITCH_KINDS = {"direct", "menu_walk", "unsupported"}
+_MODEL_SWITCH_PLACEHOLDERS = {"model", "effort", "effort_label"}
+_MODEL_SWITCH_EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 _KEY_TOKENS = {
     *(str(i) for i in range(1, 10)),
     "enter", "left", "right", "up", "down", "tab", "esc", "y", "a", "d",
@@ -179,6 +184,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     required = {
         "permission_bypass", "resume", "bg", "autonomous_pane", "route_on_pane",
         "stop_hook", "command_surface", "permission_response", "resume_strategy",
+        "model_switch_strategy",
         "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
         "stop_strategy", "remove_strategy", "manifest_rules", "session_binding",
     }
@@ -260,8 +266,91 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
                 raise _contract_error(harness, "resume_strategy", f"malformed {lane}")
             if kind == "unsupported" and tokens:
                 raise _contract_error(harness, "resume_strategy", f"unsupported {lane} has tokens")
+            if (
+                lane == "interactive_attach"
+                and kind != "unsupported"
+                and "{short_id}" not in tokens
+            ):
+                raise _contract_error(harness, "resume_strategy", f"{lane} drops short id")
             if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
                 raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
+        model_switch = caps["model_switch_strategy"]
+        expected_switch_fields = {
+            "kind", "tokens", "effort_labels", "status_command", "status_pattern",
+        }
+        if not isinstance(model_switch, dict) or set(model_switch) != expected_switch_fields:
+            raise _contract_error(harness, "model_switch_strategy", "malformed strategy")
+        switch_kind = model_switch["kind"]
+        switch_tokens = model_switch["tokens"]
+        effort_labels = model_switch["effort_labels"]
+        status_command = model_switch["status_command"]
+        status_pattern = model_switch["status_pattern"]
+        if switch_kind not in _MODEL_SWITCH_KINDS:
+            raise _contract_error(harness, "model_switch_strategy", "unknown kind")
+        if not isinstance(switch_tokens, list) or not all(
+            isinstance(token, str) and token for token in switch_tokens
+        ):
+            raise _contract_error(harness, "model_switch_strategy", "malformed tokens")
+        if not isinstance(effort_labels, dict) or not all(
+            effort in _MODEL_SWITCH_EFFORTS
+            and isinstance(label, str)
+            and label
+            for effort, label in effort_labels.items()
+        ):
+            raise _contract_error(harness, "model_switch_strategy", "malformed effort labels")
+        placeholders: list[str] = []
+        for token in switch_tokens:
+            token_placeholders = re.findall(r"\{([^{}]+)\}", token)
+            remainder = re.sub(r"\{[^{}]+\}", "", token)
+            if "{" in remainder or "}" in remainder:
+                raise _contract_error(harness, "model_switch_strategy", "malformed placeholder")
+            placeholders.extend(token_placeholders)
+        unknown = set(placeholders) - _MODEL_SWITCH_PLACEHOLDERS
+        if unknown:
+            raise _contract_error(
+                harness, "model_switch_strategy", f"unknown placeholder {sorted(unknown)[0]!r}"
+            )
+        if switch_kind == "unsupported":
+            if switch_tokens or effort_labels or status_command or status_pattern:
+                raise _contract_error(
+                    harness, "model_switch_strategy", "unsupported strategy has executable data"
+                )
+        else:
+            if not isinstance(status_command, str) or not status_command.startswith("/"):
+                raise _contract_error(harness, "model_switch_strategy", "missing status command")
+            if not isinstance(status_pattern, str) or not status_pattern:
+                raise _contract_error(harness, "model_switch_strategy", "missing status pattern")
+            try:
+                compiled_status = re.compile(status_pattern)
+            except re.error as exc:
+                raise _contract_error(
+                    harness, "model_switch_strategy", f"invalid status pattern: {exc}"
+                ) from exc
+            if not {"model", "effort"} <= compiled_status.groupindex.keys():
+                raise _contract_error(
+                    harness, "model_switch_strategy", "status pattern needs model and effort groups"
+                )
+            if switch_kind == "direct":
+                if placeholders.count("model") != 1 or placeholders.count("effort") != 1:
+                    raise _contract_error(
+                        harness, "model_switch_strategy", "direct needs model and effort placeholders"
+                    )
+                if "effort_label" in placeholders or effort_labels:
+                    raise _contract_error(
+                        harness, "model_switch_strategy", "direct cannot carry menu labels"
+                    )
+            elif (
+                placeholders.count("model") != 1
+                or placeholders.count("effort_label") != 1
+                or "effort" in placeholders
+                or placeholders.index("model") > placeholders.index("effort_label")
+                or set(effort_labels) != _MODEL_SWITCH_EFFORTS
+            ):
+                raise _contract_error(
+                    harness,
+                    "model_switch_strategy",
+                    "menu_walk needs ordered model and effort targets",
+                )
         if caps["stop_strategy"] not in _STOP_STRATEGIES:
             raise _contract_error(harness, "stop_strategy", "unknown strategy")
         if caps["remove_strategy"] not in _REMOVE_STRATEGIES:
@@ -366,8 +455,14 @@ def capabilities(harness: str) -> dict:
     return caps
 
 
-def render_session_argv(harness: str, lane: str, session_id: Optional[str] = None) -> list[str]:
-    """Render the identity-bearing create/resume skeleton for one harness lane."""
+def render_session_argv(
+    harness: str,
+    lane: str,
+    session_id: Optional[str] = None,
+    *,
+    short_id: Optional[str] = None,
+) -> list[str]:
+    """Render one form with the identity type its contract declares."""
     form = capabilities(harness)["resume_strategy"]["forms"].get(lane)
     if form is None:
         raise DispatchResolveError(f"harness {harness!r} resume_strategy has no lane {lane!r}")
@@ -376,6 +471,20 @@ def render_session_argv(harness: str, lane: str, session_id: Optional[str] = Non
             f"harness {harness!r} lane {lane!r} is unsupported by resume_strategy"
         )
     tokens = list(form["tokens"])
+    if "{short_id}" in tokens:
+        if session_id:
+            raise DispatchResolveError(
+                f"harness {harness!r} lane {lane!r} needs a short_id, not a session_id"
+            )
+        if not short_id:
+            raise DispatchResolveError(
+                f"harness {harness!r} lane {lane!r} needs a non-empty short_id"
+            )
+        return [short_id if token == "{short_id}" else token for token in tokens]
+    if short_id:
+        raise DispatchResolveError(
+            f"harness {harness!r} lane {lane!r} accepts a session_id, not a short_id"
+        )
     if "{session_id}" not in tokens:
         return tokens
     if session_id:
@@ -664,6 +773,7 @@ def resolve_dispatch(
         "resume": caps["resume"],
         "permission_response": deepcopy(caps["permission_response"]),
         "resume_strategy": deepcopy(caps["resume_strategy"]),
+        "model_switch_strategy": deepcopy(caps["model_switch_strategy"]),
         "ready_marker": caps["ready_marker"],
         "send_keys_enter_delay_ms": caps["send_keys_enter_delay_ms"],
         "submit_keys": list(caps["submit_keys"]),

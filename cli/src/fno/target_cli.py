@@ -19,12 +19,15 @@ init script owns the owner_cwd worktree binding and all state.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -948,6 +951,164 @@ def review_invocation_cmd(
     from fno.review_capability import render_self_review_invocation
 
     typer.echo(render_self_review_invocation(harness=harness, project_root=Path.cwd()))
+
+
+def _read_pr_metadata(pr_number: int, cwd: Path) -> dict[str, Any]:
+    """Read the PR identity required before a native self-review can fire.
+
+    The REST lane (`fetch_pr_info_rest`), never `gh pr view`: the fno gh
+    proxy routes that spelling through the GraphQL broker, which refuses
+    discretionary reads once the shared quota hits its reserve - exactly
+    when a fleet is busiest - and the ship step would stall on a read the
+    REST endpoint serves freely.
+    """
+    from fno.pr._rest import fetch_pr_info_rest
+
+    info, reason = fetch_pr_info_rest(str(pr_number), cwd=str(cwd))
+    if info is None:
+        raise RuntimeError(
+            f"cannot read PR {pr_number}: {(reason or 'REST read failed')[:240]}"
+        )
+    return {
+        "number": info.get("pr", pr_number),
+        "headRefOid": info.get("head_sha") or "",
+        "baseRefName": info.get("base_ref") or "",
+    }
+
+
+def _resolve_self_review_identity() -> tuple[str, str]:
+    """Return the owned harness and full session id for the self-send lane."""
+    from fno.claims.self_identity import resolve_self_identity
+
+    identity = resolve_self_identity()
+    harness = (identity.harness or "").strip()
+    session_id = (identity.session_id or "").strip()
+    if not harness or not session_id:
+        raise RuntimeError("no owned harness identity is available for self-review")
+    return harness, session_id
+
+
+def _send_self_review_payload(
+    *, payload: str, harness: str, session_id: str
+) -> dict[str, Any]:
+    """Use the existing raw self-send router and normalize its receipt."""
+    from fno.mail.cli import _raw_send
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    exit_code = 0
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        try:
+            # The FULL session id, never canonical_handle's head-8: a codex id
+            # is UUIDv7, so its first eight are a 65.536-second timestamp
+            # bucket that every same-minute sibling shares, and resolution
+            # fails closed on the shared short exactly when a fleet is busy.
+            _raw_send(
+                session_id,
+                payload,
+                self_ok=True,
+                review_request=True,
+            )
+        except typer.Exit as exc:
+            exit_code = int(exc.exit_code or 0)
+
+    if exit_code != 0:
+        reason = (stderr.getvalue() or stdout.getvalue()).strip()
+        return {"outcome": "refused", "transport": harness, "reason": reason}
+    receipt = stdout.getvalue().strip()
+    if receipt.startswith("review/start"):
+        transport = "codex-daemon"
+        outcome = "started"
+    elif receipt.startswith("queued"):
+        transport = "mux-pane"
+        outcome = "queued"
+    elif receipt.startswith("started"):
+        transport = "mux-pane"
+        outcome = "started"
+    elif receipt.startswith("injected"):
+        transport = "prompt-line"
+        outcome = "started"
+    else:
+        transport = harness
+        outcome = "unconfirmed"
+    return {"outcome": outcome, "transport": transport}
+
+
+def _self_review_refusal(
+    pr_number: int, reason: str, *, head_sha: str = "", base_branch: str = ""
+) -> dict[str, Any]:
+    """Build one machine-readable refusal without ever entering the send lane."""
+    return {
+        "outcome": "refused",
+        "pr": pr_number,
+        "head_sha": head_sha,
+        "base_branch": base_branch,
+        "reason": reason,
+    }
+
+
+@target_app.command("request-self-review", hidden=True)
+def request_self_review_cmd(
+    pr_number: int = typer.Option(..., "--pr-number", "--pr", help="PR number to review."),
+) -> None:
+    """Request one explicit final-head native review through the raw self lane."""
+    from fno.review_capability import (
+        harness_can_self_review,
+        render_self_review_invocation,
+    )
+
+    cwd = Path.cwd()
+    head_sha = _git_out(cwd, "rev-parse", "HEAD") or ""
+    base_branch = ""
+    metadata: dict[str, Any] = {}
+    try:
+        if pr_number <= 0:
+            raise RuntimeError("PR number must be positive")
+        metadata = _read_pr_metadata(pr_number, cwd)
+        pr_head = str(metadata.get("headRefOid") or "").strip()
+        base_branch = str(metadata.get("baseRefName") or "").strip()
+        if not head_sha:
+            raise RuntimeError("cannot resolve local HEAD")
+        if not pr_head:
+            raise RuntimeError("PR has no headRefOid")
+        if head_sha.lower() != pr_head.lower():
+            raise RuntimeError(
+                f"local HEAD {head_sha} does not match PR head {pr_head}; refusing review"
+            )
+        if not base_branch:
+            raise RuntimeError("PR baseRefName is unresolved; refusing review")
+        harness, session_id = _resolve_self_review_identity()
+        if not harness_can_self_review(harness):
+            raise RuntimeError(f"harness {harness!r} has no native review verb")
+        payload = render_self_review_invocation(
+            harness=harness,
+            project_root=cwd,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            base_branch=base_branch,
+        )
+        receipt = _send_self_review_payload(
+            payload=payload, harness=harness, session_id=session_id
+        )
+    except (RuntimeError, ValueError) as exc:
+        receipt = _self_review_refusal(
+            pr_number,
+            str(exc),
+            head_sha=head_sha,
+            base_branch=base_branch,
+        )
+    else:
+        receipt = {
+            **receipt,
+            "pr": pr_number,
+            "head_sha": head_sha,
+            "base_branch": base_branch,
+            "payload": payload,
+        }
+
+    typer.echo(json.dumps(receipt, sort_keys=True))
+    if receipt.get("outcome") in {"refused", "unconfirmed"}:
+        raise typer.Exit(code=2)
 
 
 @target_app.command("resolve-owned-identity", hidden=True)
@@ -1927,6 +2088,12 @@ def _resolve_node_model(
     ``model`` is None -> the spawn path uses the provider default. Strictly
     non-fatal: any error degrades to the explicit value or the provider default,
     so a dispatch never fails because of the routing layer (inherited Locked 10).
+
+    ``difficulty`` is deliberately NOT resolved here: advance's dispatch seams
+    defer it to the capacity grid (``advance._spawn_worker``), and a static pin
+    at start would suppress the same grid for a bare ``target start`` - the
+    exact upstream pin the deferral exists to remove. A difficulty-only node
+    starts on the provider default.
     """
     try:
         from fno import route_resolve
@@ -2496,11 +2663,13 @@ def _manifest_is_explicitly_unclaimed(text: str) -> bool:
 def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
     """True iff ``holder`` is THIS session's identity (any claim state).
 
-    Three arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
+    Four arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
     successor and the classifier agree on 'ours': TARGET_SESSION_ID (a
     driver-run claude session), CODEX_THREAD_ID (codex parity - the durable-pid
-    arm below only resolves a claude ancestor), then durable session pid +
-    machine (a bare re-run with no env id). An uncapturable own pid reads as
+    arm below only resolves a claude ancestor), the proven transcript identity
+    (what init falls to when no env id exists, and the only arm that can
+    re-recognize a pid_unavailable claim of our own), then durable session pid
+    + machine (a bare re-run with no env id). An uncapturable own pid reads as
     not-ours (park / re-acquire, never assume ownership) - the conservative
     direction. The machine check goes through ``hostid.is_same_machine``, never
     a raw gethostname() compare: the name is not stable.
@@ -2510,13 +2679,24 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         if own_id and holder == f"target-session:{own_id}":
             return True
     try:
+        from fno.claims.self_identity import resolve_self_identity
+
+        own_sid = (resolve_self_identity().session_id or "").strip()
+    except Exception:
+        own_sid = ""
+    if own_sid and holder == f"target-session:{own_sid}":
+        return True
+    # v2 claims carry no pid to compare, so the process-tree walk below is
+    # pure waste for them.
+    if info.get("pid_unavailable"):
+        return False
+    try:
         from fno.claims.session_pid import resolve_session_pid
 
         own_pid = resolve_session_pid(from_pid=os.getpid())
     except Exception:
         own_pid = None
     from fno.claims.hostid import is_same_machine
-
     same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
     return bool(own_pid and info.get("pid") == own_pid and same_machine)
 
@@ -2587,46 +2767,85 @@ def _print_foreign_holder_park(node_id: str, info: dict, wt_path: Path) -> None:
     )
 
 
-_HARNESS_CLAIM_INFIX = {
-    "claude": "cl",
-    "codex": "cx",
-    "gemini": "gm",
-    "agy": "ag",
-    "hermes": "hm",
-    "opencode": "oc",
-}
+def _successor_claim_holder() -> Optional[str]:
+    """Resolve the current worker's final claim holder from owned identity.
 
-
-def _successor_claim_holder() -> str:
-    """This session's ``node:`` claim holder, mirroring init-target-state.sh's
-    ``claim_owner_id`` (TARGET_SESSION_ID > CODEX_THREAD_ID > generated
-    ``{ts}-{prov}{pid}-{6hex}``) so a re-acquired lockfile names a holder the
-    classifier and the incarnation fence later recognize as ours."""
-    for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
-        own_id = os.environ.get(env_var)
-        if own_id:
-            return f"target-session:{own_id}"
-    # No env id: the helper's generated form; liveness rides the durable pid.
-    import secrets
-    from datetime import datetime, timezone
-
-    from fno.claims.session_pid import resolve_session_pid
-
-    try:
-        pid = resolve_session_pid(from_pid=os.getpid()) or os.getpid()
-    except Exception:
-        pid = os.getpid()
-    # OWNED, not precedence (x-20f1): this infix is baked into the claim HOLDER
-    # string, which is written to the lockfile and read back as ownership. An
-    # ambiguous resolve leaves it empty rather than minting a holder that
-    # claims a harness this process cannot prove.
+    A successor must never mint a second identity from a timestamp, PID, or
+    entropy. An unresolved identity is a refusal because the claim would not
+    answer who acquired it.
+    """
     from fno.claims.self_identity import resolve_self_identity
 
-    infix = _HARNESS_CLAIM_INFIX.get(
-        (resolve_self_identity().harness or "").lower(), ""
-    )
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return f"target-session:{ts}-{infix}{pid}-{secrets.token_hex(3)}"
+    identity = resolve_self_identity()
+    session_id = (identity.session_id or "").strip()
+    return f"target-session:{session_id}" if session_id else None
+
+
+def _classify_worktree_occupancy(wt_path: Path) -> tuple[str, Optional[dict]]:
+    """Join meaningful worktree dirt with recent transcript activity.
+
+    A failed probe is ``unknown``. Only a clean tree or positively stale
+    transcript makes a free/stale claim available for takeover.
+    """
+    try:
+        from fno.worktree_reapable import reapable
+
+        dirt = reapable(wt_path)
+    except Exception as exc:  # noqa: BLE001 - takeover must fail closed
+        return "unknown", {"reason": "probe-failed", "detail": str(exc)}
+    if dirt.reapable:
+        return "available", None
+    if dirt.reason == "probe-failed":
+        return "unknown", {"reason": dirt.reason, "detail": dirt.detail}
+
+    try:
+        from fno.agents.registry import load_registry
+
+        rows = [
+            row
+            for row in load_registry()
+            if Path(row.cwd).resolve() == wt_path.resolve()
+        ]
+    except Exception as exc:  # noqa: BLE001 - unreadable registry is unknown
+        return "unknown", {"reason": "registry-read-failed", "detail": str(exc)}
+    if len(rows) != 1:
+        return "unknown", {
+            "reason": "worktree-row-not-unique",
+            "rows": len(rows),
+        }
+    row = rows[0]
+    session_id = (getattr(row, "harness_session_id", None) or "").strip()
+    if not session_id:
+        return "unknown", {"reason": "session-id-unavailable"}
+    try:
+        from fno.agents.watchdog import REAP_QUIET_AFTER_S, finished_with_the_tree, tail_facts
+
+        facts = tail_facts(
+            session_id,
+            row.cwd,
+            agent=getattr(row, "harness", None) or "claude",
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable transcript is unknown
+        return "unknown", {"reason": "transcript-read-failed", "detail": str(exc)}
+    last_epoch = getattr(facts, "last_event_epoch", None) if facts else None
+    if last_epoch is None:
+        return "unknown", {
+            "reason": "transcript-activity-unavailable",
+            "session_id": session_id,
+        }
+    # One question, one answer: the reap lane decides "done with the tree"
+    # through finished_with_the_tree (quiet window + engaged-tail
+    # classification). The inline threshold here let takeover and reap
+    # disagree about the same session - a silent-but-ENGAGED tail read
+    # available to a successor while reap refused to touch it, and a dead
+    # worker occupied its tree an hour past the fleet's quiet window.
+    if not finished_with_the_tree(facts, time.time(), REAP_QUIET_AFTER_S):
+        return "occupied_worktree", {
+            "session_id": session_id,
+            "age_s": int(max(0.0, time.time() - last_epoch)),
+            "reason": dirt.reason,
+        }
+    return "available", None
 
 
 def _claim_ttl_ms() -> int:
@@ -2658,6 +2877,21 @@ def _reacquire_node_claim(
 
     key = f"node:{node_id}"
     holder = _successor_claim_holder()
+    if holder is None:
+        typer.echo(
+            f"fno do target start: holder_unattributable for {key}; the current "
+            "harness session could not be proven, so no successor claim was "
+            "written.",
+            err=True,
+        )
+        # Not the user-cancel sentinel (an identity refusal is not a user
+        # cancel, and under worktree.policy=never the shared .fno would
+        # cancel a concurrently live in-place session for another node), and
+        # not the predecessor's manifest either: it is write-once per session
+        # with the init hook as sole owner, and a successor's append would
+        # misattribute the refusal to that session. The stderr line above is
+        # this refusal's trace.
+        raise typer.Exit(code=1)
     try:
         pid = resolve_session_pid(from_pid=os.getpid())
     except Exception:
@@ -2668,6 +2902,7 @@ def _reacquire_node_claim(
             holder,
             ttl_ms=_claim_ttl_ms(),
             pid=pid,
+            pid_unavailable=pid is None,
             reason="target start successor re-acquire",
             root=claims_root_for(key),
         )
@@ -2965,6 +3200,23 @@ def start(
             if no_merge:
                 _warn_no_merge_dropped()
             return
+        if _is_linked_worktree(wt_path):
+            occupancy, occupancy_info = _classify_worktree_occupancy(wt_path)
+            if occupancy != "available":
+                remedy = ""
+                if occupancy == "unknown":
+                    remedy = (
+                        " No automatic path re-marks this worktree available; "
+                        "a human must clear it (fno agents watchdog for the "
+                        "fleet sweep, fno workspace worktree cleanup for "
+                        "merged leftovers) and retry."
+                    )
+                typer.echo(
+                    f"fno do target start: refusing takeover of {wt_path}: "
+                    f"{occupancy} {occupancy_info or {}}.{remedy}",
+                    err=True,
+                )
+                raise typer.Exit(code=1)
         # verdict in {dead_predecessor, free}: a successor inheriting a
         # predecessor's worktree, or a stale-free claim. Re-acquire under this
         # session so the lockfile names a live, recognizable holder.

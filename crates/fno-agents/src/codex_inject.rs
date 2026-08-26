@@ -61,6 +61,231 @@ pub fn codex_app_server_socket_path() -> PathBuf {
         .join("app-server-control.sock")
 }
 
+/// The Codex daemon's recorded process identity. The state file is provider
+/// owned, so a pid without `processStartTime` is unreadable rather than a
+/// positive liveness signal.
+pub struct CodexDaemonAdapter {
+    provider_state_path: PathBuf,
+    state_path: PathBuf,
+    lock_path: PathBuf,
+    socket_path: PathBuf,
+}
+
+impl CodexDaemonAdapter {
+    pub fn new(provider_state_path: PathBuf, lock_path: PathBuf, socket_path: PathBuf) -> Self {
+        let state_path = provider_state_path
+            .parent()
+            .map(|parent| parent.join("fno-harness-daemon.json"))
+            .unwrap_or_else(|| PathBuf::from("fno-harness-daemon.json"));
+        Self {
+            provider_state_path,
+            state_path,
+            lock_path,
+            socket_path,
+        }
+    }
+
+    pub fn from_environment() -> Self {
+        let home = std::env::var_os("CODEX_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+            .unwrap_or_else(|| PathBuf::from(".codex"));
+        Self::new(
+            home.join("app-server-daemon").join("app-server.pid"),
+            home.join("app-server-daemon")
+                .join("fno-harness-daemon.lock"),
+            home.join("app-server-control")
+                .join("app-server-control.sock"),
+        )
+    }
+
+    fn provider_state(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        let raw = std::fs::read_to_string(&self.provider_state_path)
+            .map_err(|error| format!("read Codex daemon state: {error}"))?;
+        <Self as crate::harness_daemon::HarnessDaemonAdapter>::parse_state(self, &raw)
+    }
+}
+
+impl crate::harness_daemon::HarnessDaemonAdapter for CodexDaemonAdapter {
+    fn harness(&self) -> &str {
+        "codex"
+    }
+
+    fn state_path(&self) -> &Path {
+        &self.state_path
+    }
+
+    fn lock_path(&self) -> &Path {
+        &self.lock_path
+    }
+
+    fn parse_state(&self, raw: &str) -> Result<crate::harness_daemon::DaemonState, String> {
+        let mut value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|error| error.to_string())?;
+        let pid = value
+            .get("pid")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|pid| *pid > 0)
+            .ok_or_else(|| "missing pid".to_string())? as u32;
+        let process_start_time = ["processStartToken", "process_start_time", "startTime"]
+            .into_iter()
+            .find_map(|key| value.get(key).and_then(json_u64))
+            .or_else(|| {
+                value
+                    .get("processStartTime")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                value
+                    .get("processStartTime")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|start| !start.is_empty())
+                    .and_then(|_| crate::daemon::process_start_time(pid))
+            })
+            .filter(|start| *start > 0)
+            .ok_or_else(|| "missing process start time".to_string())?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "processStartToken".to_string(),
+                serde_json::Value::from(process_start_time),
+            );
+        }
+        crate::harness_daemon::DaemonState::new(
+            value,
+            pid,
+            process_start_time,
+            self.socket_path.to_string_lossy(),
+            format!("{pid}:{process_start_time}"),
+        )
+    }
+
+    fn is_healthy(&self, state: &crate::harness_daemon::DaemonState) -> bool {
+        let process_is_current = state
+            .pid
+            .is_some_and(|pid| crate::daemon::pid_is_ours(pid, state.process_start_time));
+        process_is_current && self.socket_path.exists() && probe_codex_app_server(&self.socket_path)
+    }
+
+    fn may_replace(&self) -> bool {
+        false
+    }
+
+    fn may_refresh_unhealthy(&self) -> bool {
+        true
+    }
+
+    fn unreadable_state_may_boot(&self) -> bool {
+        true
+    }
+
+    fn boot(&self) -> Result<crate::harness_daemon::DaemonState, String> {
+        if let Ok(state) = self.provider_state() {
+            if self.is_healthy(&state) {
+                return Ok(state);
+            }
+        }
+        // The daemon is a detached service: its startup output must never
+        // land on the spawning client's stdout, whose bytes are the reply
+        // stream by contract (`.status()` inherits, and an inherited child
+        // printed its banner straight into a one-shot spawn's reply).
+        let status = std::process::Command::new("codex")
+            .args(["app-server", "daemon", "start"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|error| format!("codex app-server daemon start: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "codex app-server daemon start exited {}",
+                status.code().unwrap_or(1)
+            ));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(state) = self.provider_state() {
+                if self.is_healthy(&state) {
+                    return Ok(state);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "Codex daemon did not pass initialize handshake within 15s ({})",
+                    self.socket_path.display()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+/// Ensure the Codex app-server daemon before a client-side spawn.
+pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::DaemonReceipt, String> {
+    crate::harness_daemon::ensure_harness_daemon(&CodexDaemonAdapter::from_environment())
+        .map(|result| result.receipt)
+        .map_err(|error| error.to_string())
+}
+
+/// Positive Codex app-server health: the control socket must complete the
+/// initialize handshake. Socket existence alone is deliberately insufficient.
+pub fn probe_codex_app_server(socket_path: &Path) -> bool {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let socket_path = socket_path.to_path_buf();
+        return std::thread::spawn(move || probe_codex_app_server_fresh(&socket_path))
+            .join()
+            .unwrap_or(false);
+    }
+    probe_codex_app_server_fresh(socket_path)
+}
+
+fn probe_codex_app_server_fresh(socket_path: &Path) -> bool {
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(_) => return false,
+    };
+    runtime.block_on(async {
+        codex_initialize_handshake_with_timeout(socket_path, HANDSHAKE_TIMEOUT)
+            .await
+            .is_ok()
+    })
+}
+
+async fn codex_initialize_handshake_with_timeout(
+    socket_path: &Path,
+    timeout: Duration,
+) -> Result<(), &'static str> {
+    match tokio::time::timeout(timeout, codex_initialize_handshake(socket_path)).await {
+        Ok(result) => result,
+        Err(_) => Err("timeout"),
+    }
+}
+
+async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
+    let conn = UnixStream::connect(socket_path)
+        .await
+        .map_err(|_| "connect-failed")?;
+    let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
+        .await
+        .map_err(|_| "handshake-failed")?;
+    let (mut sink, mut stream) = ws.0.split();
+    sink.send(Message::Text(initialize_request_json().into()))
+        .await
+        .map_err(|_| "send-failed")?;
+    read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    sink.send(Message::Text(initialized_notification_json().into()))
+        .await
+        .map_err(|_| "send-failed")?;
+    Ok(())
+}
+
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the
 /// handshake. `id` is the string `"init"` (matched on the response). Note the
 /// absence of a `"jsonrpc":"2.0"` field: the codex app-server carries bare
@@ -262,6 +487,7 @@ async fn review_start_round_trip(
     parse_review_start_response(&resp)
 }
 
+#[cfg(test)]
 fn review_start_audit_fields(
     thread_id: &str,
     target_raw: &str,
@@ -270,6 +496,28 @@ fn review_start_audit_fields(
     audit_sender: Option<&str>,
     audit_target_cwd: Option<&str>,
     confirmed: bool,
+) -> serde_json::Map<String, serde_json::Value> {
+    review_start_audit_fields_with_origin(
+        thread_id,
+        target_raw,
+        delivery,
+        audit_payload,
+        audit_sender,
+        audit_target_cwd,
+        confirmed,
+        None,
+    )
+}
+
+fn review_start_audit_fields_with_origin(
+    thread_id: &str,
+    target_raw: &str,
+    delivery: ReviewDelivery,
+    audit_payload: Option<&str>,
+    audit_sender: Option<&str>,
+    audit_target_cwd: Option<&str>,
+    confirmed: bool,
+    audit_origin: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut fields = serde_json::Map::new();
     fields.insert("target_session".into(), thread_id.into());
@@ -295,6 +543,9 @@ fn review_start_audit_fields(
     if let Some(cwd) = audit_target_cwd {
         fields.insert("target_cwd".into(), cwd.into());
     }
+    if let Some(origin) = audit_origin {
+        fields.insert("origin".into(), origin.into());
+    }
     fields
 }
 
@@ -310,6 +561,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     let mut audit_payload: Option<String> = None;
     let mut audit_sender: Option<String> = None;
     let mut audit_target_cwd: Option<String> = None;
+    let mut audit_origin: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -343,6 +595,9 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             }
             "--audit-target-cwd" => {
                 audit_target_cwd = it.next().cloned();
+            }
+            "--audit-origin" => {
+                audit_origin = it.next().cloned();
             }
             other => {
                 eprintln!("review-start: unknown flag: {other}");
@@ -384,7 +639,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     // marker in the recipient thread, so it needs the same ledger record the
     // mail-inject lane writes -- a guard on one of two reachable paths is
     // decorative. Best-effort; a write failure never changes the exit code.
-    let fields = review_start_audit_fields(
+    let fields = review_start_audit_fields_with_origin(
         &thread_id,
         &target_raw,
         delivery,
@@ -392,6 +647,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
         audit_sender.as_deref(),
         audit_target_cwd.as_deref(),
         outcome.is_ok(),
+        audit_origin.as_deref(),
     );
     let _ = crate::events::EventEmitter::new(
         crate::paths::AgentsHome::from_env().events_jsonl(),
@@ -690,6 +946,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::harness_daemon::HarnessDaemonAdapter;
     use tokio::net::UnixListener;
     use tokio_tungstenite::{accept_async, WebSocketStream};
 
@@ -1071,5 +1328,102 @@ mod tests {
         // assert the stable suffix to avoid mutating process env in a unit test.
         let p = codex_app_server_socket_path();
         assert!(p.ends_with("app-server-control/app-server-control.sock"));
+    }
+
+    #[test]
+    fn codex_daemon_state_requires_pid_and_process_start_time() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        assert!(adapter
+            .parse_state(r#"{"pid":123}"#)
+            .expect_err("bare pid must be unreadable")
+            .contains("process start"));
+    }
+
+    #[test]
+    fn codex_daemon_state_receipt_names_endpoint_and_incarnation() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        let state = adapter
+            .parse_state(r#"{"pid":123,"processStartTime":456}"#)
+            .unwrap();
+        assert_eq!(state.endpoint, "/tmp/codex.sock");
+        assert_eq!(state.incarnation, "123:456");
+    }
+
+    #[test]
+    fn codex_daemon_state_accepts_provider_date_string() {
+        let adapter = CodexDaemonAdapter::new(
+            PathBuf::from("/tmp/codex.pid"),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        let pid = std::process::id();
+        let state = adapter
+            .parse_state(&format!(
+                r#"{{"pid":{pid},"processStartTime":"Tue Aug 25 05:29:46 2026"}}"#
+            ))
+            .expect("the provider's live date-string format is readable");
+        assert_eq!(state.pid, Some(pid));
+        assert_eq!(
+            state.process_start_time,
+            crate::daemon::process_start_time(pid)
+        );
+    }
+
+    #[test]
+    fn codex_uses_an_fno_sidecar_and_never_replaces_the_provider_process() {
+        use crate::harness_daemon::HarnessDaemonAdapter;
+        let provider_state = PathBuf::from("/tmp/app-server.pid");
+        let adapter = CodexDaemonAdapter::new(
+            provider_state.clone(),
+            PathBuf::from("/tmp/codex.lock"),
+            PathBuf::from("/tmp/codex.sock"),
+        );
+        assert_ne!(adapter.state_path(), provider_state.as_path());
+        assert!(!adapter.may_replace());
+    }
+
+    #[test]
+    fn codex_socket_without_initialize_handshake_is_not_healthy() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("codex.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::thread::spawn(move || {
+            let _ = listener.accept();
+        });
+        assert!(!probe_codex_app_server(&socket));
+    }
+
+    #[tokio::test]
+    async fn codex_health_handshake_times_out_when_the_server_stops_replying() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("codex.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = accept_async(stream).await.unwrap();
+            let _initialize = ws.next().await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+
+        let result =
+            codex_initialize_handshake_with_timeout(&socket, Duration::from_millis(20)).await;
+
+        assert_eq!(result, Err("timeout"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn synchronous_probe_inside_runtime_does_not_start_a_nested_runtime() {
+        let missing =
+            std::env::temp_dir().join(format!("missing-codex-probe-{}", std::process::id()));
+        assert!(!probe_codex_app_server(&missing));
     }
 }

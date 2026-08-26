@@ -179,6 +179,7 @@ class ThreadHandle:
     replies_to: Optional[str]
     persist_to_memory: bool
     refs: dict[str, str]
+    origin: Optional[str] = None
     messages: list[ThreadMessage] = field(default_factory=list)
 
     @property
@@ -407,6 +408,8 @@ def _format_thread(handle: ThreadHandle) -> str:
         fm["replies_to"] = handle.replies_to
     if handle.persist_to_memory:
         fm["persist_to_memory"] = True
+    if handle.origin is not None:
+        fm["origin"] = handle.origin
     for k, v in handle.refs.items():
         fm[k] = v
 
@@ -439,6 +442,7 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
     from_project = fm.get("from")
     to_project = fm.get("to")
     kind = fm.get("kind")
+    origin = fm.get("origin")
     created = _parse_dt(fm.get("created", ""))
 
     if not all([thread_id, from_project, to_project, kind, created]):
@@ -468,6 +472,7 @@ def _parse_thread_text(text: str, path: Path) -> Optional[ThreadHandle]:
         from_project=str(from_project),
         to_project=str(to_project),
         kind=str(kind),
+        origin=str(origin) if origin is not None else None,
         created=created,
         read_at=read_at,
         replies_to=str(replies_to) if replies_to else None,
@@ -625,6 +630,7 @@ def _append_to_bus(
     owner: Optional[str] = None,
     ttl_at: Optional[datetime] = None,
     word_count: Optional[int] = None,
+    origin: Optional[str] = None,
 ) -> None:
     """Append a versioned envelope to the canonical bus log (the durable write).
 
@@ -649,6 +655,9 @@ def _append_to_bus(
         meta["owner"] = owner
     if ttl_at is not None:
         meta["ttl_at"] = _format_dt(ttl_at)
+    # Origin rides the Envelope field only (from_json_line falls back to the
+    # legacy meta copy for pre-field rows); writing both channels left two
+    # places a future edit could update divergently.
     _bus_append(
         Envelope(
             id=msg_id,
@@ -666,6 +675,7 @@ def _append_to_bus(
             from_model=from_model,
             to_kind=to_kind,
             word_count=word_count,
+            origin=origin,
         )
     )
 
@@ -731,6 +741,7 @@ def post_inbox_message(
     refs: Optional[dict[str, str]] = None,
     msg_id: Optional[str] = None,
     word_count: Optional[int] = None,
+    origin: Optional[str] = None,
 ) -> PostResult:
     """Post a project-addressed inbox message (the durable write path).
 
@@ -757,6 +768,7 @@ def post_inbox_message(
                 body,
                 msg_id=msg_id,
                 word_count=word_count,
+                origin=origin,
             )
             return PostResult(
                 msg_id=new_id, thread_path=existing.path, appended=True, orphan=False
@@ -772,6 +784,7 @@ def post_inbox_message(
             refs=refs,
             owner=DurableOwner.INBOX_DRAIN.value,
             word_count=word_count,
+            origin=origin,
         )
         return PostResult(
             msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=True
@@ -784,6 +797,7 @@ def post_inbox_message(
         refs=refs,
         owner=DurableOwner.INBOX_DRAIN.value,
         word_count=word_count,
+        origin=origin,
     )
     return PostResult(
         msg_id=handle.thread_id, thread_path=handle.path, appended=False, orphan=False
@@ -809,6 +823,7 @@ def write_new_thread(
     owner: Optional[str] = None,
     ttl_at: Optional[datetime] = None,
     word_count: Optional[int] = None,
+    origin: Optional[str] = None,
 ) -> ThreadHandle:
     """Create a new thread file. Returns the resulting handle.
 
@@ -869,6 +884,7 @@ def write_new_thread(
         from_project=sender,
         to_project=recipient,
         kind=kind,
+        origin=origin,
         created=timestamp,
         read_at=None,
         replies_to=replies_to,
@@ -908,6 +924,7 @@ def write_new_thread(
             owner=owner,
             ttl_at=ttl_at,
             word_count=word_count,
+            origin=origin,
         )
     except Exception:
         try:
@@ -930,6 +947,7 @@ def append_to_thread(
     msg_id: Optional[str] = None,
     timestamp: Optional[datetime] = None,
     word_count: Optional[int] = None,
+    origin: Optional[str] = None,
 ) -> str:
     """Append a message block to an existing thread file. Returns new msg-id."""
     if not thread_path.exists():
@@ -964,6 +982,7 @@ def append_to_thread(
         in_reply_to=existing.thread_id,
         render_path=thread_path,
         word_count=word_count,
+        origin=origin,
     )
 
     # Best-effort: update the derived markdown render under the per-path lock.
@@ -1100,6 +1119,7 @@ def rebuild_render(recipient: str) -> int:
             from_project=root.from_,
             to_project=recipient,
             kind=root.kind,
+            origin=root.origin,
             created=created,
             read_at=None,
             replies_to=root.in_reply_to,

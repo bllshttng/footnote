@@ -64,7 +64,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 503, (
+    assert len(mapped) == 513, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -147,8 +147,10 @@ def test_live_baseline_matches_the_projected_allocation():
     # +1 for `king done`, the crown expire verb.
     # +1 for `doctor footprint`, landed on main while this branch ran; the
     # merged tree carries both rows, so both counts include it.
+    # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
+    # inspect), each baselined in this PR.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 117
+    assert len(leaves) <= 122
     assert "fno-agents" in leaves
 
 

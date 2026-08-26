@@ -208,7 +208,7 @@ def test_ac6_hp_dispatch_records_resolved_recipient(env, tmp_path, monkeypatch):
     _register("alpha", cwd, status="live")
 
     # Stub the by-name send so we exercise the resolver wiring, not the provider.
-    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name):
+    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name, origin=None):
         return dmod.DispatchSendResult(msg_id="msg-deadbe", delivery="hosted")
 
     monkeypatch.setattr(dmod, "dispatch_send", fake_send)
@@ -282,7 +282,7 @@ def test_cli_send_to_project_demoted_peer_reports_peer_not_project(env, tmp_path
     cwd = _project_cwd(tmp_path, "projA")
     _register("alpha", cwd, status="live")
 
-    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name):
+    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name, origin=None):
         return dmod.DispatchSendResult(msg_id="msg-dem01", delivery="durable")
 
     monkeypatch.setattr(dmod, "dispatch_send", fake_send)
@@ -305,7 +305,7 @@ def test_cli_send_to_project_carries_the_lock_timeout_reason(env, tmp_path, runn
     cwd = _project_cwd(tmp_path, "projA")
     _register("alpha", cwd, status="live")
 
-    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name):
+    def fake_send(*, name, message, provider, cwd, lock_timeout, from_name, origin=None):
         return dmod.DispatchSendResult(
             msg_id="msg-lock01",
             delivery="durable",

@@ -34,11 +34,6 @@ _KNOWN_REVIEW_VERDICTS = {"reviewed", "stale", "refused", "errored", "absent"}
 _KNOWN_COVERAGE_PRODUCERS = {"github_app", "local_attestation"}
 _KNOWN_REVIEW_STATES = {"reviewed", "unreviewed", "reviewer_refused"}
 
-# The optional-reviewer bots the x-d996 drain paragraph names. config.review.peers
-# (resolved below) extends this; config.review.required_bots is the separate GATE
-# (read by loop-check) and is out of scope here.
-_OPTIONAL_BOTS = ("gemini-code-assist", "chatgpt-codex-connector")
-
 # Emitted on any review-read failure. A distinct sentinel from an empty list `[]`
 # so "read failed" never reads as "nothing posted" (US4).
 _UNKNOWN = {
@@ -68,22 +63,26 @@ def _strip_bot(login: str) -> str:
 def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
     """The reviewer names that mark a review author as *optional*.
 
-    The single source of truth for the optional set: the hardcoded bots plus
-    `config.review.optional_apps` and every `config.review.peers` posting
-    identity (and the shared `peer_identity`). A config that can't be read
-    degrades to just the bots - the optional signal is advisory, so a missing
-    config never hard-fails.
+    The single source of truth for the optional set: the resolved
+    `config.review.optional_apps` (which DEFAULTS to the built-in two logins -
+    the same default the Rust gate's `resolved_optional_bots` falls back to, so
+    `fno do pr status` and the loop gate measure the same lanes on one PR) plus
+    every `config.review.peers` posting identity (and the shared
+    `peer_identity`). A config that can't be read degrades to that same default
+    - the optional signal is advisory, so a missing config never hard-fails.
     """
-    names = list(_OPTIONAL_BOTS)
+    from fno.config import DEFAULT_OPTIONAL_APPS
+
+    names: list[str] = []
     try:
         from pathlib import Path
 
-        from fno.config import load_settings_for_repo
+        from fno.config import load_settings_for_repo, resolved_optional_apps
 
         review = load_settings_for_repo(Path(cwd) if cwd else Path.cwd()).review
-        # optional_apps is the config's own honored-if-present optional-bot list;
-        # excluding it would hide a configured optional app's findings.
-        names.extend(review.optional_apps or [])
+        # optional_apps is the config's own honored-if-present optional-bot list
+        # (unset -> the built-in default; [] -> an explicit opt-out that wins).
+        names.extend(resolved_optional_apps(review))
         if review.peer_identity:
             names.append(review.peer_identity)
         for entry in review.peers or []:
@@ -92,8 +91,8 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
                 # authors. Only the explicit legacy posting carrier belongs in
                 # this login-matching set.
                 names.append(entry.get("identity") or "")
-    except Exception:  # unreadable/invalid config -> just the hardcoded bots
-        pass
+    except Exception:  # unreadable/invalid config -> the built-in default
+        names = list(DEFAULT_OPTIONAL_APPS)
     return [n for n in names if n]
 
 
@@ -908,6 +907,14 @@ def read_review_coverage(
 # the publisher, the refresher workflow, and the audit; a context string typed
 # twice is a context that splits in two the first time one copy is edited.
 COVERAGE_STATUS_CONTEXT = "fno/review-coverage"
+COVERAGE_UNAVAILABLE_STATUS_CONTEXT = "fno/review-coverage-unavailable"
+# Both contexts as one collection: every surface that excludes the coverage
+# projections from generic CI (the status read, the covered merge) filters
+# through THIS, so a context added later lands everywhere or nowhere, never
+# half the surfaces.
+COVERAGE_STATUS_CONTEXTS = frozenset(
+    {COVERAGE_STATUS_CONTEXT, COVERAGE_UNAVAILABLE_STATUS_CONTEXT}
+)
 
 # The label that makes an uncovered PR mergeable on purpose: the 3am release
 # valve. Named here so the publisher, the refresher, and the docs agree on it.
@@ -1000,6 +1007,33 @@ def _best_effort_reviewed_count(pr_number: int, repo: Optional[str]) -> int:
     return _safe_int((row or {}).get("reviewed_count"), 0)
 
 
+def _post_coverage_status(
+    runner: Runner,
+    gh_dir: str,
+    head: str,
+    context: str,
+    state: str,
+    description: str,
+) -> "tuple[bool, str]":
+    args = [
+        "gh", "api", "--method", "POST",
+        f"repos/:owner/:repo/statuses/{head}",
+        "-f", f"state={state}",
+        "-f", f"context={context}",
+        "-f", f"description={description}",
+    ]
+    res = runner(args, cwd=gh_dir, timeout=30)
+    for _retry in range(2):
+        if res.ok:
+            return True, ""
+        time.sleep(_POST_RETRY_SLEEP_SECS)
+        res = runner(args, cwd=gh_dir, timeout=30)
+    if res.ok:
+        return True, ""
+    why = (res.stderr or res.stdout or f"gh exited {res.returncode}").strip()
+    return False, why[:200]
+
+
 def publish_coverage_status(
     pr_number: int,
     head: Optional[str] = None,
@@ -1056,15 +1090,15 @@ def publish_coverage_status(
             # time, so the status it stamps and the verdict the merge enforces
             # cannot disagree about the valve.
             head = covered_head or head
-            state = "success"
-            description = note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :]
+            required_state = "success"
+            required_description = note[len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :]
         elif verdict == _coverage_gate.COVERED and covered_head:
             # POST on the head the row pins, not one the caller guessed
             # at: the verdict describes that sha and no other.
             head = covered_head
             count = _best_effort_reviewed_count(pr_number, gh_dir)
-            state = "success"
-            description = (
+            required_state = "success"
+            required_description = (
                 f"covered: {count} reviewed at {head[:8]}"
                 if count
                 else f"covered at {head[:8]}"
@@ -1076,51 +1110,60 @@ def publish_coverage_status(
             # empty": a covered row that carried no head_sha lands there too,
             # and telling the reader that a reviewed merge is ungated is the
             # receipt lying in the reassuring direction.
-            state = "success"
-            description = "no review lane configured; merge ungated"
+            required_state = "success"
+            required_description = "no review lane configured; merge ungated"
         elif verdict == _coverage_gate.COVERED:
             # Covered, but the row pinned no head. The verdict still stands;
             # it just cannot name the sha it was computed at.
             count = _best_effort_reviewed_count(pr_number, gh_dir)
-            state = "success"
-            description = (
+            required_state = "success"
+            required_description = (
                 f"covered: {count} reviewed (row pinned no head sha)"
                 if count
                 else "covered (row pinned no head sha)"
             )
+        elif verdict == _coverage_gate.UNANSWERED:
+            required_state = "pending"
+            detail = f" ({note.strip()})" if note.strip() else ""
+            required_description = _truncate_description(
+                f"coverage read unavailable at {head[:8]}; retry the review verb{detail}"
+            )
         else:
-            state = "failure"
             line = (
                 _coverage_gate.refusal_line(refusal, note)
                 if verdict == _coverage_gate.REFUSED
                 else (note or "coverage verdict unavailable")
             )
-            description = _truncate_description(line)
+            required_state = "failure"
+            required_description = _truncate_description(line)
 
-        # Three attempts, the same transient-5xx policy the refresher workflow
-        # and the stacked-base guard apply to the same POST: once the ruleset
-        # makes the context required, one blip here must not cost the merge
-        # that follows it. The BACKOFF is the policy, not the count - three
-        # POSTs fired back to back inside one millisecond all land in the same
-        # outage, so a retry with no wait is a retry in name only. A permanent
-        # 4xx costs two waits, which is the price of surviving the transient.
-        args = [
-            "gh", "api", "--method", "POST",
-            f"repos/:owner/:repo/statuses/{head}",
-            "-f", f"state={state}",
-            "-f", f"context={COVERAGE_STATUS_CONTEXT}",
-            "-f", f"description={description}",
-        ]
-        res = runner(args, cwd=gh_dir, timeout=30)
-        for _retry in range(2):
-            if res.ok:
-                return True, ""
-            time.sleep(_POST_RETRY_SLEEP_SECS)
-            res = runner(args, cwd=gh_dir, timeout=30)
-        if res.ok:
-            return True, ""
-        why = (res.stderr or res.stdout or f"gh exited {res.returncode}").strip()
-        return False, why[:200]
+        diagnostic_state = "pending" if verdict == _coverage_gate.UNANSWERED else "success"
+        diagnostic_description = (
+            required_description
+            if verdict == _coverage_gate.UNANSWERED
+            else f"coverage read healthy at {head[:8]}"
+        )
+        # Attempt BOTH posts even when the first fails: a failed
+        # required-context POST must not strand a stale diagnostic (an
+        # earlier unknown-read stamp reading "instrument down") on a
+        # gate-covered PR until some other writer happens to run.
+        failures = []
+        for context, state, description in (
+            (COVERAGE_STATUS_CONTEXT, required_state, required_description),
+            (
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                diagnostic_state,
+                diagnostic_description,
+            ),
+        ):
+            posted, why = _post_coverage_status(
+                runner, gh_dir, head, context, state, description
+            )
+            if not posted:
+                failures.append(f"{context}: {why}")
+        if failures:
+            return False, "; ".join(failures)
+        return True, ""
     except Exception as exc:  # noqa: BLE001 - a publisher must never raise
         return False, f"publish failed: {exc}"
 

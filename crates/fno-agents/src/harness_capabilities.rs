@@ -1,17 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use regex::Regex;
 use serde::Deserialize;
 
 pub const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 
-const SESSION_LANES: [&str; 4] = [
+const SESSION_LANES: [&str; 5] = [
     "interactive_create",
     "interactive_resume",
+    "interactive_attach",
     "headless_create",
     "headless_resume",
 ];
 const RESPONSE_ACTIONS: [&str; 3] = ["allow_once", "allow_always", "deny"];
 const RESUME_KINDS: [&str; 4] = ["flag", "subcommand", "session_flag", "unsupported"];
+const MODEL_SWITCH_KINDS: [&str; 3] = ["direct", "menu_walk", "unsupported"];
+const MODEL_SWITCH_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 
@@ -48,6 +52,7 @@ pub struct HarnessCapabilities {
     pub session_binding: SessionBinding,
     pub permission_response: BTreeMap<String, PermissionResponse>,
     pub resume_strategy: ResumeStrategy,
+    pub model_switch_strategy: ModelSwitchStrategy,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +89,16 @@ pub struct ResumeStrategy {
 pub struct ResumeForm {
     pub kind: String,
     pub tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSwitchStrategy {
+    pub kind: String,
+    pub tokens: Vec<String>,
+    pub effort_labels: BTreeMap<String, String>,
+    pub status_command: String,
+    pub status_pattern: String,
 }
 
 impl HarnessContract {
@@ -265,6 +280,9 @@ impl HarnessContract {
                 if !RESUME_KINDS.contains(&form.kind.as_str())
                     || form.tokens.iter().any(String::is_empty)
                     || (form.kind == "unsupported" && !form.tokens.is_empty())
+                    || (lane == "interactive_attach"
+                        && form.kind != "unsupported"
+                        && !form.tokens.iter().any(|token| token == "{short_id}"))
                     || (lane.ends_with("resume")
                         && form.kind != "unsupported"
                         && !form.tokens.iter().any(|token| token == "{session_id}"))
@@ -276,6 +294,7 @@ impl HarnessContract {
                     ));
                 }
             }
+            validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
             if !STOP_STRATEGIES.contains(&caps.stop_strategy.as_str()) {
                 return Err(field_error(harness, "stop_strategy", "unknown strategy"));
             }
@@ -312,6 +331,16 @@ impl HarnessContract {
         lane: &str,
         session_id: Option<&str>,
     ) -> Result<Vec<String>, ContractError> {
+        self.render_session_argv_with_ids(harness, lane, session_id, None)
+    }
+
+    pub fn render_session_argv_with_ids(
+        &self,
+        harness: &str,
+        lane: &str,
+        session_id: Option<&str>,
+        short_id: Option<&str>,
+    ) -> Result<Vec<String>, ContractError> {
         let caps = self.capabilities(harness)?;
         let form =
             caps.resume_strategy.forms.get(lane).ok_or_else(|| {
@@ -322,6 +351,32 @@ impl HarnessContract {
                 harness,
                 "resume_strategy",
                 &format!("lane {lane:?} is unsupported"),
+            ));
+        }
+        if let Some(index) = form.tokens.iter().position(|token| token == "{short_id}") {
+            if session_id.is_some_and(|id| !id.is_empty()) {
+                return Err(field_error(
+                    harness,
+                    "resume_strategy",
+                    &format!("lane {lane:?} needs a short_id, not a session_id"),
+                ));
+            }
+            let Some(id) = short_id.filter(|id| !id.is_empty()) else {
+                return Err(field_error(
+                    harness,
+                    "resume_strategy",
+                    &format!("lane {lane:?} needs a non-empty short_id"),
+                ));
+            };
+            let mut tokens = form.tokens.clone();
+            tokens[index] = id.to_string();
+            return Ok(tokens);
+        }
+        if short_id.is_some_and(|id| !id.is_empty()) {
+            return Err(field_error(
+                harness,
+                "resume_strategy",
+                &format!("lane {lane:?} accepts a session_id, not a short_id"),
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
@@ -384,6 +439,137 @@ impl HarnessContract {
     }
 }
 
+fn validate_model_switch_strategy(
+    harness: &str,
+    strategy: &ModelSwitchStrategy,
+) -> Result<(), ContractError> {
+    if !MODEL_SWITCH_KINDS.contains(&strategy.kind.as_str()) {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "unknown kind",
+        ));
+    }
+    if strategy.tokens.iter().any(String::is_empty)
+        || strategy.effort_labels.iter().any(|(effort, label)| {
+            !MODEL_SWITCH_EFFORTS.contains(&effort.as_str()) || label.is_empty()
+        })
+    {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "malformed tokens or effort labels",
+        ));
+    }
+    let placeholder_re = Regex::new(r"\{([^{}]+)\}").expect("static placeholder regex");
+    let mut placeholders = Vec::new();
+    for token in &strategy.tokens {
+        placeholders.extend(
+            placeholder_re
+                .captures_iter(token)
+                .map(|capture| capture[1].to_string()),
+        );
+        let remainder = placeholder_re.replace_all(token, "");
+        if remainder.contains('{') || remainder.contains('}') {
+            return Err(field_error(
+                harness,
+                "model_switch_strategy",
+                "malformed placeholder",
+            ));
+        }
+    }
+    if placeholders
+        .iter()
+        .any(|value| !["model", "effort", "effort_label"].contains(&value.as_str()))
+    {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "unknown placeholder",
+        ));
+    }
+    if strategy.kind == "unsupported" {
+        if !strategy.tokens.is_empty()
+            || !strategy.effort_labels.is_empty()
+            || !strategy.status_command.is_empty()
+            || !strategy.status_pattern.is_empty()
+        {
+            return Err(field_error(
+                harness,
+                "model_switch_strategy",
+                "unsupported strategy has executable data",
+            ));
+        }
+        return Ok(());
+    }
+    if !strategy.status_command.starts_with('/') {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "missing status command",
+        ));
+    }
+    let status_re = Regex::new(&strategy.status_pattern).map_err(|error| {
+        field_error(
+            harness,
+            "model_switch_strategy",
+            &format!("invalid status pattern: {error}"),
+        )
+    })?;
+    let groups: BTreeSet<&str> = status_re.capture_names().flatten().collect();
+    if !groups.contains("model") || !groups.contains("effort") {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "status pattern needs model and effort groups",
+        ));
+    }
+    let model_count = placeholders
+        .iter()
+        .filter(|value| value.as_str() == "model")
+        .count();
+    let effort_count = placeholders
+        .iter()
+        .filter(|value| value.as_str() == "effort")
+        .count();
+    let effort_label_count = placeholders
+        .iter()
+        .filter(|value| value.as_str() == "effort_label")
+        .count();
+    if strategy.kind == "direct" {
+        if model_count != 1
+            || effort_count != 1
+            || effort_label_count != 0
+            || !strategy.effort_labels.is_empty()
+        {
+            return Err(field_error(
+                harness,
+                "model_switch_strategy",
+                "direct needs model and effort placeholders",
+            ));
+        }
+        return Ok(());
+    }
+    let model_index = placeholders.iter().position(|value| value == "model");
+    let effort_index = placeholders
+        .iter()
+        .position(|value| value == "effort_label");
+    let label_keys: BTreeSet<&str> = strategy.effort_labels.keys().map(String::as_str).collect();
+    if model_count != 1
+        || effort_count != 0
+        || effort_label_count != 1
+        || model_index >= effort_index
+        || label_keys != MODEL_SWITCH_EFFORTS.into_iter().collect()
+    {
+        return Err(field_error(
+            harness,
+            "model_switch_strategy",
+            "menu_walk needs ordered model and effort targets",
+        ));
+    }
+    Ok(())
+}
+
 fn field_error(harness: &str, field: &str, detail: &str) -> ContractError {
     ContractError(format!("harness {harness:?} field {field:?}: {detail}"))
 }
@@ -394,6 +580,15 @@ pub fn render_session_argv(
     session_id: Option<&str>,
 ) -> Result<Vec<String>, ContractError> {
     HarnessContract::packaged()?.render_session_argv(harness, lane, session_id)
+}
+
+pub fn render_session_argv_with_ids(
+    harness: &str,
+    lane: &str,
+    session_id: Option<&str>,
+    short_id: Option<&str>,
+) -> Result<Vec<String>, ContractError> {
+    HarnessContract::packaged()?.render_session_argv_with_ids(harness, lane, session_id, short_id)
 }
 
 #[cfg(test)]
@@ -408,18 +603,35 @@ mod tests {
             "Python and packaged Rust contract copies diverged",
         );
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 8);
+        assert_eq!(contract.map_version, 9);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode"]
         );
         for (name, caps) in &contract.harness {
             assert_eq!(caps.permission_response.len(), 3, "{name}");
-            assert_eq!(caps.resume_strategy.forms.len(), 4, "{name}");
+            assert_eq!(caps.resume_strategy.forms.len(), 5, "{name}");
+            assert!(!caps.model_switch_strategy.kind.is_empty(), "{name}");
             assert!(!caps.submit_keys.is_empty(), "{name}");
             assert!(!caps.stop_strategy.is_empty(), "{name}");
             assert!(!caps.remove_strategy.is_empty(), "{name}");
         }
+        assert_eq!(
+            contract
+                .capabilities("claude")
+                .unwrap()
+                .model_switch_strategy
+                .kind,
+            "direct"
+        );
+        assert_eq!(
+            contract
+                .capabilities("codex")
+                .unwrap()
+                .model_switch_strategy
+                .kind,
+            "menu_walk"
+        );
     }
 
     #[test]
@@ -431,6 +643,27 @@ mod tests {
                 .unwrap(),
             ["claude", "--session-id", "c-1"]
         );
+        assert_eq!(
+            contract
+                .render_session_argv_with_ids(
+                    "claude",
+                    "interactive_attach",
+                    None,
+                    Some("deadbeef")
+                )
+                .unwrap(),
+            ["claude", "attach", "deadbeef"]
+        );
+        assert!(contract
+            .render_session_argv_with_ids(
+                "claude",
+                "interactive_attach",
+                Some("00000000-1111-2222-3333-444444444444"),
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("short_id"));
         assert_eq!(
             contract
                 .render_session_argv("codex", "interactive_resume", Some("cx-1"))
@@ -537,6 +770,35 @@ mod tests {
                 "kind = \"subcommand\"",
                 "kind = \"mystery\"",
                 "resume_strategy",
+            ),
+            (
+                "tokens = [\"/model {model}\", \"/effort {effort}\"]",
+                "tokens = [\"/model {model}\"]",
+                "model_switch_strategy",
+            ),
+            (
+                "tokens = [\"/model\", \"{model}\", \"{effort_label}\"]",
+                "tokens = [\"/model\", \"{effort_label}\", \"{model}\"]",
+                "model_switch_strategy",
+            ),
+            (
+                "tokens = [\"/model {model}\", \"/effort {effort}\"]",
+                "tokens = [\"/model {bogus}\", \"/effort {effort}\"]",
+                "model_switch_strategy",
+            ),
+            (
+                // Header-anchored: bare `kind = "unsupported"\ntokens = []`
+                // also occurs in codex's resume_strategy forms (interactive_attach),
+                // and a first-occurrence replacen would error naming
+                // resume_strategy instead of the field under test.
+                "[harness.gemini.model_switch_strategy]\nkind = \"unsupported\"\ntokens = []",
+                "[harness.gemini.model_switch_strategy]\nkind = \"unsupported\"\ntokens = [\"/model {model}\"]",
+                "model_switch_strategy",
+            ),
+            (
+                "status_command = \"/status\"",
+                "status_command = \"status\"",
+                "model_switch_strategy",
             ),
         ] {
             let bad = CAPABILITY_TOML.replacen(needle, replacement, 1);

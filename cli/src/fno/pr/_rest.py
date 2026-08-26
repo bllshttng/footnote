@@ -216,7 +216,9 @@ def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] =
 def _map_pr_state(data: dict) -> str:
     """REST `state` (open/closed + `merged`) -> the OPEN/CLOSED/MERGED shape
     the GraphQL read emitted, so `pr_state` in the output is unchanged."""
-    if data.get("merged"):
+    # The single-PR endpoint carries ``merged`` while list-pulls carries the
+    # same fact as a non-null ``merged_at`` timestamp.
+    if data.get("merged") or data.get("merged_at"):
         return "MERGED"
     return {"open": "OPEN", "closed": "CLOSED"}.get(str(data.get("state") or "").lower(), "UNKNOWN")
 
@@ -266,6 +268,9 @@ def fetch_pr_info_rest(
     merged_at = pr_data.get("merged_at")
     if merged_at is not None and not isinstance(merged_at, str):
         return None, "gh api pulls/<n> carried malformed merged_at"
+    merge_sha = pr_data.get("merge_commit_sha")
+    if merge_sha is not None and (not isinstance(merge_sha, str) or not merge_sha):
+        return None, "gh api pulls/<n> carried malformed merge_commit_sha"
     url = pr_data.get("html_url")
     if url is not None and (not isinstance(url, str) or not url):
         return None, "gh api pulls/<n> carried malformed HTML URL"
@@ -279,9 +284,56 @@ def fetch_pr_info_rest(
             "base_ref": base_ref,
             "mergeable": _map_mergeable(pr_data.get("mergeable")),
             "merged_at": merged_at,
+            "merge_sha": merge_sha,
         },
         "",
     )
+
+
+def fetch_pr_file_paths_rest(
+    pr: str,
+    cwd: Optional[str] = None,
+    runner: Callable = run,
+    repo: Optional[str] = None,
+) -> "tuple[Optional[list[str]], str]":
+    """Fetch every changed-file path from the paginated REST files endpoint."""
+    if not str(pr).strip().isdigit():
+        return None, f"REST file reader needs a numeric PR number, got {pr!r}"
+    slug = repo or _repo_slug(cwd, runner)
+    if not slug:
+        return None, "could not resolve owner/repo from `git remote get-url origin`"
+
+    paths: list[str] = []
+    # GitHub exposes at most 3,000 files for this endpoint. A full final page
+    # at that cap has no positive tail marker, so fail closed rather than call
+    # an incomplete list complete.
+    for page in range(1, 31):
+        files = runner(
+            [
+                "gh",
+                "api",
+                f"repos/{slug}/pulls/{pr}/files?per_page=100&page={page}",
+            ],
+            cwd=cwd,
+        )
+        if not files.ok:
+            return None, _rest_reason(files, runner=runner, cwd=cwd)
+        try:
+            payload = json.loads(files.stdout)
+        except json.JSONDecodeError:
+            return None, f"gh api pull files page {page} returned output that is not JSON"
+        if not isinstance(payload, list):
+            return None, f"gh api pull files page {page} returned a value that is not an array"
+        page_paths: list[str] = []
+        for index, row in enumerate(payload):
+            if not isinstance(row, dict) or not isinstance(row.get("filename"), str) or not row["filename"]:
+                return None, f"gh api pull files page {page} carried malformed row {index}"
+            page_paths.append(row["filename"])
+        paths.extend(page_paths)
+        if len(payload) < 100:
+            return paths, ""
+
+    return None, "gh api pull files reached GitHub's 3,000-file cap without a short page"
 
 
 def resolve_current_pr_number_rest(
@@ -437,6 +489,7 @@ def list_prs_rest(
     slug: str,
     *,
     state: str = "open",
+    requested_numbers: Optional[set[int]] = None,
     runner: Callable = run,
     cwd: Optional[str] = None,
     per_page: int = 100,
@@ -450,12 +503,15 @@ def list_prs_rest(
     open-PR question completely and left core untouched, which is why the
     pr-watch bulk sweep routes here instead of `gh pr list` (GraphQL bills
     by point cost; one oversized sweep drained the shared per-user budget).
-    Paginates on `page=` until a short page or the `max_pages` ceiling; rows
-    are reduced to ``{"number", "state"}`` with ``_map_pr_state``, so the
-    caller sees the OPEN/CLOSED/MERGED shape the GraphQL path produced.
+    Paginates on `page=` until a short page, all ``requested_numbers`` are
+    found, or the `max_pages` ceiling; rows are reduced to
+    ``{"number", "state"}`` with ``_map_pr_state``, so the caller sees the
+    OPEN/CLOSED/MERGED shape the GraphQL path produced. The optional requested
+    set is an early-stop bound for terminal lookups and does not filter rows.
     `(None, reason)` on any failure, matching `fetch_pr_rest`'s loud contract.
     """
     rows: list[dict[str, Any]] = []
+    found_numbers: set[int] = set()
     for page in range(1, max_pages + 1):
         res = runner(
             ["gh", "api", f"repos/{slug}/pulls?state={state}&per_page={per_page}&page={page}"],
@@ -493,6 +549,9 @@ def list_prs_rest(
                     }
                 )
             rows.append(summary)
+            found_numbers.add(number)
+        if requested_numbers and requested_numbers.issubset(found_numbers):
+            break
         if len(payload) < per_page:
             break
     else:

@@ -29,6 +29,7 @@ import hashlib as _hashlib
 import json as _json
 import math as _math
 import re as _re
+import secrets as _secrets
 import sys as _sys
 from pathlib import Path
 from typing import Any, TypeGuard
@@ -255,6 +256,26 @@ def validate(event: dict[str, Any]) -> None:
         if field not in data:
             raise ValidationError(f"event type {type_name} missing required data field: {field}")
 
+    # Claim records have two truthful PID shapes. A null PID must carry the
+    # positive marker and a TTL expiry, while an integer PID must not carry the
+    # marker. Without this cross-field check, a missing instrument and a
+    # deliberate PID-unavailable claim become indistinguishable in the audit log.
+    if type_name.startswith("claim_") and "pid" in data:
+        pid = data.get("pid")
+        if "pid_unavailable" in data and not isinstance(data["pid_unavailable"], bool):
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable must be boolean"
+            )
+        unavailable = data.get("pid_unavailable") is True
+        if pid is None and (not unavailable or data.get("expires_at") is None):
+            raise ValidationError(
+                f"event type {type_name} null pid requires pid_unavailable=true and expires_at"
+            )
+        if pid is not None and unavailable:
+            raise ValidationError(
+                f"event type {type_name} pid_unavailable=true requires pid=null"
+            )
+
     # a2a status-breakpoint family (x-dbaf): the extended envelope. Routable
     # fields live at envelope level; additionalProperties:false for this family
     # ONLY (legacy types keep today's tolerance). Enforced pre-lock so a
@@ -293,6 +314,14 @@ def validate(event: dict[str, Any]) -> None:
 
     if type_name == "phase_transition" and data.get("gate_bearing") and not data.get("gate"):
         raise ValidationError("phase_transition with gate_bearing=true must include data.gate")
+
+    if type_name == "failover_swapped":
+        if source != "daemon":
+            raise ValidationError("failover_swapped source must be daemon")
+        if not isinstance(data.get("short_id"), str) or not data["short_id"]:
+            raise ValidationError("failover_swapped short_id must be a non-empty string")
+        if type(data.get("redispatched")) is not bool:
+            raise ValidationError("failover_swapped redispatched must be boolean")
 
     if type_name == "context_snapshot":
         if source not in {"hook", "test"}:
@@ -941,10 +970,12 @@ def operator_decision(
     question: str | None = None,
     asked_by: str | None = None,
     asked_at: str | None = None,
+    expiry_ref: dict[str, Any] | None = None,
     options: "list[str] | None" = None,
     decided_by: str | None = None,
     attested_by: str | None = None,
     relayed_by: str | None = None,
+    origin: str | None = None,
     authority_source: str | None = None,
     rationale: str | None = None,
     supersedes: str | None = None,
@@ -964,10 +995,12 @@ def operator_decision(
         ("question", question[:QUESTION_CAP] if question else None),
         ("asked_by", asked_by),
         ("asked_at", asked_at),
+        ("expiry_ref", expiry_ref),
         ("options", options),
         ("decided_by", decided_by),
         ("attested_by", attested_by),
         ("relayed_by", relayed_by),
+        ("origin", origin),
         ("authority_source", authority_source),
         ("rationale", rationale[:QUESTION_CAP] if rationale else None),
         ("supersedes", supersedes),
@@ -975,6 +1008,38 @@ def operator_decision(
         if value is not None:
             data[key] = value
     return _build("operator_decision", source, data)
+
+
+def decision_retracted(
+    *,
+    retraction_id: str | None = None,
+    target_decision_id: str,
+    subject: str,
+    reason: str,
+    retracted_by: str | None = None,
+    attested_by: str | None = None,
+    relayed_by: str | None = None,
+    origin: str | None = None,
+    authority_source: str | None = None,
+    source: str = "target",
+) -> dict[str, Any]:
+    """Build an append-only event that retracts one decision."""
+    data: dict[str, Any] = {
+        "retraction_id": retraction_id or f"r-{_secrets.token_hex(4)}",
+        "target_decision_id": target_decision_id,
+        "subject": subject,
+        "reason": reason[:QUESTION_CAP],
+    }
+    for key, value in (
+        ("retracted_by", retracted_by),
+        ("attested_by", attested_by),
+        ("relayed_by", relayed_by),
+        ("origin", origin),
+        ("authority_source", authority_source),
+    ):
+        if value is not None:
+            data[key] = value
+    return _build("decision_retracted", source, data)
 
 
 def agent_raw_inject(
@@ -987,6 +1052,7 @@ def agent_raw_inject(
     target_cwd: str | None = None,
     target_head: str | None = None,
     confirmed: bool | None = None,
+    origin: str | None = None,
     source: str = "daemon",
 ) -> dict[str, Any]:
     """Build an ``agent_raw_inject`` provenance event.
@@ -1016,7 +1082,35 @@ def agent_raw_inject(
         data["target_head"] = target_head
     if confirmed is not None:
         data["confirmed"] = confirmed
+    if origin is not None:
+        data["origin"] = origin
     return _build("agent_raw_inject", source, data)
+
+
+def mail_origin_classified(
+    *,
+    origin: str,
+    lane: str,
+    presumed_human: bool,
+    sender: str | None = None,
+    target_session: str | None = None,
+    source: str = "daemon",
+) -> dict[str, Any]:
+    """Build the positive mail-origin measurement emitted before delivery.
+
+    ``presumed_human`` records the measured positive case rather than treating
+    a missing non-human row as proof that classification ran.
+    """
+    data: dict[str, Any] = {
+        "origin": origin,
+        "lane": lane,
+        "presumed_human": presumed_human,
+    }
+    if sender is not None:
+        data["sender"] = sender
+    if target_session is not None:
+        data["target_session"] = target_session
+    return _build("mail_origin_classified", source, data)
 
 
 def done_race_collision(
@@ -1359,6 +1453,7 @@ __all__ = [
     "operator_question",
     "operator_question_closed",
     "operator_decision",
+    "decision_retracted",
     "phase_0_decision",
     "phase_transition",
     "session_satisfied",

@@ -191,6 +191,41 @@ exit 1
         MockBins { _dir: dir, gh, git }
     }
 
+    /// CI is still pending on an otherwise shipped, reviewed PR.
+    fn ci_pending() -> Self {
+        let dir = TempDir::new().unwrap();
+        let gh = make_script(
+            dir.path(),
+            "gh",
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":17,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000017"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"unit-tests","state":"IN_PROGRESS","bucket":"pending"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000017"}}],"comments":[]}'
+  exit 0
+fi
+exit 1
+"#,
+        );
+        let git = make_script(
+            dir.path(),
+            "git",
+            r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000017""#,
+        );
+        MockBins { _dir: dir, gh, git }
+    }
+
     /// No PR: `gh pr view` exits 1 with gh's real no-PR stderr (distinct
     /// from an outage, which exits 1 with other stderr - see failing_gh).
     /// --version exits 0 so gh is detected as available.
@@ -348,6 +383,16 @@ fn transcript_empty() -> String {
     serde_json::to_string(&msg).unwrap() + "\n"
 }
 
+fn transcript_with_watching() -> String {
+    let msg = serde_json::json!({
+        "message": {
+            "role": "assistant",
+            "content": "<watching reason=\"ci\" timeout=\"30m\">"
+        }
+    });
+    serde_json::to_string(&msg).unwrap() + "\n"
+}
+
 /// Parse the stdout JSON decision from run_loop_check return value.
 #[derive(Debug, serde::Deserialize)]
 struct Decision {
@@ -398,6 +443,101 @@ fn fire(args: &[&str]) -> (i32, Decision) {
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn watching_ignored_codex_harness_is_audible() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-watching-codex", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_watching()).unwrap();
+
+    let mock = MockBins::ci_pending();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "codex",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message
+            .contains("watching ignored: harness codex cannot idle"),
+        "discarded watching tag must be named: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("CI still running on PR #17"),
+        "the actionable PR blocker must remain: {}",
+        d.message
+    );
+}
+
+#[test]
+fn watching_ignored_unaddressed_findings_are_audible() {
+    let tmp = findings_cwd("sess-watching-findings");
+    let cwd = tmp.path();
+    fs::write(cwd.join("transcript.jsonl"), transcript_with_watching()).unwrap();
+
+    let comments = r#"[
+  {"id":100,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) First","path":"src/one.rs","line":11,"created_at":"2026-06-05T01:10:00Z"},
+  {"id":101,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Second","path":"src/two.rs","line":22,"created_at":"2026-06-05T01:11:00Z"},
+  {"id":102,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Third","path":"src/three.rs","line":33,"created_at":"2026-06-05T01:12:00Z"},
+  {"id":103,"in_reply_to_id":null,"user":{"login":"chatgpt-codex-connector[bot]"},"body":"![P1 Badge](https://img.shields.io/badge/P1-orange?style=flat) Fourth","path":"src/four.rs","line":44,"created_at":"2026-06-05T01:13:00Z"}
+]"#;
+    let mock = findings_mock(comments, r#"{"commits":[]}"#);
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T02:00:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--author-harness",
+        "claude",
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(d.decision, "block");
+    assert!(
+        d.message
+            .contains("watching ignored: 4 unaddressed findings, this is not an async wait"),
+        "discarded watching tag must name the finding reason: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("src/one.rs:11"),
+        "the actionable first finding must remain: {}",
+        d.message
+    );
+}
 
 /// AC1-HP: promise with green PR -> DonePRGreen, exit 0, termination event.
 #[test]
@@ -2880,6 +3020,119 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
     assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
 }
 
+/// A no_external session on a repo with an ACTIVE login gate suppressed reads
+/// the config demanded, so the coverage axis must serialize as "unknown"
+/// (retry remedy intact) - never a definitive "uncovered" for bots that were
+/// never queried. The inactive-gate skip (nothing configured) stays a known
+/// zero; see ac3_hp_empty_required_bots_skips_review_reads.
+#[test]
+fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext2\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "no_external must not block: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"unknown\""),
+        "no_external on an active gate must read unknown, not a fabricated zero: {events}"
+    );
+    assert!(
+        !events.contains("\"coverage\":\"uncovered\""),
+        "an unqueried GitHub axis must never serialize as a definitive uncovered: {events}"
+    );
+}
+
+/// The other skip cause: no_external on a repo with an INACTIVE login gate.
+/// Nothing was configured to read, so the axis is a known zero and the event
+/// serializes uncovered. The retry remedy belongs to suppressed reads of an
+/// ACTIVE gate, not to a session that opted out of a gate that does not
+/// exist - else every no_external fire on an ungated repo reads
+/// review_coverage_unknown with no writer that can ever clear it.
+#[test]
+fn no_external_on_inactive_gate_serializes_the_known_zero() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-noext3\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(
+        d.decision, "allow",
+        "an ungated repo must not block: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"coverage\":\"uncovered\""),
+        "nothing configured to read is a known zero, never an unknown: {events}"
+    );
+}
+
 // ── x-e703: config.review.reviewers local-attestation gate ──────────────────
 
 /// The green() git+gh mock's HEAD (== headRefOid, so head_shipped passes). An
@@ -3055,6 +3308,14 @@ fn no_external_still_honors_reviewers_gate() {
     assert_eq!(
         d.decision, "block",
         "no_external must NOT bypass the local reviewers gate: {}",
+        d.message
+    );
+    // The remedy must name the unmet gate, not the instrument: this session
+    // lands with a known-zero GitHub axis, and a generic "coverage read
+    // unavailable; retry" cannot clear an unattested reviewer.
+    assert!(
+        d.message.contains("reviewers gate unmet"),
+        "block must name the unmet reviewer gate, not the instrument retry: {}",
         d.message
     );
     assert!(d.termination_reason.is_none());
@@ -7242,8 +7503,8 @@ fn status_posts(record: &Path) -> Vec<String> {
 
 const BOT_LANE: &str = "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\n";
 
-/// Covered fixture: BOTH emitters post one status each, to the same PR head
-/// sha, under the one context string, green because the review is at HEAD.
+/// Covered fixture: BOTH emitters post the required verdict and the diagnostic
+/// instrument-health status to the same PR head sha.
 #[test]
 fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     let tmp = TempDir::new().unwrap();
@@ -7290,21 +7551,42 @@ fn coverage_status_publish_fires_from_both_emitters_to_the_pr_head() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 2, "one POST per emitter, got: {posts:?}");
+    assert_eq!(posts.len(), 4, "two POSTs per emitter, got: {posts:?}");
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage "))
+            .count(),
+        2,
+        "required context must be posted by both emitters: {posts:?}"
+    );
+    assert_eq!(
+        posts
+            .iter()
+            .filter(|post| post.contains("context=fno/review-coverage-unavailable "))
+            .count(),
+        2,
+        "diagnostic context must be posted by both emitters: {posts:?}"
+    );
     for post in &posts {
         assert!(
             post.contains(&format!("statuses/{PUB_HEAD}")),
             "posted to the wrong sha: {post}"
         );
-        assert!(
-            post.contains("context=fno/review-coverage"),
-            "posted under the wrong context: {post}"
-        );
-        assert!(
-            post.contains("state=success")
-                && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
-            "covered fixture must post a success naming count+sha: {post}"
-        );
+        if post.contains("context=fno/review-coverage ") {
+            assert!(
+                post.contains("state=success")
+                    && post.contains(&format!("reviewed at {}", &PUB_HEAD[..8])),
+                "covered fixture must post a success naming count+sha: {post}"
+            );
+        } else {
+            assert!(
+                post.contains("context=fno/review-coverage-unavailable ")
+                    && post.contains("state=success")
+                    && post.contains("coverage read healthy"),
+                "covered fixture must clear instrument unavailability: {post}"
+            );
+        }
     }
 }
 
@@ -7327,9 +7609,17 @@ fn coverage_status_publish_posts_failure_when_unreviewed() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
-    assert!(posts[0].contains("state=failure"), "got: {}", posts[0]);
-    assert!(posts[0].contains("context=fno/review-coverage"));
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
+    let required = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage "))
+        .unwrap();
+    let diagnostic = posts
+        .iter()
+        .find(|post| post.contains("context=fno/review-coverage-unavailable "))
+        .unwrap();
+    assert!(required.contains("state=failure"), "got: {required}");
+    assert!(diagnostic.contains("state=success"), "got: {diagnostic}");
 }
 
 /// A configured local `code-review` reviewer with no head-pinned local pass:
@@ -7352,11 +7642,20 @@ fn coverage_status_publish_requires_local_code_review_pass_when_configured() {
     assert_eq!(vcode, 0, "verb must emit a row: {vjson}");
 
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "verb arm posts exactly once: {posts:?}");
+    assert_eq!(posts.len(), 2, "verb arm posts both contexts: {posts:?}");
     assert!(
-        posts[0].contains("state=failure"),
-        "a bot review must not satisfy the local code-review lane: {}",
-        posts[0]
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=failure")),
+        "a bot review must not satisfy the local code-review lane: {posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=success")
+        ),
+        "the diagnostic context must clear for a known uncovered result: {posts:?}"
     );
 }
 
@@ -7411,9 +7710,20 @@ fn coverage_status_posts_covered_after_refused_label_reads_find_no_override() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("covered: 1 reviewed at"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("state=success") && post.contains("covered: 1 reviewed at")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("coverage read healthy")
+        ),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7434,8 +7744,14 @@ fn coverage_status_posts_failure_after_refused_label_reads_find_no_status() {
     let recorded = fs::read_to_string(&record).unwrap();
     assert_eq!(recorded.matches("label-read-").count(), 3, "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=failure"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=failure")),
+        "{posts:?}"
+    );
 }
 
 #[test]
@@ -7457,9 +7773,22 @@ fn coverage_status_retries_a_label_read_then_honors_the_override() {
     assert_eq!(recorded.matches("label-read-").count(), 2, "{recorded}");
     assert!(!recorded.contains("status-description-read"), "{recorded}");
     let posts = status_posts(&record);
-    assert_eq!(posts.len(), 1, "{recorded}");
-    assert!(posts[0].contains("state=success"), "{}", posts[0]);
-    assert!(posts[0].contains("coverage-override"), "{}", posts[0]);
+    assert_eq!(posts.len(), 2, "{recorded}");
+    assert!(
+        posts
+            .iter()
+            .any(|post| post.contains("context=fno/review-coverage ")
+                && post.contains("state=success")
+                && post.contains("coverage-override")),
+        "{posts:?}"
+    );
+    assert!(
+        posts.iter().any(
+            |post| post.contains("context=fno/review-coverage-unavailable ")
+                && post.contains("state=success")
+        ),
+        "{posts:?}"
+    );
 }
 
 // ── the king driver arm ───────────────────────────────────────────────────────
@@ -8219,5 +8548,333 @@ fn a_clean_king_terminal_does_not_ask_the_operator_anything() {
         !log.exists(),
         "a NoWork terminal must not escalate: {}",
         fs::read_to_string(&log).unwrap_or_default()
+    );
+}
+
+// ── bounded external reads: every stop-gate read is bounded and a killed
+// child is named as the exact read that timed out ──────────────────────────
+//
+// Each case wedges ONE logical read behind a 30s sleep and injects a 1s
+// bound, then asserts three things: the fire RETURNS (bounded), the decision
+// message names exactly the wedged read as a killed timeout, and it never
+// names an unrelated read (the pr_info_rest misattribution this family of
+// tests exists to close).
+
+/// A gh mock that answers every read green EXCEPT `wedge`, which sleeps 30s
+/// past any test bound. The fingerprint read's exact argv
+/// (`state,number,headRefName` with no `headRefOid`) is distinguished from
+/// done()'s full-field view so each read can wedge independently.
+fn wedged_gh(dir: &Path, wedge: &str) -> PathBuf {
+    let body = r#"# wedge2: sleep only on the SECOND invocation of the read. The fingerprint
+# block reads checks/reviews BEFORE done() does with identical argv, so a
+# first-call wedge proves the fingerprint path and a second-call wedge is the
+# only way to reach the done() read's own timeout.
+wedge2() {
+  [ "$1" = "WEDGE" ] || return 0
+  c=$(dirname "$0")/count.$1
+  n=$(cat "$c" 2>/dev/null || echo 0)
+  n=$((n + 1))
+  echo "$n" > "$c"
+  [ "$n" -ge 2 ] && sleep 30
+}
+wedge() { [ "$1" = "WEDGE" ] && sleep 30; }
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+# fingerprint read: exactly state,number,headRefName (no headRefOid)
+if echo "$*" | grep -q "state,number,headRefName" && ! echo "$*" | grep -q "headRefOid"; then
+  wedge fingerprint_pr_view
+  echo '{"state":"OPEN","number":1,"headRefName":"main"}'
+  exit 0
+fi
+# done() Read 1: the full-field view
+if echo "$*" | grep -q "headRefOid"; then
+  wedge pr_view
+  echo '{"state":"OPEN","number":1,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001","mergeable":"MERGEABLE","baseRefName":"main"}'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  wedge pulls_comments
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  wedge2 pr_checks
+  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  wedge2 pr_reviews
+  echo '{"reviews":[{"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED","submittedAt":"2026-06-05T01:00:00Z","commit":{"oid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}}],"comments":[]}'
+  exit 0
+fi
+exit 1"#
+        .replace("WEDGE", wedge);
+    make_script(dir, "gh", &body)
+}
+
+/// Standard target-driver fire against a wedged gh: promise intent so the
+/// done() reads actually run, 1s read bound so a wedge kills at ~1s.
+fn wedged_fire(
+    cwd: &Path,
+    manifest_path: &Path,
+    transcript_path: &Path,
+    gh: &Path,
+    git: &Path,
+) -> (i32, Decision, std::time::Duration) {
+    let started = std::time::Instant::now();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--read-timeout-ms=1000",
+    ]);
+    (code, d, started.elapsed())
+}
+
+/// Shared setup for the target-driver wedge cases. The `WedgedSetup` keeps
+/// BOTH tempdirs alive for the test body: dropping the mock's dir here (the
+/// classic TempDir-in-a-helper bug) deletes the gh binary before the fire
+/// and every read answers ENOENT.
+struct WedgedSetup {
+    _tmp: TempDir,
+    _bins: TempDir,
+    manifest: PathBuf,
+    transcript: PathBuf,
+    gh: PathBuf,
+}
+
+fn wedged_setup(wedge: &str) -> WedgedSetup {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest = cwd.join("target-state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest,
+        new_manifest("sess-wedge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+    let bins = TempDir::new().unwrap();
+    let gh = wedged_gh(bins.path(), wedge);
+    WedgedSetup {
+        _tmp: tmp,
+        _bins: bins,
+        manifest,
+        transcript,
+        gh,
+    }
+}
+
+/// Assert the killed-timeout shape: bounded return, exact read named, the
+/// timeout event row present, and no misattributed read in the message.
+fn assert_timeout_block(
+    code: i32,
+    d: &Decision,
+    elapsed: std::time::Duration,
+    expected_read: &str,
+    events: &Path,
+) {
+    assert_eq!(code, 0, "a bounded read blocks, never errors: {d:?}");
+    assert_eq!(d.decision, "block", "{d:?}");
+    assert!(
+        d.message
+            .contains(&format!("external read '{expected_read}' timed out after")),
+        "message must name the wedged read as a killed timeout: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("was killed"),
+        "message must say the child was killed: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("gh read '"),
+        "a killed timeout must not render the ordinary failed-read wording: {}",
+        d.message
+    );
+    // Bounded: 1s bound plus generous cleanup and scheduling slack.
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "fire must return within the bound plus slack, took {elapsed:?}"
+    );
+    let journal = fs::read_to_string(events).unwrap_or_default();
+    assert!(
+        journal.contains("\"outcome\":\"timeout\""),
+        "the gh_error event must carry the positive timeout outcome: {journal}"
+    );
+    assert!(
+        journal.contains(expected_read),
+        "the gh_error event must name the wedged read {expected_read}: {journal}"
+    );
+}
+
+#[test]
+fn external_read_timeout_pr_view_names_the_read_not_a_sibling() {
+    let ws = wedged_setup("pr_view");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    // The misattribution this closes: a killed pr_view reported as pr_info_rest.
+    assert!(!d.message.contains("pr_info_rest"), "{}", d.message);
+    assert_timeout_block(code, &d, elapsed, "pr_view", &events);
+}
+
+#[test]
+fn external_read_timeout_pr_checks_names_the_read() {
+    let ws = wedged_setup("pr_checks");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "pr_checks", &events);
+}
+
+#[test]
+fn external_read_timeout_pr_reviews_names_the_read() {
+    let ws = wedged_setup("pr_reviews");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "pr_reviews", &events);
+}
+
+#[test]
+fn external_read_timeout_fingerprint_read_names_the_read() {
+    let ws = wedged_setup("fingerprint_pr_view");
+    let events = ws._tmp.path().join(".fno/events.jsonl");
+    let git = MockBins::green().git;
+    let (code, d, elapsed) =
+        wedged_fire(ws._tmp.path(), &ws.manifest, &ws.transcript, &ws.gh, &git);
+    assert_timeout_block(code, &d, elapsed, "fingerprint_pr_view", &events);
+}
+
+/// A wedged LOCAL git read (the external-diff-driver shape) must not hang
+/// the fire either: the stop-gate git calls route through the same bounded
+/// transport, and a killed read degrades to each caller's conservative
+/// no-answer instead of wedging the stop gate.
+#[test]
+fn wedged_git_read_degrades_bounded_instead_of_hanging() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    let manifest = cwd.join("target-state.md");
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest,
+        new_manifest("sess-gitwedge", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript, transcript_with_promise()).unwrap();
+    let bins = TempDir::new().unwrap();
+    // Everything answers green except the payload-classify diff (the
+    // three-dot range), which sleeps past any test bound.
+    let git = make_script(
+        bins.path(),
+        "git",
+        r#"if echo "$*" | grep -q -- "--version"; then exit 0; fi
+if [ "$1" = "diff" ] && echo "$*" | grep -q "\.\.\."; then sleep 30; fi
+if [ "$1" = "rev-parse" ]; then
+  if echo "$*" | grep -q "HEAD"; then echo "deadbeefdeadbeefdeadbeefdeadbeef00000001"; exit 0; fi
+  echo "cafecafecafecafecafecafecafecafe00000001"; exit 0
+fi
+[ "$1" = "merge-base" ] && exit 1
+[ "$1" = "status" ] && exit 0
+[ "$1" = "branch" ] && { echo "feature/x"; exit 0; }
+exit 0"#,
+    );
+    let gh = MockBins::green().gh;
+    let started = std::time::Instant::now();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest.to_str().unwrap(),
+        "--transcript",
+        transcript.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--read-timeout-ms=1000",
+    ]);
+    let elapsed = started.elapsed();
+    assert_eq!(code, 0, "a degraded git read still decides: {d:?}");
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "a wedged git read must not hang the fire, took {elapsed:?}"
+    );
+    assert!(
+        !d.message.is_empty(),
+        "the fire must emit a decision message, not die silently: {d:?}"
+    );
+}
+
+/// The king driver's one external read (the board) is bounded too, and a
+/// wedged board blocks with the killed-timeout wording rather than hanging
+/// the king's fire.
+#[test]
+fn external_read_timeout_king_board_blocks_named() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let state = king_manifest(cwd, "k-wedge");
+    let events = cwd.join("events.jsonl");
+    let bins = TempDir::new().unwrap();
+    // The mock must answer the harness's `--version` probe instantly: an
+    // unconditional sleep costs the setup 30s before the fire even starts
+    // (make_script probe-runs every generated script once).
+    let fno = make_script(
+        bins.path(),
+        "fno-king-mock",
+        "[ \"$1\" = \"--version\" ] && exit 0\nsleep 30",
+    );
+
+    let started = std::time::Instant::now();
+    let (code, json) = fno_agents::loopcheck::run_loop_check_capture(&[
+        "loop-check".to_string(),
+        "--driver".to_string(),
+        "king".to_string(),
+        "--state".to_string(),
+        state.to_str().unwrap().to_string(),
+        "--transcript".to_string(),
+        cwd.join("transcript.jsonl").to_str().unwrap().to_string(),
+        "--cwd".to_string(),
+        cwd.to_str().unwrap().to_string(),
+        "--events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--global-events".to_string(),
+        events.to_str().unwrap().to_string(),
+        "--fno-bin".to_string(),
+        fno.to_str().unwrap().to_string(),
+        "--read-timeout-ms".to_string(),
+        "1000".to_string(),
+    ]);
+    let elapsed = started.elapsed();
+    let d: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(d["decision"], "block", "{d}");
+    let reason = d["reason"].as_str().unwrap();
+    assert!(
+        reason.contains("external read 'king_board' timed out after"),
+        "the king block reason must name the wedged board read: {reason}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "king fire must return within the bound plus slack, took {elapsed:?}"
+    );
+    assert_eq!(
+        code, 2,
+        "a king block exits 2 like the non-empty board: {code}"
     );
 }

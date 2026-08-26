@@ -241,12 +241,19 @@ def clear(
         help="How the answerer was entitled to answer: 'operator', 'crown', "
         "'agent', or 'beastmode'. Omit to claim none.",
     ),
+    origin: str = typer.Option(
+        None,
+        "--origin",
+        hidden=True,
+        help="Carried mail origin used by the machine law gate.",
+    ),
 ) -> None:
     """Close one or more open questions. Idempotent."""
     from fno.decide import (
         AUTHORITY_SOURCES,
         IndexWriteError,
         RefusedAuthorityError,
+        UnknownOriginError,
         UnattributedAuthorityError,
     )
     from fno.events import QUESTION_CAP, operator_question_closed
@@ -312,15 +319,20 @@ def clear(
                 try:
                     recorded = record_decision(
                         decision=answer,
-                        subject=record.node,
+                        subject=record.node or f"question:{qid}",
                         question_id=qid,
                         question=record.question,
                         asked_by=record.asker or record.session_id,
                         asked_at=record.ts or None,
                         authority_source=authority,
+                        origin=origin,
                         events_root=root,
                     )["decision_id"]
-                except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+                except (
+                    RefusedAuthorityError,
+                    UnknownOriginError,
+                    UnattributedAuthorityError,
+                ) as exc:
                     # Refuse the CLOSE too, never just the decision. Closing a
                     # question whose answer was refused would retire it with
                     # nothing on record, which is the worse of the two.

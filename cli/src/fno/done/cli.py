@@ -48,7 +48,9 @@ from fno.graph._reconcile import (
     node_pr_refs,
     pr_number_from_url,
     pr_url_for_repo,
+    query_pr_merge_state,
     repo_slug_from_url,
+    render_merge_evidence_failure,
     resolve_merge_evidence,
     resolve_promise_evidence,
 )
@@ -347,19 +349,10 @@ def _apply_rollup(
 
 def _gh_query(pr_number, **kwargs):
     """Query REST for PR merge state. Injectable test seam, mirroring graph.cli."""
-    from fno.graph._reconcile import PrMergeState, ReconcileError
-    from fno.pr._rest import fetch_pr_info_rest
-
-    info, reason = fetch_pr_info_rest(
-        str(pr_number), cwd=kwargs.get("cwd"), repo=kwargs.get("repo")
-    )
-    if info is None:
-        raise ReconcileError(reason)
-    return PrMergeState(
-        number=info["pr"],
-        state=info["state"],
-        url=info["url"],
-        merged_at=info["merged_at"],
+    return query_pr_merge_state(
+        pr_number,
+        cwd=kwargs.get("cwd"),
+        repo=kwargs.get("repo"),
     )
 
 
@@ -638,17 +631,16 @@ def done_command(
             )
             raise typer.Exit(code=evidence.exit_code)
         if evidence.outcome == "outage":
-            typer.echo(
-                f"Error: gh cross-check failed for {node_id}: {evidence.error}\n"
-                f"The check is retryable once gh is available again. Node stays open.",
-                err=True,
-            )
+            typer.echo(render_merge_evidence_failure(node_id, evidence, stays="open"), err=True)
             raise typer.Exit(code=evidence.exit_code)
         if evidence.outcome == "refused":
-            typer.echo(
-                f"Refused: {node_id} cross-check failed: {evidence.reason}",
-                err=True,
-            )
+            if evidence.remedy:
+                typer.echo(render_merge_evidence_failure(node_id, evidence, stays="open"), err=True)
+            else:
+                typer.echo(
+                    f"Refused: {node_id} cross-check failed: {evidence.reason}",
+                    err=True,
+                )
             raise typer.Exit(code=evidence.exit_code)
         merge_status_to_write = "merged"
 

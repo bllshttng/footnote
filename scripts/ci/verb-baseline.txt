@@ -70,6 +70,7 @@ context
 cost
 decide list
 decide reindex
+decide retract !--origin
 delivery
 dispatch
 do
@@ -86,7 +87,7 @@ inbox approvals show !--db
 inbox board !--state
 inbox notify
 inbox outstanding ask
-inbox outstanding clear
+inbox outstanding clear !--origin
 inbox outstanding mine do
 inbox outstanding reindex
 king board !--state
@@ -94,17 +95,21 @@ king done
 king escalate
 king init
 king manifest-path
+law enact
+law inspect
+law prepare
+law resume
 lint
 loops
 loops resume-all
 mail
-mail send !--provider
+mail send !--origin !--provider
 mcp send
 mux
 notify
 observer
 outstanding ask
-outstanding clear
+outstanding clear !--origin
 outstanding mine do
 outstanding reindex
 paths

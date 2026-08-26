@@ -473,9 +473,11 @@ def test_build_argv_resume_session() -> None:
     to the model/permission/effort flags, not this one."""
     from fno.agents.harnesses.claude import _build_argv
 
-    assert _build_argv("a", "hi", False, resume_session_id="U-123") == [
+    argv = _build_argv("a", "hi", False, resume_session_id="U-123")
+    assert argv == [
         "claude", "--bg", "--name", "a", "--resume", "U-123", "--", "hi",
     ]
+    assert "-p" not in argv, "a hosted bg revival stays interactive"
     # stdin path (large message): message omitted, resume still present.
     assert _build_argv("a", "hi", True, resume_session_id="U-123") == [
         "claude", "--bg", "--name", "a", "--resume", "U-123",

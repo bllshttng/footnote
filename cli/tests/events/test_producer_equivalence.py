@@ -55,14 +55,33 @@ def _producer_names() -> list[str]:
 def _temp_git_repo(tmp_path: Path) -> Path:
     sub = tmp_path / "repo"
     sub.mkdir()
+    # The producer measures the diff under review and refuses an EMPTY one (a
+    # review of nothing is not a pass), so the fixture carries a base commit
+    # on origin/main plus a feature commit with a real change - without the
+    # second commit every emit below hits the empty-diff refusal.
     for args in (
         ["git", "init", "-q"],
         ["git", "config", "user.email", "t@t.t"],
         ["git", "config", "user.name", "t"],
-        ["git", "commit", "-q", "--allow-empty", "-m", "init"],
     ):
         subprocess.run(args, cwd=sub, check=True)
+    (sub / "a.txt").write_text("one\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=sub, check=True)
+    base = _head_of(sub)
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/main", base], cwd=sub, check=True
+    )
+    (sub / "a.txt").write_text("one\ntwo\n", encoding="utf-8")
+    subprocess.run(["git", "add", "a.txt"], cwd=sub, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "feature"], cwd=sub, check=True)
     return sub
+
+
+def _head_of(repo: Path) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout.strip()
 
 
 def _head(repo: Path) -> str:
@@ -187,6 +206,7 @@ def test_codex_stop_path_reaches_the_same_attestation_producer(tmp_path: Path) -
     assert data["reviewer"] == "code-review"
     assert data["verdict"] == "pass"
     assert data["head_sha"] == head
+    assert data["reviewer_context"] == "unknown"
 
 
 def test_report_findings_path_also_emits(tmp_path: Path) -> None:
@@ -214,6 +234,39 @@ def test_report_findings_path_also_emits(tmp_path: Path) -> None:
     assert len(events) == 1, events
     assert events[0]["data"]["reviewer"] == "code-review"
     assert events[0]["data"]["head_sha"] == head
+    assert events[0]["data"]["reviewer_context"] == "shared"
+
+
+def test_claude_fork_marker_records_fresh_reviewer_context(tmp_path: Path) -> None:
+    repo = _temp_git_repo(tmp_path)
+    head = _head(repo)
+    transcript = repo / "agent.jsonl"
+    transcript.write_text("")
+    (repo / "agent.forked-skill.marker.json").write_text(
+        json.dumps({"forkedSkill": True, "skillName": "code-review"})
+    )
+    payload = json.dumps(
+        {
+            "hook_event_name": "SubagentStop",
+            "agent_type": "general-purpose",
+            "agent_transcript_path": str(transcript),
+            "last_assistant_message": "```json\n[]\n```",
+            "cwd": str(repo),
+        }
+    )
+    r = subprocess.run(
+        ["bash", str(_HOOK)],
+        input=payload,
+        cwd=repo,
+        env=_base_env(),
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+    assert len(events) == 1, events
+    assert events[0]["data"]["head_sha"] == head
+    assert events[0]["data"]["reviewer_context"] == "fresh"
 
 
 def test_subagent_stop_ignores_a_non_code_review_description(tmp_path: Path) -> None:

@@ -247,7 +247,10 @@ def _build_argv(
     """
     from fno.agents.harness_map import render_session_argv
 
-    lane = "headless_resume" if resume_session_id else "headless_create"
+    # A --bg supervisor is interactive even though it is hosted by the
+    # daemon. Keep it on the interactive create/resume forms; the headless
+    # resume form owns `-p` and would turn this worker into a one-shot process.
+    lane = "interactive_resume" if resume_session_id else "interactive_create"
     identity = render_session_argv("claude", lane, resume_session_id)
     argv = [identity[0], "--bg", "--name", name]
     # x-6de8: a routed bg session's serving process is forked by the daemon
@@ -440,6 +443,7 @@ def headless_create(
         incoherent_model_env,
         overlay_restores_model_env,
         scrub_incoherent_model_env_and_notify,
+        unrouted_model_keys,
     )
 
     _incoherent = incoherent_model_env()
@@ -449,14 +453,18 @@ def headless_create(
     from fno.agents.model_routing import ROUTE_PROVIDER_ENV, inherited_route_stamp
 
     _stale_stamp = bool(inherited_route_stamp()) and not route_env
-    if account_env or route_env or _incoherent or _stale_stamp:
+    # An unrouted child carries no model claim: build the env (rather than
+    # bare-inheriting os.environ) whenever the shell holds one, so the scrub
+    # below can clear it.
+    _restores_model = overlay_restores_model_env(account_env, route_env)
+    _unrouted_claims = () if _restores_model else unrouted_model_keys(os.environ)
+    if account_env or route_env or _incoherent or _stale_stamp or _unrouted_claims:
         spawn_env = dict(os.environ)
         if _stale_stamp:
             spawn_env.pop(ROUTE_PROVIDER_ENV, None)
         # Strip before the overlay below so a real route still wins.
         scrub_incoherent_model_env_and_notify(
-            spawn_env,
-            routed=overlay_restores_model_env(account_env, route_env),
+            spawn_env, routed=_restores_model
         )
         if account_env or route_env:
             from fno.agents.account_env import compose_worker_credentials
@@ -570,24 +578,35 @@ def bg_create(
     # when both are present the route wins the settings file (route-wins
     # atomicity - endpoint+auth+model as one unit), and the account overlay
     # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
-    from fno.agents.model_routing import incoherent_model_env, route_settings_path_for
+    from fno.agents.model_routing import (
+        incoherent_model_env,
+        route_settings_path_for,
+        unrouted_model_keys,
+    )
 
     # Computed once here because the settings-file float below needs the
     # answer before _build_argv; the spawn_env scrub rescans on its own.
     _incoherent = incoherent_model_env()
     settings_path = route_settings_path_for(route_env, account_env)
     # Without a route/account there is no settings file, so an env-only scrub
-    # of the poisoned model vars below is decorative for `claude --bg`: the
-    # serving session is forked by the claude daemon with the DAEMON's own
-    # env (x-6de8), never this process's spawn_env. Float a settings file
-    # flooring just the offending vars so the fix reaches the actual worker
-    # in the plain unrouted case too - the shape x-4709 exists to fix.
-    if settings_path is None and _incoherent:
+    # of the model vars below is decorative for `claude --bg`: the serving
+    # session is forked by the claude daemon with the DAEMON's own env
+    # (x-6de8), never this process's spawn_env. Float a settings file
+    # flooring the offending vars so the fix reaches the actual worker in the
+    # plain unrouted case too - the shape x-4709 exists to fix. The floor
+    # covers COHERENT inherited claims as well: a daemon-forked child cannot
+    # be reached by the spawn_env clear below, and an unrouted child running
+    # on a model the launching shell happened to export is the same
+    # unselected-model defect, just one that fails quietly.
+    _floor_keys: list[str] = [_k for _k, _v in _incoherent]
+    if settings_path is None:
+        _floor_keys += [
+            _k for _k in unrouted_model_keys(os.environ) if _k not in _floor_keys
+        ]
+    if settings_path is None and _floor_keys:
         from fno.agents.model_routing import materialize_model_scrub_settings
 
-        settings_path = materialize_model_scrub_settings(
-            [_k for _k, _v in _incoherent]
-        )
+        settings_path = materialize_model_scrub_settings(_floor_keys)
     argv = _build_argv(
         name=name,
         message=message,

@@ -58,6 +58,7 @@ def _common(claim: Claim) -> dict[str, Any]:
         "key": claim.key,
         "holder": claim.holder,
         "pid": claim.pid,
+        "pid_unavailable": claim.pid_unavailable,
         "host": claim.host,
         "acquired_at": claim.acquired_at,
         "expires_at": claim.expires_at,
@@ -99,7 +100,7 @@ def emit_claim_idempotent_reacquired(claim: Claim, *, previous: Claim) -> None:
 def emit_claim_rebound(
     claim: Claim,
     *,
-    previous_pid: int,
+    previous_pid: Optional[int],
     previous_state: str,
     mode: str,
     fno_id: Optional[str] = None,
@@ -113,7 +114,7 @@ def emit_claim_rebound(
     authoritative; this audit row is observability, like every claim event.
     """
     data = _common(claim)
-    data["previous_pid"] = int(previous_pid)
+    data["previous_pid"] = previous_pid
     data["previous_state"] = previous_state
     data["mode"] = mode
     if fno_id is not None:

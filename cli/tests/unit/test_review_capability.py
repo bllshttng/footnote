@@ -240,7 +240,10 @@ def test_self_review_invocation_names_the_harness_verb():
 
     assert rc.harness_can_self_review("claude") is True
     assert rc.harness_can_self_review("codex") is True
-    assert rc.harness_can_self_review("opencode") is True
+    # opencode's verb is recorded, but no lane this code drives can fire it
+    # (daemon lane submits text; mux declares submit unsupported), so the
+    # floor must not demand its attestation.
+    assert rc.harness_can_self_review("opencode") is False
     assert rc.harness_can_self_review("gemini") is False
     assert rc.harness_can_self_review("agy") is False
     assert rc.harness_can_self_review(None) is False
@@ -280,6 +283,30 @@ def test_render_self_review_invocation_sizes_from_the_diff_never_the_default(mon
     # the same path. A dead render never raises - it degrades to the placeholder.
     monkeypatch.setattr(rc, "diff_review_level", lambda root: sized)
     assert "<level>" not in rc.render_self_review_invocation()
+
+
+def test_render_self_review_invocation_names_the_final_pr_head_and_base():
+    import fno.review_capability as rc
+
+    codex = rc.render_self_review_invocation(
+        "codex",
+        project_root=None,
+        pr_number=123,
+        head_sha="abc1234",
+        base_branch="main",
+    )
+    assert codex == "/review HEAD abc1234 of PR 123 against origin/main"
+
+    claude = rc.render_self_review_invocation(
+        "claude",
+        project_root=None,
+        pr_number=123,
+        head_sha="abc1234",
+        base_branch="main",
+    )
+    assert claude == (
+        "/code-review <level> --comment HEAD abc1234 of PR 123 against origin/main"
+    )
 
 
 def test_level_for_diff_sizes_from_both_dimensions():

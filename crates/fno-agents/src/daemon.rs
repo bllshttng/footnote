@@ -567,8 +567,9 @@ pub fn worktree_sweep(
 /// `None` no path recorded or the file cannot be stat'd.
 ///
 /// This is the INDEPENDENT half of the reap decision. `status` and `exited_at`
-/// are one signal wearing two hats: `gc_sweep` sets the stamp when a sweep first
-/// fails to reach a worker, so they cannot corroborate each other. A claude bg
+/// are one signal wearing two hats: the reconcile transition and `gc_sweep` (for
+/// rows no reconcile ever flipped) set the stamp when fno first observes the
+/// death, so they cannot corroborate each other. A claude bg
 /// thread that finished a turn is idle and resumable, not gone, and a batched
 /// stamp says nothing about which it is. Its transcript does.
 ///
@@ -6636,6 +6637,9 @@ where
 /// pid is cleared only on `Exited` (the lone terminal status reconcile produces)
 /// -- an `Orphaned` row keeps its pid, which is still the live-but-unowned
 /// process an operator may want to `ps`/signal while investigating the orphan.
+/// The `Exited` transition also stamps `exited_at`: `last_reconciled_at` rotates
+/// on every probe, so it is a CHECKED stamp, not a transition stamp, and the only
+/// timestamp a reader can attribute to the exit itself is one written here.
 fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>, now: &str) {
     e.last_reconciled_at = Some(now.to_string());
     if let Some(s) = new_status {
@@ -6643,6 +6647,7 @@ fn apply_reconcile_change(e: &mut RegistryEntry, new_status: Option<AgentStatus>
         if matches!(s, AgentStatus::Exited) {
             e.pid = None;
             e.pid_start_time = None;
+            e.exited_at = Some(now.to_string());
             // Ordered exit teardown (E3.3, AC-X2-4): clear the inside-leg
             // authority on exit so a stale `working` never wins after the pane
             // is gone. The completion event is published by the caller BEFORE
@@ -9132,8 +9137,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
     #[test]
     fn the_exit_stamp_is_written_per_sweep_not_per_exit() {
-        // NAMING THE BATCH WRITER. `gc_sweep` is the only production writer of
-        // `exited_at`, and it computes ONE timestamp per pass and applies it to
+        // NAMING THE BATCH WRITER. `gc_sweep` is the batch writer of
+        // `exited_at` (the reconcile Exited transition stamps one row at a
+        // time; the sweep remains the backstop for rows no reconcile ever
+        // flipped). It computes ONE timestamp per pass and applies it to
         // every row it newly observes as dead. That is why rows across unrelated
         // tenants and projects share a stamp to the second: the field measures a
         // sweep tick, not an exit.
@@ -11566,6 +11573,11 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             "exited row must clear the inside-leg authority (E3.3 / AC-X2-4)"
         );
         assert_eq!(to_exited.last_reconciled_at.as_deref(), Some("T1"));
+        assert_eq!(
+            to_exited.exited_at.as_deref(),
+            Some("T1"),
+            "the Exited transition stamps exited_at; CHECKED alone must not pose as one"
+        );
 
         let mut to_orphaned = rentry("y", AgentStatus::Live, None);
         to_orphaned.pid = Some(4242);
@@ -11587,6 +11599,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             to_orphaned.inside_leg.is_some(),
             "a non-exit transition keeps the inside-leg report (only exit tears it down)"
         );
+        assert_eq!(
+            to_orphaned.exited_at, None,
+            "a non-exit transition writes no exit stamp"
+        );
 
         // No status change: status held, but CHECKED still freshens (AC2-FR).
         let mut no_change = rentry("z", AgentStatus::Live, Some("OLD"));
@@ -11595,6 +11611,10 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert_eq!(no_change.status, AgentStatus::Live);
         assert_eq!(no_change.pid, Some(4242));
         assert_eq!(no_change.last_reconciled_at.as_deref(), Some("T3"));
+        assert_eq!(
+            no_change.exited_at, None,
+            "a CHECKED-only probe must not write an exit stamp"
+        );
     }
 
     #[test]

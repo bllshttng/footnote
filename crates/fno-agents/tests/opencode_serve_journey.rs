@@ -19,7 +19,6 @@ use fno_agents::opencode_serve::{
 use fno_agents::paths::AgentsHome;
 use fno_agents::state::load_registry;
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
 fn journey_enabled() -> bool {

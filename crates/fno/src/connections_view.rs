@@ -1237,12 +1237,13 @@ pub async fn load_all() -> ReadOutcome {
 /// One `fno <args>` read shell-out with the fail-open budget. Resolves the `fno`
 /// binary from `$FNO_BIN` else PATH (the mux shells the deployed CLI).
 async fn read_json(args: &[&str]) -> Result<Vec<u8>, String> {
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(args)
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(READ_TIMEOUT, fut)
         .await
         .map_err(|_| "timed out".to_string())?
@@ -1274,15 +1275,13 @@ pub async fn run_verb(argv: Vec<String>) -> ActionResult {
 /// Like [`run_verb`] but sets extra child env vars (register needs
 /// `CLAUDE_CONFIG_DIR` to pick the account's config dir / Keychain item).
 pub async fn run_verb_env(argv: Vec<String>, env: Vec<(String, String)>) -> ActionResult {
-    let mut cmd = tokio::process::Command::new(fno_bin());
+    let mut cmd = crate::process_admission::tokio_command(fno_bin());
     cmd.args(&argv);
     for (k, v) in &env {
         cmd.env(k, v);
     }
-    let fut = cmd
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+    cmd.stdin(std::process::Stdio::null()).kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut cmd);
     let output = match tokio::time::timeout(Duration::from_secs(30), fut).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {

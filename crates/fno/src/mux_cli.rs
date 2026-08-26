@@ -2030,6 +2030,24 @@ const CR_RESUBMIT_EVERY: u32 = 8;
 const SUBMIT_CONFIRM_ATTEMPTS: u32 = 40;
 const SUBMIT_CONFIRM_INTERVAL_MS: u64 = 250;
 
+/// `pane send --raw` byte cap. Raw is the keystroke lane, exempt from the
+/// prose gates by design, but exempt is not unbounded: `--raw --stdin` had no
+/// limit at all, an ungated prose channel past every gate. The cap sits above
+/// the mail body refuse cap plus envelope overhead, because the mail lane
+/// pastes its own already-gated wrapped bodies through `--stdin --raw`.
+const RAW_PANE_SEND_CAP_BYTES: usize = 8192;
+
+/// The shared refusal for an over-cap pane paste. Used by both paste entry
+/// points (`pane send --raw` and `block pipe`), so the bound is a property of
+/// the transport, not of one verb.
+fn paste_cap_refusal(len: usize) -> String {
+    format!(
+        "payload is {len} bytes (cap {RAW_PANE_SEND_CAP_BYTES}); it would be \
+         typed into the pane with no envelope and no gates. Put the prose in a \
+         node or doc and send a short enveloped pointer."
+    )
+}
+
 /// Default `pane wait` deadline when `--timeout` is omitted. There is never an
 /// infinite wait (Failure Modes: every wait is bounded).
 const DEFAULT_WAIT_TIMEOUT_S: u64 = 30;
@@ -2208,6 +2226,11 @@ pub enum PaneCmd {
         raw: bool,
         /// (v51, x-588a) The pane-captured identity the caller addressed.
         expected_identity: Option<String>,
+        /// `--style-exception <reason>`: the reasoned one-send exception the
+        /// mail verbs honor, threaded to the Python renderer so the escape
+        /// hatch keeps one shape across every enveloped lane. A raw send
+        /// never renders, so the flag beside `--raw` has no effect.
+        style_exception: Option<String>,
     },
     Wait {
         pane: u64,
@@ -2323,8 +2346,9 @@ pub const PANE_REFERENCE_USAGE: &str =
 /// around the character `1` is the nonsense the flag exists to avoid.
 pub const PANE_SEND_RAW_HELP: &str = "pane send wraps the text in an <fno_mail> envelope by \
 default, so a worker can tell a peer's message from its operator's, and refuses a pane showing \
-an option prompt. --raw types the bytes verbatim for genuine keystrokes: \
-`fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
+an option prompt. The enveloped body passes the same style and word-budget gates as mail; \
+--style-exception <reason> excepts one reasoned send. --raw types the bytes verbatim for \
+genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a prompt with a digit.";
 
 /// `pane run --worker`'s one line, same posture as [`PANE_SEND_RAW_HELP`]: the
 /// flag records the pane as a squad member joined to the registry row by name,
@@ -2502,6 +2526,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let mut guarded = false;
     let mut submit = false;
     let mut raw = false;
+    let mut style_exception: Option<String> = None;
     let mut quiet_ms = None;
     let mut pattern = None;
     let mut timeout_s = None;
@@ -2542,6 +2567,9 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
             "--guarded" => guarded = true,
             "--submit" => submit = true,
             "--raw" => raw = true,
+            "--style-exception" => {
+                style_exception = Some(flag_value(args, &mut i, "--style-exception")?)
+            }
             "--quiet-ms" => {
                 quiet_ms = Some(parse_u64(
                     &flag_value(args, &mut i, "--quiet-ms")?,
@@ -2579,6 +2607,12 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
         Ok(pane)
     };
 
+    // Before the match: the Send arm below MOVES `style_exception`, and a
+    // post-match validation would not compile. Same refusal shape as the
+    // `--raw` check, which sits after only because bool is Copy.
+    if style_exception.is_some() && verb != "send" {
+        return Err("--style-exception pairs only with pane send".into());
+    }
     let cmd = match verb {
         "ls" => PaneCmd::Ls { fno_id },
         "read" => PaneCmd::Read {
@@ -2616,6 +2650,11 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 (Some(_), true) => return Err("pane send takes --text OR --stdin, not both".into()),
                 (Some(t), false) => SendSource::Text(t),
                 (None, true) => SendSource::Stdin,
+                // The bare-submit keystroke the attribution refusal names as
+                // `--raw`: an omitted payload is an empty text ONLY when both
+                // flags are present. Every other source-less form keeps the
+                // arity error, because it expresses no operation.
+                (None, false) if raw && submit => SendSource::Text(String::new()),
                 (None, false) => return Err("pane send needs --text <s> or --stdin".into()),
             };
             PaneCmd::Send {
@@ -2625,6 +2664,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                 submit,
                 raw,
                 expected_identity: fno_id,
+                style_exception,
             }
         }
         "wait" => PaneCmd::Wait {
@@ -2788,12 +2828,12 @@ fn squad_target(squad: Option<String>) -> PaneTarget {
     }
 }
 
-/// `fno mux tab ls|create|rename|join ...` (x-d865).
+/// `fno mux tab ls|create|rename|join|close ...` (x-d865).
 pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let verb = match args.first().and_then(|a| a.to_str()) {
         Some(v) => v.to_string(),
         None => {
-            eprintln!("fno mux tab: needs a verb: ls|create|rename|join");
+            eprintln!("fno mux tab: needs a verb: ls|create|rename|join|close");
             return EXIT_USAGE;
         }
     };
@@ -2806,6 +2846,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
     let mut src = None;
     let mut at = None;
     let mut dir = None;
+    let mut force = false;
     let mut i = 1;
     while i < args.len() {
         let tok = match args[i].to_str() {
@@ -2821,11 +2862,22 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 "--session" => session = Some(flag_value(args, &mut i, "--session")?),
                 "--workspace" | "--squad" | "-s" => squad = Some(flag_value(args, &mut i, tok)?),
                 "--name" => name = Some(flag_value(args, &mut i, "--name")?),
-                "--tab" => tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?),
+                "--tab" => {
+                    if tab_sel.is_some() {
+                        return Err("duplicate --tab".into());
+                    }
+                    tab_sel = Some(parse_tab_sel(&flag_value(args, &mut i, "--tab")?)?);
+                }
                 "--src" => src = Some(parse_tab_sel(&flag_value(args, &mut i, "--src")?)?),
                 "--at" => at = Some(parse_u64(&flag_value(args, &mut i, "--at")?, "--at")?),
                 "--dir" | "--direction" | "-d" => {
                     dir = Some(parse_dir(&flag_value(args, &mut i, tok)?, tok)?)
+                }
+                "--force" => {
+                    if force {
+                        return Err("duplicate --force".into());
+                    }
+                    force = true;
                 }
                 t => return Err(format!("unknown flag: {t}")),
             }
@@ -2868,8 +2920,19 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
                 direction,
             }
         }
+        "close" => {
+            let Some(tab) = tab_sel else {
+                eprintln!("fno mux tab close: needs --tab <sel>");
+                return EXIT_USAGE;
+            };
+            ControlVerb::TabClose {
+                squad: squad_target(squad),
+                tab,
+                force,
+            }
+        }
         other => {
-            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join)");
+            eprintln!("fno mux tab: unknown verb {other} (ls|create|rename|join|close)");
             return EXIT_USAGE;
         }
     };
@@ -4211,6 +4274,7 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             submit,
             raw,
             expected_identity,
+            style_exception,
         } => {
             let bytes = match source {
                 SendSource::Text(t) => t.into_bytes(),
@@ -4231,9 +4295,13 @@ fn dispatch(session: &str, sock: &Path, json: bool, cmd: PaneCmd) -> i32 {
             // A bare-paste fallback would rebuild that exact defect, and would
             // do it precisely when something is already wrong.
             let bytes = if raw {
+                if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
+                    eprintln!("fno mux pane send: {}", paste_cap_refusal(bytes.len()));
+                    return EXIT_ERROR;
+                }
                 bytes
             } else {
-                match prepare_pane_bytes(session, pane, &bytes) {
+                match prepare_pane_bytes(session, pane, &bytes, style_exception.as_deref()) {
                     Ok(b) => b,
                     Err(e) => {
                         eprintln!("fno mux pane send: {e}");
@@ -4817,6 +4885,30 @@ fn render_reply(
             }
             EXIT_OK
         }
+        ServerMsg::TabClosed {
+            tab_id,
+            pane_ids,
+            forced,
+        } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "tab_id": tab_id,
+                        "pane_ids": pane_ids,
+                        "forced": forced,
+                    })
+                );
+            } else {
+                let panes = pane_ids
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                println!("closed tab_id={tab_id} panes={panes} forced={forced}");
+            }
+            EXIT_OK
+        }
         ServerMsg::Err { code, msg } => {
             eprintln!("fno mux: {msg}");
             // Each error class the CLI can act on gets its OWN exit code so a
@@ -5041,7 +5133,12 @@ const PANE_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 ///
 /// Re-invokes this binary by `current_exe`, which forwards non-mux verbs to the
 /// Python wheel. `FNO_BIN` overrides it for a test or a split install.
-fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>, String> {
+fn prepare_pane_bytes(
+    session: &str,
+    pane: u64,
+    bytes: &[u8],
+    style_exception: Option<&str>,
+) -> Result<Vec<u8>, String> {
     use std::io::Write;
 
     let exe = match std::env::var_os("FNO_BIN") {
@@ -5049,15 +5146,20 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
         None => std::env::current_exe()
             .map_err(|e| format!("cannot locate the fno binary to render the envelope: {e}"))?,
     };
-    let mut child = std::process::Command::new(&exe)
-        .args([
-            "mail",
-            "pane-prepare",
-            "--session-id",
-            session,
-            "--pane",
-            &pane.to_string(),
-        ])
+    let mut command = crate::process_admission::std_command(&exe);
+    command.args([
+        "mail",
+        "pane-prepare",
+        "--session-id",
+        session,
+        "--pane",
+        &pane.to_string(),
+    ]);
+    if let Some(reason) = style_exception.filter(|r| !r.trim().is_empty()) {
+        // The mail verbs' reasoned one-send exception, same flag on this lane.
+        command.arg("--style-exception").arg(reason);
+    }
+    let mut child = command
         // Hand the child the path we resolved. It runs a nested `mux pane read`
         // for the prompt gate, and that hop resolves `FNO_BIN` or a bare `fno`
         // on PATH. We are here via `current_exe` precisely because `fno` may not
@@ -5067,15 +5169,14 @@ fn prepare_pane_bytes(session: &str, pane: u64, bytes: &[u8]) -> Result<Vec<u8>,
         .env("FNO_BIN", &exe)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "envelope renderer ({}) could not start: {e}. Refusing to type an \
+        .stderr(std::process::Stdio::piped());
+    let mut child = crate::process_admission::std_spawn(&mut child).map_err(|e| {
+        format!(
+            "envelope renderer ({}) could not start: {e}. Refusing to type an \
                  unattributed payload; pass --raw for a genuine keystroke.",
-                exe.display()
-            )
-        })?;
+            exe.display()
+        )
+    })?;
     // The write runs on its own thread, so it cannot deadlock against a child
     // that starts answering before it has read everything. Dropping the handle
     // at the end of the closure closes the pipe, which is the renderer's EOF.
@@ -5264,6 +5365,14 @@ fn submit_pane(
     for attempt in 0..SUBMIT_CONFIRM_ATTEMPTS {
         if let (Some(before), Ok(after)) = (baseline.as_deref(), pane_text(sock, session, pane)) {
             if positive_post_submit_marker(before, &after) {
+                // Every failure arm prints, so silence was the ONLY quiet
+                // outcome: a reader with the "no --submit prints nothing"
+                // contract read a silent success as a non-submit and re-sent.
+                // One positive word on stdout, the channel WaitDone reports
+                // its outcome word on.
+                if !json {
+                    println!("submitted");
+                }
                 return render_reply(ServerMsg::Ok, json, false, None);
             }
         }
@@ -5353,6 +5462,14 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         eprintln!("fno mux block: --force: skipping the receive-side idle guard");
     }
     let bytes = text.trim_end_matches(['\r', '\n']).as_bytes().to_vec();
+    // Same paste bound as `pane send --raw`: the cap is a property of the
+    // transport, and a completed block is still bytes typed ungated into a
+    // pane's input. A consumer wanting a long block reads it from the source
+    // pane instead of pasting it.
+    if bytes.len() > RAW_PANE_SEND_CAP_BYTES {
+        eprintln!("fno mux block: {}", paste_cap_refusal(bytes.len()));
+        return EXIT_ERROR;
+    }
     let sent = bytes.len();
     match control_roundtrip(
         &sock,
@@ -5563,7 +5680,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     //    lives in one place. The
     //    excerpt rides stdin (`--block-excerpt-file -`), never a temp file.
     let fno = std::env::current_exe().unwrap_or_else(|_| "fno".into());
-    let mut cmd = std::process::Command::new(&fno);
+    let mut cmd = crate::process_admission::std_command(&fno);
     cmd.args([
         OsString::from("backlog"),
         OsString::from("annotate"),
@@ -5579,7 +5696,7 @@ fn block_annotate(args: &[OsString], env_session: Option<&str>) -> i32 {
     if let Some(cwd) = pane_cwd {
         cmd.current_dir(cwd);
     }
-    let mut child = match cmd.spawn() {
+    let mut child = match crate::process_admission::std_spawn(&mut cmd) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("fno mux block: cannot run `fno backlog annotate add`: {e}");
@@ -5821,6 +5938,7 @@ mod tests {
                 submit: false,
                 raw: false,
                 expected_identity: None,
+                style_exception: None,
             }
         );
     }
@@ -6758,6 +6876,7 @@ mod tests {
                 submit: false,
                 raw: false,
                 expected_identity: None,
+                style_exception: None,
             }
         );
         assert_eq!(
@@ -6769,6 +6888,7 @@ mod tests {
                 submit: false,
                 raw: false,
                 expected_identity: None,
+                style_exception: None,
             }
         );
         // --guarded opts the send into the server-side turn-taken interlock.
@@ -6783,6 +6903,7 @@ mod tests {
                 submit: false,
                 raw: false,
                 expected_identity: None,
+                style_exception: None,
             }
         );
         assert_eq!(
@@ -6796,6 +6917,7 @@ mod tests {
                 submit: true,
                 raw: false,
                 expected_identity: None,
+                style_exception: None,
             }
         );
         // --raw opts OUT of the envelope (node x-3a64). Default false is the
@@ -6812,6 +6934,7 @@ mod tests {
                 submit: true,
                 raw: true,
                 expected_identity: None,
+                style_exception: None,
             }
         );
         assert_eq!(
@@ -6827,14 +6950,222 @@ mod tests {
                 submit: false,
                 raw: false,
                 expected_identity: Some("addressed".into()),
+                style_exception: None,
             }
         );
+        // The bare-submit keystroke the attribution refusal promises (x-3081):
+        // `--raw --submit` with no payload parses as an EMPTY raw text, never
+        // the arity error that used to make the refusal's advice false.
+        assert_eq!(
+            parse_pane_args(&os(&["send", "2", "--raw", "--submit"]))
+                .unwrap()
+                .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text(String::new()),
+                guarded: false,
+                submit: true,
+                raw: true,
+                expected_identity: None,
+                style_exception: None,
+            }
+        );
+        // Every other source-less form is still a usage error: `--raw` or
+        // `--submit` alone names no operation, and a plain source-less send
+        // never worked.
+        assert!(parse_pane_args(&os(&["send", "2", "--raw"])).is_err());
+        assert!(parse_pane_args(&os(&["send", "2", "--submit"])).is_err());
         // Neither / both are usage errors.
         assert!(parse_pane_args(&os(&["send", "2"])).is_err());
         assert!(parse_pane_args(&os(&["send", "2", "--text", "x", "--stdin"])).is_err());
         // --raw pairs only with send: on any other verb it is a usage error, not
         // a silently ignored flag that reads as "the envelope was skipped".
         assert!(parse_pane_args(&os(&["read", "2", "--raw"])).is_err());
+    }
+
+    #[test]
+    fn mux_pane_parse_send_style_exception() {
+        // The reasoned one-send exception threads to the renderer (x-4268).
+        assert_eq!(
+            parse_pane_args(&os(&[
+                "send",
+                "2",
+                "--text",
+                "hi",
+                "--style-exception",
+                "quoted"
+            ]))
+            .unwrap()
+            .cmd,
+            PaneCmd::Send {
+                pane: 2,
+                source: SendSource::Text("hi".into()),
+                guarded: false,
+                submit: false,
+                raw: false,
+                expected_identity: None,
+                style_exception: Some("quoted".into()),
+            }
+        );
+        // A valueless flag and a non-send verb are usage errors, mirroring
+        // `--raw`: a silently ignored flag would read as "the exception held".
+        assert!(parse_pane_args(&os(&["send", "2", "--style-exception"])).is_err());
+        assert!(parse_pane_args(&os(&["read", "2", "--style-exception", "why"])).is_err());
+    }
+
+    #[test]
+    fn pane_send_default_refuses_style_but_raw_delivers_same_bytes() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use std::sync::Mutex;
+
+        // The style/budget gates live in the renderer child, so this is their
+        // ownership boundary (x-4268): a DEFAULT send dies on the renderer's
+        // nonzero exit with no PaneSend reaching the socket, while the
+        // byte-identical --raw payload never launches a renderer and arrives
+        // verbatim. The received BYTES are asserted, not `raw: true`.
+        let sock = control_test_sock("send-gates");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let connections = std::sync::Arc::new(AtomicU32::new(0));
+        let connections_srv = connections.clone();
+        let received: std::sync::Arc<Mutex<Option<ControlVerb>>> =
+            std::sync::Arc::new(Mutex::new(None));
+        let received_srv = received.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            connections_srv.fetch_add(1, AtomicOrdering::SeqCst);
+            let msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            if let ClientMsg::Control { verb, .. } = msg {
+                *received_srv.lock().unwrap() = Some(verb);
+            }
+            write_msg_sync(&mut s, &ServerMsg::Ok).unwrap();
+        });
+
+        // A fake renderer that refuses the way the style gate does: a nonzero
+        // exit with a stderr line. FNO_BIN is the seam prepare_pane_bytes
+        // already exposes for a test or a split install.
+        let script = std::env::temp_dir().join(format!(
+            "fno-fake-renderer-{}-{}.sh",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho 'pane send refused: rule 1' >&2\nexit 1\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let FNO_BIN_GUARD_LOCK = FNO_BIN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let payload = b"you should fix this; it breaks.".to_vec();
+        let send_cmd = |raw: bool| PaneCmd::Send {
+            pane: 7,
+            source: SendSource::Text(String::from_utf8(payload.clone()).unwrap()),
+            guarded: false,
+            submit: false,
+            raw,
+            expected_identity: None,
+            style_exception: None,
+        };
+
+        std::env::set_var("FNO_BIN", &script);
+        let refused = dispatch("t", &sock, false, send_cmd(false));
+        let raw_exit = dispatch("t", &sock, false, send_cmd(true));
+        std::env::remove_var("FNO_BIN");
+        drop(FNO_BIN_GUARD_LOCK);
+        let _ = std::fs::remove_file(&script);
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert_eq!(
+            refused, EXIT_ERROR,
+            "a refused renderer must fail the default send"
+        );
+        assert_eq!(
+            raw_exit, EXIT_OK,
+            "the raw send must reach the socket and return Ok"
+        );
+        assert_eq!(
+            connections.load(AtomicOrdering::SeqCst),
+            1,
+            "only the raw send may open a control connection"
+        );
+        // Bind before matching: the guard is a temporary, and as the block's
+        // tail expression it would outlive `received` (E0597).
+        let arrived = received.lock().unwrap().take();
+        match arrived {
+            Some(ControlVerb::PaneSend { bytes, .. }) => assert_eq!(
+                bytes, payload,
+                "raw must deliver the byte-identical payload"
+            ),
+            other => panic!("expected PaneSend at the socket, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_raw_over_cap_refuses_before_reaching_the_socket() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+        use std::sync::Mutex;
+
+        // Exempt from the prose gates is not unbounded: `--raw --stdin` had no
+        // size limit at all, an ungated prose channel. The cap refuses
+        // in-process, before any control connection, while a small raw payload
+        // in the same run still delivers.
+        let sock = control_test_sock("raw-cap");
+        let _ = std::fs::remove_file(&sock);
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let connections = std::sync::Arc::new(AtomicU32::new(0));
+        let connections_srv = connections.clone();
+        let received: std::sync::Arc<Mutex<Option<ControlVerb>>> =
+            std::sync::Arc::new(Mutex::new(None));
+        let received_srv = received.clone();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().unwrap();
+            connections_srv.fetch_add(1, AtomicOrdering::SeqCst);
+            let msg: ClientMsg = read_msg_sync(&mut s).unwrap();
+            if let ClientMsg::Control { verb, .. } = msg {
+                *received_srv.lock().unwrap() = Some(verb);
+            }
+            write_msg_sync(&mut s, &ServerMsg::Ok).unwrap();
+        });
+
+        let big = "x".repeat(RAW_PANE_SEND_CAP_BYTES + 1);
+        let small = b"1".to_vec();
+        let send_cmd = |text: String| PaneCmd::Send {
+            pane: 7,
+            source: SendSource::Text(text),
+            guarded: false,
+            submit: false,
+            raw: true,
+            expected_identity: None,
+            style_exception: None,
+        };
+
+        let over = dispatch("t", &sock, false, send_cmd(big));
+        let ok = dispatch(
+            "t",
+            &sock,
+            false,
+            send_cmd(String::from_utf8(small.clone()).unwrap()),
+        );
+        server.join().unwrap();
+        let _ = std::fs::remove_file(&sock);
+
+        assert_eq!(over, EXIT_ERROR, "an over-cap raw payload must refuse");
+        assert_eq!(ok, EXIT_OK, "a small raw payload must still deliver");
+        assert_eq!(
+            connections.load(AtomicOrdering::SeqCst),
+            1,
+            "only the small raw send may open a control connection"
+        );
+        let arrived = received.lock().unwrap().take();
+        match arrived {
+            Some(ControlVerb::PaneSend { bytes, .. }) => assert_eq!(
+                bytes, small,
+                "the delivered raw payload is the small one, byte for byte"
+            ),
+            other => panic!("expected PaneSend at the socket, got {other:?}"),
+        }
     }
 
     #[test]
@@ -7296,6 +7627,13 @@ mod tests {
     /// A unique short-lived scratch socket path. No tempfile dep: pid + test
     /// name is unique enough for a test process (sun_path stays short - the
     /// limit is ~104 bytes on macOS).
+    /// Serializes any test that mutates the process-global FNO_BIN (today the
+    /// one renderer-gate test). Cargo runs this binary's tests on parallel
+    /// threads; a second mutator added without this guard would race the
+    /// first for the same env slot. A concurrent test that only READS
+    /// FNO_BIN during the window remains a theoretical exposure.
+    static FNO_BIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn control_test_sock(name: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("fno-control-{}-{name}.sock", std::process::id()))
     }

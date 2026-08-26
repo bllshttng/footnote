@@ -92,7 +92,8 @@ def _merged(monkeypatch, *, target="both"):
     import fno.graph.cli as graph_cli
     import fno.done.cli as done_cli
 
-    state = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at="2026-08-09T00:00:00Z")
+    def state(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at="2026-08-09T00:00:00Z")
     if target in ("both", "graph"):
         monkeypatch.setattr(graph_cli, "_done_gh_query", state)
     if target in ("both", "done"):
@@ -324,7 +325,8 @@ def test_condition_c_shortfall_refuses(tmp_path: Path):
         "pr_number": 42,
         "pr_url": "https://github.com/o/r/pull/42",
     }
-    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    def merged(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     v = resolve_promise_evidence(node, query=merged)
     assert v.outcome == "promise_unmet"
     assert "promised 3 ships" in (v.reason or "")
@@ -345,7 +347,8 @@ def test_condition_c_satisfied_passes(tmp_path: Path):
             {"number": 3, "url": "https://github.com/o/r/pull/3"},
         ],
     }
-    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    def merged(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     assert resolve_promise_evidence(node, query=merged).outcome == "ok"
 
 
@@ -372,6 +375,27 @@ def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
     assert "could not confirm 2 ships" in (v.warning or "")
 
 
+def test_condition_c_nonretryable_read_refuses(tmp_path: Path):
+    from fno.graph._reconcile import ReconcileError, resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
+    node = {
+        "id": "x-c",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+        "additional_prs": [{"number": 2, "url": "https://github.com/o/r/pull/2"}],
+    }
+
+    def _refused(n, **kw):
+        raise ReconcileError("gh auth login required")
+
+    verdict = resolve_promise_evidence(node, query=_refused)
+
+    assert verdict.outcome == "promise_unmet"
+    assert "gh auth login" in (verdict.reason or "")
+
+
 def test_promise_verdict_exit_code_table():
     from fno.graph._reconcile import PromiseVerdict
 
@@ -392,7 +416,8 @@ def test_relative_plan_resolved_against_owning_cwd(tmp_path: Path):
     _write_plan(repo / "rel.md", expected_url_count=2)
     node = {"id": "x-rel", "plan_path": "rel.md", "pr_number": 7,
             "pr_url": "https://github.com/o/r/pull/7"}
-    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    def merged(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     v = resolve_promise_evidence(node, cwd=str(repo), query=merged)
     assert v.outcome == "promise_unmet"  # found the declaration via cwd, did not fail open
 
@@ -410,7 +435,8 @@ def test_condition_c_counts_extra_refs(tmp_path: Path):
         "pr_number": 1,
         "pr_url": "https://github.com/o/r/pull/1",
     }
-    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    def merged(n, **kw):
+        return PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     # Stored ref #1 merged + explicit #2 (extra_refs) merged -> 2 >= 2 -> ok.
     v = resolve_promise_evidence(
         node, query=merged, extra_refs=[(2, "https://github.com/o/r/pull/2")]

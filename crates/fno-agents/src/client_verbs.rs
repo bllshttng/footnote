@@ -1184,16 +1184,54 @@ fn is_session_shaped(token: &str) -> bool {
         || is_uuid_shaped(&token.to_ascii_lowercase())
 }
 
-fn token_helper_output(token: &str, registry_path: &Path) -> std::io::Result<std::process::Output> {
+fn helper_registry_path(registry_path: &Path) -> std::io::Result<PathBuf> {
+    let absolute = if registry_path.is_absolute() {
+        registry_path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(registry_path)
+    };
+    if let Ok(canonical) = fs::canonicalize(&absolute) {
+        return Ok(canonical);
+    }
+    if let (Some(parent), Some(name)) = (absolute.parent(), absolute.file_name()) {
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            return Ok(canonical_parent.join(name));
+        }
+    }
+    Ok(absolute)
+}
+
+fn token_helper_args(token: &str, registry_path: &Path, cross_project: bool) -> Vec<String> {
+    let mut args = vec![
+        "agents".to_string(),
+        "heal-token".to_string(),
+        token.to_string(),
+        "--registry".to_string(),
+        registry_path.to_string_lossy().into_owned(),
+        "--all-sources".to_string(),
+    ];
+    if cross_project {
+        args.push("--cross-project".to_string());
+    }
+    args
+}
+
+fn token_helper_output(
+    token: &str,
+    registry_path: &Path,
+    cross_project: bool,
+    scope_cwd: Option<&Path>,
+) -> std::io::Result<std::process::Output> {
     use std::process::Command;
 
+    let registry_path = helper_registry_path(registry_path)?;
     let mut command = Command::new("fno");
     command
-        .args(["agents", "heal-token", token])
-        .arg("--registry")
-        .arg(registry_path)
-        .arg("--all-sources")
+        .args(token_helper_args(token, &registry_path, cross_project))
         .env("FNO_AGENTS_RUNTIME", "python");
+    if let Some(cwd) = scope_cwd {
+        command.current_dir(cwd);
+    }
     command.output()
 }
 
@@ -1203,8 +1241,13 @@ fn token_helper_output(token: &str, registry_path: &Path) -> std::io::Result<std
 /// clean miss, and `Err(msg)` on ambiguity or unavailable/incomplete coverage.
 /// `FNO_AGENTS_RUNTIME=python` pins the child to the Python dispatch so the
 /// shellout cannot recurse back into this binary.
-fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String> {
-    let out = match token_helper_output(token, registry_path) {
+fn heal_token(
+    token: &str,
+    registry_path: &Path,
+    cross_project: bool,
+    scope_cwd: Option<&Path>,
+) -> Result<Option<Value>, String> {
+    let out = match token_helper_output(token, registry_path, cross_project, scope_cwd) {
         Ok(o) => o,
         Err(exc) => {
             return Err(format!(
@@ -1319,12 +1362,22 @@ pub(crate) fn resolve_entry_with_heal(
     token: &str,
     registry_path: &Path,
 ) -> Result<Value, ResolveError> {
+    resolve_entry_with_heal_scoped(rows, token, registry_path, false, None)
+}
+
+fn resolve_entry_with_heal_scoped(
+    rows: &[Value],
+    token: &str,
+    registry_path: &Path,
+    cross_project: bool,
+    scope_cwd: Option<&Path>,
+) -> Result<Value, ResolveError> {
     match find_agent_entry(rows, token) {
         Ok(e) => {
             if entry_session_tier(e, token) == Some(0) || !is_session_shaped(token) {
                 return Ok(e.clone());
             }
-            match heal_token(token, registry_path) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(ResolveError::Ambiguous(format!(
                     "cannot safely resolve token {} because the harness stores could not be checked. Use the full session id.",
@@ -1340,7 +1393,7 @@ pub(crate) fn resolve_entry_with_heal(
             if !is_session_shaped(token) {
                 return Err(err);
             }
-            match heal_token(token, registry_path) {
+            match heal_token(token, registry_path, cross_project, scope_cwd) {
                 Ok(Some(row)) => Ok(row),
                 Ok(None) => Err(err),
                 Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
@@ -1804,6 +1857,7 @@ fn persist_manifest_identity(
 fn synthesize_and_adopt(
     session_id: &str,
     home: &AgentsHome,
+    cross_project: bool,
 ) -> Result<(Value, Option<String>, AdoptSource), AdoptError> {
     let registry_path = home.registry_json();
     let entries = read_registry_entries(&registry_path).map_err(AdoptError::Io)?;
@@ -1823,7 +1877,7 @@ fn synthesize_and_adopt(
         return Ok((value, fno_id, AdoptSource::Manifest));
     }
     // 3. Harness session stores (heal-token adopts best-effort and writes the row).
-    match heal_token(session_id, &registry_path) {
+    match heal_token(session_id, &registry_path, cross_project, None) {
         Ok(Some(row)) => Ok((row, None, AdoptSource::HarnessStore)),
         Ok(None) => Err(AdoptError::NoEvidence),
         Err(msg) => Err(AdoptError::Io(msg)),
@@ -1964,10 +2018,14 @@ where
         // fno-py's before -> after line) is what actually describes what
         // happened.
         eprintln!("fno agents resume: {name} is live");
-        Ok((
-            vec!["claude".into(), "attach".into(), short_id.into()],
+        let argv = crate::harness_capabilities::render_session_argv_with_ids(
+            "claude",
+            "interactive_attach",
             None,
-        ))
+            Some(short_id),
+        )
+        .map_err(|_| 13)?;
+        Ok((argv, None))
     } else if dead && has_uuid {
         // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
         // is the one door on this verb that can lose a route. A row that records
@@ -1980,7 +2038,12 @@ where
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|p| !p.is_empty());
-        let mut argv: Vec<String> = vec!["claude".into()];
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "claude",
+            "interactive_resume",
+            Some(uuid),
+        )
+        .map_err(|_| 13)?;
         if let Some(path) = route_settings {
             // Present is not enough. The file is the auth-scrub floor with the
             // route written on top, and claude reads an empty settings value as
@@ -2011,12 +2074,9 @@ where
                 return Err(13);
             }
             eprintln!("fno agents resume: restoring recorded route from {path}");
-            argv.push("--settings".into());
-            argv.push(path.into());
+            argv.splice(1..1, ["--settings".into(), path.into()]);
         }
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        argv.push("--resume".into());
-        argv.push(uuid.into());
         Ok((argv, Some(uuid.to_string())))
     } else if !has_uuid {
         // No resumable uuid and no live socket to attach through: name the cause.
@@ -2127,7 +2187,10 @@ fn acquire_named_session_claim(
             11,
             format!(
                 "fno agents resume: session {label} is held live by another writer \
-                 ({holder}, pid={pid}, host={host}); not opening a second writer on one transcript."
+                 ({holder}, pid={}, host={host}); not opening a second writer on one transcript.",
+                // The Python twins print the bare pid / `None`, never `Some(n)`.
+                pid.map(|p| p.to_string())
+                    .unwrap_or_else(|| "None".to_string())
             ),
         )),
         AcquireOutcome::Error(e) => Err((
@@ -2385,10 +2448,14 @@ fn should_delegate_claude_live_attach(
 /// so the flag grammar is unit-testable without an `AgentsHome`/registry
 /// fixture; on error it prints the same diagnostic `run_resume` used to print
 /// inline and returns the exit code to propagate.
-fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), i32> {
+fn parse_resume_args(
+    rest: &[String],
+) -> Result<(String, bool, Option<String>, bool, Option<String>), i32> {
     let mut name: Option<String> = None;
     let mut print_command = false;
     let mut message: Option<String> = None;
+    let mut cross_project = false;
+    let mut cwd: Option<String> = None;
     // Every sibling parser in this file (`parse_trace_args`, `parse_logs_args`)
     // expands `--flag=value` into `--flag value` before iterating; without it
     // `--message=continue` falls into the `starts_with("--")` unknown-flag arm
@@ -2398,11 +2465,21 @@ fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), 
     while let Some(a) = iter.next() {
         match a.as_str() {
             "--print-command" => print_command = true,
+            "--cross-project" => cross_project = true,
             "--message" | "-m" => {
                 message = Some(match iter.next() {
                     Some(v) => v.clone(),
                     None => {
                         eprintln!("fno-agents: {a} needs a value");
+                        return Err(2);
+                    }
+                });
+            }
+            "--cwd" => {
+                cwd = Some(match iter.next() {
+                    Some(v) if !v.starts_with("--") => v.clone(),
+                    _ => {
+                        eprintln!("fno-agents: --cwd needs a value");
                         return Err(2);
                     }
                 });
@@ -2433,7 +2510,7 @@ fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), 
         }
     }
     match name {
-        Some(n) => Ok((n, print_command, message)),
+        Some(n) => Ok((n, print_command, message, cross_project, cwd)),
         None => {
             eprintln!("fno-agents: resume needs a <name>");
             Err(2)
@@ -2442,10 +2519,22 @@ fn parse_resume_args(rest: &[String]) -> Result<(String, bool, Option<String>), 
 }
 
 pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
-    let (name, print_command, message) = match parse_resume_args(rest) {
+    let (name, print_command, message, cross_project, cwd_override) = match parse_resume_args(rest)
+    {
         Ok(v) => v,
         Err(code) => return code,
     };
+
+    if let Some(path) = cwd_override.as_deref() {
+        if !Path::new(path).is_dir() {
+            eprintln!(
+                "fno agents resume: replacement cwd {} is not an existing directory.",
+                py_repr_str(path)
+            );
+            return 13;
+        }
+    }
+    let scope_cwd = cwd_override.as_deref().map(Path::new);
 
     let entries = match read_registry_entries(&home.registry_json()) {
         Ok(e) => e,
@@ -2454,7 +2543,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             return 13;
         }
     };
-    let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
+    let entry = match resolve_entry_with_heal_scoped(
+        &entries,
+        &name,
+        &home.registry_json(),
+        cross_project,
+        scope_cwd,
+    ) {
         Ok(e) => e,
         Err(err) => {
             // Session-shaped miss: try adopting from a target manifest (the durable
@@ -2502,7 +2597,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // EnterWorktree after registration has its transcript under a different
     // project dir than the recorded (pre-EnterWorktree) cwd. Resolve the cwd
     // from where the transcript actually is; other harnesses keep the recorded.
-    let resolved_cwd = if harness == "claude" {
+    let resolved_cwd = if let Some(override_cwd) = cwd_override {
+        override_cwd
+    } else if harness == "claude" {
         let claude_uuid = entry
             .get("claude_session_uuid")
             .and_then(Value::as_str)
@@ -2673,6 +2770,9 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // the stale pre-EnterWorktree cwd from the registry entry itself.
             .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
+        if cross_project {
+            command.arg("--cross-project");
+        }
         if let Some(msg) = &message {
             command.args(["--message", msg]);
         }
@@ -2801,13 +2901,15 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 /// through the existing registry writer; adopt takes NO single-writer claim (its
 /// process is transient -- the claim is acquired by `resume`'s dead arm, whose
 /// pid survives exec; a transient-pid claim would recreate the reanchor bug).
-pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
+fn parse_adopt_args(rest: &[String]) -> Result<(String, bool), i32> {
     let mut session_id: Option<String> = None;
-    for a in rest {
+    let mut cross_project = false;
+    for a in expand_eq(rest) {
         match a.as_str() {
+            "--cross-project" => cross_project = true,
             other if other.starts_with("--") => {
                 eprintln!("fno-agents: unknown adopt flag: {other}");
-                return 2;
+                return Err(2);
             }
             other => {
                 if session_id.is_some() {
@@ -2815,29 +2917,36 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                         "fno-agents: adopt takes one SESSION_ID (got extra: {}).",
                         echo_extra(other)
                     );
-                    return 2;
+                    return Err(2);
                 }
                 session_id = Some(other.to_string());
             }
         }
     }
-    let session_id = match session_id {
-        Some(s) => s,
+    match session_id {
+        Some(s) => Ok((s, cross_project)),
         None => {
-            // Name the short id too. The store probe matches an 8-hex prefix
-            // against surviving transcripts, so a reap reversed by short id is
-            // the common recovery -- and it is the form `rm` and `peek` now
-            // print. A usage line that omits it sends an operator looking for
-            // a full uuid they do not have.
-            eprintln!("fno-agents: usage: fno-agents adopt <session-id | 8-hex short id>");
-            eprintln!(
-                "fno agents adopt: accepts a harness session id or its 8-hex short id; resolves the registry, .fno/target-state.md, then harness stores."
-            );
-            return 2;
+            eprintln!("fno-agents: adopt needs a <session-id>");
+            Err(2)
+        }
+    }
+}
+
+pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
+    let (session_id, cross_project) = match parse_adopt_args(rest) {
+        Ok(v) => v,
+        Err(code) => {
+            if code == 2 && rest.is_empty() {
+                eprintln!("fno-agents: usage: fno-agents adopt <session-id | 8-hex short id>");
+                eprintln!(
+                    "fno agents adopt: accepts a harness session id or its 8-hex short id; resolves the registry, .fno/target-state.md, then harness stores."
+                );
+            }
+            return code;
         }
     };
 
-    match synthesize_and_adopt(&session_id, home) {
+    match synthesize_and_adopt(&session_id, home, cross_project) {
         Ok((row, fno_id, source)) => {
             let name = row.get("name").and_then(Value::as_str).unwrap_or("");
             let short = row.get("short_id").and_then(Value::as_str).unwrap_or("");
@@ -2848,6 +2957,9 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                     "fno agents adopt: short_id={short} (resolved from {})",
                     source.label()
                 );
+            }
+            if cross_project && source == AdoptSource::HarnessStore {
+                eprintln!("scope=cross-project");
             }
             if let Some(fid) = fno_id {
                 if !fid.is_empty() {
@@ -3587,6 +3699,7 @@ pub fn run_claim(args: &[String]) -> i32 {
                 Some(p) => opts.pid = Some(p),
                 None => return 2,
             },
+            "--pid-unavailable" => opts.pid_unavailable = true,
             "--ttl-ms" => match take("--ttl-ms").and_then(|v| v.parse::<i64>().ok()) {
                 Some(t) => opts.ttl_ms = Some(t),
                 None => return 2,
@@ -3681,7 +3794,15 @@ pub fn run_claim(args: &[String]) -> i32 {
             out.insert("state".into(), Value::String(state.as_str().into()));
             if let Some(rec) = rec {
                 out.insert("holder".into(), Value::String(rec.holder));
-                out.insert("pid".into(), Value::Number(rec.pid.into()));
+                out.insert(
+                    "schema_version".into(),
+                    Value::Number(rec.schema_version.into()),
+                );
+                out.insert(
+                    "pid".into(),
+                    rec.pid.map(Value::from).unwrap_or(Value::Null),
+                );
+                out.insert("pid_unavailable".into(), Value::Bool(rec.pid_unavailable));
                 out.insert("host".into(), Value::String(rec.host));
                 // Liveness compares this, not host. Omitting it here would leave a
                 // caller that classifies ownership from status JSON on the mutable
@@ -4328,7 +4449,7 @@ mod tests {
         );
         assert_eq!(
             build_resume_argv("claude", "abc123", None),
-            Some(vec!["claude".into(), "attach".into(), "abc123".into()])
+            Some(vec!["claude".into(), "--resume".into(), "abc123".into()])
         );
         assert_eq!(
             build_resume_argv("gemini", "g-1", None),
@@ -4442,7 +4563,7 @@ mod tests {
         // code-review finding: --message/-m must not die with "unknown resume
         // flag" -- resume auto-routes to this binary by default, so this
         // parser is the only door the claude wake's --message option has.
-        let (name, print_command, message) = parse_resume_args(&[
+        let (name, print_command, message, cross_project, cwd) = parse_resume_args(&[
             "alpha".to_string(),
             "--message".to_string(),
             "continue please".to_string(),
@@ -4451,19 +4572,25 @@ mod tests {
         assert_eq!(name, "alpha");
         assert!(!print_command);
         assert_eq!(message.as_deref(), Some("continue please"));
+        assert!(!cross_project);
+        assert_eq!(cwd, None);
 
-        let (name, _, message) =
+        let (name, _, message, cross_project, cwd) =
             parse_resume_args(&["-m".to_string(), "hi".to_string(), "beta".to_string()]).unwrap();
         assert_eq!(name, "beta");
         assert_eq!(message.as_deref(), Some("hi"));
+        assert!(!cross_project);
+        assert_eq!(cwd, None);
 
         // No --message given: still parses, message is None (unchanged
         // pre-fix behavior for every other flag combination).
-        let (name, print_command, message) =
+        let (name, print_command, message, cross_project, cwd) =
             parse_resume_args(&["gamma".to_string(), "--print-command".to_string()]).unwrap();
         assert_eq!(name, "gamma");
         assert!(print_command);
         assert_eq!(message, None);
+        assert!(!cross_project);
+        assert_eq!(cwd, None);
     }
 
     #[test]
@@ -4478,6 +4605,129 @@ mod tests {
     fn resume_args_still_rejects_unknown_flags() {
         assert_eq!(
             parse_resume_args(&["alpha".to_string(), "--bogus".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn heal_token_helper_forwards_cross_project_exactly_once() {
+        let registry = Path::new("/tmp/registry.json");
+        assert_eq!(
+            token_helper_args("deadbeef", registry, false),
+            vec![
+                "agents",
+                "heal-token",
+                "deadbeef",
+                "--registry",
+                "/tmp/registry.json",
+                "--all-sources",
+            ]
+        );
+        assert_eq!(
+            token_helper_args("deadbeef", registry, true),
+            vec![
+                "agents",
+                "heal-token",
+                "deadbeef",
+                "--registry",
+                "/tmp/registry.json",
+                "--all-sources",
+                "--cross-project",
+            ]
+        );
+    }
+
+    #[test]
+    fn token_helper_runs_in_explicit_scope_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = cv_tmpdir();
+        let scope = dir.path().join("replacement");
+        fs::create_dir(&scope).unwrap();
+        let marker = dir.path().join("helper-cwd");
+        let registry_marker = dir.path().join("helper-registry");
+        let fake_fno = dir.path().join("fno");
+        fs::write(
+            &fake_fno,
+            "#!/bin/sh\npwd > \"$FNO_TEST_HELPER_CWD\"\nprintf '%s\\n' \"$5\" > \"$FNO_TEST_HELPER_REGISTRY\"\nexit 0\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_fno).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_fno, permissions).unwrap();
+
+        let old_path = std::env::var_os("PATH");
+        let caller_cwd = std::env::current_dir().unwrap();
+        let relative_registry = Path::new("relative/registry.json");
+        let expected_registry = caller_cwd.join(relative_registry);
+        std::env::set_var("PATH", dir.path());
+        std::env::set_var("FNO_TEST_HELPER_CWD", &marker);
+        std::env::set_var("FNO_TEST_HELPER_REGISTRY", &registry_marker);
+        let output =
+            token_helper_output("deadbeef", relative_registry, false, Some(&scope)).unwrap();
+        match old_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        std::env::remove_var("FNO_TEST_HELPER_CWD");
+        std::env::remove_var("FNO_TEST_HELPER_REGISTRY");
+
+        assert!(output.status.success());
+        let observed = Path::new(fs::read_to_string(marker).unwrap().trim())
+            .canonicalize()
+            .unwrap();
+        assert_eq!(observed, scope.canonicalize().unwrap());
+        assert_eq!(
+            Path::new(fs::read_to_string(registry_marker).unwrap().trim()),
+            expected_registry
+        );
+    }
+
+    #[test]
+    fn resume_args_accept_cross_project_and_replacement_cwd_forms() {
+        let parsed = parse_resume_args(&[
+            "full-session-id".to_string(),
+            "--cross-project".to_string(),
+            "--cwd".to_string(),
+            "/replacement/checkout".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.0, "full-session-id");
+        assert!(parsed.3);
+        assert_eq!(parsed.4.as_deref(), Some("/replacement/checkout"));
+
+        let parsed = parse_resume_args(&[
+            "--cwd=/replacement/checkout".to_string(),
+            "--cross-project".to_string(),
+            "full-session-id".to_string(),
+        ])
+        .unwrap();
+        assert!(parsed.3);
+        assert_eq!(parsed.4.as_deref(), Some("/replacement/checkout"));
+
+        assert_eq!(
+            parse_resume_args(&["full-session-id".to_string(), "--cwd".to_string()]),
+            Err(2)
+        );
+    }
+
+    #[test]
+    fn adopt_args_accept_cross_project_and_reject_extra_tokens() {
+        let (session_id, cross_project) =
+            parse_adopt_args(&["full-session-id".to_string(), "--cross-project".to_string()])
+                .unwrap();
+        assert_eq!(session_id, "full-session-id");
+        assert!(cross_project);
+
+        assert_eq!(
+            parse_adopt_args(&[
+                "full-session-id".to_string(),
+                "--cross-project".to_string(),
+                "extra".to_string(),
+            ]),
             Err(2)
         );
     }
@@ -5142,7 +5392,7 @@ mod tests {
         };
         upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t")).unwrap();
         let (row, fno_id, source) =
-            synthesize_and_adopt("thread-seed-1234", &home).expect("seeded row resolves");
+            synthesize_and_adopt("thread-seed-1234", &home, false).expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
         assert_eq!(
             row.get("harness_session_id").and_then(Value::as_str),
@@ -5197,7 +5447,7 @@ mod tests {
         let home = AgentsHome::from_env();
         // A full session id absent from the registry, from every worktree manifest
         // (cwd is a bare tempdir), and from the harness stores. No row is written.
-        let res = synthesize_and_adopt("deadbeef-1111-2222-3333-444455556666", &home);
+        let res = synthesize_and_adopt("deadbeef-1111-2222-3333-444455556666", &home, false);
         assert!(
             matches!(res, Err(AdoptError::NoEvidence) | Err(AdoptError::Io(_))),
             "miss must refuse, not mint; got {res:?}"

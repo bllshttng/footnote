@@ -123,6 +123,52 @@ def test_validate_unknown_type() -> None:
         validate(event)
 
 
+def test_validate_dispatch_selection_diverged() -> None:
+    event = {
+        "ts": "2026-08-25T09:30:42Z",
+        "type": "dispatch_selection_diverged",
+        "source": "backlog",
+        "data": {
+            "node_id": "x-known-undispatched",
+            "selector_command": "fno backlog ready --json",
+            "observer_command": "fno backlog undispatched --json",
+            "scope": "project=fno",
+            "selector_entries_scanned": 4,
+            "observer_entries_scanned": 7,
+        },
+    }
+    assert validate(event) is None
+
+
+def test_validate_failover_swapped_happy_path() -> None:
+    event = {
+        "ts": "2026-05-07T09:30:42Z",
+        "type": "failover_swapped",
+        "source": "daemon",
+        "data": {"short_id": "aaaa1111", "redispatched": True},
+    }
+    assert validate(event) is None
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"redispatched": True},
+        {"short_id": "aaaa1111"},
+        {"short_id": "aaaa1111", "redispatched": "true"},
+    ],
+)
+def test_validate_failover_swapped_rejects_invalid_payload(data: dict) -> None:
+    event = {
+        "ts": "2026-05-07T09:30:42Z",
+        "type": "failover_swapped",
+        "source": "daemon",
+        "data": data,
+    }
+    with pytest.raises(ValidationError):
+        validate(event)
+
+
 def test_validate_phase_transition_gate_bearing_without_gate() -> None:
     event = {
         "ts": "2026-05-07T09:30:42Z",

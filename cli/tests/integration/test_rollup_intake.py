@@ -65,7 +65,7 @@ def test_auto_link_sets_parent_and_prints_receipt(graph):
     g = graph([_epic("x-mux0001", "mux pane layout polish")])
     title = "mux pane layout polish resize"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title)["parent"] == "x-mux0001"
@@ -82,7 +82,7 @@ def test_suggest_below_the_bar_writes_no_parent(graph):
     ])
     title = "billing invoice export"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title).get("parent") is None
@@ -96,7 +96,7 @@ def test_no_candidates_prints_the_orphan_hint(graph):
     g = graph([_epic("x-mux0001", "mux pane layout polish")])
     title = "quantum teapot calibration"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title).get("parent") is None
@@ -106,7 +106,7 @@ def test_no_candidates_prints_the_orphan_hint(graph):
 def test_greenfield_graph_is_quiet_and_does_not_crash(graph):
     """No epics means no mission to resolve; intake must not narrate that."""
     g = graph([])
-    res = _invoke("backlog", "idea", "first ever node", "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", "first ever node", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
     assert res.exit_code == 0
     assert len(_nodes(g)) == 1
     assert "rollup" not in res.stderr
@@ -121,7 +121,7 @@ def test_explicit_parent_is_never_second_guessed(graph):
     title = "mux pane layout polish resize"
 
     res = _invoke(
-        "backlog", "idea", title, "--cwd", "/tmp/proj", "--parent", "x-oth00002"
+        "backlog", "idea", title, "--cwd", "/tmp/proj", "--parent", "x-oth00002", "--difficulty", "low", "--separate"
     )
 
     assert _created(g, title)["parent"] == "x-oth00002"
@@ -132,7 +132,7 @@ def test_bug_type_is_exempt_from_the_ladder(graph):
     """AC6: a bug never gets a rollup line, however well it scores."""
     graph([_epic("x-mux0001", "mux pane layout polish")])
     res = _invoke(
-        "backlog", "idea", "mux pane layout polish", "--cwd", "/tmp/proj",
+        "backlog", "idea", "mux pane layout polish", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate",
         "--type", "bug",
     )
     assert res.exit_code == 0
@@ -151,7 +151,7 @@ def test_rollup_failure_never_breaks_intake(graph, monkeypatch):
     monkeypatch.setattr(rollup, "resolve", boom)
     title = "mux pane layout polish resize"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     created = _created(g, title)
@@ -170,7 +170,7 @@ def test_auto_link_repaints_the_parent_rollup(graph, monkeypatch):
         gcli, "_project_plans_from_graph", lambda ids: seen.append(list(ids))
     )
 
-    _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj")
+    _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert seen, "auto-linked node did not trigger an ancestor repaint"
 
@@ -190,7 +190,7 @@ def test_a_link_never_lands_without_its_receipt(graph, monkeypatch):
     )
     title = "mux pane layout polish resize"
 
-    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", title, "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     assert res.exit_code == 0
     assert _created(g, title).get("parent") is None
@@ -205,7 +205,7 @@ def test_stdout_stays_pure_json_for_machine_callers(graph):
     """
     graph([_epic("x-mux0001", "mux pane layout polish")])
 
-    res = _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj")
+    res = _invoke("backlog", "idea", "mux pane layout polish resize", "--cwd", "/tmp/proj", "--difficulty", "low", "--separate")
 
     payload = json.loads(res.stdout)
     assert payload["title"] == "mux pane layout polish resize"

@@ -184,7 +184,7 @@ def test_related_is_non_blocking(tmp_graph):
 def test_ac7_hp_related_at_filing_time(tmp_graph):
     """AC7-HP: --related on idea holds symmetry with no follow-up update."""
     result = runner.invoke(
-        app, ["backlog", "idea", "co-delivered work", "--related", "x-bbbb"]
+        app, ["backlog", "idea", "co-delivered work", "--related", "x-bbbb", "--difficulty", "low"]
     )
     assert result.exit_code == 0, result.output
     new_id = json.loads(result.stdout)["id"]
@@ -323,7 +323,7 @@ def test_removing_an_origin_clears_its_dependents_reference(tmp_graph):
     clearing.
     """
     created = runner.invoke(
-        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa"]
+        app, ["backlog", "idea", "follow-up", "--source-node", "x-aaaa", "--difficulty", "low"]
     )
     new_id = json.loads(created.stdout)["id"]
 

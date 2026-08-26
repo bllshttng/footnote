@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Optional
 from unittest.mock import MagicMock, patch
@@ -264,7 +265,7 @@ class TestTrackedStateBatch:
         def runner(cmd, **_kwargs):
             calls.append(list(cmd))
             # owner/one: tracked #2 closed+merged (absent from the open list,
-            # resolved by its per-key read) plus untracked open #99; owner/two:
+            # resolved by its closed batch) plus untracked open #99; owner/two:
             # tracked #3 closed.
             open_rows = {
                 "owner/one": [{"number": 1, "state": "open", "merged": False},
@@ -279,6 +280,13 @@ class TestTrackedStateBatch:
             if path.startswith("repos/") and path.endswith("/pulls?state=open&per_page=100&page=1"):
                 repo = path[len("repos/"): path.index("/pulls?")]
                 return _rest_ok(json.dumps(open_rows[repo]))
+            if path.startswith("repos/") and path.endswith("/pulls?state=closed&per_page=100&page=1"):
+                repo = path[len("repos/"): path.index("/pulls?")]
+                return _rest_ok(
+                    json.dumps([
+                        row for key, row in per_key.items() if key.startswith(f"{repo}#")
+                    ])
+                )
             number = path.rsplit("/", 1)[-1]
             repo = path[len("repos/"): -len(f"/pulls/{number}")]
             return _rest_ok(json.dumps(per_key[f"{repo}#{number}"]))
@@ -294,8 +302,8 @@ class TestTrackedStateBatch:
             "owner/two#3": "CLOSED",
         }
         assert sweep_failures == 0
-        # One open-listing per repo plus one per-key read for each tracked
-        # key the open list did not answer.
+        # One open-listing and one closed-listing per repository. No exact
+        # per-key fallback is needed when the terminal batch finds both keys.
         assert len(calls) == 4
 
     def test_repo_read_failure_returns_unknown_for_each_requested_key(self):
@@ -1765,7 +1773,15 @@ class TestReadPrStateJsonGuards:
             # First call: merge state check (query_pr_merge_state) - must succeed
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
@@ -1789,7 +1805,15 @@ class TestReadPrStateJsonGuards:
                 )
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
@@ -1968,7 +1992,15 @@ class TestCommentsInActivity:
             # merge state
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0,
-                stdout='{"state":"OPEN","number":1,"url":"https://github.com/owner/repo/pull/1","mergedAt":null}',
+                stdout=json.dumps({
+                    "state": "open",
+                    "number": 1,
+                    "html_url": "https://github.com/owner/repo/pull/1",
+                    "merged": False,
+                    "merged_at": None,
+                    "head": {"sha": "head", "ref": "feature/test"},
+                    "base": {"ref": "main"},
+                }),
                 stderr=""
             )
 
@@ -2625,6 +2657,46 @@ class TestQuotaPreflight:
                 graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
             )
 
+    def test_dispatch_budget_skips_new_action_and_mints_receipt(self, tmp_path):
+        """A spent cadence budget leaves work for the next tick, not timeout."""
+        from fno.pr_watch._dispatch import tick
+
+        candidate = _make_candidate(pr_number=77, repo_dir=tmp_path)
+        deps = _make_tick_deps(
+            tmp_path,
+            candidates=[candidate],
+            obs_map={77: _make_obs(77, "MERGED")},
+        )
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=tmp_path / "state.json",
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "MERGED" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            dispatch_deadline=time.monotonic() - 1,
+        )
+
+        assert result.acted == 0
+        assert deps["fired"] == []
+        assert {event["data"].get("reason") for event in deps["events"]} >= {"tick-budget"}
+        receipt = next(event["data"] for event in deps["events"] if event["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 1
+
+    def test_dispatch_reserve_scales_with_tick_budget(self):
+        """Short valid tick deadlines must not disable dispatch outright."""
+        from fno.pr_watch._dispatch import _dispatch_reserve_seconds
+
+        assert _dispatch_reserve_seconds(480) == 360
+        assert _dispatch_reserve_seconds(360) == 270
+        assert _dispatch_reserve_seconds(60) == 45
+
     def test_degraded_sweep_still_completes_and_receipts(self, tmp_path):
         """AC4-EDGE at the tick boundary: a sweep WITH failures completed -
         outcome degraded, keys UNKNOWN - and a completed sweep still mints
@@ -2660,3 +2732,40 @@ class TestQuotaPreflight:
         assert result.sweep_failures == 1
         receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
         assert receipt["sweep_failures"] == 1
+        assert receipt["swept_count"] == 0
+        assert receipt["swept"] == {}
+
+    def test_positive_open_observation_names_a_swept_identity(self, tmp_path):
+        """AC4-HP: a known open state produces a non-empty sweep receipt."""
+        from fno.pr_watch._dispatch import tick
+        from fno.pr_watch._state import WatermarkStore
+
+        store_path = tmp_path / "state.json"
+        WatermarkStore(path=store_path).set("owner/repo#7", {
+            "last_review_ts": None,
+            "last_seen_state": "UNKNOWN",
+            "merge_dispatched": False,
+            "retries": 0,
+            "parked": None,
+        })
+        deps = _make_tick_deps(tmp_path, candidates=[])
+        result = tick(
+            graph_path=tmp_path / "graph.json",
+            store_path=store_path,
+            discover_fn=deps["discover"],
+            read_pr_state_fn=deps["read_pr_state"],
+            read_tracked_states_fn=lambda keys: ({key: "OPEN" for key in keys}, 0),
+            fire_skill_fn=deps["fire_skill"],
+            emit=deps["emit"],
+            reviewers_for=deps["reviewers_for"],
+            claim=deps["claim"],
+            notify=deps["notify"],
+            post_merge_readiness_fn=deps["post_merge_readiness"],
+            now_iso="2026-06-14T12:00:00Z",
+            graphql_remaining_fn=lambda: (4800, "2026-08-17T07:00:00Z"),
+        )
+
+        assert result.sweep_failures == 0
+        receipt = next(e["data"] for e in deps["events"] if e["type"] == "pr_watch_tick")
+        assert receipt["swept_count"] == 1
+        assert receipt["swept"] == {"owner/repo": [7]}

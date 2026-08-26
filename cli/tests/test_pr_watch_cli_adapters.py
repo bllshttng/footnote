@@ -72,6 +72,121 @@ def test_emit_event_dispatched_writes_valid_event(tmp_path: Path) -> None:
     validate(event)
 
 
+def test_real_tick_composition_survives_route_metadata_and_records_live_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC6-HP: config load, REST discovery, and canonical receipt compose."""
+    from types import SimpleNamespace
+
+    from fno.adapters.providers.loader import load_providers
+    from fno.pr._proc import Result
+    from fno.pr_watch._dispatch import DispatchResult, tick
+    from fno.pr_watch._discover import PrCandidate, PrObservation, read_tracked_pr_states
+    from fno.pr_watch._state import WatermarkStore
+    from fno.pr_watch.cli import _emit_event
+
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    settings = tmp_path / ".fno" / "config.toml"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        """
+[accounts]
+active = "zai-primary"
+
+[[accounts.records]]
+id = "zai-primary"
+name = "Zai Primary"
+harness = "claude"
+auth = "api_key"
+route = "zai/glm-5.3[1m]"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    provider = load_providers(repo_root=tmp_path).by_id["zai-primary"]
+    assert provider.model_dump()["route"] == "zai/glm-5.3[1m]"
+
+    live_key = "owner/repo#1134"
+    stale_key = "owner/repo#889"
+    store_path = tmp_path / "pr-watcher-state.json"
+    WatermarkStore(path=store_path).set(stale_key, {
+        "last_review_ts": None,
+        "last_seen_state": "UNKNOWN",
+        "merge_dispatched": False,
+        "retries": 0,
+        "parked": None,
+    })
+    candidate = PrCandidate(
+        node_id="x-live1234",
+        pr_number=1134,
+        pr_url="https://github.com/owner/repo/pull/1134",
+        repo_dir=tmp_path,
+        repo_slug="owner/repo",
+    )
+
+    def rest_runner(cmd, **_kwargs):
+        path = cmd[2]
+        if "state=open" in path:
+            return Result(returncode=0, stdout=json.dumps([
+                {"number": 1134, "state": "open", "merged": False}
+            ]), stderr="")
+        if "state=closed" in path:
+            return Result(returncode=1, stdout="", stderr="network down")
+        raise AssertionError(f"unexpected exact fallback: {cmd}")
+
+    events_path = tmp_path / "events.jsonl"
+
+    class Claim:
+        def acquire_tick_lock(self, _key, _holder):
+            return None
+
+        def release_tick_lock(self, _key, _holder):
+            return None
+
+        def acquire_pr_lock(self, _key, _holder):
+            return None
+
+        def release_pr_lock(self, _key, _holder):
+            return None
+
+        def is_node_live(self, _node_id):
+            return False
+
+    result = tick(
+        graph_path=tmp_path / "graph.json",
+        store_path=store_path,
+        discover_fn=lambda _entries: [candidate],
+        read_pr_state_fn=lambda *_args, **_kwargs: PrObservation(
+            pr_number=1134,
+            state="OPEN",
+            latest_review_ts=None,
+            opened_at="2026-08-23T00:00:00Z",
+        ),
+        read_tracked_states_fn=lambda keys: read_tracked_pr_states(
+            keys, runner=rest_runner
+        ),
+        fire_skill_fn=lambda *_args, **_kwargs: DispatchResult(
+            ok=True, rc=0, is_error=False, raw="{}"
+        ),
+        dispatch_ritual_fn=lambda *_args, **_kwargs: None,
+        emit=lambda event_type, data: _emit_event(
+            event_type, data, events_path=events_path
+        ),
+        reviewers_for=lambda _repo: [],
+        claim=Claim(),
+        notify=lambda *_args, **_kwargs: None,
+        post_merge_readiness_fn=lambda _root: SimpleNamespace(is_ready=True),
+        now_iso="2026-08-23T01:00:00Z",
+        graphql_remaining_fn=lambda: (4800, "2026-08-24T00:00:00Z"),
+    )
+
+    assert result.sweep_failures == 1
+    event = json.loads(events_path.read_text(encoding="utf-8").strip())
+    assert event["type"] == "pr_watch_tick"
+    assert event["data"]["swept_count"] == 1
+    assert event["data"]["swept"] == {"owner/repo": [1134]}
+
+
 # ---------------------------------------------------------------------------
 # AC2-ERR: _emit_event on write failure LOGS a warning and does not raise
 # ---------------------------------------------------------------------------

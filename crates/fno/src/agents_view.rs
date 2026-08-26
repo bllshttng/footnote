@@ -90,12 +90,14 @@ pub struct RegistryAgent {
     /// `crown_level`, a fixed authority rank: lineage is who spawned whom.
     pub spawned_by_session: Option<String>,
     /// (x-9de7) Whether this row's terminal-looking status is a POSITIVE
-    /// falsification or an absence of evidence. `Alive` for anything
-    /// non-terminal (mirrors `exited == false`, unchanged). Only a terminal
-    /// row is further split: `Dead` when a recorded pid is CONFIRMED gone (or
-    /// no pid/short_id was ever recorded to check), `Unmeasured` for every
-    /// other terminal row -- most commonly a live pid contradicting a stale
-    /// or falsely-written `exited` status. `exited` keeps its today meaning
+    /// falsification or an absence of evidence. `Alive` for an active
+    /// non-terminal status (mirrors `exited == false`). Orphaned and failed
+    /// rows are backend-not-live and use `Unmeasured` because they are not safe
+    /// evidence of a live writer. Only a terminal row is further split: `Dead`
+    /// when a recorded pid is CONFIRMED gone (or no pid/short_id was ever
+    /// recorded to check), `Unmeasured` for every other terminal row -- most
+    /// commonly a live pid contradicting a stale or falsely-written `exited`
+    /// status. `exited` keeps its today meaning
     /// (terminal-status, `Dead` OR `Unmeasured`) for every existing
     /// attach/sort/filter call site; this field exists so the render layer
     /// can draw the two differently, per the repo's "assert a positive
@@ -105,7 +107,8 @@ pub struct RegistryAgent {
 
 /// See [`RegistryAgent::liveness`]. `Alive`/`Dead` are confident reads;
 /// `Unmeasured` is the deliberate third state a `bool` could never hold --
-/// terminal status with no corroborating evidence either way.
+/// either a non-live backend status or terminal status with no corroborating
+/// evidence either way.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Liveness {
     Alive,
@@ -134,6 +137,9 @@ fn pid_confirmed_dead(pid: u64) -> bool {
 /// other field. Pure and syscall-free except the one `kill(pid, 0)` probe,
 /// gated behind a terminal status so a live-ish row never pays it.
 fn derive_liveness(status: &str, pid: Option<u64>, short_id: &str) -> Liveness {
+    if matches!(status, "orphaned" | "failed") {
+        return Liveness::Unmeasured;
+    }
     let terminal = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
     if !terminal {
         return Liveness::Alive;
@@ -725,10 +731,9 @@ fn process_create_time_ms(_pid: i32) -> Option<i64> {
 /// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "macos")]
 fn platform_machine_id() -> String {
-    let out = match std::process::Command::new("/usr/sbin/ioreg")
-        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
-        .output()
-    {
+    let mut command = crate::process_admission::std_command("/usr/sbin/ioreg");
+    command.args(["-rd1", "-c", "IOPlatformExpertDevice"]);
+    let out = match crate::process_admission::std_output(&mut command) {
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(_) => return String::new(),
     };
@@ -2413,6 +2418,14 @@ mod tests {
         // Non-terminal status: Alive regardless of pid/short_id.
         assert_eq!(derive_liveness("live", None, ""), Liveness::Alive);
         assert_eq!(derive_liveness("busy", Some(999_999), ""), Liveness::Alive);
+        assert_eq!(
+            derive_liveness("orphaned", Some(999_999), "sid"),
+            Liveness::Unmeasured
+        );
+        assert_eq!(
+            derive_liveness("failed", Some(999_999), "sid"),
+            Liveness::Unmeasured
+        );
         // Terminal + no identity surface at all: nothing to falsify -> Dead
         // (mirrors gc.rs's !liveness_surface corroboration).
         assert_eq!(derive_liveness("exited", None, ""), Liveness::Dead);

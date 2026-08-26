@@ -235,6 +235,17 @@ fi
 
    After `$NODE_ID` is minted, run the **Model Pin / Routing** and **Blueprint Provenance Stamp** gates ([references/blueprint-gates.md](references/blueprint-gates.md#model-pin-transcription-x-571f-when-a-plan-supplies-a-model)) when their triggers fire.
 
+   After successful adoption, close the blueprint phase before returning the completion message:
+
+   ```bash
+   test -n "${NODE_ID:-}" || { echo "Blueprint close refused: intake produced no node." >&2; exit 2; }
+   fno backlog session close "$NODE_ID" \
+     --summary "<short plan summary>" \
+     --launch "/fno:target $NODE_ID"
+   ```
+
+   This is an identity-guarded write. An unresolved harness or session id is a hard refusal, not a skipped provenance stamp. Raw-prose plans with `no-adopt` stop before this close because they have no adopted node.
+
 3b-bis. **Node-bearing filename for raw-prose intake** (US5)
 
    A node-seeded plan is authored with its id already in the name (step 3, and

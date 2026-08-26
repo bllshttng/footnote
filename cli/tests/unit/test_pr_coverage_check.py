@@ -26,12 +26,19 @@ from .test_pr_merge import FakeRun, _last_json, enabled  # noqa: F401
 HEAD = "aaaa1111bbbb2222"
 
 
-def _seed_row(tmp_path, *, coverage, count, head, verdicts=None, pr=42):
+def _seed_row(
+    tmp_path, *, coverage, count, head, verdicts=None, pr=42, self_attested=None,
+    review_state=None,
+):
     """One review_coverage event in the project log the gate reads."""
     (tmp_path / ".fno").mkdir(exist_ok=True)
     data = {"pr": pr, "coverage": coverage, "head_sha": head}
+    if review_state is not None:
+        data["review_state"] = review_state
     if coverage in ("covered", "uncovered"):
         data["reviewed_count"] = count
+    if self_attested is not None:
+        data["self_attested_count"] = self_attested
     if verdicts is not None:
         data["verdicts"] = verdicts
     (tmp_path / ".fno" / "events.jsonl").write_text(
@@ -356,3 +363,198 @@ def test_an_unreadable_label_never_opens_the_valve(
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     capsys.readouterr()
     assert rc == 3
+
+
+# ---- config.review.require_corroboration (x-7f7b) ----
+
+
+@pytest.fixture
+def corroboration_on(monkeypatch):
+    """config.review.require_corroboration = true, the operator's explicit
+    flip. Default (unset) stays covered by the pins above."""
+    from fno.config import ReviewBlock
+
+    class _Settings:
+        review = ReviewBlock(require_corroboration=True)
+
+    import fno.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod, "load_settings_for_repo", lambda *a, **k: _Settings()
+    )
+
+
+_SELF_ONLY_VERDICTS = [
+    {
+        "name": "code-review",
+        "producer": "local_attestation",
+        "verdict": "reviewed",
+        "attestation_origin": "self_attested",
+        "reviewed_sha": HEAD,
+        "freshness": "fresh",
+    }
+]
+
+
+def test_corroboration_on_holds_a_self_attested_only_pr(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The policy: a PR whose only coverage is the author's own attestation
+    reads as uncovered, and the refusal names BOTH satisfying paths."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    fake = FakeRun(toplevel=str(tmp_path))
+    merge_line = _merge_refusal(capsys, tmp_path, fake)
+    assert "rests on the author's own attestation alone" in merge_line
+    assert "second session's head-pinned attestation" in merge_line
+    assert "GitHub App review" in merge_line
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert verb_line == merge_line, "both surfaces must refuse with one sentence"
+
+
+def test_corroboration_on_holds_a_policy_rewritten_row(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The reachable shape: the loop-side policy already rewrote the row to
+    covered=uncovered / reviewed_count 0 while PRESERVING the self-attestation
+    count. The gate must answer with the corroboration refusal naming both
+    remedies - the generic uncovered remedy ("re-run your own review") can
+    never satisfy the policy and would burn a worker to budget."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="uncovered",
+        count=0,
+        head=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert "rests on the author's own attestation alone" in verb_line
+    assert "second session's head-pinned attestation" in verb_line
+
+
+def test_corroboration_never_masks_a_stale_head(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """A self-attested-only row pinned to a MOVED head: the stale-head remedy
+    (re-attest at the live head) is the truer one and outranks the policy
+    sentence, which prescribes corroboration for a row that is stale anyway."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head="cccc3333dddd4444",
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "eeee5555ffff6666")
+    rc, verb_line = _verb_refusal(capsys, tmp_path)
+    assert rc == 3
+    assert "attestations are head-pinned by design" in verb_line
+    assert "rests on the author's own attestation alone" not in verb_line
+
+
+def test_corroboration_off_by_default_covers_the_same_row(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Unchanged, pinned: with the key unset the same row is covered. No
+    existing install changes behavior when this ships."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=1,
+        head=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested=1,
+        review_state="reviewed",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged", ""), toplevel=str(tmp_path))
+    monkeypatch_run = pytest.MonkeyPatch()
+    monkeypatch_run.setattr(_merge, "run", fake)
+    try:
+        assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    finally:
+        monkeypatch_run.undo()
+
+
+def test_corroboration_on_covers_a_corroborated_pr(
+    enabled, live_head, corroboration_on, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """One self-attested pass plus a second session's attestation is covered:
+    the policy demands corroboration, and it has it."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(
+        tmp_path,
+        coverage="covered",
+        count=2,
+        head=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS
+        + [
+            {
+                "name": "code-review",
+                "producer": "local_attestation",
+                "verdict": "reviewed",
+                "attestation_origin": "other_session",
+                "reviewed_sha": HEAD,
+                "freshness": "fresh",
+            }
+        ],
+        self_attested=1,
+        review_state="reviewed",
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged", ""), toplevel=str(tmp_path))
+    monkeypatch_run = pytest.MonkeyPatch()
+    monkeypatch_run.setattr(_merge, "run", fake)
+    try:
+        assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    finally:
+        monkeypatch_run.undo()
+
+
+def test_status_ready_names_the_corroboration_conjunct(
+    corroboration_on, monkeypatch, tmp_path  # noqa: F811
+):
+    """`fno do pr status` reports the same refusal merge enforces: a
+    self-attested-only row blocks `ready` as review_coverage_corroboration,
+    not as a bare uncovered count a worker would retry into budget. The
+    policy-rewritten shape (0 counted, self-attestation preserved) names the
+    policy too - the truer blocker, exactly as the merge verb ranks it."""
+    from fno.pr import _status
+
+    monkeypatch.setattr(_merge, "_repo_state_dir", lambda repo: str(tmp_path / ".fno"))
+    base = dict(
+        head_sha=HEAD,
+        verdicts=_SELF_ONLY_VERDICTS,
+        self_attested_count=1,
+        review_state="reviewed",
+    )
+    covered_row = dict(coverage="covered", reviewed_count=1, **base)
+    rewritten_row = dict(coverage="uncovered", reviewed_count=0, **base)
+    for row in (covered_row, rewritten_row):
+        blockers = _status._ready_blockers(
+            True,
+            "green",
+            0,
+            row,
+            True,
+            head=HEAD,
+            code_review_required=False,
+            counts={},
+            repo=str(tmp_path),
+        )
+        assert blockers == ["review_coverage_corroboration"], (row, blockers)

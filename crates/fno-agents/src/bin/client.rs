@@ -1150,6 +1150,20 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // agents`; attach/peek/reply; NOT a grid pane). claude-only by nature.
         ("claude", "bg") => {
             let claude_home = ClaudeHome::from_env();
+            let daemon_receipt = match fno_agents::claude_ask::preflight_claude_daemon(&claude_home)
+            {
+                Ok(fno_agents::claude_ask::ClaudeDaemonPreflight::Ready(receipt)) => Some(receipt),
+                Ok(fno_agents::claude_ask::ClaudeDaemonPreflight::NeedsBootstrap) => None,
+                Err(error) => {
+                    eprintln!(
+                        "claude spawn refused: harness=claude observed=unreadable remedy=repair the Claude daemon roster: {error}"
+                    );
+                    if let Some(g) = gate_guard.as_mut() {
+                        g.release();
+                    }
+                    return Some(13);
+                }
+            };
             // The message-derived refusal carrier (see message_carries_no_merge
             // above) rides extra_env so a worker that drops the flag
             // post-compaction still folds the refusal at init.
@@ -1158,7 +1172,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             } else {
                 Vec::new()
             };
-            let outcome = dispatch_claude_spawn(
+            let mut outcome = dispatch_claude_spawn(
                 home,
                 &claude_home,
                 name,
@@ -1174,6 +1188,24 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 claude_flags,
                 surface_cwd,
             );
+            if outcome.exit_code == 0 {
+                let daemon_receipt = match daemon_receipt {
+                    Some(receipt) => Ok(receipt),
+                    None => fno_agents::claude_ask::ensure_claude_daemon(&claude_home),
+                };
+                match daemon_receipt {
+                    Ok(receipt) => {
+                        fno_agents::claude_ask::stamp_daemon_receipt(&mut outcome, &receipt)
+                    }
+                    Err(error) => {
+                        outcome.exit_code = 13;
+                        outcome.stdout.clear();
+                        outcome.stderr.push_str(&format!(
+                            "claude spawn refused after create: harness=claude observed=unreadable remedy=inspect the Claude daemon roster: {error}\n"
+                        ));
+                    }
+                }
+            }
             if !outcome.stderr.is_empty() {
                 eprint!("{}", outcome.stderr);
             }
@@ -1232,9 +1264,30 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // codex/gemini/agy headless: the client-side one-shot (codex --exec /
         // gemini -p / agy -p). x-c772: --model is forwarded to each (exact
         // passthrough to the provider CLI's own --model).
-        ("codex", "headless") => emit!(dispatch_codex_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
-        )),
+        ("codex", "headless") => {
+            // The daemon receipt is teardown telemetry for a one-shot spawn
+            // (append_daemon_receipt only stamps stderr on success), never a
+            // precondition: a codex whose app-server cannot boot (a stubbed
+            // CLI on PATH, a partial install, CI) still runs `codex --exec`,
+            // exactly like the Python lane that has no daemon step - refusing
+            // here was exit-code drift against every such environment. The
+            // daemon stays mandatory where it is load-bearing (inject/mail
+            // ensure their own).
+            let daemon_receipt = match fno_agents::codex_inject::ensure_codex_daemon() {
+                Ok(receipt) => Some(receipt),
+                Err(error) => {
+                    eprintln!("spawn: harness=codex daemon-ensure degraded: {error}");
+                    None
+                }
+            };
+            let mut outcome = dispatch_codex_once(
+                home, name, &message, from_name, &cwd, yolo, timeout, model, effort, add_dir,
+            );
+            if let Some(receipt) = daemon_receipt.as_ref() {
+                fno_agents::codex_ask::append_daemon_receipt(&mut outcome, receipt);
+            }
+            emit!(outcome)
+        }
         ("gemini", "headless") => emit!(dispatch_gemini_once(
             home, name, &message, from_name, &cwd, yolo, timeout, model,
         )),
@@ -2299,7 +2352,7 @@ fn format_success(
                             adopt_hint = Some(format!(
                                 "\nthe {harness} session record was the resume handle; \
                                  the transcript stays on disk.\nreverse it with: \
-                                 fno agents adopt {adopt_key}"
+                                 fno agents adopt {adopt_key} --cross-project"
                             ));
                         }
                     }
@@ -2860,8 +2913,8 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "drive-authority [--json]",
     "trace [options]",
     "ping",
-    "resume <name> [--print-command] [--message/-m <text>]",
-    "adopt <session-id>",
+    "resume <name> [--print-command] [--message/-m <text>] [--cross-project] [--cwd <existing-checkout>]",
+    "adopt <session-id> [--cross-project]",
     "attach <name>",
     "logs <name> [--follow] [options]",
     "loop run --driver target [options]",
@@ -3303,7 +3356,7 @@ mod tests {
         let out = format_success("rm", "bar-agent", &result, false, true, false)
             .expect("rm renders a receipt");
         assert!(
-            out.contains("fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092"),
+            out.contains("fno agents adopt 01a02125-4eb4-7bf1-b74e-d238887eb092 --cross-project"),
             "{out}"
         );
         assert!(!out.contains("adopt 01a02125\n"), "{out}");
@@ -3324,8 +3377,21 @@ mod tests {
             out.starts_with("removed: bar-agent (fno + claude)"),
             "{out}"
         );
-        assert!(out.contains("fno agents adopt 0a6e775f"), "{out}");
+        assert!(
+            out.contains("fno agents adopt 0a6e775f --cross-project"),
+            "{out}"
+        );
         assert!(out.contains("resume handle"), "{out}");
+    }
+
+    #[test]
+    fn resume_and_adopt_usage_advertise_recovery_flags() {
+        let resume = verb_usage("resume").expect("resume usage");
+        assert!(resume.contains("--cross-project"), "{resume}");
+        assert!(resume.contains("--cwd <existing-checkout>"), "{resume}");
+
+        let adopt = verb_usage("adopt").expect("adopt usage");
+        assert!(adopt.contains("--cross-project"), "{adopt}");
     }
 
     /// No row id means no handle to name, so the receipt stays exactly as it
@@ -4187,6 +4253,27 @@ mod tests {
                 "{provider} --once: no mint"
             );
         }
+    }
+
+    #[test]
+    fn spawn_once_after_named_message_stays_headless() {
+        let args = vec![
+            "--name".to_string(),
+            "parity-agent".to_string(),
+            "hi".to_string(),
+            "--harness".to_string(),
+            "codex".to_string(),
+            "--once".to_string(),
+        ];
+
+        let (method, params) = build_request("spawn", &args).unwrap();
+
+        assert_eq!(method, "agent.spawn");
+        assert_eq!(params["name"], "parity-agent");
+        assert_eq!(params["message"], "hi");
+        assert_eq!(params["provider"], "codex");
+        assert_eq!(params["substrate"], "headless");
+        assert!(params.get("host_mode").is_none());
     }
 
     #[test]

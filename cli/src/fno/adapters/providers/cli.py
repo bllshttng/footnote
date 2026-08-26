@@ -23,6 +23,7 @@ from fno.adapters.providers.loader import (
     is_effective_active,
     load_providers,
     load_quota_config,
+    load_scope_config,
     mutable_accounts_block,
     save_providers,
 )
@@ -644,10 +645,10 @@ def add_provider(
         typer.echo(f"error: {msg}", err=True)
         raise typer.Exit(1)
 
-    # Load existing config
-    repo_root = _get_repo_root()
+    # Load the TARGET scope's own block: a read-modify-write on the merged
+    # view would copy other layers' records into the file being written.
     try:
-        config = load_providers(repo_root=repo_root)
+        config = load_scope_config(scope)  # type: ignore[arg-type]
     except ProviderConfigError as exc:
         typer.echo(f"error loading existing config: {exc}", err=True)
         raise typer.Exit(1)
@@ -715,9 +716,10 @@ def _register_config_dir_account(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
-    repo_root = _get_repo_root()
     try:
-        config = load_providers(repo_root=repo_root)
+        # Scope-own read: the save below must not freeze other layers'
+        # records into the target file.
+        config = load_scope_config(scope)  # type: ignore[arg-type]
     except ProviderConfigError as exc:
         typer.echo(f"error loading existing config: {exc}", err=True)
         raise typer.Exit(1)
@@ -787,7 +789,6 @@ def register_provider(
     # the second read, or a concurrent switch between them.
     # No pre-lock load: `_persist` re-reads the authoritative config under the
     # slot lock, and a second read here would only be a staler copy of it.
-    repo_root = _get_repo_root()
 
     from fno.adapters.providers.model import ProvidersConfig
 
@@ -795,8 +796,9 @@ def register_provider(
         # Re-read under the lock. The load above happened before it, so two
         # concurrent registrations would otherwise each merge into the same
         # stale record set and the later save would silently drop the earlier
-        # account.
-        current = load_providers(repo_root=repo_root)
+        # account. Scope-own read: the save must not freeze other layers'
+        # records into the target file.
+        current = load_scope_config(cast('Literal["project", "global"]', scope))
         new_records = [r for r in current.records if r.id != record.id]
         new_records.append(record)
         save_providers(
@@ -1416,6 +1418,9 @@ def use_provider(
     scope: str = typer.Option("project", "--scope", help="project|global"),
 ) -> None:
     """Set the active account (default scope: project)."""
+    # Merged view for the lookup (the pointer may legitimately target a
+    # record declared in another layer); the save below writes only the
+    # target scope's own records so it cannot freeze the merge.
     repo_root = _get_repo_root()
     try:
         config = load_providers(repo_root=repo_root)
@@ -1438,6 +1443,26 @@ def use_provider(
             f"error: '{provider_id}' is a config-dir account (its own "
             f"{record.config_dir}); it is spawn-only. Use it per-worker with "
             f"`fno agents spawn --account {provider_id}`, not a daemon-wide switch.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Validate the pointer target BEFORE any side effects: managed.switch
+    # materializes credentials into the shared slot irreversibly, and a
+    # validation failure after it leaves the slot switched with no routing
+    # pointer.
+    try:
+        scope_records = load_scope_config(scope).records  # type: ignore[arg-type]
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+    if scope == "global" and provider_id not in {r.id for r in scope_records}:
+        # Same rule `config set` enforces: a GLOBAL pointer must name a
+        # globally declared record, or every project without that record
+        # bricks its loader.
+        typer.echo(
+            f"error: account '{provider_id}' is not declared in the global "
+            "config; declare it there first or set the pointer per project.",
             err=True,
         )
         raise typer.Exit(1)
@@ -1487,7 +1512,10 @@ def use_provider(
             )
 
     from fno.adapters.providers.model import ProvidersConfig
-    new_config = ProvidersConfig(records=config.records, active=provider_id)
+    new_config = ProvidersConfig(
+        records=scope_records,
+        active=provider_id,
+    )
 
     try:
         save_providers(new_config, scope=scope)  # type: ignore[arg-type]
@@ -1521,9 +1549,10 @@ def remove_provider(
     scope: str = typer.Option("global", "--scope", help="global|project"),
 ) -> None:
     """Remove an account record. Refuses to remove the active account without --force."""
-    repo_root = _get_repo_root()
+    # Scope-own read: removal edits ONE file's records; the merged view would
+    # freeze every other layer's records into the file being written.
     try:
-        config = load_providers(repo_root=repo_root)
+        config = load_scope_config(scope)  # type: ignore[arg-type]
     except ProviderConfigError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
@@ -1532,12 +1561,28 @@ def remove_provider(
         typer.echo(f"error: account '{provider_id}' not found", err=True)
         raise typer.Exit(1)
 
-    if config.active == provider_id and not force:
-        typer.echo(
-            f"error: '{provider_id}' is the active provider. Use --force to remove it.",
-            err=True,
+    # Cross-layer pointers are legitimate now, so the refusal must see every
+    # layer's own active, not just this scope's: deleting a record any layer
+    # points at bricks that layer's loader.
+    if not force:
+        from fno.adapters.providers.loader import (
+            _extract_accounts_block,
+            _provider_candidates,
+            _read_parsed,
         )
-        raise typer.Exit(1)
+
+        pointed_at = any(
+            (_extract_accounts_block(_read_parsed(path)) or {}).get("active")
+            == provider_id
+            for path in _provider_candidates()
+        )
+        if pointed_at:
+            typer.echo(
+                f"error: '{provider_id}' is an active provider (some config "
+                "layer points at it). Use --force to remove it.",
+                err=True,
+            )
+            raise typer.Exit(1)
 
     new_records = [r for r in config.records if r.id != provider_id]
     new_active = config.active if config.active != provider_id else None

@@ -208,9 +208,22 @@ fn proto_stale_socket_is_unlinked_and_rebound() {
     }
     fno::proto::remove_startup_guard(&sock);
     assert!(sock.exists(), "dropping a listener must leave the file");
-    match bind_or_probe(&sock).unwrap() {
-        BindOutcome::Bound(_) => {}
-        BindOutcome::AlreadyRunning => panic!("stale socket must be rebindable"),
+    // The contract is "a dropped listener reads dead EVENTUALLY", not at
+    // zero latency: probe_alive already grants a startup grace on the alive
+    // side, and a loaded runner can land the first probe inside the teardown
+    // window. Bounded retry, same shape as the production probe's own.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    loop {
+        match bind_or_probe(&sock).unwrap() {
+            BindOutcome::Bound(_) => break,
+            BindOutcome::AlreadyRunning => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "stale socket must be rebindable"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
     }
 }
 

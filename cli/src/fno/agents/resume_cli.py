@@ -23,11 +23,11 @@ instead of exec):
   a no-op detectable instead of a lie. Up to two wake attempts, each
   bounded by a fixed ~19s send sequence plus a 60s subprocess timeout, so
   a full failure takes up to roughly two minutes wall-clock, not instant.
-  ``--print-command`` still prints the OLD interactive form
-  (``claude attach <short_id>``) for a claude row: that is the manual
-  escape hatch for a human who wants to type into the session directly,
-  distinct from (and no longer equivalent to) what a direct
-  ``fno agents resume <name>`` now does.
+  ``--print-command`` prints the interactive attach form
+  (``claude attach <short_id>``) for a Claude background row: that is the
+  manual escape hatch for a human who wants to type into the session directly,
+  distinct from the verified PTY wake used by direct
+  ``fno agents resume <name>``.
 - ``gemini`` / ``opencode`` → exec into the provider's own resume CLI,
   same as codex.
 
@@ -120,6 +120,16 @@ def _build_resume_argv(
         grant = git_writable_config_args(Path(cwd)) if cwd else []
         return [argv[0], *grant, *argv[1:]]
     return argv
+
+
+def _build_attach_argv(short_id: str) -> Optional[list[str]]:
+    """Render Claude's live-supervisor attach form from its short id."""
+    from fno.agents.harness_map import DispatchResolveError, render_session_argv
+
+    try:
+        return render_session_argv("claude", "interactive_attach", short_id=short_id)
+    except DispatchResolveError:
+        return None
 
 
 _DEFAULT_WAKE_MESSAGE = "continue"
@@ -629,6 +639,7 @@ def resume_logic(
     print_command: bool = False,
     message: str = _DEFAULT_WAKE_MESSAGE,
     cwd_override: Optional[str] = None,
+    cross_project: bool = False,
     registry_loader: Optional[Any] = None,
     path_checker: Optional[Any] = None,
     cwd_checker: Optional[Any] = None,
@@ -651,6 +662,8 @@ def resume_logic(
             transcript dir before delegating here (`resolve_resume_cwd`);
             without this override this fallback would silently re-derive
             the stale pre-EnterWorktree cwd from the registry instead.
+        cross_project: Explicitly authorize store selection outside the caller's
+            project. It never bypasses ambiguity, route, liveness, or cwd checks.
         registry_loader: Optional callable returning the registry list
             (defaults to ``fno.agents.registry.load_registry``).
         path_checker: Optional callable ``(bin) -> bool`` for PATH check
@@ -700,7 +713,12 @@ def resume_logic(
     )
 
     try:
-        entry = resolve_agent_across_sources(entries, name).entry
+        entry = resolve_agent_across_sources(
+            entries,
+            name,
+            scope_cwd=cwd_override or os.getcwd(),
+            cross_project=cross_project,
+        ).entry
     except AgentResolutionError as exc:
         return ResumeResult(
             exit_code=13,
@@ -749,10 +767,9 @@ def resume_logic(
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
     from fno.agents.harness_map import DispatchResolveError, capabilities
 
+    form_lane = "interactive_attach" if harness == "claude" else "interactive_resume"
     try:
-        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][
-            "interactive_resume"
-        ]
+        resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][form_lane]
         resume_supported = resume_form["kind"] != "unsupported"
     except (DispatchResolveError, KeyError, TypeError):
         resume_supported = False
@@ -774,7 +791,10 @@ def resume_logic(
             ),
         )
 
-    argv = _build_resume_argv(harness or "?", session_id, cwd)
+    if harness == "claude":
+        argv = _build_attach_argv(getattr(entry, "short_id", "") or "")
+    else:
+        argv = _build_resume_argv(harness or "?", session_id, cwd)
     if argv is None:
         return ResumeResult(
             exit_code=13,
@@ -843,7 +863,7 @@ def resume_logic(
             emit_event = events_mod.emit
         return _resume_claude_wake(
             name=name,
-            short_id=session_id or "",
+            short_id=getattr(entry, "short_id", "") or "",
             session_id=session_id,
             cwd=cwd,
             harness=harness,
@@ -919,9 +939,16 @@ def cmd_resume(
     cwd: Optional[str] = typer.Option(
         None, "--cwd",
         help=(
-            "Use this cwd instead of the registry's recorded one. Internal: "
-            "the Rust binary passes this when delegating a claude row whose "
-            "transcript moved under EnterWorktree."
+            "Use this existing checkout instead of the recorded cwd when "
+            "recovering a pruned worktree."
+        ),
+    ),
+    cross_project: bool = typer.Option(
+        False,
+        "--cross-project",
+        help=(
+            "Authorize machine-wide store selection for an orphaned session; "
+            "does not bypass ambiguity or cwd validation."
         ),
     ),
 ) -> None:
@@ -933,7 +960,11 @@ def cmd_resume(
     resume CLI in the recorded cwd, handing over the terminal.
     """
     result = resume_logic(
-        name=name, print_command=print_command, message=message, cwd_override=cwd
+        name=name,
+        print_command=print_command,
+        message=message,
+        cwd_override=cwd,
+        cross_project=cross_project,
     )
     if result.stderr:
         sys.stderr.write(result.stderr)

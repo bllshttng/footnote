@@ -178,7 +178,7 @@ FIELD_META: dict[str, Meta] = {
         "never", "Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.",
     ),
     "review.optional_apps": Meta(
-        "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. Also the escape for a required App you no longer want the gate to wait on: move its login here.",
+        "advanced", "Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. Also the escape for a required App you no longer want the gate to wait on: move its login here. UNSET resolves to the built-in default [gemini-code-assist, chatgpt-codex-connector] on both readers (`fno do pr status` and the loop-check gate); an explicit [] is a real opt-out and wins over the default; a non-empty list EXTENDS the default (add a login) rather than replacing it, so a partial list never silently drops a built-in.",
     ),
     "review.nudge": Meta(
         "advanced", "Per-App override for the bot-review nudge, as [review.nudge.<login>] tables with {review_handle, wait_minutes, ceiling, enabled}. A github_apps bot that reviews on MENTION not on push never reviews unless something posts its trigger; the loop-check stop gate posts review_handle (default from the built-in profile), waits wait_minutes (default 15), and after ceiling (default 3) unanswered nudges gives up rather than idling to the budget ceiling. enabled=false opts a repo back into plain block-and-wait. Ships populated for chatgpt-codex-connector, which wears three distinct names for one bot: match the review-author login chatgpt-codex-connector, trigger a fresh review with '@codex review', and address an in-thread reply to '@chatgpt-codex-connector'.",
@@ -191,6 +191,9 @@ FIELD_META: dict[str, Meta] = {
     ),
     "review.self_review_required": Meta(
         "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false to opt out and restore unreviewed code-PR shipping.",
+    ),
+    "review.require_corroboration": Meta(
+        "advanced", "When true (default false), a PR whose only coverage is the author's own (self_attested) local attestation reads as uncovered; the refusal names both satisfying paths: a second session's head-pinned attestation, or a GitHub App review. Read `fno doctor`'s self-attestation report before flipping it - that row is the number of recent merged PRs that would have been held.",
     ),
     "review.hold_ttl_minutes": Meta(
         "advanced", "How long a registered review hold blocks a merge before it ages out (default 90). A review that starts registers review:branch:<branch>; fno do pr status and fno do pr merge refuse while it is live, so a merge cannot land on the pre-review code. A wedge bound, not an estimate: an expired hold clears with a receipt rather than holding the lane forever.",
@@ -255,6 +258,7 @@ FIELD_META: dict[str, Meta] = {
     "agents.silence_deadline_seconds": Meta("advanced", "Seconds of transcript silence after which `fno agents sweep` reports a worker as silent (default 600). A REPORT and never an action: no stop, no spawn, no claim mutation. A worker whose transcript age is unknowable emits nothing at all, because absence of evidence must not become a finding.", default_source="default"),
     "agents.dead_row_grace": Meta("advanced", "Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600).", default_source="default"),
     "agents.max_live": Meta("advanced", "Cap on concurrent live worker processes (fno registry + claude roster union); spawn queues at cap (default 3).", default_source="default"),
+    "process_admission.max_processes": Meta("advanced", "Maximum fno-attributed OS processes admitted by the native pre-spawn gate; counts processes, not agents or panes (default 400).", default_source="default"),
     "agents.provider_limits": Meta("advanced", "Per-provider budget record keyed by model provider: `lanes` is the immediate-refusal cap on concurrent live workers, `subagents` is the in-session fan-out width review route resolution reads (1 means a panel is never dispatched there). A bare integer is still legal and reads as `lanes`. Unlisted providers are uncapped in both dimensions; the built-in zai budget is lanes 5, subagents 1, because that account is shared. Renamed from `agents.max_lanes` so no two leaves share that name with `parallel.max_lanes`; the legacy spelling still parses with one deprecation line.", default_source="default"),
     "agents.min_free_gb": Meta("advanced", "Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).", default_source="default"),
     "agents.max_load_per_cpu": Meta("advanced", "CPU ceiling for spawn preflight: spawn refuses when the 1-min load average exceeds this factor times the CPU count (<= 0 disables; default 8). Measured motivation: load 309 on 12 CPUs while the RAM floor held ten times its margin.", default_source="default"),
@@ -477,6 +481,18 @@ FIELD_META: dict[str, Meta] = {
     # --- config.king.* (the king loop; both default false) ---
     "king.enabled": Meta("advanced", "Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false."),
     "king.autonomous_merge": Meta("advanced", "Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work."),
+    # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
+    "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
+    "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),
+    "accounts.active_combo": Meta("never", "Name of the combo currently driving provider rotation."),
+    "accounts.records": Meta("never", "Account records for rotation: list of {name, provider, model, ...} entries."),
+    "accounts.combos": Meta("never", "Named provider combos, each {strategy (fallback or round_robin), sticky_limit, providers}."),
+    "accounts.quota.defer_dispatch": Meta("never", "Hold dispatch while the active account's quota use sits above the threshold."),
+    "accounts.quota.defer_threshold_pct": Meta("never", "Quota-use percentage at or above which dispatch defers."),
+    "accounts.quota.probe_ttl_seconds": Meta("never", "Seconds a quota probe result stays fresh before re-probing."),
+    "accounts.quota.defer_horizon_minutes": Meta("never", "How far ahead a quota-window reset is still worth deferring for."),
+    "accounts.quota.pick_on_launch": Meta("never", "Pick the least-loaded account at spawn time instead of pinning one."),
+    "accounts.failover": Meta("never", "Provider-rotation failover: {max_swaps_per_phase}."),
 }
 
 

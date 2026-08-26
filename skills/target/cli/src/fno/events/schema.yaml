@@ -233,13 +233,39 @@ event_types:
           description: "Full repository identity `host/owner/repo`, lowercased, from the git remote. Present ONLY on the copy mirrored into the cross-project global log (`fno.events.cli` GLOBAL_MIRROR_TYPES); the project-log copy needs no scoping and omits it. Same producer and same meaning as `review_coverage.repo`: one parser, `fno.paths.repo_identity_from_remote_url`, in parity with `repo_identity_from_remote_url` in crates/fno-agents/src/finalize.rs. It is the FULL identity, never the last path segment, because `org-a/widget` and `org-b/widget` would otherwise share a key. Without it a global-log reader can match only on `head_sha`, and a fork shares those. Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the row rather than guess."
         attester_session_id:
           type: string
-          description: "The harness session of the process that emitted the attestation - the attesting ACTOR. Read from the live process env on the marker precedence CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID > CODEX_SESSION_ID > GEMINI_SESSION_ID (the same one init resolves). Unlike session_id it varies with who emitted, so it is the field the authorship join keys on: equal to the authoring session's manifest harness_session_id means self-attested. Empty when no marker is set (unobserved, never guessed, never fallen back to the manifest - a fallback restores the tautology session_id carries). Every pre-landed attestation has this empty."
+          description: "The harness session of the process that emitted the attestation - the attesting ACTOR. Stamped by the emit chokepoint (`fno doctor event emit`) via resolve_attester_identity(), never read from a caller-supplied value: the env read is corroborated against the process ancestry and an ancestor carrying a DIFFERENT value for the same marker refuses the whole emit, because one `VAR=<other-session>` assignment on the command line used to write the attestation under any session id and refresh that session's stale verdict onto a head it never saw. A supplied --data value disagreeing with the resolved identity is refused too. Unlike session_id it varies with who emitted, so it is the field the authorship join keys on: equal to the authoring session's manifest harness_session_id means self-attested. Empty when no marker is set or a mixed-family env cannot be attributed (unobserved, never guessed, never fallen back to the manifest - a fallback restores the tautology session_id carries). Every pre-landed attestation has this empty or caller-stamped."
+        attester_witness:
+          type: string
+          enum: [process, env_only]
+          description: "How attester_session_id was corroborated at emit: `process` when a readable ancestor process carries the same marker value (the harness that minted the id is in the emitting process's ancestry), `env_only` when nothing corroborates it - a bare shell, dead ancestry, or an ancestor the OS will not let the emitter read (darwin `ps eww` readability is partial by measurement: it exposed a live harness chain yet not other same-user processes). Recorded, never gating: an env_only attestation from such a lane is still a real review, and refusing it would wedge exactly the lanes the review-coverage work is trying to unwedge. Whether to gate on it is a later operator decision with this data in hand."
+        retracts_attester:
+          type: string
+          description: "Present only on a RETRACTION: a fail verdict naming the attester whose pass at this head is revoked. The pair the coverage gate keys on becomes (reviewer, retracts_attester) instead of the event's own attester, so an operator session can revoke a forged or mistaken pass WITHOUT performing the impersonation a second time - the revoking identity is recorded in attester_session_id, never laundered into the key. Emitted by `fno do pr attestation retract`, which refuses when no matching pass exists."
+        retraction_reason:
+          type: string
+          description: "The --reason text a retraction was emitted with, verbatim. The audit trail for why a pass stopped counting."
         model:
           type: string
           description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. The producer now REFUSES to record a claim it can prove false: a non-`claude*` model name with an empty or anthropic.com base URL cannot be the model that answered (the request silently falls back to the primary Anthropic model), so that case records empty rather than a value a reader would take as fact. A live specimen produced exactly that wrong record on 2026-08-12. The residue is a claim that is merely unverified rather than known-false, and no environment-side check closes that one. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
         provider:
           type: string
           description: "The endpoint host the attesting session was pointed at (host only, derived from ANTHROPIC_BASE_URL at emit; scheme, path, and any userinfo are stripped so no key material lands here). Empty means not observable from the environment - the default Anthropic endpoint, or a lane that does not route via env. Same best-effort caveat as model."
+        reviewer_context:
+          type: string
+          enum: [fresh, shared, unknown]
+          description: "Positive evidence about the reviewer's execution context: fresh means a harness-recorded forked review context, shared means a same-context review tool result, and unknown means no positive context marker. Measures context independence, never who invoked the verb, and is not gating."
+        reviewed_base_sha:
+          type: string
+          description: "The merge-base of the base branch and HEAD at emit - the far end of the diff the reviewer read. Recorded so a reader can tell a review of the PR from a review of nothing: a session resolving its target from a checkout sitting on the base branch reads an empty diff, and before this field a clean review of nothing was byte-identical to a clean review. The producer REFUSES to emit when the measured diff changed no FILE, so every event carrying these fields covers a non-empty diff. OPTIONAL: every pre-landed attestation lacks the trio."
+        reviewed_head_sha:
+          type: string
+          description: "The HEAD the diff was measured against at emit - equal to head_sha, recorded explicitly so a reader never has to infer the range from two events. OPTIONAL, same pre-landed cohort as reviewed_base_sha."
+        reviewed_file_count:
+          type: integer
+          description: "Files changed in the reviewed range, counted by name: the measure that decides whether a review had anything to read. Binary, pure-rename and empty-file changes count as files with 0 lines, so reviewed_line_count can be an honest 0 on a real review. The gate's zero-evidence guard keys on this field, never on the line count alone."
+        reviewed_line_count:
+          type: integer
+          description: "Added plus deleted lines across the reviewed diff (git diff --numstat of reviewed_base_sha..reviewed_head_sha). An honest 0 on a binary, pure-rename or empty-file diff - the gate skips an attestation only when this is 0 AND reviewed_file_count is absent or 0, the empty-diff shape the producer refuses to emit. A line with BOTH fields ABSENT still counts: that is the pre-landed backlog and must not be invalidated. OPTIONAL."
     consumers: [fno-agents loop-check]
 
   - name: review_coverage
@@ -266,6 +292,9 @@ event_types:
         self_attested_count:
           type: integer
           description: "How many of reviewed_count are the AUTHOR attesting its own diff (attestation_origin == self_attested). Recorded, never gating, and deliberately not named `independent_count` - the schema is explicit below that other_session is not independence, and this must not launder that. A self-attested pass counts, because self-review is the DEFAULT path (config.review.self_review_required floors the harness review verb onto the author's own head), so refusing one would wedge every single-session PR. What x-62a1 asked for is that the answer be visible in the verdict rather than asserted in prose: a gate that wants to demand a second reader is now one predicate over this number, not a redesign. Present alongside reviewed_count."
+        author_session_id:
+          type: string
+          description: "The authoring harness session used to classify each local verdict's attestation_origin. Persisted with the coverage snapshot so later status reads never substitute a newer live worktree manifest owner for the historical comparison. Omitted when authorship was unmeasured."
         verdicts:
           type: array
           description: "One entry per reviewer over one producer axis. Producer is named by axis so the chatgpt-codex-connector App and the local codex CLI are distinct."
@@ -963,8 +992,10 @@ event_types:
           type: string
           description: "Symbolic owner string (e.g. target-session:<sid>)."
         pid:
-          type: integer
+          type: [integer, "null"]
           description: "Holder process PID at acquire time."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
           description: "Host (socket.gethostname) at acquire time; liveness compares the claim's machine_id, not this."
@@ -991,7 +1022,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1015,7 +1048,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1040,7 +1075,9 @@ event_types:
           type: string
           description: "New holder taking over."
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1051,7 +1088,7 @@ event_types:
           type: string
           description: "Holder whose claim was reclaimed."
         previous_pid:
-          type: integer
+          type: [integer, "null"]
           description: "PID of the dead/expired holder."
     consumers: [operator]
 
@@ -1087,7 +1124,9 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
+          type: [integer, "null"]
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1112,8 +1151,10 @@ event_types:
           type: string
           description: "Unchanged symbolic holder across the PID rebind."
         pid:
-          type: integer
+          type: [integer, "null"]
           description: "The resumed durable PID now anchoring the claim."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -1121,7 +1162,7 @@ event_types:
         expires_at:
           type: integer
         previous_pid:
-          type: integer
+          type: [integer, "null"]
           description: "The dead prior PID that proved the rebind was safe."
         previous_state:
           type: string
@@ -1149,8 +1190,10 @@ event_types:
         holder:
           type: string
         pid:
-          type: integer
-          description: "The dead/reused pid that proved the claim was reapable."
+          type: [integer, "null"]
+          description: "The new claim's pid; null when the new holder is pid_unavailable. The dead/reused pid that proved reapability rides previous_pid."
+        pid_unavailable:
+          type: boolean
         host:
           type: string
         acquired_at:
@@ -2330,6 +2373,9 @@ event_types:
         subject:
           type: string
           description: "Optional. The node, file, or area the decision governs. The recovery key: `fno backlog decisions <subject>` and the graph projection read it."
+        expiry_ref:
+          type: object
+          description: "Optional exact coordination closure reference. Node refs name node_id. PR refs name repository and number, with an optional URL."
         options:
           type: array
           description: "Optional. What was on the table, so a later reader sees what was rejected."
@@ -2342,6 +2388,9 @@ event_types:
         relayed_by:
           type: string
           description: "Optional. A name an agent SUPPLIED for someone else, kept apart from decided_by so a claimed decider and a stamped one never share a column. Present only when it differs from the stamped handle."
+        origin:
+          type: string
+          description: "Optional. Mail-channel provenance carried into this ruling. It is evidence, not attended-terminal attestation."
         authority_source:
           type: string
           description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."
@@ -2351,6 +2400,42 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
+    consumers: [operator, fno backlog decisions]
+
+  - name: decision_retracted
+    retention: durable
+    description: "An append-only retraction of one decision. The original operator_decision remains unchanged and readers fold the newest valid event into its lifecycle."
+    sources: [target, hook, subagent, test]
+    data:
+      required: [retraction_id, target_decision_id, subject, reason]
+      properties:
+        retraction_id:
+          type: string
+          description: "Unique id for this retraction event. Distinct retractions of one target remain independently recoverable."
+        target_decision_id:
+          type: string
+          description: "The decision_id being retracted."
+        subject:
+          type: string
+          description: "The target decision subject, copied into the audit event for safe recovery."
+        reason:
+          type: string
+          description: "Why this decision must stop counting."
+        retracted_by:
+          type: string
+          description: "Stamped caller identity when available."
+        attested_by:
+          type: string
+          description: "Optional attended-terminal attestation."
+        relayed_by:
+          type: string
+          description: "Optional caller-supplied name kept separate from the stamp."
+        origin:
+          type: string
+          description: "Optional mail-channel provenance."
+        authority_source:
+          type: string
+          description: "Optional authority lane used for the retraction."
     consumers: [operator, fno backlog decisions]
 
   - name: agent_raw_inject
@@ -2384,6 +2469,33 @@ event_types:
         confirmed:
           type: boolean
           description: "Optional. The transport's own answer, recorded after the send so the record never asserts an injection a stalled pane or an absent daemon never performed. False covers both a clean refusal (nothing sent) and a payload that landed past the confirm budget - the transport returns one bool for both."
+        origin:
+          type: string
+          description: "Optional. The classified mail origin carried by the sender before the raw transport removed the envelope."
+    consumers: [operator]
+
+  - name: mail_origin_classified
+    retention: durable
+    description: "Positive measurement of the origin classified at the mail send chokepoint, emitted before delivery or enforcement narrows the path."
+    sources: [daemon]
+    data:
+      required: [origin, lane, presumed_human]
+      properties:
+        origin:
+          type: string
+          description: "Closed mail origin: operator, peer, scheduler, or recovery; unknown records an unresolved classifier and is never stamped on the authority wire."
+        lane:
+          type: string
+          description: "Mail surface classified before delivery: raw, inbox, reply, project, or peer."
+        presumed_human:
+          type: boolean
+          description: "Positive marker for an origin still presumed operator-authored."
+        sender:
+          type: string
+          description: "Optional sender handle or project label."
+        target_session:
+          type: string
+          description: "Optional recipient session for directed or raw delivery."
     consumers: [operator]
 
   - name: loop_check_gh_error
@@ -2750,6 +2862,33 @@ event_types:
         transcript_path:
           type: string
           description: "Transcript path that was probed (best-effort; may be empty if manifest was unreadable)."
+    consumers: [operator]
+
+  - name: dispatch_selection_diverged
+    retention: durable
+    description: "An independent planned-unclaimed observer named a node absent from the normal dispatch selector. This is completeness evidence and the node is recovered only after normal dispatch safety gates run."
+    sources: [backlog]
+    data:
+      required: [node_id, selector_command, observer_command, scope, selector_entries_scanned, observer_entries_scanned]
+      properties:
+        node_id:
+          type: string
+          description: "The observer row omitted by the normal selector."
+        selector_command:
+          type: string
+          description: "The selector surface whose result omitted the node."
+        observer_command:
+          type: string
+          description: "The independent observer surface that named the node."
+        scope:
+          type: string
+          description: "Project, mission, roadmap, and parent scope used for the comparison."
+        selector_entries_scanned:
+          type: integer
+          description: "Number of rows returned by the selector read used in the comparison."
+        observer_entries_scanned:
+          type: integer
+          description: "Number of graph entries scanned by the independent observer."
     consumers: [operator]
 
   - name: advance_dispatched
@@ -3567,6 +3706,20 @@ event_types:
         reason:
           type: string
           description: "chain-empty (config named no chain), all-tried, all-exhausted (every remaining link's own provider reads EXHAUSTED), or chain-malformed:<detail> (the chain refused validation and nothing was spawned)."
+
+  - name: failover_swapped
+    description: "A recovery sweep rotated the provider for a refused worker and records whether a replacement worker was actually redispatched."
+    sources: [daemon]
+    data:
+      required: [short_id, redispatched]
+      properties:
+        short_id:
+          type: string
+          description: "The refusing worker's 8-hex jobId."
+        redispatched:
+          type: boolean
+          description: "True only when a replacement worker actually started."
+    consumers: [operator]
 
   - name: provider_window_closing
     description: "A provider record's PROJECTED usage window is within the configured warning threshold of closing. A projection from a recorded window open plus a configured length, never a utilization measurement - a record with no probe still reads UNKNOWN for headroom. Emitted once per window so a long tick loop does not re-warn."

@@ -481,9 +481,14 @@ def test_optional_apps_scalar_coerces(
 def test_optional_apps_defaults_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Absent -> [] (no optional reviewers), independent of the required gate."""
+    """Absent -> the RAW field stays None (the lane probe reads its
+    truthiness) while the RESOLVED list carries the built-in honored-if-present
+    logins, independent of the required gate."""
+    from fno.config import DEFAULT_OPTIONAL_APPS, resolved_optional_apps
+
     settings = _load(tmp_path, monkeypatch, "schema_version: 1\n")
-    assert settings.review.optional_apps == []
+    assert settings.review.optional_apps is None
+    assert resolved_optional_apps(settings.review) == list(DEFAULT_OPTIONAL_APPS)
 
 
 # --- parser parity on non-string malformed values (codex P1 on #205) ---

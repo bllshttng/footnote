@@ -104,6 +104,29 @@ def test_get_related_respects_k(tmp_path):
     assert [r["id"] for r in R.get_related(p, "a", k=1)] == ["b"]
 
 
+def test_filing_candidates_unions_sidecar_and_since_groom_delta(tmp_path):
+    """AC7-HP: a stale sidecar keeps today's live sibling in recall."""
+    sidecar = tmp_path / "relatedness.json"
+    R.write_map(sidecar, {"incoming": [{"id": "old-sibling", "score": 0.4, "reason": "shared"}]})
+    entries = [
+        _node("old-sibling", title="shared filing surface", created_at="2020-01-01T00:00:00+00:00"),
+        _node("today-sibling", title="shared filing surface", created_at="2999-01-01T00:00:00+00:00"),
+        _node("unrelated", title="invoice export", created_at="2020-01-01T00:00:00+00:00"),
+    ]
+    candidates, source = R.filing_candidates(entries, sidecar)
+    assert {row["id"] for row in candidates} == {"old-sibling", "today-sibling"}
+    assert source == "sidecar+since-groom"
+
+
+def test_filing_candidates_falls_back_to_all_live_on_missing_sidecar(tmp_path):
+    candidates, source = R.filing_candidates(
+        [_node("a", title="one"), _node("b", title="two", status="done")],
+        tmp_path / "missing.json",
+    )
+    assert {row["id"] for row in candidates} == {"a"}
+    assert source == "fallback:all-live"
+
+
 # --- atomic write round-trips ---
 
 def test_write_map_round_trip(tmp_path):

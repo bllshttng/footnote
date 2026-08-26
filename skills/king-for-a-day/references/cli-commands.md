@@ -75,12 +75,12 @@ A bg or daemon worker is reaped stop first, then rm.
 |---|---|---|
 | 1 | `fno agents stop <name>` | Reaches a session on claude rows only. Codex and gemini answer `stop is a no-op between asks`, registry unchanged. |
 | 2 | `fno agents rm <name>` | Tears down the harness session record FIRST, registry row after. That record is the resume handle. On teardown failure the registry row is KEPT for retry. `--force` drops it anyway and names the orphan left in the harness store. |
-| 2r | `fno agents adopt <short-id>` | The reversal of step 2. The transcript survives every reap, so adopt re-registers the row and the handle resolves again. It takes the 8-hex short id as well as the full session id. |
+| 2r | `fno agents adopt <full-harness-session-id> --cross-project` | Identity-only recovery from a surviving harness store. Use the full session ID. The flag authorizes machine-wide store selection after uniqueness checks. |
 
 `rm` alone never stops a running session. Removing a row and stopping a session are separate verbs by design.
 
 <!-- retired-ok: names the command in order to forbid it. -->
-Never follow `rm` with a bare `claude rm <id>`. `rm` already made that call itself, before it touched the registry. The second call buys nothing, and the first one already spent the resume handle. Step 2r is how you get it back.
+Never follow `rm` with a bare `claude rm <id>`. `rm` already made that call itself, before it touched the registry. The second call buys nothing, and the first one already spent the resume handle. Step 2r with the retained full session UUID is how you get the row back. For one-step recovery into an existing checkout, use `fno agents resume <full-harness-session-id> --cross-project --cwd <existing-checkout>` instead.
 
 Measured on a live registry: `fno agents rm` lands the registry removal, then hangs on harness teardown. A timeout is not a failed removal. Re-read the registry before you believe the receipt.
 
@@ -105,7 +105,7 @@ It is a dry run by default. `--apply` executes the wake lane only, the one actio
 
 ## Delivery to a live session
 
-`fno-agents resume <name> -m <text>` forwards the text on exactly one path: a live, non-mux Claude row.
+`fno-agents resume <name> -m <text>` forwards the text on exactly one path: a live, non-mux Claude row. A pruned-worktree recovery uses `fno agents resume <full-harness-session-id> --cross-project --cwd <existing-checkout>`.
 
 Every other resume parses `-m` and drops the value: a dead Claude relaunch, a mux pane relaunch, every non-Claude harness. The resume succeeds and the instruction never lands.
 
@@ -114,6 +114,17 @@ On the one path that forwards it, the warning `timed out after 3.0s, falling bac
 Everywhere else, resume first and deliver the instruction with `fno agents mail send <handle>`, then confirm it in the transcript.
 
 `fno agents mail send` can hang for minutes. A send that has not returned is pending, not failed.
+
+## Blueprint retask
+
+Close blueprint provenance before clearing its pane:
+
+```bash
+fno backlog session close <node> --summary "<summary>" --launch "/fno:target <node>"
+fno agents retask <blueprint-worker> --node <node>
+```
+
+The retask receipt has separate `cleared`, `session_restamped`, `switch`, `switch_verified`, and `target_submit_confirmed` fields. `retasked` means the no-merge target submit was confirmed by the pane transport. `spawn_required` means the target coordinate cannot be switched in place. Any other refusal preserves the original pane for inspection, except where the receipt's `cleared` and `session_restamped` fields read true: a refusal that fires mid-transaction (after /clear, after rename, on a pane timeout) reports the pane's real state in those fields, and the pane it preserves is the cleared, renamed one.
 
 A receipt reading `queued (durable)` is NOT delivery. Verify by transcript content (`fno agents peek <handle>`), never by a roster field.
 

@@ -228,6 +228,25 @@ def _run_status_on(monkeypatch, capsys, rollup):
     return code, _json.loads(cap.out), cap.err
 
 
+def test_unknown_coverage_statuses_block_ready_without_code_red(monkeypatch, capsys):
+    rollup = [
+        {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"context": "fno/review-coverage", "state": "PENDING"},
+        {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+    ]
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda *args, **kwargs: (True, ""),
+    )
+    code, out, _err = _run_status_on(monkeypatch, capsys, rollup)
+    assert code == 0
+    assert out["green"] is True
+    assert out["ready"] is False
+    assert out["ready_blockers"] == ["review_coverage_unknown"]
+    assert "ci_red" not in out["ready_blockers"]
+    assert "commit_status_red" not in out["ready_blockers"]
+
+
 def test_ac1_cancelled_latest_is_red_and_unsettled(monkeypatch, capsys):
     """AC1-HP: a genuinely-cancelled latest run keeps verdict red (a cancelled
     run is not a pass) but settled FALSE (it is not a conclusion either - the
@@ -358,6 +377,27 @@ def test_pending_and_cancelled_get_their_own_distinct_notes(monkeypatch, capsys)
     cancelled_note, pending_note = notes.split("\n", 1)
     assert "ci" in cancelled_note and "smoke" not in cancelled_note
     assert "smoke" in pending_note and "ci" not in pending_note
+
+
+def test_pending_note_skips_coverage_contexts(monkeypatch, capsys):
+    """codex P2: coverage StatusContexts are filtered out of the
+    generic CI verdict, so the pending-check guidance must not resurrect them
+    from the unfiltered rollup. A pending coverage context means "retry the
+    review verb", never "wait for the run" - naming it in the wait note sent
+    the operator to sleep on a read that needed a retry."""
+    code, out, err = _run_status_on(
+        monkeypatch,
+        capsys,
+        [
+            {"name": "ci", "status": "QUEUED", "conclusion": None},
+            {"context": "fno/review-coverage", "state": "PENDING"},
+            {"context": "fno/review-coverage-unavailable", "state": "PENDING"},
+        ],
+    )
+    assert code == 2
+    assert out["checks"]["unsettled"] == 1
+    assert "still queued or running" in err
+    assert "fno/review-coverage" not in err
 
 
 def test_latest_in_progress_over_earlier_success_is_pending():
@@ -1278,6 +1318,187 @@ def test_ready_passes_with_the_local_code_review_pass_present(monkeypatch, capsy
     out = json.loads(capsys.readouterr().out)
     assert out["ready"] is True
     assert out["ready_blockers"] == []
+
+
+def test_other_session_guidance_names_counted_owner_and_worktree(
+    monkeypatch, capsys
+):
+    from fno.pr._review_hold import ReviewActivity
+
+    _lane_fetch(monkeypatch, head="current-head")
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "review_state": "reviewed",
+            "reviewed_count": 1,
+            "head_sha": "current-head",
+            "author_session_id": "OWNER-SESSION",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "reviewed_sha": "current-head",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        _status,
+        "_review_activity",
+        lambda branch, head, cwd: ReviewActivity(
+            False,
+            "",
+            "",
+            None,
+            {
+                "probed": True,
+                "path": "/tmp/pr-worktree",
+                "dirty": False,
+                "head": "current-head",
+                "note": "",
+                "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+                "harness_session_id": "OWNER-SESSION",
+                "authority_note": "live target manifest",
+            },
+        ),
+    )
+
+    assert _status.run_status("42") == 0
+    captured = capsys.readouterr()
+    out = _json.loads(captured.out)
+
+    assert out["ready"] is True
+    assert out["review_owner_guidance"] == {
+        "attestation_origin": "other_session",
+        "counts": True,
+        "harness_session_id": "OWNER-SESSION",
+        "worktree_path": "/tmp/pr-worktree",
+        "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+        "authority_note": "live target manifest; matches coverage event author",
+    }
+    assert "other_session counts" in captured.err
+    assert "OWNER-SESSION" in captured.err
+    assert "/tmp/pr-worktree" in captured.err
+
+
+def test_other_session_guidance_names_unavailable_manifest_authority(
+    monkeypatch, capsys
+):
+    from fno.pr._review_hold import ReviewActivity
+
+    _lane_fetch(monkeypatch, head="current-head")
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {
+            "coverage": "covered",
+            "review_state": "reviewed",
+            "reviewed_count": 1,
+            "head_sha": "current-head",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "reviewed_sha": "current-head",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        _status,
+        "_review_activity",
+        lambda branch, head, cwd: ReviewActivity(
+            False,
+            "",
+            "",
+            None,
+            {
+                "probed": True,
+                "path": "/tmp/pr-worktree",
+                "dirty": False,
+                "head": "current-head",
+                "note": "",
+                "manifest_path": None,
+                "harness_session_id": None,
+                "authority_note": "matched worktree; no readable target manifest",
+            },
+        ),
+    )
+
+    _status.run_status("42")
+    captured = capsys.readouterr()
+    out = _json.loads(captured.out)
+
+    assert out["review_owner_guidance"]["harness_session_id"] is None
+    assert out["review_owner_guidance"]["worktree_path"] == "/tmp/pr-worktree"
+    assert "coverage event lacks author_session_id" in captured.err
+    assert "harness_session_id unavailable" in captured.err
+    assert "OWNER-SESSION" not in captured.err
+
+
+def test_other_session_guidance_prefers_coverage_event_author_over_reused_manifest():
+    guidance = _status._review_owner_guidance(
+        {
+            "author_session_id": "EVENT-OWNER",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+        {
+            "path": "/tmp/pr-worktree",
+            "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+            "harness_session_id": "NEW-LIVE-OWNER",
+            "authority_note": "live target manifest",
+        },
+    )
+
+    assert guidance is not None
+    assert guidance["harness_session_id"] == "EVENT-OWNER"
+    assert guidance["authority_note"] == (
+        "coverage event author; current worktree manifest owner differs"
+    )
+
+
+def test_legacy_other_session_guidance_does_not_claim_current_manifest_owner():
+    guidance = _status._review_owner_guidance(
+        {
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                    "freshness": "fresh",
+                    "attestation_origin": "other_session",
+                }
+            ],
+        },
+        {
+            "path": "/tmp/pr-worktree",
+            "manifest_path": "/tmp/pr-worktree/.fno/target-state.md",
+            "harness_session_id": "NEW-LIVE-OWNER",
+            "authority_note": "live target manifest",
+        },
+    )
+
+    assert guidance is not None
+    assert guidance["harness_session_id"] is None
+    assert guidance["authority_note"] == (
+        "coverage event lacks author_session_id; current manifest is not historical evidence"
+    )
 
 
 def test_ready_exempts_a_merged_pr_from_the_coverage_conjunct(monkeypatch, capsys):

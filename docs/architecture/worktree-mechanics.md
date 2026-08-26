@@ -43,11 +43,16 @@ A harness or Codex substrate with no native worktree transition degrades to the 
 ## Removal
 
 ```bash
-bash scripts/setup/archive-worktree.sh <name|path>   # checks: clean tree, no unpushed commits, no live session
+fno workspace worktree archive <name|path>           # the public guarded path
+bash scripts/setup/archive-worktree.sh <name|path>   # the shared implementation
 ```
 
-Flags: `--force`, `--yes` (skip kill prompt), `--delete-branch`.
-Or use `git worktree remove <path>`.
+The CLI and compatibility lifecycle entry delegate to the script above. They expose `--force`, `--yes` (skip kill prompt), and `--delete-branch` without copying the checks.
+
+Without `--force`, archival refuses on dirty state, unpushed commits, live sessions, unreadable process snapshots, failed salvage, app ownership, canonical checkout, and removal-time changes.
+
+With `--force`, the script measures and prints every dirty path. It prints each unpushed commit's abbreviated SHA and subject. It prints positive live-session evidence before removal. It still refuses unverifiable evidence. Its final receipt distinguishes discarded worktree state from preserved or deleted branch data.
+
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
 Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno workspace worktree cleanup --merged --apply` sweeps landed ones.

@@ -23,7 +23,7 @@ _NO_CFG: dict = {}
 
 
 _REQUIRED_INTERACTIVE_FIELDS = {
-    "permission_response", "resume_strategy", "ready_marker",
+    "permission_response", "resume_strategy", "model_switch_strategy", "ready_marker",
     "send_keys_enter_delay_ms", "submit_keys", "stop_strategy", "remove_strategy",
     "session_binding",
 }
@@ -36,19 +36,35 @@ def test_packaged_contract_is_complete_for_every_known_harness():
     ).read_text(encoding="utf-8") == (
         root / "cli/src/fno/agents/harness_capabilities.toml"
     ).read_text(encoding="utf-8")
-    assert MAP_VERSION == 8
+    assert MAP_VERSION == 9
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
     for harness in known_harnesses():
         caps = capabilities(harness)
         assert _REQUIRED_INTERACTIVE_FIELDS <= caps.keys(), harness
         assert set(caps["permission_response"]) == {"allow_once", "allow_always", "deny"}
 
+    assert capabilities("claude")["model_switch_strategy"]["kind"] == "direct"
+    assert capabilities("codex")["model_switch_strategy"]["kind"] == "menu_walk"
+    for harness in ("gemini", "agy", "opencode"):
+        assert capabilities(harness)["model_switch_strategy"]["kind"] == "unsupported"
+
 
 @pytest.mark.parametrize(
     ("harness", "lane", "session_id", "expected"),
     [
         ("claude", "interactive_create", "c-1", ["claude", "--session-id", "c-1"]),
-        ("claude", "interactive_resume", "c-1", ["claude", "attach", "c-1"]),
+        ("claude", "interactive_resume", "c-1", ["claude", "--resume", "c-1"]),
+        (
+            "claude",
+            "headless_resume",
+            "c-1",
+            [
+                "claude",
+                "-p",
+                "--resume",
+                "c-1",
+            ],
+        ),
         ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
         ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
         ("opencode", "headless_resume", "ses_1", ["opencode", "run", "--session", "ses_1"]),
@@ -61,6 +77,35 @@ def test_resume_strategy_renders_identity_skeletons(harness, lane, session_id, e
 def test_unsupported_resume_lane_fails_before_spawn():
     with pytest.raises(DispatchResolveError, match="agy.*interactive_resume.*unsupported"):
         render_session_argv("agy", "interactive_resume", "x")
+
+
+def test_claude_attach_uses_only_a_short_id():
+    assert render_session_argv("claude", "interactive_attach", short_id="deadbeef") == [
+        "claude", "attach", "deadbeef"
+    ]
+    with pytest.raises(DispatchResolveError, match="short_id"):
+        render_session_argv("claude", "interactive_attach", "00000000-1111-2222-3333-444444444444")
+    with pytest.raises(DispatchResolveError, match="short_id"):
+        render_session_argv("claude", "interactive_attach", short_id="")
+
+
+def test_unsupported_attach_lane_fails_closed_for_every_other_harness():
+    for harness in ("codex", "gemini", "agy", "opencode"):
+        with pytest.raises(DispatchResolveError, match=f"{harness}.*interactive_attach.*unsupported"):
+            render_session_argv(harness, "interactive_attach", short_id="deadbeef")
+
+
+def test_contract_rejects_attach_form_without_short_id_placeholder():
+    from importlib.resources import files
+
+    text = files("fno.agents").joinpath("harness_capabilities.toml").read_text()
+    bad = text.replace(
+        'tokens = ["claude", "attach", "{short_id}"]',
+        'tokens = ["claude", "attach", "{session_id}"]',
+        1,
+    )
+    with pytest.raises(DispatchResolveError, match="interactive_attach.*short id"):
+        parse_capability_contract(bad)
 
 
 def test_permission_and_submit_contracts_are_per_harness_not_claude_defaults():
@@ -165,6 +210,24 @@ def test_contract_rejects_ready_marker_invented_in_both_marker_fields():
         'ready_rule_ids = ["idle_prompt"]', 'ready_rule_ids = ["invented"]', 1
     )
     with pytest.raises(DispatchResolveError, match="ready_marker.*invented"):
+        parse_capability_contract(bad)
+
+
+@pytest.mark.parametrize(
+    ("needle", "replacement"),
+    [
+        ('tokens = ["/model {model}", "/effort {effort}"]', 'tokens = ["/model {model}"]'),
+        ('tokens = ["/model", "{model}", "{effort_label}"]', 'tokens = ["/model", "{effort_label}", "{model}"]'),
+        ('tokens = ["/model {model}", "/effort {effort}"]', 'tokens = ["/model {bogus}", "/effort {effort}"]'),
+        ('[harness.gemini.model_switch_strategy]\nkind = "unsupported"\ntokens = []', '[harness.gemini.model_switch_strategy]\nkind = "unsupported"\ntokens = ["/model {model}"]'),
+        ('status_command = "/status"', 'status_command = "status"'),
+    ],
+)
+def test_model_switch_strategy_rejects_malformed_shapes(needle, replacement):
+    root = Path(__file__).resolve().parents[4]
+    text = (root / "cli/src/fno/agents/harness_capabilities.toml").read_text(encoding="utf-8")
+    bad = text.replace(needle, replacement, 1)
+    with pytest.raises(DispatchResolveError, match="model_switch_strategy"):
         parse_capability_contract(bad)
 
 

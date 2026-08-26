@@ -754,6 +754,28 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
     assert "--beastmode" not in (seen["init_cmd"] or []), "start forwarded --beastmode without the flag"
 
 
+def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
+    """The start seam pins only model/model_tier: a canonical difficulty defers
+    to the capacity grid at the spawn seam (parity with advance's dispatch),
+    while the legacy tier pin still resolves statically."""
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "high"}
+    )
+    model, source = target_cli._resolve_node_model("x-def1")
+    assert model is None
+    assert source == "provider-default"
+
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "model_tier": "low"}
+    )
+    from fno.adapters.providers import benchmarks as _bm
+
+    monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+    model, source = target_cli._resolve_node_model("x-def2")
+    assert model == "glm-4.7"  # STATIC_TIERS['low'][0]
+    assert source == "task-tier(low)"
+
+
 def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):
     """x-6390: `start` no-ops inside a linked worktree and returns before it can
     forward --beastmode, so the grant is dropped. Same silent-drop class as the init
@@ -1459,3 +1481,64 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     assert fields["DISPOSITION"] == "proven"
     assert fields["COLLISION"] == owner
     assert fields["COLLISION_ID"] == foreign
+
+
+def test_holder_is_ours_recognizes_own_pid_unavailable_claim(monkeypatch):
+    """The transcript-identity arm: init minted ``target-session:<sid>`` from the
+    proven harness session when no env id existed, and the pid walk failed, so
+    the v2 claim carries no pid for the pid arm to compare. A rerun in the same
+    session must still read it as ours instead of parking on its own claim."""
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None: SimpleNamespace(session_id="aaaa1111-mine"),
+    )
+    info = {"pid_unavailable": True, "host": "other-box", "machine_id": "m2"}
+    assert target_cli._holder_is_ours("target-session:aaaa1111-mine", info)
+    assert not target_cli._holder_is_ours("target-session:zzz999-not-mine", info)
+
+
+def test_holder_is_ours_identity_arm_fails_closed(monkeypatch):
+    """No provable identity -> no recognition: the claim stays foreign to this
+    rerun (park / re-acquire), never assumed ours."""
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env=None: SimpleNamespace(session_id=""),
+    )
+    info = {"pid_unavailable": True, "host": "h", "machine_id": "m"}
+    assert not target_cli._holder_is_ours("target-session:anything", info)
+
+
+def test_worktree_occupancy_defers_to_finished_with_the_tree(monkeypatch, tmp_path):
+    """The gate must answer 'is this session done with its tree' through the
+    shared helper, not its own threshold: takeover and reap disagreed about
+    the same session when each derived it (a silent-but-engaged tail read
+    available here while reap refused to touch the tree)."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    row = SimpleNamespace(cwd=str(wt), harness_session_id="s-1", harness="claude")
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+    monkeypatch.setattr(
+        "fno.worktree_reapable.reapable",
+        lambda p: SimpleNamespace(reapable=False, reason="dirty", detail=""),
+    )
+    facts = SimpleNamespace(last_event_epoch=1.0, last_role="assistant", last_text="x")
+    monkeypatch.setattr("fno.agents.watchdog.tail_facts", lambda *a, **k: facts)
+    calls = {}
+
+    def fake_finished(f, now_s, quiet_after_s):
+        calls["quiet"] = quiet_after_s
+        return calls.get("done", False)
+
+    monkeypatch.setattr("fno.agents.watchdog.finished_with_the_tree", fake_finished)
+    from fno.agents.watchdog import REAP_QUIET_AFTER_S
+
+    verdict, info = target_cli._classify_worktree_occupancy(wt)
+    assert verdict == "occupied_worktree"
+    assert info["session_id"] == "s-1"
+    assert calls["quiet"] == REAP_QUIET_AFTER_S
+    calls["done"] = True
+    assert target_cli._classify_worktree_occupancy(wt)[0] == "available"

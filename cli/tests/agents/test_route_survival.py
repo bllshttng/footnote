@@ -220,12 +220,24 @@ def test_route_settings_path_for_is_stable_and_route_wins(tmp_path, monkeypatch)
         route_settings_path_for,
     )
 
-    assert route_settings_path_for(None, None) is None
-    routed = route_settings_path_for(dict(ROUTE_ENV))
+    assert route_settings_path_for(None, None, env={}) is None
+    routed = route_settings_path_for(dict(ROUTE_ENV), env={})
     assert routed == materialize_route_settings(dict(ROUTE_ENV))
     # Composed: the route wins the settings file (x-5ed4), so the recorded path
     # is the route's, not the account's.
-    assert route_settings_path_for(dict(ROUTE_ENV), {"CLAUDE_CONFIG_DIR": "/cfg"}) == routed
+    assert (
+        route_settings_path_for(dict(ROUTE_ENV), {"CLAUDE_CONFIG_DIR": "/cfg"}, env={})
+        == routed
+    )
+    # An unrouted model claim inherited from the spawning shell is floored into
+    # the SAME file: the daemon fork carries the shell's env, and a bare
+    # account that names no model owns no slot (round 3). A claim the overlay
+    # itself sets is spared - the route owns what it names.
+    shell = {"ANTHROPIC_MODEL": "claude-opus-4-8"}
+    acct = route_settings_path_for(None, {"CLAUDE_CONFIG_DIR": "/cfg"}, env=shell)
+    assert json.loads(Path(acct).read_text())["env"]["ANTHROPIC_MODEL"] == ""
+    both = route_settings_path_for(dict(ROUTE_ENV), {"CLAUDE_CONFIG_DIR": "/cfg"}, env=shell)
+    assert json.loads(Path(both).read_text())["env"]["ANTHROPIC_MODEL"] == "glm-5.2"
 
 
 # --- 1.3: the revive door restores the route, or refuses ---------------------

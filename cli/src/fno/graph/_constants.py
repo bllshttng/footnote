@@ -297,6 +297,37 @@ LOCK_TTL_HOURS = float(os.environ.get("TASK_LOCK_TTL_HOURS", "2"))
 PRIORITY_ORDER: dict[str, int] = {"p0": 0, "p1": 1, "p2": 2, "p3": 3}
 PRIORITY_MIGRATION: dict[str, str] = {"high": "p1", "medium": "p2", "low": "p3"}
 DEFAULT_PRIORITY: str = "p2"
+P0_REFUSAL = (
+    "p0 blocks everything else, usually a bug. "
+    "Use --blocks-everything only when a broken service or fleet-wide resource "
+    "leak blocks all downstream work. Run this next: fno backlog rank <id> --top"
+)
+
+
+def validate_priority_write(priority: str, *, blocks_everything: bool = False) -> None:
+    """Refuse an unacknowledged p0 before any graph mutation."""
+    if priority == "p0" and not blocks_everything:
+        raise ValueError(P0_REFUSAL)
+
+# Difficulty is intrinsic work complexity, not a model or capacity hint.
+DIFFICULTY_BANDS: tuple[str, ...] = ("low", "medium", "high")
+DIFFICULTY_HELP = (
+    "Intrinsic work difficulty: expected duration, edge cases, unknowns, "
+    "and a senior tech lead's estimate. Do not use current capacity or model quality."
+)
+
+
+def normalize_difficulty(value: str | None) -> str | None:
+    """Normalize and validate a filing-time work-difficulty estimate."""
+    if value is None:
+        return None
+    band = value.strip().lower()
+    if band not in DIFFICULTY_BANDS:
+        raise ValueError(
+            f"invalid difficulty {value!r}; must be one of: "
+            f"{', '.join(DIFFICULTY_BANDS)}"
+        )
+    return band
 
 # Tags (x-6c2b wave 1): lowercase-kebab only, so they mirror cleanly into
 # Obsidian frontmatter `tags:` and stay legible as Base/tag-search filters.

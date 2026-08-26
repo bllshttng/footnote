@@ -241,6 +241,7 @@ def test_late_codex_identity_composes_across_every_peer_surface(
     monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
     monkeypatch.setenv("FNO_E2E", "1")
+    monkeypatch.setenv("FNO_PROCESS_ADMISSION_MAX", "512")
     monkeypatch.delenv("FNO_SESSION", raising=False)
 
     requested_name = "late-codex-identity"
@@ -488,6 +489,7 @@ sleep 5
         "FNO_MUX_DIR": str(mux_dir),
         "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
         "FNO_E2E": "1",
+        "FNO_PROCESS_ADMISSION_MAX": "512",
         "FAKE_CODEX_PROMPT_FILE": str(prompt_file),
     }
     for key, value in env.items():
@@ -1878,6 +1880,48 @@ def test_placement_omitted_leaves_pane_run_argv_unchanged(
     run_call = runner.calls[0]
     sep = run_call.index("--")
     assert "squad" not in run_call[:sep] and "split" not in run_call[:sep]
+
+
+@pytest.mark.parametrize(
+    "placement",
+    [{}, {"squad": "review"}, {"split": "left"}, {"tab": "name:review"}],
+)
+def test_every_pane_route_carries_the_existing_cap(
+    tmp_path: Path, monkeypatch, placement: dict[str, str]
+) -> None:
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_group_max", lambda: 7)
+    _result, runner = _spawn(monkeypatch, tmp_path, **placement)
+    run_call = runner.calls[0]
+    assert run_call[run_call.index("--max-panes") + 1] == "7"
+
+
+def test_pane_env_carries_separate_process_and_pane_unit_wires(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    assert hasattr(mux_spawn, "_process_admission_max"), (
+        "process admission needs a process-valued resolver independent of agents.max_live"
+    )
+
+    class EnvRunner(FakeRunner):
+        run_env: Optional[dict[str, str]] = None
+
+        def __call__(self, argv, **kwargs):
+            if argv[1:4] == ["mux", "pane", "run"]:
+                self.run_env = kwargs.get("env")
+            return super().__call__(argv, **kwargs)
+
+    runner = EnvRunner()
+    monkeypatch.setattr(mux_spawn, "_process_admission_max", lambda: 650)
+    monkeypatch.setattr(mux_spawn, "_pane_group_max", lambda: 7)
+
+    _spawn(monkeypatch, tmp_path, runner=runner)
+
+    assert runner.run_env is not None
+    assert runner.run_env["FNO_PROCESS_ADMISSION_MAX"] == "650"
+    assert runner.run_env["FNO_MUX_PANE_GROUP_MAX"] == "7"
+    assert "FNO_MUX_MAX_LIVE" not in runner.run_env
 
 
 def test_cmd_spawn_placement_rejected_on_bg_substrate(tmp_path: Path, monkeypatch) -> None:
@@ -4620,6 +4664,94 @@ def test_an_agy_trust_timeout_fails_the_spawn_rather_than_holding_a_slot():
     # The modal WAS read on the first call, so the instrument worked. The doubt
     # here is about the gate, which is what `unconfirmed` already says.
     assert pane == "painted"
+
+
+def test_codex_project_trust_prompt_refuses_before_seed_and_reaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    modal = "Do you trust the contents of this directory?"
+    runner = FakeRunner(read_stdout=modal)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)
+
+    detail = str(exc.value)
+    assert "Codex project trust required" in detail
+    assert str(tmp_path) in detail
+    assert "trust_level = \"trusted\"" in detail
+    assert not any(call[1:4] == ["mux", "pane", "send"] for call in runner.calls)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+def test_codex_hook_review_prompt_refuses_before_seed_and_reaps(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(read_stdout="Hooks need review")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(monkeypatch, tmp_path, provider="codex", runner=runner)
+
+    detail = str(exc.value)
+    assert "Codex hooks need review" in detail
+    assert "/hooks" in detail
+    assert "binding" not in detail.lower()
+    assert not any(call[1:4] == ["mux", "pane", "send"] for call in runner.calls)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+def test_codex_hook_review_bypass_posture_keeps_argv_seed_contract(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "_codex_cli_version", lambda: (0, 148, 0))
+    runner = FakeRunner(read_stdout="Hooks need review")
+
+    result, _ = _spawn(
+        monkeypatch, tmp_path, provider="codex", runner=runner, yolo=True
+    )
+
+    run_call = next(call for call in runner.calls if call[1:4] == ["mux", "pane", "run"])
+    assert "--dangerously-bypass-hook-trust" in run_call
+    assert result.seed == "submitted"
+    assert result.seed_source == "argv"
+
+
+@pytest.mark.parametrize(
+    "modal, expected",
+    [
+        ("Do you trust the contents of this directory?", "Codex project trust required"),
+        ("Hooks need review", "Codex hooks need review"),
+    ],
+)
+def test_empty_codex_spawn_still_refuses_trust_prompt(
+    tmp_path: Path, monkeypatch, modal: str, expected: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    runner = FakeRunner(read_stdout=modal)
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="codex",
+            runner=runner,
+            message="",
+        )
+
+    assert expected in str(exc.value)
+    assert runner.kill_calls
+    assert load_registry() == []
 
 
 def test_a_timed_out_submit_keeps_the_row_and_never_retries(

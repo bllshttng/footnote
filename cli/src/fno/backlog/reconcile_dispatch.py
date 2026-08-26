@@ -133,10 +133,11 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             "cwd": e.get("cwd"),
             # x-571f: carry the model pin so the reconcile worker (a /target
             # --reconcile build) honors it, not just advance's dependents.
-            # model_tier rides alongside so the tier resolver sees the annotation;
+            # difficulty rides alongside so the grid resolver sees the work axis;
             # provider so the tier scopes to (and the worker spawns on) the same
             # harness as the other dispatch paths (x-da6e).
             "model": e.get("model"),
+            "difficulty": e.get("difficulty") or e.get("model_tier"),
             "model_tier": e.get("model_tier"),
             "provider": e.get("provider"),
         })
@@ -227,8 +228,11 @@ def _dispatch_reconcile(
             root,
             dep.get("slug"),
             reconcile_manifest=str(manifest_path),
-            model=_route_resolve.node_model(dep, provider=dep.get("provider")),
+            model=_route_resolve.node_model(
+                dep, provider=dep.get("provider"), resolve_difficulty=False
+            ),
             provider=dep.get("provider"),
+            node=dep,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder, dispatch_root)
@@ -369,7 +373,9 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
             if isinstance(e, dict) and e.get("id") == node_id:
                 dep = {"id": node_id, "project": e.get("project"),
                        "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),
-                       "model": e.get("model"), "model_tier": e.get("model_tier"),
+                       "model": e.get("model"),
+                       "difficulty": e.get("difficulty") or e.get("model_tier"),
+                       "model_tier": e.get("model_tier"),
                        "provider": e.get("provider")}
                 break
         if dep is None:

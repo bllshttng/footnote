@@ -50,7 +50,9 @@ def _pid_map_from_lsof(text: str) -> dict[str, int]:
     return out
 
 
-def bg_socket_pid_map(root: Optional[Path] = None) -> dict[str, int]:
+def bg_socket_pid_map(
+    root: Optional[Path] = None, *, timeout: float = 15.0
+) -> dict[str, int]:
     """8-hex claude jobId -> pid of the process that IS that bg session.
 
     Best-effort by design: a missing farm, a dead lsof, or a timeout all mean
@@ -70,7 +72,7 @@ def bg_socket_pid_map(root: Optional[Path] = None) -> dict[str, int]:
             ["lsof", "-F", "pfn", "--", *[str(s) for s in socks]],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout,
         )
     except (OSError, subprocess.SubprocessError):
         return {}

@@ -135,18 +135,17 @@ const WALL_MARKERS: &[&str] = &[
 const STATUS_REGION_LINES: usize = 3;
 
 /// Shared readiness decision: not-ready under any wall or busy marker *in the
-/// bottom status region*; otherwise ready only when the last non-blank line
-/// ends with a recognized prompt glyph. Never guesses from byte counts (Open
-/// Question #9).
+/// bottom status region*; otherwise ready only when the last line ends with a
+/// recognized glyph. Never guesses from byte counts (Open Question #9).
 fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     let nonblank: Vec<&str> = screen
         .visible_text
         .lines()
         .filter(|l| !l.trim().is_empty())
         .collect();
-    let Some(last) = nonblank.last() else {
+    if nonblank.is_empty() {
         return false; // blank screen: nothing drawn yet, not ready
-    };
+    }
     // Status region = the last few non-blank lines (where the composer/status
     // bar lives), NOT the whole scrollback.
     let region_start = nonblank.len().saturating_sub(STATUS_REGION_LINES);
@@ -157,8 +156,51 @@ fn prompt_ready(screen: &ScreenView, glyphs: &[char]) -> bool {
     if BUSY_MARKERS.iter().any(|m| region.contains(m)) {
         return false;
     }
-    let tail = last.trim_end();
-    glyphs.iter().any(|g| tail.ends_with(*g))
+    let last = nonblank.last().expect("non-empty checked").trim_end();
+    glyphs.iter().any(|glyph| last.ends_with(*glyph))
+}
+
+fn codex_prompt_ready(screen: &ScreenView) -> bool {
+    let nonblank: Vec<&str> = screen
+        .visible_text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if nonblank.is_empty() {
+        return false;
+    }
+    let region_start = nonblank.len().saturating_sub(STATUS_REGION_LINES);
+    let region_lines = &nonblank[region_start..];
+    let region = region_lines.join("\n");
+    if WALL_MARKERS.iter().any(|marker| region.contains(marker))
+        || BUSY_MARKERS.iter().any(|marker| region.contains(marker))
+    {
+        return false;
+    }
+    let selector_visible = region_lines.iter().any(|line| {
+        let trimmed = line.trim_start();
+        PROMPT_GLYPHS.iter().any(|glyph| {
+            trimmed.strip_prefix(*glyph).is_some_and(|rest| {
+                let rest = rest.trim_start();
+                let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+                digits > 0 && rest.as_bytes().get(digits) == Some(&b'.')
+            })
+        })
+    });
+    if selector_visible {
+        return false;
+    }
+    let last = nonblank.last().expect("non-empty checked").trim_end();
+    let legacy_prompt = PROMPT_GLYPHS.iter().any(|glyph| last.ends_with(*glyph));
+    let placeholder = region_lines.iter().any(|line| {
+        let prompt = line.trim();
+        PROMPT_GLYPHS.iter().any(|glyph| {
+            prompt
+                .strip_prefix(*glyph)
+                .is_some_and(|rest| rest.trim() == "Ask Codex to do anything")
+        })
+    });
+    legacy_prompt || placeholder
 }
 
 /// Provider-agnostic readiness check for the grid attention scanner
@@ -184,7 +226,7 @@ impl ReadinessDetector for CodexReadinessDetector {
     }
 
     fn is_ready(&self, screen: &ScreenView) -> Result<bool, ReadinessError> {
-        Ok(prompt_ready(screen, PROMPT_GLYPHS))
+        Ok(codex_prompt_ready(screen))
     }
 }
 
@@ -448,6 +490,48 @@ mod tests {
             )),
             Ok(true)
         );
+    }
+
+    #[test]
+    fn codex_detector_ready_with_status_below_prompt() {
+        let d = CodexReadinessDetector;
+        assert_eq!(
+            d.is_ready(&view(
+                "model reply\n› Ask Codex to do anything\ngpt-5.6-luna xhigh"
+            )),
+            Ok(true)
+        );
+        assert_eq!(
+            d.is_ready(&view(
+                "› Ask Codex to do anything\nWorking · esc to interrupt\nstatus"
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            d.is_ready(&view(
+                "Select Model and Effort\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna"
+            )),
+            Ok(false)
+        );
+        assert_eq!(
+            d.is_ready(&view("answer\n› quoted text\nstatus")),
+            Ok(false)
+        );
+        assert_eq!(
+            d.is_ready(&view(
+                "› Ask Codex to do anything\n› 1. gpt-5.6-sol\n  2. gpt-5.6-luna"
+            )),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn codex_placeholder_is_not_a_prompt_for_other_detectors() {
+        let screen = view("› Ask Codex to do anything\nstatus");
+        assert_eq!(GeminiReadinessDetector.is_ready(&screen), Ok(false));
+        assert_eq!(AgyReadinessDetector.is_ready(&screen), Ok(false));
+        assert_eq!(ClaudeReadinessDetector.is_ready(&screen), Ok(false));
+        assert!(!screen_is_waiting(&screen));
     }
 
     #[test]

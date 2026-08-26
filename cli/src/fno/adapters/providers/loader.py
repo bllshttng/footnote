@@ -305,7 +305,7 @@ def _parse_providers_block(
             )
         record_id = raw.get("id", "<unknown>")
         try:
-            records.append(ProviderRecord.model_validate(raw))
+            record = ProviderRecord.model_validate(raw)
         except pydantic.ValidationError as exc:
             # Surface the original Pydantic message in ProviderConfigError.
             # Always include the record id and re-include auth_strategy_mismatch
@@ -317,6 +317,15 @@ def _parse_providers_block(
                 msg_parts.append(phrase)
             msg_parts.append(pydantic_msg)
             raise ProviderConfigError(": ".join(msg_parts)) from exc
+        unknown_keys = sorted(record.model_extra or {})
+        if unknown_keys:
+            logger.warning(
+                "provider record %r contains unknown metadata keys %s; retaining "
+                "them without interpreting them",
+                record.id,
+                unknown_keys,
+            )
+        records.append(record)
 
     try:
         config_obj = ProvidersConfig(records=records, active=active, auto_switch=auto_switch)
@@ -405,85 +414,159 @@ def _parse_providers_block(
     return config_obj
 
 
-def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
-    """Read config.providers.combos from project-local or global settings.yaml.
+def _provider_candidates(repo_root: Path | None = None) -> list[Path]:
+    """Candidate config file paths for provider loading (FNO_CONFIG or layered).
 
-    Same precedence as load_providers (project-local wins over global).
-    Returns an empty dict when no combos block exists. Cross-validates
-    every combo's providers list against the declared record IDs in
-    config.providers.records and raises ProviderConfigError on any
-    unknown reference.
+    Precedence, FIRST layer wins (repo-root local highest): the repo-root
+    local (where ``fno config set --local`` writes, found from any
+    subdirectory), then a PWD-anchored local when it differs (the legacy
+    anchor, kept so nested config dirs and PWD-pinned callers keep
+    working), then the global settings path. The merge loops iterate the
+    reversed list, so later assignments come from the higher layers. An
+    explicit ``repo_root`` is authoritative and skips the PWD layer.
+    """
+    env_cfg = os.environ.get("FNO_CONFIG")
+    if env_cfg:
+        return [Path(env_cfg)]
+    from fno.paths import resolve_repo_root
+
+    root = repo_root if repo_root is not None else resolve_repo_root()
+    candidates = [root / ".fno" / "config.toml"]
+    if repo_root is None:
+        pwd = Path(os.environ.get("PWD", os.getcwd()))
+        candidates.append(pwd / ".fno" / "config.toml")
+    candidates.append(_global_settings_path())
+    return list(dict.fromkeys(candidates))
+
+
+def _overlay_records(accum: list[Any], incoming: list[Any]) -> list[Any]:
+    """Overlay account records by id: ``incoming`` wins per id, new ids append.
+
+    Combos and agent pins merge across files, so records must too - a local
+    records list that REPLACES the global one breaks every global combo and
+    pin referencing a global record id the moment a project adds its own.
+    Duplicate ids WITHIN one file are preserved: the downstream
+    duplicate_record_ids validation must still see them.
+    """
+    out = list(accum)
+    seen: set[str] = set()
+    for record in incoming:
+        rid = record.get("id") if isinstance(record, dict) else None
+        if isinstance(rid, str):
+            if rid in seen:
+                out.append(record)
+                continue
+            seen.add(rid)
+            out = [
+                r
+                for r in out
+                if not (isinstance(r, dict) and r.get("id") == rid)
+            ]
+        out.append(record)
+    return out
+
+
+def known_account_ids(repo_root: Path | None = None) -> set[str]:
+    """Every record id declared across the config layers (best effort).
+
+    For cross-record validation at write time (``config set accounts.active
+    <id>``): a pointer that names no record bricks every loader call, so the
+    set path refuses it up front instead.
+    """
+    ids: set[str] = set()
+    for path in _provider_candidates(repo_root):
+        block = _extract_accounts_block(_read_parsed(path)) or {}
+        for record in block.get("records") or []:
+            if isinstance(record, dict) and isinstance(record.get("id"), str):
+                ids.add(record["id"])
+    return ids
+
+
+def load_combos(repo_root: Path | None = None) -> dict[str, "Combo"]:
+    """Read config.providers.combos from project-local and global settings.
+
+    Project-local combos overlay global combos. Returns an empty dict when no
+    combos block exists anywhere. Cross-validates every combo's providers list
+    against the declared record IDs in config.providers.records and raises
+    ProviderConfigError on any unknown reference.
 
     Raises:
         ProviderConfigError: combos block is not a mapping, an entry
             references an unknown provider id, or a Combo construction
             fails (empty providers, invalid strategy).
     """
-    # Local import to avoid a load-order cycle: rotation imports from
-    # this module's siblings (model.ProviderConfigError) but combos are
-    # loaded only by code that already has the loader available.
     from fno.adapters.providers.rotation import Combo
 
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+    candidates = _provider_candidates(repo_root)
 
-    candidates = [
-        repo_root / ".fno" / "config.toml",
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
-        # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
-        # do not leak the developer's real ~/.fno/settings.yaml.
-        _global_settings_path(),
-    ]
+    merged_combos: dict[str, Any] = {}
+    merged_records: list[Any] = []
+    found_any = False
+    # The highest-precedence layer that DECLARES combos decides the effective
+    # shape: malformed there is an error (a typo'd local block must not
+    # silently fall through to global combos); malformed in a lower layer is
+    # inert, because a higher dict overrides it wholesale.
+    malformed_top: tuple[Path, Any] | None = None
 
-    for path in candidates:
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
         if block is None:
             continue
         combos_raw = block.get("combos")
-        if combos_raw is None:
-            return {}
-        if not isinstance(combos_raw, dict):
-            raise ProviderConfigError(
-                "config.providers.combos must be a mapping of name -> spec, "
-                f"got {type(combos_raw).__name__}"
-            )
-        # Cross-validation needs the set of declared provider IDs.
-        known_ids = {
-            r["id"] for r in (block.get("records") or [])
-            if isinstance(r, dict) and isinstance(r.get("id"), str)
-        }
-        result: dict[str, Combo] = {}
-        for name, spec in combos_raw.items():
-            if not isinstance(spec, dict):
-                raise ProviderConfigError(
-                    f"combo {name!r} spec must be a mapping, got "
-                    f"{type(spec).__name__}"
-                )
-            providers_raw = spec.get("providers", [])
-            if not isinstance(providers_raw, list):
-                raise ProviderConfigError(
-                    f"combo {name!r} providers must be a list, got "
-                    f"{type(providers_raw).__name__}"
-                )
-            for pid in providers_raw:
-                if pid not in known_ids:
-                    raise ProviderConfigError(
-                        f"combo {name!r} references unknown provider id "
-                        f"{pid!r} (not in config.providers.records)"
-                    )
-            try:
-                result[name] = Combo(
-                    name=name,
-                    strategy=spec.get("strategy", "fallback"),
-                    sticky_limit=int(spec.get("sticky_limit", 1)),
-                    providers=tuple(providers_raw),
-                )
-            except ValueError as exc:
-                raise ProviderConfigError(str(exc)) from exc
-        return result
+        if combos_raw is not None:
+            found_any = True
+            if isinstance(combos_raw, dict):
+                merged_combos.update(combos_raw)
+            malformed_top = (path, combos_raw) if not isinstance(combos_raw, dict) else None
+        records_raw = block.get("records")
+        if isinstance(records_raw, list) and records_raw:
+            merged_records = _overlay_records(merged_records, records_raw)
 
-    return {}
+    if malformed_top is not None:
+        raise ProviderConfigError(
+            "config.providers.combos must be a mapping of name -> spec, "
+            f"got {type(malformed_top[1]).__name__} "
+            f"({malformed_top[0]})"
+        )
+    if not found_any or not merged_combos:
+        return {}
+
+    # Cross-validation needs the set of declared provider IDs.
+    known_ids = {
+        r["id"] for r in merged_records
+        if isinstance(r, dict) and isinstance(r.get("id"), str)
+    }
+
+    result: dict[str, Combo] = {}
+    for name, spec in merged_combos.items():
+        if not isinstance(spec, dict):
+            raise ProviderConfigError(
+                f"combo {name!r} spec must be a mapping, got "
+                f"{type(spec).__name__}"
+            )
+        providers_raw = spec.get("providers", [])
+        if not isinstance(providers_raw, list):
+            raise ProviderConfigError(
+                f"combo {name!r} providers must be a list, got "
+                f"{type(providers_raw).__name__}"
+            )
+        for pid in providers_raw:
+            if pid not in known_ids:
+                raise ProviderConfigError(
+                    f"combo {name!r} references unknown provider id "
+                    f"{pid!r} (not in config.providers.records)"
+                )
+        try:
+            result[name] = Combo(
+                name=name,
+                strategy=spec.get("strategy", "fallback"),
+                sticky_limit=int(spec.get("sticky_limit", 1)),
+                providers=tuple(providers_raw),
+            )
+        except ValueError as exc:
+            raise ProviderConfigError(str(exc)) from exc
+    return result
 
 
 def load_active_combo(repo_root: Path | None = None) -> str | None:
@@ -493,10 +576,8 @@ def load_active_combo(repo_root: Path | None = None) -> str | None:
     here matches what combos_use/combos_remove write. Returns None when no
     active_combo is set anywhere.
     """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
-
-    for path in (repo_root / ".fno" / "config.toml", _global_settings_path()):
+    candidates = _provider_candidates(repo_root)
+    for path in candidates:
         block = _extract_accounts_block(_read_parsed(path))
         if block is None:
             continue
@@ -507,79 +588,104 @@ def load_active_combo(repo_root: Path | None = None) -> str | None:
 
 
 def load_quota_config(repo_root: Path | None = None) -> QuotaConfig:
-    """Read config.providers.quota from project-local or global settings.
+    """Read config.providers.quota from project-local and global settings.
 
     Same precedence as load_combos (project-local wins over global). Returns
     all-defaults when no quota block exists. Fail-safe like the autonomous
     opt-in blocks (ActiveBacklogConfig): a malformed block degrades to defaults
     rather than raising out of a dispatch decision - the dangerous direction
     for an opt-in autonomous feature is silently-enabled, and defaults are off.
-    """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
 
-    candidates = [
-        repo_root / ".fno" / "config.toml",
-        _global_settings_path(),
-    ]
-    for path in candidates:
+    One invalid LEAF degrades only that leaf: valid leaves from any layer
+    survive, so a bad global key never discards a healthy local setting.
+    """
+    candidates = _provider_candidates(repo_root)
+    merged_quota: dict[str, Any] = {}
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
         if block is None:
             continue
         quota_raw = block.get("quota")
-        if quota_raw is None:
-            return QuotaConfig()
-        if not isinstance(quota_raw, dict):
-            return QuotaConfig()
-        try:
-            return QuotaConfig.model_validate(quota_raw)
-        except pydantic.ValidationError as exc:
+        if isinstance(quota_raw, dict):
+            merged_quota.update(quota_raw)
+    if not merged_quota:
+        return QuotaConfig()
+    try:
+        return QuotaConfig.model_validate(merged_quota)
+    except pydantic.ValidationError:
+        salvage = {
+            k: v
+            for k, v in merged_quota.items()
+            if _quota_leaf_valid(k, v)
+        }
+        dropped = sorted(set(merged_quota) - set(salvage))
+        if dropped:
             logger.warning(
-                "config.providers.quota malformed (%s); using defaults", exc
+                "config.providers.quota keys %s invalid; dropped (rest kept)",
+                dropped,
             )
-            return QuotaConfig()
-    return QuotaConfig()
+        return QuotaConfig.model_validate(salvage)
+
+
+def _quota_leaf_valid(key: str, value: Any) -> bool:
+    """Whether one quota leaf validates on its own (salvage probe)."""
+    try:
+        QuotaConfig.model_validate({key: value})
+    except pydantic.ValidationError:
+        return False
+    return True
 
 
 def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
-    """Read config.providers from project-local or global settings.yaml.
+    """Read config.providers from project-local and global settings.
+
+    Merges project-local over global settings so that a local leaf write
+    (like `[accounts.quota] defer_dispatch = true`) does not shadow and drop
+    globally defined account records.
 
     Precedence (project-local wins, mirrors _load_v2_config_flag):
-        1. {repo_root}/.fno/settings.yaml
-        2. ~/.fno/settings.yaml
+        1. {repo_root}/.fno/config.toml
+        2. ~/.fno/config.toml
 
     Returns an empty ProvidersConfig (records=[], active=None) when:
     - Neither file exists
-    - config.providers is absent
+    - config.providers / config.accounts is absent
     - records list is empty
 
     Raises ProviderConfigError on any validation failure, naming the
     offending record id and including discriminating phrase(s).
     """
-    if repo_root is None:
-        repo_root = Path(os.environ.get("PWD", os.getcwd()))
+    candidates = _provider_candidates(repo_root)
 
-    candidates = [
-        repo_root / ".fno" / "config.toml",
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference).
-        # Honors $FNO_GLOBAL_SETTINGS_PATH so unit tests pinning repo_root=tmp_path
-        # do not leak the developer's real ~/.fno/settings.yaml.
-        _global_settings_path(),
-    ]
+    merged_block: dict[str, Any] = {}
+    merged_agents: dict[str, Any] = {}
+    found_any = False
 
-    for path in candidates:
+    for path in reversed(candidates):
         data = _read_parsed(path)
         block = _extract_accounts_block(data)
-        if block is None:
-            continue
-        # Found a providers block; also read the sibling agents block from the
-        # same file so project-local-over-global precedence applies uniformly.
-        agents_block = _extract_agents_block(data)
-        return _parse_providers_block(block, agents_block=agents_block)
+        if block is not None:
+            found_any = True
+            for k, v in block.items():
+                if k == "records" and isinstance(v, list):
+                    # An empty local list is "nothing declared here", not
+                    # "erase the global records" (the generated example config
+                    # ships records = [] verbatim).
+                    if v:
+                        merged_block["records"] = _overlay_records(
+                            merged_block.get("records") or [], v
+                        )
+                else:
+                    merged_block[k] = v
+        agents = _extract_agents_block(data)
+        if agents is not None:
+            merged_agents.update(agents)
 
-    # Neither file had a providers block.
-    return ProvidersConfig(records=[], active=None)
+    if not found_any or not merged_block:
+        return ProvidersConfig(records=[], active=None)
+
+    return _parse_providers_block(merged_block, agents_block=merged_agents or None)
 
 
 # ---------------------------------------------------------------------------
@@ -645,6 +751,35 @@ def effective_active(
     return _active_id_for(record, config, root)
 
 
+def load_scope_config(scope: "Literal['project', 'global']") -> ProvidersConfig:
+    """The accounts config as stored in ONE scope's own file.
+
+    Read-modify-write verbs (add/register/use/pin) mutate one file's own
+    block; loading the merged view here copies other layers' records into
+    the target file, where the frozen copies shadow later edits by id.
+    Mirrors save_providers' target selection so the read and the write hit
+    the same file.
+    """
+    if scope == "project":
+        target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
+    else:
+        # _global_settings_path honors FNO_GLOBAL_SETTINGS_PATH, so the
+        # validation read tracks the same pin the config writer honors.
+        target = _global_settings_path()
+    block = _extract_accounts_block(_read_parsed(target)) or {}
+    if not block:
+        return ProvidersConfig(records=[], active=None)
+    active = block.get("active")
+    if isinstance(active, str):
+        # Cross-layer pointers are legal (a project may point at a global
+        # record), so scope-own parsing must not validate the pointer
+        # against scope-own records; the merged read resolves it instead.
+        rest = {k: v for k, v in block.items() if k != "active"}
+        parsed = _parse_providers_block(rest)
+        return ProvidersConfig(records=parsed.records, active=active)
+    return _parse_providers_block(block)
+
+
 def save_providers(
     config: ProvidersConfig,
     scope: Literal["project", "global"],
@@ -657,8 +792,9 @@ def save_providers(
     if scope == "project":
         target = Path(os.environ.get("PWD", os.getcwd())) / ".fno" / "config.toml"
     else:
-        # Bootstrap path: cannot use paths.config_file() here (settings loader self-reference)
-        target = Path.home() / ".fno" / "config.toml"
+        # Same env-honoring resolver load_scope_config reads through, so the
+        # scope-own read/write pair honors FNO_GLOBAL_SETTINGS_PATH together.
+        target = _global_settings_path()
 
     # Read existing file to preserve other keys.
     # Use strict variant: if the file exists but is unparseable, raise rather

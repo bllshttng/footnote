@@ -71,10 +71,15 @@ impl Scratch {
             .env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"))
             .env("FNO_CLAIMS_ROOT", &home)
             .env(
+                "FNO_MUX_ADMISSION_NAMESPACE",
+                self.0.file_name().unwrap_or_default(),
+            )
+            .env(
                 "FNO_GLOBAL_SETTINGS_PATH",
                 self.0.join("iso-cfg").join("settings.json"),
             )
-            .env("FNO_E2E", "1");
+            .env("FNO_E2E", "1")
+            .env("FNO_PROCESS_ADMISSION_MAX", "512");
     }
 
     fn isolate_pty_command(&self, cmd: &mut CommandBuilder) {
@@ -92,10 +97,15 @@ impl Scratch {
         cmd.env("FNO_GRAPH_JSON", self.0.join("iso-graph.json"));
         cmd.env("FNO_CLAIMS_ROOT", &home);
         cmd.env(
+            "FNO_MUX_ADMISSION_NAMESPACE",
+            self.0.file_name().unwrap_or_default(),
+        );
+        cmd.env(
             "FNO_GLOBAL_SETTINGS_PATH",
             self.0.join("iso-cfg").join("settings.json"),
         );
         cmd.env("FNO_E2E", "1");
+        cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
     }
 
     /// The session socket the client will use under `FNO_MUX_DIR`.
@@ -258,8 +268,12 @@ impl ClientHarness {
     }
 
     pub fn type_bytes(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).unwrap();
-        self.writer.flush().unwrap();
+        if let Err(error) = self.writer.write_all(bytes) {
+            panic!("client input write failed: {error}\n{}", self.diagnostics());
+        }
+        if let Err(error) = self.writer.flush() {
+            panic!("client input flush failed: {error}\n{}", self.diagnostics());
+        }
     }
 
     /// Prove the client's input loop is accepting bytes, not merely that the
@@ -466,10 +480,60 @@ impl Drop for ClientHarness {
 /// A `fno --server` child, always killed on test exit.
 pub struct ServerProc(pub std::process::Child);
 
+pub struct ServerTermination {
+    pub pid: u32,
+    pub status: std::process::ExitStatus,
+}
+
+impl ServerProc {
+    /// Stop the server and COLLECT it, returning the exit status as proof.
+    ///
+    /// This replaced a `pkill -9 -f <socket path>` plus a 300ms sleep. The
+    /// pattern match could reach any process carrying that path and the sleep
+    /// stood in for a reap it never performed, which is the nondeterminism the
+    /// symptoms below kept tripping over. Owning the child makes the wait a
+    /// real collection.
+    ///
+    /// KNOWN LIMITATION, measured 2026-08-25, read this before trusting a green
+    /// persistence symptom. `server.rs` flushes the topology on its SIGTERM
+    /// shutdown path, so the graceful stop WRITES state that a symptom test may
+    /// be reading back as proof it was already on disk. A SIGKILL variant would
+    /// close that, and it is not a drop-in: switching this to `kill` makes
+    /// `symptom_hand_split_survives_restart` fail deterministically (3 of 3),
+    /// while the old `pkill -9` path still passes, so the difference is NOT the
+    /// signal and the cause is not yet known. Closing this means finding that
+    /// difference first, not swapping the signal.
+    pub fn terminate_and_wait(mut self) -> ServerTermination {
+        let pid = self.0.id();
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            if let Some(status) = self.0.try_wait().expect("owned server status") {
+                return ServerTermination { pid, status };
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        // Escalation is not free and it used to be invisible: a `forced` field
+        // recorded it and nothing ever read the field, so a server that stopped
+        // reaching its SIGTERM handler cost three silent seconds per restart
+        // and every test still passed. Not an assertion - a slow shutdown on a
+        // loaded runner is legitimate, and failing on it would be noise in the
+        // stress trial count. A line on stderr is the right weight.
+        eprintln!("server pid {pid} ignored SIGTERM for 3s; escalating to SIGKILL");
+        let _ = self.0.kill();
+        let status = self.0.wait().expect("owned server waits after escalation");
+        ServerTermination { pid, status }
+    }
+}
+
 impl Drop for ServerProc {
     fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+        if self.0.try_wait().ok().flatten().is_none() {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
     }
 }
 
@@ -492,6 +556,10 @@ pub fn spawn_server(sock: &Path, envs: &[(&str, &str)]) -> ServerProc {
     // panic=abort, cargo-test timeout) — x-4e30. A test that needs a specific
     // grace (or none) overrides via `envs`, which is applied after.
     cmd.env("FNO_E2E", "1");
+    cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
+    if let Some(namespace) = sock.parent().and_then(|path| path.file_name()) {
+        cmd.env("FNO_MUX_ADMISSION_NAMESPACE", namespace);
+    }
     // Hermetic sideline: point the agent registry and the claude-daemon roster
     // at empty scratch subdirs so the server enumerates only THIS test's panes,
     // never the developer's live agents. Without this the server reads the real
@@ -594,6 +662,10 @@ pub struct FakeClient {
     /// Initiator-only search results (v12, x-e780): `(pane_id, total, current)`,
     /// newest last. A co-viewer never receives these.
     pub search_results: Vec<(u64, u32, u32)>,
+    /// Initiator-only hover replies (v56): `(pane_id, seq, cells)`, newest
+    /// last. Coordinates only - the URL never rides the reply, which is part
+    /// of what the e2e test asserts.
+    pub link_hovers: Vec<(u64, u64, Vec<(u16, u16)>)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
     /// Bytes read off the socket that do not yet form a whole message.
@@ -638,6 +710,7 @@ impl FakeClient {
             copies: Vec::new(),
             opened_links: Vec::new(),
             search_results: Vec::new(),
+            link_hovers: Vec::new(),
             order: Vec::new(),
             carry: Vec::new(),
         }
@@ -693,6 +766,22 @@ impl FakeClient {
         write_msg_sync(&mut w, &ClientMsg::SearchClear { pane }).unwrap();
     }
 
+    /// (v56, hover affordance) Ask the server which cells of `pane` belong to
+    /// the link under pane-local `(row, col)`.
+    pub fn link_hover(&mut self, pane: u64, row: u16, col: u16, seq: u64) {
+        let mut w = self.stream.try_clone().unwrap();
+        write_msg_sync(
+            &mut w,
+            &ClientMsg::LinkHover {
+                pane,
+                row,
+                col,
+                seq,
+            },
+        )
+        .unwrap();
+    }
+
     pub fn reset_counts(&mut self) {
         self.frame_counts.clear();
     }
@@ -740,6 +829,11 @@ impl FakeClient {
                 total,
                 current,
             } => self.search_results.push((pane_id, total, current)),
+            ServerMsg::LinkHover {
+                pane_id,
+                seq,
+                cells,
+            } => self.link_hovers.push((pane_id, seq, cells)),
             // Answers a pre-Attach Query only; stray on an attached client.
             ServerMsg::Info { .. } => {}
             // v4 control-verb replies belong to one-shot `fno mux pane`
@@ -759,7 +853,8 @@ impl FakeClient {
             | ServerMsg::TabSpawned { .. }
             | ServerMsg::LayoutApplied { .. }
             | ServerMsg::LayoutGrafted { .. }
-            | ServerMsg::TabLocation { .. } => {}
+            | ServerMsg::TabLocation { .. }
+            | ServerMsg::TabClosed { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.
             ServerMsg::PeekBody { .. } => {}

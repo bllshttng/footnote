@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
 
 from fno.harness_identity import (
@@ -719,3 +722,269 @@ def test_strip_flags_keep_fno_plumbing():
     assert "CODEX_THREAD_ID" in flags and "CODEX_CI" in flags
     assert "TARGET_SESSION_ID" not in flags
     assert "CLAUDE_CODE_SESSION_ID" not in flags
+
+
+def test_strip_flags_skip_foreign_name_with_matching_keep_session_id():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_SESSION_ID": "own-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == []
+
+
+def test_strip_flags_keep_equal_foreign_resolver_marker_for_ambiguity_remedy():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_THREAD_ID": "own-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == ["-u", "CODEX_THREAD_ID"]
+
+
+def test_strip_flags_keep_foreign_name_with_different_session_id():
+    from fno.harness_identity import ambient_identity_strip_flags
+
+    env = {
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+        "CODEX_COMPANION_SESSION_ID": "foreign-session",
+    }
+
+    assert ambient_identity_strip_flags("claude", env) == [
+        "-u",
+        "CODEX_COMPANION_SESSION_ID",
+    ]
+
+
+# --- attester identity: bound to the emitting process -------------------------
+
+
+def test_attester_witness_process_on_equal_family_ancestor():
+    from fno.harness_identity import _attester_witness
+
+    # A NON-family carrier agreeing first (the fno CLI process carrying the
+    # inherited marker) still corroborates only through the family carrier
+    # behind it; here the family carrier agrees too.
+    assert (
+        _attester_witness("CODEX_THREAD_ID", "sess-a", [None, "sess-a"], [False, True])
+        == "process"
+    )
+
+
+def test_attester_witness_env_only_when_no_family_carrier():
+    from fno.harness_identity import _attester_witness
+
+    # Carriers that agree but are not family processes (shells, the CLI
+    # python) corroborate nothing on their own: no family carrier, env_only -
+    # the daemon-carrier lane must degrade, never wedge or over-certify.
+    assert (
+        _attester_witness("CODEX_THREAD_ID", "sess-a", ["sess-a", None], [False, False])
+        == "env_only"
+    )
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [None, None], [False, False]) == "env_only"
+    assert _attester_witness("CODEX_THREAD_ID", "sess-a", [], []) == "env_only"
+
+
+def test_attester_witness_raises_on_differing_family_ancestor():
+    from fno.harness_identity import AttesterIdentityConflict, _attester_witness
+
+    with pytest.raises(AttesterIdentityConflict) as exc:
+        _attester_witness("CODEX_THREAD_ID", "sess-forged", ["sess-true"], [True])
+    # Both ids are named: the refusal is the one place a reader can see which
+    # session the harness says versus which the env claims.
+    assert "sess-true" in str(exc.value)
+    assert "sess-forged" in str(exc.value)
+
+
+def test_attester_witness_raise_outranks_the_equal_match():
+    """The override shape yields BOTH an equal carrier (the shell carrying the
+    assignment, not a family process) and a differing family carrier (the
+    harness above it, the only kind that can mint the id). Stopping at the
+    first equal carrier would certify the forgery, so the family carrier's
+    disagreement raises."""
+    from fno.harness_identity import AttesterIdentityConflict, _attester_witness
+
+    with pytest.raises(AttesterIdentityConflict):
+        _attester_witness(
+            "CODEX_THREAD_ID",
+            "sess-forged",
+            ["sess-forged", None, "sess-true"],
+            [False, False, True],
+        )
+
+
+def test_a_stale_marker_above_the_session_never_vetoes():
+    """The daemon-carrier lane: the session process (a family carrier) agrees
+    with the env, and a LONG-LIVED ancestor above it retains a previous
+    session's marker. The nearer family carrier decided; the stale value above
+    was never the minter of this id, so the witness is process, not a refusal
+    that would wedge every emit under that daemon."""
+    from fno.harness_identity import _attester_witness
+
+    assert (
+        _attester_witness(
+            "CODEX_THREAD_ID",
+            "sess-now",
+            ["sess-now", "sess-old"],
+            [True, True],
+        )
+        == "process"
+    )
+
+
+def test_resolve_attester_identity_reads_winning_marker_and_empty_without_one():
+    """Ancestry-adaptive, for the same reason the actor test is: run under a
+    real codex session, a family ancestor carries a DIFFERENT live id and the
+    resolver raises - the refusal is correct there, so this asserts it rather
+    than erroring. On any other host no codex ancestor exists and the honest
+    answer is env_only."""
+    from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
+
+    try:
+        assert resolve_attester_identity({"CODEX_SESSION_ID": "codex-sess"}) == (
+            "codex-sess",
+            "env_only",
+        )
+    except AttesterIdentityConflict:
+        pass  # a live codex ancestry disagrees; the refusal is the verdict
+    assert resolve_attester_identity({}) == ("", "env_only")
+
+
+def test_resolve_attester_identity_refuses_mixed_family_env():
+    """Markers from two harness families: one is foreign and inherited. Empty
+    rather than by precedence - picking either would launder or ignore a
+    provably mixed env."""
+    from fno.harness_identity import resolve_attester_identity
+
+    env = {"CODEX_THREAD_ID": "codex-id", "CLAUDE_CODE_SESSION_ID": "claude-id"}
+    assert resolve_attester_identity(env) == ("", "env_only")
+
+
+def _proc_environ_strictly_readable() -> bool:
+    """Whether this OS GUARANTEES reading an ancestor's environment: linux
+    /proc does. darwin's `ps eww` is PARTIAL - it exposed the harness chain's
+    markers in a live session yet showed nothing for other processes - so the
+    darwin arms below accept the recorded outcome rather than demand one."""
+    return Path("/proc/self/environ").exists()
+
+
+def test_resolve_attester_identity_refuses_the_command_line_override():
+    """The verbatim reproduction: a command-scoped `CODEX_THREAD_ID=<foreign>`
+    assignment makes the emitting env disagree with the bash parent that
+    inherited the harness's own value. The resolver must raise, naming both
+    ids. Runs live where the OS exposes ancestor environments (linux CI); on
+    darwin the same chain honestly resolves env_only, which that arm pins."""
+    import subprocess
+    import sys
+
+    probe = (
+        "from fno.harness_identity import AttesterIdentityConflict, "
+        "resolve_attester_identity\n"
+        "try:\n"
+        "    print(resolve_attester_identity())\n"
+        "except AttesterIdentityConflict as exc:\n"
+        "    print('CONFLICT', exc)\n"
+        "    raise SystemExit(3)\n"
+    )
+    import fno as _fno
+
+    src_dir = str(Path(_fno.__file__).resolve().parents[1])
+    # The parent must be a FAMILY carrier (a process whose argv0 names the
+    # marker's harness), because the nearest family carrier is what decides:
+    # `exec -a codex` renames the intermediate bash, so its argv0 carries the
+    # family token while its env still holds the harness's own id. The `rc=$?
+    # ... exit $rc` tail is load-bearing: a lone command gets tail-exec'd
+    # (the leaf REPLACES the renamed bash and inherits its pid), leaving the
+    # walk no family carrier at all - the pre-tail shape passed only via
+    # full-argv matching, the exact artifact the argv0 rule removed. The tail
+    # also re-exits with the leaf's status; a bare `; :` would swallow it.
+    import shlex
+
+    leaf = (
+        f"CODEX_THREAD_ID=foreign-sess {sys.executable} -c "
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; "
+        "rc=$?; :; exit \"$rc\""
+    )
+    wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
+    r = subprocess.run(
+        ["bash", "-c", wrapped],
+        env={
+            **os.environ,
+            "CODEX_THREAD_ID": "true-sess",
+            "PYTHONPATH": src_dir,
+            "FNO_IDENTITY_PROBE": probe,
+        },
+        capture_output=True,
+        text=True,
+    )
+    if _proc_environ_strictly_readable():
+        # linux: /proc answers for every ancestor, so the family carrier is
+        # readable and its disagreement with the leaf's override must raise.
+        assert r.returncode == 3, r.stdout + r.stderr
+        assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
+    else:
+        # darwin: `ps eww` readability is partial by measurement, so the
+        # carrier is either readable (the disagreement raises) or not
+        # (env_only). Both are honest. The one forbidden outcome on every
+        # OS is the forged stamp: the override resolving with a `process`
+        # witness, which is what full-argv family matching shipped.
+        if r.returncode == 0:
+            assert "env_only" in r.stdout, r.stdout + r.stderr
+        else:
+            assert r.returncode == 3, r.stdout + r.stderr
+            assert "true-sess" in r.stdout and "foreign-sess" in r.stdout
+
+
+def test_resolve_attester_identity_corroborates_the_own_id():
+    """The other direction, both positive: the same chain with the harness's
+    OWN id emits nothing conflicting - process witness on linux, env_only on
+    darwin - and never raises against a session's own marker."""
+    import subprocess
+    import sys
+
+    probe = (
+        "from fno.harness_identity import resolve_attester_identity\n"
+        "sid, witness = resolve_attester_identity()\n"
+        "print(sid, witness)\n"
+    )
+    import fno as _fno
+
+    src_dir = str(Path(_fno.__file__).resolve().parents[1])
+    # Same family-carrier parent as the override test (exec -a codex renames
+    # the intermediate bash; the rc-capturing tail keeps it alive under the
+    # leaf): the carrier agrees with the env. linux reads it and answers
+    # process; darwin cannot read a fresh child's environment, so the same
+    # chain honestly degrades to env_only there.
+    import shlex
+
+    leaf = (
+        f"{sys.executable} -c "
+        "'import os; exec(os.environ[\"FNO_IDENTITY_PROBE\"])'; "
+        "rc=$?; :; exit \"$rc\""
+    )
+    wrapped = "exec -a codex bash -c " + shlex.quote(leaf)
+    r = subprocess.run(
+        ["bash", "-c", wrapped],
+        env={
+            **os.environ,
+            "CODEX_THREAD_ID": "sess-own",
+            "PYTHONPATH": src_dir,
+            "FNO_IDENTITY_PROBE": probe,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    sid, witness = r.stdout.split()
+    assert sid == "sess-own"
+    if _proc_environ_strictly_readable():
+        assert witness == "process"
+    else:
+        # darwin: ps eww readability is partial, so the agreeing carrier is
+        # corroborated where it was readable (process) and honestly
+        # env_only where it was not. Either is correct; a raise is not.
+        assert witness in ("process", "env_only")

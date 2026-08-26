@@ -42,6 +42,7 @@ input="$(cat)"
 event="$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null || true)"
 
 is_clean=0
+reviewer_context="unknown"
 case "$event" in
   PostToolUse)
     tool_name="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
@@ -51,7 +52,12 @@ case "$event" in
     # without the key says nothing about the review outcome and must not
     # attest.
     findings="$(printf '%s' "$input" | jq -c '.tool_input.findings? // "absent"' 2>/dev/null || true)"
-    [[ "$findings" == "[]" ]] && is_clean=1
+    if [[ "$findings" == "[]" ]]; then
+      is_clean=1
+      # ReportFindings is a tool call in the authoring turn. That is positive
+      # same-context evidence, not a guess from who typed the command.
+      reviewer_context="shared"
+    fi
     ;;
   SubagentStop)
     message="$(printf '%s' "$input" | jq -r '.last_assistant_message // empty' 2>/dev/null || true)"
@@ -126,6 +132,7 @@ case "$event" in
     [[ "$message" =~ ^[[:space:]]*"## Review findings" ]] && shaped=1
 
     [[ "$described" == "1" || "$forked" == "1" || "$shaped" == "1" ]] || exit 0
+    [[ "$forked" == "1" ]] && reviewer_context="fresh"
 
     # The clean-pass verdict, positively enumerated over every shape observed
     # live. An empty fenced JSON array is the high-level protocol's marker; a
@@ -202,6 +209,9 @@ print("[]")
         and (.findings == []))
     ' <<<"$review_outputs" >/dev/null 2>&1 || exit 0
     is_clean=1
+    # Codex's Stop payload proves the structured review result, but this hook
+    # has no positive evidence that the reviewer ran in a separate context.
+    reviewer_context="unknown"
     ;;
   *)
     exit 0
@@ -217,4 +227,4 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 cd "$cwd"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review
+bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review pass "$reviewer_context"

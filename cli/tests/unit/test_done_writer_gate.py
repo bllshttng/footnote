@@ -179,7 +179,7 @@ def test_ac2_hp_done_on_open_pr_exits_5_after_querying_gh(done_graph, monkeypatc
 
 
 def test_ac3_err_gh_failure_fails_closed(done_graph, monkeypatch):
-    """AC3-ERR: an unreachable gh refuses the close rather than trusting --pr."""
+    """AC3-ERR: an authentication failure refuses with its repair command."""
     from typer.testing import CliRunner
     from fno.cli import app
 
@@ -188,10 +188,42 @@ def test_ac3_err_gh_failure_fails_closed(done_graph, monkeypatch):
 
     r = CliRunner().invoke(app, ["done", "ab-out001", "--pr", "42"])
 
-    assert r.exit_code == 4
+    assert r.exit_code == 3
+    combined = r.output + (r.stderr or "")
+    assert "gh auth login" in combined
+    assert "retryable once gh is available again" not in combined
     entry = _node(done_graph, "ab-out001")
     assert entry.get("completed_at") is None
     assert entry.get("merge_status") is None
+
+
+def test_compat_done_routing_refusal_is_not_retryable(done_graph, monkeypatch):
+    from typer.testing import CliRunner
+    from fno.cli import app
+    import fno.done.cli as done_cli
+    from fno.graph._reconcile import ReconcileError
+
+    _seed(done_graph, {
+        "id": "ab-routec01",
+        "title": "Routed refusal",
+        "domain": "code",
+        "pr_number": 1140,
+        "pr_url": "https://github.com/o/r/pull/1140",
+    })
+    monkeypatch.setattr(
+        done_cli,
+        "_gh_query",
+        lambda n, **kw: (_ for _ in ()).throw(
+            ReconcileError("[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal")
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["done", "ab-routec01"])
+
+    assert result.exit_code == 3
+    combined = result.output + (result.stderr or "")
+    assert "fno do pr info 1140 --repo o/r" in combined
+    assert "retryable once gh is available again" not in combined
 
 
 def test_merged_pr_closes_and_records_resolved_merge_status(done_graph, monkeypatch):

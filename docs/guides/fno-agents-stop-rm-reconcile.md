@@ -47,12 +47,12 @@ To override claude's refusal:
 ```bash
 fno agents rm worker-claude --force
 # WARN: claude rm failed but --force given; removing registry only.
-# Supervisor session 7c5dcf5d is orphaned; `fno agents adopt 7c5dcf5d`
+# Supervisor session is orphaned; `fno agents adopt <full-harness-session-id> --cross-project`
 # brings it back under management.
 # removed: worker-claude
 ```
 
-`--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. Bring it back with `fno agents adopt 7c5dcf5d`, which the stderr WARN spells out. Do not reap it by hand: that spends the resume handle and buys nothing.
+`--force` drops the registry row regardless of claude's exit code, leaving the supervisor session orphaned. Bring it back with `fno agents adopt <full-harness-session-id> --cross-project`, which the stderr WARN spells out. For one-step recovery into an existing canonical or replacement checkout, use `fno agents resume <full-harness-session-id> --cross-project --cwd <existing-checkout>`. A pruned worktree's uncommitted contents are not reconstructed. Do not reap it by hand: that spends the resume handle and buys nothing.
 
 The same ordering holds for **codex**, which tears down its own session record before the registry row is dropped:
 

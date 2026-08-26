@@ -64,6 +64,7 @@ pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
 pub mod harness_capabilities;
+pub mod harness_daemon;
 mod identity;
 pub mod interrupt_classify;
 pub mod kill_criteria;

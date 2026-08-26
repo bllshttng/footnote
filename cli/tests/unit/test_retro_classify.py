@@ -25,7 +25,7 @@ def test_severity_to_tier_and_priority():
     assert severity_to_tier("medium") == TIER_NODE
     assert severity_to_tier("low") == TIER_INBOX
     assert severity_to_tier(None) == TIER_NODE  # deliberate work
-    assert severity_to_priority("critical") == "p0"
+    assert severity_to_priority("critical") == "p1"
     assert severity_to_priority("high") == "p1"
     assert severity_to_priority("medium") == "p2"
     assert severity_to_priority("low") == "p3"

@@ -18,10 +18,14 @@ import json
 import re
 import secrets
 import sys
+from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, overload
 
 DECISION_EVENT = "operator_decision"
+RETRACTION_EVENT = "decision_retracted"
+DECISION_EVENT_TYPES = frozenset({DECISION_EVENT, RETRACTION_EVENT})
 
 # The deployed writer still labelled agent-authored rulings as ``operator``.
 # This safely postdates every row that writer produced during the cutover; the
@@ -41,10 +45,57 @@ AUTHORITY_SOURCES: tuple[str, ...] = (
     "beastmode",  # an agent acting under an explicit grant
 )
 
+# Origin is evidence about the channel, not an authority claim. Keep the two
+# axes separate: only operator-origin evidence can carry operator intent into
+# a machine-readable gate.
+MAIL_ORIGINS: tuple[str, ...] = (
+    "operator",
+    "peer",
+    "scheduler",
+    "recovery",
+)
+
+
+@overload
+def enforce_origin_floor(origin: str) -> str: ...
+
+
+@overload
+def enforce_origin_floor(origin: None) -> None: ...
+
+
+def enforce_origin_floor(origin: str | None) -> str | None:
+    """An ambient agent identity cannot declare an origin above peer.
+
+    The one gate every explicit origin claim routes through (d-02625dda,
+    d-8f396483): mail send's classify_origin, record_decision for the law
+    record, and the dispatch ctx builder all ask this before trusting a
+    caller-stated origin. Identity is proven by ancestry (a process-tree walk,
+    never env markers), so a caller that resolves an agent identity is an
+    agent claiming a channel it does not own, scheduler and recovery included;
+    a detached scheduler or recovery daemon has no harness ancestor and keeps
+    its honest declaration.
+    """
+    if origin is None or origin == "peer":
+        return origin
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    if ident.session_id and ident.harness:
+        return "peer"
+    return origin
+MAX_AUTHORITY_BY_ORIGIN: dict[str, str] = {
+    "operator": "operator",
+    "peer": "agent",
+    "scheduler": "agent",
+    "recovery": "agent",
+}
+
 PROJECTION_FIELDS = (
     "decision_id",
     "decision",
     "subject",
+    "expiry_ref",
     "question",
     "asked_by",
     "asked_at",
@@ -52,6 +103,7 @@ PROJECTION_FIELDS = (
     "decided_by",
     "attested_by",
     "relayed_by",
+    "origin",
     "authority_source",
     "rationale",
     "supersedes",
@@ -77,11 +129,22 @@ class IndexWriteError(RuntimeError):
 class RefusedAuthorityError(RuntimeError):
     """An agent session tried to record a ruling as operator law."""
 
-    def __init__(self, agent_handle: str) -> None:
+    def __init__(self, agent_handle: str, origin: str | None = None) -> None:
+        detail = f" from {origin} origin" if origin else ""
         super().__init__(
-            f"agent {agent_handle} cannot record under operator authority"
+            f"agent {agent_handle} cannot record under operator authority{detail}"
         )
         self.agent_handle = agent_handle
+        self.origin = origin
+
+
+class UnknownOriginError(RuntimeError):
+    """A claimed origin is not in the closed mail-origin vocabulary."""
+
+    def __init__(self, origin: str) -> None:
+        super().__init__(
+            f"mail origin {origin!r} is unknown; use one of {', '.join(MAIL_ORIGINS)}"
+        )
 
 
 class UnattributedAuthorityError(RuntimeError):
@@ -97,6 +160,32 @@ class UnattributedAuthorityError(RuntimeError):
             "no session identity and no terminal, so operator authority "
             "cannot be established"
         )
+
+
+@dataclass(frozen=True)
+class OperatorConsent:
+    """Permission-bound proof for one exact staged law proposal."""
+
+    proposal_id: str
+    content_hash: str
+    session_id: str
+    permission_mode: str
+    tool_input: str
+
+
+def _consent_locked(function: Any) -> Any:
+    """Hold the proposal lock across validation, writes, and consumption."""
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        consent = kwargs.get("consent")
+        if consent is None:
+            return function(*args, **kwargs)
+        from fno.law import proposal_lock
+
+        with proposal_lock(consent.proposal_id):
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def mint_decision_id() -> str:
@@ -146,7 +235,10 @@ def _attended_terminal() -> bool:
 
 
 def _resolve_decider(
-    decided_by: str | None, authority_source: str | None
+    decided_by: str | None,
+    authority_source: str | None,
+    *,
+    origin: str | None = None,
 ) -> Provenance:
     """Resolve provenance from the ambient harness identity.
 
@@ -174,6 +266,9 @@ def _resolve_decider(
     State 3 exists because state 2 used to be everything that was not state 1,
     which made it an absence. Scrubbing the environment was enough to reach it.
     """
+    if origin is not None and origin not in MAIL_ORIGINS:
+        raise UnknownOriginError(origin)
+
     from fno.agents.self_stamp import resolve_self_identity
     from fno.harness_identity import canonical_handle
 
@@ -183,11 +278,18 @@ def _resolve_decider(
         if ident.session_id and ident.harness
         else None
     )
+    max_authority = (
+        MAX_AUTHORITY_BY_ORIGIN.get(origin) if origin is not None else None
+    )
+    if authority_source == "operator" and max_authority not in (None, "operator"):
+        raise RefusedAuthorityError(agent or "unattributed-caller", origin)
     if agent and authority_source == "operator":
         raise RefusedAuthorityError(agent)
     if agent:
         # State 1. Relayed only when it says something the stamp does not. A
         # caller passing its own handle relayed nothing.
+        if origin == "operator":
+            return Provenance(agent, authority_source or "agent", None, agent)
         relayed = decided_by if decided_by and decided_by != agent else None
         return Provenance(agent, authority_source or "agent", None, relayed)
 
@@ -199,7 +301,8 @@ def _resolve_decider(
         # by silence, in any state: a caller who wants the operator lane says
         # so. Forging law then costs two deliberate acts rather than one.
         decider = decided_by or "operator"
-        return Provenance(decider, authority_source, decider, None)
+        attested = origin if origin is not None else decider
+        return Provenance(decider, authority_source, attested, None)
 
     # State 3, and it fails closed. No session identity and no terminal, so
     # nothing here positively marks anyone. Law is refused rather than
@@ -213,12 +316,15 @@ def _resolve_decider(
     )
 
 
+@_consent_locked
 def record_decision(
     *,
     decision: str,
     subject: str | None = None,
     decided_by: str | None = None,
     authority_source: str | None = None,
+    consent: OperatorConsent | None = None,
+    origin: str | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
     supersedes: str | None = None,
@@ -226,6 +332,7 @@ def record_decision(
     question: str | None = None,
     asked_by: str | None = None,
     asked_at: str | None = None,
+    expiry_ref: dict[str, Any] | None = None,
     events_root: Any = None,
 ) -> dict[str, Any]:
     """Append the event, then project it onto the subject node.
@@ -243,7 +350,54 @@ def record_decision(
     from fno.events import append_event, operator_decision
     from fno.outstanding.core import events_path
 
-    provenance = _resolve_decider(decided_by, authority_source)
+    # The event records this value, so the floor must bind here, not only in
+    # the provenance resolution: a gated provenance beside a raw self-declared
+    # origin on the same row would be the inconsistency the gate exists to
+    # close.
+    origin = enforce_origin_floor(origin)
+    if consent is not None and authority_source != "chat_attested":
+        from fno.law import InvalidOperatorConsentError
+
+        raise InvalidOperatorConsentError(
+            "consent proves a chat approval, never operator authority"
+        )
+
+    consent_expected = None
+    if consent is not None:
+        from fno.law import validate_operator_consent
+
+        consent_expected = {
+            "subject": subject,
+            "decision": decision,
+            "rationale": rationale,
+            "options": list(options or []),
+            "supersedes": supersedes,
+        }
+        validate_operator_consent(consent, expected=consent_expected)
+        # The permission click approves the attribution; it does not prove a
+        # human origin (the 2026-08-24 UserPromptSubmit probe found no
+        # discriminator), so authority_source keeps the caller's honest value
+        # and the reader lanes the row accordingly.
+        provenance = Provenance("operator", authority_source, "operator", None)
+    else:
+        provenance = _resolve_decider(decided_by, authority_source, origin=origin)
+
+    if supersedes:
+        superseded_row = _decision_row_by_id(supersedes)
+        if superseded_row is None:
+            raise ValueError(
+                f"supersession target {supersedes} is not recoverable from the "
+                "decision index. Run `fno backlog decide-reindex` before retrying."
+            )
+        if (
+            superseded_row is not None
+            and _decision_lane(superseded_row) == "law"
+            and provenance.authority_source != "operator"
+        ):
+            raise RefusedAuthorityError(provenance.decided_by, origin)
+
+    if _decision_lane({"authority_source": provenance.authority_source}) == "coord":
+        expiry_ref = _derive_coord_expiry_ref(subject, expiry_ref)
 
     if events_root is None:
         from fno.carveout.core import resolve_carveout_root
@@ -259,15 +413,40 @@ def record_decision(
         question=question,
         asked_by=asked_by,
         asked_at=asked_at,
+        expiry_ref=expiry_ref,
         options=options,
         decided_by=provenance.decided_by,
         attested_by=provenance.attested_by,
         relayed_by=provenance.relayed_by,
+        origin=origin,
         authority_source=provenance.authority_source,
         rationale=rationale,
         supersedes=supersedes,
     )
-    append_event(event, events_path=events_path(events_root))
+    if consent is not None:
+        from fno.law import claim_operator_consent
+
+        claim_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
+    try:
+        append_event(event, events_path=events_path(events_root))
+    except Exception:
+        if consent is not None:
+            from fno.law import release_operator_consent
+
+            release_operator_consent(consent, decision_id=decision_id)
+        raise
+    if consent is not None:
+        from fno.law import consume_operator_consent
+
+        consume_operator_consent(
+            consent,
+            expected=consent_expected or {},
+            decision_id=decision_id,
+        )
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
@@ -290,6 +469,106 @@ def record_decision(
         )
         node_id = None
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
+
+
+_REPOSITORY_AUDIT_FIELDS = (
+    "ts",
+    "decided_by",
+    "attested_by",
+    "relayed_by",
+    "origin",
+)
+
+
+def _merge_repository_row(local: dict, repository: dict) -> dict:
+    """Use reviewed law content while retaining machine-local audit facts."""
+    merged = dict(repository)
+    for key in _REPOSITORY_AUDIT_FIELDS:
+        if key in local:
+            merged[key] = local[key]
+    return merged
+
+
+def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
+    rows, _ = _read_index(_index_path())
+    local_matches = [
+        row
+        for row in rows
+        if row.get("_event_type") in {None, DECISION_EVENT}
+        and str(row.get("decision_id") or "").casefold() == decision_id.casefold()
+    ]
+    from fno.decide.catalog import load_catalog
+
+    repository = next(
+        (
+            dict(row)
+            for row in load_catalog().rows
+            if str(row.get("decision_id") or "").casefold() == decision_id.casefold()
+        ),
+        None,
+    )
+    if repository is not None and local_matches:
+        local = max(
+            local_matches,
+            key=lambda row: (
+                str(row.get("ts") or ""),
+                str(row.get("decision_id") or ""),
+            ),
+        )
+        return _merge_repository_row(local, repository)
+    if repository is not None:
+        return repository
+    if not local_matches:
+        return None
+    return max(
+        local_matches,
+        key=lambda row: (str(row.get("ts") or ""), str(row.get("decision_id") or "")),
+    )
+
+
+def retract_decision(
+    *,
+    decision_id: str,
+    reason: str,
+    authority_source: str | None = None,
+    origin: str | None = None,
+) -> dict[str, Any]:
+    """Append a provenance-checked retraction without changing old bytes."""
+    if not decision_id.strip():
+        raise ValueError("decision id is required")
+    if not reason.strip():
+        raise ValueError("retraction reason is required")
+    target = _decision_row_by_id(decision_id.strip())
+    if target is None:
+        raise KeyError(decision_id)
+
+    origin = enforce_origin_floor(origin)
+    provenance = _resolve_decider(None, authority_source, origin=origin)
+    if _decision_lane(target) == "law" and provenance.authority_source != "operator":
+        raise RefusedAuthorityError(provenance.decided_by, origin)
+
+    from fno.events import append_event, decision_retracted
+    from fno.outstanding.core import events_path
+
+    event = decision_retracted(
+        target_decision_id=str(target["decision_id"]),
+        subject=str(target.get("subject") or "(unscoped)"),
+        reason=reason.strip(),
+        retracted_by=provenance.decided_by,
+        attested_by=provenance.attested_by,
+        relayed_by=provenance.relayed_by,
+        origin=origin,
+        authority_source=provenance.authority_source,
+    )
+    from fno.carveout.core import resolve_carveout_root
+
+    events_root = resolve_carveout_root()
+    append_event(event, events_path=events_path(events_root))
+    try:
+        append_event(event, events_path=_index_path())
+    except Exception as exc:  # noqa: BLE001 - durable event must not be retried blindly
+        raise IndexWriteError(str(target["decision_id"]), exc) from exc
+    return {"decision_id": str(target["decision_id"]), "event": event}
 
 
 def _project(event: dict[str, Any]) -> str | None:
@@ -348,7 +627,11 @@ def _project(event: dict[str, Any]) -> str | None:
             sup = data.get("supersedes")
             if sup:
                 for d in e.setdefault("decisions", []):
-                    if isinstance(d, dict) and d.get("decision_id") == sup:
+                    if (
+                        isinstance(d, dict)
+                        and str(d.get("decision_id") or "").casefold()
+                        == str(sup).casefold()
+                    ):
                         d["superseded_by"] = data["decision_id"]
             e.setdefault("decisions", []).append(record)
             matched.append(match.id)
@@ -411,16 +694,21 @@ def _read_index(path: Path, *, warn: bool = True) -> "tuple[list[dict], int]":
                 damaged += 1
                 continue
             data = rec.get("data") if isinstance(rec, dict) else None
-            if (
-                not isinstance(rec, dict)
-                or rec.get("type") != DECISION_EVENT
-                or not isinstance(data, dict)
-                or not data.get("decision_id")
-            ):
+            if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
+                damaged += 1
+                continue
+            if not isinstance(data, dict):
+                damaged += 1
+                continue
+            if rec.get("type") == DECISION_EVENT and not data.get("decision_id"):
+                damaged += 1
+                continue
+            if rec.get("type") == RETRACTION_EVENT and not data.get("target_decision_id"):
                 damaged += 1
                 continue
             row = dict(data)
             row["ts"] = rec.get("ts")
+            row["_event_type"] = rec.get("type")
             rows.append(row)
 
     if damaged and warn:
@@ -514,7 +802,7 @@ def _resolved_node(subject: str, entries: "list[dict]") -> str | None:
     return str(match.id) if match.kind == "exact" and match.id else None
 
 
-def _subject_matcher(subject: str):
+def _subject_matcher(subject: str, catalog=None):
     """A predicate over a recorded subject string, matching the same node.
 
     BOTH sides expand, not just the query. The operator records under whatever
@@ -525,6 +813,11 @@ def _subject_matcher(subject: str):
 
     A subject that names no node matches itself and nothing more.
     """
+    if catalog is None:
+        from fno.decide.catalog import load_catalog
+
+        catalog = load_catalog()
+    subject = catalog.canonical_subject(subject)
     entries = _graph_entries()
     node_id = _resolved_node(subject, entries) or _resolved_node(
         subject.strip().casefold(), entries
@@ -536,7 +829,7 @@ def _subject_matcher(subject: str):
         # - two subject shapes behaving differently on the case this fixes.
         # Still exact: folding case never turns `pr-92` into `pr-921`.
         want = subject.strip().casefold()
-        return lambda recorded: recorded.strip().casefold() == want
+        return lambda recorded: catalog.canonical_subject(recorded).casefold() == want
 
     # Resolved per DISTINCT recorded subject by the caller's cache, never per
     # row: the graph read is the expensive part and it already happened.
@@ -548,6 +841,7 @@ def _subject_matcher(subject: str):
         # case-sensitive, so without it a ruling recorded as `X-7D94` answers
         # nothing for `x-7d94` while the unresolved branch folds case happily -
         # and the doc promises every spelling, "any case", for a node subject.
+        recorded = catalog.canonical_subject(recorded)
         if recorded.strip().casefold() == want:
             return True
         if recorded not in seen:
@@ -561,6 +855,8 @@ def _subject_matcher(subject: str):
 
 def _decision_lane(row: dict) -> str:
     """Map stored provenance to the authority lane a reader can trust."""
+    if row.get("_source") == "repository":
+        return "law"
     authority = str(row.get("authority_source") or "")
     if authority in ("agent", "crown"):
         # A king ruling inside its own crown scope is still coordination. It
@@ -574,6 +870,94 @@ def _decision_lane(row: dict) -> str:
             return "law"
         return "unattributed"
     return "unattributed"
+
+
+def _pr_expiry_ref(subject: str | None) -> dict[str, Any] | None:
+    """Parse only repository-scoped PR subjects, never a bare PR number."""
+    if not subject:
+        return None
+    value = subject.strip()
+    match = re.fullmatch(
+        r"(?:https?://github\.com/)?([\w.-]+/[\w.-]+)(?:/pull/|#)(\d+)",
+        value,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return None
+    repository, number = match.groups()
+    return {"kind": "pr", "repository": repository.lower(), "number": int(number)}
+
+
+def _derive_coord_expiry_ref(
+    subject: str | None, expiry_ref: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    """Stamp an exact node/PR closure key when the subject proves one."""
+    if isinstance(expiry_ref, dict):
+        return dict(expiry_ref)
+    if not subject:
+        return None
+    try:
+        entries = _graph_entries(required=True)
+    except Exception:  # noqa: BLE001 - an unproven closure key stays unscoped
+        return None
+    node_id = _resolved_node(subject, entries)
+    if node_id:
+        return {"kind": "node", "node_id": node_id}
+    return _pr_expiry_ref(subject)
+
+
+def _graph_node_for_pr(expiry_ref: dict[str, Any], entries: list[dict]) -> dict | None:
+    repository = str(expiry_ref.get("repository") or "").casefold()
+    number = expiry_ref.get("number")
+    if not repository or not isinstance(number, int):
+        return None
+    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
+    matches: list[dict] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        for candidate, url in node_pr_refs(entry):
+            if candidate != number:
+                continue
+            slug = repo_slug_from_url(str(url or ""))
+            if slug and slug.casefold() == repository:
+                matches.append(entry)
+                break
+    return matches[0] if len(matches) == 1 else None
+
+
+def _coord_lifecycle(row: dict, entries: list[dict]) -> tuple[str, str | None]:
+    """Return a coord row's lifecycle and positive closure evidence."""
+    raw_ref = row.get("expiry_ref")
+    ref: dict[str, Any] | None = raw_ref if isinstance(raw_ref, dict) else None
+    if ref is None:
+        ref = _derive_coord_expiry_ref(row.get("subject"), None)
+    if not isinstance(ref, dict):
+        return "unscoped", None
+    kind = ref.get("kind")
+    if kind == "node":
+        node_id = str(ref.get("node_id") or "")
+        matches = [e for e in entries if isinstance(e, dict) and e.get("id") == node_id]
+        if len(matches) != 1:
+            return "unscoped", None
+        node_entry = matches[0]
+        from fno.graph._reconcile import node_is_open
+
+        if node_is_open(node_entry):
+            return "live", None
+        evidence = node_entry.get("completed_at")
+        if not evidence and isinstance(node_entry.get("supersession"), dict):
+            evidence = node_entry["supersession"].get("verified_at")
+        return "expired", f"node {node_id} closed at {evidence}"
+    if kind == "pr":
+        pr_node = _graph_node_for_pr(ref, entries)
+        if pr_node is None:
+            return "unscoped", None
+        if str(pr_node.get("merge_status") or "").casefold() == "merged":
+            return "expired", f"PR {ref.get('repository')}#{ref.get('number')} merged"
+        return "live", None
+    return "unscoped", None
 
 
 _DECISION_ID_RE = re.compile(r"^d-[0-9a-f]{4,32}$", re.IGNORECASE)
@@ -610,15 +994,18 @@ def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
     one ruling twice, so a raw row count inflates the very number this message
     exists to convey.
     """
-    want = subject.strip().casefold()
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog()
+    want = catalog.canonical_subject(subject).casefold()
     if not want:
         return []
-    matches = _subject_matcher(subject)
+    matches = _subject_matcher(subject, catalog)
     rows, _ = _read_index(_index_path(), warn=False)
     seen: "dict[str, set[str]]" = {}
     for row in rows:
         recorded = str(row.get("subject") or "")
-        folded = recorded.strip().casefold()
+        folded = catalog.canonical_subject(recorded).casefold()
         if not folded or folded == want or matches(recorded):
             continue
         if want in folded or folded in want:
@@ -633,6 +1020,7 @@ def list_decisions(
     subject: str | None = None,
     limit: int | None = None,
     lane: str | None = None,
+    state: str | None = None,
 ) -> "tuple[str, list[dict], int]":
     """Decision history from the index, newest first. Never raises LookupError.
 
@@ -645,7 +1033,46 @@ def list_decisions(
     record written with no subject at all - what ``fno inbox outstanding clear
     --answer`` writes for a question that names no node.
     """
+    if state not in {None, "live", "expired", "superseded", "retracted", "unscoped", "all"}:
+        raise ValueError(
+            "state must be live, expired, superseded, retracted, unscoped, or all"
+        )
     rows, damaged = _read_index(_index_path())
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog()
+    local_decisions = [
+        row for row in rows if row.get("_event_type") in {None, DECISION_EVENT}
+    ]
+    catalog_by_id = {
+        str(row.get("decision_id") or "").casefold(): dict(row)
+        for row in catalog.rows
+    }
+    decisions: list[dict[str, Any]] = []
+    local_ids: set[str] = set()
+    for local in local_decisions:
+        decision_id = str(local.get("decision_id") or "").casefold()
+        repository = catalog_by_id.get(decision_id)
+        if repository is None:
+            decisions.append(local)
+            continue
+        local_ids.add(decision_id)
+        decisions.append(_merge_repository_row(local, repository))
+    decisions.extend(
+        row for decision_id, row in catalog_by_id.items() if decision_id not in local_ids
+    )
+    retractions = [row for row in rows if row.get("_event_type") == RETRACTION_EVENT]
+    latest_retractions: dict[str, dict] = {}
+    for row in retractions:
+        target = str(row.get("target_decision_id") or "").casefold()
+        if not target:
+            continue
+        rank = (str(row.get("ts") or ""), str(row.get("reason") or ""))
+        previous = latest_retractions.get(target)
+        if previous is None or rank > (
+            str(previous.get("ts") or ""), str(previous.get("reason") or "")
+        ):
+            latest_retractions[target] = row
 
     # The graph projection stamped superseded_by at write time under the lock.
     # The index cannot (it is append-only), so the reader derives it, across
@@ -653,13 +1080,14 @@ def list_decisions(
     # wins: an operator can overturn one ruling twice, and file order is not
     # recency once a backfill has interleaved journals and projections.
     superseded_by: "dict[str, tuple[str, str]]" = {}
-    for row in rows:
-        target = row.get("supersedes")
-        if not target:
+    for row in decisions:
+        superseded_target = row.get("supersedes")
+        if not isinstance(superseded_target, str) or not superseded_target:
             continue
+        superseded_target = superseded_target.casefold()
         rank = (str(row.get("ts") or ""), str(row.get("decision_id") or ""))
-        if rank > superseded_by.get(str(target), ("", ""))[0:2]:
-            superseded_by[str(target)] = rank
+        if rank > superseded_by.get(superseded_target, ("", ""))[0:2]:
+            superseded_by[superseded_target] = rank
 
     # A d- token is a decision id before it is a subject. The id is the first
     # column of the row's own output, so answering "no decisions recorded" for
@@ -671,7 +1099,7 @@ def list_decisions(
         if subject and looks_like_decision_id(subject)
         else ""
     )
-    by_subject = _subject_matcher(subject) if subject else None
+    by_subject = _subject_matcher(subject, catalog) if subject else None
 
     def keep(row: dict) -> bool:
         """Id OR subject, never id INSTEAD OF subject.
@@ -687,7 +1115,14 @@ def list_decisions(
         return by_subject is not None and by_subject(str(row.get("subject") or ""))
     out: "list[dict]" = []
     emitted: "set[str]" = set()
-    for row in rows:
+    graph_entries: list[dict] = []
+    if any(_decision_lane(row) == "coord" for row in decisions):
+        try:
+            graph_entries = _graph_entries(required=True)
+        except Exception:
+            graph_entries = []
+
+    for row in decisions:
         if not keep(row):
             continue
         # One id, one row. reindex is read-then-write with no lock across the
@@ -695,15 +1130,33 @@ def list_decisions(
         # the index is append-only, so the reader is where that stops being
         # visible as two rulings.
         did = str(row.get("decision_id") or "")
-        if did in emitted:
+        decision_key = did.casefold()
+        if decision_key in emitted:
             continue
-        emitted.add(did)
+        emitted.add(decision_key)
         row = dict(row)
-        winner = superseded_by.get(str(row.get("decision_id")))
+        winner = superseded_by.get(decision_key)
         row["superseded_by"] = winner[1] if winner else None
         row["lane"] = _decision_lane(row)
+        if decision_key in latest_retractions:
+            lifecycle = "retracted"
+            row["lifecycle_reason"] = latest_retractions[decision_key].get("reason")
+        elif winner:
+            lifecycle = "superseded"
+        elif row["lane"] == "coord":
+            lifecycle, evidence = _coord_lifecycle(row, graph_entries)
+            if evidence:
+                row["lifecycle_evidence"] = evidence
+        elif row["lane"] == "unattributed":
+            lifecycle = "unscoped"
+        else:
+            lifecycle = "live"
+        row["lifecycle"] = lifecycle
         if lane is not None and row["lane"] != lane:
             continue
+        if state not in {None, "all"} and lifecycle != state:
+            continue
+        row.pop("_event_type", None)
         out.append(row)
 
     # decision_id breaks the tie. A stable sort keeps file order for equal
@@ -716,6 +1169,108 @@ def list_decisions(
     if limit and limit > 0:
         out = out[:limit]
     return subject or "(all)", out, damaged
+
+
+def current_law(subject: str) -> dict[str, Any]:
+    """Return one explicit current-law verdict without choosing by recency."""
+    from fno.decide.catalog import load_catalog
+
+    canonical_subject = load_catalog().canonical_subject(subject)
+    _, rows, damaged = list_decisions(
+        canonical_subject,
+        limit=None,
+        lane="law",
+        state="live",
+    )
+    if damaged:
+        noun = "row" if damaged == 1 else "rows"
+        raise ValueError(
+            f"decision index has {damaged} damaged {noun}; current law is unknown"
+        )
+    decision_ids = [str(row.get("decision_id") or "") for row in rows]
+    if not decision_ids:
+        status = "none"
+    elif len(decision_ids) == 1:
+        status = "single"
+    else:
+        status = "conflict"
+    verdict: dict[str, Any] = {
+        "status": status,
+        "decision_ids": decision_ids,
+    }
+    if status == "single":
+        verdict["decision_id"] = decision_ids[0]
+    return {
+        "canonical_subject": canonical_subject,
+        "current_law": verdict,
+    }
+
+
+def review_list() -> dict[str, Any]:
+    """Report unresolved multi-ruling subjects without mutating the index."""
+    _, rows, damaged = list_decisions(limit=None, state="all")
+    from fno.decide.catalog import load_catalog
+
+    catalog = load_catalog()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    display_subjects: dict[str, str] = {}
+    try:
+        graph_entries = _graph_entries(required=True)
+    except Exception:
+        graph_entries = []
+    subjectless = 0
+    subjectless_rows: list[dict[str, Any]] = []
+    invalid_authority = 0
+
+    def review_row(row: dict) -> dict[str, Any]:
+        return {
+            key: row.get(key)
+            for key in (
+                "decision_id",
+                "lane",
+                "ts",
+                "decision",
+                "rationale",
+                "authority_source",
+                "lifecycle",
+            )
+            if row.get(key) is not None
+        }
+
+    for row in rows:
+        subject = catalog.canonical_subject(str(row.get("subject") or ""))
+        if not subject:
+            subjectless += 1
+            subjectless_rows.append(review_row(row))
+        authority = row.get("authority_source")
+        if (
+            authority
+            and row.get("_source") != "repository"
+            and authority not in AUTHORITY_SOURCES
+        ):
+            invalid_authority += 1
+        if row.get("lifecycle") != "live" or not subject:
+            continue
+        node_id = _resolved_node(subject, graph_entries)
+        group_key = f"node:{node_id}" if node_id else f"text:{subject.casefold()}"
+        display_subjects.setdefault(group_key, subject)
+        grouped.setdefault(group_key, []).append(review_row(row))
+
+    groups = [
+        {"subject": display_subjects[group_key], "decisions": decisions}
+        for group_key, decisions in sorted(grouped.items())
+        if len(decisions) > 1
+    ]
+    if subjectless_rows:
+        groups.append({"subject": "(unscoped)", "decisions": subjectless_rows})
+    return {
+        "groups": groups,
+        "data_quality": {
+            "subjectless": subjectless,
+            "invalid_authority": invalid_authority,
+        },
+        "damaged": damaged,
+    }
 
 
 def _projection_events() -> "list[dict]":
@@ -823,16 +1378,20 @@ def _journal_events(paths: "list[Path]") -> "list[dict]":
             continue
         with fh:
             for line in fh:
-                if DECISION_EVENT not in line:
+                if not any(event_type in line for event_type in DECISION_EVENT_TYPES):
                     continue
                 try:
                     rec = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
                     continue
-                if not isinstance(rec, dict) or rec.get("type") != DECISION_EVENT:
+                if not isinstance(rec, dict) or rec.get("type") not in DECISION_EVENT_TYPES:
                     continue
                 data = rec.get("data")
-                if isinstance(data, dict) and data.get("decision_id"):
+                if isinstance(data, dict) and (
+                    data.get("decision_id")
+                    or data.get("retraction_id")
+                    or data.get("target_decision_id")
+                ):
                     events.append(rec)
     return events
 
@@ -853,9 +1412,20 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
 
     index = _index_path()
     repaired = _compact_index(index)
-    known = {str(row["decision_id"]) for row in _read_index(index, warn=False)[0]}
+    known = {
+        (
+            row.get("_event_type") or DECISION_EVENT,
+            str(
+                row.get("decision_id")
+                or row.get("retraction_id")
+                or row.get("target_decision_id")
+                or ""
+            ),
+        )
+        for row in _read_index(index, warn=False)[0]
+    }
     preexisting = set(known)
-    counted: "set[str]" = set()
+    counted: "set[tuple[str, str]]" = set()
     already = 0
     invalid = 0
     unusable = 0
@@ -867,16 +1437,23 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         # as a wedged one.
         print(f"reindex: folding {len(paths)} journal(s)...", file=sys.stderr)
     for event in _journal_events(paths) + _projection_events():
-        did = str(event["data"].get("decision_id") or "")
-        if not did:
+        event_type = str(event.get("type") or "")
+        did = str(
+            event["data"].get("decision_id")
+            or event["data"].get("retraction_id")
+            or event["data"].get("target_decision_id")
+            or ""
+        )
+        key = (event_type, did)
+        if not did or event_type not in DECISION_EVENT_TYPES:
             continue
-        if did in known:
+        if key in known:
             # Counted once per DECISION, not once per sighting, and only
             # against what the index already held. A journal row and its own
             # projection are one decision seen twice in one run, not a record
             # that was "already indexed", and not two of them either.
-            if did in preexisting and did not in counted:
-                counted.add(did)
+            if key in preexisting and key not in counted:
+                counted.add(key)
                 already += 1
             continue
         try:
@@ -893,7 +1470,7 @@ def reindex(sources: "list[Path] | None" = None) -> "dict[str, int]":
         except Exception:  # noqa: BLE001 - transient: the store refused a write
             invalid += 1
             continue
-        known.add(did)
+        known.add(key)
         added += 1
 
     return {
@@ -971,7 +1548,11 @@ def _is_index_line(line: str) -> bool:
     data = rec.get("data") if isinstance(rec, dict) else None
     return (
         isinstance(rec, dict)
-        and rec.get("type") == DECISION_EVENT
+        and rec.get("type") in DECISION_EVENT_TYPES
         and isinstance(data, dict)
-        and bool(data.get("decision_id"))
+        and bool(
+            data.get("decision_id")
+            or data.get("retraction_id")
+            or data.get("target_decision_id")
+        )
     )

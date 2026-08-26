@@ -54,14 +54,15 @@ fn fno_bin() -> PathBuf {
 /// exit, unparseable JSON) - the caller shows the degraded notice; a clean
 /// `Some(vec)` (possibly empty) is a good fold.
 pub async fn fold_now() -> Option<Vec<YardItem>> {
-    let fut = tokio::process::Command::new(fno_bin())
+    let mut command = crate::process_admission::tokio_command(fno_bin());
+    command
         .args(["yard", "--json"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         // Dropped on timeout; kill_on_drop reaps the child so a slow fold
         // can't orphan a Python process on each overlay open.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
     let output = tokio::time::timeout(SHELLOUT_TIMEOUT, fut)
         .await
         .ok()?

@@ -869,6 +869,20 @@ impl AskOutcome {
     }
 }
 
+/// Append the positive daemon ownership proof to the stderr teardown receipt of
+/// the one-shot Codex spawn. Stdout remains the model reply by contract.
+pub fn append_daemon_receipt(
+    outcome: &mut AskOutcome,
+    receipt: &crate::harness_daemon::DaemonReceipt,
+) {
+    if outcome.exit_code == 0 {
+        outcome.stderr.push_str(&format!(
+            "spawn: harness={} durability={} incarnation={} endpoint={}\n",
+            receipt.harness, receipt.durability, receipt.incarnation, receipt.endpoint,
+        ));
+    }
+}
+
 // Validation reuses `claude_ask::validate_inputs` directly — it is the
 // canonical pre-flight gate for `ask` across all providers, mirroring
 // Python's `dispatch.py::_validate_inputs` + `_validate_from_name`. The

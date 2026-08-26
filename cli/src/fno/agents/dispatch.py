@@ -5390,6 +5390,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
         model=ctx.model,
         node=ctx.node,
         to=ctx.to,
+        origin=ctx.origin,
     )
 
 
@@ -5869,6 +5870,7 @@ class _MailCtx:
     # reply-correlatable and dedupable like the name-lane path. None on paths that
     # do not carry a minted id (relay hops), keeping the envelope byte-identical.
     id: Optional[str] = None
+    origin: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -5877,8 +5879,14 @@ def _build_mail_ctx(
     provider_from: Optional[str],
     to: Optional[str] = None,
     id: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
+
+    The ``origin`` kwarg is caller-stated, and an in-process caller never
+    routes through the mail CLI's classify_origin, so the same floor binds
+    here (d-02625dda): an ambient agent identity cannot declare an origin
+    above peer, on any path into an envelope.
 
     ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is the invoking session's real model,
@@ -5894,7 +5902,10 @@ def _build_mail_ctx(
     from fno.mail.envelope import harness_for_provider
 
     from_ = canonical_handle(from_session) if from_session else from_name
+    from fno.decide import enforce_origin_floor
+
     return _MailCtx(
+        origin=enforce_origin_floor(origin),
         from_=from_,
         harness=harness_for_provider(provider_from),
         model=resolve_self_model(),
@@ -5910,6 +5921,17 @@ def _build_mail_ctx(
 # other for the same "did the paste land" question.
 _MUX_CONFIRM_ATTEMPTS = 40
 _MUX_CONFIRM_INTERVAL_S = 0.25
+
+_CODEX_QUEUE_MARKER = "tab to queue message"
+# Substring match, so the bare word subsumes every longer spelling that
+# contains it ("queued review", "review queued"); listing those adds nothing.
+_CODEX_QUEUED_MARKERS = ("queued",)
+_CODEX_ACTIVE_REVIEW_MARKERS = (
+    "review in progress",
+    "reviewing",
+    "review mode",
+    "analyzing diff",
+)
 
 
 def _mux_recipient_transcript(entry: "AgentEntry") -> Optional[Path]:
@@ -5998,7 +6020,9 @@ def _mux_pane_send(
     raw: bool = False,
     gate: Optional[bool] = None,
     failure_out: Optional[list[str]] = None,
-) -> bool:
+    review: bool = False,
+    origin: Optional[str] = None,
+) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded``, the paste rides the server-side turn-taken interlock: a
@@ -6038,6 +6062,17 @@ def _mux_pane_send(
     itself standing in for a confirm, and this flag governs the unguarded path
     replacing it), and ignored for a non-claude recipient, which has no
     ~/.claude/projects transcript to confirm against.
+
+    ``review`` is a private review-request lane. It is only set by the target
+    final-head producer after it has validated the explicit PR payload. On a
+    Codex pane, the submitted payload is then classified from a positive frame:
+    a composer showing ``tab to queue message`` plus the exact payload gets one
+    literal Tab and a second frame must positively show a queued marker plus
+    that same payload; a positive active-review marker returns ``started`` and
+    sends no control key. Markers count only within a few lines of the echoed
+    payload - the same word deep in scrollback does not classify this frame.
+    Any unreadable or unmatched frame returns ``unconfirmed``. Other payloads
+    keep the ordinary boolean contract.
 
     ``raw`` (default False) is the keystroke opt-out. By default the text is
     gated and enveloped through :func:`fno.mail.pane_transport.prepare`, so an
@@ -6191,6 +6226,7 @@ def _mux_pane_send(
                     lane="mux-pane",
                     target_cwd=getattr(entry, "cwd", None),
                     sender=sender,
+                    origin=origin,
                     confirmed=confirmed,
                     source="daemon",
                 ),
@@ -6358,12 +6394,96 @@ def _mux_pane_send(
                 return False
         return True
 
+    def _read_screen() -> Optional[str]:
+        proc = _run(["read", pane])
+        if (
+            proc is None
+            or proc == _MUX_SEND_UNKNOWN
+            or proc.returncode != 0
+        ):
+            return None
+        return proc.stdout or ""
+
+    def _contains_payload(screen: str) -> bool:
+        # Codex may wrap a long slash request across visual lines. Compare the
+        # positive content after collapsing whitespace, never on screen growth.
+        compact = re.sub(r"\s+", " ", screen).strip()
+        expected = re.sub(r"\s+", " ", text).strip()
+        return bool(expected) and expected in compact
+
+    def _payload_signature() -> str:
+        # One distinctive token of the payload, used to bind status markers to
+        # the composer region that echoed THIS request. The same words anywhere
+        # else in scrollback (a "queued" from an earlier turn) must not
+        # classify this frame. Empty for payloads too short to be distinctive,
+        # which fails the caller closed (unconfirmed).
+        words = re.sub(r"\s+", " ", text).strip().lower().split(" ")
+        longest = max(words, key=len) if words else ""
+        return longest if len(longest) >= 4 else ""
+
+    def _marker_near_payload(screen: str, marker: str, window: int = 2) -> bool:
+        # The marker counts only within a few lines of a line carrying the
+        # payload signature: the composer and its status render adjacent, while
+        # scrollback can carry the bare word arbitrarily far away.
+        sig = _payload_signature()
+        if not sig:
+            return False
+        lines = [
+            re.sub(r"\s+", " ", ln).strip().lower() for ln in screen.splitlines()
+        ]
+        for i, ln in enumerate(lines):
+            if marker not in ln:
+                continue
+            near = lines[max(0, i - window) : i + window + 1]
+            if any(sig in other for other in near):
+                return True
+        return False
+
+    def _review_outcome() -> str:
+        if (getattr(entry, "harness", "") or "") != "codex":
+            return "started"
+        # Same settle the Tab gets: classifying before the TUI absorbed the
+        # submit CR reads a pre-submit composer and fires a stray Tab at a
+        # pane whose review already started.
+        time.sleep(enter_delay_s)
+        screen = _read_screen()
+        if screen is None or not _contains_payload(screen):
+            return "unconfirmed"
+        if _marker_near_payload(screen, _CODEX_QUEUE_MARKER):
+            tab_args = ["send", pane, "--text", "\t", "--raw"]
+            if expected_fno_id:
+                tab_args.extend(["--fno-id", str(expected_fno_id)])
+            tab = _run(tab_args)
+            if tab is None or tab == _MUX_SEND_UNKNOWN or tab.returncode != 0:
+                return "unconfirmed"
+            # Same settle the CR gets: reading before the TUI absorbed the Tab
+            # classifies a successfully queued request as unconfirmed.
+            time.sleep(enter_delay_s)
+            queued_screen = _read_screen()
+            if queued_screen is None:
+                return "unconfirmed"
+            if _contains_payload(queued_screen) and any(
+                _marker_near_payload(queued_screen, marker)
+                for marker in _CODEX_QUEUED_MARKERS
+            ):
+                return "queued"
+            return "unconfirmed"
+        if any(
+            _marker_near_payload(screen, marker)
+            for marker in _CODEX_ACTIVE_REVIEW_MARKERS
+        ):
+            return "started"
+        return "unconfirmed"
+
     if guarded:
         sent = _paste_then_submit()
         if not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(sent)
-        return sent
+        outcome: bool | str = sent
+        if sent and review and (getattr(entry, "harness", "") or "") == "codex":
+            outcome = _review_outcome()
+        _audit_raw_inject(outcome in {True, "started", "queued"})
+        return outcome
 
     if not _verify_pane_occupant():
         _audit_raw_inject(False)
@@ -6445,7 +6565,10 @@ def _mux_pane_send(
             return False
     try:
         sent = _paste_then_submit()
-        if sent and confirm:
+        outcome = sent
+        if sent and review and (getattr(entry, "harness", "") or "") == "codex":
+            outcome = _review_outcome()
+        elif sent and confirm:
             # Bytes-written alone is Locked-Decision-4 banned as a hosted
             # verdict; confirm by content against the recipient's own
             # transcript, never optimistically on an unreadable one.
@@ -6455,12 +6578,13 @@ def _mux_pane_send(
             sent = confirm_transcript is not None and confirm_baseline is not None and (
                 _mux_content_confirm(confirm_transcript, marker, confirm_baseline)
             )
+            outcome = "started" if review and sent else sent
             if not sent:
                 _record_failure("unconfirmed")
         elif not sent:
             _record_failure(last_attempt_phase)
-        _audit_raw_inject(sent)
-        return sent
+        _audit_raw_inject(outcome in {True, "started", "queued"})
+        return outcome
     finally:
         if claimed:
             _run(["release", pane])
@@ -6681,6 +6805,7 @@ def _mail_inject_claude(
     reason_out: Optional[list] = None,
     liveness_scaled: bool = False,
     harness: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
@@ -6768,6 +6893,8 @@ def _mail_inject_claude(
     ]
     if sender:
         argv += ["--sender", sender]
+    if origin:
+        argv += ["--origin", origin]
     timeout = _MAIL_INJECT_TIMEOUT_S
     if liveness_scaled:
         argv += ["--attempts", str(_MAIL_INJECT_LIVENESS_SCALED_ATTEMPTS)]
@@ -7209,7 +7336,11 @@ def wake_if_asleep_claude(token: str) -> tuple[bool, Optional[str]]:
 
 
 def _mail_inject_codex(
-    thread_id: str, text: str, *, reason_out: Optional[list] = None
+    thread_id: str,
+    text: str,
+    *,
+    reason_out: Optional[list] = None,
+    origin: Optional[str] = None,
 ) -> bool:
     """Inject ``text`` into a live codex session over the app-server daemon socket
     via the ``fno-agents mail-inject --harness codex`` verb (US8, node x-d899).
@@ -7239,8 +7370,11 @@ def _mail_inject_codex(
     if binary is None:
         return False
     try:
+        argv = [str(binary), "mail-inject", "--harness", "codex", "--session", thread_id]
+        if origin:
+            argv.extend(("--origin", origin))
         proc = subprocess.run(
-            [str(binary), "mail-inject", "--harness", "codex", "--session", thread_id],
+            argv,
             input=text,
             capture_output=True,
             text=True,
@@ -7261,6 +7395,7 @@ def _review_start_codex(
     audit_payload: str | None = None,
     audit_sender: str | None = None,
     audit_target_cwd: str | None = None,
+    origin: str | None = None,
 ) -> dict[str, object]:
     """Start an inline Codex review and preserve its structured outcome receipt."""
     import json
@@ -7285,6 +7420,7 @@ def _review_start_codex(
             ("--audit-payload", audit_payload),
             ("--audit-sender", audit_sender),
             ("--audit-target-cwd", audit_target_cwd),
+            ("--audit-origin", origin),
         ):
             if value is not None:
                 argv.extend((flag, value))
@@ -7404,6 +7540,7 @@ def _deliver_live(
             node=mail.node,
             to=mail.to,
             id=mail.id,
+            origin=mail.origin,
         )
 
     # Dual-run dispatch on the row's live ref (4a-G2): a mux-hosted agent gets
@@ -7526,6 +7663,7 @@ def _deliver_live(
                 harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
+                origin="peer",
             )
     if _switchboard_exchange(
         entry.name,
@@ -7602,6 +7740,7 @@ def _queue_durable_fallback(
     reason: Optional[str] = None,
     mail_ctx: "Optional[_MailCtx]" = None,
     owner: Optional[str] = None,
+    origin: Optional[str] = None,
 ) -> "tuple[str, str]":
     """Write the <fno_mail> envelope to the durable bus.
 
@@ -7661,6 +7800,7 @@ def _queue_durable_fallback(
             # refusal above already proved durable_recipient is not None here.
             to=durable_recipient,
             id=msg_id,
+            origin=origin,
         )
     # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
     # fills one whenever the caller passed none, so the envelope is always
@@ -7674,6 +7814,7 @@ def _queue_durable_fallback(
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
+        origin=mail_ctx.origin,
     )
     from fno import style as _style
 
@@ -7689,6 +7830,7 @@ def _queue_durable_fallback(
             provider_from=provider_from,
             from_session=from_session,
             owner=owner or DurableOwner.WAKE_DAEMON.value,
+            origin=mail_ctx.origin,
             # Count the raw body, not the wire wrapper: Rule 7 and the rolling
             # budget read the same string, so the row must too.
             word_count=_style.word_count(message),
@@ -7834,6 +7976,7 @@ def dispatch_send(
     *,
     registry_stamp_timeout_seconds: float = 1.0,
     budget_enforce: bool = True,
+    origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -8090,6 +8233,7 @@ def dispatch_send(
                 provider_from,
                 to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
+                origin=origin,
             )
             reservation = _reserve_send_budget(
                 sender=mail_ctx.from_,
@@ -8442,6 +8586,7 @@ def dispatch_send(
                     provider_from,
                     to=timeout_recipient,
                     id=msg_id,
+                    origin=origin,
                 )
                 reservation = _reserve_send_budget(
                     sender=timeout_mail_ctx.from_,
@@ -8700,6 +8845,7 @@ def dispatch_send_to_project(
     any_: bool = False,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     budget_enforce: bool = True,
+    origin: Optional[str] = None,
 ) -> "DispatchSendResult":
     """Async send addressed to a project (anycast over the registry).
 
@@ -8746,6 +8892,7 @@ def dispatch_send_to_project(
             cwd=cwd,
             lock_timeout=lock_timeout,
             from_name=from_name,
+            origin=origin,
             **budget_kwargs,
         )
         return replace(result, recipient=res.recipient, to_project=project)
@@ -8796,6 +8943,7 @@ def dispatch_send_to_project(
             # US6: an explicit --to-project note deliberately chose the durable
             # project-inbox lane; the project's own drain owns it.
             owner=DurableOwner.INBOX_DRAIN.value,
+            origin=origin,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         budget.release(reservation)

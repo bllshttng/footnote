@@ -233,6 +233,30 @@ validate_event() {
         fi
     done <<<"$required_fields"
 
+    # Claim records have two truthful PID shapes. A null PID needs the
+    # positive marker and a TTL expiry; an integer PID must not carry the
+    # marker. This mirrors Python events.validate so a missing instrument
+    # cannot read as an intentional PID-unavailable claim.
+    if [[ "$type" == claim_* ]] && jq -e '.data | has("pid")' <<<"$payload" >/dev/null 2>&1; then
+        local pid_kind pid_unavailable marker_type expiry
+        pid_kind=$(jq -r 'if .data.pid == null then "null" else "value" end' <<<"$payload" 2>/dev/null)
+        pid_unavailable=$(jq -r 'if ((.data | has("pid_unavailable")) and (.data.pid_unavailable | type == "boolean") and .data.pid_unavailable) then "true" else "false" end' <<<"$payload" 2>/dev/null)
+        marker_type=$(jq -r 'if ((.data | has("pid_unavailable"))) then (.data.pid_unavailable | type) else "absent" end' <<<"$payload" 2>/dev/null)
+        expiry=$(jq -r 'if ((.data | has("expires_at")) and (.data.expires_at != null)) then "present" else "absent" end' <<<"$payload" 2>/dev/null)
+        if [[ "$marker_type" != "absent" && "$marker_type" != "boolean" ]]; then
+            _ev_warn "event type $type pid_unavailable must be boolean"
+            return 1
+        fi
+        if [[ "$pid_kind" == "null" && ("$pid_unavailable" != "true" || "$expiry" != "present") ]]; then
+            _ev_warn "event type $type null pid requires pid_unavailable=true and expires_at"
+            return 1
+        fi
+        if [[ "$pid_kind" != "null" && "$pid_unavailable" == "true" ]]; then
+            _ev_warn "event type $type pid_unavailable=true requires pid=null"
+            return 1
+        fi
+    fi
+
     # Conditional invariant: gate_bearing=true requires data.gate.
     if [[ "$type" == "phase_transition" && "$gate_bearing" == "true" ]]; then
         local gate_val
@@ -262,6 +286,20 @@ validate_event() {
                 _ev_warn "unknown status: $mc_status"
                 return 1
             fi
+        fi
+    fi
+
+    if [[ "$type" == "failover_swapped" ]]; then
+        local failover_swapped_ok
+        failover_swapped_ok=$(jq -r '
+            (.source == "daemon")
+            and ((.data.short_id | type) == "string")
+            and ((.data.short_id | length) > 0)
+            and ((.data.redispatched | type) == "boolean")
+        ' <<<"$payload" 2>/dev/null || true)
+        if [[ "$failover_swapped_ok" != "true" ]]; then
+            _ev_warn "failover_swapped requires daemon source, non-empty short_id, and boolean redispatched"
+            return 1
         fi
     fi
 

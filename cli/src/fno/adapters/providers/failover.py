@@ -39,6 +39,7 @@ from fno.adapters.providers.error_taxonomy import (
 from fno.adapters.providers.loader import (
     _extract_accounts_block,
     _parse_providers_block,
+    _provider_candidates,
     _read_parsed,
     atomic_mutate_settings,
     mutable_accounts_block,
@@ -197,20 +198,21 @@ def _write_state(state_path: Path, state: FailoverState) -> None:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
 
-def _read_max_swaps_per_phase(settings_path: Path) -> int:
-    """Read config.providers.failover.max_swaps_per_phase from settings.yaml.
+def _read_max_swaps_per_phase(repo_root: Path | None = None) -> int:
+    """Read accounts.failover.max_swaps_per_phase, local merged over global.
 
-    Falls back to ``DEFAULT_MAX_SWAPS_PER_PHASE`` when missing. Hand-walks
-    the YAML to avoid pulling the full pydantic model for one number.
+    The storm cap is config, not state: the records/active snapshot honors the
+    controller's pinned settings_path, but pinning this leaf the same way made
+    a global cap invisible to any project holding a local config.toml. Falls
+    back to ``DEFAULT_MAX_SWAPS_PER_PHASE`` when missing. Hand-walks the file
+    to avoid pulling the full pydantic model for one number.
     """
-    if not settings_path.is_file():
-        return DEFAULT_MAX_SWAPS_PER_PHASE
-    data = _read_parsed(settings_path)
-    providers = _extract_accounts_block(data) or {}
-    block = providers.get("failover", {})
-    if not isinstance(block, dict):
-        return DEFAULT_MAX_SWAPS_PER_PHASE
-    raw = block.get("max_swaps_per_phase")
+    raw: Any = None
+    for path in reversed(_provider_candidates(repo_root)):
+        block = _extract_accounts_block(_read_parsed(path)) or {}
+        failover = block.get("failover")
+        if isinstance(failover, dict) and failover.get("max_swaps_per_phase") is not None:
+            raw = failover["max_swaps_per_phase"]
     try:
         return int(raw) if raw is not None else DEFAULT_MAX_SWAPS_PER_PHASE
     except (TypeError, ValueError):
@@ -344,7 +346,7 @@ class FailoverController:
 
     @property
     def max_swaps_per_phase(self) -> int:
-        return _read_max_swaps_per_phase(self._settings_path)
+        return _read_max_swaps_per_phase()
 
     def snapshot_state(self) -> FailoverState:
         """Return a copy of the current in-memory state."""

@@ -359,7 +359,7 @@ def test_pr270_gemini_default_paths_anchor_to_repo_root(
         f"anchored={anchored_events!r} subdir={subdir_events!r}"
     )
     assert not subdir_events.exists(), (
-        f"event leaked to subdir .fno; defaults are not anchored"
+        "event leaked to subdir .fno; defaults are not anchored"
     )
     # And source auto-detection found the repo-root state file -> "target".
     event = json.loads(anchored_events.read_text().splitlines()[0])
@@ -534,3 +534,202 @@ def test_global_conflicts_with_events_and_writes_nowhere(
     assert "not both" in result.stderr
     assert not global_journal.exists()
     assert not pinned.exists()
+
+
+# ---------------------------------------------------------------------------
+# attester stamping: the caller gets no vote on review_attestation identity
+# ---------------------------------------------------------------------------
+
+
+def _attestation_data() -> dict:
+    return {
+        "reviewer": "code-review",
+        "head_sha": "a" * 40,
+        "verdict": "pass",
+        "session_id": "20260825T000000Z-cl00000-000000",
+    }
+
+
+def test_attestation_stamps_attester_and_witness_from_the_emitting_process(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No caller-supplied attester -> the emit chokepoint stamps the resolved
+    identity and its witness. Both directions of the witness are legal values
+    on the event; gating on witness is a later operator decision."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-A", "process"))
+    events = _events_path(tmp_path)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(_attestation_data()),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(events.read_text().splitlines()[0])["data"]
+    assert data["attester_session_id"] == "sess-A"
+    assert data["attester_witness"] == "process"
+
+
+def test_attestation_env_only_witness_is_recorded_not_refused(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lane whose ancestry is unreadable still attests with witness env_only.
+    A fix that only refuses breaks every unparented lane."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-A", "env_only"))
+    events = _events_path(tmp_path)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(_attestation_data()),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    data = json.loads(events.read_text().splitlines()[0])["data"]
+    assert data["attester_session_id"] == "sess-A"
+    assert data["attester_witness"] == "env_only"
+
+
+def test_attestation_refuses_a_supplied_attester_that_disagrees(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A --data attester_session_id that disagrees with the resolved identity is
+    REFUSED naming both, never silently dropped: the caller gets no vote."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "resolve_attester_identity", lambda: ("sess-true", "process"))
+    events = _events_path(tmp_path)
+    payload = {**_attestation_data(), "attester_session_id": "sess-forged"}
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(payload),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "sess-forged" in result.stderr and "sess-true" in result.stderr
+    assert not events.exists()
+
+
+def test_attestation_refuses_the_ancestry_override_shape(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The command-line override: an ancestor carries a DIFFERENT value for the
+    winning marker. The whole emit is refused naming both ids, and no event is
+    written - this is the refusal that stops one env assignment from
+    refreshing another session's stale verdict onto a head it never saw."""
+    import fno.harness_identity as hi
+
+    def boom():
+        raise hi.AttesterIdentityConflict(
+            "CODEX_THREAD_ID", "sess-true", "sess-forged"
+        )
+
+    monkeypatch.setattr(hi, "resolve_attester_identity", boom)
+    events = _events_path(tmp_path)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit", "--type", "review_attestation",
+            "--data", json.dumps(_attestation_data()),
+            "--events", str(events),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "sess-true" in result.stderr and "sess-forged" in result.stderr
+    assert not events.exists()
+
+
+# ---------------------------------------------------------------------------
+# review_coverage rides the global mirror: a hand emit reaches every reader
+# ---------------------------------------------------------------------------
+
+
+def _coverage_payload() -> dict:
+    return {
+        "pr": 4242,
+        "coverage": "covered",
+        "review_state": "reviewed",
+        "reviewed_count": 1,
+        "verdicts": [
+            {
+                "name": "code-review",
+                "producer": "local_attestation",
+                "verdict": "reviewed",
+            }
+        ],
+        "head_sha": "b" * 40,
+    }
+
+
+def test_hand_emitted_review_coverage_reaches_both_logs(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manual coverage emit from a worktree whose journal is not the global
+    one lands in BOTH: the project log it named and the machine-global log a
+    canonical merge reads. The mirror adds a destination; it moves nothing."""
+    global_journal = tmp_path / "global-events.jsonl"
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+    worktree_log = tmp_path / "worktree" / ".fno" / "events.jsonl"
+    worktree_log.parent.mkdir(parents=True)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "review_coverage",
+            "--data", json.dumps(_coverage_payload()),
+            "--events", str(worktree_log),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+
+    project_rows = [json.loads(ln) for ln in worktree_log.read_text().splitlines()]
+    assert len(project_rows) == 1
+    assert project_rows[0]["type"] == "review_coverage"
+    global_rows = [json.loads(ln) for ln in global_journal.read_text().splitlines()]
+    assert len(global_rows) == 1
+    # The mirrored copy carries the repo scoping a cross-project reader needs;
+    # the project copy needs none.
+    assert "repo" in global_rows[0]["data"]
+    assert "repo" not in project_rows[0]["data"]
+
+
+def test_mirror_does_not_double_when_the_project_log_is_the_global_one(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity guard: when the resolved project log IS the global journal
+    (a --global emit, or a config where both resolve to one file), the row is
+    written once, never twice."""
+    global_journal = tmp_path / "global-events.jsonl"
+    import fno.paths
+
+    monkeypatch.setattr(fno.paths, "global_events_json", lambda: global_journal)
+
+    result = runner.invoke(
+        event_cli,
+        [
+            "emit",
+            "--type", "review_coverage",
+            "--data", json.dumps(_coverage_payload()),
+            "--global",
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    rows = [json.loads(ln) for ln in global_journal.read_text().splitlines()]
+    assert len(rows) == 1

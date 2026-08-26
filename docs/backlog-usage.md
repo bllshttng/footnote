@@ -61,7 +61,7 @@ fno backlog update <id> --size L               # S | M | L
 fno backlog update <id> --type epic            # feature | epic | bug
 fno backlog update <id> --project fno --cwd /path   # reproject (move swimlane)
 fno backlog update <id> --plan-path path/to/plan.md
-fno backlog update <id> --public               # show on the public roadmap
+fno backlog update <id> --no-public            # exclude from public projections
 fno backlog update <id> --source-node x-aaaa   # origin edge (see "Node-to-node edges")
 fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
 ```
@@ -323,13 +323,14 @@ fno workspace worktree policy --repo <path> [--harness claude]
 
 ## Public roadmap
 
-A curated, leak-free view for advertising an OSS project's roadmap. Opt in per node. Nothing is published unless flagged.
+A curated view for advertising an OSS project's roadmap. Qualifying nodes are public by default. Use `--no-public` for an explicit exclusion. One fail-closed title gate protects both public projections.
 
 ```bash
-fno backlog update <id> --public                              # flag a node
-fno backlog roadmap --project fno --out ROADMAP.md --html roadmap.html
+fno backlog update <id> --no-public
+fno backlog roadmap --project fno --out ROADMAP.md \
+  --html roadmap.html --backlog-html backlog.html
 ```
 
-The roadmap emits only title / priority / size grouped Now / Next / Later /
-Shipped (Triage folds into Later). It never exposes IDs, plan paths, or cwd,
-and excludes deferred / superseded nodes.
+The roadmap emits only title / priority / size grouped Now / Next / Later / Shipped (Triage folds into Later). The public backlog groups open `idea`, `ready`, `in_progress`, and `blocked` work by subsystem. Neither projection emits IDs, details, plan paths, cwd, blockers, PR links, or sessions.
+
+Before any public file is replaced, the shared gate scans every emitted title for PR references, graph IDs, home paths, and session IDs. One offender makes the command exit nonzero, prints the complete cleanup queue on private stderr, and leaves every requested output unchanged.

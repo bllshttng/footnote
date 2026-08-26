@@ -172,9 +172,15 @@ else
   # A branch-checked scratch repo to emit from. The emitter refuses a detached
   # HEAD (an empty branch field would mint a pre-branch-field event), and a CI
   # checkout IS detached - $REPO_ROOT is not a place this emitter can run from.
+  # It also measures the diff under review and refuses a zero-line one, so the
+  # fixture carries a base commit on origin/main plus a real feature commit.
   EMITREPO="$TMP/emitrepo"
   git init -q -b scratch/emit "$EMITREPO"
   git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+  git -C "$EMITREPO" update-ref refs/remotes/origin/main "$(git -C "$EMITREPO" rev-parse HEAD)"
+  echo body > "$EMITREPO/a.txt"
+  git -C "$EMITREPO" add a.txt
+  git -C "$EMITREPO" -c user.email=t@t -c user.name=t commit -qm feature
 
   emitter_stored_model() { # args: MODEL BASE -> echoes the stored model value
     local _m="$1" _b="$2"
@@ -204,6 +210,11 @@ else
   }
 
   # model|base|expected-drift
+  # The rows past the original seven are the surfaces the two copies judged
+  # differently before the collapse: bare tier aliases (the emitter's old
+  # claude* glob refused a coherent "opus"), mixed case (case-folded claim and
+  # host), padding, and a userinfo URL (the hook's old host parse kept the
+  # user@ prefix and missed the anthropic host under it).
   MATRIX=(
     "||no"
     "claude-opus-4-8||no"
@@ -212,6 +223,12 @@ else
     "glm-4.6|https://eu.anthropic.com|yes"
     "glm-4.6|https://open.bigmodel.cn/api/anthropic|no"
     "glm-4.6|https://notanthropic.com/api|no"
+    "opus||no"
+    "fable||no"
+    "Claude-Haiku-4-5||no"
+    "opus ||no"
+    "glm-4.6|https://API.Anthropic.com|yes"
+    "glm-4.6|https://key@anthropic.com|yes"
   )
   for row in "${MATRIX[@]}"; do
     IFS='|' read -r m b want <<<"$row"

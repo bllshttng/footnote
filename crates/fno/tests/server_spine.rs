@@ -84,6 +84,12 @@ fn server_command(sock: &Path, shell: &str, env: &[(&str, &str)]) -> Command {
     cmd.env("FNO_CLAUDE_DAEMON_DIR", iso.join("iso-daemon"));
     cmd.env("FNO_GRAPH_JSON", iso.join("iso-graph.json"));
     cmd.env("FNO_CLAIMS_ROOT", &home);
+    cmd.env("FNO_E2E", "1");
+    cmd.env("FNO_PROCESS_ADMISSION_MAX", "512");
+    cmd.env(
+        "FNO_MUX_ADMISSION_NAMESPACE",
+        iso.file_name().unwrap_or_default(),
+    );
     cmd.env(
         "FNO_GLOBAL_SETTINGS_PATH",
         iso.join("iso-cfg").join("settings.json"),
@@ -194,6 +200,7 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::Copy { .. })
             | Ok(ServerMsg::OpenLink { .. })
             | Ok(ServerMsg::SearchResult { .. })
+            | Ok(ServerMsg::LinkHover { .. })
             | Ok(ServerMsg::PeekBody { .. })
             | Ok(ServerMsg::PaneFocused { .. })
             | Ok(ServerMsg::TabList { .. })
@@ -202,7 +209,8 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::TabSpawned { .. })
             | Ok(ServerMsg::LayoutApplied { .. })
             | Ok(ServerMsg::LayoutGrafted { .. })
-            | Ok(ServerMsg::TabLocation { .. }) => {}
+            | Ok(ServerMsg::TabLocation { .. })
+            | Ok(ServerMsg::TabClosed { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),
             Err(fno::proto::ProtoError::Io(e))
                 if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {}

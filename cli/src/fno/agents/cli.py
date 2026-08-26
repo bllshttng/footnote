@@ -2660,6 +2660,56 @@ def cmd_name(
     typer.echo(name)
 
 
+@agents_app.command("rename", hidden=True)
+def cmd_rename(
+    worker: str = typer.Argument(..., help="Current registry label or immutable session id."),
+    new_name: str = typer.Option(..., "--name", help="New mutable registry label."),
+) -> None:
+    """Rename a registry label without changing the worker's session identity."""
+    from fno.agents.registry import AgentResolutionError, rename_agent
+
+    try:
+        entry = rename_agent(worker, new_name)
+    except (AgentResolutionError, ValueError) as exc:
+        typer.echo(f"agents rename: {exc}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"renamed {worker} -> {entry.name} (session={entry.harness_session_id or 'unknown'})")
+
+
+@agents_app.command("retask", hidden=True)
+def cmd_retask(
+    worker: str = typer.Argument(..., help="Blueprint worker registry label or session id."),
+    node: str = typer.Option(..., "--node", help="Target backlog node."),
+    model: Optional[str] = typer.Option(None, "--model"),
+    effort: Optional[str] = typer.Option(None, "--effort"),
+    json_out: bool = typer.Option(False, "--json", "-J"),
+) -> None:
+    """Retask one finished blueprint pane through the verified transaction."""
+    from fno.agents.retask import run_retask
+    from fno.config import load_settings
+
+    try:
+        receipt = run_retask(
+            worker,
+            node=node,
+            settings=load_settings(),
+            model=model,
+            effort=effort,
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.echo(f"agents retask: {exc}", err=True)
+        raise typer.Exit(code=2)
+    if json_out:
+        typer.echo(json.dumps(receipt))
+    else:
+        # Same JSON either way (sorted keys are the only difference): the
+        # receipt is machine-parsed by the king loop, so there is no human
+        # rendering to switch to.
+        typer.echo(json.dumps(receipt, sort_keys=True))
+    if receipt.get("status") != "retasked":
+        raise typer.Exit(code=1)
+
+
 @agents_app.command("spawn-guard", hidden=True)
 def cmd_spawn_guard(
     node_id: str = typer.Argument(
@@ -3196,6 +3246,12 @@ def cmd_heal_token(
         hidden=True,
         help="Resolve against the registry and stores as one namespace.",
     ),
+    cross_project: bool = typer.Option(
+        False,
+        "--cross-project",
+        hidden=True,
+        help="Authorize machine-wide store selection after uniqueness checks.",
+    ),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
@@ -3224,9 +3280,13 @@ def cmd_heal_token(
         from fno.agents.registry import resolve_agent
 
         try:
-            resolved_entry = resolve_agent(
-                token, path=Path(registry) if registry else None
-            ).entry
+            resolved = resolve_agent(
+                token,
+                path=Path(registry) if registry else None,
+                scope_cwd=os.getcwd(),
+                cross_project=cross_project,
+            )
+            resolved_entry = resolved.entry
         except AgentResolutionError as exc:
             if exc.ambiguous:
                 sys.stderr.write(f"{exc}\n")
@@ -3235,19 +3295,26 @@ def cmd_heal_token(
                 sys.stderr.write(f"{exc}\n")
                 raise typer.Exit(code=HEAL_TOKEN_UNAVAILABLE_EXIT)
             raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+        if cross_project and resolved.matched_by == "harness_store":
+            sys.stderr.write("scope=cross-project\n")
         sys.stdout.write(_json.dumps(asdict(resolved_entry)))
         sys.stdout.write("\n")
         return
 
     try:
         entry = resolve_from_harness_store(
-            token, registry_path=Path(registry) if registry else None
+            token,
+            registry_path=Path(registry) if registry else None,
+            scope_cwd=os.getcwd(),
+            cross_project=cross_project,
         )
     except AgentResolutionError as exc:
         sys.stderr.write(f"{exc}\n")
         raise typer.Exit(code=HEAL_TOKEN_AMBIGUOUS_EXIT)
     if entry is None:
         raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+    if cross_project:
+        sys.stderr.write("scope=cross-project\n")
     sys.stdout.write(_json.dumps(asdict(entry)))
     sys.stdout.write("\n")
 
@@ -4384,7 +4451,9 @@ def cmd_rm(
     check does not even cover). Do not tear a session down by hand: the
     harness session record IS the resume handle, and dropping it directly
     spends that handle for nothing this command has not already done. If one
-    is already orphaned, ``fno agents adopt <short-id>`` brings it back.
+    is already orphaned, use the retained full ``harness_session_id`` with
+    ``fno agents adopt``. A short id is only a best-effort lookup while durable
+    harness evidence still resolves it.
 
     Worktrees are NOT removed here (the harness row does not prove that its
     cwd is disposable). Reap them with

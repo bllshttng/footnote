@@ -79,6 +79,13 @@ def test_empty_blocked_by_clears_stale_mirror(tmp_path):
     assert fields["blocked_by"] == []
 
 
+def test_none_difficulty_clears_stale_mirror(tmp_path):
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ndifficulty: high"))
+    assert project_node_to_plan({"difficulty": None}, plan) is True
+    _, fields, _ = read_plan_file(plan)
+    assert "difficulty" not in fields
+
+
 def test_missing_plan_path_warns_no_raise(tmp_path):
     node = {"priority": "p0"}
     assert project_node_to_plan(node, tmp_path / "does-not-exist.md") is False

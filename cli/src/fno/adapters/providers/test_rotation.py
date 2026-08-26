@@ -20,6 +20,17 @@ def _write_settings(path: Path, content: dict) -> None:
     path.write_text(yaml.safe_dump(content, sort_keys=False), encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _pin_fno_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point provider-config discovery at the per-test seed file.
+
+    The candidates walk includes a process-cached resolve_repo_root layer;
+    without a pin, a cwd-fallback freeze from an earlier test can redirect
+    later loads at a RETAINED tmp dir and leak its combos across tests.
+    FNO_CONFIG collapses candidates to the seed every test here writes."""
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "settings.yaml"))
+
+
 def _settings_with_records_and_combos(combos: dict) -> dict:
     """Build a settings.yaml with two providers + the given combos block."""
     return {

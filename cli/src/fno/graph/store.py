@@ -752,6 +752,15 @@ def entries_with_archive(entries: list) -> list:
         return entries
 
 
+def read_graph_with_archive(path: Path | None = None) -> list[dict]:
+    """Read the working graph through the canonical seam, then overlay archive."""
+    if path is None:
+        from fno.paths import graph_json
+
+        path = graph_json()
+    return entries_with_archive(read_graph_strict(path))
+
+
 def read_graph_strict(path: Path = GRAPH_JSON) -> list[dict]:
     """Failure-surfacing counterpart to :func:`read_graph`.
 
@@ -1069,7 +1078,7 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
         try:
             from fno.graph.render_html import render_graph_html
-            render_graph_html(entries, html_target)
+            render_graph_html(entries_with_archive(entries), html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
@@ -1112,6 +1121,28 @@ def append_progress_note(
 
     locked_mutate_graph(path, mutator)
     return result["found"], result["plan_path"]
+
+
+def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | None]:
+    """Append a structured wave note, refusing missing or terminal targets."""
+    from fno.graph._intake import _find_node
+
+    result: dict[str, object] = {"found": False, "error": None}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            result["error"] = f"no node resolves to '{node_id}'"
+            return entries
+        if node.get("completed_at") or node.get("status") in {"done", "superseded"}:
+            result["error"] = f"wave target '{node_id}' is terminal"
+            return entries
+        node.setdefault("progress_notes", []).append(dict(note))
+        result["found"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return bool(result["found"]), result["error"] if isinstance(result["error"], str) else None
 
 
 # Bounded ceiling for harness / session-id strings (x-b6e4). Real ids are UUIDs

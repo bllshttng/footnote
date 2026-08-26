@@ -69,6 +69,18 @@ def test_agents_resume_help_shows_print_command(runner: CliRunner) -> None:
     code, out = _run(runner, "resume", "--help")
     assert code == 0
     assert "--print-command" in out
+    assert "--cwd" in out
+    assert "--cross-project" in out
+
+
+def test_heal_token_accepts_hidden_cross_project_recovery_flag(
+    runner: CliRunner, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_from_harness_store", lambda *args, **kwargs: None
+    )
+    code, _out = _run(runner, "heal-token", "deadbeef", "--cross-project")
+    assert code == 13
 
 
 # x-71b6: the advertised `fno agents` menu (the In-N-Out verbs).
@@ -97,7 +109,7 @@ def test_agents_help_advertises_only_the_eight_menu_verbs(runner: CliRunner) -> 
     assert len(listed) <= 12
 
 
-@pytest.mark.parametrize("verb", ["ask", "whoami", "top", "ping", "rm", "reconcile", "trace"])
+@pytest.mark.parametrize("verb", ["ask", "whoami", "top", "ping", "rm", "reconcile", "trace", "rename", "retask"])
 def test_hidden_python_agents_verbs_stay_invocable(runner: CliRunner, verb: str) -> None:
     """AC2-ERR: a display-hidden Python agents verb still runs its own --help."""
     code, out = _run(runner, verb, "--help")

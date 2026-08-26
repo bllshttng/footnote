@@ -295,6 +295,12 @@ pub(crate) struct Settings {
     /// absent, normalized to true (the obligation defaults ON); `false` is the
     /// documented escape hatch.
     self_review_required: Option<bool>,
+    /// config.review.require_corroboration (default false): when true, a PR
+    /// whose only coverage is the author's own (self_attested) local
+    /// attestation reads as uncovered. Recorded policy, not a proof upgrade:
+    /// an other_session attestation is still not "independent", but it is a
+    /// SECOND session, which is what this key demands.
+    require_corroboration: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -723,6 +729,34 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         }
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
+        }
+        if let Some(v) = review.get("require_corroboration") {
+            // String spellings parse the way pydantic's lax bool coerces them
+            // ("true"/"false"/"yes"/"no"/"on"/"off"/"1"/"0"), so the two gates
+            // cannot disagree on a config that loads at all. Anything else
+            // stays None -> false here; the Python config loader rejects it,
+            // so no config can load green on one side and parse false on the
+            // other.
+            s.require_corroboration = v
+                .as_bool()
+                .or_else(|| {
+                    v.as_integer().and_then(|i| match i {
+                        1 => Some(true),
+                        0 => Some(false),
+                        _ => None,
+                    })
+                })
+                .or_else(|| {
+                    v.as_str()
+                        // pydantic's lax bool spellings in full, so one config
+                        // cannot load true on the Python side and parse false
+                        // here (round 2: "t"/"y" and the bare integers).
+                        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                            "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                            "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                            _ => None,
+                        })
+                });
         }
         if let Some(v) = review.get("self_review_required") {
             // A malformed value stays None -> normalized to true (obligation on,
@@ -1190,14 +1224,15 @@ fn is_documentation_path(path: &str) -> bool {
     p.ends_with(".md") || p.starts_with("docs/")
 }
 
-/// Whether the author harness has a self-review verb (claude `/code-review`,
-/// codex `/review`, opencode `/review-changes`). The self-review floor only
-/// applies on these: gemini/agy have no native review verb, so flooring
-/// code-review would demand an attestation nothing produces and wedge the
-/// loop. Their path is route 3 (a spawned reviewer), which is deferred. Pure
-/// so a unit test pins the set.
+/// Whether a lane THIS code drives can fire the harness's review verb (claude
+/// `/code-review`, codex `/review`). The self-review floor only applies on
+/// these: gemini/agy have no native review verb and opencode's recorded
+/// `/review-changes` has no fireable lane (the daemon lane submits text, the
+/// mux row declares submit unsupported), so flooring code-review would demand
+/// an attestation nothing produces and wedge the loop. Their path is route 3
+/// (a spawned reviewer), which is deferred. Pure so a unit test pins the set.
 fn harness_can_self_review(harness: Option<&str>) -> bool {
-    matches!(harness, Some("claude") | Some("codex") | Some("opencode"))
+    matches!(harness, Some("claude") | Some("codex"))
 }
 
 /// The KNOWN harnesses with no native self-review verb. A set, not
@@ -1207,12 +1242,13 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 /// `cli/src/fno/review_capability.py`; the two are pinned to each other by
 /// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
 /// on both sides or the suite goes red.
-const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy"];
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy", "opencode"];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
 /// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
-/// harness (gemini/agy) does not, because the floor would demand an
+/// harness (gemini/agy; opencode's verb is recorded but no lane this code
+/// drives can fire it) does not, because the floor would demand an
 /// attestation no native verb there produces. An UNRESOLVED harness (absent
 /// or ambiguous ambient markers - a claude session started from a codex
 /// shell) floors, because ambiguity about who authored the run is not
@@ -1269,25 +1305,24 @@ fn floor_self_review(
 /// stale pre-migration sibling would size the payload from a whole era.
 fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
-        let range = format!("{base}...HEAD");
-        let out = Command::new(git_bin)
-            .args(["diff", "--name-only", &range])
-            .current_dir(cwd)
-            .output();
-        if let Ok(o) = out {
+        if let Some(o) = git_bounded(
+            git_bin,
+            &["diff", "--name-only", &format!("{base}...HEAD")],
+            cwd,
+        ) {
             if o.status.success() {
                 let paths = String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1497,17 +1532,17 @@ fn pr_code_diff_identity(
     base: &str,
     sha: &str,
 ) -> Option<CodeDiffIdentity> {
-    let out = Command::new(git_bin)
-        .args([
+    let out = git_bounded(
+        git_bin,
+        &[
             "diff",
             "--raw",
             "--no-abbrev",
             "--no-renames",
             &format!("{base}...{sha}"),
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+    )?;
     if !out.status.success() {
         return None;
     }
@@ -1534,11 +1569,7 @@ fn pr_code_diff_identity(
 
 /// Paths differing between two TREES (two-dot), or `None` on git failure.
 fn git_tree_paths(git_bin: &str, cwd: &Path, a: &str, b: &str) -> Option<Vec<String>> {
-    let out = Command::new(git_bin)
-        .args(["diff", "--name-only", "--no-renames", a, b])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["diff", "--name-only", "--no-renames", a, b], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -1633,12 +1664,8 @@ impl<'a> FreshnessResolver<'a> {
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
-    let out = Command::new(git_bin)
-        .args(["rev-parse", "HEAD"])
-        .current_dir(cwd)
-        .output();
-    match out {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    match git_bounded(git_bin, &["rev-parse", "HEAD"], cwd) {
+        Some(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
 }
@@ -1653,11 +1680,10 @@ fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
 /// A git that cannot answer reads as DIRTY, so an unreadable tree never
 /// widens what counts as shipped.
 fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
-    let out = Command::new(git_bin)
-        .args(["status", "--porcelain"])
-        .current_dir(cwd)
-        .output();
-    matches!(out, Ok(o) if o.status.success() && o.stdout.is_empty())
+    matches!(
+        git_bounded(git_bin, &["status", "--porcelain"], cwd),
+        Some(o) if o.status.success() && o.stdout.is_empty()
+    )
 }
 
 /// True when local HEAD carries nothing the base does not already have.
@@ -1676,27 +1702,26 @@ fn git_tree_clean(git_bin: &str, cwd: &Path) -> bool {
 /// [`head_is_shipped`].
 fn git_head_on_base(git_bin: &str, cwd: &Path) -> bool {
     for base in ["origin/main", "origin/master"] {
-        let verify = Command::new(git_bin)
-            .args([
+        match git_bounded(
+            git_bin,
+            &[
                 "rev-parse",
                 "--verify",
                 "--quiet",
                 &format!("{base}^{{commit}}"),
-            ])
-            .current_dir(cwd)
-            .output();
-        match verify {
-            Ok(v) if v.status.success() => {}
+            ],
+            cwd,
+        ) {
+            Some(v) if v.status.success() => {}
             _ => continue,
         }
         // `--is-ancestor` exits 0 when HEAD is reachable from base, 1 when it
         // is not, and >1 on a real error. Only a clean 0 counts, so an errored
         // probe reads as "not shipped" rather than as consent to terminate.
-        let out = Command::new(git_bin)
-            .args(["merge-base", "--is-ancestor", "HEAD", base])
-            .current_dir(cwd)
-            .output();
-        return matches!(out, Ok(o) if o.status.success());
+        return matches!(
+            git_bounded(git_bin, &["merge-base", "--is-ancestor", "HEAD", base], cwd),
+            Some(o) if o.status.success()
+        );
     }
     false
 }
@@ -1731,11 +1756,7 @@ fn head_is_shipped(pr: &PrInfo, local_head: &str, git_bin: &str, cwd: &Path) -> 
 }
 
 fn git_head_branch(git_bin: &str, cwd: &Path) -> Option<String> {
-    let out = Command::new(git_bin)
-        .args(["branch", "--show-current"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    let out = git_bounded(git_bin, &["branch", "--show-current"], cwd)?;
     if !out.status.success() {
         return None;
     }
@@ -1786,7 +1807,7 @@ fn read_pr_view(
     gh_bin: &str,
     cwd: &Path,
     selector: Option<&str>,
-) -> Result<Option<Value>, (String, String)> {
+) -> Result<Option<Value>, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let metadata_read = if rest_adapter {
         "pr_info_rest"
@@ -1803,21 +1824,26 @@ fn read_pr_view(
         args.push(selector);
     }
     args.extend(["--json", PR_VIEW_FIELDS]);
-    let out = Command::new(gh_bin)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|e| (metadata_read.to_string(), e.to_string()))?;
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &args,
+        cwd,
+        metadata_read,
+        stopgate_read_timeout(),
+    )?;
     if !out.status.success() {
-        return if is_no_pr_stderr(&out.stderr) {
+        return if is_no_pr_stderr(&out.stderr_tail) {
             Ok(None)
         } else {
-            Err((metadata_read.to_string(), stderr_tail(&out.stderr)))
+            Err(GhReadError::failed(
+                metadata_read,
+                stderr_tail(&out.stderr_tail),
+            ))
         };
     }
     serde_json::from_slice(&out.stdout)
         .map(Some)
-        .map_err(|_| (metadata_parse.to_string(), String::new()))
+        .map_err(|_| GhReadError::parse_failed(metadata_parse))
 }
 
 /// Resolve a numeric PR selector without consulting the checkout branch.
@@ -1830,7 +1856,7 @@ fn read_pr_head_oid(
     gh_bin: &str,
     cwd: &Path,
     selector: &str,
-) -> Result<Option<(String, Value)>, (String, String)> {
+) -> Result<Option<(String, Value)>, GhReadError> {
     let Some(pr_json) = read_pr_view(gh_bin, cwd, Some(selector))? else {
         return Ok(None);
     };
@@ -1840,7 +1866,7 @@ fn read_pr_head_oid(
         } else {
             "pr_view_parse"
         };
-        (read.to_string(), "missing headRefOid".to_string())
+        GhReadError::failed(read, "missing headRefOid".to_string())
     })?;
     Ok(Some((head, pr_json)))
 }
@@ -1869,11 +1895,16 @@ struct GraphqlQuota {
 const GRAPHQL_FLOOR: i64 = 200;
 
 fn probe_graphql_quota(gh_bin: &str, cwd: &Path) -> Option<GraphqlQuota> {
-    let out = Command::new(gh_bin)
-        .args(["api", "rate_limit"])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+    // Advisory by contract: any failure (including a timeout kill) is None -
+    // a failed probe must never fabricate an exhaustion verdict.
+    let out = bounded_read(
+        gh_bin.as_ref(),
+        &["api", "rate_limit"],
+        cwd,
+        "graphql_quota",
+        stopgate_read_timeout(),
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -2247,6 +2278,12 @@ pub fn unattested_reviewers_scan(
         if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
             continue;
         }
+        // The SAME zero-evidence predicate the coverage axis uses: a review
+        // of nothing must not satisfy the config.review.reviewers gate either,
+        // which is the surface that floors the self-review obligation.
+        if zero_evidence_attestation(&val) {
+            continue;
+        }
         // The SAME predicate the coverage axis uses, not a second head-equality
         // rule beside it. Leaving this one a bare equality would have made the
         // softening decorative: this is the scan that satisfies
@@ -2403,6 +2440,7 @@ fn read_pr_info(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -2413,7 +2451,8 @@ fn read_pr_info(
     author_session: Option<&str>,
     pr_selector: Option<&str>,
     prefetched_pr_json: Option<Value>,
-) -> Result<PrInfo, (String, String)> {
+    require_corroboration: bool,
+) -> Result<PrInfo, GhReadError> {
     let rest_adapter = internal_gh_adapter(gh_bin);
     let checks_read = if rest_adapter {
         "pr_status_rest"
@@ -2548,33 +2587,30 @@ fn read_pr_info(
     let (ci_conclusion, failing_checks, ci_has_pending) = if no_hosted_ci {
         (CiConclusion::Skipped, Vec::new(), false)
     } else {
-        let checks_out = Command::new(gh_bin)
-            .args(["pr", "checks"])
-            .args(&sel)
-            .args(["--json", "name,state,bucket,startedAt,workflow"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| (checks_read.to_string(), e.to_string()))?;
+        let mut checks_args = vec!["pr", "checks"];
+        checks_args.extend(sel.iter().copied());
+        checks_args.extend(["--json", "name,state,bucket,startedAt,workflow"]);
+        let checks_out = bounded_read(
+            gh_bin.as_ref(),
+            &checks_args,
+            cwd,
+            checks_read,
+            stopgate_read_timeout(),
+        )?;
 
         if !checks_out.status.success() {
-            return Err((checks_read.to_string(), stderr_tail(&checks_out.stderr)));
+            return Err(GhReadError::failed(
+                checks_read,
+                stderr_tail(&checks_out.stderr_tail),
+            ));
         }
 
         let checks: Value = serde_json::from_slice(&checks_out.stdout)
-            .map_err(|_| (checks_parse.to_string(), String::new()))?;
-        // One dedup feeds every reader of this payload, so the conclusion, the
-        // failing-name set, and the pending flag can never answer off different
-        // rollups (a superseded run read as the current one is the exact lie
-        // this dedup exists to remove).
-        let checks = latest_per_name(&checks);
-
-        let failing = failing_check_names(&checks);
-        let has_pending = ci_has_pending_checks(&checks);
-        (
-            compute_ci_conclusion(&checks).map_err(|e| (e, String::new()))?,
-            failing,
-            has_pending,
-        )
+            .map_err(|_| GhReadError::parse_failed(checks_parse))?;
+        // One truth table for the payload (classify_checks_payload): the
+        // conclusion, the failing-name set, and the pending flag can never
+        // answer off different rollups.
+        classify_checks_payload(&checks).map_err(|e| GhReadError::parse_failed(&e))?
     };
 
     // Reads 3+4: reviews + inline findings. Skipped when the session declares
@@ -2595,7 +2631,7 @@ fn read_pr_info(
     // (fixes a fail-open the sigma review caught). `reviewers` is empty for
     // every pre-x-e703 config, so `reviewers_all_attested` is vacuously true
     // there and this changes nothing for them.
-    let login_gate_active = !required_bots.is_empty() || !optional_bots.is_empty();
+    let login_gate_active = !required_bots.is_empty() || optional_lane_configured;
     let login_skipped = no_external || !login_gate_active;
     // One scan feeds both the gate and its explanation, so the two cannot
     // disagree the way the decision and the message did on PR #618.
@@ -2623,20 +2659,38 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage = classify_coverage(
+        // The GitHub axis was intentionally not queried. That is a known
+        // zero ONLY when nothing was configured to read: the skip is the
+        // inactive gate, with or without no_external. A `no_external` session
+        // on a repo with an ACTIVE login gate suppressed reads the config
+        // demanded, so the honest answer for that axis is Unknown with its
+        // retry remedy - reporting a healthy read of zero bots fabricated
+        // "uncovered" and an instrument-health receipt for reviews that were
+        // never queried. A fresh local pass still rescues it inside
+        // classify_coverage (positive evidence).
+        let mut coverage = classify_coverage(
             &[],
             &[],
             &events_text,
             &[],
-            false,
+            !(no_external && login_gate_active),
             author_session,
             &freshness,
             &head_branch,
             head_sha,
         );
+        // Same capture-then-apply order as the external-read arm below: the
+        // predicate reads the pre-downgrade report, and the `reviewed` verdict
+        // needs the same corroboration term or the loop finishes DonePRGreen
+        // on a self-attested-only row the merge verb refuses (round 3: the
+        // solo lane - reviewers configured, no bots, no optional lane - takes
+        // this arm every time).
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
+        coverage.apply_corroboration_policy(require_corroboration);
         (
             "none".to_string(),
-            reviewers_ok,
+            reviewers_ok
+                && CoverageReport::corroboration_term(require_corroboration, self_attested_alone),
             Vec::new(),
             Vec::new(),
             Vec::new(),
@@ -2645,24 +2699,33 @@ fn read_pr_info(
         )
     } else {
         // Read 3: top-level reviews + issue comments
-        let reviews_out = Command::new(gh_bin)
-            .args(["pr", "view"])
-            .args(&sel)
-            .args(["--json", "reviews,comments"])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
+        let mut reviews_args = vec!["pr", "view"];
+        reviews_args.extend(sel.iter().copied());
+        reviews_args.extend(["--json", "reviews,comments"]);
+        let reviews_out = bounded_read(
+            gh_bin.as_ref(),
+            &reviews_args,
+            cwd,
+            "pr_reviews",
+            stopgate_read_timeout(),
+        )?;
 
         if !reviews_out.status.success() {
-            return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
+            return Err(GhReadError::failed(
+                "pr_reviews",
+                stderr_tail(&reviews_out.stderr_tail),
+            ));
         }
 
         let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
-            .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
+            .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"))?;
 
         // PRESENCE is required-only: an optional login's absence must never
-        // create a missing_bot (never wait for it). FINDINGS honor the union:
-        // an optional login's blocking P1 still holds the gate ("honor if
+        // create a missing_bot (never wait for it), and its STALENESS must
+        // never reach stale_bots either - an optional bot reading an older
+        // commit is not a property any reviewer owes, so it may neither block
+        // nor disqualify local-review recovery. FINDINGS honor the union: an
+        // optional login's blocking P1 still holds the gate ("honor if
         // present"). A dedup keeps a login that is in both lists counted once.
         let info = compute_review_info(&reviews_json, required_bots, &freshness);
         // Per-outstanding-bot nudge classification (x-b167), computed AFTER the
@@ -2715,30 +2778,29 @@ fn read_pr_info(
         // the /pulls/N/comments REST endpoint, which `gh pr view --json
         // comments` does NOT return (verified on PR #447). --paginate may
         // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
-        let comments_out = Command::new(gh_bin)
-            .args([
-                "api",
-                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
-                "--paginate",
-            ])
-            .current_dir(cwd)
-            .output()
-            .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
+        let pulls_target = format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments");
+        let comments_out = bounded_read(
+            gh_bin.as_ref(),
+            &["api", &pulls_target, "--paginate"],
+            cwd,
+            "pulls_comments",
+            stopgate_read_timeout(),
+        )?;
 
         if !comments_out.status.success() {
-            return Err((
-                "pulls_comments".to_string(),
-                stderr_tail(&comments_out.stderr),
+            return Err(GhReadError::failed(
+                "pulls_comments",
+                stderr_tail(&comments_out.stderr_tail),
             ));
         }
 
         let mut inline_comments: Vec<Value> = Vec::new();
         for page in serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
         {
-            let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
+            let page = page.map_err(|_| GhReadError::parse_failed("pulls_comments_parse"))?;
             match page.as_array() {
                 Some(arr) => inline_comments.extend(arr.iter().cloned()),
-                None => return Err(("pulls_comments_parse".to_string(), String::new())),
+                None => return Err(GhReadError::parse_failed("pulls_comments_parse")),
             }
         }
 
@@ -2749,18 +2811,24 @@ fn read_pr_info(
                 && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or("")).is_some()
         });
         let commit_dates: Vec<String> = if has_blocking_candidate {
-            let commits_out = Command::new(gh_bin)
-                .args(["pr", "view"])
-                .args(&sel)
-                .args(["--json", "commits"])
-                .current_dir(cwd)
-                .output()
-                .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
+            let mut commits_args = vec!["pr", "view"];
+            commits_args.extend(sel.iter().copied());
+            commits_args.extend(["--json", "commits"]);
+            let commits_out = bounded_read(
+                gh_bin.as_ref(),
+                &commits_args,
+                cwd,
+                "pr_commits",
+                stopgate_read_timeout(),
+            )?;
             if !commits_out.status.success() {
-                return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
+                return Err(GhReadError::failed(
+                    "pr_commits",
+                    stderr_tail(&commits_out.stderr_tail),
+                ));
             }
             let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
-                .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
+                .map_err(|_| GhReadError::parse_failed("pr_commits_parse"))?;
             commits_json
                 .get("commits")
                 .and_then(|v| v.as_array())
@@ -2833,7 +2901,7 @@ fn read_pr_info(
             }
         }
         // github_read_ok is true here: a failed gh read returned Err above.
-        let coverage = classify_coverage(
+        let mut coverage = classify_coverage(
             reviews_arr,
             comments_arr,
             &events_text,
@@ -2844,14 +2912,23 @@ fn read_pr_info(
             &head_branch,
             head_sha,
         );
-        let local_recovery = !info.reviewer_refused.is_empty()
-            && info.missing_bots.is_empty()
-            && info.stale_bots.is_empty()
-            && coverage.verdicts.iter().any(|verdict| {
-                verdict.producer == CoverageProducer::LocalAttestation
-                    && verdict.verdict == CoverageVerdict::Reviewed
-            });
+        // The predicate reads the pre-downgrade report (the policy below only
+        // flips the covered state, preserving verdicts), so capture it first.
+        let self_attested_alone = coverage.rests_on_self_attestation_alone();
+        coverage.apply_corroboration_policy(require_corroboration);
+        let local_recovery = local_recovery_from_refusal(
+            &info.reviewer_refused,
+            &info.missing_bots,
+            &info.stale_bots,
+            &coverage,
+        );
+        // The corroboration policy must reach the `reviewed` verdict itself,
+        // not only the coverage axis: the DonePRGreen conjunct below reads
+        // this field and never consults coverage, so without this line the
+        // loop can finish a PR the merge gate refuses on the same row - the
+        // two surfaces this repo keeps unified would split under the flag.
         let reviewed = (info.all_required_passed() || local_recovery)
+            && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok;
         (
@@ -2965,6 +3042,46 @@ fn latest_per_name(checks: &Value) -> Value {
     Value::Array(kept)
 }
 
+fn without_coverage_statuses(checks: &Value) -> Value {
+    let Some(arr) = checks.as_array() else {
+        return checks.clone();
+    };
+    Value::Array(
+        arr.iter()
+            .filter(|check| {
+                let name = check.get("name").and_then(|v| v.as_str());
+                let context = check.get("context").and_then(|v| v.as_str());
+                let is_coverage = |value: Option<&str>| {
+                    value == Some(COVERAGE_STATUS_CONTEXT)
+                        || value == Some(COVERAGE_UNAVAILABLE_STATUS_CONTEXT)
+                };
+                !is_coverage(name) && !is_coverage(context)
+            })
+            .cloned()
+            .collect(),
+    )
+}
+
+/// One truth table for a `gh pr checks --json` payload: dedup to the latest
+/// run per name, drop the coverage projections, then derive the conclusion,
+/// the failing names, and the pending flag. A rollup the filter EMPTIED
+/// (only the two coverage contexts existed) reads Pending - "CI has not
+/// reported yet", never the declared-none None, matching the Python twin's
+/// unknown - and its pending flag is set too, so the wait stays watchable
+/// instead of a non-idlable re-invoke loop.
+fn classify_checks_payload(checks: &Value) -> Result<(CiConclusion, Vec<String>, bool), String> {
+    let deduped = latest_per_name(checks);
+    let had_rows = deduped.as_array().map(|a| !a.is_empty()).unwrap_or(false);
+    let filtered = without_coverage_statuses(&deduped);
+    let mut conclusion = compute_ci_conclusion(&filtered)?;
+    let emptied = had_rows && matches!(conclusion, CiConclusion::None);
+    if emptied {
+        conclusion = CiConclusion::Pending;
+    }
+    let pending = emptied || ci_has_pending_checks(&filtered);
+    Ok((conclusion, failing_check_names(&filtered), pending))
+}
+
 fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     let arr = match checks.as_array() {
         Some(a) => a,
@@ -3007,6 +3124,34 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
         return Ok(CiConclusion::Pending);
     }
     Ok(CiConclusion::Success)
+}
+
+/// The local-review recovery from refusal: a REQUIRED bot explicitly refused
+/// (not merely absent - that is a wait), nothing else required is missing or
+/// stale, and a fresh local attestation at HEAD exists.
+///
+/// Optional staleness deliberately plays no part: an optional bot reading an
+/// older commit is not a property any reviewer owes, and letting it disqualify
+/// recovery wedges exactly the lanes the recovery exists to unwedge (PR 1151:
+/// attestation minted, reviewed_count 1, gate still uncovered until the bot
+/// was re-triggered and waited out). The three bot inputs are REQUIRED-only by
+/// construction (`compute_review_info` walks `required_bots` alone), and that
+/// is the invariant this split exists to state. Required staleness still
+/// disqualifies: a stale REQUIRED verdict is one re-read from counting, and
+/// recovery must not skip past it.
+fn local_recovery_from_refusal(
+    reviewer_refused: &[String],
+    missing_bots: &[String],
+    stale_bots: &[(String, String)],
+    coverage: &CoverageReport,
+) -> bool {
+    !reviewer_refused.is_empty()
+        && missing_bots.is_empty()
+        && stale_bots.is_empty()
+        && coverage.verdicts.iter().any(|verdict| {
+            verdict.producer == CoverageProducer::LocalAttestation
+                && verdict.verdict == CoverageVerdict::Reviewed
+        })
 }
 
 /// True when explicit reviewer refusal is the only remaining review obstacle.
@@ -3131,8 +3276,10 @@ fn is_pre_existing_main_red(pr_failing: &[String], main_failing: &[String]) -> b
 /// with no failures on HEAD returns `Some(empty)` -> the subset rule then fails
 /// and the caller holds; only positive proof fires the terminal.
 fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<String>> {
-    let list_out = Command::new(gh_bin)
-        .args([
+    let limit = n.to_string();
+    let list_out = match bounded_read(
+        gh_bin.as_ref(),
+        &[
             "run",
             "list",
             "--branch",
@@ -3140,18 +3287,41 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
             "--status",
             "completed",
             "--limit",
-            &n.to_string(),
+            &limit,
             "--json",
             "databaseId,conclusion,headSha",
-        ])
-        .current_dir(cwd)
-        .output()
-        .ok()?;
+        ],
+        cwd,
+        "main_run_list",
+        stopgate_read_timeout(),
+    ) {
+        Ok(out) => out,
+        Err(error) => {
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     if !list_out.status.success() {
+        let error = GhReadError::failed("main_run_list", stderr_tail(&list_out.stderr_tail));
+        log_bounded_read_error("main-head", &error);
         return None; // gh error -> unknown -> hold
     }
-    let list: Value = serde_json::from_slice(&list_out.stdout).ok()?;
-    let arr = list.as_array()?;
+    let list: Value = match serde_json::from_slice(&list_out.stdout) {
+        Ok(value) => value,
+        Err(parse_error) => {
+            let error = GhReadError::failed("main_run_list_parse", parse_error.to_string());
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
+    let arr = match list.as_array() {
+        Some(array) => array,
+        None => {
+            let error = GhReadError::parse_failed("main_run_list_shape");
+            log_bounded_read_error("main-head", &error);
+            return None;
+        }
+    };
     // Zero completed runs (new/quiet repo) is not proof -> unknown.
     // The newest run's headSha IS the current main HEAD; classify against only
     // that commit's runs so a failure fixed on a later commit never counts.
@@ -3164,15 +3334,33 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
 
     let mut names: Vec<String> = Vec::new();
     for id in failing_run_ids {
-        let view_out = Command::new(gh_bin)
-            .args(["run", "view", &id.to_string(), "--json", "jobs"])
-            .current_dir(cwd)
-            .output()
-            .ok()?;
+        let id_arg = id.to_string();
+        let view_out = match bounded_read(
+            gh_bin.as_ref(),
+            &["run", "view", &id_arg, "--json", "jobs"],
+            cwd,
+            "main_run_view",
+            stopgate_read_timeout(),
+        ) {
+            Ok(out) => out,
+            Err(error) => {
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         if !view_out.status.success() {
+            let error = GhReadError::failed("main_run_view", stderr_tail(&view_out.stderr_tail));
+            log_bounded_read_error("main-head", &error);
             return None; // any per-run gh error -> unknown -> hold (fail closed)
         }
-        let view: Value = serde_json::from_slice(&view_out.stdout).ok()?;
+        let view: Value = match serde_json::from_slice(&view_out.stdout) {
+            Ok(value) => value,
+            Err(parse_error) => {
+                let error = GhReadError::failed("main_run_view_parse", parse_error.to_string());
+                log_bounded_read_error("main-head", &error);
+                return None;
+            }
+        };
         for name in parse_failing_job_names(&view) {
             if !names.contains(&name) {
                 names.push(name);
@@ -3230,18 +3418,17 @@ fn post_nudge_comment(gh_bin: &str, cwd: &Path, pr_number: i64, review_handle: &
     if std::env::var("FNO_LOOPCHECK_NO_COMMENT").as_deref() == Ok("1") {
         return false;
     }
-    Command::new(gh_bin)
-        .args([
-            "pr",
-            "comment",
-            &pr_number.to_string(),
-            "--body",
-            review_handle,
-        ])
-        .current_dir(cwd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    let pr_arg = pr_number.to_string();
+    matches!(
+        bounded_read(
+            gh_bin.as_ref(),
+            &["pr", "comment", &pr_arg, "--body", review_handle],
+            cwd,
+            "nudge_comment",
+            stopgate_read_timeout(),
+        ),
+        Ok(out) if out.status.success()
+    )
 }
 
 /// The first missing bot that has been nudged to its ceiling and gone silent, if
@@ -3257,6 +3444,24 @@ fn unresponsive_bot(pr: &PrInfo) -> Option<&BotNudge> {
 /// and refresher workflow pin the same name from their own surfaces, and a
 /// context string that splits in two is a green marker on nothing.
 const COVERAGE_STATUS_CONTEXT: &str = "fno/review-coverage";
+const COVERAGE_UNAVAILABLE_STATUS_CONTEXT: &str = "fno/review-coverage-unavailable";
+
+fn coverage_unavailable_description(head: &str) -> String {
+    format!(
+        "coverage read unavailable at {}; retry the review verb",
+        short_sha(head)
+    )
+}
+
+fn coverage_instrument_status(coverage: &Coverage, head: &str) -> (&'static str, String) {
+    match coverage {
+        Coverage::Unknown => ("pending", coverage_unavailable_description(head)),
+        Coverage::Covered(_) => (
+            "success",
+            format!("coverage read healthy at {}", short_sha(head)),
+        ),
+    }
+}
 
 /// Whether `name` is the local reviewer Python's gate demands a pass from,
 /// with the same leading-slash tolerance `_coverage_has_local_pass` applies.
@@ -3264,8 +3469,11 @@ fn is_code_review_reviewer(name: &str) -> bool {
     normalize_reviewer(name) == "code-review"
 }
 
-fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<String> {
-    let out = out.ok()?;
+/// A bounded run's successful stdout: the completed payload's stdout when
+/// the child exited zero. A timeout or unrunnable child is not a success
+/// (None), which preserves each caller's degrade semantics.
+fn bounded_success_text(result: Result<BoundedOutput, GhReadError>) -> Option<String> {
+    let out = result.ok()?;
     out.status
         .success()
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
@@ -3297,19 +3505,23 @@ fn successful_output_text(out: std::io::Result<std::process::Output>) -> Option<
 /// description before deciding whether an override green needs protection.
 fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<bool> {
     for attempt in 1..=3 {
-        let out = Command::new(gh_bin)
-            .args([
+        let pr_arg = pr_number.to_string();
+        let out = bounded_read(
+            gh_bin.as_ref(),
+            &[
                 "pr",
                 "view",
-                &pr_number.to_string(),
+                &pr_arg,
                 "--json",
                 "labels",
                 "--jq",
                 "[.labels[].name] | index(\"coverage-override\") != null",
-            ])
-            .current_dir(cwd)
-            .output();
-        if let Some(text) = successful_output_text(out) {
+            ],
+            cwd,
+            "coverage_override_label",
+            stopgate_read_timeout(),
+        );
+        if let Some(text) = bounded_success_text(out) {
             match text.as_str() {
                 "true" => return Some(true),
                 "false" => return Some(false),
@@ -3328,27 +3540,36 @@ fn pr_has_override_label(gh_bin: &str, cwd: &Path, pr_number: i64) -> Option<boo
 
 fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<String> {
     let target = format!("repos/:owner/:repo/commits/{head}/status");
-    successful_output_text(
-        Command::new(gh_bin)
-        .args([
+    bounded_success_text(bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             target.as_str(),
             "--jq",
             "[.statuses[] | select(.context == \"fno/review-coverage\")] | first | .description // \"\"",
-        ])
-        .current_dir(cwd)
-        .output(),
-    )
+        ],
+        cwd,
+        "coverage_status_read",
+        stopgate_read_timeout(),
+    ))
 }
 
 /// The one POST shape every coverage-marker writer uses.
-fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, description: &str) {
+fn post_coverage_status(
+    gh_bin: &str,
+    cwd: &Path,
+    head: &str,
+    context: &str,
+    state: &str,
+    description: &str,
+) {
     let target = format!("repos/:owner/:repo/statuses/{head}");
     let state_arg = format!("state={state}");
-    let context_arg = format!("context={COVERAGE_STATUS_CONTEXT}");
+    let context_arg = format!("context={context}");
     let description_arg = format!("description={description}");
-    let _ = Command::new(gh_bin)
-        .args([
+    let result = bounded_read(
+        gh_bin.as_ref(),
+        &[
             "api",
             "--method",
             "POST",
@@ -3359,9 +3580,19 @@ fn post_coverage_status(gh_bin: &str, cwd: &Path, head: &str, state: &str, descr
             context_arg.as_str(),
             "-f",
             description_arg.as_str(),
-        ])
-        .current_dir(cwd)
-        .output();
+        ],
+        cwd,
+        "coverage_status_post",
+        stopgate_read_timeout(),
+    );
+    match result {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let error = GhReadError::failed("coverage_status_post", stderr_tail(&out.stderr_tail));
+            log_bounded_read_error("review-coverage publisher", &error);
+        }
+        Err(error) => log_bounded_read_error("review-coverage publisher", &error),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3373,7 +3604,8 @@ fn publish_coverage_status(
     event_head: &str,
     coverage: &CoverageReport,
     required_bots: &[String],
-    optional_bots: &[String],
+    _optional_bots: &[String],
+    optional_lane_configured: bool,
     reviewers: &[String],
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
@@ -3391,7 +3623,7 @@ fn publish_coverage_status(
     // gate axis). Counting it made this writer post failure on configs the
     // Python merge gate answers "no lane" to - two writers of one context
     // posting opposite states.
-    let lane = !(required_bots.is_empty() && optional_bots.is_empty() && reviewers.is_empty());
+    let lane = !(required_bots.is_empty() && !optional_lane_configured && reviewers.is_empty());
     if !lane {
         eprintln!(
             "review-coverage publisher: not posting for {pr_head_oid}: no review lane configured"
@@ -3421,8 +3653,21 @@ fn publish_coverage_status(
                 gh_bin,
                 cwd,
                 pr_head_oid,
+                COVERAGE_STATUS_CONTEXT,
                 "success",
                 "coverage-override label applied on the PR",
+            );
+            // The diagnostic mirrors the Python override arm, not the
+            // possibly-Unknown computed read: a waived review must not wear
+            // "retry the review verb" beside its override success, and the
+            // two writers of one context must post the same state.
+            post_coverage_status(
+                gh_bin,
+                cwd,
+                pr_head_oid,
+                COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+                "success",
+                &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
             );
             return;
         }
@@ -3468,13 +3713,7 @@ fn publish_coverage_status(
             format!("covered: {} reviewed at {}", n, short_sha(pr_head_oid)),
         )
     } else if matches!(coverage.coverage, Coverage::Unknown) {
-        (
-            "failure",
-            format!(
-                "coverage unknown (gh read failed) at {}; retry the review verb",
-                short_sha(pr_head_oid)
-            ),
-        )
+        ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
         // The sized invocation rides along when it fits: GitHub caps this
         // description at 140 chars and rejects an overflow whole, which would
@@ -3503,7 +3742,24 @@ fn publish_coverage_status(
         };
         ("failure", description)
     };
-    post_coverage_status(gh_bin, cwd, pr_head_oid, state, &description);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_STATUS_CONTEXT,
+        state,
+        &description,
+    );
+    let (diagnostic_state, diagnostic_description) =
+        coverage_instrument_status(&coverage.coverage, pr_head_oid);
+    post_coverage_status(
+        gh_bin,
+        cwd,
+        pr_head_oid,
+        COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+        diagnostic_state,
+        &diagnostic_description,
+    );
 }
 
 /// The give-up line for an unresponsive nudged bot (x-b167 AC13): the operator's
@@ -4054,11 +4310,45 @@ fn apply_same_model_guard(
     }
 }
 
+/// The built-in optional logins an UNSET `review.optional_apps` resolves to -
+/// the same default the Python side resolves (`DEFAULT_OPTIONAL_APPS` in
+/// fno.config, pinned with it against the shared golden file
+/// cli/tests/config/optional_apps_default.json). Without a shared default, this
+/// side resolved empty while `fno do pr status` matched two hardcoded logins,
+/// so a worker following the remedy one printed was refused by the other.
+const DEFAULT_OPTIONAL_APPS: [&str; 2] = ["gemini-code-assist", "chatgpt-codex-connector"];
+
 /// The OPTIONAL reviewer logins (config.review.optional_apps): honored-if-
 /// present but never required. Their blocking findings hold the gate, but their
-/// absence never does (x-4baa "honor if present"). Empty when unset.
+/// absence never does (x-4baa "honor if present"). Unset resolves to the
+/// built-in default; an explicit `[]` is a real opt-out and wins over it.
 fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
-    settings.optional_apps.clone().unwrap_or_default()
+    match settings.optional_apps.clone() {
+        // Unset: the built-in honored-if-present logins.
+        None => DEFAULT_OPTIONAL_APPS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        // Explicit [] is the real opt-out (the one behavior this default
+        // changes on purpose, documented in the registry Meta).
+        Some(configured) if configured.is_empty() => Vec::new(),
+        // A non-empty list EXTENDS the built-ins: it named extra honored
+        // logins since before the default existed, and silently dropping a
+        // built-in from a partial list would stop counting that login's
+        // blocking findings on configs that never asked for it.
+        Some(configured) => {
+            let mut all = DEFAULT_OPTIONAL_APPS
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>();
+            for login in configured {
+                if !all.contains(&login) {
+                    all.push(login);
+                }
+            }
+            all
+        }
+    }
 }
 
 /// Case-insensitive substring match so a configured short name ("codex") or a
@@ -4656,11 +4946,14 @@ pub enum CoverageVerdict {
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
 ///
-/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
-/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
-/// the caller handles by block-retry (fail-safe: the session retries, it does
-/// not green or merge). The variant, its receipt, schema enum, and tests exist
-/// so that softening the error path to terminate (rather than block) is a
+/// NOTE (x-0eaf finding 4): a FAILED GitHub reviews read still never yields
+/// `Unknown` - `read_pr_info` returns `Err` and the caller block-retries
+/// (fail-safe: the session retries, it does not green or merge). `Unknown` IS
+/// reachable in production through the login_skipped arm: a `no_external`
+/// session on a repo with an active login gate suppressed the reads the
+/// config demanded, and the honest answer for that axis is Unknown with its
+/// retry remedy (pinned by the no_external-on-active-gate tests). The
+/// receipt, schema enum, and tests exist so softening the error path is a
 /// one-line change, not a redesign. Do not delete it as dead code without
 /// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4793,6 +5086,46 @@ impl CoverageReport {
             .count()
     }
 
+    /// The corroboration term of the `reviewed` verdict, shared by BOTH read
+    /// arms (external reads and login_skipped): DonePRGreen reads the field
+    /// and never consults coverage, so each arm must splice this term or the
+    /// loop can finish a PR the merge verb refuses on the same row.
+    fn corroboration_term(require_corroboration: bool, self_attested_alone: bool) -> bool {
+        !(require_corroboration && self_attested_alone)
+    }
+
+    /// Whether every counted review verdict rests on the author's own
+    /// (self_attested) local attestation: no GitHub App review, no second
+    /// session. Unmeasured origins (Unknown) are NOT self-attestation, so an
+    /// unmeasured row fails open - it is not proof of corroboration, but it is
+    /// not proof of its absence either.
+    pub fn rests_on_self_attestation_alone(&self) -> bool {
+        let mut counted = 0usize;
+        let mut self_attested = 0usize;
+        for v in &self.verdicts {
+            if v.verdict != CoverageVerdict::Reviewed || v.human_approval {
+                continue;
+            }
+            counted += 1;
+            if v.producer == CoverageProducer::LocalAttestation
+                && v.attestation_origin == AttestationOrigin::SelfAttested
+            {
+                self_attested += 1;
+            }
+        }
+        counted > 0 && counted == self_attested
+    }
+
+    /// Apply `config.review.require_corroboration`: a covered report whose
+    /// whole count is the author's own attestation reads as uncovered. The
+    /// verdicts stay on the event, so the evidence trail is reconstructable;
+    /// the VERDICT is what the merge gate reads.
+    pub fn apply_corroboration_policy(&mut self, on: bool) {
+        if on && self.rests_on_self_attestation_alone() {
+            self.coverage = Coverage::Covered(0);
+        }
+    }
+
     pub fn coverage_count(&self) -> Option<usize> {
         match &self.coverage {
             Coverage::Unknown => None,
@@ -4899,6 +5232,33 @@ struct LocalPass {
 /// out-of-scope line is skipped ENTIRELY (never a verdict, never a stale
 /// entry), which is also what keeps the pair key honest - one session
 /// attesting PR B after PR A no longer overwrites A's pass with B's head.
+/// A pass over a diff that changed NO FILE is a review of nothing, not a
+/// review: a session resolving its target from a checkout sitting on the base
+/// branch reads an empty diff and reports clean, and without this guard that
+/// pass is byte-identical to a real one. The producer refuses to emit with
+/// zero files, so a line carrying `reviewed_file_count: 0` is either
+/// pre-guard or hand-crafted - skipped either way. Lines alone never decide
+/// this: binary, pure-rename and empty-file diffs are real reviews whose
+/// `reviewed_line_count` is an honest 0, so a 0-line row WITH files counts,
+/// and a 0-line row from before the field existed (file count absent) is
+/// still skipped - absence must not be read as "had files".
+fn zero_evidence_attestation(val: &Value) -> bool {
+    if val
+        .pointer("/data/reviewed_line_count")
+        .and_then(|v| v.as_i64())
+        != Some(0)
+    {
+        return false;
+    }
+    match val
+        .pointer("/data/reviewed_file_count")
+        .and_then(|v| v.as_i64())
+    {
+        Some(files) => files <= 0,
+        None => true,
+    }
+}
+
 fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> Vec<LocalPass> {
     // (reviewer, attester_session_id) -> (head it attested, branch it named,
     // was it a pass). The attester lives in the key so cross-session
@@ -4928,6 +5288,9 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
         if line_head.is_empty() {
             continue;
         }
+        if zero_evidence_attestation(&val) {
+            continue;
+        }
         // The branch this attestation named; empty on every event predating
         // the field, which attestation_in_scope then admits only on exact
         // head equality. Once the head moves, a pre-field line emits NO
@@ -4955,15 +5318,42 @@ fn local_latest_passes(events_text: &str, head_branch: &str, head_sha: &str) -> 
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
+        // A RETRACTION names the pair it revokes in retracts_attester: an
+        // operator session revoking a forged pass must not have to emit under
+        // the victim's identity (which the attester binding now refuses). Key
+        // the retraction on the NAMED pair so it lands on the pass being
+        // revoked, while the retracting session's own entry stays untouched.
+        let key_attester = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty())
+            .or(attester);
         // Under the pair key a peer's `fail` revokes only the peer's own pass;
         // the author's `pass` still counts toward coverage. Coverage counts
         // reviews performed, not approvals granted - the hold on a bad review
         // lives on `open_review_findings` and on `unattested_reviewers_scan`,
         // which keeps its name key (the config.review.reviewers gate).
-        latest.insert(
-            (r.trim_start_matches('/').to_string(), attester),
-            (line_head.to_string(), line_branch, is_pass),
-        );
+        // A retraction names ONE pass, by head. When the pair's entry already
+        // describes a different (newer) head, the named pass is superseded and
+        // the retraction must not touch it: the verb emits the retraction after
+        // any newer pass, so an unconditional insert would revoke a live pass
+        // nobody asked to revoke. Same-head (and first-entry) inserts keep
+        // today's semantics.
+        let pair_key = (r.trim_start_matches('/').to_string(), key_attester);
+        let is_retraction = val
+            .pointer("/data/retracts_attester")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if is_retraction {
+            if let Some((existing_head, _, _)) = latest.get(&pair_key) {
+                if existing_head != line_head {
+                    continue;
+                }
+            }
+        }
+        latest.insert(pair_key, (line_head.to_string(), line_branch, is_pass));
     }
     let mut out: Vec<LocalPass> = latest
         .into_iter()
@@ -5309,6 +5699,9 @@ fn coverage_event_data(
         if author_session.is_some() {
             data["self_attested_count"] = serde_json::json!(rep.self_attested_count());
         }
+    }
+    if let Some(author_session_id) = author_session {
+        data["author_session_id"] = serde_json::json!(author_session_id);
     }
     if !repo.is_empty() {
         data["repo"] = serde_json::json!(repo);
@@ -6188,6 +6581,10 @@ struct LoopCheckArgs {
     /// idiom as `gh_bin` / `git_bin`, and for the same reason: a test may not
     /// depend on what happens to be installed.
     fno_bin: String,
+    /// Override for the shared stop-gate read bound, in milliseconds. Tests
+    /// inject a small bound so a sleeping fake wedges for ~1s instead of 30;
+    /// any value <= 0 keeps the default. Production never passes it.
+    read_timeout_ms: Option<u64>,
 }
 
 fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
@@ -6207,6 +6604,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
     let mut hook_input_stdin = false;
     let mut driver = "target".to_string();
     let mut fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
+    // Env-as-default like the two bin overrides, so the real shell shim can be
+    // driven end to end against a wedged child at a test bound without the
+    // shim having to forward a flag it does not know about.
+    let mut read_timeout_ms: Option<u64> = std::env::var("FNO_LOOPCHECK_READ_TIMEOUT_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
 
     // Skip the "loop-check" verb itself if present
     let args = if args.first().map(|s| s.as_str()) == Some("loop-check") {
@@ -6240,6 +6643,12 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
             now_override = Some(val);
         } else if let Some(val) = try_flag_value(arg, "--gh-bin", args, &mut i) {
             gh_bin = val;
+        } else if let Some(val) = try_flag_value(arg, "--read-timeout-ms", args, &mut i) {
+            // A parse failure falls back to the default rather than refusing:
+            // the bound is a safety ceiling, and a malformed override must
+            // never wedge or kill the fire over an argument nobody validates
+            // in production.
+            read_timeout_ms = val.parse::<u64>().ok();
         } else if let Some(val) = try_flag_value(arg, "--git-bin", args, &mut i) {
             git_bin = val;
         } else if let Some(val) = try_flag_value(arg, "--author-harness", args, &mut i) {
@@ -6286,6 +6695,7 @@ fn parse_args(args: &[String]) -> Result<LoopCheckArgs, String> {
         hook_input_stdin,
         driver,
         fno_bin,
+        read_timeout_ms,
     })
 }
 
@@ -6319,6 +6729,12 @@ pub(crate) struct ReviewInputs {
     pub(crate) required_bots: Vec<String>,
     pub(crate) required_reviewers: Vec<String>,
     pub(crate) optional_bots: Vec<String>,
+    /// Lane CONFIGURATION is explicit config only (a non-empty
+    /// `review.optional_apps`), never the built-in default that fills unset
+    /// configs: the default logins are honored-if-present where a lane
+    /// exists, but must not light the login gate, the publisher's lane
+    /// predicate, or the self-review floor on a stock install.
+    pub(crate) optional_lane_configured: bool,
     pub(crate) nudge_configs: Vec<NudgeConfig>,
 }
 
@@ -6438,6 +6854,13 @@ pub(crate) fn resolve_review_inputs(
                 // a global Some(true). Same overlay rule as required_bots.
                 merged.self_review_required = local.self_review_required;
             }
+            if local.require_corroboration.is_some() {
+                // Same presence rule: a project-local policy flip is honored by
+                // load_settings_for_repo on the Python merge/status/doctor
+                // side, so omitting it here made the loop gate read the global
+                // file only and the two surfaces split on one config (round 3).
+                merged.require_corroboration = local.require_corroboration;
+            }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
                 // `enabled = false`) is read from the GLOBAL file only and the
@@ -6487,6 +6910,10 @@ pub(crate) fn resolve_review_inputs(
         }
     }
     let optional_bots = resolved_optional_bots(&settings);
+    let optional_lane_configured = settings
+        .optional_apps
+        .as_ref()
+        .is_some_and(|v| !v.is_empty());
     let nudge_configs = resolved_nudge_configs(&settings);
 
     ReviewInputs {
@@ -6499,6 +6926,13 @@ pub(crate) fn resolve_review_inputs(
         required_bots,
         required_reviewers,
         optional_bots,
+        // Lane CONFIGURATION is explicit config, never the built-in default:
+        // the default logins are honored-if-present where a lane exists, but
+        // they must not light up the login gate, the coverage publisher's
+        // lane predicate, or the self-review floor on a stock install - that
+        // flip skips the floor and forces gh review reads for installs that
+        // configured nothing (review round 2).
+        optional_lane_configured,
         nudge_configs,
     }
 }
@@ -6515,6 +6949,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             return (2, out.to_string());
         }
     };
+    // Publish the per-thread read bound and the fire's budget deadline before
+    // any read can fire. Zero (and absent) both mean "the production
+    // default". Thread-local, not process-global: the test harness fires
+    // `decide` in-process on parallel threads, and one fire must never reset
+    // or inherit a neighboring fire's injected bound mid-read.
+    STOPGATE_READS.with(|cell| {
+        *cell.borrow_mut() = (
+            parsed.read_timeout_ms.unwrap_or(0),
+            Some(std::time::Instant::now() + STOPGATE_FIRE_BUDGET),
+        );
+    });
 
     // The king asks a different question of a different manifest, so it routes
     // BEFORE the target-shaped manifest read below. Branching inside that read
@@ -6641,8 +7086,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // rather than waving the obligation away. The floor is additive: an
     // already-configured lane (reviewers, bots, peers) keeps meaning exactly
     // what it meant today, and a lane that already names code-review is a no-op.
-    let lane_configured =
-        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
+    let lane_configured = !required_bots.is_empty()
+        || inputs.optional_lane_configured
+        || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
     // The floor applies where a session can satisfy it: a harness with a
     // self-review verb (claude /code-review, codex /review, opencode
@@ -6810,11 +7256,26 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let gh_available = {
         // Use a harmless read-only probe: `gh auth status` exits non-zero when
         // not logged in, but the binary IS present. We only care about
-        // NotFound (binary missing from path entirely).
-        match Command::new(gh_bin).arg("--version").output() {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(_) => false,
-            Ok(_) => true, // any exit code: binary exists
+        // NotFound (binary missing from path entirely). Bounded like every
+        // other synchronous child, so even `--version` cannot wedge the fire.
+        match bounded_read(
+            gh_bin.as_ref(),
+            &["--version"],
+            &cwd,
+            "gh_version_probe",
+            std::time::Duration::from_secs(5),
+        ) {
+            // SpawnFailed (kind Failed) covers NotFound and every other spawn
+            // error: binary absent. Completion at any exit code proves it
+            // exists, and so does a timeout - a wedged --version must not read
+            // as "gh not found" and Interrupt an unattended session; the
+            // downstream reads are themselves bounded.
+            Err(GhReadError {
+                kind: ReadErrorKind::Failed | ReadErrorKind::Unrunnable,
+                ..
+            }) => false,
+            Err(_) => true,
+            Ok(_) => true,
         }
     };
 
@@ -7096,10 +7557,17 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // forward the most recent prior fingerprint so the consecutive-unchanged streak
     // continues instead of resetting to "none|none|none" which would mask NoProgress.
     // fp_read_failed is recorded in the event payload for observability.
-    let fp_read_result = Command::new(gh_bin)
-        .args(["pr", "view", "--json", "state,number,headRefName"])
-        .current_dir(&cwd)
-        .output();
+    let fp_read_result = bounded_read(
+        gh_bin.as_ref(),
+        &["pr", "view", "--json", "state,number,headRefName"],
+        &cwd,
+        "fingerprint_pr_view",
+        stopgate_read_timeout(),
+    );
+    let mut fp_timeout: Option<GhReadError> = fp_read_result
+        .as_ref()
+        .err()
+        .and_then(|e| (e.kind == ReadErrorKind::TimedOut).then(|| e.clone()));
     let (fp_pr_state, fp_ci, fp_review_ts, fp_read_failed) = match fp_read_result {
         Ok(o) if o.status.success() => {
             let pv: Value = serde_json::from_slice(&o.stdout).unwrap_or(Value::Null);
@@ -7107,22 +7575,33 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 PrState::from_gh_str(pv.get("state").and_then(|v| v.as_str()).unwrap_or("none"));
 
             // Get CI
-            let ci = match Command::new(gh_bin)
-                .args([
+            let ci = match bounded_read(
+                gh_bin.as_ref(),
+                &[
                     "pr",
                     "checks",
                     "--json",
                     "name,state,bucket,startedAt,workflow",
-                ])
-                .current_dir(&cwd)
-                .output()
-            {
+                ],
+                &cwd,
+                "fingerprint_pr_checks",
+                stopgate_read_timeout(),
+            ) {
                 Ok(co) if co.status.success() => {
                     let cv: Value = serde_json::from_slice(&co.stdout).unwrap_or(Value::Null);
-                    // Same dedup as the main CI read: the fingerprint's CI arm
-                    // must describe the latest run per name, not a superseded
-                    // one a newer push already replaced.
-                    compute_ci_conclusion(&latest_per_name(&cv)).unwrap_or(CiConclusion::None)
+                    // The same truth table as the main CI read (one helper,
+                    // not a second spelling of dedup-plus-filter): the
+                    // fingerprint's CI arm must describe the latest run per
+                    // name, not a superseded one a newer push replaced, and
+                    // must agree with the main read about a coverage-only
+                    // rollup.
+                    classify_checks_payload(&cv)
+                        .map(|(c, _, _)| c)
+                        .unwrap_or(CiConclusion::None)
+                }
+                Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                    fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                    CiConclusion::None
                 }
                 _ => CiConclusion::None,
             };
@@ -7130,14 +7609,20 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             // Get review ts (skipped for no_external sessions and declared
             // no-review repos, matching the done() Read 3/4 skip)
             let rv_ts = if !manifest.no_external && !required_bots.is_empty() {
-                match Command::new(gh_bin)
-                    .args(["pr", "view", "--json", "reviews,comments"])
-                    .current_dir(&cwd)
-                    .output()
-                {
+                match bounded_read(
+                    gh_bin.as_ref(),
+                    &["pr", "view", "--json", "reviews,comments"],
+                    &cwd,
+                    "fingerprint_pr_reviews",
+                    stopgate_read_timeout(),
+                ) {
                     Ok(ro) if ro.status.success() => {
                         let rv: Value = serde_json::from_slice(&ro.stdout).unwrap_or(Value::Null);
                         review_activity_ts(&rv)
+                    }
+                    Err(e) if e.kind == ReadErrorKind::TimedOut => {
+                        fp_timeout = fp_timeout.or_else(|| Some(e.clone()));
+                        "none".to_string()
                     }
                     _ => "none".to_string(),
                 }
@@ -7150,13 +7635,52 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         // No PR yet: a healthy fire with a "none" fingerprint (world-state,
         // not an outage) - the backstop keeps ticking for a session that
         // never ships a PR.
-        Ok(o) if is_no_pr_stderr(&o.stderr) => {
+        Ok(o) if is_no_pr_stderr(&o.stderr_tail) => {
             (PrState::None, CiConclusion::None, "none".to_string(), false)
         }
-        // Hard gh failure (spawn error OR non-zero exit): mark as failed; we will
-        // carry forward the prior fingerprint after reading the events log.
+        // Hard gh failure (spawn error, non-zero exit, or any remaining
+        // non-success shape): mark as failed; we will carry forward the prior
+        // fingerprint after reading the events log. A TIMEOUT additionally
+        // surfaces below as a named, event-emitted block reason rather than a
+        // silent carry-forward.
         _ => (PrState::None, CiConclusion::None, "none".to_string(), true),
     };
+
+    // A killed fingerprint read blocks this fire with its own name and bound,
+    // exactly like a hard done() read error. The NoProgress backstop stays
+    // safe because the loop_check row this path emits carries
+    // fp_read_failed=true, which read_prior_fires skips - the streak survives
+    // without the carry-forward logic below ever running (the return exits
+    // before it), so this comment must not point a maintainer at "logic
+    // below" as the mechanism.
+    if let Some(err) = &fp_timeout {
+        let quota = probe_graphql_quota(gh_bin, &cwd);
+        emit(
+            "loop_check_gh_error",
+            serde_json::json!({
+                "session_id": session_id,
+                "read": err.read,
+                "outcome": err.outcome(),
+                "stderr_tail": err.stderr_tail,
+                "elapsed_s": err.elapsed.map(|d| d.as_secs_f64()),
+                "graphql_remaining": quota.as_ref().map(|q| q.remaining),
+                "graphql_reset": quota.as_ref().map(|q| q.reset_epoch)
+            }),
+        );
+        emit(
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "fingerprint": Value::Null,
+                "decision": "block",
+                "pr_state": "unknown",
+                "ci": "unknown",
+                "reviewed": false,
+                "fp_read_failed": true
+            }),
+        );
+        return (0, allow_output("block", None, &err.render(), 0, None));
+    }
 
     // Build a tentative fingerprint from this fire's gh reads.
     let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
@@ -7510,6 +8034,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             manifest.no_external,
             &required_bots,
             &optional_bots,
+            settings
+                .optional_apps
+                .as_ref()
+                .is_some_and(|v| !v.is_empty()),
             &settings.external_reviewers,
             &required_reviewers,
             &nudge_configs,
@@ -7518,6 +8046,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             &global_events,
             &repo_slug,
             manifest.harness_session_id.as_deref(),
+            settings.require_corroboration.unwrap_or(false),
         );
 
         match done_result {
@@ -7649,7 +8178,11 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         manifest.plan_path.as_deref(),
                         &fno_bin,
                         &cwd,
-                        FIDELITY_TIMEOUT,
+                        // The 60s ceiling, clamped to the fire budget: a
+                        // fidelity probe is a stop-gate read like any other,
+                        // and one read must not spend more than the fire
+                        // still has before the harness kills the hook.
+                        clamp_to_fire_deadline(FIDELITY_TIMEOUT),
                     ) {
                         FidelityGate::Refused { reason } => fidelity_block = Some(reason),
                         // Degraded fails OPEN on the stop decision (same as Absent - a
@@ -7950,7 +8483,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // terminal above already ran (a terminal always beats an idle),
                 // and this sits BEFORE the NoProgress backstop so a long watched
                 // wait degrades to budget/claim-expiry, never a spurious kill.
-                if let Intent::Watching {
+                let watching_refusal = if let Intent::Watching {
                     ref reason,
                     ref timeout,
                     ..
@@ -7961,10 +8494,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // (FNO_DRIVER_LIB, the same discriminator terminal_stop.rs
                     // uses) exits on allow. codex/gemini keep today's block
                     // behavior until their daemon-consumer waker ships (AC1-EDGE).
-                    let blocker = if harness_can_idle(
-                        author_harness.as_deref(),
-                        std::env::var("FNO_DRIVER_LIB").is_ok(),
-                    ) {
+                    let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
+                    let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
+                    let blocker = if can_idle {
                         async_wait_class(&pr_info, open_findings.is_empty(), head_shipped)
                     } else {
                         None
@@ -8028,10 +8560,23 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // renewal failed / holder mismatch -> fall through to the
                         // block below (AC3-ERR): never idle without a lease.
                     }
-                    // not async-wait class, or a loop-run child -> fall through:
-                    // build_block_reason names the real blocker (AC1-ERR CI red,
-                    // AC2-ERR head mismatch / finding).
-                }
+                    // Not an async-wait class, or a loop-run child: fall through
+                    // with an explicit refusal before the real blocker.
+                    Some(if !can_idle {
+                        watching_harness_refusal(author_harness.as_deref(), is_loop_run_child)
+                    } else if blocker.is_none() && !pr_info.unaddressed_findings.is_empty() {
+                        format!(
+                            "watching ignored: {} unaddressed findings, this is not an async wait",
+                            pr_info.unaddressed_findings.len()
+                        )
+                    } else if blocker.is_none() {
+                        "watching ignored: PR is not in an async wait class".to_string()
+                    } else {
+                        "watching ignored: watch lease could not be renewed".to_string()
+                    })
+                } else {
+                    None
+                };
 
                 // x-b167: a freshly-posted nudge sits in Awaiting until
                 // wait_minutes elapses. On a harness that cannot idle on a
@@ -8145,21 +8690,22 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // A failed probe OR a fidelity refusal IS the blocker when
                 // everything else is green; build_block_reason would otherwise
                 // report a healthy PR.
-                let reason = crate::nudge::append_inbox_nudge(
-                    &probe_block
-                        .clone()
-                        .or(fidelity_block.clone())
-                        .unwrap_or_else(|| {
-                            build_block_reason(
-                                &pr_info,
-                                &head_sha,
-                                open_findings.is_empty(),
-                                head_shipped,
-                            )
-                        }),
-                    &cwd,
-                    &session_id,
-                );
+                let block_reason = probe_block
+                    .clone()
+                    .or(fidelity_block.clone())
+                    .unwrap_or_else(|| {
+                        build_block_reason(
+                            &pr_info,
+                            &head_sha,
+                            open_findings.is_empty(),
+                            head_shipped,
+                        )
+                    });
+                let block_reason = match watching_refusal {
+                    Some(refusal) => format!("{refusal}; {block_reason}"),
+                    None => block_reason,
+                };
+                let reason = crate::nudge::append_inbox_nudge(&block_reason, &cwd, &session_id);
                 emit(
                     "loop_check",
                     serde_json::json!({
@@ -8185,7 +8731,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     allow_output("block", None, &reason, this_fire, Some(fingerprint)),
                 );
             }
-            Err((failed_read, failed_stderr)) => {
+            Err(read_err) => {
+                let failed_read = read_err.read.clone();
+                let failed_stderr = read_err.stderr_tail.clone();
                 // US4 (locked decision 6, REVERSES the wedge's behavior): a
                 // gh-errored done() read NEVER terminates NoProgress, even
                 // with the backstop tripped - a healthy session must not be
@@ -8234,7 +8782,9 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     serde_json::json!({
                         "session_id": session_id,
                         "read": failed_read,
+                        "outcome": read_err.outcome(),
                         "stderr_tail": failed_stderr,
+                        "elapsed_s": read_err.elapsed.map(|d| d.as_secs_f64()),
                         "graphql_remaining": quota.as_ref().map(|q| q.remaining),
                         "graphql_reset": quota.as_ref().map(|q| q.reset_epoch),
                         "rate_limit_class": secondary.then_some("secondary")
@@ -8268,7 +8818,13 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // that actually clears in seconds - the exact "assert a
                 // positive marker, never an absence" trap this whole
                 // diagnosis exists to avoid.
-                let reason = if secondary {
+                // A killed timeout renders its own sentence and never falls
+                // through the ordinary failed-read wording: the two demand
+                // opposite operator responses, and the quota probe below must
+                // not label a killed child as a quota problem either.
+                let reason = if read_err.kind == ReadErrorKind::TimedOut {
+                    read_err.render()
+                } else if secondary {
                     format!(
                         "gh read '{failed_read}' hit GitHub's SECONDARY rate limit (burst/\
                          concurrency, not the hourly quota - `gh api rate_limit` can read \
@@ -8335,6 +8891,7 @@ fn run_done(
     no_external: bool,
     required_bots: &[String],
     optional_bots: &[String],
+    optional_lane_configured: bool,
     external_reviewers: &[String],
     reviewers: &[String],
     nudge_configs: &[NudgeConfig],
@@ -8343,7 +8900,8 @@ fn run_done(
     global_events_path: &Path,
     repo_slug: &str,
     author_session: Option<&str>,
-) -> Result<PrInfo, (String, String)> {
+    require_corroboration: bool,
+) -> Result<PrInfo, GhReadError> {
     let info = read_pr_info(
         gh_bin,
         git_bin,
@@ -8352,6 +8910,7 @@ fn run_done(
         no_external,
         required_bots,
         optional_bots,
+        optional_lane_configured,
         external_reviewers,
         reviewers,
         nudge_configs,
@@ -8362,6 +8921,7 @@ fn run_done(
         author_session,
         None,
         None,
+        require_corroboration,
     )?;
     // read_pr_info stays read-only against GitHub; the CALLER owns
     // the write. A row was just emitted for this PR, so the publisher has the
@@ -8380,6 +8940,7 @@ fn run_done(
             &info.coverage,
             required_bots,
             optional_bots,
+            optional_lane_configured,
             reviewers,
         );
     }
@@ -8412,6 +8973,17 @@ fn watch_window_ms(timeout: Option<&str>) -> i64 {
 /// "unroutable harness -> status quo, never a dead watch" degradation.
 fn harness_can_idle(author_harness: Option<&str>, is_loop_run_child: bool) -> bool {
     author_harness == Some("claude") && !is_loop_run_child
+}
+
+fn watching_harness_refusal(author_harness: Option<&str>, is_loop_run_child: bool) -> String {
+    if is_loop_run_child {
+        "watching ignored: loop-run child cannot idle".to_string()
+    } else {
+        format!(
+            "watching ignored: harness {} cannot idle",
+            author_harness.unwrap_or("unknown")
+        )
+    }
 }
 
 /// Whether the PR is in the async-wait class a `<watching>` tag may idle on
@@ -8487,11 +9059,11 @@ fn short_sha(s: &str) -> String {
 /// (gh's `--watch` exit varies by version); the design depends only on the task
 /// EXITING, never on its exit code.
 ///
-/// The bound uses shell builtins, never `timeout(1)`: stock macOS has neither
-/// it nor `gtimeout`, so naming it makes the watcher no-op and the session idle
-/// forever on a wait that never started. The watchdog is reaped once the wait
-/// returns - left alive, it wakes 30m later and kills whatever now holds that
-/// recycled pid (codex P1).
+/// The bound uses shell builtins, never `timeout(1)`: the plugin must work on
+/// hosts where that binary (and `gtimeout`) is absent, so naming it makes the
+/// watcher no-op and the session idle forever on a wait that never started.
+/// The watchdog is reaped once the wait returns - left alive, it wakes 30m
+/// later and kills whatever now holds that recycled pid (codex P1).
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
     // has CI already green, so a checks watcher returns instantly and the
@@ -8525,8 +9097,9 @@ fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
 // the enforcement arm: the gate refuses done until the declared observation
 // holds, forcing the session to perform the last mile before claiming done.
 
-/// Wall-clock ceiling per probe. The host has no `timeout` binary (and no
-/// gtimeout), so the bound is native: spawn, poll `try_wait`, kill.
+/// Wall-clock ceiling per probe. The bound is native (spawn, poll `try_wait`,
+/// kill): the plugin must run on hosts where `timeout(1)` and `gtimeout` are
+/// absent, so no bound may depend on either binary existing.
 const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// A probe list is a gate, not a test suite.
@@ -8595,13 +9168,29 @@ enum FidelityGate {
 /// different things and must be free to drift independently.
 const FIDELITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Cap on RETAINED stderr per bounded run. Only retention is capped - the
+/// drain itself always runs to EOF, or a child that overflows the pipe would
+/// deadlock before exiting. The tail (not the head) is kept because the end
+/// of a diagnostic stream carries the line that killed the run.
+const BOUNDED_STDERR_TAIL_CAP: usize = 2000;
+
+/// A completed bounded run's full classification payload: exit status, stdout,
+/// and a capped stderr tail. Parsers read `stdout`; the status and tail exist
+/// so a non-zero exit or a failing child can be NAMED at the call site rather
+/// than collapsed into "the read failed".
+struct BoundedOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr_tail: Vec<u8>,
+}
+
 /// Outcome of a bounded, killable child run: the whole point is that a hang
 /// inside the child (x-8ad8 was one; nothing rules out another) can never
 /// again read as "the read failed" or wedge forever - it reads as exactly
 /// what happened, with the verb and the elapsed time attached at the call
 /// site.
 enum BoundedRun {
-    Stdout(Vec<u8>),
+    Completed(BoundedOutput),
     TimedOut(std::time::Duration),
     SpawnFailed,
     /// `try_wait()` itself errored (e.g. a concurrent reap of the group
@@ -8613,15 +9202,16 @@ enum BoundedRun {
 
 /// Run `fno_bin args...` under a native wall-clock bound, killing the
 /// child's whole process group on expiry - the same discipline as
-/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`), but capturing
-/// stdout too since the caller needs to parse it as JSON. `Command::output()`
-/// alone has no timeout: it blocks until the child exits, however long that
-/// takes, which is exactly how a hang three calls deep in `fno do plan fidelity`
-/// (x-8ad8) turned into loop-check itself hanging forever and stranding the
-/// session behind it. stdout/stderr are drained on background threads for
-/// the same reason `run_probe` drains stderr that way: reading a pipe only
-/// after the child exits deadlocks against a child that fills the pipe
-/// buffer before exiting.
+/// `run_probe` (spawn, poll `try_wait`, `kill_process_group`) - and return
+/// the completed payload (exit status, stdout, capped stderr tail). This is
+/// the single transport boundary for synchronous external work on the stop
+/// path: `Command::output()` alone has no timeout, so it blocks until the
+/// child exits however long that takes, which is exactly how a hang three
+/// calls deep in `fno do plan fidelity` (x-8ad8) turned into loop-check
+/// itself hanging forever and stranding the session behind it. stdout and
+/// stderr are drained on background threads for the same reason `run_probe`
+/// drains stderr that way: reading a pipe only after the child exits
+/// deadlocks against a child that fills the pipe buffer before exiting.
 fn run_bounded(
     fno_bin: &OsStr,
     args: &[&str],
@@ -8655,16 +9245,35 @@ fn run_bounded(
     });
     let mut stderr_pipe = child.stderr.take();
     let stderr_drain = std::thread::spawn(move || {
-        // Nothing reads this back (the caller only wants stdout) - drain to
-        // sink rather than a growing Vec so an unbounded stderr write
-        // doesn't buy an unbounded allocation for bytes no one inspects.
+        // Retain only the LAST `BOUNDED_STDERR_TAIL_CAP` bytes while still
+        // draining to EOF: an unbounded write must not buy an unbounded
+        // allocation, but stopping the read early would block a child that
+        // is still writing, deadlocking the runner before any timeout.
+        let mut tail: Vec<u8> = Vec::new();
         if let Some(ref mut p) = stderr_pipe {
-            let _ = std::io::copy(p, &mut std::io::sink());
+            let mut chunk = [0u8; 4096];
+            loop {
+                match p.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        // Always append, THEN trim: a guard on append would
+                        // freeze the buffer at whatever the first chunks
+                        // carried, which for a stream longer than one chunk
+                        // keeps the head, not the tail.
+                        tail.extend_from_slice(&chunk[..n]);
+                        if tail.len() > BOUNDED_STDERR_TAIL_CAP {
+                            let excess = tail.len() - BOUNDED_STDERR_TAIL_CAP;
+                            tail.drain(..excess);
+                        }
+                    }
+                }
+            }
         }
+        tail
     });
 
     enum Outcome {
-        Done,
+        Done(std::process::ExitStatus),
         TimedOut(std::time::Duration),
         WaitFailed,
     }
@@ -8672,7 +9281,7 @@ fn run_bounded(
     let start = std::time::Instant::now();
     let outcome = loop {
         match child.try_wait() {
-            Ok(Some(_)) => break Outcome::Done,
+            Ok(Some(status)) => break Outcome::Done(status),
             Ok(None) => {
                 let elapsed = start.elapsed();
                 if elapsed >= timeout {
@@ -8703,10 +9312,245 @@ fn run_bounded(
         // is inflated by cleanup cost instead of reflecting the timeout itself.
         Outcome::TimedOut(elapsed) => BoundedRun::TimedOut(elapsed),
         Outcome::WaitFailed => BoundedRun::WaitFailed,
-        Outcome::Done => {
+        Outcome::Done(status) => {
             let stdout = stdout_drain.join().unwrap_or_default();
-            let _ = stderr_drain.join();
-            BoundedRun::Stdout(stdout)
+            let stderr_tail = stderr_drain.join().unwrap_or_default();
+            BoundedRun::Completed(BoundedOutput {
+                status,
+                stdout,
+                stderr_tail,
+            })
+        }
+    }
+}
+
+/// Wall-clock ceiling for ONE synchronous stop-gate read: PR metadata,
+/// checks, reviews, inline comments, commits, quota, coverage reads,
+/// fingerprint reads, nudges/coverage writes, the king board, and every
+/// local `git` read the gate makes. One named bound so a single wedged child
+/// can never outlive the stop fire; the fidelity ceiling (60s) and the
+/// advisory-hint ceiling (10s) stay separate because they gate different
+/// things and drift independently.
+const STOPGATE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Aggregate wall-clock budget for ONE fire's external reads. The harness
+/// kills the stop hook at 60s (hooks/git-protection.py records the budget and
+/// the Stop hook carries no override), so N sequential reads each legal at
+/// 30s could burn multiples of that and die mid-fire with no decision -
+/// recreating the exact no-decision path this transport exists to close.
+/// Reads that start after the budget is spent still run, but at the floor
+/// bound, so the fire ends fast with a decision naming what it could not
+/// wait for.
+const STOPGATE_FIRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(50);
+
+/// A spent budget must still bound every remaining read, so the effective
+/// ceiling never reaches zero: this floor keeps a late read killable in
+/// bounded time instead of degenerating into an unbounded wait.
+const STOPGATE_BOUND_FLOOR: std::time::Duration = std::time::Duration::from_millis(250);
+
+thread_local! {
+    /// The fire's read-bound override (from `--read-timeout-ms`, 0 meaning
+    /// the production default) and its budget deadline, stamped when `decide`
+    /// begins. Thread-local, not process-global: the test harness fires
+    /// `decide` in-process on parallel threads, and one fire must never reset
+    /// or inherit a neighboring fire's injected bound mid-read.
+    static STOPGATE_READS: std::cell::RefCell<(u64, Option<std::time::Instant>)> =
+        const { std::cell::RefCell::new((0, None)) };
+}
+
+/// Effective bound for one stop-gate read: the configured ceiling (flag or
+/// production default) clamped to whatever remains of this fire's aggregate
+/// budget, floored so the answer is always a positive killable bound.
+fn stopgate_read_timeout() -> std::time::Duration {
+    STOPGATE_READS.with(|cell| {
+        let (override_ms, _) = *cell.borrow();
+        let configured = if override_ms > 0 {
+            std::time::Duration::from_millis(override_ms)
+        } else {
+            STOPGATE_READ_TIMEOUT
+        };
+        clamp_to_fire_deadline(configured)
+    })
+}
+
+/// Clamp a configured read ceiling to this fire's budget deadline, so no
+/// single long read can spend more than the fire still has. Used both for
+/// stop-gate reads (via `stopgate_read_timeout`) and for the fidelity
+/// probe's separate 60s ceiling - the budget is the fire's, not the read's.
+fn clamp_to_fire_deadline(configured: std::time::Duration) -> std::time::Duration {
+    STOPGATE_READS.with(|cell| match cell.borrow().1 {
+        Some(d) => {
+            let remaining = d.saturating_duration_since(std::time::Instant::now());
+            clamp_to_fire_budget(configured, remaining)
+        }
+        None => configured,
+    })
+}
+
+/// Pure clamp so the deadline math is testable without a clock: never above
+/// what remains of the budget, never below the floor.
+fn clamp_to_fire_budget(
+    configured: std::time::Duration,
+    remaining: std::time::Duration,
+) -> std::time::Duration {
+    configured.min(remaining).max(STOPGATE_BOUND_FLOOR)
+}
+
+/// How an external stop-gate read failed. `TimedOut` is its own kind so a
+/// killed child can never render through the ordinary failed-read wording -
+/// the two demand opposite operator responses (wait out a reset vs. debug a
+/// command), and conflating them is how a hang reads as a blip forever.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadErrorKind {
+    /// Non-zero exit or unparseable payload. The ordinary vocabulary
+    /// ("gh read '<name>' failed; retrying next fire").
+    Failed,
+    /// The process could not be spawned or waited on.
+    Unrunnable,
+    /// The child outlived its bound and the process group was killed.
+    TimedOut,
+}
+
+/// One external read's typed failure: the logical read name, the kind, the
+/// capped stderr tail, and - for a timeout - the elapsed bound. Threads
+/// through every stop-gate reader so the render sites classify instead of
+/// guessing from a detail string.
+#[derive(Clone)]
+struct GhReadError {
+    read: String,
+    kind: ReadErrorKind,
+    stderr_tail: String,
+    elapsed: Option<std::time::Duration>,
+}
+
+impl GhReadError {
+    fn failed(read: &str, stderr_tail: String) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Failed,
+            stderr_tail,
+            elapsed: None,
+        }
+    }
+
+    fn parse_failed(read: &str) -> Self {
+        Self::failed(read, String::new())
+    }
+
+    fn timed_out(read: &str, elapsed: std::time::Duration) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::TimedOut,
+            stderr_tail: String::new(),
+            elapsed: Some(elapsed),
+        }
+    }
+
+    fn unrunnable(read: &str, detail: &str) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Unrunnable,
+            stderr_tail: detail.to_string(),
+            elapsed: None,
+        }
+    }
+
+    fn render(&self) -> String {
+        match self.kind {
+            ReadErrorKind::TimedOut => format!(
+                "external read '{}' timed out after {:.1}s and was killed; retrying next fire",
+                self.read,
+                self.elapsed.map(|d| d.as_secs_f64()).unwrap_or(0.0)
+            ),
+            ReadErrorKind::Failed => format!(
+                "gh read '{}' failed; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
+            ReadErrorKind::Unrunnable => format!(
+                "external read '{}' could not run; retrying next fire. {}",
+                self.read, self.stderr_tail
+            ),
+        }
+    }
+
+    /// The positive outcome marker for `loop_check_gh_error` rows: every row
+    /// carries one, so a timeout is distinguishable in the events log without
+    /// parsing prose.
+    fn outcome(&self) -> &'static str {
+        match self.kind {
+            ReadErrorKind::TimedOut => "timeout",
+            ReadErrorKind::Failed => "failed",
+            ReadErrorKind::Unrunnable => "unrunnable",
+        }
+    }
+}
+
+fn bounded_read_diagnostic(context: &str, error: &GhReadError) -> String {
+    let elapsed = error
+        .elapsed
+        .map(|duration| format!("{:.1}", duration.as_secs_f64()))
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "loop-check: {context}: external read '{}' outcome={} elapsed_s={} stderr_tail={:?}",
+        error.read,
+        error.outcome(),
+        elapsed,
+        error.stderr_tail
+    )
+}
+
+fn log_bounded_read_error(context: &str, error: &GhReadError) {
+    eprintln!("{}", bounded_read_diagnostic(context, error));
+}
+
+/// One external read through the single bounded transport. Every synchronous
+/// `gh`/`fno` read reachable from the stop decision routes through here, so
+/// none can hang the fire and none can misreport a kill as an ordinary
+/// failure. The completed payload carries the exit status, stdout, and the
+/// pre-capped stderr tail; policy (fail-closed, fail-open, degrade) stays at
+/// the typed call site.
+fn bounded_read(
+    bin: &OsStr,
+    args: &[&str],
+    cwd: &Path,
+    read_name: &str,
+    timeout: std::time::Duration,
+) -> Result<BoundedOutput, GhReadError> {
+    match run_bounded(bin, args, cwd, timeout) {
+        BoundedRun::Completed(out) => Ok(out),
+        BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
+        BoundedRun::SpawnFailed => Err(GhReadError::unrunnable(read_name, "spawn failed")),
+        BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
+    }
+}
+
+/// One bounded local-`git` read. Every stop-gate git call routes here for
+/// the same reason the gh reads route through `bounded_read`: an external
+/// diff driver, a locked index, or a stalled mount can hang `git` exactly
+/// the way a wedged network child hangs `gh`, and an unbounded `.output()`
+/// turns that into a fire that never decides. A timeout or unrunnable git is
+/// named on stderr (the shim's forensic log) and reads as "no answer";
+/// every caller already treats no-answer as its conservative outcome
+/// (unshipped, dirty, unknown branch), so the degrade direction is the same
+/// one each caller documented for a failing git.
+fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput> {
+    let read_name = format!("git {}", args.first().unwrap_or(&"?"));
+    match run_bounded(OsStr::new(git_bin), args, cwd, stopgate_read_timeout()) {
+        BoundedRun::Completed(out) => Some(out),
+        BoundedRun::TimedOut(elapsed) => {
+            let error = GhReadError::timed_out(&read_name, elapsed);
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::SpawnFailed => {
+            let error = GhReadError::unrunnable(&read_name, "spawn failed");
+            log_bounded_read_error("git", &error);
+            None
+        }
+        BoundedRun::WaitFailed => {
+            let error = GhReadError::unrunnable(&read_name, "wait failed");
+            log_bounded_read_error("git", &error);
+            None
         }
     }
 }
@@ -8736,7 +9580,7 @@ fn evaluate_plan_fidelity(
         cwd,
         timeout,
     ) {
-        BoundedRun::Stdout(out) => classify_plan_fidelity(&out),
+        BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
         BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
@@ -8794,8 +9638,8 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
         cwd,
         std::time::Duration::from_secs(10),
     ) {
-        BoundedRun::Stdout(out) => {
-            let s = String::from_utf8_lossy(&out).trim().to_string();
+        BoundedRun::Completed(out) => {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             // One sane line only: a wrapper's chatter or an error page must
             // never end up embedded in a held reason as if it were an
             // invocation. Empty means the render itself gave up. An unsized
@@ -9745,6 +10589,15 @@ fn build_block_reason(
                 hint("review")
             );
         }
+        // Unknown AFTER the specific arms but BEFORE the config complaint:
+        // the unmet gate, the unaddressed finding, and the outstanding bot
+        // are all more actionable than the read remedy, but "no reviewer is
+        // outstanding" beside an unread coverage axis is the read remedy's
+        // exact case (the pinned test: Unknown names the read remedy, never
+        // a config lecture).
+        if matches!(pr.coverage.coverage, Coverage::Unknown) {
+            return coverage_unavailable_description(&pr.head_oid);
+        }
         // Reaching here means missing_bots is empty, which `async_wait_class`
         // treats as non-idlable, so this must not teach the arm-and-tag ritual
         // either (the two must never disagree about whether a wait is valid).
@@ -9755,6 +10608,12 @@ fn build_block_reason(
              Nothing here will arrive on its own.",
             pr.number
         );
+    }
+
+    // And the reviewed-but-Unknown case (a satisfied gate beside an unread
+    // axis) keeps the read remedy here, outside the block.
+    if matches!(pr.coverage.coverage, Coverage::Unknown) {
+        return coverage_unavailable_description(&pr.head_oid);
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
@@ -9918,19 +10777,29 @@ pub(crate) fn read_king_board(
     // regardless of that exit code; only an absent or unparseable one is a read
     // failure, and that one blocks, because a king that cannot see its board
     // must not certify itself finished.
-    let output = Command::new(fno_bin)
-        .args(["inbox", "board", "--json", "--state"])
-        .arg(state_path)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run {fno_bin} inbox board: {e}"))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let state_arg = state_path.to_string_lossy().into_owned();
+    let read = bounded_read(
+        fno_bin.as_ref(),
+        &["inbox", "board", "--json", "--state", &state_arg],
+        cwd,
+        "king_board",
+        stopgate_read_timeout(),
+    )
+    .map_err(|e| match e.kind {
+        ReadErrorKind::TimedOut => e.render(),
+        ReadErrorKind::Failed => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
+        ReadErrorKind::Unrunnable => {
+            format!("cannot run {fno_bin} inbox board: {}", e.stderr_tail)
+        }
+    })?;
+    let stdout = String::from_utf8_lossy(&read.stdout);
     parse_king_board(&stdout).ok_or_else(|| {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = String::from_utf8_lossy(&read.stderr_tail);
         format!(
             "unparseable board output (exit {}): {}",
-            output.status.code().unwrap_or(-1),
+            read.status.code().unwrap_or(-1),
             stderr.trim().chars().take(300).collect::<String>()
         )
     })
@@ -10594,7 +11463,20 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 (resolved, true)
             }
             Ok(None) => return (3, no_pr_payload()),
-            Err((read, tail)) => {
+            Err(read_err) => {
+                // A killed timeout reports its own shape before the unknown-row
+                // machinery: no quota diagnosis for a child that never answered.
+                if read_err.kind == ReadErrorKind::TimedOut {
+                    let mut out = serde_json::json!({
+                        "error": read_err.render(),
+                        "outcome": read_err.outcome(),
+                        "emitted": false,
+                    });
+                    insert_quota_diagnostic(&mut out, &None);
+                    return (4, out.to_string());
+                }
+                let read = read_err.read.clone();
+                let tail = read_err.stderr_tail.clone();
                 let pr_num: i64 = pr.as_deref().and_then(|p| p.parse().ok()).unwrap_or(0);
                 let data = coverage_event_data(
                     pr_num,
@@ -10648,7 +11530,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     // disagreed with the stop hook's floored row for the same PR.
     let mut required_reviewers = inputs.required_reviewers;
     let lane_configured = !(inputs.required_bots.is_empty()
-        && inputs.optional_bots.is_empty()
+        && !inputs.optional_lane_configured
         && required_reviewers.is_empty());
     if !lane_configured
         && inputs.settings.self_review_required.unwrap_or(true)
@@ -10673,6 +11555,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         false,
         &inputs.required_bots,
         &inputs.optional_bots,
+        inputs.optional_lane_configured,
         &inputs.settings.external_reviewers,
         &required_reviewers,
         &inputs.nudge_configs,
@@ -10683,6 +11566,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
         author_session.as_deref(),
         pr.as_deref(),
         prefetched_pr_json,
+        inputs.settings.require_corroboration.unwrap_or(false),
     ) {
         Ok(pr_info) => {
             if pr_info.number == 0 {
@@ -10706,6 +11590,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &pr_info.coverage,
                     &inputs.required_bots,
                     &inputs.optional_bots,
+                    inputs.optional_lane_configured,
                     &required_reviewers,
                 );
             }
@@ -10721,7 +11606,21 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 .to_string(),
             )
         }
-        Err((read, tail)) => {
+        Err(read_err) => {
+            // A killed timeout gets its own stdout shape: the caller must see
+            // what was killed and after how long, never a quota diagnosis for
+            // a child that never answered.
+            if read_err.kind == ReadErrorKind::TimedOut {
+                let mut out = serde_json::json!({
+                    "error": read_err.render(),
+                    "outcome": read_err.outcome(),
+                    "emitted": false,
+                });
+                insert_quota_diagnostic(&mut out, &None);
+                return (4, out.to_string());
+            }
+            let read = read_err.read.clone();
+            let tail = read_err.stderr_tail.clone();
             // The gh read failed. Emit an unknown row when the PR number is
             // known (--pr was passed - always true for the merge recompute) so
             // downstream readers see the failed read rather than nothing; with
@@ -10764,6 +11663,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         },
                         &inputs.required_bots,
                         &inputs.optional_bots,
+                        inputs.optional_lane_configured,
                         &required_reviewers,
                     );
                 }
@@ -11081,6 +11981,175 @@ mod tests {
                 assert!(!reason.contains("timed out after 0.0s"), "{reason}");
             }
             other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    // ── bounded run transport (the single subprocess boundary) ─────────────
+    //
+    // Hermetic: every child is a stub script in a tempdir, so no test touches
+    // a real `gh` or `fno`, and every timing case asserts wall-clock bounds
+    // wide enough to survive parallel test scheduling.
+
+    #[test]
+    fn bounded_run_completed_retains_status_stdout_and_capped_stderr_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Writes well past the retention cap to stderr, then JSON to stdout:
+        // the drain must reach EOF anyway (or the child blocks on a full pipe
+        // and the run degrades to a timeout), and the retained tail must be
+        // exactly the cap.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert!(out.status.success(), "status: {:?}", out.status);
+                assert_eq!(out.stdout, b"{\"ok\":true}\n");
+                assert!(
+                    out.stderr_tail.len() <= BOUNDED_STDERR_TAIL_CAP,
+                    "retained {} > cap {}",
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP
+                );
+                // The tail, not the head: the retained bytes are the END of
+                // the stream, which for a uniform fill is still all 'x' but
+                // provably capped.
+                assert_eq!(out.stderr_tail.len(), BOUNDED_STDERR_TAIL_CAP.min(9999));
+                assert!(out.stderr_tail.iter().all(|&b| b == b'x'));
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_retains_the_last_stderr_bytes_not_the_first() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A uniform fill followed by a marker at the END of the stream: the
+        // retained bytes must carry the marker. A cap that freezes at the
+        // first chunks (head-keeping) drops exactly this marker, and the
+        // uniform-fill sibling above cannot tell head from tail - only this
+        // shape distinguishes them.
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\nhead -c 5000 /dev/zero | tr '\\0' 'x' 1>&2\necho TAIL_MARKER 1>&2\necho '{\"ok\":true}'\n",
+        );
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                let tail = String::from_utf8_lossy(&out.stderr_tail);
+                assert!(tail.ends_with("TAIL_MARKER\n"), "retained {tail:?}");
+                assert_eq!(
+                    out.stderr_tail.len(),
+                    BOUNDED_STDERR_TAIL_CAP,
+                    "a stream past the cap retains exactly the cap"
+                );
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_read_diagnostic_preserves_transport_classification() {
+        let timeout = GhReadError::timed_out("main_run_view", std::time::Duration::from_secs(1));
+        let rendered = bounded_read_diagnostic("main-head", &timeout);
+        assert!(rendered.contains("main-head"), "{rendered}");
+        assert!(rendered.contains("main_run_view"), "{rendered}");
+        assert!(rendered.contains("outcome=timeout"), "{rendered}");
+        assert!(rendered.contains("elapsed_s=1.0"), "{rendered}");
+
+        let spawn = GhReadError::unrunnable("git_status", "spawn failed");
+        let rendered = bounded_read_diagnostic("payload", &spawn);
+        assert!(rendered.contains("git_status"), "{rendered}");
+        assert!(rendered.contains("outcome=unrunnable"), "{rendered}");
+        assert!(rendered.contains("spawn failed"), "{rendered}");
+    }
+
+    #[test]
+    fn fire_budget_clamp_stays_under_remaining_and_above_the_floor() {
+        let s = std::time::Duration::from_secs(30);
+        // Budget-rich: the configured ceiling stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, s + std::time::Duration::from_secs(1)),
+            s
+        );
+        // Budget-poor: what remains stands.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::from_millis(500)),
+            std::time::Duration::from_millis(500)
+        );
+        // Budget spent: every read still gets a positive, killable bound.
+        assert_eq!(
+            clamp_to_fire_budget(s, std::time::Duration::ZERO),
+            STOPGATE_BOUND_FLOOR
+        );
+    }
+
+    #[test]
+    fn bounded_run_completed_keeps_a_nonzero_exit_code_distinct_from_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(tmp.path(), "fno", "#!/bin/sh\necho boom 1>&2\nexit 3\n");
+        let cwd = std::env::temp_dir();
+        match run_bounded(fno.as_os_str(), &[], &cwd, PROBE_TIMEOUT) {
+            BoundedRun::Completed(out) => {
+                assert_eq!(out.status.code(), Some(3));
+                assert!(!out.status.success());
+                assert_eq!(out.stdout, b"");
+                assert_eq!(out.stderr_tail, b"boom\n");
+            }
+            other => panic!("expected Completed, got {}", bounded_kind(&other)),
+        }
+    }
+
+    #[test]
+    fn bounded_run_spawn_failure_reads_as_spawn_failed() {
+        let cwd = std::env::temp_dir();
+        let missing = Path::new("/definitely/missing/fno");
+        assert!(matches!(
+            run_bounded(missing.as_os_str(), &[], &cwd, PROBE_TIMEOUT),
+            BoundedRun::SpawnFailed
+        ));
+    }
+
+    #[test]
+    fn bounded_run_kills_a_forked_process_group_on_timeout() {
+        // A descendant keeps the stderr pipe open past the leader's death;
+        // only a process-GROUP kill reaps it, and the run must resolve as a
+        // distinct timeout inside the wall-clock budget, never as a hang.
+        let tmp = tempfile::tempdir().unwrap();
+        let fno = write_exec(
+            tmp.path(),
+            "fno",
+            "#!/bin/sh\n(sleep 30 &) 1>&2\nsleep 30\n",
+        );
+        let cwd = std::env::temp_dir();
+        let started = std::time::Instant::now();
+        match run_bounded(
+            fno.as_os_str(),
+            &[],
+            &cwd,
+            std::time::Duration::from_millis(200),
+        ) {
+            BoundedRun::TimedOut(elapsed) => {
+                assert!(elapsed >= std::time::Duration::from_millis(200));
+                // Cleanup slack for spawn + group kill, generous for parallel
+                // test scheduling: the point is "bounded", not "precise".
+                assert!(started.elapsed() < std::time::Duration::from_secs(10));
+            }
+            other => panic!("expected TimedOut, got {}", bounded_kind(&other)),
+        }
+    }
+
+    /// Render a `BoundedRun` variant name for assertion failures without a
+    /// Debug derive on the payload-carrying enum.
+    fn bounded_kind(run: &BoundedRun) -> &'static str {
+        match run {
+            BoundedRun::Completed(_) => "Completed",
+            BoundedRun::TimedOut(_) => "TimedOut",
+            BoundedRun::SpawnFailed => "SpawnFailed",
+            BoundedRun::WaitFailed => "WaitFailed",
         }
     }
 
@@ -11835,6 +12904,7 @@ mod tests {
         assert_eq!(data["coverage"], serde_json::json!("covered"));
         assert_eq!(data["reviewed_count"], serde_json::json!(2));
         assert_eq!(data["self_attested_count"], serde_json::json!(1));
+        assert_eq!(data["author_session_id"], serde_json::json!("sess-author"));
     }
 
     #[test]
@@ -11888,6 +12958,505 @@ mod tests {
         );
         let measured = coverage_event_data(826, &measured_rep, "h", "", Some("sess-author"));
         assert_eq!(measured["self_attested_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn a_zero_line_attestation_is_not_review_evidence() {
+        // A pass over a zero-line diff is a review of nothing: a session
+        // resolving its target from a checkout sitting on the base branch
+        // reads an empty diff, reports clean, and before this guard that
+        // pass counted exactly like a real one. The producer refuses to emit
+        // at 0, so a line carrying the field as 0 is either pre-guard or
+        // hand-crafted; skipped either way. The control pins that the field
+        // ABSENT (the pre-landed backlog) still counts - absence must never
+        // be read as zero.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author", "reviewed_line_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-line pass must yield no verdict"
+        );
+        assert_eq!(rep.coverage, Coverage::Unknown);
+
+        let control = attestation_line("code-review", "h", "pass");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &control,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_zero_file_attestation_is_not_review_evidence_either() {
+        // The forged row of the future spells the file count explicitly: 0
+        // lines AND 0 files is the empty-diff shape the producer refuses, so
+        // the gate must refuse it too, whatever else the line claims.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &zero,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert!(
+            rep.verdicts.is_empty(),
+            "a zero-file pass must yield no verdict"
+        );
+    }
+
+    #[test]
+    fn a_zero_line_pass_with_files_is_a_real_review() {
+        // Binary, pure-rename and empty-file diffs change files without
+        // changing text lines: reviewed_line_count 0 WITH reviewed_file_count
+        // above zero is an honest measurement of a real review, and skipping
+        // it would strand exactly those PRs (images, fonts, renames) with no
+        // satisfiable producer path.
+        let binary = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 1}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &binary,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+    }
+
+    #[test]
+    fn a_zero_file_pass_does_not_satisfy_the_reviewers_gate() {
+        // The reviewers gate (config.review.reviewers, the self-review floor)
+        // reads a separate scan; a review of nothing must not satisfy it
+        // there either, only on the coverage axis.
+        let zero = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-author",
+                     "reviewed_line_count": 0, "reviewed_file_count": 0}
+        })
+        .to_string();
+        let dir = std::env::temp_dir().join(format!(
+            "fno-zero-file-scan-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let events = dir.join("events.jsonl");
+        std::fs::write(&events, zero).unwrap();
+        let reviewers = vec!["code-review".to_string()];
+        let (unattested, _malformed) =
+            unattested_reviewers_scan(&events, &reviewers, &|_| Freshness::Fresh, "", "h");
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(
+            !unattested.is_empty(),
+            "a zero-file pass must leave the reviewer unattested"
+        );
+        assert_eq!(unattested[0].name, "code-review");
+    }
+
+    #[test]
+    fn a_zero_file_retraction_for_an_old_head_spares_the_newer_pass() {
+        // The verb emits the retraction after any newer pass, so the events
+        // order is pass@head2 then retract@head1: the named (old) pass is
+        // already superseded, and revoking it must not also revoke the live
+        // head-2 pass nobody asked about.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head2", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head1", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 3, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        // local_latest_passes returns PASSES only (fails are folded away),
+        // so "the head-2 pass survives" is exactly "a pass at head2 exists".
+        let passes = local_latest_passes(&text, "b", "head2");
+        assert!(
+            passes.iter().any(|p| p.head == "head2"),
+            "the newer head-2 pass must survive a retraction naming head-1: {passes:?}"
+        );
+    }
+
+    #[test]
+    fn retraction_for_the_current_head_still_revokes() {
+        // Same guard, the case it must not break: the retraction names the
+        // head the pair entry already holds, so it lands and revokes.
+        let mut text = String::new();
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        text.push('\n');
+        text.push_str(
+            &serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                         "attester_session_id": "sess-a", "branch": "b",
+                         "retracts_attester": "sess-a",
+                         "reviewed_line_count": 5, "reviewed_file_count": 1}
+            })
+            .to_string(),
+        );
+        let passes = local_latest_passes(&text, "b", "h");
+        assert!(
+            !passes.iter().any(|p| p.head == "h"),
+            "a same-head retraction must revoke the pass"
+        );
+    }
+
+    #[test]
+    fn require_corroboration_parses_the_string_spellings_pydantic_accepts() {
+        // The two gates must read one config one way: pydantic coerces
+        // require_corroboration = "true" to true, so the string spellings
+        // parse here too instead of silently reading false.
+        let mut s = Settings::default();
+        let review: serde_json::Value =
+            serde_json::from_str(r#"{"require_corroboration": "true"}"#).unwrap();
+        if let Some(v) = review.get("require_corroboration") {
+            s.require_corroboration = v.as_bool().or_else(|| {
+                v.as_str()
+                    .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+                        "true" | "yes" | "on" | "y" | "t" | "1" => Some(true),
+                        "false" | "no" | "off" | "n" | "f" | "0" => Some(false),
+                        _ => None,
+                    })
+            });
+        }
+        assert_eq!(s.require_corroboration, Some(true));
+    }
+
+    #[test]
+    fn a_retraction_revokes_the_named_pair_not_the_retractor() {
+        // The retraction verb addresses the EVENT, not the identity: an
+        // operator session emits a fail carrying retracts_attester naming the
+        // pair that passed. The pair-keyed scan must revoke THAT pair while
+        // the retracting session's own entry stays untouched - undoing an
+        // impersonation must not require performing it a second time.
+        let pass = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                     "attester_session_id": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let control = classify_coverage(
+            &[],
+            &[],
+            &pass,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(control.coverage, Coverage::Covered(1));
+
+        let retraction = serde_json::json!({
+            "type": "review_attestation",
+            "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "fail",
+                     "attester_session_id": "sess-operator",
+                     "retracts_attester": "sess-A", "branch": "feature/x"}
+        })
+        .to_string();
+        let revoked = classify_coverage(
+            &[],
+            &[],
+            &format!("{}\n{}", pass, retraction),
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(
+            revoked.verdicts.is_empty(),
+            "the named pair must yield no verdict"
+        );
+        assert_eq!(revoked.coverage, Coverage::Unknown);
+    }
+
+    #[test]
+    fn one_attesters_emit_never_moves_another_pairs_head() {
+        // The staleness defence of the pair key, pinned: session B emitting at
+        // a new head inserts B's own entry and leaves A's pass pinned to the
+        // head A actually reviewed. A same-key overwrite would have refreshed
+        // A's stale verdict onto code A never saw.
+        let events = format!(
+            "{}\n{}",
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-1", "verdict": "pass",
+                         "attester_session_id": "sess-A", "branch": "feature/x"}
+            }),
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "head-2", "verdict": "pass",
+                         "attester_session_id": "sess-B", "branch": "feature/x"}
+            })
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            false,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "head-2",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(2));
+        let shas: Vec<&str> = rep
+            .verdicts
+            .iter()
+            .map(|v| v.reviewed_sha.as_str())
+            .collect();
+        assert!(
+            shas.contains(&"head-1") && shas.contains(&"head-2"),
+            "{:?}",
+            shas
+        );
+    }
+
+    #[test]
+    fn project_local_require_corroboration_overlays_the_global_file() {
+        // The per-field overlay merge listed every review field except
+        // require_corroboration, so a project-local flip was read from the
+        // GLOBAL file only and the loop gate finished DonePRGreen on a row
+        // the Python merge/status/doctor surfaces refused (round 3).
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        std::fs::write(&global, "[review]\nrequired_bots = []\n").unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".fno")).unwrap();
+        std::fs::write(
+            repo.join(".fno").join("config.toml"),
+            "[review]\nrequire_corroboration = true\n",
+        )
+        .unwrap();
+        let inputs = resolve_review_inputs(&repo, None, None, None, Some(&global), None);
+        assert_eq!(inputs.settings.require_corroboration, Some(true));
+    }
+
+    #[test]
+    fn the_corroboration_term_blocks_exactly_the_policy_held_row() {
+        // Both read arms splice CoverageReport::corroboration_term into the
+        // `reviewed` verdict; the term blocks one shape: policy on AND the
+        // whole count self-attested.
+        assert!(!CoverageReport::corroboration_term(true, true));
+        assert!(CoverageReport::corroboration_term(true, false));
+        assert!(CoverageReport::corroboration_term(false, true));
+        assert!(CoverageReport::corroboration_term(false, false));
+    }
+
+    #[test]
+    fn corroboration_policy_holds_self_attested_only_and_passes_corroborated() {
+        // config.review.require_corroboration, default false (first pin: the
+        // policy OFF leaves a self-attested-only report covered). ON, a report
+        // whose whole count is the author's own attestation reads as uncovered
+        // (Covered(0) serializes "uncovered"), and a corroborated report - one
+        // other_session attestation - stays covered.
+        let self_only = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let mut off = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(off.coverage, Coverage::Covered(1));
+        off.apply_corroboration_policy(false);
+        assert_eq!(off.coverage, Coverage::Covered(1));
+
+        let mut on = classify_coverage(
+            &[],
+            &[],
+            &self_only,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert!(on.rests_on_self_attestation_alone());
+        on.apply_corroboration_policy(true);
+        assert_eq!(on.coverage, Coverage::Covered(0));
+
+        let corroborated = format!(
+            "{}\n{}",
+            self_only,
+            serde_json::json!({
+                "type": "review_attestation",
+                "data": {"reviewer": "code-review", "head_sha": "h", "verdict": "pass",
+                         "attester_session_id": "sess-peer", "branch": "feature/x"}
+            })
+        );
+        let mut corr = classify_coverage(
+            &[],
+            &[],
+            &corroborated,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(corr.coverage, Coverage::Covered(2));
+        assert!(!corr.rests_on_self_attestation_alone());
+        corr.apply_corroboration_policy(true);
+        assert_eq!(corr.coverage, Coverage::Covered(2));
+    }
+
+    #[test]
+    fn optional_staleness_never_disqualifies_local_recovery() {
+        // The PR-1151 shape: a REQUIRED bot refused, a fresh local attestation
+        // at HEAD, and an OPTIONAL bot whose verdict read an older commit.
+        // Recovery must hold - an optional bot going stale is not a property
+        // any reviewer owes. The stale optional verdict rides in COVERAGE (the
+        // union axis), never in the required-only bot sets.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &["chatgpt-codex-connector".to_string()],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(1));
+        let refused = vec!["some-required-bot".to_string()];
+        assert!(local_recovery_from_refusal(&refused, &[], &[], &rep));
+    }
+
+    #[test]
+    fn required_staleness_still_blocks_local_recovery() {
+        // Unchanged, pinned: a stale REQUIRED verdict is one re-read from
+        // counting, so recovery must not skip past it.
+        let events = attestation_line_on_branch("code-review", "h", "pass", "feature/x");
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            Some("sess-author"),
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "h",
+        );
+        let refused = vec!["some-required-bot".to_string()];
+        let stale = vec![("some-required-bot".to_string(), "oldsha".to_string())];
+        assert!(!local_recovery_from_refusal(&refused, &[], &stale, &rep));
+        // And no refusal means no recovery at all: absence is a wait.
+        assert!(!local_recovery_from_refusal(&[], &[], &[], &rep));
+    }
+
+    #[test]
+    fn resolved_optional_bots_default_matches_the_shared_python_default() {
+        // One oracle, two readers: this resolver and fno.config's
+        // DEFAULT_OPTIONAL_APPS both answer these rows, so a drift on either
+        // side fails its own test against the SAME file.
+        let golden = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/tests/config/optional_apps_default.json");
+        let text = std::fs::read_to_string(&golden)
+            .unwrap_or_else(|e| panic!("read golden {}: {e}", golden.display()));
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let unset = v["unset"].as_array().unwrap();
+        let unset: Vec<String> = unset
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        // Unset (None) -> the built-in default.
+        let settings = Settings::default();
+        assert_eq!(resolved_optional_bots(&settings), unset);
+        // An explicit [] is a real opt-out and wins over the default.
+        let empty = Settings {
+            optional_apps: Some(Vec::new()),
+            ..Settings::default()
+        };
+        assert!(resolved_optional_bots(&empty).is_empty());
+        // A partial list EXTENDS the built-ins (round-2 ruling): it never
+        // silently drops a honored-if-present login.
+        let partial = v["partial_union"].as_array().unwrap();
+        let partial: Vec<String> = partial
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect();
+        let mine = Settings {
+            optional_apps: Some(vec!["my-app".to_string()]),
+            ..Settings::default()
+        };
+        assert_eq!(resolved_optional_bots(&mine), partial);
     }
 
     #[test]
@@ -13019,6 +14588,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_coverage_names_the_read_remedy_not_a_ci_failure() {
+        let mut pr = watch_pr();
+        pr.ci_conclusion = CiConclusion::Success;
+        pr.ci_has_pending = false;
+        pr.coverage = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let reason = build_block_reason(&pr, "abc", true, true);
+        assert!(
+            reason.contains("coverage read unavailable"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("retry the review verb"), "got: {reason}");
+        assert!(!reason.contains("CI red"), "got: {reason}");
+        assert!(!reason.contains("failed"), "got: {reason}");
+        assert!(!reason.contains("Read the failing log"), "got: {reason}");
+        assert!(!reason.contains("fno do pr logs"), "got: {reason}");
+    }
+
+    #[test]
     fn unwatched_async_nudge_ci_pending_teaches_arm_and_tag() {
         // AC3-HP: the CI-pending block message must instruct arming a
         // harness-tracked watcher with a timeout and emitting <watching>,
@@ -13051,6 +14641,111 @@ mod tests {
                 tail.chars().take(60).collect::<String>()
             );
         }
+    }
+
+    /// Names every direct synchronous wait on `gh`/`fno` outside the
+    /// centralized runner, given loopcheck source text. Pure over the source so
+    /// the ratchet test can drive it with a mutated fixture instead of trusting
+    /// a zero-hit scan that never ran.
+    ///
+    /// A bypass is `Command::new(gh_bin|fno_bin|git_bin)` whose statement (the
+    /// next 300 chars, cut at the next `fn ` boundary so one chain cannot
+    /// bleed into the next function) calls `.output()`, `.wait()`, or
+    /// `.status()` - the three synchronous waits. The transport's own
+    /// `.spawn()` chain and the one deliberately detached notifier spawn are
+    /// not waits and pass.
+    fn direct_wait_bypasses(source: &str) -> Vec<String> {
+        let mut hits = Vec::new();
+        for marker in [
+            "Command::new(gh_bin",
+            "Command::new(fno_bin",
+            "Command::new(git_bin",
+        ] {
+            for tail in source.split(marker).skip(1) {
+                let stmt: String = tail
+                    .chars()
+                    .take(300)
+                    .collect::<String>()
+                    .split("fn ")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let ctx = tail.chars().take(60).collect::<String>();
+                for wait in [".output()", ".wait()", ".status()"] {
+                    if stmt.contains(wait) {
+                        hits.push(format!("{marker} ... {ctx}"));
+                        break;
+                    }
+                }
+            }
+        }
+        hits
+    }
+
+    #[test]
+    fn no_direct_external_read_bypasses_bounded_runner() {
+        // Production region only: the file's own test module may legitimately
+        // spawn helper processes.
+        let source = include_str!("loopcheck.rs");
+        let production = source
+            .split("\nmod tests {")
+            .next()
+            .expect("test module marker");
+        // Positive control first, so an empty scan can never read as green:
+        // the centralized runner must exist and carry real call sites.
+        assert!(production.contains("fn run_bounded("));
+        assert!(
+            production.matches("bounded_read(").count() >= 10,
+            "the bounded transport must carry its registered read sites"
+        );
+        assert!(
+            production.matches("git_bounded(").count() >= 10,
+            "the bounded transport must carry the stop-gate git read sites"
+        );
+        let bypasses = direct_wait_bypasses(production);
+        assert!(
+            bypasses.is_empty(),
+            "direct synchronous gh/fno/git waits outside the bounded runner: {bypasses:?}"
+        );
+    }
+
+    #[test]
+    fn the_bypass_detector_catches_an_injected_bypass() {
+        // The detector itself is under test: a fixture with ONE new direct
+        // wait must be named, proving a green production scan is a scan that
+        // ran and matched the right symbol - not an empty haystack.
+        let fixture = "fn somewhere() {
+    let out = Command::new(gh_bin)
+        .args([\"pr\", \"view\"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|e| e.to_string())?;
+}
+fn run_bounded() {}
+bounded_read(); bounded_read();";
+        let hits = direct_wait_bypasses(fixture);
+        assert_eq!(hits.len(), 1, "exactly the injected bypass: {hits:?}");
+        assert!(hits[0].contains("Command::new(gh_bin"), "{hits:?}");
+        // The git marker is under test too: a direct git wait is the same
+        // hang shape with a different binary, and the detector must name it.
+        let git_fixture = "fn g() {
+    let out = Command::new(git_bin)
+        .args([\"status\"])
+        .output()?;
+}
+fn run_bounded() {}
+git_bounded();";
+        let git_hits = direct_wait_bypasses(git_fixture);
+        assert_eq!(
+            git_hits.len(),
+            1,
+            "exactly the injected git bypass: {git_hits:?}"
+        );
+        assert!(git_hits[0].contains("Command::new(git_bin"), "{git_hits:?}");
+        // And the wait call is what flagged it, not the spawn shape: the same
+        // fixture without the wait passes clean.
+        let clean = fixture.replace(".output()", ".spawn()");
+        assert!(direct_wait_bypasses(&clean).is_empty());
     }
 
     #[test]
@@ -13179,6 +14874,18 @@ mod tests {
         assert!(!harness_can_idle(Some("gemini"), false));
         // Unknown harness (bare shell / daemon): conservative block.
         assert!(!harness_can_idle(None, false));
+    }
+
+    #[test]
+    fn watching_refusal_names_the_disqualifying_substrate() {
+        assert_eq!(
+            watching_harness_refusal(Some("claude"), true),
+            "watching ignored: loop-run child cannot idle"
+        );
+        assert_eq!(
+            watching_harness_refusal(Some("codex"), false),
+            "watching ignored: harness codex cannot idle"
+        );
     }
 
     #[test]
@@ -14506,9 +16213,10 @@ mod tests {
         // reviewer) is the path for harnesses without one and is deferred.
         assert!(harness_can_self_review(Some("claude")));
         assert!(harness_can_self_review(Some("codex")));
-        // opencode carries a recorded native verb (/review-changes), so the
-        // floor is satisfiable there; agy/gemini have none and stay unfloored.
-        assert!(harness_can_self_review(Some("opencode")));
+        // opencode's /review-changes is recorded but no lane this code drives
+        // can fire it (daemon lane submits text; mux declares submit
+        // unsupported), so the floor must not demand its attestation.
+        assert!(!harness_can_self_review(Some("opencode")));
         assert!(!harness_can_self_review(Some("gemini")));
         assert!(!harness_can_self_review(Some("agy")));
         assert!(!harness_can_self_review(None));
@@ -14525,6 +16233,7 @@ mod tests {
         assert!(!self_review_floor_applies(None, true));
         assert!(self_review_floor_applies(Some("claude"), false));
         assert!(self_review_floor_applies(Some("codex"), true));
+        assert!(!self_review_floor_applies(Some("opencode"), false));
         assert!(!self_review_floor_applies(Some("gemini"), false));
         assert!(!self_review_floor_applies(Some("agy"), false));
         // An unrecognized spelling is an unattributed run: it floors rather
@@ -15312,6 +17021,35 @@ mod tests {
         assert!(failing_check_names(&checks).is_empty());
         // Malformed input never panics, yields empty.
         assert!(failing_check_names(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn coverage_statuses_are_not_generic_ci_checks() {
+        let checks = serde_json::json!([
+            {"name": "ci", "bucket": "pass"},
+            {"name": "fno/review-coverage", "bucket": "pending"},
+            {"name": "fno/review-coverage-unavailable", "bucket": "pending"}
+        ]);
+        let filtered = without_coverage_statuses(&checks);
+        assert_eq!(filtered.as_array().unwrap().len(), 1);
+        assert_eq!(
+            compute_ci_conclusion(&filtered).unwrap(),
+            CiConclusion::Success
+        );
+        assert!(failing_check_names(&filtered).is_empty());
+        assert!(!ci_has_pending_checks(&filtered));
+    }
+
+    #[test]
+    fn coverage_instrument_status_is_pending_only_when_the_read_is_unknown() {
+        let unknown = coverage_instrument_status(&Coverage::Unknown, "abc123456789");
+        assert_eq!(unknown.0, "pending");
+        assert!(unknown.1.contains("coverage read unavailable"));
+        assert!(unknown.1.contains("retry the review verb"));
+
+        let known = coverage_instrument_status(&Coverage::Covered(0), "abc123456789");
+        assert_eq!(known.0, "success");
+        assert!(known.1.contains("coverage read healthy"));
     }
 
     #[test]
@@ -16371,9 +18109,14 @@ mod tests {
             resolved_required_bots(&s).is_empty(),
             "optional must not be required"
         );
+        // A non-empty configured list EXTENDS the built-ins, so this config
+        // (built-in named explicitly) resolves to both built-ins.
         assert_eq!(
             resolved_optional_bots(&s),
-            vec!["chatgpt-codex-connector".to_string()]
+            vec![
+                "gemini-code-assist".to_string(),
+                "chatgpt-codex-connector".to_string()
+            ]
         );
     }
 

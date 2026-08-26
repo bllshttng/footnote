@@ -799,25 +799,251 @@ def test_truncated_evidence_blames_the_truncation_not_the_surface():
     assert entries[0]["supersession"]["verified_at"] is None
 
 
-def test_page_sized_file_list_reads_as_truncated():
+def test_complete_rest_file_list_is_not_marked_truncated():
     from fno.graph._reconcile import query_pr_merge_state
 
-    payload = {
+    state = query_pr_merge_state(
+        5,
+        info_reader=lambda number, *, repo=None, cwd=None: ({
+            "pr": 5,
+            "state": "MERGED",
+            "url": "u",
+            "merged_at": "t",
+            "merge_sha": "sha",
+        }, ""),
+        files_reader=lambda number, *, repo=None, cwd=None: ([f"f{i}.py" for i in range(100)], ""),
+    )
+    assert state.files_truncated is False
+
+
+def test_query_composes_injected_rest_readers_and_complete_files():
+    from fno.graph._reconcile import query_pr_merge_state
+
+    calls: list[tuple[str, int, str | None]] = []
+
+    def info_reader(number, *, repo=None, cwd=None):
+        calls.append(("info", int(number), repo))
+        return ({
+            "pr": int(number),
+            "url": "https://github.com/o/r/pull/5",
+            "state": "MERGED",
+            "head_sha": "head",
+            "head_ref": "feature/test",
+            "base_ref": "main",
+            "mergeable": "UNKNOWN",
+            "merged_at": "2026-08-25T12:00:00Z",
+            "merge_sha": "merge",
+        }, "")
+
+    def files_reader(number, *, repo=None, cwd=None):
+        calls.append(("files", int(number), repo))
+        return (["cli/a.py", "cli/b.py"], "")
+
+    state = query_pr_merge_state(
+        5,
+        repo="o/r",
+        info_reader=info_reader,
+        files_reader=files_reader,
+        include_files=True,
+    )
+
+    assert state.state == "MERGED"
+    assert state.url == "https://github.com/o/r/pull/5"
+    assert state.merged_at == "2026-08-25T12:00:00Z"
+    assert state.merge_sha == "merge"
+    assert state.changed_files == ["cli/a.py", "cli/b.py"]
+    assert state.files_truncated is False
+    assert calls == [("info", 5, "o/r"), ("files", 5, "o/r")]
+
+
+def test_query_skips_file_evidence_for_merge_only_callers():
+    from fno.graph._reconcile import query_pr_merge_state
+
+    def files_reader(*args, **kwargs):
+        raise AssertionError("merge-only query must not read changed files")
+
+    state = query_pr_merge_state(
+        5,
+        repo="o/r",
+        info_reader=lambda number, *, repo=None, cwd=None: ({
+            "pr": 5,
+            "state": "MERGED",
+            "url": "u",
+            "merged_at": "t",
+            "merge_sha": "sha",
+        }, ""),
+        files_reader=files_reader,
+    )
+
+    assert state.state == "MERGED"
+    assert state.changed_files == []
+
+
+def test_query_source_contains_no_graphql_view_read():
+    import inspect
+
+    from fno.graph._reconcile import query_pr_merge_state
+
+    assert "gh pr view" not in inspect.getsource(query_pr_merge_state)
+
+
+def test_query_runner_guard_sees_only_routed_rest_argv():
+    from fno.graph._reconcile import query_pr_merge_state
+    from fno.pr._proc import Result
+
+    calls: list[list[str]] = []
+    pull = {
         "number": 5,
-        "state": "MERGED",
-        "url": "u",
-        "mergedAt": "t",
-        "mergeCommit": {"oid": "sha"},
-        "files": [{"path": f"f{i}.py"} for i in range(100)],
+        "html_url": "https://github.com/o/r/pull/5",
+        "state": "closed",
+        "merged": True,
+        "merged_at": "2026-08-25T12:00:00Z",
+        "merge_commit_sha": "merge",
+        "head": {"sha": "head", "ref": "feature/test"},
+        "base": {"ref": "main"},
     }
 
-    def runner(*args, **kwargs):
-        import subprocess, json
+    def runner(cmd, **kwargs):
+        calls.append(list(cmd))
+        assert cmd[:2] == ["gh", "api"], f"unrouted PR read: {cmd}"
+        if "/files?" in cmd[-1]:
+            return Result(0, '[{"filename":"cli/a.py"}]', "")
+        return Result(0, json.dumps(pull), "")
 
-        return subprocess.CompletedProcess(args, 0, json.dumps(payload), "")
+    state = query_pr_merge_state(5, repo="o/r", runner=runner, include_files=True)
 
-    state = query_pr_merge_state(5, runner=runner)
-    assert state.files_truncated is True
+    assert state.state == "MERGED"
+    assert state.changed_files == ["cli/a.py"]
+    assert all(cmd[:3] != ["gh", "pr", "view"] for cmd in calls)
+
+
+def test_query_rest_timeout_is_retryable_availability_failure():
+    import subprocess
+
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    def runner(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, 30)
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r", runner=runner)
+
+    assert raised.value.kind == "availability"
+    assert raised.value.retryable is True
+    assert "retry" in raised.value.remedy_for(pr_number=5, repo="o/r").lower()
+
+
+def test_query_missing_gh_is_retryable_availability_failure():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr._proc import ToolMissing
+
+    def runner(cmd, **kwargs):
+        raise ToolMissing("gh")
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r", runner=runner)
+
+    assert raised.value.kind == "availability"
+    assert raised.value.retryable is True
+
+
+def test_query_rate_limit_reader_forwards_timeout_to_bucket_probe():
+    import json
+
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr._proc import Result
+
+    probe_timeouts: list[float | None] = []
+
+    def runner(cmd, **kwargs):
+        if cmd[-1] == "rate_limit":
+            probe_timeouts.append(kwargs.get("timeout"))
+            return Result(0, json.dumps({"resources": {"core": {"remaining": 0, "reset": 1}}}), "")
+        return Result(1, "", "API rate limit exceeded")
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r", runner=runner)
+
+    assert raised.value.kind == "availability"
+    assert probe_timeouts == [30.0]
+
+
+def test_query_file_cap_is_non_retryable_incomplete_evidence():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({
+                "pr": 5,
+                "state": "MERGED",
+                "url": "u",
+                "merged_at": "t",
+                "merge_sha": "sha",
+            }, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: (
+                None,
+                "gh api pull files reached GitHub's 3,000-file cap without a short page",
+            ),
+            include_files=True,
+        )
+
+    assert raised.value.kind == "evidence_incomplete"
+    assert raised.value.retryable is False
+    assert "force --reason" in raised.value.remedy_for(pr_number=5, repo="o/r")
+
+
+def test_query_rejects_missing_required_reader_metadata():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({"url": "u"}, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: ([], ""),
+        )
+
+    assert raised.value.kind == "malformed"
+    assert raised.value.retryable is False
+
+
+def test_query_default_rest_timeout_stays_retryable(monkeypatch):
+    import subprocess
+
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+    from fno.pr import _rest
+
+    def timed_out(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], kwargs.get("timeout", 30))
+
+    monkeypatch.setattr(_rest, "run", timed_out)
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(5, repo="o/r")
+
+    assert raised.value.kind == "availability"
+    assert raised.value.retryable is True
+
+
+def test_query_unknown_rest_state_is_a_malformed_failure():
+    from fno.graph._reconcile import ReconcileError, query_pr_merge_state
+
+    with pytest.raises(ReconcileError) as raised:
+        query_pr_merge_state(
+            5,
+            repo="o/r",
+            info_reader=lambda number, *, repo=None, cwd=None: ({
+                "pr": 5,
+                "state": "UNKNOWN",
+                "url": "u",
+            }, ""),
+            files_reader=lambda number, *, repo=None, cwd=None: ([], ""),
+        )
+
+    assert raised.value.kind == "malformed"
+    assert raised.value.retryable is False
 
 
 def test_manifest_node_id_beats_a_stale_branch():

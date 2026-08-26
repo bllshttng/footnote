@@ -370,6 +370,33 @@ def test_a_gh_outage_leaves_the_node_done(tmp_graph, monkeypatch):
     assert _read(tmp_graph)["ab-11111111"]["completed_at"] is not None
 
 
+def test_a_routing_refusal_does_not_reopen_the_node(tmp_graph, monkeypatch):
+    import fno.graph.cli as gcli
+    from fno.graph._reconcile import ReconcileError
+
+    def _refused(n, **kw):
+        raise ReconcileError(
+            "[fno GraphQL reserve] use `fno do pr info 1140`; unconditional route refusal"
+        )
+
+    monkeypatch.setattr(gcli, "_done_gh_query", _refused)
+    _write(
+        tmp_graph,
+        _node(
+            "ab-route001",
+            pr_number=1140,
+            pr_url="https://github.com/o/r/pull/1140",
+        ),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-route001", "--reason", "x"])
+
+    assert res.exit_code == 3
+    combined = res.output + (res.stderr or "")
+    assert "fno do pr info 1140 --repo o/r" in combined
+    assert "retryable once gh is available again" not in combined
+    assert _read(tmp_graph)["ab-route001"]["completed_at"] is not None
+
+
 def test_a_node_that_is_not_done_warns_and_changes_nothing(tmp_graph):
     """Idempotent in the safe direction, matching unsupersede's shape."""
     _write(tmp_graph, _node("ab-11111111", completed_at=None, status="ready"))

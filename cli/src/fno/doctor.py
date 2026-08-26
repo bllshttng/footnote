@@ -1001,6 +1001,97 @@ def _post_merge_sync_health() -> dict[str, Any]:
         return {"state": "unknown", "stale": False, "behind": None, "detail": ""}
 
 
+def _self_attested_coverage_report() -> dict[str, Any]:
+    """Per merged PR in the recent window: did coverage rest on the author's
+    own attestation alone?
+
+    The number the operator needs before ever flipping
+    ``config.review.require_corroboration`` to true - each row is one merged PR
+    that policy would have held. Advisory only, never changes status/exit; a
+    probe that cannot run reports unknown rather than zero.
+    """
+    try:
+        # project_events_json, not a hand-joined resolve_repo_root: the domain
+        # helper honors the test sandbox pin (FNO_EVENTS_PATH), and a bare
+        # resolver call here arms the shellout-drift guard's module-level
+        # predicate, which then flags doctor.py's two pre-existing
+        # privately-rooted report shell-outs the guard was never taught about.
+        from fno.paths import project_events_json
+
+        events = project_events_json()
+        newest: dict[int, dict[str, Any]] = {}
+        try:
+            for line in events.read_text(encoding="utf-8").splitlines():
+                try:
+                    val = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if val.get("type") != "review_coverage":
+                    continue
+                data = val.get("data") or {}
+                pr = data.get("pr")
+                if isinstance(pr, int):
+                    newest[pr] = data
+        except OSError:
+            newest = {}
+
+        merged: list[dict[str, Any]] = []
+        proc = subprocess.run(
+            [
+                "gh",
+                "pr",
+                "list",
+                "--state",
+                "merged",
+                "--limit",
+                "10",
+                "--json",
+                "number",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if proc.returncode == 0:
+            for row in json.loads(proc.stdout or "[]"):
+                number = row.get("number")
+                if not isinstance(number, int):
+                    continue
+                cov = newest.get(number)
+                if cov is None:
+                    continue
+                reviewed = cov.get("reviewed_count")
+                self_attested_n = cov.get("self_attested_count")
+                # The corroboration policy rewrites held rows to
+                # reviewed_count 0 while preserving self_attested_count, so a
+                # count-only filter hides exactly the PRs the policy holds -
+                # the population this report exists to measure.
+                if (
+                    not isinstance(reviewed, int)
+                    or reviewed <= 0
+                ) and not (isinstance(self_attested_n, int) and self_attested_n > 0):
+                    continue
+                # The SAME predicate the merge gate's corroboration policy
+                # applies, so the report and the gate cannot disagree about a
+                # row.
+                from fno.pr._coverage_gate import rests_on_self_attestation_alone
+
+                merged.append(
+                    {
+                        "pr": number,
+                        "reviewed_count": reviewed,
+                        "self_attested_count": cov.get("self_attested_count"),
+                        "self_attested_only": rests_on_self_attestation_alone(cov),
+                    }
+                )
+        return {
+            "prs": merged,
+            "self_attested_only_count": sum(1 for row in merged if row["self_attested_only"]),
+        }
+    except Exception:  # noqa: BLE001 - an alarm that crashes doctor helps nobody
+        return {"prs": [], "self_attested_only_count": 0, "error": "probe failed"}
+
+
 def _launch_agent_failures() -> dict[str, Any]:
     """Every ``sh.fno.*`` LaunchAgent whose LAST EXIT was nonzero.
 
@@ -2438,6 +2529,14 @@ def _codex_bind_report() -> dict[str, Any]:
     future regression in that sequence's probe order, deadline handling, or
     pane-death detection shows up here too instead of passing silently.
     """
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="fno-codex-bind-") as scratch:
+        return _run_codex_bind_canary(Path(scratch).resolve())
+
+
+def _run_codex_bind_canary(cwd: Path) -> dict[str, Any]:
+    """Run the production binding probe in one fno-owned scratch directory."""
     import time
     import uuid as _uuid
 
@@ -2453,13 +2552,29 @@ def _codex_bind_report() -> dict[str, Any]:
     )
 
     version = _codex_version()
-    cwd = Path.cwd()
     session = resolve_mux_session()
     name = f"codex-bind-canary-{_uuid.uuid4().hex[:8]}"
-    argv = build_pane_argv("codex", "", cwd, True, None, name=name)
+    codex_home = cwd / ".codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text(
+        f"[projects.{json.dumps(str(cwd))}]\ntrust_level = \"trusted\"\n",
+        encoding="utf-8",
+    )
+    source_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    source_auth = source_home / "auth.json"
+    if source_auth.is_file():
+        (codex_home / "auth.json").symlink_to(source_auth.resolve())
+    prompt = "fno codex bind canary: reply READY and take no other action."
+    argv = build_pane_argv("codex", prompt, cwd, True, None, name=name)
+    argv = ["env", f"CODEX_HOME={codex_home}", *argv]
     # None (daemon unreachable at this instant) is passed through as-is; the
-    # probe below refuses to correlate against a fabricated empty baseline.
-    baseline_ids = _codex_session_ids_loaded(cwd)
+    # ordinary production probe refuses to correlate against a fabricated
+    # empty baseline. This home is newly created and uniquely owned by the
+    # canary, so it positively contains no pre-existing daemon sessions: an
+    # absent pre-spawn socket is an empty baseline here, not ambiguity.
+    baseline_ids = _codex_session_ids_loaded(cwd, codex_home=codex_home)
+    if baseline_ids is None:
+        baseline_ids = set()
     spawn_started_ms = int(time.time() * 1000)
     proc = _run_mux(
         ["mux", "pane", "run", "--session", session, "--cwd", str(cwd), "--", *argv],
@@ -2468,6 +2583,7 @@ def _codex_bind_report() -> dict[str, Any]:
     if proc.returncode != 0:
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2482,6 +2598,7 @@ def _codex_bind_report() -> dict[str, Any]:
         # leak.
         return {
             "bound": False,
+            "session_id": None,
             "oracle": None,
             "elapsed_s": 0.0,
             "codex_version": version,
@@ -2492,50 +2609,72 @@ def _codex_bind_report() -> dict[str, Any]:
             ),
         }
 
-    mux = {"session": session, "pane_id": pane_id}
-    child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
-    started = time.monotonic()
-    oracle_used: list = []
-    if child_pid is not None:
-        binding = _await_pane_binding(
-            mux,
-            _make_codex_bind_probe(
-                cwd=cwd,
-                spawn_started_ms=spawn_started_ms,
-                child_pid=child_pid,
-                codex_sessions_dir=None,
-                daemon_baseline_ids=baseline_ids,
-                mux=mux,
+    try:
+        mux = {"session": session, "pane_id": pane_id}
+        child_pid = _lookup_child_pid(session, pane_id, subprocess.run)
+        started = time.monotonic()
+        oracle_used: list = []
+        if child_pid is not None:
+            binding = _await_pane_binding(
+                mux,
+                _make_codex_bind_probe(
+                    cwd=cwd,
+                    spawn_started_ms=spawn_started_ms,
+                    child_pid=child_pid,
+                    codex_sessions_dir=codex_home / "sessions",
+                    daemon_baseline_ids=baseline_ids,
+                    mux=mux,
+                    runner=subprocess.run,
+                    oracle_used=oracle_used,
+                    daemon_codex_home=codex_home,
+                ),
                 runner=subprocess.run,
-                oracle_used=oracle_used,
-            ),
-            runner=subprocess.run,
-            window_s=_CODEX_BIND_CANARY_WINDOW_S,
-            label="codex-bind-canary",
-        )
-        session_id = binding.session_id
-        error = None if session_id else "neither oracle bound within the window"
-    else:
-        # No window was waited out here at all - a missing child pid is a
-        # pane-lookup miss, not a timed-out bind, and reporting the timeout
-        # message would hide that real cause from whoever reads the canary.
-        session_id = None
-        error = "no child pid found for the canary pane"
-    elapsed = time.monotonic() - started
-    _reap_spawned_pane(session, pane_id, subprocess.run)
-    return {
-        "bound": session_id is not None,
-        "oracle": oracle_used[0] if oracle_used else None,
-        "elapsed_s": round(elapsed, 2),
-        "codex_version": version,
-        "error": error,
-    }
+                window_s=_CODEX_BIND_CANARY_WINDOW_S,
+                label="codex-bind-canary",
+            )
+            candidate = binding.session_id
+            oracle = oracle_used[0] if oracle_used else None
+            try:
+                canonical = str(_uuid.UUID(candidate)) if candidate else ""
+            except (ValueError, AttributeError):
+                canonical = ""
+            if candidate and canonical == candidate.lower() and len(candidate) == 36:
+                session_id = candidate
+                error = None
+            elif candidate:
+                session_id = None
+                error = (
+                    f"{oracle or 'binding oracle'} returned {candidate!r}, not a full "
+                    "canonical session id"
+                )
+                oracle_used.clear()
+            else:
+                session_id = None
+                error = "neither oracle bound within the window"
+        else:
+            # No window was waited out here at all - a missing child pid is a
+            # pane-lookup miss, not a timed-out bind, and reporting the timeout
+            # message would hide that real cause from whoever reads the canary.
+            session_id = None
+            error = "no child pid found for the canary pane"
+        elapsed = time.monotonic() - started
+        return {
+            "bound": session_id is not None,
+            "session_id": session_id,
+            "oracle": oracle_used[0] if oracle_used else None,
+            "elapsed_s": round(elapsed, 2),
+            "codex_version": version,
+            "error": error,
+        }
+    finally:
+        _reap_spawned_pane(session, pane_id, subprocess.run)
 
 
 def _emit_codex_bind_report(result: dict[str, Any]) -> None:
     if result["bound"]:
         typer.echo(
-            f"fno doctor: codex bind: ok, oracle={result['oracle']} "
+            f"fno doctor: codex bind: ok, session={result.get('session_id')} "
+            f"oracle={result['oracle']} "
             f"elapsed={result['elapsed_s']}s codex={result['codex_version'] or 'unknown'}"
         )
     else:
@@ -3433,6 +3572,12 @@ def build_report(source: Optional[Path] = None) -> dict[str, Any]:
     result["archive_id_collisions"] = _archive_id_collisions()
     result["post_merge_sync"] = _post_merge_sync_health()
     result["launch_agents"] = _launch_agent_failures()
+
+    # Advisory self-attestation share (x-7f7b): per merged PR in the recent
+    # window, whether coverage rested on the author's own attestation alone -
+    # the number to read before flipping review.require_corroboration. Never
+    # changes status/exit.
+    result["self_attested_coverage"] = _self_attested_coverage_report()
 
     # Advisory silent-switch legibility (x-8cd5 Wave 6): default-off switches
     # silently producing inaction + default-on/armed switches silently merging.

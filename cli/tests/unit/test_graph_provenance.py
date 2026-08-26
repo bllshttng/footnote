@@ -1133,6 +1133,56 @@ def test_cli_session_add_pr_mode_resolves_node(tmp_path, monkeypatch):
     assert read_graph(g)[0]["sessions"][0]["phase"] == "ship"
 
 
+def test_cli_session_close_blueprint_writes_completion_receipt(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+    from fno.graph.store import read_graph
+
+    g = _make_graph(tmp_path, [{"id": "x-close001", "title": "t", "plan_path": "p.md"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-close")
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close001",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close001",
+        "--json",
+    ])
+
+    assert r.exit_code == 0, r.output
+    out = json.loads(r.output)
+    assert out["status"] == "closed"
+    assert out["phase"] == "blueprint"
+    assert out["summary"] == "plan is ready"
+    assert out["launch"] == "/fno:target x-close001"
+    row = read_graph(g)[0]
+    assert row["status"] == "ready"
+    assert row["sessions"][0]["phase"] == "blueprint"
+    assert row["sessions"][0]["session_id"] == "sess-close"
+    assert "ended_at" in row["sessions"][0]
+
+
+def test_cli_session_close_refuses_without_identity(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "x-close002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+
+    r = CliRunner().invoke(C.cli, [
+        "session", "close", "x-close002",
+        "--summary", "plan is ready",
+        "--launch", "/fno:target x-close002",
+    ])
+
+    assert r.exit_code == 2
+    assert "no ambient identity" in r.output
+
+
 def test_cli_session_add_pr_repo_scopes_resolution(tmp_path, monkeypatch):
     """AC1-HP (CLI): --repo disambiguates a pr_number that collides across repos."""
     from typer.testing import CliRunner

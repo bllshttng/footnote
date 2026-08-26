@@ -179,9 +179,36 @@ def cleanup(
 
 
 @app.command()
-def archive(name: str = typer.Argument(..., help="Worktree branch or path to archive.")) -> None:
-    """Remove the worktree directory but keep the branch."""
-    raise typer.Exit(code=_run_lifecycle("archive", name))
+def archive(
+    name: str = typer.Argument(..., help="Worktree branch or path to archive."),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help="Override strict data-loss checks and disclose the state discarded.",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip confirmation before terminating processes rooted in the worktree.",
+    ),
+    delete_branch: bool = typer.Option(
+        False,
+        "--delete-branch",
+        help="Delete the branch after archiving the worktree.",
+    ),
+) -> None:
+    """Archive through the guarded script, preserving the branch by default."""
+    args = ["archive"]
+    if force:
+        args.append("--force")
+    if yes:
+        args.append("--yes")
+    if delete_branch:
+        args.append("--delete-branch")
+    args.append(name)
+    raise typer.Exit(code=_run_lifecycle(*args))
 
 
 # --- ensure: mechanical dispatch-time isolation primitive (x-73ca) ----------

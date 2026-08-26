@@ -661,6 +661,69 @@ def test_reconcile_happy_path_then_noop(cli_env, monkeypatch):
     assert node2["completed_at"] == first_ts
 
 
+def test_reconcile_routes_rest_merge_evidence_and_keeps_repo_scope(cli_env, monkeypatch):
+    """Merged closure uses REST readers and a wrong stored slug cannot fall back."""
+    graph_path, _sentinel = cli_env
+    _make_graph(
+        graph_path,
+        [
+            _node(
+                "ab-rest-good",
+                pr_number=1140,
+                pr_url="https://github.com/bllshttng/footnote/pull/1140",
+            ),
+            _node(
+                "ab-rest-wrong",
+                pr_number=1140,
+                pr_url="https://github.com/jasonnoahchoi/.claude/pull/1140",
+            ),
+        ],
+    )
+    requested: list[tuple[int, str | None]] = []
+    real_query = rec.query_pr_merge_state
+
+    def info_reader(number, *, repo=None, cwd=None):
+        requested.append((int(number), repo))
+        if repo == "jasonnoahchoi/.claude":
+            return None, "gh: HTTP 404 Not Found"
+        return ({
+            "pr": int(number),
+            "url": "https://github.com/bllshttng/footnote/pull/1140",
+            "state": "MERGED",
+            "merged_at": "2026-08-24T17:04:17Z",
+            "merge_sha": "merge1140",
+        }, "")
+
+    def routed_query(number, *, repo=None, cwd=None):
+        return real_query(
+            number,
+            repo=repo,
+            cwd=cwd,
+            info_reader=info_reader,
+            files_reader=lambda n, *, repo=None, cwd=None: (["cli/a.py"], ""),
+        )
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", routed_query)
+
+    good = runner.invoke(app, ["backlog", "reconcile", "--node", "ab-rest-good", "--json"])
+    assert good.exit_code == 0, good.output
+    good_payload = json.loads(good.output)
+    assert [row["node_id"] for row in good_payload["closed"]] == ["ab-rest-good"]
+    good_node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rest-good")
+    assert good_node["status"] == "done"
+    assert good_node["merge_status"] == "merged"
+
+    wrong = runner.invoke(app, ["backlog", "reconcile", "--node", "ab-rest-wrong", "--json"])
+    assert wrong.exit_code == 4, wrong.output
+    wrong_payload = json.loads(wrong.output)
+    assert wrong_payload["closed"] == []
+    assert wrong_payload["failures"][0]["kind"] == "not_found"
+    assert "jasonnoahchoi/.claude#1140" in wrong_payload["failures"][0]["remedy"]
+    wrong_node = next(e for e in _read_entries(graph_path) if e["id"] == "ab-rest-wrong")
+    assert wrong_node.get("completed_at") is None
+    assert requested == [(1140, "bllshttng/footnote"), (1140, "jasonnoahchoi/.claude")]
+
+
 def test_reconcile_does_not_dispatch_post_merge_ritual(cli_env, monkeypatch):
     """AC10-EDGE: reconcile is no longer a ritual detector. Closing a merged node
     with post_merge.auto_run armed must NOT invoke the dispatch seam, run the
@@ -1355,6 +1418,55 @@ def test_reconcile_keeps_pending_supersession_when_files_do_not_cover_cause(cli_
     assert updated["status"] == "blocked"
     assert updated["supersession"]["verified_at"] is None
     assert "supersession_unverified" in result.output
+
+
+def test_reconcile_reports_supersession_and_pr_failures_together(cli_env, monkeypatch, tmp_path):
+    from fno.graph._reconcile import MergeDriftRecord, ReconcileError
+
+    graph_path, _ = cli_env
+    successor = _node(
+        "ab-new003",
+        pr_number=903,
+        pr_url="https://github.com/test-owner/test-repo/pull/903",
+        cwd=str(tmp_path),
+    )
+    _make_graph(graph_path, [successor])
+
+    monkeypatch.setattr(
+        rec,
+        "scan_merge_drift",
+        lambda entries, **kwargs: [
+            MergeDriftRecord(
+                node_id="ab-pr-fail1",
+                plan_path=None,
+                pr_number=904,
+                pr_url="https://github.com/test-owner/test-repo/pull/904",
+                pr_state="UNKNOWN",
+                merged_at=None,
+                error="ordinary PR read failed",
+                error_kind="availability",
+                remedy="retry the ordinary PR read",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        rec,
+        "successors_owing_verification",
+        lambda entries: {"ab-new003": successor},
+    )
+
+    def fail_supersession_read(*args, **kwargs):
+        raise ReconcileError("supersession files read failed", kind="malformed")
+
+    monkeypatch.setattr(rec, "query_pr_merge_state", fail_supersession_read)
+
+    result = runner.invoke(app, ["backlog", "reconcile"])
+
+    assert result.exit_code == 4
+    assert "Supersession evidence reads failed" in result.output
+    assert "ab-new003 PR #903" in result.output
+    assert "node(s) could not be resolved" in result.output
+    assert "ab-pr-fail1  PR #904: ordinary PR read failed" in result.output
 
 
 def test_reconcile_pr_number_dry_run_previews_the_trailer_only_node(cli_env, monkeypatch):

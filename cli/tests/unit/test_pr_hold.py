@@ -152,7 +152,11 @@ def test_hold_for_pr_fails_closed_on_a_closure_query_error_even_when_unstamped(
     monkeypatch.setattr("fno.pr.closure.fetch_pr_closure_context", _boom)
     reason = _hold.merge_hold_reason(42, str(tmp_path))
     assert reason is not None and "dispatch-hold-invalid:" in reason
-    assert "PR body is unreadable" in reason
+    assert "hold lookup unavailable" in reason
+    assert "gh pr view timed out" in reason
+    assert "retry the hold lookup" in reason
+    assert "do not edit the PR body" in reason
+    assert "PR body is unreadable" not in reason
 
 
 def test_hold_for_pr_returns_none_with_no_gh_call_when_repo_has_zero_backlog_nodes(

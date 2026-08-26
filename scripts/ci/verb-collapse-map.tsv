@@ -61,8 +61,10 @@ agents reconcile	T1	agents reconcile	12
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents report	T1	agents report	3
+agents rename	T1	agents rename	0
 agents restart	T1	agents restart	6
 agents resume	KEEP	agents resume	43	deliberate readability slack for a high-traffic distinct operation
+agents retask	T1	agents retask	2
 agents review-coverage	T1	agents review-coverage	34
 agents rm	KEEP	agents rm	56	deliberate readability slack for a high-traffic distinct operation
 agents roles context	T1	agents roles context	2
@@ -128,6 +130,7 @@ backlog collisions check	T1	backlog collisions check	11
 backlog cost	T1	backlog cost	1
 backlog decide	T1	backlog decide	13
 backlog decide-reindex	T1	backlog decide-reindex	5
+backlog decide-retract	T1	backlog decide-retract	0
 backlog decisions	T1	backlog decisions	16
 backlog decompose	T1	backlog decompose	8
 backlog defer	T1	backlog defer	14
@@ -142,6 +145,7 @@ backlog intake	T1	backlog intake	32
 backlog lane-fill	T1	backlog lane-fill	2
 backlog lanes	T1	backlog lanes	2
 backlog maintain	T1	backlog maintain	7
+backlog migrate-priorities	T1	backlog migrate-priorities	0
 backlog new	T1	backlog new	38
 backlog next	KEEP	backlog next	54	deliberate readability slack for a high-traffic distinct operation
 backlog note	T1	backlog note	1
@@ -165,9 +169,11 @@ backlog retro run	T1	backlog retro run	16
 backlog retro sweep-carveouts	T1	backlog retro sweep-carveouts	7	
 backlog roadmap	T1	backlog roadmap	1
 backlog session add	T1	backlog session add	4
+backlog session close	T1	backlog session close	3
 backlog session reap-open	T1	backlog session reap-open	3
 backlog status	T1	backlog status	1
 backlog supersede	T1	backlog supersede	10
+backlog undispatched	T1	backlog undispatched	0
 backlog triage apply	T1	backlog triage apply	3
 backlog triage consistency	T1	backlog triage consistency	2
 backlog triage context	T1	backlog triage context	7
@@ -235,6 +241,7 @@ do plan set-expected	T1	do plan set-expected	1
 do plan stamp	T1	do plan stamp	5
 do plan sync	T1	do plan sync	3
 do plan validate	T1	do plan validate	14
+do pr attestation retract	T1	do pr attestation retract	0
 do pr base-check	T1	do pr base-check	0
 do pr base-lineage-check	T1	do pr base-lineage-check	6
 do pr bind-created	T1	do pr bind-created	0
@@ -282,6 +289,7 @@ do target check-dispatch-hold	T1	do target check-dispatch-hold	2
 do target check-review-gate	T1	do target check-review-gate	4
 do target denominator-ratio	T1	do target denominator-ratio	2
 do target init	T1	do target init	90
+do target request-self-review	T1	do target request-self-review	12
 do target resolve-model	T1	do target resolve-model	2
 do target resolve-owned-identity	T1	do target resolve-owned-identity	3
 do target review-invocation	T1	do target review-invocation	4
@@ -399,6 +407,7 @@ plugins deactivate	T1	plugins deactivate	1
 plugins inspect	T1	plugins inspect	1
 plugins ls	T1	plugins ls	2
 plugins verify	T1	plugins verify	4
+pr attestation retract	T1	pr attestation retract	0
 pr base-check	T1	pr base-check	0
 pr base-lineage-check	T1	pr base-lineage-check	6
 pr bind-created	T1	pr bind-created	0
@@ -474,6 +483,7 @@ target check-dispatch-hold	T1	target check-dispatch-hold	2
 target check-review-gate	T1	target check-review-gate	4
 target denominator-ratio	T1	target denominator-ratio	2
 target init	KEEP	target init	90	deliberate readability slack for a high-traffic distinct operation
+target request-self-review	T1	target request-self-review	12
 target resolve-model	T1	target resolve-model	2
 target resolve-owned-identity	T1	target resolve-owned-identity	3
 target review-invocation	T1	target review-invocation	4
