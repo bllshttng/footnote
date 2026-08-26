@@ -14,7 +14,10 @@ ROOT = Path(__file__).resolve().parents[2]
 def main() -> int:
     retired = 0
     for row in REGISTERED_GRADUATION_PROBES:
-        result = evaluate_graduation(row, root=ROOT)
+        # A test probe pays cold pytest collection on a CI runner. The 30s
+        # library default would read that as `probe_timeout` and fail the job
+        # over runner speed rather than over the enforcement being gone.
+        result = evaluate_graduation(row, root=ROOT, timeout=300)
         decision_id = result["decision_id"]
         marker = result.get("graduation_checked", "probe_not_run")
         print(f"graduation_checked decision={decision_id} marker={marker}")
