@@ -24,7 +24,7 @@ Read the argument left to right: an optional substrate token, an optional brief 
 |---|---|
 | (none) | what is true about X? |
 | `what-if` | how does X break? Read the real error paths and concurrency. Cite each failure mode you FIND. An imagined one does not count. |
-| `panel` | what does X look like from several lenses? Each lens reads the code it owns and cites it. |
+| `panel` | what does X look like from several lenses? Each lens reads the code it owns and cites it. Before dispatching the lenses, declare the fan-out width and check it: `fno config assert-subagent-budget --width <n>`. A refusal names the provider, the width and the budget: run the lenses inline instead. |
 | `class` | what owns X, and what are all the sites that decide it? Enumerate every site, then say which ones disagree. |
 
 ## The process

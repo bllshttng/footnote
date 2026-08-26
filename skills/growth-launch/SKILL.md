@@ -129,6 +129,18 @@ authorized and the context is configured before any draft is written.
 
 ## 4. One draft round
 
+Before dispatching, check the declared width against the route's provider
+budget (the four role subagents are the fan-out; this is a declaration check,
+not a cap the Task tool enforces):
+
+```
+fno config assert-subagent-budget --width 4
+```
+
+A refusal (exit 1) names the provider, the width and the budget: dispatch in
+two waves instead, or run inline. A permit whose reason says the budget is
+unknown records that honestly and dispatch stands.
+
 Dispatch the roles that resolved, concurrently via the Task tool:
 
 - `@fno:growth-marketer` producing `campaign-plan.md`

@@ -822,6 +822,61 @@ def provider_subagent_budget(
     return subagents if isinstance(subagents, int) and subagents >= 1 else None
 
 
+@dataclass(frozen=True)
+class BudgetCheck:
+    """The verdict of assert_subagent_budget: a permit with its reason.
+
+    A permit carries a reason too, because "allowed" has three different
+    meanings here (within budget, no stamp, no entry) and a caller that
+    reports the check should say which one it got. Refusals name the
+    provider, the declared width and the budget; permits never do less.
+    """
+
+    permitted: bool
+    reason: str
+
+
+def assert_subagent_budget(
+    width: object, provider: Optional[str] = None
+) -> BudgetCheck:
+    """Check a DECLARED fan-out width against the provider's subagent budget.
+
+    What this enforces is a declaration check plus the skill text that carries
+    it, not a hard cap on a native dispatch: a native Task/Agent call does not
+    route through fno, and this guard never claims otherwise. Where fno routes
+    the dispatch (spawn, the owned review lane), the budget is a real cap and
+    the declaring site must refuse or narrow before dispatching.
+
+    Fails OPEN on every unreadable input, exactly as provider_subagent_budget
+    documents: no route stamp, an unresolved provider, no budget entry, an
+    unreadable width - each permits and records why, because refusing a fan-out
+    over an unreadable config would wedge every session on the machine over a
+    resource question that only ever applied to one shared account.
+    """
+    stamp = (
+        provider
+        if provider is not None
+        else (os.environ.get("FNO_ROUTE_PROVIDER") or "").strip()
+    )
+    if not stamp or stamp == "unknown":
+        return BudgetCheck(True, "no route stamp; budget unknown")
+    try:
+        # width may arrive as skill text; an unparseable one permits below
+        w = int(width)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return BudgetCheck(True, f"declared width {width!r} unreadable; budget unknown")
+    budget = provider_subagent_budget(stamp)
+    if budget is None:
+        return BudgetCheck(True, f"no budget entry for {stamp}; uncapped")
+    if w <= budget:
+        return BudgetCheck(True, f"width {w} within {stamp} budget {budget}")
+    return BudgetCheck(
+        False,
+        f"{stamp} declares a subagent budget of {budget}; declared width {w} exceeds it"
+        " - run inline or split the work",
+    )
+
+
 def resolvable_reviewers(
     registry: Optional[Mapping[str, ReviewerDescriptor]] = None,
 ) -> dict[str, ReviewerDescriptor]:

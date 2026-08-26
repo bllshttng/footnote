@@ -706,6 +706,31 @@ def status_sinks_cmd(
         typer.echo(f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s")
 
 
+@app.command("assert-subagent-budget", hidden=True)
+def assert_subagent_budget_cmd(
+    width: int = typer.Option(..., "--width", "-w", help="The fan-out width the caller declares."),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        "-P",
+        help="Provider whose budget applies; defaults to the FNO_ROUTE_PROVIDER stamp.",
+    ),
+) -> None:
+    """Refuse a declared fan-out wider than the provider's subagent budget.
+
+    Prints the verdict's reason and exits 0 on a permit, 1 on a refusal.
+    Fails open: no stamp, no budget entry or an unreadable config permits,
+    with the reason saying so. This is the seam skill text calls before
+    declaring a panel width (x-25a7 Locked Decision 7).
+    """
+    from fno.config import assert_subagent_budget
+
+    check = assert_subagent_budget(width, provider)
+    prefix = "permit" if check.permitted else "refused"
+    typer.echo(f"{prefix}: {check.reason}")
+    raise typer.Exit(0 if check.permitted else 1)
+
+
 @app.command("get")
 def get_cmd(
     key: str = typer.Argument(

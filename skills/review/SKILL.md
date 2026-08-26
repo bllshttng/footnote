@@ -1,7 +1,7 @@
 ---
 name: review
-description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), runtime evidence (prove-it), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'prove it works', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
-argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | prove-it [<target>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `prove-it`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
+description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), runtime evidence (prove-it), the apply-or-skip cleanup pass (cleanup), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'prove it works', 'clean this up', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
+argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | prove-it [<target>] | cleanup [<target>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `prove-it`, `cleanup`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -18,6 +18,8 @@ requires:
 | Mode | What runs | Shared object |
 |------|-----------|---------------|
 | default (bare, or a level token) | the fno review lane: inline angles, dedup, three-state verify, one attestation | the diff |
+| `prove-it` | runtime evidence at the changed code's real surface, with a validator that refuses an unprobed PASS | the running change |
+| `cleanup` | the apply-or-skip pass: four cleanup angles once, no gate weight, no attestation | the diff |
 | `peer` | a cross-model second opinion, optionally producing a verdict-gated local attestation | the diff |
 | `research` | advisory research-verify panel (fact-checker / citation-auditor / contradiction-finder / completeness-critic) | a `doc` deliverable (brief + sources sidecar) |
 | `sigma` | RETIRED. The token refuses and names the default lane as the replacement. | - |
@@ -26,13 +28,14 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 ## Step 1: Resolve the mode (ALWAYS announce it)
 
-The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `peer`, `research`, and `declare` as leading mode tokens. Strip the flags first, then read the first remaining token:
+The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. Strip the flags first, then read the first remaining token:
 
 - **no argument** -> mode is the default lane at a level sized from the diff. Print exactly: `running fno review lane (default, level from diff)` and continue to Step 2.
 - **a level token** (`low` `medium` `high` `xhigh` `max`) -> mode is the default lane at that explicit level. Print `running fno review lane (level <token>)`. Any remaining tokens are the target. Continue to Step 2.
 - **`ultra`** -> REFUSE. Print exactly `refused: ultra is billed separately and no fno surface issues it; use max` and stop with a non-zero result. Run nothing, emit nothing.
 - **`sigma`** -> REFUSE, naming the replacement. Print exactly `refused: sigma is retired; the default review lane replaced it - run /fno:review [level] [<target>] (or /fno:review peer for a cross-model read)` and stop with a non-zero result. Run nothing, dispatch nothing.
 - **`prove-it`** -> mode is `prove-it`, runtime evidence. Print `running prove-it (runtime evidence)`. The remaining tokens, if any, are the target. Continue to Step 2p.
+- **`cleanup`** -> mode is `cleanup`, the apply-or-skip pass. Print `running cleanup (apply-or-skip)`. The remaining tokens, if any, are the target. Continue to Step 2c.
 - **`peer`** -> mode is `peer`. Print `running peer review (cross-model)`. The remaining tokens are peer's own arguments (`[PR#|branch] [codex|gemini]`). Continue to Step 3.
 - **`research`** -> mode is `research`. Print `running research-verify (advisory)`. The remaining tokens, if any, are the brief path. Continue to Step 4.
 - **`declare`** -> mode is `declare`. Print `emitting self-cert attestation (declare)`. Continue to Step 5.
@@ -40,7 +43,7 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `peer
 
   ```
   unknown review mode: '<token>'
-  valid modes: peer, research, declare (bare = the fno review lane; or lead with a level: low medium high xhigh max)
+  valid modes: prove-it, cleanup, peer, research, declare (bare = the fno review lane; or lead with a level: low medium high xhigh max)
   ```
 
   and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default. A bare number is a PR target, not a mode.
@@ -86,6 +89,10 @@ bash "${SKILL_DIR}/scripts/validate-prove-it.sh" <report-file>
 ```
 
 The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
+
+## Step 2c: cleanup mode (apply-or-skip terminus)
+
+Load [cleanup.md](references/cleanup.md) and execute it in full, in this context: four cleanup angles (Reuse, Simplification, Efficiency, Altitude) over the diff, each applied or skipped ONCE, each skip recorded with its reason. No verify pass, no threads, no re-review, and no attestation - a cleanup run writes no `review_attestation` row and clears no gate. It is fno's own pass, so it runs inline on every harness; an "unavailable on this harness" outcome is not one this mode can produce.
 
 ## Step 3: peer mode (cross-model second opinion)
 

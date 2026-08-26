@@ -57,9 +57,21 @@ else
 fi
 
 echo "== AC2-HP: the surviving modes keep their route lines"
-for marker in 'running peer review (cross-model)' 'running research-verify (advisory)' 'emitting self-cert attestation (declare)'; do
+for marker in 'running peer review (cross-model)' 'running research-verify (advisory)' 'emitting self-cert attestation (declare)' 'running prove-it (runtime evidence)' 'running cleanup (apply-or-skip)'; do
   if has "$ROUTER" "$marker"; then pass "route line kept: $marker"; else fail "route line lost: $marker"; fi
 done
+
+echo "== AC7-ERR: cleanup runs inline on every harness"
+if has "$ROUTER" 'runs inline on every harness'; then
+  pass "cleanup route names every-harness availability"
+else
+  fail "cleanup harness availability not stated in the router"
+fi
+if [ -e "$REPO_ROOT/skills/review/references/cleanup.md" ]; then
+  pass "cleanup reference exists"
+else
+  fail "cleanup reference missing"
+fi
 
 echo "== the grammar teaches the level surface"
 if has "$ROUTER" 'low` `medium` `high` `xhigh` `max'; then

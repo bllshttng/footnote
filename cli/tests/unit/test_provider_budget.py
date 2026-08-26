@@ -9,11 +9,18 @@ uncapped fan-out read as a pass on the night this node was filed.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fno.agents.model_routing import ROUTE_PROVIDER_ENV, bind_route_provider
 from fno.agents.spawn_gate import provider_lanes_cap
-from fno.config import AgentsBlock, ProviderBudget, provider_subagent_budget
+from fno.config import (
+    AgentsBlock,
+    ProviderBudget,
+    assert_subagent_budget,
+    provider_subagent_budget,
+)
 from fno.review_capability import (
     SessionCapability,
     detect_session,
@@ -99,6 +106,67 @@ def test_subagent_budget_fails_open_on_every_unknown():
     assert provider_subagent_budget("anthropic") is None
     assert provider_subagent_budget("unknown") is None
     assert provider_subagent_budget(None) is None
+
+
+# --- assert_subagent_budget: the relocated refusing consumer (x-25a7 w5) ---
+#
+# The panel-width branch in review_capability.py refused and died with the
+# panel. The refusal lives again here, fan-out-neutral: any site that DECLARES
+# a width in skill text calls this before dispatching (Locked Decision 7).
+
+
+def test_a_width_over_budget_is_refused_with_all_three_names():
+    # AC3b-MARKER. The refusal must name the provider, the declared width and
+    # the budget, or a wedged session cannot tell what to shrink.
+    check = assert_subagent_budget(4, "zai")
+    assert check.permitted is False
+    assert "zai" in check.reason
+    assert "4" in check.reason
+    assert "budget of 1" in check.reason
+
+
+def test_a_width_within_budget_permits():
+    # AC3b-HP. Budget 1 tolerates exactly a width-1 fan-out.
+    assert assert_subagent_budget(1, "zai").permitted is True
+
+
+def test_every_unreadable_input_permits_and_records_why():
+    # AC3b-ERR. Unreadable width, no-budget provider, unknown provider: all
+    # three permit, none silently. Fail-open here is the documented posture of
+    # provider_subagent_budget; refusing over an unreadable config would wedge
+    # every session on the machine.
+    unreadable_width = assert_subagent_budget(None, "zai")
+    assert unreadable_width.permitted is True and "unreadable" in unreadable_width.reason
+    no_entry = assert_subagent_budget(4, "anthropic")
+    assert no_entry.permitted is True and "no budget entry" in no_entry.reason
+    unknown = assert_subagent_budget(4, "unknown")
+    assert unknown.permitted is True
+
+
+def test_no_stamp_permits_and_records_the_reason():
+    # AC3b-EDGE. No stamp means no fno route, so no budget can be known. The
+    # permit is RECORDED with that reason, not returned silently.
+    check = assert_subagent_budget(4, provider=None)
+    assert check.permitted is True
+    assert check.reason == "no route stamp; budget unknown"
+
+
+def test_the_env_stamp_drives_the_check_when_no_provider_is_passed(monkeypatch):
+    monkeypatch.setenv("FNO_ROUTE_PROVIDER", "zai")
+    check = assert_subagent_budget(4)
+    assert check.permitted is False
+    assert "zai" in check.reason
+
+
+def test_the_declaring_skill_sites_call_the_guard_by_name():
+    # AC3b-INV. The guard exists to be CALLED by the sites that declare a
+    # width in skill text. If neither site invokes it, the refusal relocated
+    # into a function nobody runs.
+    root = Path(__file__).resolve().parents[3]
+    think = (root / "skills" / "think" / "SKILL.md").read_text(encoding="utf-8")
+    growth = (root / "skills" / "growth-launch" / "SKILL.md").read_text(encoding="utf-8")
+    assert "fno config assert-subagent-budget" in think
+    assert "fno config assert-subagent-budget" in growth
 
 
 # --- the stamp -------------------------------------------------------------
