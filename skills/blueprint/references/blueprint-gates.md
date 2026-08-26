@@ -221,30 +221,17 @@ child id it creates. No pin present -> write nothing (no `--model` call).
 
 ### Model Routing (difficulty revision, parallel to executor routing)
 
-Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch
-joins with live provider capacity (pareto routing). This mirrors executor
-routing: judged once at planning time, honored at every dispatch, and a missing
-band on a pre-gate plan changes nothing (the provider default).
+Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch joins with live provider capacity (pareto routing). This mirrors executor routing: judged once at planning time, honored at every dispatch, and a missing band on a pre-gate plan changes nothing (the provider default).
 
-`difficulty` is required in plan frontmatter for plans created after 2026-08-26,
-so the transcription below always runs. Assign the band per the task's nature,
-one line of rationale each:
+`difficulty` is required in plan frontmatter for plans created after 2026-08-26, so the transcription below always runs. Assign the band per the task's nature, one line of rationale each:
 
 - **`low`** - mechanical work: a rename, a codemod, a doc tweak, boilerplate.
-- **`medium`** - a standard feature or fix that needs real reasoning but no
-  load-bearing judgment.
-- **`high`** - gate semantics, security, concurrency, migrations, or an
-  architecture decision where a weaker model's error is expensive.
+- **`medium`** - a standard feature or fix that needs real reasoning but no load-bearing judgment.
+- **`high`** - gate semantics, security, concurrency, migrations, or an architecture decision where a weaker model's error is expensive.
 
-The blueprint phase is the sanctioned second write: the planner has read the
-code and knows more than the filer did. Record BOTH the filed estimate and the
-blueprint revision - the intake path appends a `source: "blueprint"` history
-entry rather than overwriting, because the filed-versus-revised delta is the
-only signal that eventually says whether filers estimate well.
+The blueprint phase is the sanctioned second write: the planner has read the code and knows more than the filer did. Record BOTH the filed estimate and the blueprint revision - the intake path appends a `source: "blueprint"` history entry rather than overwriting, because the filed-versus-revised delta is the only signal that eventually says whether filers estimate well.
 
-Precedence is `model:` (exact) over the provider default; an exact pin on the
-same task wins. Transcribe the band from frontmatter onto the node (AFTER
-`$NODE_ID` is minted), idempotently:
+Precedence is `model:` (exact) over the provider default. An exact pin on the same task wins. Transcribe the band from frontmatter onto the node (AFTER `$NODE_ID` is minted), idempotently:
 
 ```bash
 # Plan frontmatter `difficulty:` (scope to the frontmatter block).
@@ -252,10 +239,7 @@ DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^d
 [[ -n "$DIFFICULTY" ]] && fno backlog update "$NODE_ID" --difficulty "$DIFFICULTY"
 ```
 
-`fno backlog update --difficulty` validates the band (`high|medium|low`); an
-invalid value exits non-zero and leaves the node unchanged (surface it, do not
-fabricate a band). The retired `--model-tier` spelling exits 2 with a message
-naming `--difficulty`.
+`fno backlog update --difficulty` validates the band (`high|medium|low`). An invalid value exits non-zero and leaves the node unchanged (surface it, do not fabricate a band). The retired `--model-tier` spelling exits 2 with a message naming `--difficulty`.
 
 ## Blueprint Provenance Stamp (x-b6e4)
 
