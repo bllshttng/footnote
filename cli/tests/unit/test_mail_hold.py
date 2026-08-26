@@ -56,6 +56,8 @@ def _expire(handle):
 def test_arm_writes_a_readable_clock_and_clear_removes_it():
     armed = hold_mod.arm(HANDLE, 5)
     assert armed.window_s == 300
+    assert armed.clock_kind == "idle"
+    assert armed.ceiling == armed.until + timedelta(seconds=300)
     read_back = hold_mod.read(HANDLE)
     assert read_back is not None
     assert read_back.until is not None
@@ -63,6 +65,51 @@ def test_arm_writes_a_readable_clock_and_clear_removes_it():
 
     hold_mod.clear(HANDLE)
     assert hold_mod.read(HANDLE) is None
+
+
+def test_wall_clock_arm_has_fixed_deadline_and_no_idle_ceiling(monkeypatch):
+    start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(hold_mod, "_now", lambda: start)
+    armed = hold_mod.arm_wall(HANDLE, 8)
+
+    assert armed.clock_kind == "wall"
+    assert armed.until == start + timedelta(minutes=8)
+    assert armed.ceiling is None
+    assert armed.window_s == 480
+
+
+def test_wall_clock_activity_preserves_the_original_deadline(monkeypatch):
+    start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(hold_mod, "_now", lambda: start)
+    armed = hold_mod.arm_wall(HANDLE, 8)
+    later = start + timedelta(minutes=1)
+    monkeypatch.setattr(hold_mod, "_now", lambda: later)
+
+    active = hold_mod.extend(HANDLE)
+
+    assert active is not None
+    assert active.clock_kind == "wall"
+    assert active.until == armed.until
+
+
+def test_idle_activity_clamps_at_the_absolute_ceiling(monkeypatch):
+    start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
+    hold_mod._write(
+        hold_mod.Hold(
+            handle=HANDLE,
+            until=start + timedelta(minutes=1),
+            window_s=480,
+            clock_kind="idle",
+            ceiling=start + timedelta(minutes=2),
+        )
+    )
+    monkeypatch.setattr(hold_mod, "_now", lambda: start)
+
+    active = hold_mod.extend(HANDLE)
+
+    assert active is not None
+    assert active.until == start + timedelta(minutes=2)
+    assert active.ceiling == start + timedelta(minutes=2)
 
 
 def test_a_permanent_policy_renders_as_held_with_no_countdown():
@@ -273,6 +320,7 @@ def test_release_delivers_the_digest_and_consumes_every_held_id(monkeypatch):
             "mail_hold_released",
             {
                 "handle": HANDLE,
+                "clock": "no expiry",
                 "held_count": 3,
                 "deduped_count": 2,
                 "held_for_s": 300,
@@ -416,7 +464,63 @@ def test_bounce_reason_names_the_recipient_and_when_it_lands():
     assert reason is not None
     assert HANDLE in reason
     assert "do-not-disturb" in reason
+    assert "quiet minutes" in reason
     assert "lifts in" in reason
+
+
+def test_wall_bounce_reason_names_the_wall_clock():
+    hold_mod.arm_wall(HANDLE, 5)
+
+    reason = hold_mod.bounce_reason(HANDLE)
+
+    assert reason is not None
+    assert "wall clock" in reason
+
+
+def test_cli_rejects_minutes_and_for_together(monkeypatch):
+    from typer.testing import CliRunner
+    from fno.mail import cli as mail_cli
+
+    monkeypatch.setattr(
+        mail_cli,
+        "_self_handle_or_exit",
+        lambda: (HANDLE, SimpleNamespace(harness="claude", session_id="sid")),
+    )
+    result = CliRunner().invoke(
+        mail_cli.mail_app,
+        ["hold", "--minutes", "1", "--for", "1"],
+    )
+
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_cli_for_arms_wall_clock_and_names_it_in_the_receipt(monkeypatch, capsys):
+    from fno.mail import cli as mail_cli
+
+    start = datetime(2026, 8, 25, 20, 0, tzinfo=timezone.utc)
+    armed = hold_mod.Hold(
+        handle=HANDLE,
+        until=start + timedelta(minutes=8),
+        window_s=480,
+        clock_kind="wall",
+    )
+    monkeypatch.setattr(
+        mail_cli,
+        "_self_handle_or_exit",
+        lambda: (HANDLE, SimpleNamespace(harness="claude", session_id="sid")),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.register_existing_session", lambda **_kwargs: None
+    )
+    monkeypatch.setattr(hold_mod, "arm_wall", lambda handle, minutes: armed)
+    monkeypatch.setattr("subprocess.Popen", lambda *args, **kwargs: None)
+
+    mail_cli.cmd_hold(minutes=None, for_minutes=8, off=False, status=False)
+
+    output = capsys.readouterr().out
+    assert "wall clock" in output
+    assert "fixed deadline 20:08:00 UTC" in output
 
 
 def test_bounce_reason_is_silent_for_a_permanent_policy_and_for_no_hold():
