@@ -78,6 +78,34 @@ impl PopupRow {
     }
 }
 
+/// Menu glyphs must stay in the BMP. Astral symbols render as tofu on
+/// terminals whose fonts lack the supplemental-plane glyph, which makes a
+/// destructive action look absent rather than visibly unsupported.
+pub fn menu_glyph_is_bmp(glyph: &str) -> bool {
+    !glyph.is_empty() && glyph.chars().all(|ch| (ch as u32) <= 0xffff)
+}
+
+fn validate_menu_glyphs(rows: &[PopupRow]) {
+    for row in rows {
+        match row {
+            PopupRow::Entry { glyph, .. } => assert!(
+                menu_glyph_is_bmp(glyph),
+                "menu glyph must be a non-empty BMP string: {glyph:?}"
+            ),
+            PopupRow::Grid(cells) => {
+                for cell in cells {
+                    assert!(
+                        menu_glyph_is_bmp(&cell.glyph),
+                        "menu glyph must be a non-empty BMP string: {:?}",
+                        cell.glyph
+                    );
+                }
+            }
+            PopupRow::Header(_) | PopupRow::Rule | PopupRow::FullWidth(_) => {}
+        }
+    }
+}
+
 /// A directional selection move.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavDir {
@@ -155,6 +183,7 @@ impl Rendered {
 
 impl Popup {
     pub fn new(rows: Vec<PopupRow>, anchor: Anchor) -> Self {
+        validate_menu_glyphs(&rows);
         Popup {
             rows,
             chrome: Chrome::new("", anchor),
@@ -559,6 +588,18 @@ pub fn draw(cells: &mut [Cell], rows: usize, cols: usize, r: &Rendered, theme: &
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn menu_glyph_guard_rejects_astral_tofu_risk() {
+        assert!(menu_glyph_is_bmp("♺"));
+        assert!(!menu_glyph_is_bmp("📄"));
+    }
+
+    #[test]
+    #[should_panic(expected = "menu glyph must be a non-empty BMP string")]
+    fn popup_rejects_astral_menu_glyphs() {
+        let _ = Popup::new(vec![entry("📄", "document", "")], Anchor::Center);
+    }
 
     fn entry(g: &str, l: &str, h: &str) -> PopupRow {
         PopupRow::Entry {

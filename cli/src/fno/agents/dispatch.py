@@ -1919,7 +1919,9 @@ def _claude_create_path(
         harness_session_id=session_uuid,
         cwd=str(cwd),
         model=model,
-        substrate="bg",
+        # `bg` remains an accepted input alias, but new lifecycle receipts use
+        # the canonical `thread` vocabulary.
+        substrate="thread",
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,

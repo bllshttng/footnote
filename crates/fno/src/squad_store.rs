@@ -140,6 +140,9 @@ pub struct StoredMember {
     /// delete that name before restart restore runs. This durable fallback is
     /// therefore audit and resume identity, never an attach-id prefix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    /// Full harness session identity captured alongside `harness`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness_session_id: Option<String>,
 }
 
@@ -721,6 +724,7 @@ pub enum MemberLiveness {
 pub struct MemberEvidence {
     live: std::collections::HashSet<String>,
     dead: std::collections::HashSet<String>,
+    complete_attach_set: bool,
 }
 
 impl MemberEvidence {
@@ -728,7 +732,26 @@ impl MemberEvidence {
         live: std::collections::HashSet<String>,
         dead: std::collections::HashSet<String>,
     ) -> Self {
-        Self { live, dead }
+        Self {
+            live,
+            dead,
+            complete_attach_set: false,
+        }
+    }
+
+    /// Build evidence from a successful empty agent system. This is the one
+    /// legacy compatibility case where an unmatched attach id is known dead:
+    /// both registry stores are absent, so no worker identity can be live.
+    pub fn from_complete_live_set(live: std::collections::HashSet<String>) -> Self {
+        Self {
+            live,
+            dead: std::collections::HashSet::new(),
+            complete_attach_set: true,
+        }
+    }
+
+    pub fn add_dead(&mut self, identity: impl Into<String>) {
+        self.dead.insert(identity.into());
     }
 
     pub fn verdict(&self, member: &StoredMember) -> MemberLiveness {
@@ -751,6 +774,8 @@ impl MemberEvidence {
             .flatten()
             .any(|key| self.dead.contains(key))
         {
+            MemberLiveness::Dead
+        } else if self.complete_attach_set && !member.attach_id.is_empty() {
             MemberLiveness::Dead
         } else {
             MemberLiveness::Unknown
@@ -1126,12 +1151,9 @@ pub fn classify_squad_with_evidence(
     let mut kept_unknown = 0;
     for member in &sq.members {
         match evidence.verdict(member) {
-            MemberLiveness::Dead if !matches!(decision, PruneDecision::Prune) => {
-                reaped_if_kept += 1;
-            }
+            MemberLiveness::Dead => reaped_if_kept += 1,
             MemberLiveness::Live => kept_live += 1,
             MemberLiveness::Unknown => kept_unknown += 1,
-            MemberLiveness::Dead => {}
         }
     }
     SquadFate {
@@ -1199,11 +1221,7 @@ pub fn prune_with_evidence(
         for mut sq in sf.squads.drain(..) {
             let fate = classify_squad_with_evidence(&sq, &decide, evidence);
             if matches!(fate.decision, PruneDecision::Prune) {
-                out.members_reaped += sq
-                    .members
-                    .iter()
-                    .filter(|m| matches!(evidence.verdict(m), MemberLiveness::Dead))
-                    .count();
+                out.members_reaped += fate.reaped_if_kept;
                 out.removed.push(PrunedSquad::from(&sq));
                 continue;
             }
@@ -1794,6 +1812,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
     }
@@ -2036,6 +2055,7 @@ mod tests {
             tab_name: Some("lane".into()),
             cwd: Some("/repo/wt".into()),
             worker: Some("probe-x5f7f".into()),
+            harness: None,
             harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
@@ -2061,6 +2081,7 @@ mod tests {
             "members":[{
                 "attach_id":"",
                 "worker":"t-x8a01-restore",
+                "harness":"codex",
                 "harness_session_id":"01a03a85-1111-7222-8333-444455556666"
             }]
         }"#;
@@ -2070,6 +2091,7 @@ mod tests {
             encoded["members"][0]["harness_session_id"], "01a03a85-1111-7222-8333-444455556666",
             "the full resume key must survive a squads.json read/write"
         );
+        assert_eq!(encoded["members"][0]["harness"], "codex");
     }
 
     #[test]
@@ -2084,6 +2106,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: Some("a;rm -rf".into()),
+            harness: None,
             harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
@@ -2973,6 +2996,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }];
             assert_eq!(
@@ -3168,6 +3192,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }];
         assert_eq!(
@@ -3324,6 +3349,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
     }
@@ -3335,6 +3361,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: Some(name.into()),
+            harness: None,
             harness_session_id: None,
         }
     }

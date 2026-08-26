@@ -756,6 +756,10 @@ struct PaneEntry {
     /// disposition to see that its session is already running here.
     /// `None` for a shell pane or any non-resume run.
     resume_target: Option<String>,
+    /// A restore placeholder created because a worker could not be resumed.
+    /// This positive refusal marker is sweepable; it is not inferred from an
+    /// absent registry row.
+    refused_worker: Option<String>,
     /// (x-d401) When this pane last produced PTY output, stamped on the drain
     /// path itself so a pane with no `pane wait` watcher still records activity
     /// (`note_pane_output` returns early with zero subscribers, which is why
@@ -1542,7 +1546,10 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             Some("agent_spawned") => {}
             _ => continue,
         }
-        if data.get("substrate").and_then(|v| v.as_str()) != Some("pane") {
+        if !matches!(
+            data.get("substrate").and_then(|v| v.as_str()),
+            Some("pane") | Some("thread") | Some("bg")
+        ) {
             continue;
         }
         let Some(session_id) = data
@@ -1583,12 +1590,16 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
     receipts
 }
 
-fn load_spawn_receipts() -> HashMap<String, HeldWorker> {
+fn load_spawn_receipts() -> Result<HashMap<String, HeldWorker>, String> {
     let path = agents_view::registry_path().with_file_name("events.jsonl");
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|raw| parse_spawn_receipts(&raw))
-        .unwrap_or_default()
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => Ok(parse_spawn_receipts(&raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(error) => Err(format!(
+            "spawn receipt store unreadable at {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 struct Core {
@@ -2005,6 +2016,33 @@ fn restore_member_cwd(
         Some(path) => (cwd0.to_string(), Some(path.to_string())),
         None => (cwd0.to_string(), None),
     }
+}
+
+fn restore_worker_refusal_reason(
+    member: &crate::squad_store::StoredMember,
+    row: Option<&RegistryAgent>,
+    receipt_store_error: Option<&str>,
+    receipts: &HashMap<String, HeldWorker>,
+) -> String {
+    if let Some(reason) = row
+        .and_then(Core::row_no_pane_reason)
+        .map(Core::no_pane_reason_text)
+    {
+        return reason.to_string();
+    }
+    let Some(harness) = member.harness.as_deref() else {
+        return "harness is unknown".into();
+    };
+    let Some(session_id) = member.harness_session_id.as_deref() else {
+        return "session id is missing".into();
+    };
+    if let Some(error) = receipt_store_error {
+        return error.to_string();
+    }
+    if !receipts.contains_key(session_id) {
+        return format!("spawn receipt is missing for {harness} session {session_id}");
+    }
+    format!("{harness} session {session_id} is not resumable")
 }
 
 /// The set of attach-ids live NOW, from the raw registry + roster contents
@@ -2881,6 +2919,7 @@ impl Core {
                 cmd,
                 account,
                 resume_target,
+                refused_worker: None,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
             },
@@ -5429,6 +5468,7 @@ impl Core {
         let pid = self.spawn_pane(rows, cols, cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
+            entry.refused_worker = Some(name.to_string());
         }
         self.write_restore_message(pid, &format!("{name} could not be resumed: {reason}"));
         Ok(pid)
@@ -5578,6 +5618,12 @@ impl Core {
             .iter()
             .map(|pane| pane.and_then(|pid| self.pane_tab_name(sid, pid)))
             .collect();
+        let worker_facts: HashMap<String, (String, String)> = self
+            .agents
+            .iter()
+            .filter_map(Self::worker_facts)
+            .map(|facts| (facts.name, (facts.harness, facts.harness_session_id)))
+            .collect();
         if let Some(list) = self.squad_members.get_mut(&sid) {
             for (m, resolved) in list.iter_mut().zip(names) {
                 // Only overwrite when the member's pane resolved to a tab
@@ -5601,6 +5647,19 @@ impl Core {
                     .filter(|c| !c.is_empty())
                 {
                     m.cwd = Some(cwd);
+                }
+            }
+            // (x-d33f) Re-derive the complete worker identity on every
+            // topology flush. A registry row can publish after placement, so
+            // a transient miss preserves the last durable pair rather than
+            // erasing it; a hit always replaces both fields authoritatively.
+            for member in list.iter_mut() {
+                let Some(worker) = member.worker.as_deref() else {
+                    continue;
+                };
+                if let Some((harness, session_id)) = worker_facts.get(worker) {
+                    member.harness = Some(harness.clone());
+                    member.harness_session_id = Some(session_id.clone());
                 }
             }
         }
@@ -5739,6 +5798,7 @@ impl Core {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }),
         }
@@ -5777,12 +5837,15 @@ impl Core {
                     .map(|t| t.name.clone())
             })
             .flatten();
-        let harness_session_id = persisted_session_id.map(str::to_string).or_else(|| {
-            self.agents
-                .iter()
-                .find(|a| a.name == name)
-                .and_then(|a| a.harness_session_id.clone())
-        });
+        let facts = self
+            .agents
+            .iter()
+            .find(|a| a.name == name)
+            .and_then(Self::worker_facts);
+        let harness = facts.as_ref().map(|facts| facts.harness.clone());
+        let harness_session_id = persisted_session_id
+            .map(str::to_string)
+            .or_else(|| facts.as_ref().map(|facts| facts.harness_session_id.clone()));
         let members = self.squad_members.entry(sid).or_default();
         match members
             .iter_mut()
@@ -5792,9 +5855,11 @@ impl Core {
                 m.tombstone = false;
                 m.tab_name = tab_name;
                 m.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+                m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
             Some(m) => {
+                m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
             None => {
@@ -5805,6 +5870,7 @@ impl Core {
                     tab_name,
                     cwd,
                     worker: Some(name.to_string()),
+                    harness,
                     harness_session_id,
                 });
             }
@@ -5985,6 +6051,127 @@ impl Core {
         live_attach_ids_snapshot()
     }
 
+    /// Fold the cached registry rows into the same exact identity evidence the
+    /// standalone workspace-prune verb consumes. Unknown rows contribute no
+    /// verdict; only a positive `Alive` or `Dead` reading enters a set.
+    fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
+        let mut live = HashSet::new();
+        let mut dead = HashSet::new();
+        for agent in &self.agents {
+            let mut keys = Vec::new();
+            keys.push(agent.name.as_str());
+            if let Some(id) = agent.attach_id.as_deref() {
+                keys.push(id);
+            }
+            if let Some(id) = agent.effective_identity() {
+                keys.push(id);
+            }
+            let target = match agent.liveness {
+                agents_view::Liveness::Alive => &mut live,
+                agents_view::Liveness::Dead => &mut dead,
+                agents_view::Liveness::Unmeasured => continue,
+            };
+            target.extend(keys.into_iter().map(str::to_string));
+        }
+        crate::squad_store::MemberEvidence::from_sets(live, dead)
+    }
+
+    fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
+        self.squad_members.values().flatten().any(|member| {
+            let Some(worker) = member.worker.as_deref() else {
+                return false;
+            };
+            let Some(agent) = rows.iter().find(|agent| agent.name == worker) else {
+                return false;
+            };
+            Self::worker_facts(agent).is_some()
+                && (member.harness.is_none() || member.harness_session_id.is_none())
+        })
+    }
+
+    /// Remove positively dead stored members from every surviving squad and
+    /// refresh the in-memory membership projection before the next Layout.
+    /// Registry-row cleanup remains the existing off-loop `fno-agents reap`
+    /// action, so one menu gesture covers both durable sideline stores.
+    fn sweep_dead_sideline(&mut self, client_id: u64) {
+        let refused: Vec<(u64, String)> = self
+            .panes
+            .iter()
+            .filter_map(|(&pid, entry)| {
+                entry
+                    .refused_worker
+                    .as_ref()
+                    .map(|worker| (pid, worker.clone()))
+            })
+            .collect();
+        let mut evidence = self.member_evidence();
+        for (_, worker) in &refused {
+            evidence.add_dead(worker.clone());
+        }
+        let live_cwds: Vec<String> = self.panes.values().map(|p| p.cwd.clone()).collect();
+        let origin_exists = |path: &str| Path::new(path).exists();
+        let now = crate::squad_store::now_epoch_secs();
+        let outcome = crate::squad_store::prune_with_evidence(
+            |squad| {
+                crate::squad_store::prune_decision_with_evidence(
+                    squad,
+                    true,
+                    &evidence,
+                    &live_cwds,
+                    &origin_exists,
+                    now,
+                )
+            },
+            &evidence,
+        );
+        match outcome {
+            Ok(outcome) => {
+                let loaded = crate::squad_store::load();
+                let identities: HashMap<(String, String), Vec<_>> = loaded
+                    .squads
+                    .into_iter()
+                    .map(|s| ((s.name, s.key), s.members))
+                    .collect();
+                let sids: Vec<u64> = self.squad_members.keys().copied().collect();
+                for sid in sids {
+                    let Some((name, key)) = self.squad_identity(sid) else {
+                        continue;
+                    };
+                    if let Some(members) = identities.get(&(name, key)) {
+                        self.squad_members.insert(sid, members.clone());
+                    } else {
+                        self.squad_members.insert(sid, Vec::new());
+                    }
+                }
+                // Refused restore placeholders are positive dead markers even
+                // when their registry row is gone. Remove their visible panes
+                // after the store pass; keep a last pane so the session's
+                // >=1-pane invariant remains intact.
+                let mut closed_placeholders = 0;
+                for (pid, _) in refused {
+                    if self.panes.len() <= 1 {
+                        break;
+                    }
+                    self.close_pane(pid);
+                    closed_placeholders += 1;
+                }
+                self.notice(
+                    client_id,
+                    format!(
+                        "swept {} dead member(s) and {} refused pane(s); kept {} live, {} unknown",
+                        outcome.members_reaped,
+                        closed_placeholders,
+                        outcome.members_kept_live,
+                        outcome.members_kept_unknown
+                    ),
+                );
+                self.reap_action(client_id);
+                self.push_layout(true);
+            }
+            Err(error) => self.notice(client_id, format!("sweep failed: {error}")),
+        }
+    }
+
     /// Materialize the persisted named squads at the first real attach (US2).
     /// `rows`/`cols` are the attaching client's dims; `home_sid` is its own cwd
     /// squad, restored as the active anchor afterward so the restored squads sit
@@ -6072,7 +6259,13 @@ impl Core {
                 .map(crate::digest_overlay::mux_restore_hold_workers)
                 .unwrap_or(true)
         });
-        let spawn_receipts = load_spawn_receipts();
+        let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
+            Ok(receipts) => (receipts, None),
+            Err(error) => {
+                self.notice_all(format!("restore: {error}"));
+                (HashMap::new(), Some(error))
+            }
+        };
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
         let mut refused_workers_total = 0usize;
@@ -6130,10 +6323,15 @@ impl Core {
                         members.push(m.clone());
                         let row = self.agents.iter().find(|agent| {
                             agent.name == worker_name
-                                || m.harness_session_id.as_deref().is_some_and(|session_id| {
-                                    agent.harness_session_id.as_deref() == Some(session_id)
-                                        || agent.claude_session_uuid.as_deref() == Some(session_id)
-                                })
+                                || matches!(
+                                    (
+                                        m.harness.as_deref(),
+                                        m.harness_session_id.as_deref(),
+                                    ),
+                                    (Some(harness), Some(session_id))
+                                        if agent.harness.as_deref() == Some(harness)
+                                            && agent.effective_identity() == Some(session_id)
+                                )
                         });
                         let held = row
                             .filter(|agent| Self::row_resumable(agent))
@@ -6142,6 +6340,11 @@ impl Core {
                                 m.harness_session_id
                                     .as_deref()
                                     .and_then(|session_id| spawn_receipts.get(session_id))
+                                    .filter(|facts| {
+                                        m.harness
+                                            .as_deref()
+                                            .is_none_or(|harness| harness == facts.harness)
+                                    })
                                     .cloned()
                                     .map(|mut facts| {
                                         facts.name = worker_name.to_string();
@@ -6154,11 +6357,13 @@ impl Core {
                                 pid
                             })
                         } else {
-                            let reason = row
-                                .and_then(Self::row_no_pane_reason)
-                                .map(Self::no_pane_reason_text)
-                                .unwrap_or("spawn receipt is missing");
-                            self.refused_worker_pane(worker_name, reason, rows, cols, &cwd0)
+                            let reason = restore_worker_refusal_reason(
+                                m,
+                                row,
+                                receipt_store_error.as_deref(),
+                                &spawn_receipts,
+                            );
+                            self.refused_worker_pane(worker_name, &reason, rows, cols, &cwd0)
                                 .map(|pid| {
                                     refused_workers_total += 1;
                                     pid
@@ -6201,6 +6406,7 @@ impl Core {
                         tab_name: m.tab_name.clone(),
                         cwd: m.cwd.clone(),
                         worker: None,
+                        harness: None,
                         harness_session_id: None,
                     });
                     continue;
@@ -6241,6 +6447,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         });
                     }
@@ -6254,6 +6461,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         });
                     }
@@ -7614,7 +7822,8 @@ impl Core {
                                 pane_id: Some(pid),
                                 badge: None,
                                 reason: None,
-                                exited: pane_dead,
+                                exited: pane_dead
+                                    || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 unmeasured: false,
                                 answerable: None,
                                 attach_id: None,
@@ -10129,6 +10338,7 @@ impl Core {
                             tab_name: None,
                             cwd: None,
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         },
                     );
@@ -10229,6 +10439,13 @@ impl Core {
                 // up-to-20s subprocess, since reap has no row-level state.
                 self.notice(client_id, "reaping exited agents…");
                 self.reap_action(client_id);
+                Flow::Continue
+            }
+            Command::SweepDead => {
+                // The sideline menu's global bulk action re-folds its target
+                // set here, after confirmation, so a row that became live is
+                // retained and a row that became unknown is not guessed dead.
+                self.sweep_dead_sideline(client_id);
                 Flow::Continue
             }
             Command::StopExternal { attach_id, name: _ } => {
@@ -11076,9 +11293,17 @@ impl Core {
                 branches,
                 tails,
             } => {
+                let identity_published = self.worker_identity_published(&rows);
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                if identity_published {
+                    // A registry row can publish after a worker pane was
+                    // recorded. Force the existing debounce funnel to flush
+                    // the newly authoritative identity instead of waiting for
+                    // another topology mutation.
+                    self.mark_topology_dirty();
+                }
                 // (x-caef) The debounce flush for topology captures: a drag's
                 // events mark dirty without writing; the 1s registry tick is
                 // the coalescing timer that turns them into one store write.
@@ -16850,6 +17075,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-one".into()),
                 },
                 crate::squad_store::StoredMember {
@@ -16858,6 +17084,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-two".into()),
                 },
             ],
@@ -16977,6 +17204,19 @@ mod tests {
     }
 
     #[test]
+    fn spawn_receipt_accepts_thread_and_one_release_bg_alias() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"thread-worker","provider":"codex","harness_session_id":"thread-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"legacy-worker","provider":"claude","harness_session_id":"legacy-session","substrate":"bg"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(receipts["thread-session"].harness, "codex");
+        assert_eq!(receipts["legacy-session"].harness, "claude");
+    }
+
+    #[test]
     fn spawn_receipt_removal_events_revoke_resume_facts() {
         let raw = concat!(
             r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
@@ -17015,6 +17255,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: Some("worker".into()),
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -17093,6 +17334,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-live".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
@@ -17101,6 +17343,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-reaped".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
             ],
@@ -17169,6 +17412,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
@@ -17177,6 +17421,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
             ],
@@ -19905,6 +20150,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -19918,6 +20164,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
     }
@@ -20605,6 +20852,48 @@ mod tests {
     }
 
     #[test]
+    fn persist_squad_refreshes_worker_harness_identity_from_registry() {
+        let _s = StoreScratch::new("persist-worker-identity");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            Tab {
+                name: None,
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("worker".into()),
+                harness: None,
+                harness_session_id: None,
+            }],
+        );
+        let mut row = bg_row("worker", "/repo", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id = Some("full-codex-session".into());
+        core.agents = vec![row];
+
+        core.persist_squad(7);
+
+        let member = crate::squad_store::load().squads[0].members[0].clone();
+        assert_eq!(member.harness.as_deref(), Some("codex"));
+        assert_eq!(
+            member.harness_session_id.as_deref(),
+            Some("full-codex-session")
+        );
+    }
+
+    #[test]
     fn persist_squad_writes_named_workspace_and_dupe_is_taken() {
         let _s = StoreScratch::new("persist-named");
         let mut core = empty_core();
@@ -20834,6 +21123,7 @@ mod tests {
                 tab_name: Some("old".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -20960,6 +21250,7 @@ mod tests {
                 tab_name: Some("home".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -21020,6 +21311,7 @@ mod tests {
                 tab_name: Some("src".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );

@@ -2494,6 +2494,22 @@ mod tests {
     }
 
     #[test]
+    fn full_harness_session_ids_remain_distinct_for_same_prefix() {
+        let raw = reg(
+            r#"{"name":"one","cwd":"/w","status":"working","harness":"codex",
+                "harness_session_id":"01abcdef-one"},
+               {"name":"two","cwd":"/w","status":"working","harness":"codex",
+                "harness_session_id":"01abcdef-two"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let one = rows.iter().find(|row| row.name == "one").unwrap();
+        let two = rows.iter().find(|row| row.name == "two").unwrap();
+        assert_eq!(one.effective_identity(), Some("01abcdef-one"));
+        assert_eq!(two.effective_identity(), Some("01abcdef-two"));
+        assert_ne!(one.effective_identity(), two.effective_identity());
+    }
+
+    #[test]
     fn derive_rows_carries_crown_level_and_scope() {
         // The registry->row parse boundary: a spawn-stamped crown reaches the
         // RegistryAgent; an un-crowned row carries None (additive, absence-safe).

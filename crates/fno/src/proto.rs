@@ -1576,6 +1576,9 @@ pub enum Command {
     /// (observer) client; external rows are never touched (the reap verb only
     /// knows the fno registry). The uppercase-`X` sibling of per-row `x`.
     ReapAgents,
+    /// Sweep positively dead stored squad members and the empty sideline rows
+    /// from the operator menu. The server re-folds the current identities.
+    SweepDead,
     /// (v30, x-7561) Stop a LIVE external claude-daemon row by its stable
     /// `attach_id` (8-hex). The server re-validates the exact live external
     /// catalog row (`external` + matching `attach_id`), durably records

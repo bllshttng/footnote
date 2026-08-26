@@ -86,6 +86,23 @@ def test_emit_spawned_persists_full_resume_coordinate(daemon_log: Path) -> None:
     assert data["substrate"] == "pane"
 
 
+@pytest.mark.parametrize("provider", ["codex", _CLAUDE])
+def test_emit_spawned_uses_canonical_thread_substrate(
+    daemon_log: Path, provider: str
+) -> None:
+    events.emit_spawned(
+        name=f"thread-{provider}",
+        short_id="deadbeef",
+        provider=provider,
+        harness_session_id=f"{provider}-full-session",
+        substrate="thread",
+    )
+    data = _read_records(daemon_log)[0]["data"]
+    assert data["provider"] == provider
+    assert data["harness_session_id"] == f"{provider}-full-session"
+    assert data["substrate"] == "thread"
+
+
 def test_emit_spawned_does_not_land_in_python_dispatch_log(daemon_log: Path) -> None:
     """One birth per spawn, in the daemon log only (not also in the python log)."""
     py_log = daemon_log.parent.parent / "events.jsonl"

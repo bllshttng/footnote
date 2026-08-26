@@ -415,6 +415,22 @@ mod tests {
     }
 
     #[test]
+    fn live_thread_identity_is_kept_across_all_dead_markers() {
+        let first_session = "01abcdef-one";
+        let second_session = "01abcdef-two";
+        assert_ne!(first_session, second_session);
+        let row = GcRow {
+            is_live: true,
+            pid_confirmed_dead: true,
+            transcript_fresh: Some(false),
+            harness_session_gone: Some(true),
+            ..reapable()
+        };
+        assert_eq!(gc_action(&row, NOW, GRACE), GcAction::Keep);
+        assert_eq!(keep_reason(&row, NOW, GRACE), Some(KeepReason::Live));
+    }
+
+    #[test]
     fn ac1_edge_dirty_worktree_is_kept() {
         let row = GcRow {
             worktree_clean: Some(false),

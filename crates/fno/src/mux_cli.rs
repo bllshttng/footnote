@@ -1752,6 +1752,88 @@ fn live_set_or_unknown() -> Option<std::collections::HashSet<String>> {
     Some(crate::server::live_attach_ids_snapshot())
 }
 
+fn add_agent_evidence(
+    agent: &crate::agents_view::RegistryAgent,
+    target: &mut std::collections::HashSet<String>,
+) {
+    target.insert(agent.name.clone());
+    if let Some(id) = agent.attach_id.as_deref() {
+        target.insert(id.to_string());
+    }
+    if let Some(id) = agent.effective_identity() {
+        target.insert(id.to_string());
+    }
+}
+
+/// Read exact positive live/dead identities for the squad-member classifier.
+/// Missing stores are the only complete-empty case; a present but malformed or
+/// unreadable store contributes no verdict and therefore keeps unknown members.
+fn member_evidence() -> crate::squad_store::MemberEvidence {
+    let registry_path = crate::agents_view::registry_path();
+    let roster_path = crate::agents_view::roster_path();
+    let registry = std::fs::read_to_string(&registry_path);
+    let roster = std::fs::read_to_string(&roster_path);
+    let complete_empty = matches!(
+        (&registry, &roster),
+        (Err(a), Err(b))
+            if a.kind() == std::io::ErrorKind::NotFound
+                && b.kind() == std::io::ErrorKind::NotFound
+    );
+    let mut live = std::collections::HashSet::new();
+    let mut dead = std::collections::HashSet::new();
+    let now = crate::squad_store::now_epoch_secs().unwrap_or_default() as u64;
+    if let Ok(raw) = registry {
+        if let Some(rows) = crate::agents_view::derive_rows(&raw, now) {
+            for row in rows {
+                match row.liveness {
+                    crate::agents_view::Liveness::Alive => add_agent_evidence(&row, &mut live),
+                    crate::agents_view::Liveness::Dead => add_agent_evidence(&row, &mut dead),
+                    crate::agents_view::Liveness::Unmeasured => {}
+                }
+            }
+        }
+    }
+    if let Ok(raw) = roster {
+        if let Some(rows) = crate::agents_view::parse_roster(&raw) {
+            for row in rows {
+                live.insert(row.name);
+                live.insert(row.short_id);
+            }
+        }
+    }
+    if let Ok(raw) = std::fs::read_to_string(registry_path.with_file_name("events.jsonl")) {
+        for line in raw.lines() {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if !matches!(
+                value.get("type").and_then(|v| v.as_str()),
+                Some("agent_stopped")
+                    | Some("agent_removed")
+                    | Some("agent_orphan_reaped")
+                    | Some("agent_row_reaped")
+            ) {
+                continue;
+            }
+            let Some(data) = value.get("data").and_then(|v| v.as_object()) else {
+                continue;
+            };
+            for key in ["name", "short_id", "harness_session_id"] {
+                if let Some(value) = data.get(key).and_then(|v| v.as_str()) {
+                    if !value.is_empty() {
+                        dead.insert(value.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if complete_empty {
+        crate::squad_store::MemberEvidence::from_complete_live_set(live)
+    } else {
+        crate::squad_store::MemberEvidence::from_sets(live, dead)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LiveTab {
     session: String,
@@ -1875,18 +1957,17 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
     }
 
-    let live = live_set_or_unknown();
+    let evidence = member_evidence();
     let (tabs, live_cwds, server_reachable) = live_tabs();
     let tab_outcome = prune_live_tabs(&tabs, include_named, dry_run);
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
-    let live_ref = live.as_ref();
 
     let now = crate::squad_store::now_epoch_secs();
     let decide = |sq: &crate::squad_store::StoredSquad| {
-        crate::squad_store::prune_decision_at(
+        crate::squad_store::prune_decision_with_evidence(
             sq,
             include_named,
-            live_ref,
+            &evidence,
             &live_cwds,
             &origin_exists,
             now,
@@ -1912,7 +1993,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         let (mut ku, mut sn, mut kp, mut mr, mut mkl, mut mku) =
             (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
         for sq in &loaded.squads {
-            let fate = crate::squad_store::classify_squad(sq, &decide, live_ref);
+            let fate = crate::squad_store::classify_squad_with_evidence(sq, &decide, &evidence);
             match fate.decision {
                 crate::squad_store::PruneDecision::Prune => {
                     removed.push(crate::squad_store::PrunedSquad::from(sq));
@@ -1929,7 +2010,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
         (removed, ku, sn, kp, mr, mkl, mku, false, loaded.notice)
     } else {
-        match crate::squad_store::prune(decide, live_ref) {
+        match crate::squad_store::prune_with_evidence(decide, &evidence) {
             Ok(o) => (
                 o.removed,
                 o.kept_unknown,
