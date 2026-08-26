@@ -580,7 +580,7 @@ def _ready_nodes(
 
     The normal ranked list remains the selector. The independent observer is
     compared with it so a named omission is recovered before lane-fill applies
-    its existing claim, domain, collision, and spawn guards. Raises on a
+    its existing claim, collision, and spawn guards. Raises on a
     garbled response so the caller skips rather than guessing.
     ``mission`` restricts to that mission's nodes, mirroring the sequential
     path's ``MegawalkQueue::with_mission`` (codex P1 on PR #137).
@@ -737,15 +737,22 @@ def select_lane_fill(
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
-                if reason is not None and inflight:
+                if reason is not None and (inflight or "+same-domain:" in reason):
                     # Unevaluated (no comparable file surface): dispatch anyway
-                    # (fail-open, today's behavior) but say so LOUDLY - a silent
-                    # pass would read as "gate clean" when it never ran.
+                    # (fail-open) but say so LOUDLY - a silent pass would read
+                    # as "gate clean" when it never ran.
                     #
-                    # Only when something is actually in flight. With nothing to
-                    # collide against, an unknown surface risks nothing, and
-                    # every plan-less node (which is every `backlog idea` node)
-                    # would otherwise warn on every candidate of every tick.
+                    # Normally only when something is actually in flight: with
+                    # nothing to collide against, an unknown surface risks
+                    # nothing, and every plan-less node (which is every
+                    # `backlog idea` node) would otherwise warn on every
+                    # candidate of every tick. The exception is the
+                    # held-domain annotation: before the guard reorder a held
+                    # domain excluded this candidate outright, so that
+                    # dispatch is new risk, not standing behavior - and a
+                    # surfaceless PEER is dropped from inflight, which would
+                    # otherwise silence the warning on exactly the riskiest
+                    # case. The annotation on the token keeps it armed.
                     _LOG.warning(
                         "lane-fill: %s file surface UNEVALUATED (%s) - "
                         "dispatching anyway (fail-open)", nid, reason,
@@ -841,7 +848,10 @@ def _classify_lane_candidate(
         When the node's domain is already held (by a live lane or an earlier
         pick) the token carries ``+same-domain:<domain>`` - the domain tiebreak
         survives only as that annotation, so the report can still explain a
-        serialized unknown.
+        serialized unknown. That subclass is the one behavior change inside the
+        class: a held domain excluded such a candidate before the reorder and
+        now it dispatches, loudly (select_lane_fill warns on the annotation),
+        with the mandatory-surface intake refusal as the standing control.
       ``unevaluated:collision-error`` the collision gate raised, so safety is
         unknown for the same reason and gets the same fail-open treatment. It is
         a stated verdict rather than a swallowed error precisely so it cannot

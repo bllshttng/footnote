@@ -1284,10 +1284,12 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
     from fno.graph.collision import has_file_surface
 
     for p in paths:
-        # Path(p), not resolve_plan_path: intake reads the CLI-given spelling
-        # cwd-relative like every other read in the flow, and a git-root join
-        # here would disagree with _prepare_intake from a subdirectory.
-        target = Path(p)
+        # expanduser, not resolve_plan_path: intake reads the CLI-given
+        # spelling like every other read in the flow, but a quoted tilde path
+        # ("~/vault/plan.md") must still resolve - the collision resolver
+        # expands it at dispatch, so refusing it here would break a plan that
+        # works end to end.
+        target = Path(p).expanduser()
         if target.exists():
             if has_file_surface(target):
                 continue
@@ -1298,8 +1300,8 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
             )
         else:
             typer.echo(
-                f"Error: plan file not found: {p}. A missing plan has no file "
-                "table either; pass --allow-no-surface to bind it anyway.",
+                f"Error: plan file not found: {p}. Check the path spelling; a "
+                "missing plan has no file table either.",
                 err=True,
             )
         raise typer.Exit(code=2)

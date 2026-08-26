@@ -291,7 +291,7 @@ def test_intake_missing_plan_file_refused_as_not_found(fixture_graph, tmp_path, 
     assert code == 2
     err = capsys.readouterr().err
     assert "plan file not found" in err
-    assert "--allow-no-surface" in err
+    assert "path spelling" in err
     assert len(_read_entries(fixture_graph)) == 3
 
 
@@ -305,6 +305,17 @@ def test_surface_refusal_reads_cli_paths_cwd_relative(tmp_path, monkeypatch):
     _refuse_surfaceless_intake(["../plan.md"], allow_no_surface=False)  # no raise
     with pytest.raises((SystemExit, click.exceptions.Exit)):
         _refuse_surfaceless_intake(["../missing.md"], allow_no_surface=False)
+
+
+def test_surface_refusal_expands_tilde_paths(tmp_path, monkeypatch):
+    """A quoted tilde path to an existing, surfaceful plan must not take the
+    missing-file branch: the collision resolver expands tilde at dispatch, so
+    refusing it here would break a plan that works end to end."""
+    (tmp_path / "vault").mkdir()
+    plan = tmp_path / "vault" / "plan.md"
+    plan.write_text(f"# Title\n\n{_SURFACE}\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _refuse_surfaceless_intake(["~/vault/plan.md"], allow_no_surface=False)
 
 
 def test_multi_intake_exempts_already_intaked_surfaceless_plan(

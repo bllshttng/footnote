@@ -494,6 +494,30 @@ def test_domain_seed_failure_fails_open(tmp_path, monkeypatch):
     assert [n["id"] for n in advance.select_lane_fill(2, claims_root=tmp_path)] == ["n-a", "n-c"]
 
 
+def test_held_domain_warning_fires_with_nothing_comparable_inflight(
+    tmp_path, monkeypatch, caplog, _isolated_graph
+):
+    """A surfaceless peer lane is dropped from inflight, so nothing comparable
+    exists - yet an unevaluated candidate in its domain is the one dispatch
+    that changed from excluded to fail-open. The +same-domain annotation keeps
+    the loud warning armed for exactly that case."""
+    _seed_graph(_isolated_graph, [
+        {"id": "n-peer", "title": "peer", "plan_path": str(tmp_path / "gone.md"),
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(
+        max_lanes=3, lane_id="n-peer", extra_metadata={"domain": "code"}, root=tmp_path
+    )
+    ready = [{"id": "n-b", "domain": "code", "title": "b"}]  # plan-less
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-b"]  # fail-open dispatch
+    assert "UNEVALUATED" in caplog.text and "n-b" in caplog.text
+
+
 def test_inflight_seed_failure_fails_open(tmp_path, monkeypatch):
     """Seeding runs outside the main try; a read error must not wedge dispatch."""
     def boom(*a, **k):
