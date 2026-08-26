@@ -729,11 +729,14 @@ def test_native_codex_resume_preserves_exact_node_claim(
         "_reacquire_node_claim",
         lambda node, cwd, info: reacquired.append(node) or "holder",
     )
-    def _no_init(*args, **kwargs):
-        argv = args if isinstance(args, list) else list(args)
+    def _no_init(cmd, *args, **kwargs):
+        # `cmd` is the argv LIST, not the *args tuple: `"init" in list(args)`
+        # compares against the list itself and never matches, which silently
+        # retired this guard.
+        argv = list(cmd) if isinstance(cmd, (list, tuple)) else [str(cmd)]
         if "init" in argv:
             pytest.fail("native resume must not rerun init")
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _no_init)
 

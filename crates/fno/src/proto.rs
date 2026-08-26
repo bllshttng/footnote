@@ -279,7 +279,13 @@ fn default_true() -> bool {
 /// the sequenced, initiator-only hover lookup for clickable URLs. New
 /// variants, so an unbumped peer cannot decode the pair; the handshake is
 /// what stops the skew.
-pub const PROTO_VERSION: u32 = 56;
+///
+/// v57 (x-d401, unmeasured liveness): `AgentNoPaneReason::LivenessUnmeasured`
+/// - a NEW enum variant, so a v56 peer cannot decode a row carrying it, the
+/// same reason `BackendNotLive` bumped 53 -> 54. `AgentRow.pane_activity`
+/// rides the same bump (additive-tolerant on its own, but it is the shape
+/// change the variant belongs to).
+pub const PROTO_VERSION: u32 = 57;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -953,8 +959,10 @@ pub struct AnchoredLayoutSpec {
 /// Why a paneless registry-backed agent cannot take the third row-action branch.
 /// The client renders this only after pane focus, daemon attach, and dead-row
 /// resume have all been ruled out. Missing fields from pre-v53 rows remain the
-/// generic compatibility notice. The enum is additive only within v54; older
-/// peers are rejected by the protocol handshake before they decode this row.
+/// generic compatibility notice. The enum is NOT additive-tolerant; a new
+/// variant bumps `PROTO_VERSION` (53 -> 54 for `BackendNotLive`, 56 -> 57 for
+/// `LivenessUnmeasured`) so older peers are rejected by the handshake before
+/// they decode this row.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNoPaneReason {
@@ -963,7 +971,7 @@ pub enum AgentNoPaneReason {
     MissingSessionId,
     UnsupportedHarness,
     BackendNotLive,
-    /// (v55, x-d401) The liveness reading is absent: no confirmed-dead pid and
+    /// (v57, x-d401) The liveness reading is absent: no confirmed-dead pid and
     /// no confirmed-live backend either. Distinct from `BackendNotLive`
     /// because that variant asserts a falsified backend; this one says the
     /// reading does not exist and names the check to run instead.
@@ -1161,7 +1169,7 @@ pub struct AgentRow {
     /// additive field wire-tolerant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub no_pane_reason: Option<AgentNoPaneReason>,
-    /// (v55, x-d401) What this pane's own OSC 133 evidence says about its
+    /// (v57, x-d401) What this pane's own OSC 133 evidence says about its
     /// shell activity, read server-side from the pane's vt. Carried by BARE
     /// panes (a pane with no registry row can still be a full agent running a
     /// real workload - not-in-registry is not is-a-shell); `None` on rows that
@@ -3912,7 +3920,8 @@ mod tests {
         // receipts (x-588a) bumped it 51 -> 52; the typed paneless recovery
         // reason bumps it 52 -> 53; backend-not-live classification bumps it
         // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
-        // message pair bumps it 55 -> 56.
+        // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
+        // bumps it 56 -> 57.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3921,7 +3930,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 56);
+        assert_eq!(PROTO_VERSION, 57);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,

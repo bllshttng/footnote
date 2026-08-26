@@ -9230,7 +9230,12 @@ impl Core {
                             || agent.claude_session_uuid.as_deref()
                                 == Some(held.harness_session_id.as_str())
                     });
-                    if current.is_some_and(|agent| !Self::row_resumable(agent)) {
+                    // (x-d401) The SESSION-AWARE gate, the same one
+                    // `Command::ResumeAgent` and the sideline render use: a
+                    // pane of this session already running the row's session
+                    // is direct observation the backend is live, and resuming
+                    // under it opens a second writer on the live rollout.
+                    if current.is_some_and(|agent| !self.row_resumable_in_session(agent)) {
                         self.held_workers.remove(&pid);
                         self.write_restore_message(
                             pid,

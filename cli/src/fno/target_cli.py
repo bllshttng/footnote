@@ -2622,8 +2622,8 @@ def _start_codex_native(
             typer.echo(
                 f"worktree={cwd}  app-owned=codex  .fno=ok  "
                 f"base={_truthful_base(cwd, base)}  "
-                f"node=already-claimed (holder {info.get('holder', '?') if info else '?'}, "
-                f"state {info.get('state', '?') if info else '?'})"
+                f"node=already-claimed (holder {(info or {}).get('holder') or '?'}, "
+                f"state {(info or {}).get('state') or '?'})"
             )
             if beastmode:
                 _warn_if_authority_not_granted(cwd)
@@ -3255,8 +3255,8 @@ def start(
             typer.echo(
                 f"worktree={wt_path}  .fno={fno_state}  "
                 f"base={_truthful_base(wt_path, base_label)}  "
-                f"node=already-claimed (holder {claim_info.get('holder', '?') if claim_info else '?'}, "
-                f"state {claim_info.get('state', '?') if claim_info else '?'})"
+                f"node=already-claimed (holder {(claim_info or {}).get('holder') or '?'}, "
+                f"state {(claim_info or {}).get('state') or '?'})"
             )
             if beastmode:
                 _warn_if_authority_not_granted(wt_path)

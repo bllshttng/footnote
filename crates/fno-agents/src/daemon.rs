@@ -4847,8 +4847,11 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
     // rows read `spawning` for 3-16 hours while alive (x-0248).
     if row.get("status").and_then(Value::as_str) == Some("spawning")
         && row.get("pid_alive") == Some(&Value::Bool(true))
+        // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
+        // truncates, so a 600.5s-old row read `spawning` here and `live` in
+        // Python, whose timedelta compare keeps the fraction.
         && row_timestamp(row.get("created_at"))
-            .is_some_and(|created_at| (now - created_at).num_seconds() > 600)
+            .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
     {
         row.insert("status".into(), json!("live"));
         row.insert("basis".into(), json!("stale-spawning-live-pid"));

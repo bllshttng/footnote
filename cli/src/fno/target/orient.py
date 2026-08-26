@@ -673,22 +673,35 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     return line
 
 
+def _bound_plan_path(
+    plan_path: Optional[str], project_root: Path, node_id: Optional[str]
+) -> Optional[str]:
+    """The plan the node is actually bound to (x-d401 / x-3ae1).
+
+    An empty manifest field is a CARRIER miss, not an unbound node: when a
+    node is bound, its graph entry's plan_path is the truth. Shared by every
+    line that consumes a plan path, so the plan line and boundary-reconcile
+    cannot answer off two different bindings. Propagates a graph read error;
+    each caller degrades in its own vocabulary.
+    """
+    if plan_path or not node_id:
+        return plan_path
+    entry = _graph_entry(node_id, project_root) or {}
+    return str(entry.get("plan_path") or "").strip() or None
+
+
 def _plan_line(
     plan_path: Optional[str], project_root: Path, node_id: Optional[str] = None
 ) -> str:
     """The plan line, read from the binding's truth (x-d401 / x-3ae1).
 
-    An empty manifest field is a CARRIER miss, not an unbound node: when a
-    node is bound, its graph entry's plan_path is the truth and is read at
-    receipt time. The remaining absences carry their basis - "no plan bound"
-    states the graph's own emptiness, and an unreadable graph reads
-    unknown, never as a measured none."""
-    if not plan_path and node_id:
-        try:
-            entry = _graph_entry(node_id, project_root) or {}
-        except Exception:  # noqa: BLE001 - never abort the report
-            return "unknown (plan unreadable: graph unreadable)"
-        plan_path = str(entry.get("plan_path") or "").strip() or None
+    The absences carry their basis - "no plan bound" states the graph's own
+    emptiness, and an unreadable graph reads unknown, never as a measured
+    none."""
+    try:
+        plan_path = _bound_plan_path(plan_path, project_root, node_id)
+    except Exception:  # noqa: BLE001 - never abort the report
+        return "unknown (plan unreadable: graph unreadable)"
     if not plan_path:
         return "none (no plan bound)"
     return reconcile_plan(plan_path, project_root).summary()
@@ -754,13 +767,21 @@ def build_report(
     manifest_raw: Optional[Dict[str, Any]] = None,
 ) -> List[OrientLine]:
     """Resolve all seven orientation lines. Read-only; never raises."""
+    # boundary-reconcile reads the SAME binding the plan line does: given an
+    # empty manifest field and a graph-bound plan, `_resolve_target` would
+    # otherwise fall back to the node's brief (or nothing) and report a
+    # verdict about a file the plan line just said was the plan.
+    try:
+        bound_plan = _bound_plan_path(plan_path, project_root, node_id)
+    except Exception:  # noqa: BLE001 - _boundary_line reports its own basis
+        bound_plan = plan_path
     return [
         OrientLine("node", _node_line(node_id, project_root, manifest_raw)),
         OrientLine("attended", _attended_line(manifest_raw)),
         OrientLine("worktree", _worktree_line(project_root, node_id)),
         OrientLine("tests", _tests_line(project_root)),
         OrientLine("plan", _plan_line(plan_path, project_root, node_id)),
-        OrientLine("boundary-reconcile", _boundary_line(node_id, plan_path, project_root)),
+        OrientLine("boundary-reconcile", _boundary_line(node_id, bound_plan, project_root)),
         OrientLine("manifest-live", _manifest_live_line(manifest_raw)),
         OrientLine("done-when", _done_when_line(manifest_raw, project_root)),
     ]
