@@ -1076,9 +1076,10 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # KeyError/TypeError/etc. surface so render bugs are visible
             # instead of silently producing a stale graph.md.
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
+        _archived = entries_with_archive(entries)
         try:
             from fno.graph.render_html import render_graph_html
-            render_graph_html(entries_with_archive(entries), html_target)
+            render_graph_html(_archived, html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
@@ -1096,6 +1097,23 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     # mutexes never hold the graph lock (see the closure hook above).
     for entry_id, rung in closure_releases:
         release_node_claim_at_closure(entry_id, rung=rung)
+    # Operator-configured project-scoped public projections (x-9415), through
+    # the same leak gate as the manual roadmap verb. CANONICAL ONLY: a tmp
+    # graph.json in a test must never write the operator's real public
+    # targets. Runs AFTER the flock drops, unlike the state_dir renders above:
+    # these paths are operator-chosen, and a stalled (not erroring) target
+    # filesystem - a cloud-synced vault - must never hold the graph lock every
+    # backlog verb in the fleet waits on. Tradeoff: two concurrent mutations
+    # can land their renders out of order, leaving the board one mutation
+    # stale until the next one; bytes are never partial (atomic replaces).
+    # Fail-open: graph.json is already written; render_configured_targets
+    # itself never raises.
+    if is_canonical:
+        try:
+            from fno.graph.roadmap_public import render_configured_targets
+            render_configured_targets(_archived)
+        except Exception as e:
+            print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
     return result
 
 

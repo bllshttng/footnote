@@ -273,6 +273,87 @@ class MaintainBlock(BaseModel):
         return v
 
 
+_RENDER_PROJECTIONS = ("backlog", "roadmap")
+
+# Shared with the graph-layer auto-render so the array-of-tables typo warns
+# with one text over both channels (logger at load, stderr at render).
+RENDER_TARGETS_TABLE_TYPO_MSG = (
+    "config.backlog.render_targets is %s, not an array of tables - "
+    "ignoring it (use [[backlog.render_targets]], not "
+    "[backlog.render_targets.<name>])"
+)
+
+
+class RenderTargetConfig(BaseModel):
+    """One auto-rendered public projection (``config.backlog.render_targets[]``).
+
+    Every graph mutation re-renders each configured target through the shared
+    public title leak gate (one renderer, one gate - never a second HTML
+    author). Unknown ``projection`` values raise at load; unknown KEYS warn
+    and are ignored (the module's never-brick rule) so a typo'd key cannot
+    take down every settings-loading command - the row still renders its
+    default projection, visibly, with the warning naming the key.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    project: str
+    projection: str = "backlog"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _warn_unknown_keys(cls, data: object) -> object:
+        if isinstance(data, dict):
+            known = set(cls.model_fields)
+            for key in data:
+                if key not in known:
+                    _LOG.warning(
+                        "config.backlog.render_targets: unknown key %r in row "
+                        "%r - ignoring it (allowed: %s)",
+                        key,
+                        data.get("path"),
+                        ", ".join(sorted(known)),
+                    )
+        return data
+
+    @field_validator("path")
+    @classmethod
+    def _plain_path(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets path must not be empty")
+        _check_no_glob(v, "backlog.render_targets path")
+        _check_path_max(v, "backlog.render_targets path")
+        # The auto-render fires from arbitrary project and agent cwds, so a
+        # relative path would scatter a copy of the public board into each
+        # one. Absolute (or ~/-rooted) only.
+        if not os.path.isabs(os.path.expanduser(v)):
+            raise ValueError(
+                "backlog.render_targets path must be absolute or ~/-rooted "
+                f"(it is written from arbitrary cwds), got: {v!r}"
+            )
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def _nonempty_project(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("backlog.render_targets project must not be empty")
+        return v
+
+    @field_validator("projection")
+    @classmethod
+    def _known_projection(cls, v: str) -> str:
+        if v not in _RENDER_PROJECTIONS:
+            raise ValueError(
+                f"unknown backlog.render_targets projection {v!r} "
+                f"(allowed: {', '.join(_RENDER_PROJECTIONS)})"
+            )
+        return v
+
+
 class BacklogBlock(BaseModel):
     """Backlog hygiene settings (nested under 'config.backlog').
 
@@ -295,6 +376,22 @@ class BacklogBlock(BaseModel):
     # maintain.staleness_days (30, for idea-stage rows) - ready work goes stale
     # faster than an untriaged idea, so it defaults tighter (21).
     staleness_days: int = 21
+    render_targets: list[RenderTargetConfig] = Field(default_factory=list)
+
+    @field_validator("render_targets", mode="before")
+    @classmethod
+    def _coerce_render_targets(cls, v: object) -> object:
+        """Fail-safe container: a non-list ``render_targets`` degrades to [] so
+        a stray scalar never bricks settings load. Present-but-not-a-list (the
+        ``[backlog.render_targets.<name>]`` table typo where the
+        ``[[backlog.render_targets]]`` array belongs) is WARNED, not silently
+        dropped - the operator would otherwise believe their public board is
+        wired. Mirrors ``_coerce_status_sinks``."""
+        if isinstance(v, list):
+            return v
+        if v is not None:
+            _LOG.warning(RENDER_TARGETS_TABLE_TYPO_MSG, type(v).__name__)
+        return []
 
     @field_validator("staleness_days")
     @classmethod

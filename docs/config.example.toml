@@ -101,6 +101,8 @@ max_prs_per_epic = 4
 id_hex_width = 8
 # Age (days) before an unmoved ready node is quarantined from selection.
 staleness_days = 21
+# Auto-rendered public projections (GLOBAL config file only): every graph mutation re-renders each {path, project, projection=backlog|roadmap} target through the leak gate.
+render_targets = []
 
 [backlog.maintain]
 # Age (days) before an idea is flagged stale.
