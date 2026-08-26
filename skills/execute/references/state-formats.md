@@ -121,10 +121,7 @@ Completed: 2026-01-24T14:45:00Z
 
 ### After a Peer-Hold Skip
 
-A task another session's claim owns gets `[~]`, not `[!]`: nothing failed,
-another worker is on it (see the task-claim step in
-[waves.md](waves.md)). `get_completed_tasks_from_state` matches only `[x]`, so
-a `[~]` task stays re-offerable on a later pass once the peer releases.
+A task another session's claim owns gets `[~]`, not `[!]`. Nothing failed. Another worker is on it (see the task-claim step in [waves.md](waves.md)). `get_completed_tasks_from_state` matches only `[x]`, so a `[~]` task stays re-offerable on a later pass once the peer releases.
 
 ```markdown
 # Task held by a peer session
