@@ -2428,6 +2428,9 @@ event_types:
         authority_source:
           type: string
           description: "Optional. How the decider was entitled to decide: operator law, agent coordination from a resolvable session, or a beastmode grant."
+        graduation:
+          type: object
+          description: "Structured local declaration: enforced with an artifact, guidance, or should-be-enforced-but-i-did-not with a follow-up node. Omitted legacy rows remain readable."
         rationale:
           type: string
           description: "Optional. One line: the reason, not a restatement."
