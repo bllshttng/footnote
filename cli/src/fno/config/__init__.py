@@ -2402,12 +2402,13 @@ class ThinkSpawnBlock(BaseModel):
         """Preserve previously accepted values without restoring authority.
 
         An absent key remains ``None`` so ``config.dispatch`` and its harness
-        default decide. A present malformed legacy value keeps the historical
-        fail-safe to Claude ``bg`` behavior.
+        default decide. ``bg`` remains accepted for one release, while new
+        configuration should use ``thread``. A present malformed value keeps
+        the historical fail-safe to Claude ``bg`` behavior.
         """
         if v is None or (isinstance(v, str) and not v.strip()):
             return None
-        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
+        if isinstance(v, str) and v.strip().lower() in {"pane", "thread", "bg", "headless"}:
             return v.strip().lower()
         return "bg"
 

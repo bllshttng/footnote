@@ -2914,7 +2914,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 /// list against that set, so a new verb cannot land without a `--help` entry
 /// (ab-351427cb).
 const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--substrate pane|bg|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
+    "spawn <name> --provider <p> [--substrate pane|thread|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all] [--status <live|orphaned|unknown>] [--progress <advancing|awaiting-operator|parked|refused|unknown>]",
     "status",
