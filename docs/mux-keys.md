@@ -1,6 +1,6 @@
 # Mux keybindings: the sideline surfaces
 
-The three sideline-adjacent actions sit on three different keys, and their names do not always match what they do. This table is the map. The in-app `prefix+?` modal is the live authority; it renders the same table the scanner dispatches from.
+The three sideline-adjacent actions sit on three different keys, and their names do not always match what they do. This table is the map. The in-app `prefix+?` modal is the live authority. It renders the same table the scanner dispatches from.
 
 | Key | Action id | Event | What opens |
 |---|---|---|---|
@@ -12,11 +12,11 @@ The three sideline-adjacent actions sit on three different keys, and their names
 
 `Ctrl+Opt+Left` opens the sideline row selector with no prefix, from anywhere. It lands on the focused pane's row, not the top.
 
-Why this chord: plain `Ctrl+arrow` is macOS Mission Control, so it never reaches the terminal. `Ctrl+Opt` is free at the OS level. In xterm encoding it is `ESC[1;7D`, the next rung on the modifier ladder the prefix arrows already parse (`1;5` Ctrl resize, `1;2` Shift move; see `esc_chord` in `crates/fno/src/keys.rs`).
+Why this chord: plain `Ctrl+arrow` is macOS Mission Control, so it never reaches the terminal. `Ctrl+Opt` is free at the OS level. In xterm encoding it is `ESC[1;7D`. That is the next rung on the modifier ladder the prefix arrows already parse: `1;5` Ctrl resize, `1;2` Shift move. See `esc_chord` in `crates/fno/src/keys.rs`.
 
-The cost, accepted: the sequence is consumed by the mux and never forwarded to the pane. A program inside a pane that binds `Ctrl+Opt+arrow` loses it. `Opt+arrow` alone (word motion) is untouched; it is modifier 3, not 7.
+The cost, accepted: the sequence is consumed by the mux and never forwarded to the pane. A program inside a pane that binds `Ctrl+Opt+arrow` loses it. `Opt+arrow` alone (word motion) is untouched. That is modifier 3, not 7.
 
-Emulators: iTerm2, Ghostty, kitty and WezTerm emit the xterm CSI form. Verify yours before relying on it: run `cat -v`, press `Ctrl+Opt+Left`, expect `^[[1;7D`. Bind what your emulator actually sends if it differs.
+Emulators: iTerm2, Ghostty, kitty and WezTerm emit the xterm CSI form. Verify yours before relying on it: run `cat -v`, press `Ctrl+Opt+Left`, expect `^[[1;7D`. If your emulator sends something else, bind what it sends.
 
 ## Inside the navigator
 
