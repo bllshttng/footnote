@@ -673,12 +673,7 @@ def resolve_owned_identity(
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
         owner = collide(identity.harness, identity.session_id) if collide else None
-        vendor_proves_session = any(
-            harness == identity.harness
-            and session_identity_key(value) == session_identity_key(identity.session_id)
-            for _marker, harness, value in markers
-        )
-        if owner and not vendor_proves_session:
+        if owner:
             canonical_rejected = (
                 {
                     "harness": identity.harness,
@@ -691,19 +686,7 @@ def resolve_owned_identity(
                 None, None, present, "ambiguous", canonical_rejected
             )
         if verdict is not True:
-            unproven_rejected: tuple[dict[str, str], ...] = ()
-            if owner:
-                unproven_rejected = (
-                    {
-                        "harness": identity.harness,
-                        "session_id": identity.session_id,
-                        "reason": "owned_by_live_row",
-                        "owner": owner,
-                    },
-                )
-            return OwnedHarnessIdentity(
-                None, None, present, "ambiguous", unproven_rejected
-            )
+            return OwnedHarnessIdentity(None, None, present, "ambiguous")
         return OwnedHarnessIdentity(
             identity.session_id, identity.harness, present, "canonical"
         )

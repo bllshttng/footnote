@@ -109,11 +109,7 @@ def test_no_marker_returns_empty_identity():
 
 def test_canonical_pair_resolves_without_vendor_markers():
     session_id = "11111111-1111-4111-8111-111111111111"
-    env = {
-        "FNO_HARNESS_NAME": "claude",
-        "FNO_HARNESS_SESSION_ID": session_id,
-        "FNO_AGENT_SELF": "victim",
-    }
+    env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
 
     assert resolve_harness_identity(env) == HarnessIdentity(session_id, "claude")
     assert resolve_owned_identity(env, prove=lambda _harness, _session: True) == OwnedHarnessIdentity(
@@ -152,6 +148,7 @@ def test_canonical_pair_does_not_skip_collision_on_family_proof():
         "FNO_HARNESS_NAME": "claude",
         "FNO_HARNESS_SESSION_ID": session_id,
         "FNO_AGENT_SELF": "victim",
+        "CLAUDE_CODE_SESSION_ID": session_id,
     }
 
     owned = resolve_owned_identity(
