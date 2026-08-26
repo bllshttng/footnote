@@ -13785,7 +13785,12 @@ mod tests {
             coverage: Coverage::Covered(0),
             verdicts: Vec::new(),
         };
-        let line = coverage_receipt_line(&rep, Some("/code-review high"), Some((3, 2)));
+        // The hint is a placeholder, not a real invocation: concrete review
+        // levels live in the sized-invocation builder alone (single-source
+        // guard), and this test only needs SOME hint string to prove the
+        // past-cap arm ignores it.
+        let hint = "/verb-from-the-builder --flags";
+        let line = coverage_receipt_line(&rep, Some(hint), Some((3, 2)));
         assert!(line.starts_with("review coverage:"), "{line}");
         assert!(
             line.contains("the review round budget is spent (3/2)"),
@@ -13814,9 +13819,10 @@ mod tests {
             coverage: Coverage::Covered(0),
             verdicts: Vec::new(),
         };
-        let line = coverage_receipt_line(&rep, Some("/code-review high"), None);
+        let hint = "/verb-from-the-builder --flags";
+        let line = coverage_receipt_line(&rep, Some(hint), None);
         assert!(line.contains("run the review verb at HEAD"), "{line}");
-        assert!(line.contains("`/code-review high`"), "{line}");
+        assert!(line.contains(&format!("`{hint}`")), "{line}");
     }
 
     #[test]
