@@ -1709,12 +1709,23 @@ def _review_invocation_report(
                         )
                     except ValueError:
                         continue
+                    if event_time.tzinfo is None:
+                        # A tz-naive row would raise on the cutoff comparison
+                        # below and kill the whole report; read it as UTC.
+                        event_time = event_time.replace(tzinfo=timezone.utc)
                     if data.get("stage") == "sent":
                         sent[invocation_id] = (event_time, data)
                 elif event.get("type") == "review_attestation":
                     invocation_id = data.get("invocation_id")
                     if isinstance(invocation_id, str) and invocation_id:
                         attested.add(invocation_id)
+    except FileNotFoundError:
+        # No journal is the normal state of a fresh checkout, not an
+        # instrument failure: nothing was ever sent, so nothing is lost.
+        return [
+            "fno doctor: review invocations: no event journal; "
+            "no sent attempt to lose"
+        ]
     except OSError as exc:
         return [f"fno doctor: review invocations: unmeasurable ({exc})"]
 
