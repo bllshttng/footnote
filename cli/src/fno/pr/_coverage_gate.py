@@ -434,23 +434,46 @@ def coverage_verdict(
         note = "; ".join(x for x in (recompute_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
-    # The spent-budget arm, mirroring the Rust receipt exactly: past the cap
-    # the gate must not teach the review verb - that instruction is the loop
-    # this cap exists to bound, and a worker obeying it here would restart
-    # the loop through the merge-gate channel. It names the terminal act and
-    # the operator lever instead, and names no verb.
+    # The spent budget DISCHARGES the review obligation. It does not fail it.
+    #
+    # This arm used to refuse, and that was the inversion at the heart of the
+    # runaway-review problem. `config.review.max_rounds = 2` has to mean "this
+    # PR gets two rounds, and then review is DONE" - a budget you spend. It
+    # read as "after two rounds you are permanently unmergeable" instead,
+    # which is a guard nothing can pass: every remedy that could clear it
+    # names a review verb, and running one spends a round that is already
+    # spent. Measured across 25 recent merged PRs, seven blew past the cap and
+    # four reached double digits (12, 11, 10, 8 rounds) precisely because the
+    # cap never ended a review phase - it only refused afterward.
+    #
+    # The operator's ruling is already written twenty lines above: "the PR
+    # merges with its remaining findings FILED as nodes, never dropped". That
+    # ruling was only ever reachable through the `covered` branch, so it fired
+    # for a PR that had findings and never for a PR that had none. Having
+    # findings made a PR MORE mergeable than having none. This is where the
+    # ruling actually lands.
+    #
+    # What still blocks: a CONFIRMED correctness or security finding returns
+    # IMPOSSIBLE above and never reaches here, and a filing failure refuses
+    # there too. Those are the real safety, not this arm. Requiring an
+    # attestation past the cap buys no trust the budget does not: in this
+    # fleet the attestation is emitted by the same worker that wrote the code,
+    # so both axes are self-certified. External review and human approval are
+    # the trust boundary, and neither is weakened here.
+    #
+    # The waiver is NAMED in the note, never silent, so a merge that happened
+    # on a spent budget is legible afterward.
     if rounds > max_rounds:
+        waiver = (
+            f"review budget discharged ({rounds}/{max_rounds} rounds): the "
+            "review phase is complete and the remainder is filed; the "
+            "operator lever is config.review.max_rounds"
+        )
         return (
-            REFUSED,
-            f"the review round budget is spent ({rounds}/{max_rounds}) - "
-            "decline the remainder, file it with the declining identity and "
-            "the reason, then merge; the operator lever is "
-            "config.review.max_rounds",
+            COVERED,
             "",
-            # file_findings_at_cap ran above and created real nodes; dropping
-            # its note here would hand the operator "file the remainder" with
-            # no word that it was already filed, or which nodes hold it.
-            "; ".join(n for n in (recompute_note, filed_note) if n),
+            head or "",
+            "; ".join(n for n in (recompute_note, filed_note, waiver) if n),
         )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)

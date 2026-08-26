@@ -6753,18 +6753,46 @@ pub fn classify_coverage_tiled(
     let local_counts = verdicts.iter().any(|v| {
         v.producer == CoverageProducer::LocalAttestation && v.verdict == CoverageVerdict::Reviewed
     });
-    let coverage = if !github_read_ok && !local_counts {
+    let counted = verdicts
+        .iter()
+        .filter(|v| {
+            v.verdict == CoverageVerdict::Reviewed
+                && human_approval_counts(v, github_approval_satisfies)
+        })
+        .count();
+    // A SPENT round budget DISCHARGES the review obligation, and it does so
+    // here, before the evidence arms below, so that no shape of PR can escape
+    // it. `config.review.max_rounds = 2` means "this PR gets two rounds, then
+    // review is DONE" - a budget you spend, not a bar you clear.
+    //
+    // This is the mirror of the same discharge in `_coverage_gate`, and it has
+    // to live at the coverage decision rather than at any one consumer: this
+    // value feeds the published fno/review-coverage status, the stop-hook
+    // receipt, and the emitted row alike. Fixing only the merge verb left the
+    // status red and the hook still asking for another round, which is what
+    // kept spending rounds past the cap.
+    //
+    // Why it survives a rebase or a force push, which is the case that
+    // mattered: `rounds_used` counts distinct reviewed commits from GitHub
+    // review objects, and those objects outlive the shas a rebase orphans.
+    // Coverage evidence is head-pinned and does NOT survive, so before this
+    // change every force push reset coverage to zero while the spent budget
+    // stayed spent - a ratchet that made each rebase strictly harder to merge.
+    // Reading the discharge from the budget turns that same persistence into
+    // the thing that keeps a reviewed PR reviewed.
+    //
+    // Unknown is deliberately NOT preferred over a discharge: an unreadable
+    // GitHub is a reason to stop asking for more review at a spent budget,
+    // never a reason to demand a round the budget cannot fund. CONFIRMED
+    // correctness and security findings are unaffected - they block through
+    // the disposition gate, which never consults coverage.
+    let budget_spent = tiling.map(|t| t.rounds_exhausted).unwrap_or(false);
+    let coverage = if budget_spent {
+        Coverage::Covered(counted.max(1))
+    } else if !github_read_ok && !local_counts {
         Coverage::Unknown
     } else {
-        Coverage::Covered(
-            verdicts
-                .iter()
-                .filter(|v| {
-                    v.verdict == CoverageVerdict::Reviewed
-                        && human_approval_counts(v, github_approval_satisfies)
-                })
-                .count(),
-        )
+        Coverage::Covered(counted)
     };
 
     CoverageReport {

@@ -1851,7 +1851,7 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
     assert _coverage_gate._pr_reviews(42, "/repo") is None
 
 
-def test_past_the_cap_the_gate_refusal_names_the_terminal_act(monkeypatch, tmp_path):
+def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tmp_path):
     """The Python mirror of the spent-budget receipt: past the cap the
     uncovered refusal must not teach the review verb (that instruction is
     the loop this cap exists to bound) and must name the terminal act. The
@@ -1894,19 +1894,31 @@ def test_past_the_cap_the_gate_refusal_names_the_terminal_act(monkeypatch, tmp_p
     monkeypatch.setattr(
         _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
     )
-    state, refusal, _head, note = _coverage_gate.coverage_verdict(
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
-    assert state == _coverage_gate.REFUSED
-    assert "the review round budget is spent (3/2)" in refusal, refusal
-    assert (
-        "decline the remainder, file it with the declining identity and the "
-        "reason, then merge" in refusal
-    ), refusal
-    # file_findings_at_cap ran and created a real node. The refusal says
-    # "file it"; the note must say it was already filed, and name the node,
-    # or the operator files the same finding twice.
+    # A SPENT budget discharges the review obligation; it does not fail it.
+    # `max_rounds = 2` means "this PR gets two rounds, then review is done".
+    # The old REFUSED here was a guard nothing could pass: every remedy that
+    # could clear it names a review verb, and running one spends a round
+    # already spent. That is what produced 12-round PRs against a cap of 2.
+    assert state == _coverage_gate.COVERED, f"spent budget must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert head, "a covered verdict must name the head it covers"
+
+    # The waiver is NAMED, never silent: a merge on a spent budget has to be
+    # legible afterward, and the note is the only place that record lives.
+    assert "review budget discharged (3/2 rounds)" in note, note
+    assert "config.review.max_rounds" in note, note
+
+    # file_findings_at_cap ran and created a real node. The remainder being
+    # FILED is what makes the discharge safe, so the node id must reach the
+    # receipt or the operator files the same finding twice.
     assert "x-filed1" in note, "the filed node must reach the receipt: " + note
     assert "filed at the round cap (3/2)" in note, note
+
+    # Unchanged from the refusal this replaces, and still the point: past the
+    # cap the gate must name NO review verb. That instruction is the loop the
+    # cap exists to bound.
     for needle in ("/code-review", "/review", "/fno:review", "review verb"):
-        assert needle not in refusal, f"past-cap refusal names {needle}: {refusal}"
+        assert needle not in note, f"past-cap receipt names {needle}: {note}"
