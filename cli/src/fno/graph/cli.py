@@ -3105,7 +3105,7 @@ def cmd_intake(
 # -- update --
 
 
-@cli.command("note", hidden=True)
+@cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
