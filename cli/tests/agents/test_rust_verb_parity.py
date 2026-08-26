@@ -623,7 +623,11 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     assert rust.returncode == 0, rust.stderr
     assert rust.stdout.startswith("cd /tmp/proj && exec codex ")
     assert "writable_roots=" in rust.stdout
-    assert rust.stdout.endswith(" resume uuid-9\n")
+    # The point of this assertion is that the Rust reader resolved the agent and
+    # rendered ITS session id, not that the id is the final token: the codex
+    # lane appends modal-clearing flags after it (--cd, permission_bypass,
+    # --dangerously-bypass-hook-trust), which the codex parser accepts.
+    assert " resume uuid-9" in rust.stdout
     # attach refuses codex (agent FOUND -> the refusal message, not "not found").
     att = _run_rust(["attach", "cx"], agents)
     assert att.returncode == 13

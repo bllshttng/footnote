@@ -1708,16 +1708,38 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
         Some(session_id),
     )
     .ok()?;
-    // codex's bounded sandbox re-resolves from config on `resume` (it accepts
-    // neither `--sandbox` nor `--add-dir`), so the git + plan grants must ride
-    // as `-c` tokens spliced right after the `codex` binary token.
+    // codex's bounded sandbox re-resolves from config on `resume`, so the git +
+    // plan grants ride as `-c` tokens spliced right after the `codex` binary
+    // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
+    // lane that does not. `-c` is kept because one grant builder serves both.)
     if provider == "codex" {
         if let Some(cwd) = cwd {
             let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
             if !grant.is_empty() {
                 argv.splice(1..1, grant);
             }
+            // Without --cd, codex asks session-directory vs current-directory
+            // and defaults to the SESSION directory: the canonical checkout
+            // recorded at spawn, not the worktree the row works in. Unattended
+            // that prompt is a hang; attended it is a wrong default a human
+            // must catch.
+            argv.push("--cd".into());
+            argv.push(cwd.into());
         }
+        // Declared per harness in the capability contract; this lane never
+        // applied it. Hook trust is a separate axis with no contract key, and
+        // footnote's own Stop hooks are what trip it.
+        if let Some(bypass) = crate::harness_capabilities::HarnessContract::packaged()
+            .ok()
+            .and_then(|c| {
+                c.capabilities(provider)
+                    .ok()
+                    .map(|caps| caps.permission_bypass.clone())
+            })
+        {
+            argv.extend(bypass);
+        }
+        argv.push("--dangerously-bypass-hook-trust".into());
     }
     Some(argv)
 }
@@ -4247,6 +4269,10 @@ mod tests {
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
+        // The trailing flags clear codex's two modals. Both were answered by
+        // hand during the 2026-08-25 fleet recovery, and each is a hang with no
+        // human attached. Kept byte-identical to Python `_build_resume_argv`;
+        // `test_rust_verb_parity.py` fails if the twins drift.
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(vec![
@@ -4256,6 +4282,23 @@ mod tests {
                     .into(),
                 "resume".into(),
                 "uuid-1".into(),
+                "--cd".into(),
+                "/path/that/does/not/exist".into(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+                "--dangerously-bypass-hook-trust".into(),
+            ])
+        );
+        // No cwd means no --cd (a bare flag fails parsing, and inventing a
+        // directory is the wrong-tree failure this exists to prevent), but the
+        // modal-clearing flags do not depend on cwd.
+        assert_eq!(
+            build_resume_argv("codex", "uuid-2", None),
+            Some(vec![
+                "codex".into(),
+                "resume".into(),
+                "uuid-2".into(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+                "--dangerously-bypass-hook-trust".into(),
             ])
         );
         assert_eq!(
