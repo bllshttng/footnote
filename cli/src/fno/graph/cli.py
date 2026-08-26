@@ -6511,12 +6511,16 @@ def _task_callback() -> None:
     """Keep ``list``/``update`` real subcommands (single-command Typer collapse)."""
 
 
-def _task_plan_or_exit(node_token: str) -> tuple[str, str]:
-    """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals."""
+def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
+    """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
+
+    Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
+    guard lives on the tracker-owned task verbs that call this.
+    """
     from fno.graph.fuzzy import resolve_node
     from fno.graph.store import read_graph
 
-    entries = read_graph(_graph_path())
+    entries = read_graph(graph_path)
     match = resolve_node(node_token, entries)
     if match.kind != "exact":
         typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
@@ -6545,7 +6549,7 @@ def cmd_task_list(
     from fno.graph.store import locked_mutate_graph
     from fno.graph.tasks import ensure_task_rows
 
-    node_id, plan_path = _task_plan_or_exit(node)
+    node_id, plan_path = _task_plan_or_exit(node, _graph_path())
     rows: list[dict] = []
 
     def mutator(entries):
@@ -6605,7 +6609,7 @@ def cmd_task_update(
             f"invalid --status {status!r}; one of {', '.join(TASK_STATUSES)}", err=True
         )
         raise typer.Exit(code=2)
-    node_id, plan_path = _task_plan_or_exit(node)
+    node_id, plan_path = _task_plan_or_exit(node, _graph_path())
     ids = derive_task_ids(Path(plan_path))
     if task_id not in ids:
         typer.echo(
