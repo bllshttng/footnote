@@ -255,7 +255,7 @@ pub const PANE_ID_REVEAL_WINDOW: Duration = PANE_IDS_REPEAT_WINDOW;
 
 /// (x-c5ee) The top-K live-row cap per rendered squad: attention rows
 /// (Blocked/Working/DoneUnseen) always render, then idle rows fill up to this
-/// many LIVE rows total; the idle overflow folds into one `+N idle` row. Sized
+/// many LIVE rows total; the idle overflow folds into one `+N more` row. Sized
 /// a little above a typical attention set so the common squad emits no fold.
 /// Dead rows sit outside this budget under the section view's control.
 const SQUAD_ROW_CAP: usize = 8;
@@ -831,7 +831,13 @@ fn squad_peek_lines(layout: &LayoutView, sid: u64) -> Vec<String> {
                 PaneState::Blocked => "blocked",
                 PaneState::Working => "working",
                 PaneState::DoneUnseen => "done",
-                PaneState::Unmeasured => "unread",
+                // NOT "unread" (x-d401): that word names output nobody has
+                // looked at, which is `DoneUnseen` - a different row, filed
+                // under "done". A filter typed as `unread` would then return
+                // rows with no liveness reading and EXCLUDE every row that
+                // actually has unseen output, which is this branch's own
+                // defect: a word standing in for a fact it does not name.
+                PaneState::Unmeasured => "unmeasured",
                 PaneState::Idle => "idle",
                 PaneState::Empty => "empty",
             }
@@ -5633,7 +5639,7 @@ impl View {
     }
 
     /// (x-c5ee) Toggle a squad's top-K idle expansion: a squad in the set shows
-    /// all its idle rows, one absent folds the overflow behind `+N idle`. A pure
+    /// all its idle rows, one absent folds the overflow behind `+N more`. A pure
     /// local flip, never persisted (the durable layer is [`SectionView`]), then
     /// re-anchor the selector and re-clamp - the row set just changed size under
     /// the cursor, exactly like a section cycle. Idempotent per press.
@@ -7353,7 +7359,7 @@ impl View {
 
     // (x-c5ee) The sideline tree, with the top-K idle cap applied. A PURE
     // function of state: a squad shows its idle overflow only when the operator
-    // toggled its `+N idle` row open (`idle_expanded`). No per-frame,
+    // toggled its `+N more` row open (`idle_expanded`). No per-frame,
     // selector-driven force-expand - that needs to know which row the selector
     // rests on, but the selector is an index INTO this very output, so any
     // attempt to resolve it here is circular: resolving against a rebuilt
@@ -7430,9 +7436,9 @@ impl View {
                 squad_agents = order.into_iter().map(|i| squad_agents[i]).collect();
                 // (x-c5ee) Top-K idle cap: attention rows (live, non-idle) always
                 // render; idle rows fill to SQUAD_ROW_CAP live rows total; the
-                // idle overflow folds into one `+N idle` row. Dead rows (present
+                // idle overflow folds into one `+N more` row. Dead rows (present
                 // only in Expanded) sit OUTSIDE the budget under the view's
-                // control, so `+N idle` and the header's `✗N` never double-count.
+                // control, so `+N more` and the header's `✗N` never double-count.
                 let attention = squad_agents
                     .iter()
                     .filter(|&a| !a.exited && !is_idle_row(a))
@@ -7448,7 +7454,7 @@ impl View {
                 for &a in &squad_agents {
                     if is_idle_row(a) && !show_all_idle {
                         if idle_shown >= idle_budget {
-                            continue; // folded into the `+N idle` row below
+                            continue; // folded into the `+N more` row below
                         }
                         idle_shown += 1;
                     }
@@ -7473,7 +7479,7 @@ impl View {
                         out.push(DisplayRow::Sub(a.cwd_base.clone().unwrap_or_default()));
                     }
                 }
-                // Emit the fold row whenever there is idle overflow: `+N idle`
+                // Emit the fold row whenever there is idle overflow: `+N more`
                 // when folded, `- fewer` when shown (so the expansion reverses
                 // from the same spot). No row when nothing overflows (no `+0`).
                 if hidden > 0 {
@@ -7942,7 +7948,7 @@ impl View {
                 DisplayRow::TableEmpty => {
                     ("  no agents".to_string(), cell_flags::DIM, Color::Default)
                 }
-                // (x-c5ee) The idle fold: `+N idle` folded, `- fewer` expanded.
+                // (x-c5ee) The idle fold: `+N more` folded, `- fewer` expanded.
                 // Indented 4 cells to sit under the agent rows like a `Sub`, and
                 // DIM as a quiet summary - but it is NOT inert, so the selector's
                 // INVERSE bar still lifts it when the cursor lands on it.
@@ -8157,7 +8163,7 @@ enum DisplayRow<'a> {
     /// Unlike the inert rows above it is ACTIONABLE - a click / selector Enter
     /// toggles the squad's idle expansion (the idle sibling of a header's
     /// `CycleSection`), so it is NOT in `row_is_inert` and the cursor can rest
-    /// on it. Folded it paints `+N idle`; expanded it paints `- fewer`.
+    /// on it. Folded it paints `+N more`; expanded it paints `- fewer`.
     IdleFold {
         key: SectionKey,
         hidden: usize,
@@ -8838,7 +8844,7 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// (x-c5ee) A LIVE idle row - the top-K cap's fold target. Exited is checked
 /// first, exactly as [`agent_lattice_state`] does, so a dead worker (whose
 /// `pane_state` also reads `Idle`) is never mistaken for live idle and swept
-/// into `+N idle`: dead rows are the section view's business, not the cap's.
+/// into `+N more`: dead rows are the section view's business, not the cap's.
 /// (x-d401) The fold takes every NON-ATTENTION state, which after this branch
 /// means three of them, not one. `pane_state` used to answer `Idle` for any
 /// badgeless row; the split sends a pristine shell to `Empty` and a row with
@@ -8849,7 +8855,7 @@ fn attention_key(a: &AgentRow, need: Option<NeedKind>) -> (u8, u8, std::cmp::Rev
 /// fold outright on any real fleet.
 ///
 /// Folding an unmeasured row is safe only because the fold row says `+N more`
-/// rather than `+N idle`. An earlier revision of this comment claimed the `?`
+/// rather than `+N more`. An earlier revision of this comment claimed the `?`
 /// glyph carried the honesty "wherever the row renders", which is exactly
 /// wrong for a row the fold REMOVED: the count would then have stood in for a
 /// measurement nothing took, on the surface this branch exists to fix. The
@@ -9946,7 +9952,7 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         Some(PaneState::Blocked) => "blocked",
         Some(PaneState::Working) => "working",
         Some(PaneState::DoneUnseen) => "done",
-        Some(PaneState::Unmeasured) => "unread",
+        Some(PaneState::Unmeasured) => "unmeasured",
         Some(PaneState::Idle) => "idle",
         Some(PaneState::Empty) => "empty",
     };
@@ -19558,7 +19564,7 @@ mod tests {
         assert!(v.peek.is_none(), "the peek closes with its workspace");
     }
 
-    // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N idle`
+    // AC1-UI (x-c5ee): the fold toggles visibly and reversibly - folded `+N more`
     // -> all idle shown with a `- fewer` affordance -> folded again.
     #[test]
     fn idle_fold_toggles_visibly_and_reversibly() {
@@ -19668,7 +19674,7 @@ mod tests {
     }
 
     // Regression (x-c5ee, codex P1/P2 on #566/#568): the render is a pure
-    // function of state, so resting the selector ON the `+N idle` fold row never
+    // function of state, so resting the selector ON the `+N more` fold row never
     // perturbs it. The earlier per-frame force-expand resolved the selector index
     // against a rebuilt enumeration, which mis-identified the row (fold moved /
     // Enter reported no action) and could collapse a walked-into overflow row.
@@ -25497,10 +25503,17 @@ mod tests {
         // x-df4c: idle was the outline `○` (was the near-invisible `·`); x-d401
         // moves a badgeless reading-less row to the marked absence `?` - the
         // mux cannot see an external/fno live row's workload, so it says so.
-        // The external DIM modifier and the no-reading DIM coincide by design
-        // (DIM is reinforcement, the glyph is the discriminator); the exited
-        // `✗` precedence below is unchanged, and external-ness still reads
-        // through the row's actions, not this glyph.
+        // The external DIM modifier and the no-reading DIM coincide, and this
+        // is a KNOWN, accepted collision, not an oversight: a badgeless local
+        // row and a badgeless external row both paint `?` + DIM, where before
+        // they were a bright `○` and a dim `○`. What the glyph discriminates
+        // is STATE, never external-ness, and DIM only reinforces it - the
+        // earlier wording read as though the glyph told the two rows apart,
+        // which it does not. External-ness reads through the row's ACTIONS.
+        // Restoring the distinction here means giving `external` a channel of
+        // its own; DIM cannot carry it once the state is already dim, which
+        // was already true of `✗` before this branch. The exited precedence
+        // below is unchanged.
         assert_eq!(probe("z-exited"), ('\u{2717}', true), "exited: ✗ + DIM");
         assert_eq!(probe("z-external"), ('?', true), "external: ? + DIM");
         assert_eq!(
@@ -30352,7 +30365,7 @@ mod tests {
         };
         assert!(
             is_idle_row(&with(Some(ShellActivity::Empty))),
-            "a pristine shell folds, else the +N idle cap dies on a shell-heavy squad"
+            "a pristine shell folds, else the fold cap dies on a shell-heavy squad"
         );
         assert!(is_idle_row(&with(Some(ShellActivity::Idle))), "idle folds");
         assert!(
