@@ -15,6 +15,7 @@
 #
 # Format: <file>::<function>  <reason>
 
+cli/src/fno/agent/state.py::load_agent_context  PREDICATE. Compares this process's session id with a target manifest to prevent a visitor from adopting it. The mismatch is displayed and nothing durable carries the resolved id.
 cli/src/fno/agents/rust_runtime.py::env_scrub_spawn_warning  BRANCH. Picks a default provider name for a warning. Nothing durable carries it.
 cli/src/fno/events/cli.py::_stamp_protocol_envelope  LAYERING. A durable stamp that CANNOT reach the owned path: events is L0 platform and `fno.claims` is L1 core, so the import is a prohibited edge and a new cycle (scripts/ci/check-company-boundaries.sh catches it). Safe because the precedence primitive itself now refuses a mixed-family env; what is lost is resolving a mixed env the process tree could decide. The durable fix is to move the owned resolver out of `claims/` to a layer platform may depend on.
 cli/src/fno/events/cli.py::_resolve_parent_handle  LAYERING. Same edge, same reason: the resolved id selects this session's registry row to read its spawn edge.
