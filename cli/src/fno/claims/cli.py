@@ -717,7 +717,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     coords = _do_row_coordinates(key, claim, holder, "release --rollback-do")
     if coords is None:
         return
-    node_id, harness, session_id, started = coords
+    node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
             graph_json(), node_id, phase="do",
