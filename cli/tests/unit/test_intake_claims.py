@@ -19,7 +19,9 @@ from unittest.mock import patch
 import click.exceptions
 import pytest
 
-from fno.graph._intake import _resolve_claim, _warn_similar_nodes
+from fno.graph._intake import (
+    _refuse_surfaceless_intake, _resolve_claim, _warn_similar_nodes,
+)
 from fno.graph.cli import _create_node_impl, _do_intake_multi, _intake_impl
 
 
@@ -98,6 +100,15 @@ def _read_entries(graph_file: Path) -> list[dict]:
     return json.loads(graph_file.read_text())["entries"]
 
 
+# Every plan fixture in this file carries a file surface: intake refuses a
+# surface-less plan by default, so a realistic default fixture states
+# one and the refusal tests opt OUT via a body without this section.
+_SURFACE = (
+    "## Files to Modify\n\n| File | Action |\n|---|---|\n"
+    "| `cli/src/fno/example.py` | modify |"
+)
+
+
 def _write_quick_plan(
     tmp_path: Path,
     title: str = "New plan title",
@@ -112,7 +123,7 @@ def _write_quick_plan(
     if difficulty:
         fm_lines.append(f"difficulty: {difficulty}")
     fm_lines += ["created: 2026-05-05T04:35", "---"]
-    body = [f"# {title}", "", "Body."]
+    body = [f"# {title}", "", _SURFACE, "", "Body."]
     plan.write_text("\n".join(fm_lines + [""] + body) + "\n")
     return plan
 
@@ -201,6 +212,249 @@ def test_prepare_intake_refuses_out_of_vocabulary_plan_priority(tmp_path):
             roadmap_id=None, cli_title=None, cli_priority=None, cli_deps=[], cli_points=None,
         )
     assert "invalid priority" in str(exc.value)
+
+
+# -- mandatory file surface at intake --
+
+
+def _surfaceless_plan(tmp_path: Path, title: str = "No surface plan") -> Path:
+    plan = tmp_path / "no-surface.md"
+    plan.write_text(f"---\ncreated: 2026-05-05T04:35\n---\n# {title}\n\nBody.\n")
+    return plan
+
+
+def test_intake_refuses_surfaceless_plan(fixture_graph, tmp_path, capsys):
+    """A plan whose Files to Modify parses empty is refused (exit 2) naming the
+    plan and --allow-no-surface, with the graph unchanged."""
+    plan = _surfaceless_plan(tmp_path)
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    code = getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0))
+    assert code == 2
+    err = capsys.readouterr().err
+    assert str(plan) in err
+    assert "--allow-no-surface" in err
+    assert len(_read_entries(fixture_graph)) == 3  # nothing written
+
+
+def test_intake_allow_no_surface_flag_admits_the_plan(fixture_graph, tmp_path, capsys):
+    plan = _surfaceless_plan(tmp_path)
+    _intake_impl(plan_paths=[str(plan)], allow_no_surface=True)
+    out = capsys.readouterr().out
+    assert "intake " in out
+    assert len(_read_entries(fixture_graph)) == 4
+
+
+def test_surfaceful_intake_creates_node_without_surface_message(
+    fixture_graph, tmp_path, capsys
+):
+    """A plan stating a surface intakes exactly as before - no surface noise."""
+    plan = _write_quick_plan(tmp_path, title="Surfaceful intake plan omega")
+    _intake_impl(plan_paths=[str(plan)])
+    captured = capsys.readouterr()
+    assert "no comparable file surface" not in captured.err
+    assert len(_read_entries(fixture_graph)) == 4
+
+
+def test_multi_intake_refuses_whole_batch_on_surfaceless_plan(
+    fixture_graph, tmp_path, capsys
+):
+    """The multi lane refuses the BATCH, not the file: a surface-less plan
+    aborts before any write, so the good plan does not land either."""
+    from types import SimpleNamespace
+
+    (tmp_path / "good").mkdir()
+    good = _write_quick_plan(tmp_path / "good", title="Good surface plan")
+    bad = _surfaceless_plan(tmp_path)
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _do_intake_multi(
+            args, [str(good), str(bad)], roadmap_id=None, dry_run=False
+        )
+    code = getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0))
+    assert code == 2
+    err = capsys.readouterr().err
+    assert str(bad) in err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert not any("Good surface plan" in (t or "") for t in titles)
+    assert len(_read_entries(fixture_graph)) == 3  # batch left the graph alone
+
+
+def test_intake_missing_plan_file_refused_as_not_found(fixture_graph, tmp_path, capsys):
+    """A missing plan file gets its own not-found refusal, not the misleading
+    'add rows' message (and never mints a node pointing at nothing)."""
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(tmp_path / "typo.md")])
+    code = getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0))
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "plan file not found" in err
+    assert "path spelling" in err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_surface_refusal_reads_cli_paths_cwd_relative(tmp_path, monkeypatch):
+    """The probe reads the CLI-given spelling (Path, not a git-root join), so a
+    ../path from a subdirectory does not false-refuse a valid surface."""
+    (tmp_path / "sub").mkdir()
+    plan = tmp_path / "plan.md"
+    plan.write_text(f"# Title\n\n{_SURFACE}\n")
+    monkeypatch.chdir(tmp_path / "sub")
+    _refuse_surfaceless_intake(["../plan.md"], allow_no_surface=False)  # no raise
+    with pytest.raises((SystemExit, click.exceptions.Exit)):
+        _refuse_surfaceless_intake(["../missing.md"], allow_no_surface=False)
+
+
+def test_surface_refusal_expands_tilde_paths(tmp_path, monkeypatch):
+    """A quoted tilde path to an existing, surfaceful plan must not take the
+    missing-file branch: the collision resolver expands tilde at dispatch, so
+    refusing it here would break a plan that works end to end."""
+    (tmp_path / "vault").mkdir()
+    plan = tmp_path / "vault" / "plan.md"
+    plan.write_text(f"# Title\n\n{_SURFACE}\n")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    _refuse_surfaceless_intake(["~/vault/plan.md"], allow_no_surface=False)
+
+
+def test_intake_missing_plan_refused_even_with_allow_no_surface(
+    fixture_graph, tmp_path, capsys
+):
+    """The flag overrides EMPTY tables, not a missing file: binding a node to
+    a nonexistent plan is the dangling-node hole the not-found refusal closes."""
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(
+            plan_paths=[str(tmp_path / "typo.md")], allow_no_surface=True
+        )
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) == 2
+    assert "plan file not found" in capsys.readouterr().err
+    assert len(_read_entries(fixture_graph)) == 3
+
+
+def test_intake_non_utf8_plan_refuses_cleanly(fixture_graph, tmp_path, capsys):
+    """A plan with a non-UTF-8 byte refuses cleanly, never a UnicodeDecodeError
+    traceback. The single lane hits _prepare_intake's decode ValueError first
+    (exit 1); the multi lane - where the probe runs first - is the crash path
+    the collision parser's containment closes (exit 2 below)."""
+    plan = tmp_path / "latin1.md"
+    plan.write_bytes(
+        b"# Title\n\nplan body\n\n## Files to Modify\n\n| File |\n|---|\n"
+        b"| `caf\xe9.py` | modify |\n"
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _intake_impl(plan_paths=[str(plan)])
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) != 0
+    assert len(_read_entries(fixture_graph)) == 3
+
+    from types import SimpleNamespace
+
+    (tmp_path / "gooddir").mkdir()
+    good = _write_quick_plan(tmp_path / "gooddir", title="Utf8 batch mate")
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    with pytest.raises((SystemExit, click.exceptions.Exit)) as exc_info:
+        _do_intake_multi(args, [str(good), str(plan)], roadmap_id=None, dry_run=False)
+    assert getattr(exc_info.value, "exit_code", getattr(exc_info.value, "code", 0)) == 2
+    err = capsys.readouterr().err
+    assert "no comparable file surface" in err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert not any("Utf8 batch mate" in (t or "") for t in titles)
+
+
+def test_multi_intake_exempts_already_intaked_surfaceless_plan(
+    fixture_graph, tmp_path, capsys
+):
+    """An already-bound surface-less plan is a no-op for this verb (the single
+    lane prints 'already intaked' and exits 0), so re-running a batch that
+    contains one must not refuse the rest."""
+    from types import SimpleNamespace
+
+    bound = _surfaceless_plan(tmp_path, title="Bound surfaceless")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-b0nd0001", title="Owner of the surfaceless plan",
+              plan_path=str(bound), status="ready")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh", title="Fresh surface plan")
+
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(bound), str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    assert "already intaked ab-b0nd0001" in captured.out
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Fresh surface plan" in (t or "") for t in titles)
+
+
+def test_multi_intake_exempts_bound_surfaceless_plan_across_roadmaps(
+    fixture_graph, tmp_path, capsys
+):
+    """A surface-less plan owned under ANY roadmap is exempt from the batch
+    refusal: the mutator skips it per file with the accurate owner-conflict
+    error instead of blaming a file table the owner never reads."""
+    from types import SimpleNamespace
+
+    bound = _surfaceless_plan(tmp_path, title="Bound surfaceless")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-r0ad0001", title="Owner under another roadmap",
+              plan_path=str(bound), status="ready", roadmap_id="roadmap-a")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh2").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh2", title="Cross roadmap fresh")
+
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(bound), str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    # The bound plan resolves per file to the owner conflict, not a refusal.
+    assert "delivery unit" in captured.err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Cross roadmap fresh" in (t or "") for t in titles)
+
+
+def test_multi_intake_exemption_matches_absolute_graph_spelling(
+    fixture_graph, tmp_path, capsys, monkeypatch
+):
+    """A graph-stored ABSOLUTE plan_path probed with a CLI-RELATIVE spelling:
+    the exemption must still see the binding (normpath alone cannot), or the
+    batch refuses a file this run was a no-op for."""
+    from types import SimpleNamespace
+
+    (tmp_path / "bound3").mkdir()
+    plan = tmp_path / "bound3" / "no-surface.md"
+    plan.write_text("---\ncreated: 2026-05-05T04:35\n---\n# Bound abs\n\nBody.\n")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-abs00001", title="Owner abs spelling", plan_path=str(plan),
+              status="ready")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh3").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh3", title="Relative spelling fresh")
+
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, ["bound3/no-surface.md", str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    assert "no comparable file surface" not in captured.err
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Relative spelling fresh" in (t or "") for t in titles)
 
 
 # -- _resolve_claim --
@@ -362,7 +616,7 @@ def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys)
     plan = tmp_path / "p0-claim.md"
     plan.write_text(
         "---\nclaims: ab-1dea1234\npriority: p0\nblocks_everything: true\n---\n"
-        "# Broken service\n"
+        f"# Broken service\n\n{_SURFACE}\n"
     )
     _intake_impl(plan_paths=[str(plan)])
     capsys.readouterr()
@@ -478,7 +732,9 @@ def test_claim_lane_flows_declared_type_doc_to_graph(tmp_path, monkeypatch):
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug plan\n\nBody.\n")
+    plan.write_text(
+        f"---\ncreated: 2026-05-05T04:35\ntype: bug\n---\n# Bug plan\n\n{_SURFACE}\n\nBody.\n"
+    )
 
     result = CliRunner().invoke(
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
@@ -516,7 +772,9 @@ def test_claim_lane_respects_the_epic_nesting_cap(tmp_path, monkeypatch):
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\nBody.\n")
+    plan.write_text(
+        f"---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\n{_SURFACE}\n\nBody.\n"
+    )
 
     result = CliRunner().invoke(
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
@@ -550,7 +808,9 @@ def test_claim_lane_allows_an_epic_under_a_top_level_mission(tmp_path, monkeypat
     monkeypatch.setattr(gs, "GRAPH_JSON", g)
 
     plan = tmp_path / "plan.md"
-    plan.write_text("---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\nBody.\n")
+    plan.write_text(
+        f"---\ncreated: 2026-05-05T04:35\ntype: epic\n---\n# Epic plan\n\n{_SURFACE}\n\nBody.\n"
+    )
 
     result = CliRunner().invoke(
         app, ["backlog", "intake", str(plan), "--claims", "ab-1dea1234"]
@@ -934,7 +1194,10 @@ def test_multi_intake_birth_path_warns_on_near_duplicate(fixture_graph, tmp_path
 
     def _plan(path: Path, title: str) -> Path:
         path.write_text(
-            "\n".join(["---", "created: 2026-05-05T04:35", "---", "", f"# {title}", "", "Body.", ""])
+            "\n".join(
+                ["---", "created: 2026-05-05T04:35", "---", "", f"# {title}", "",
+                 _SURFACE, "", "Body.", ""]
+            )
             + "\n"
         )
         return path
@@ -962,7 +1225,7 @@ def test_multi_intake_skips_refused_plan_cleanly(fixture_graph, tmp_path, capsys
             fm.append(f"priority: {priority}")
         fm += ["created: 2026-05-05T04:35", "---"]
         path.write_text(
-            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+            "\n".join(fm + ["", f"# {title}", "", _SURFACE, "", "Body.", ""]) + "\n"
         )
         return path
 
@@ -998,7 +1261,7 @@ def test_multi_intake_dry_run_previews_refusals_not_would_intake(
             fm.append(f"priority: {priority}")
         fm += ["created: 2026-05-05T04:35", "---"]
         path.write_text(
-            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+            "\n".join(fm + ["", f"# {title}", "", _SURFACE, "", "Body.", ""]) + "\n"
         )
         return path
 
@@ -1045,7 +1308,7 @@ def test_multi_intake_dry_run_grows_preview_graph_for_batch_duplicates(
 
     plan = tmp_path / "dupe.md"
     plan.write_text(
-        "\n".join(["---", "created: 2026-05-05T04:35", "---", "", "# Dupe plan zeta", "", "Body.", ""])
+        "\n".join(["---", "created: 2026-05-05T04:35", "---", "", "# Dupe plan zeta", "", _SURFACE, "", "Body.", ""])
         + "\n"
     )
     args = SimpleNamespace(
@@ -1078,7 +1341,7 @@ def test_multi_intake_build_refusal_skips_one_file_not_batch(
             fm.append(f"difficulty: {difficulty}")
         fm += ["created: 2026-05-05T04:35", "---"]
         path.write_text(
-            "\n".join(fm + ["", f"# {title}", "", "Body.", ""]) + "\n"
+            "\n".join(fm + ["", f"# {title}", "", _SURFACE, "", "Body.", ""]) + "\n"
         )
         return path
 
@@ -1110,7 +1373,7 @@ def test_multi_intake_claim_updates_idea_node_in_place(fixture_graph, tmp_path, 
     plan.write_text(
         "\n".join(
             ["---", "claims: ab-1dea1234", "created: 2026-05-05T04:35", "---",
-             "", "# Claimed by multi batch iota", "", "Body.", ""]
+             "", "# Claimed by multi batch iota", "", _SURFACE, "", "Body.", ""]
         ) + "\n"
     )
     args = SimpleNamespace(
@@ -1142,14 +1405,14 @@ def test_multi_intake_dry_run_previews_claim_and_build_refusal(
     claimy.write_text(
         "\n".join(
             ["---", "claims: ab-1dea1234", "created: 2026-05-05T04:35", "---",
-             "", "# Preview claim kappa", "", "Body.", ""]
+             "", "# Preview claim kappa", "", _SURFACE, "", "Body.", ""]
         ) + "\n"
     )
     baddiff = tmp_path / "baddiff.md"
     baddiff.write_text(
         "\n".join(
             ["---", "difficulty: bogus", "created: 2026-05-05T04:35", "---",
-             "", "# Preview refusal lambda", "", "Body.", ""]
+             "", "# Preview refusal lambda", "", _SURFACE, "", "Body.", ""]
         ) + "\n"
     )
     args = SimpleNamespace(

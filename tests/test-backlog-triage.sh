@@ -73,6 +73,12 @@ title: Plan X
 ---
 # Body X
 Line 2 of plan X.
+
+## Files to Modify
+
+| File | Action |
+|---|---|
+| cli/src/fno/planx.py | modify |
 EOF
 cat > "$plan_y" <<EOF
 ---
@@ -80,6 +86,12 @@ title: Plan Y
 ---
 # Body Y
 Line 2 of plan Y.
+
+## Files to Modify
+
+| File | Action |
+|---|---|
+| cli/src/fno/plany.py | modify |
 EOF
 
 run_fno backlog intake "$plan_x" >/dev/null 2>&1

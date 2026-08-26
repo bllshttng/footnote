@@ -70,7 +70,7 @@ def test_lane_harness_resolution():
     assert advance._lane_harness("opencode") == "opencode"
 
 
-def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
+def test_dispatch_spawns_one_isolated_worker_per_lane(
     tmp_path, monkeypatch
 ):
     ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "docs"))
@@ -80,17 +80,20 @@ def test_dispatch_spawns_one_isolated_worker_per_distinct_domain_lane(
         3, project_root=tmp_path, claims_root=tmp_path / "claims"
     )
 
-    # Distinct-domain selection -> n-a (code) + n-c (docs); n-b (dup code) queued.
-    assert [r["node_id"] for r in receipts] == ["n-a", "n-c"]
+    # Collision-gated selection: domain no longer excludes and these
+    # plan-less nodes dispatch fail-open, so all three fill lanes.
+    assert [r["node_id"] for r in receipts] == ["n-a", "n-b", "n-c"]
     assert all(r["status"] == "dispatched" for r in receipts)
     # (node_id, harness): no node carries a provider, so the lane worktree is
     # isolated with the claude default harness (harness-native placement).
-    assert calls["worktrees"] == [("n-a", "claude"), ("n-c", "claude")]
+    assert calls["worktrees"] == [
+        ("n-a", "claude"), ("n-b", "claude"), ("n-c", "claude"),
+    ]
     # Each worker is rooted in its OWN lane worktree (--cwd = the ensured path).
     for node_id, cwd, _slug in calls["spawns"]:
         assert cwd == str(tmp_path / "wt" / node_id)
     # Slots stay held: the worker reconciles them at target init (LD#8).
-    assert active_lane_count(root=tmp_path / "claims") == 2
+    assert active_lane_count(root=tmp_path / "claims") == 3
 
 
 def test_seed_writes_only_allowlist_keys_distinct_per_lane(tmp_path):

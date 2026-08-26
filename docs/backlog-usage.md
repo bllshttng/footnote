@@ -47,6 +47,8 @@ Differences:
 All three accept `--details`/`--description`. A node with no `plan_path`
 derives to `status: idea` until a plan is associated.
 
+`fno backlog intake` is the one creation verb that reads a plan file. The plan's file table is load-bearing downstream: parallel lane fill collision-checks dispatches against it. Intake therefore refuses a plan whose `## Files to Modify` parses empty (exit 2) unless you pass `--allow-no-surface`. Such a node cannot be collision-checked and dispatches fail-open. A multi-path intake refuses the whole batch before any write. The plan-less creation verbs above are unaffected.
+
 ## Editing a node
 
 `fno backlog update <id>` edits a node in place. Use this instead of
@@ -272,13 +274,7 @@ The worker re-derives its proposals by running read-only `fno backlog maintain` 
 
 ## Parallel lanes
 
-With `config.parallel.max_lanes >= 2`, the active-backlog daemon dispatches up
-to that many ready nodes from distinct domains concurrently, each as an
-isolated bg worktree lane. Merges stay serialized (`fno do pr merge` takes a
-repo-wide lock, and holds a stale-base PR for `fno do pr rebase` while lanes run).
-This covers immediate merges; a queued `--auto` merge lands asynchronously on
-GitHub's side, so pair lanes with branch protection requiring up-to-date
-branches if you use `require_checks_pass`.
+With `config.parallel.max_lanes >= 2`, the active-backlog daemon dispatches up to that many ready nodes concurrently, each as an isolated bg worktree lane. When file surfaces are disjoint, same-domain nodes co-schedule: the dispatch is collision-gated. Merges stay serialized (`fno do pr merge` takes a repo-wide lock, and holds a stale-base PR for `fno do pr rebase` while lanes run). This covers immediate merges. A queued `--auto` merge lands asynchronously on GitHub's side. If you use `require_checks_pass`, pair lanes with branch protection requiring up-to-date branches.
 
 ```bash
 fno backlog lane-fill --max 3      # preview which nodes would dispatch as lanes

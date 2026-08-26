@@ -124,6 +124,12 @@ cat > "$plan_a" <<EOF
 title: Intake Test Plan
 ---
 # Body
+
+## Files to Modify
+
+| File | Action |
+|---|---|
+| cli/src/fno/example.py | modify |
 EOF
 
 # The receipt reads `intake <id> -> backlog: "<title>"`. It said "adopted <id>"
