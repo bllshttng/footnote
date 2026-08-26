@@ -75,6 +75,8 @@ _DAEMON_DRIFT_WARNING = re.compile(
     r"run `fno agents restart` to pick up the new build\.$"
 )
 
+REVIEW_INVOCATION_LOST_WINDOW_SECONDS = 15 * 60
+
 
 # ---------------------------------------------------------------------------
 # Signal collectors (module-level so tests monkeypatch them individually)
@@ -1670,6 +1672,88 @@ def _blockers(result: dict[str, Any]) -> list[str]:
     return blockers
 
 
+def _review_invocation_report(
+    events_path: Optional[Path] = None,
+    *,
+    now: Optional[datetime] = None,
+    window_seconds: int = REVIEW_INVOCATION_LOST_WINDOW_SECONDS,
+) -> list[str]:
+    """Report sender attempts with no attestation in a bounded review window."""
+    from datetime import datetime, timedelta, timezone
+
+    if events_path is None:
+        from fno.paths import project_events_json
+
+        events_path = project_events_json()
+    observed_at = now or datetime.now(timezone.utc)
+    cutoff = observed_at - timedelta(seconds=window_seconds)
+    sent: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    attested: set[str] = set()
+    try:
+        with Path(events_path).open(encoding="utf-8") as stream:
+            for raw in stream:
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                if event.get("type") == "review_invocation":
+                    invocation_id = data.get("invocation_id")
+                    if not isinstance(invocation_id, str) or not invocation_id:
+                        continue
+                    try:
+                        event_time = datetime.fromisoformat(
+                            str(event.get("ts", "")).replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        continue
+                    if event_time.tzinfo is None:
+                        # A tz-naive row would raise on the cutoff comparison
+                        # below and kill the whole report; read it as UTC.
+                        event_time = event_time.replace(tzinfo=timezone.utc)
+                    if data.get("stage") == "sent":
+                        sent[invocation_id] = (event_time, data)
+                elif event.get("type") == "review_attestation":
+                    invocation_id = data.get("invocation_id")
+                    if isinstance(invocation_id, str) and invocation_id:
+                        attested.add(invocation_id)
+    except FileNotFoundError:
+        # No journal is the normal state of a fresh checkout, not an
+        # instrument failure: nothing was ever sent, so nothing is lost.
+        return [
+            "fno doctor: review invocations: no event journal; "
+            "no sent attempt to lose"
+        ]
+    except OSError as exc:
+        return [f"fno doctor: review invocations: unmeasurable ({exc})"]
+
+    lost = [
+        (invocation_id, event_time, data)
+        for invocation_id, (event_time, data) in sent.items()
+        if event_time <= cutoff and invocation_id not in attested
+    ]
+    if not lost:
+        return [
+            "fno doctor: review invocations: scan complete; "
+            f"none lost in the last {window_seconds // 60}m"
+        ]
+    lines = [
+        "fno doctor: review invocations: "
+        f"{len(lost)} sent attempt(s) have no matching attestation "
+        f"after {window_seconds // 60}m"
+    ]
+    for invocation_id, _event_time, data in lost[:5]:
+        lines.append(
+            f"  lost {invocation_id}: transport={data.get('transport', 'unmeasured')} "
+            f"receipt={data.get('receipt', 'unmeasured')}"
+        )
+    if len(lost) > 5:
+        lines.append(f"  ... {len(lost) - 5} more lost invocation(s)")
+    return lines
+
+
 def _emit_human(
     result: dict[str, Any],
     src: Optional[Path],
@@ -1679,6 +1763,8 @@ def _emit_human(
     cargo_present: bool = False,
 ) -> None:
     out = (lambda m: typer.echo(m, err=True)) if err else typer.echo
+    for line in _review_invocation_report():
+        out(line)
     status = result["status"]
     if status == "fresh":
         # Naming WHICH source is load-bearing. The comparison is against

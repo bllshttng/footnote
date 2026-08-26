@@ -50,11 +50,11 @@ tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null || true)"
 # The skill name arrives under different keys across harness versions; read the
 # ones that exist and normalize away a leading slash and a plugin prefix, so
 # `/fno:review`, `fno:review` and `review` are one name.
-skill="$(printf '%s' "$input" \
+skill_raw="$(printf '%s' "$input" \
   | jq -r '.tool_input.skill // .tool_input.name // .tool_input.command // empty' \
   2>/dev/null || true)"
-[[ -n "$skill" ]] || exit 0
-skill="${skill#/}"
+[[ -n "$skill_raw" ]] || exit 0
+skill="${skill_raw#/}"
 skill="${skill##*:}"
 skill="${skill%% *}"
 
@@ -87,7 +87,68 @@ session="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || tr
 holder="review-session:${session:-unknown}"
 
 head="$(git -C "$cwd" rev-parse HEAD 2>/dev/null || true)"
+# The helper is best-effort because this hook must never block the review. The
+# shell fallback still creates a join id when an installed fno package cannot
+# be imported by the hook process.
+plugin_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
+helper_path="${plugin_root:+$plugin_root/cli/src}"
+# Adopt the sender's pending id when one exists (the mail-path join: the
+# sent row and this started row then carry ONE id), and only mint-plus-write
+# a fresh sidecar on a miss, so a second review never re-adopts the first
+# one's consumed id.
+invocation_id="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -c '
+from fno.review.invocation import adopt_pending_invocation, mint_invocation_id, write_pending_invocation
+import sys
+s = sys.argv[1]
+i = adopt_pending_invocation(s) if s else None
+if i is None:
+    i = mint_invocation_id()
+    if s:
+        write_pending_invocation(target_session_id=s, invocation_id=i)
+print(i)' \
+  "$session" 2>/dev/null || true)"
+if [[ -z "$invocation_id" ]]; then
+  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
+fi
+
+parsed="$(PYTHONPATH="$helper_path${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 -c 'import json, sys; from fno.review.invocation import parse_review_invocation; print(json.dumps(parse_review_invocation(sys.argv[1]) or {}))' \
+  "$skill_raw" 2>/dev/null || true)"
+args_raw="$(printf '%s' "$parsed" | jq -r '.args_raw // empty' 2>/dev/null || true)"
+level="$(printf '%s' "$parsed" | jq -r '.level // "unset"' 2>/dev/null || echo unset)"
+level_source="$(printf '%s' "$parsed" | jq -r '.level_source // "fallback"' 2>/dev/null || echo fallback)"
+flags="$(printf '%s' "$parsed" | jq -c '.flags // []' 2>/dev/null || echo '[]')"
+[[ -n "$level" ]] || level="unset"
+[[ -n "$level_source" ]] || level_source="fallback"
+[[ -n "$flags" ]] || flags='[]'
+model_sidecar="${FNO_HOME:-$HOME/.fno}/attest/${session}.json"
+model_family="$(jq -r '.model_family // .model // empty' "$model_sidecar" 2>/dev/null || true)"
+data="$(jq -cn \
+  --arg invocation_id "$invocation_id" \
+  --arg stage started \
+  --arg verb "/$skill" \
+  --arg args_raw "$args_raw" \
+  --arg level "$level" \
+  --arg level_source "$level_source" \
+  --argjson flags "$flags" \
+  --arg transport skill_tool \
+  --arg initiator self \
+  --arg target_session_id "$session" \
+  --arg head_sha "$head" \
+  --arg branch "$branch" \
+  --arg model_family "$model_family" \
+  '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch} | if $model_family == "" then . else .model_family=$model_family end' \
+  2>/dev/null || true)"
+if [[ -n "$data" ]]; then
+  "$FNO_BIN" doctor event emit -t review_invocation -s daemon -d "$data" \
+    --events "${FNO_EVENTS_PATH:-$cwd/.fno/events.jsonl}" >/dev/null 2>&1 || true
+fi
+
 "$FNO_BIN" do pr review-hold acquire \
   --branch "$branch" --head "$head" --holder "$holder" --verb "/$skill" \
+  --invocation-id "$invocation_id" \
+  --args-raw "$args_raw" --level "$level" --level-source "$level_source" \
+  --flags-json "$flags" \
   --repo "$cwd" >/dev/null 2>&1 || true
 exit 0

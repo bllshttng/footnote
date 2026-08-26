@@ -6046,6 +6046,7 @@ def _mux_pane_send(
     gate: Optional[bool] = None,
     failure_out: Optional[list[str]] = None,
     review: bool = False,
+    review_invocation_id: Optional[str] = None,
     origin: Optional[str] = None,
 ) -> bool | str:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
@@ -6088,8 +6089,10 @@ def _mux_pane_send(
     replacing it), and ignored for a non-claude recipient, which has no
     ~/.claude/projects transcript to confirm against.
 
-    ``review`` is a private review-request lane. It is only set by the target
-    final-head producer after it has validated the explicit PR payload. On a
+    ``review`` is a private review-request lane. It is set by the target
+    final-head producer after it has validated the explicit PR payload, and
+    by the raw mail review send (any parsed review verb), which classifies
+    the submitted frame. On a
     Codex pane, the submitted payload is then classified from a positive frame:
     a composer showing ``tab to queue message`` plus the exact payload gets one
     literal Tab and a second frame must positively show a queued marker plus
@@ -6270,12 +6273,17 @@ def _mux_pane_send(
         swallowed. The process (not a bare code) is the return so the claim
         gate can read the refusal reason without a second wrapper."""
         try:
+            run_env = None
+            if review_invocation_id:
+                run_env = os.environ.copy()
+                run_env["FNO_REVIEW_INVOCATION_ID"] = review_invocation_id
             proc = subprocess.run(
                 [fno_bin, "mux", "pane", *args, "--session", str(session)],
                 input=stdin_text,
                 capture_output=True,
                 text=True,
                 timeout=_MAIL_INJECT_TIMEOUT_S,
+                env=run_env,
             )
         except subprocess.TimeoutExpired as exc:
             print(f"fno mux pane {args[0]} failed: {exc}", file=sys.stderr)
