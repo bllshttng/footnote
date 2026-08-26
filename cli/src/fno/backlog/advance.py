@@ -738,7 +738,13 @@ def select_lane_fill(
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
                     continue  # leave it ready; reversible, retried next round
                 if reason is not None and (
-                    inflight or selected or "+same-domain:" in reason
+                    inflight
+                    or selected
+                    or "+same-domain:" in reason
+                    or (
+                        not (node.get("domain") or _DOMAIN_UNSET)
+                        and _DOMAIN_UNSET in used_domains
+                    )
                 ):
                     # Unevaluated (no comparable file surface): dispatch anyway
                     # (fail-open) but say so LOUDLY - a silent pass would read
@@ -748,15 +754,17 @@ def select_lane_fill(
                     # nothing to collide against, an unknown surface risks
                     # nothing, and every plan-less node (which is every
                     # `backlog idea` node) would otherwise warn on every
-                    # candidate of every tick. Two dispatch shapes the guard
+                    # candidate of every tick. Three dispatch shapes the guard
                     # reorder turned from excluded to fail-open stay loud even
                     # with an empty in-flight set: a held domain (the
                     # annotation on the token - a surfaceless PEER drops out
                     # of inflight and would otherwise silence the riskiest
-                    # case) and a second unevaluated pick in THIS fill
+                    # case), a second unevaluated pick in THIS fill
                     # (`selected` - two unknown surfaces now run concurrently,
                     # and a plan-less pick never joins inflight to warn the
-                    # next one).
+                    # next one), and a held UNSET-domain bucket cross-tick (an
+                    # unset domain cannot carry the annotation, and the old
+                    # empty-bucket exclusion is what used to block this pair).
                     _LOG.warning(
                         "lane-fill: %s file surface UNEVALUATED (%s) - "
                         "dispatching anyway (fail-open)", nid, reason,
@@ -1041,6 +1049,13 @@ def schedule_shadow(
         )
         if reason is not None:
             verdict = "unevaluated" if reason.startswith(_UNEVALUATED_PREFIX) else "serialized"
+            if verdict == "unevaluated":
+                # Mirror the live selector's post-pick state: live fail-opens
+                # this candidate and its domain joins the seed, so the NEXT
+                # same-domain unevaluated candidate carries the annotation
+                # there. Without this, the report an operator gates dispatch
+                # on understates exactly that arming.
+                used_domains.add(domain)
         elif selected_count >= remaining_capacity:
             verdict, reason = "serialized", "cap-full"
         else:

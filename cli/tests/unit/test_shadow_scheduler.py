@@ -149,6 +149,22 @@ def test_collision_error_in_a_held_domain_carries_the_same_domain_annotation(
     ]
 
 
+def test_shadow_arms_the_annotation_like_the_live_selector(monkeypatch, tmp_path):
+    """Two plan-less domain:code nodes: live fail-opens the first and the
+    second carries +same-domain with a warning. The report is the evidence an
+    operator gates dispatch on, so an unevaluated verdict must arm the same
+    annotation for the next same-domain unknown."""
+    import fno.graph.collision as collision
+
+    monkeypatch.setattr(collision, "has_file_surface", lambda p: False)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-a", "unevaluated:no-surface"),
+        ("n-b", "unevaluated:no-surface+same-domain:code"),
+    ]
+
+
 def test_file_collision_is_serialized(monkeypatch, tmp_path):
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
     # n-b collides with in-flight n-a once n-a is selected.

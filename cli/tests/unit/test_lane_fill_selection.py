@@ -528,6 +528,30 @@ def test_held_domain_warning_fires_with_nothing_comparable_inflight(
     assert "UNEVALUATED" in caplog.text and "n-b" in caplog.text
 
 
+def test_cross_tick_unset_domain_second_unknown_warns(
+    tmp_path, monkeypatch, caplog, _isolated_graph
+):
+    """Tick-2 shape: a live domain-less lane holds a plan-less node (dropped
+    from inflight, no annotation possible for an unset domain). The next
+    plan-less domain-less candidate is the pair the old empty-bucket
+    exclusion blocked, so the warning fires on the held unset bucket."""
+    _seed_graph(_isolated_graph, [
+        {"id": "n-peer", "title": "peer", "plan_path": str(tmp_path / "gone.md"),
+         "status": "ready", "created_at": "2026-07-01T00:00:00+00:00"},
+    ])
+    acquire_lane_slot(max_lanes=3, lane_id="n-peer", root=tmp_path)  # no domain
+    ready = [{"id": "n-b", "title": "b"}]  # plan-less, domain-less
+    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
+
+    with caplog.at_level("WARNING"):
+        sel = advance.select_lane_fill(2, claims_root=tmp_path)
+
+    assert [n["id"] for n in sel] == ["n-b"]  # fail-open dispatch
+    assert any(
+        "n-b" in r.message for r in caplog.records if "UNEVALUATED" in r.message
+    )
+
+
 def test_inflight_seed_failure_fails_open(tmp_path, monkeypatch):
     """Seeding runs outside the main try; a read error must not wedge dispatch."""
     def boom(*a, **k):

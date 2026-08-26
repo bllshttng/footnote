@@ -1274,8 +1274,9 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
     refusal bounds the intake lane: the plan-less ``idea``/``add``/``new``
     nodes and a later ``backlog update --plan-path`` bind are other routes
     onto the board and keep the loud fail-open dispatch. ``allow_no_surface``
-    admits a surface-less plan; a MISSING plan is refused either way - the
-    flag is an override for empty tables, not a license to bind nothing.
+    admits a surface-less plan; a MISSING plan is refused in the single lane
+    (the multi lane keeps its pre-existing warn-and-skip for missing paths) -
+    the flag is an override for empty tables, not a license to bind nothing.
     Exits 2 naming the first offending path before any graph write.
     """
     import typer
@@ -1300,7 +1301,8 @@ def _refuse_surfaceless_intake(paths: list[str], *, allow_no_surface: bool) -> N
             continue
         typer.echo(
             f"Error: {p} states no comparable file surface (## Files to "
-            "Modify parses empty); add rows or pass --allow-no-surface",
+            "Modify parses empty or the file does not decode as UTF-8); add "
+            "rows or pass --allow-no-surface",
             err=True,
         )
         raise typer.Exit(code=2)
