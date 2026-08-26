@@ -35,21 +35,23 @@ _HOOK = _REPO_ROOT / "hooks" / "code-review-attest.sh"
 
 
 def _producer_names() -> list[str]:
-    """Parse the producer list straight out of the sentence at SKILL.md:112.
+    """Parse the producer list straight out of the producers sentence.
 
     Pinned to the sentence's own wording ("are local review producers"), not
-    to a line number, so the list moves with the doc. A name added to that
-    sentence with no matching entry in _SURFACES below fails loudly instead
-    of the test quietly covering fewer producers than the doc claims.
+    to a line number or a fixed count, so the list moves with the doc. A name
+    added to that sentence with no matching entry in _SURFACES below fails
+    loudly instead of the test quietly covering fewer producers than the doc
+    claims.
     """
     text = _SKILL_MD.read_text()
-    m = re.search(
-        r"^`([^`]+)`, `([^`]+)`, `([^`]+)`, and `([^`]+)` are local review producers\.",
-        text,
-        re.MULTILINE,
-    )
-    assert m, "SKILL.md producer sentence not found or changed shape - update this parser"
-    return list(m.groups())
+    idx = text.find("are local review producers.")
+    assert idx != -1, "SKILL.md producer sentence not found or changed shape - update this parser"
+    # The names live on the same physical line as the phrase; the sentence may
+    # continue past the period (one paragraph = one line, house style).
+    line = text[:idx].splitlines()[-1]
+    names = re.findall(r"`([^`]+)`", line)
+    assert names, "producer sentence carried no backticked reviewer names"
+    return names
 
 
 def _temp_git_repo(tmp_path: Path) -> Path:
@@ -99,13 +101,6 @@ def _events(repo: Path) -> list[dict]:
 
 def _base_env() -> dict:
     return {**os.environ, "FNO": "fno-py"}
-
-
-def _drive_sigma(repo: Path) -> None:
-    r = subprocess.run(
-        ["bash", str(_EMIT), "sigma"], cwd=repo, env=_base_env(), capture_output=True, text=True
-    )
-    assert r.returncode == 0, r.stderr
 
 
 def _drive_declare(repo: Path) -> None:
@@ -339,7 +334,6 @@ def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
 
 
 _SURFACES = {
-    "sigma": _drive_sigma,
     "peer": _drive_peer,
     "code-review": _drive_code_review,
     "declare": _drive_declare,

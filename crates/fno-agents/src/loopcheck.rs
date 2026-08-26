@@ -10415,20 +10415,54 @@ const PROBE_CAP: usize = 3;
 /// last-mile action to perform; cap it so the reason stays readable.
 const PROBE_STDERR_CAP: usize = 500;
 
+/// Probe stdout is the run's positive marker and travels on the probe row;
+/// cap it so one row cannot blow the event's data-size budget. The cap keeps
+/// the END of the output (a verdict line is a tail), and the row's truncation
+/// marker names what was cut.
+const PROBE_OUTPUT_CAP: usize = 2000;
+
 enum ProbeOutcome {
-    Pass,
-    Fail { code: Option<i32>, stderr: String },
-    Timeout,
+    /// Exit 0 AND captured stdout: the run produced its own positive marker.
+    /// Output is the evidence; exit status alone proves a shell ran.
+    Pass { stdout: String },
+    /// Exit 0 with nothing on stdout: no marker, so no verdict on the change.
+    /// A silent probe is exactly the vacuous pass (`test -f residue`) the
+    /// probe contract records as a trap; SKIP holds the gate without claiming
+    /// the probe failed.
+    Skip,
+    Fail {
+        code: Option<i32>,
+        stderr: String,
+        stdout: String,
+    },
+    /// The RUNNER could not answer: spawn failure or timeout. Distinct from
+    /// FAIL on purpose - the probe never executed, so its subject is untested,
+    /// not failing.
+    Blocked { why: String },
 }
 
 impl ProbeOutcome {
-    /// Event rendering: `pass` | `fail:<code>` | `timeout`.
+    /// Event rendering: `pass` | `fail:<code>` | `timeout` | `skip`. The
+    /// legacy vocabulary the scoreboard folds join on; `verdict` is the
+    /// four-state contract prove-it reads.
     fn render(&self) -> String {
         match self {
-            ProbeOutcome::Pass => "pass".to_string(),
+            ProbeOutcome::Pass { .. } => "pass".to_string(),
             ProbeOutcome::Fail { code: Some(c), .. } => format!("fail:{c}"),
             ProbeOutcome::Fail { code: None, .. } => "fail:signal".to_string(),
-            ProbeOutcome::Timeout => "timeout".to_string(),
+            ProbeOutcome::Skip => "skip".to_string(),
+            ProbeOutcome::Blocked { .. } => "timeout".to_string(),
+        }
+    }
+
+    /// PASS satisfies, FAIL blocks, SKIP and BLOCKED carry NO verdict (the
+    /// UNANSWERED shape: they hold the gate without naming a failure).
+    fn verdict(&self) -> &'static str {
+        match self {
+            ProbeOutcome::Pass { .. } => "PASS",
+            ProbeOutcome::Skip => "SKIP",
+            ProbeOutcome::Fail { .. } => "FAIL",
+            ProbeOutcome::Blocked { .. } => "BLOCKED",
         }
     }
 }
@@ -11189,12 +11223,17 @@ fn killpg(pgid: i32) {
 fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
     use std::os::unix::process::CommandExt;
 
+    // The pipefail preamble closes the `| tail -5` trap at the runner: a
+    // pipeline whose real command fails can no longer read as pass through
+    // the truncating tail's exit 0. `2>/dev/null` keeps a shell without the
+    // option (dash) running the probe unchanged rather than aborting it.
+    let wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
     let spawned = Command::new("sh")
         .arg("-c")
-        .arg(cmd)
+        .arg(&wrapped)
         .current_dir(cwd)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
         .spawn();
@@ -11202,20 +11241,27 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => {
-            return ProbeOutcome::Fail {
-                code: Some(127),
-                stderr: format!("probe spawn failed: {e}"),
+            return ProbeOutcome::Blocked {
+                why: format!("probe spawn failed: {e}"),
             }
         }
     };
 
-    // Capture the pgid before any wait() can reap the leader.
+    // Capture the pgid before any wait() could reap the leader.
     let pgid = child.id() as i32;
 
-    let mut pipe = child.stderr.take();
-    let drain = std::thread::spawn(move || {
+    let mut out_pipe = child.stdout.take();
+    let out_drain = std::thread::spawn(move || {
         let mut buf = String::new();
-        if let Some(ref mut p) = pipe {
+        if let Some(ref mut p) = out_pipe {
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let mut err_pipe = child.stderr.take();
+    let err_drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(ref mut p) = err_pipe {
             let _ = p.read_to_string(&mut buf);
         }
         buf
@@ -11225,50 +11271,58 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Exit 0 alone is not a PASS: the run must also have produced
+                // its own output, the positive marker. A silent success is
+                // SKIP - held, never counted.
                 break if status.success() {
-                    ProbeOutcome::Pass
+                    ProbeOutcome::Pass { stdout: String::new() }
                 } else {
                     ProbeOutcome::Fail {
                         code: status.code(),
                         stderr: String::new(),
+                        stdout: String::new(),
                     }
                 };
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     kill_process_group(&mut child);
-                    break ProbeOutcome::Timeout;
+                    break ProbeOutcome::Blocked {
+                        why: format!("timed out after {}s (killed)", timeout.as_secs()),
+                    };
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => {
                 kill_process_group(&mut child);
-                break ProbeOutcome::Fail {
-                    code: None,
-                    stderr: format!("probe wait failed: {e}"),
+                break ProbeOutcome::Blocked {
+                    why: format!("probe wait failed: {e}"),
                 };
             }
         }
     };
 
-    // Reap any descendant still holding the stderr write end, so the drain sees
+    // Reap any descendant still holding a pipe's write end, so the drains see
     // EOF. Without this a backgrounding probe blocks the join indefinitely even
     // though the shell itself exited cleanly.
     killpg(pgid);
 
-    // On timeout the stderr tail is worthless (the reason names the timeout) and
-    // joining risks the very hang we just escaped if anything outlived the group
-    // kill. Drop the handle instead: the thread ends when the pipe closes.
-    if matches!(outcome, ProbeOutcome::Timeout) {
+    // On a runner failure the output tail is worthless (the reason names the
+    // block) and joining risks the very hang we just escaped if anything
+    // outlived the group kill. Drop the handles instead: the threads end when
+    // the pipes close.
+    if matches!(outcome, ProbeOutcome::Blocked { .. }) {
         return outcome;
     }
 
-    let mut stderr = drain.join().unwrap_or_default();
+    let mut stdout = out_drain.join().unwrap_or_default();
+    keep_last_on_char_boundary(&mut stdout, PROBE_OUTPUT_CAP);
+    let mut stderr = err_drain.join().unwrap_or_default();
     keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
     match outcome {
-        ProbeOutcome::Fail { code, stderr: s } if s.is_empty() => {
-            ProbeOutcome::Fail { code, stderr }
-        }
+        ProbeOutcome::Pass { .. } if stdout.trim().is_empty() => ProbeOutcome::Skip,
+        ProbeOutcome::Pass { .. } => ProbeOutcome::Pass { stdout },
+        ProbeOutcome::Fail { code, .. } => ProbeOutcome::Fail { code, stderr, stdout },
         other => other,
     }
 }
@@ -11449,12 +11503,14 @@ fn evaluate_done_probes(
         // operator reads to know which file to edit - and never in the key.
         results.insert(cmd.clone(), Value::String(outcome.render()));
         match &outcome {
-            ProbeOutcome::Pass => {}
-            ProbeOutcome::Timeout => failures.push(format!(
-                "{source} probe `{cmd}` timed out after {}s (killed)",
-                timeout.as_secs()
+            ProbeOutcome::Pass { .. } => {}
+            ProbeOutcome::Skip => failures.push(format!(
+                "{source} probe `{cmd}` exited 0 with no output - SKIP, not a pass (a probe must emit its own positive marker)"
             )),
-            ProbeOutcome::Fail { code, stderr } => {
+            ProbeOutcome::Blocked { why } => {
+                failures.push(format!("{source} probe `{cmd}` BLOCKED: {why}"))
+            }
+            ProbeOutcome::Fail { code, stderr, .. } => {
                 let code = code.map(|c| c.to_string()).unwrap_or("signal".to_string());
                 let tail = if stderr.trim().is_empty() {
                     String::new()
@@ -13138,16 +13194,43 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
     let mut results: Vec<Value> = Vec::new();
     let mut failed_reason: Option<String> = None;
     for cmd in &probes {
+        // A probe may carry its claim as a trailing ` # <claim>` comment; the
+        // claim travels on the row so a reader sees what the run answered,
+        // not just what it ran. Bare commands keep today's shape.
+        let claim = cmd.find(" # ").map(|idx| cmd[idx + 3..].trim().to_string());
         let outcome = run_probe(cmd, work_dir, PROBE_TIMEOUT);
         let entry = match outcome {
-            ProbeOutcome::Pass => serde_json::json!({"cmd": cmd, "outcome": "pass"}),
-            ProbeOutcome::Timeout => {
+            ProbeOutcome::Pass { stdout } => serde_json::json!({
+                "cmd": cmd,
+                "verdict": "PASS",
+                "claim": claim,
+                "stdout": stdout,
+            }),
+            ProbeOutcome::Skip => {
                 if failed_reason.is_none() {
-                    failed_reason = Some(format!("`{cmd}` timed out"));
+                    failed_reason = Some(format!(
+                        "`{cmd}` exited 0 with no output - SKIP, not a pass"
+                    ));
                 }
-                serde_json::json!({"cmd": cmd, "outcome": "timeout"})
+                serde_json::json!({
+                    "cmd": cmd,
+                    "verdict": "SKIP",
+                    "claim": claim,
+                    "stdout": "",
+                })
             }
-            ProbeOutcome::Fail { code, stderr } => {
+            ProbeOutcome::Blocked { why } => {
+                if failed_reason.is_none() {
+                    failed_reason = Some(format!("`{cmd}` BLOCKED: {why}"));
+                }
+                serde_json::json!({
+                    "cmd": cmd,
+                    "verdict": "BLOCKED",
+                    "claim": claim,
+                    "why": why,
+                })
+            }
+            ProbeOutcome::Fail { code, stderr, stdout } => {
                 let c = code
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "signal".to_string());
@@ -13156,8 +13239,10 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                 }
                 serde_json::json!({
                     "cmd": cmd,
-                    "outcome": format!("fail:{c}"),
+                    "verdict": "FAIL",
+                    "claim": claim,
                     "code": code,
+                    "stdout": stdout,
                     "stderr": stderr,
                 })
             }
@@ -21381,13 +21466,85 @@ mod done_probe_tests {
     fn probe_outcomes_render_pass_fail_and_exit_code() {
         let tmp = tempfile::tempdir().unwrap();
         let t = Duration::from_secs(10);
-        assert_eq!(run_probe("exit 0", tmp.path(), t).render(), "pass");
+        // PASS requires exit 0 AND output: the run's own positive marker.
+        assert_eq!(run_probe("echo probe-ok", tmp.path(), t).render(), "pass");
+        // A silent exit 0 is SKIP, not pass: `test -f residue` reading as a
+        // pass is the vacuous-probe trap this vocabulary exists to close.
+        assert_eq!(run_probe("exit 0", tmp.path(), t).render(), "skip");
         assert_eq!(run_probe("exit 3", tmp.path(), t).render(), "fail:3");
         assert_eq!(
             run_probe("fno-no-such-binary-xyz", tmp.path(), t).render(),
             "fail:127",
             "a missing binary must fail closed as 127, never pass"
         );
+    }
+
+    #[test]
+    fn probe_run_verdicts_map_the_four_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Duration::from_secs(10);
+        assert_eq!(run_probe("echo marker", tmp.path(), t).verdict(), "PASS");
+        assert_eq!(run_probe("exit 0", tmp.path(), t).verdict(), "SKIP");
+        assert_eq!(run_probe("echo out; exit 4", tmp.path(), t).verdict(), "FAIL");
+        assert_eq!(
+            run_probe("sleep 30", tmp.path(), Duration::from_millis(150)).verdict(),
+            "BLOCKED",
+            "a runner timeout is BLOCKED, distinct from FAIL: the probe never ran"
+        );
+    }
+
+    #[test]
+    fn probe_run_pipefail_closes_the_tail_trap() {
+        // `failing | tail -5` reads exit 0 through the tail's status; the
+        // pipefail preamble must surface the real failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = run_probe(
+            "echo buried | grep -q nothing && echo found; exit 3 | tail -1",
+            tmp.path(),
+            Duration::from_secs(10),
+        );
+        assert_eq!(outcome.verdict(), "FAIL", "the trap must read FAIL, not PASS");
+    }
+
+    #[test]
+    fn probe_run_rows_carry_verdict_claim_and_captured_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - \"echo header-present # the route returns the header\""),
+        )
+        .unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 0);
+        let body: Value = serde_json::from_str(&json).unwrap();
+        let row = &body["results"][0];
+        assert_eq!(row["verdict"], "PASS");
+        assert_eq!(row["claim"], "the route returns the header");
+        // Captured output travels IN the row, not by path alone.
+        assert!(row["stdout"].as_str().unwrap().contains("header-present"));
+    }
+
+    #[test]
+    fn probe_run_silent_success_is_not_a_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(&plan, fm("done_probes:\n  - \"exit 0\"")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 1, "a silent probe must not satisfy the gate");
+        let body: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(body["results"][0]["verdict"], "SKIP");
+        assert!(body["reason"].as_str().unwrap().contains("SKIP"));
     }
 
     /// The close-probe gate reads its OWN key, not done_probes. One parser,
@@ -21410,7 +21567,7 @@ mod done_probe_tests {
     fn probe_run_exit_contract() {
         let tmp = tempfile::tempdir().unwrap();
         let passing = tmp.path().join("pass.md");
-        std::fs::write(&passing, fm("close_probes:\n  - \"exit 0\"")).unwrap();
+        std::fs::write(&passing, fm("close_probes:\n  - \"echo probe-passed\"")).unwrap();
         let failing = tmp.path().join("fail.md");
         std::fs::write(&failing, fm("close_probes:\n  - \"exit 7\"")).unwrap();
         let bad = tmp.path().join("bad.md");
@@ -21620,7 +21777,7 @@ mod done_probe_tests {
         // plan_path is repo-relative in practice; resolving against the process
         // cwd would read nothing and silently drop the gate.
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - echo probe-ok")).unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21718,7 +21875,7 @@ mod done_probe_tests {
         // `plans/p.md#wave-1` must resolve to plans/p.md, not a literal filename
         // containing the fragment (which would read nothing -> silent Absent).
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - echo probe-ok")).unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21742,7 +21899,7 @@ mod done_probe_tests {
         // timeout loop is already over and only the group kill bounds the join.
         let tmp = tempfile::tempdir().unwrap();
         let start = std::time::Instant::now();
-        let outcome = run_probe("sleep 300 & exit 0", tmp.path(), Duration::from_secs(30));
+        let outcome = run_probe("sleep 300 & echo probe-ok", tmp.path(), Duration::from_secs(30));
         assert_eq!(outcome.render(), "pass");
         assert!(
             start.elapsed() < Duration::from_secs(10),
@@ -21777,13 +21934,13 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         match evaluate_done_probes(
             plan.to_str(),
-            Some(&project(&["true"])),
+            Some(&project(&["echo probe-ok"])),
             tmp.path(),
             &events,
             "s1",
             Duration::from_secs(10),
         ) {
-            ProbeGate::Pass(results) => assert_eq!(results["true"], "pass"),
+            ProbeGate::Pass(results) => assert_eq!(results["echo probe-ok"], "pass"),
             _ => panic!("a passing project probe must let the gate through"),
         }
     }
@@ -21885,7 +22042,7 @@ mod done_probe_tests {
         // A 4th in the project declaration is still a loud refusal.
         match evaluate_done_probes(
             plan.to_str(),
-            Some(&project(&["true", "true", "true", "true"])),
+            Some(&project(&["echo a", "echo b", "echo c", "echo d"])),
             tmp.path(),
             &events,
             "s1",

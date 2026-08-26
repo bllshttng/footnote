@@ -1,7 +1,7 @@
 ---
 name: review
-description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
-argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
+description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default: levels low/medium/high/xhigh/max, --comment, --fix, optional PR/branch/path target), runtime evidence (prove-it), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'prove it works', 'get a second opinion', 'review this research brief', 'declare this reviewed'."
+argument-hint: "[level] [--comment] [--fix] [<pr#>|<branch>|<path>] | prove-it [<target>] | peer [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] | research [brief.md] | declare   e.g. (bare = the fno lane, level sized from the diff), `high --comment`, `657`, `prove-it`, `peer 657 codex --attest`, `research out/topic.md`, `declare`"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -32,6 +32,7 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `peer
 - **a level token** (`low` `medium` `high` `xhigh` `max`) -> mode is the default lane at that explicit level. Print `running fno review lane (level <token>)`. Any remaining tokens are the target. Continue to Step 2.
 - **`ultra`** -> REFUSE. Print exactly `refused: ultra is billed separately and no fno surface issues it; use max` and stop with a non-zero result. Run nothing, emit nothing.
 - **`sigma`** -> REFUSE, naming the replacement. Print exactly `refused: sigma is retired; the default review lane replaced it - run /fno:review [level] [<target>] (or /fno:review peer for a cross-model read)` and stop with a non-zero result. Run nothing, dispatch nothing.
+- **`prove-it`** -> mode is `prove-it`, runtime evidence. Print `running prove-it (runtime evidence)`. The remaining tokens, if any, are the target. Continue to Step 2p.
 - **`peer`** -> mode is `peer`. Print `running peer review (cross-model)`. The remaining tokens are peer's own arguments (`[PR#|branch] [codex|gemini]`). Continue to Step 3.
 - **`research`** -> mode is `research`. Print `running research-verify (advisory)`. The remaining tokens, if any, are the brief path. Continue to Step 4.
 - **`declare`** -> mode is `declare`. Print `emitting self-cert attestation (declare)`. Continue to Step 5.
@@ -75,6 +76,16 @@ fi
 ### 2b. Run the lane
 
 Load [single-lane.md](references/single-lane.md) and execute it in full, in this context, with the resolved level, flags, and target. The lane runs inline as ordinary tool calls: finder angles, dedup, three-state verify, cite-or-drop, carry-forward, then the classified emit. It dispatches ZERO review subagents and fires no native review verb; the panel that used to run here is retired, and the six specialist hunter agents remain individually invocable by their own names.
+
+## Step 2p: prove-it mode (runtime evidence)
+
+The second thing you run after a code review: a different CLASS of evidence, with a stopping condition. Load [prove-it.md](references/prove-it.md) and execute it in full, in this context: drive the changed code at its real surface, push on it with at least one marked probe, capture the artifact's own output, and end with the terminal `fno-prove-it:` JSON line. Then validate the record:
+
+```bash
+bash "${SKILL_DIR}/scripts/validate-prove-it.sh" <report-file>
+```
+
+The validator REFUSES a PASS whose Steps list carries no marked probe - a happy-path replay is not a verification - and passes FAIL, BLOCKED, and SKIP through untouched (they carry no verdict on the change). prove-it emits no attestation of its own; a PASS satisfies a declared `done_probe`, a FAIL is a blocking finding, and BLOCKED/SKIP read as unanswered.
 
 ## Step 3: peer mode (cross-model second opinion)
 

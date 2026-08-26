@@ -4493,7 +4493,7 @@ fn fire_probe_gate(cwd: &Path, manifest: &Path, transcript: &Path, mock: &MockBi
 /// DonePRGreen, with this fire's probe result recorded in the loop_check event.
 #[test]
 fn done_probes_ac1_hp_passing_probe_grants_done() {
-    let (tmp, manifest, transcript) = probe_fixture("sess-probe-hp", &["exit 0"]);
+    let (tmp, manifest, transcript) = probe_fixture("sess-probe-hp", &["echo probe-passed"]);
     let cwd = tmp.path();
     let mock = MockBins::green();
 
