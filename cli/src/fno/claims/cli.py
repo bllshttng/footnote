@@ -524,7 +524,7 @@ def release(
         typer.echo(f"released: {key}")
 
 
-def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
+def _owned_do_identity(claim, holder: str) -> "tuple[str, str, str | None]":
     """Resolve the (harness, session_id) a do provenance row should be written
     under: the OWNED identity, not the ambient env.
 
@@ -544,7 +544,7 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
         session_id = holder.split(":", 1)[1].strip()
     if not session_id:
         session_id = (ident.session_id or "").strip()
-    return harness, session_id
+    return harness, session_id, _owned_registry_effort(harness, session_id)
 
 
 def _do_row_coordinates(key: str, claim, holder: str, action: str):
@@ -559,7 +559,7 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
     node_id = key.split(":", 1)[1] if ":" in key else ""
     if not node_id:
         return None
-    harness, session_id = _owned_do_identity(claim, holder)
+    harness, session_id, effort = _owned_do_identity(claim, holder)
     if not harness or not session_id:
         typer.echo(
             f"claim {action}: no owned identity for the do provenance row of "
@@ -572,7 +572,7 @@ def _do_row_coordinates(key: str, claim, holder: str, action: str):
     started = datetime.fromtimestamp(
         claim.acquired_at / 1000, tz=timezone.utc
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return node_id, harness, session_id, started
+    return node_id, harness, session_id, started, effort
 
 
 def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
@@ -614,12 +614,12 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     coords = _do_row_coordinates(key, claim, holder, "acquire")
     if coords is None:
         return
-    node_id, harness, session_id, started = coords
+    node_id, harness, session_id, started, effort = coords
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase="do",
             harness=harness, session_id=session_id,
-            started_at=started,
+            started_at=started, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -654,13 +654,13 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     coords = _do_row_coordinates(key, claim, holder, "release")
     if coords is None:
         return
-    node_id, harness, session_id, started = coords
+    node_id, harness, session_id, started, effort = coords
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase="do",
             harness=harness, session_id=session_id,
-            started_at=started, ended_at=ended,
+            started_at=started, ended_at=ended, effort=effort,
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -701,7 +701,7 @@ def _rollback_do_on_release(key: str, claim, holder: str) -> None:
     coords = _do_row_coordinates(key, claim, holder, "release --rollback-do")
     if coords is None:
         return
-    node_id, harness, session_id, started = coords
+    node_id, harness, session_id, started, _effort = coords
     try:
         found, removed = remove_open_session_record(
             graph_json(), node_id, phase="do",
@@ -1759,3 +1759,43 @@ def _force_release(*, key: str, reason: str, json_output: bool) -> None:
 
 
 __all__ = ["cli"]
+
+
+def _owned_registry_effort(harness: str, session_id: str) -> "str | None":
+    """Read effort through the platform path without importing runtime agents.
+
+    Claims are core (L1), while the registry is runtime (L5). The registry is
+    an atomic JSON store, so this narrow best-effort read can match only the
+    owned identity; unreadable or malformed state leaves effort unknown.
+    """
+    if not harness or not session_id:
+        return None
+    try:
+        from fno import paths
+
+        raw = json.loads(paths.agents_registry_path().read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError):
+        return None
+    rows = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return None
+    legacy_session_fields = {
+        "claude": "claude_session_uuid",
+        "codex": "codex_session_id",
+        "gemini": "gemini_session_id",
+    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        row_harness = row.get("harness") or row.get("provider")
+        if row_harness != harness:
+            continue
+        row_session = row.get("harness_session_id")
+        if not isinstance(row_session, str) or not row_session:
+            legacy_key = legacy_session_fields.get(harness)
+            row_session = row.get(legacy_key) if legacy_key else None
+        if row_session != session_id:
+            continue
+        value = row.get("effort")
+        return value.strip() if isinstance(value, str) and value.strip() else None
+    return None

@@ -60,6 +60,7 @@ pub fn maybe_run_opencode_ask(
 // Headless one-shot dispatch (`opencode run`) - stateless, plain-text
 // ===========================================================================
 
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -69,6 +70,7 @@ use std::time::Duration;
 /// so a hang can't wedge the caller (a full /target run is long, so this is
 /// generous). Caller may override via `timeout`.
 const DEFAULT_OPENCODE_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const OPENCODE_DEFAULT_MODEL: &str = "zai-coding-plan/glm-5.3";
 
 /// Stdout/stderr/exit triple returned to the client (mirror of the sibling
 /// provider `AskOutcome`s; each module owns its own nominal type).
@@ -94,6 +96,103 @@ impl AskOutcome {
             exit_code: code,
         }
     }
+}
+
+pub(crate) fn apply_opencode_variant(model: &str, effort: &str) -> Result<(), String> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| "HOME is unavailable; cannot set OpenCode effort".to_string())?;
+    apply_opencode_variant_at(
+        &Path::new(&home).join(".local/state/opencode/model.json"),
+        model,
+        effort,
+    )
+}
+
+pub(crate) fn apply_opencode_variant_at(
+    path: &Path,
+    model: &str,
+    effort: &str,
+) -> Result<(), String> {
+    if model.is_empty() {
+        return Err("OpenCode model is empty; cannot set effort".to_string());
+    }
+    if effort.is_empty() {
+        return Err("--effort must be non-empty".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "OpenCode model path has no parent".to_string())?;
+    std::fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "cannot create OpenCode model state directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    let locks = parent.join("locks");
+    std::fs::create_dir_all(&locks).map_err(|error| {
+        format!(
+            "cannot create OpenCode model lock directory {}: {error}",
+            locks.display()
+        )
+    })?;
+    let lock_path = locks.join("model.json.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open OpenCode model lock: {error}"))?;
+    lock.lock()
+        .map_err(|error| format!("cannot lock OpenCode model state: {error}"))?;
+
+    let mut data: serde_json::Value = if path.exists() {
+        serde_json::from_str(
+            &std::fs::read_to_string(path)
+                .map_err(|error| format!("cannot read OpenCode model state: {error}"))?,
+        )
+        .map_err(|error| format!("OpenCode model state is invalid JSON: {error}"))?
+    } else {
+        serde_json::json!({})
+    };
+    let object = data
+        .as_object_mut()
+        .ok_or_else(|| "OpenCode model state is not an object".to_string())?;
+    let variants = object
+        .entry("variant")
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| "OpenCode model state variant is not an object".to_string())?;
+    variants.insert(
+        model.to_string(),
+        serde_json::Value::String(effort.to_string()),
+    );
+
+    let temp_path = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("model.json"),
+        std::process::id()
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|error| format!("cannot create OpenCode model state temp file: {error}"))?;
+        let encoded = serde_json::to_vec(&data)
+            .map_err(|error| format!("cannot encode OpenCode model state: {error}"))?;
+        temp.write_all(&encoded)
+            .map_err(|error| format!("cannot write OpenCode model state: {error}"))?;
+        temp.sync_all()
+            .map_err(|error| format!("cannot sync OpenCode model state: {error}"))?;
+        std::fs::rename(&temp_path, path)
+            .map_err(|error| format!("cannot publish OpenCode model state: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
 }
 
 /// `opencode run --dangerously-skip-permissions [--model <m>] <tail>` - the
@@ -259,6 +358,7 @@ pub fn dispatch_opencode_once(
     _yolo: bool, // opencode owns its permission/confinement behavior
     timeout: Option<Duration>,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> AskOutcome {
     use crate::claude_ask::{emit_event, py_repr, validate_spawn_inputs};
 
@@ -308,6 +408,14 @@ pub fn dispatch_opencode_once(
     } else {
         format!("[from: {}]\n\n{}", from_name, effective_message)
     };
+    if let Some(effort) = effort {
+        let selected_model = model
+            .filter(|model| !model.is_empty())
+            .unwrap_or(OPENCODE_DEFAULT_MODEL);
+        if let Err(error) = apply_opencode_variant(selected_model, effort) {
+            return AskOutcome::err(error, 2);
+        }
+    }
     let argv = build_opencode_argv(&full_prompt, model);
     let log_path = derive_log_path(home, name);
     if let Some(parent) = log_path.parent() {
@@ -479,6 +587,24 @@ mod tests {
                 "--",
                 "m"
             ]
+        );
+    }
+
+    #[test]
+    fn effort_variant_persists_arbitrary_provider_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model.json");
+        std::fs::write(&path, r#"{"variant":{"other/model":"low"}}"#).unwrap();
+
+        apply_opencode_variant_at(&path, "opencode/custom-model", "provider-defined-effort")
+            .expect("variant write succeeds");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(value["variant"]["other/model"], "low");
+        assert_eq!(
+            value["variant"]["opencode/custom-model"],
+            "provider-defined-effort"
         );
     }
 

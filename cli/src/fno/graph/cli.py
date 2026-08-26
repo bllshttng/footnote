@@ -5976,6 +5976,9 @@ def cmd_session_add(
     session_id: Optional[str] = typer.Option(
         None, "--session-id", help="Override session id (default: ambient session identity)."
     ),
+    effort: Optional[str] = typer.Option(
+        None, "--effort", help="Selected reasoning effort, passed through verbatim."
+    ),
     ended_at: Optional[str] = typer.Option(
         None, "--ended-at", "--at",
         help="ISO-8601 UTC instant the phase ended. Omit when there is no honest end "
@@ -6109,7 +6112,7 @@ def cmd_session_add(
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
                 harness=eff_harness, session_id=eff_session, ended_at=ended_at,
-                started_at=started_at, repo=repo,
+                effort=effort, started_at=started_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
@@ -6174,7 +6177,7 @@ def cmd_session_add(
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,
                 harness=eff_harness, session_id=eff_session, ended_at=ended_at,
-                started_at=started_at,
+                effort=effort, started_at=started_at,
             )
             if not found:
                 typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)

@@ -1340,10 +1340,11 @@ def append_session_record(
     phase: str,
     harness: str,
     session_id: str,
+    effort: "str | None" = None,
     ended_at: "str | None" = None,
     started_at: "str | None" = None,
 ) -> "tuple[bool, bool]":
-    """Append a ``{phase, harness, session_id, ended_at, started_at,
+    """Append a ``{phase, harness, session_id, effort, ended_at, started_at,
     observed_model}`` lifecycle record to a node's append-only ``sessions``
     list, returning ``(found, added)`` (x-b6e4).
 
@@ -1395,6 +1396,11 @@ def append_session_record(
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
 
     harness, session_id = _validate_session_identity(phase, harness, session_id)
+    if effort is not None:
+        if not isinstance(effort, str) or not effort.strip():
+            raise ValueError("effort must be a non-empty string when provided")
+        if len(effort) > _SESSION_STR_MAX:
+            raise ValueError(f"effort exceeds {_SESSION_STR_MAX} chars")
 
     # ended_at is the phase END; omitted when the writer has no honest end to
     # record (a row opened mid-session has a start and no end). Defaulting to the
@@ -1439,6 +1445,8 @@ def append_session_record(
                 prior["ended_at"] = ended_at
             if started_at is not None and "started_at" not in prior:
                 prior["started_at"] = started_at
+            if effort is not None and "effort" not in prior:
+                prior["effort"] = effort
             # observed_model is the one field the LATEST stamp owns rather than
             # the first, so a mid-run failover is not recorded as the lane the
             # phase started on. See _merge_observed_model.
@@ -1454,6 +1462,8 @@ def append_session_record(
             row["ended_at"] = ended_at
         if started_at is not None:
             row["started_at"] = started_at
+        if effort is not None:
+            row["effort"] = effort
         # Written unconditionally, including the unknown kinds: an ABSENT key
         # means this row predates the field or its writer never looked, while
         # {"kind": "no-transcript"} means the writer looked and found nothing.
@@ -1711,6 +1721,7 @@ def stamp_session_for_pr(
     phase: str,
     harness: str,
     session_id: str,
+    effort: "str | None" = None,
     ended_at: "str | None" = None,
     started_at: "str | None" = None,
     repo: "str | None" = None,
@@ -1739,6 +1750,6 @@ def stamp_session_for_pr(
     node_id = matches[0]
     _found, added = append_session_record(
         path, node_id, phase=phase, harness=harness, session_id=session_id,
-        ended_at=ended_at, started_at=started_at,
+        effort=effort, ended_at=ended_at, started_at=started_at,
     )
     return node_id, ("added" if added else "duplicate")

@@ -138,6 +138,7 @@ def test_spawn_with_node_opens_review_row(workdir_claude, resolvable_uuid) -> No
         agents_app,
         [
             "spawn", "--name", "row-worker", "-H", "claude", "--substrate", "bg",
+            "--effort", "xhigh",
             "--node", NODE, "review this diff",
         ],
         catch_exceptions=False,
@@ -155,6 +156,8 @@ def test_spawn_with_node_opens_review_row(workdir_claude, resolvable_uuid) -> No
     assert row["started_at"]
     assert "ended_at" not in row
     assert row["observed_model"].get("kind") != "unreadable"
+    assert "effort" in row
+    assert row["effort"] == "xhigh"
 
 
 def test_stamp_duplicate_fill_keeps_one_row(workdir_claude, resolvable_uuid) -> None:

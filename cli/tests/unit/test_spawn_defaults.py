@@ -226,22 +226,23 @@ def test_effort_injected_for_surface_provider():
     assert "--effort" in out and out[out.index("--effort") + 1] == "high"
 
 
-def test_config_effort_unmappable_for_provider_degrades_open():
-    # codex has an effort surface but does NOT support "max"; a config-sourced
-    # value must skip + notice, never hard-fail the bare spawn.
+def test_config_effort_forwards_provider_specific_value():
+    # The provider/model owns the vocabulary, so a config-sourced value passes
+    # through even when fno has no local catalog for it.
     err = io.StringIO()
     out = _inject(["spawn", "w"], err=err, provider="codex", effort="max")
-    assert "--effort" not in out
-    assert "effort skipped" in err.getvalue()
-    assert "max" in err.getvalue()
+    assert "--effort" in out
+    assert out[out.index("--effort") + 1] == "max"
+    assert "effort skipped" not in err.getvalue()
 
 
-def test_config_effort_unknown_value_degrades_open():
-    # A garbage config effort value never reaches the fail-closed validator.
+def test_config_effort_arbitrary_value_passes_through():
+    # A provider/model-specific effort value never reaches a local allowlist.
     err = io.StringIO()
     out = _inject(["spawn", "w"], err=err, provider="claude", effort="banana")
-    assert "--effort" not in out
-    assert "effort skipped" in err.getvalue()
+    assert "--effort" in out
+    assert out[out.index("--effort") + 1] == "banana"
+    assert "effort skipped" not in err.getvalue()
 
 
 def test_explicit_effort_never_overridden():

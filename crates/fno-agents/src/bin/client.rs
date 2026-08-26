@@ -859,6 +859,29 @@ fn effective_spawn_message(message: &str, substrate: &str) -> String {
     }
 }
 
+fn validate_effort_for_spawn(
+    provider: &str,
+    substrate: &str,
+    effort: Option<&str>,
+) -> Result<(), String> {
+    if substrate == "pane" {
+        return Ok(());
+    }
+    let Some(value) = effort else {
+        return Ok(());
+    };
+    if value.is_empty() {
+        return Err("--effort must be non-empty".to_string());
+    }
+    if matches!(provider, "gemini" | "agy") {
+        return Err(format!(
+            "provider {} has no reasoning-effort surface; omit --effort",
+            provider
+        ));
+    }
+    Ok(())
+}
+
 /// Route a `spawn` (NOT host/promote) to the appropriate client-side path.
 ///
 /// x-2c27 names the session substrate as one axis with three values; this arm
@@ -1030,34 +1053,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         );
         return Some(2);
     }
-    // Pane spawns re-exec the Python CLI, whose effort_tokens mapper is the
-    // validator for claude/codex/agy/opencode. Validate only client-owned lanes
-    // here; otherwise opencode pane effort would be rejected before re-exec.
-    if substrate != "pane" {
-        if let Some(value) = effort {
-            let allowed = match provider {
-                "claude" => &["low", "medium", "high", "xhigh", "max"][..],
-                "codex" => &["minimal", "low", "medium", "high", "xhigh"][..],
-                "agy" => &["low", "medium", "high"][..],
-                _ => {
-                    eprintln!(
-                        "provider {} has no reasoning-effort surface; omit --effort",
-                        py_repr(provider)
-                    );
-                    return Some(2);
-                }
-            };
-            if !allowed.contains(&value) {
-                eprintln!(
-                    "{} --effort {} unmappable; {} supports {}",
-                    provider,
-                    py_repr(value),
-                    provider,
-                    allowed.join(", ")
-                );
-                return Some(2);
-            }
-        }
+    if let Err(reason) = validate_effort_for_spawn(provider, substrate, effort) {
+        eprintln!("{reason}");
+        return Some(2);
     }
 
     // x-b6e2 fail-closed matrix for the client-owned bg/headless lanes (pane
@@ -1314,7 +1312,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // (x-567d wires the documented lane; the bare `opencode` TUI stays the
         // `pane` form). Stateless plain-text, like agy.
         ("opencode", "headless") => emit!(dispatch_opencode_once(
-            home, name, &message, from_name, &cwd, yolo, timeout, model,
+            home, name, &message, from_name, &cwd, yolo, timeout, model, effort,
         )),
 
         // opencode bg: the serve-HTTP worker lane (x-d9f9). A shared
@@ -1324,7 +1322,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // on the serve IS the worker (steering/mail over the API is a filed
         // follow-up).
         ("opencode", "bg") => emit!(fno_agents::opencode_serve::dispatch_opencode_serve(
-            home, name, &message, from_name, &cwd, model,
+            home, name, &message, from_name, &cwd, model, effort,
         )),
 
         ("agy", "headless") => {
@@ -2526,10 +2524,12 @@ fn format_success(
 /// Render agents list as Python-matching JSON (Task 3.1; discovered lane
 /// ab-098967b4; provider key restored x-f273).
 ///
-/// Shape (schema_version 3): `{"agents": [...], "count": N,
+/// Shape (schema_version 4): `{"agents": [...], "count": N,
 /// "discovered_sessions": [...], "discovered_count": M, "fields_omitted":
-/// [...], "filters_applied": {...}, "schema_version": 3}`. Stays
+/// [...], "filters_applied": {...}, "schema_version": 4}`. Stays
 /// byte-shape-aligned with Python's `format.render_json`.
+const LIST_JSON_SCHEMA_VERSION: u32 = 4;
+
 fn render_list_json(
     agents: &Value,
     filters_applied: &Value,
@@ -2544,7 +2544,7 @@ fn render_list_json(
         "discovered_count": discovered.len(),
         "fields_omitted": fields_omitted,
         "filters_applied": filters_applied,
-        "schema_version": 3,
+        "schema_version": LIST_JSON_SCHEMA_VERSION,
     });
     serde_json::to_string_pretty(&payload).unwrap_or_default()
 }
@@ -4832,7 +4832,7 @@ mod tests {
             "missing 'discovered_sessions' key"
         );
         assert_eq!(parsed["discovered_count"], 0);
-        assert_eq!(parsed["schema_version"], 3);
+        assert_eq!(parsed["schema_version"], 4);
         assert_eq!(parsed["count"], 1);
         assert_eq!(
             parsed["fields_omitted"], result["fields_omitted"],
@@ -4871,6 +4871,19 @@ mod tests {
         assert!(row["live_status"].is_null(), "live_status retained as null");
     }
 
+    #[test]
+    fn empty_effort_is_rejected_but_opencode_values_are_passed_through() {
+        assert_eq!(
+            validate_effort_for_spawn("claude", "headless", Some("")),
+            Err("--effort must be non-empty".to_string())
+        );
+        assert_eq!(
+            validate_effort_for_spawn("codex", "bg", Some("")),
+            Err("--effort must be non-empty".to_string())
+        );
+        assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
+    }
+
     /// ab-098967b4: render_list_json folds in the discovered lane (additive
     /// keys, schema 2); render_list_table appends a distinct DISCOVERED section.
     #[test]
@@ -4892,7 +4905,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&out).expect("valid JSON");
         assert_eq!(parsed["discovered_count"], 1);
         assert_eq!(parsed["discovered_sessions"][0]["handle"], "fno-aaaa1111");
-        assert_eq!(parsed["schema_version"], 3);
+        assert_eq!(parsed["schema_version"], 4);
 
         let table = render_list_table(&agents, &discovered);
         assert!(table.contains("DISCOVERED LIVE SESSIONS (1, host-local)"));
