@@ -1031,7 +1031,7 @@ def test_receipt_base_line_marks_an_unmeasured_distance_when_fetch_fails(
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 0, result.stdout
-    assert "behind=unmeasured (fetch failed)" in result.stdout
+    assert "behind=unmeasured:fetch-failed" in result.stdout
 
 
 def test_already_claimed_receipt_names_the_live_holder(monkeypatch, tmp_path):
@@ -1052,7 +1052,10 @@ def test_already_claimed_receipt_names_the_live_holder(monkeypatch, tmp_path):
     result = runner.invoke(target_app, ["start", "x-d91b"])
     assert result.exit_code == 0, result.stdout
     assert "node=already-claimed" in result.stdout
-    assert "holder target-session:abc123" in result.stdout
+    assert "holder=target-session:abc123" in result.stdout
+    # The idempotent path must stay pure-local: no fetch, and the base
+    # field SAYS it took no measurement rather than paying for one.
+    assert "behind=unmeasured:idempotent-path-does-no-network" in result.stdout
 
 
 def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
@@ -1991,13 +1994,13 @@ def test_truthful_base_names_a_timeout_apart_from_a_fetch_failure(monkeypatch):
     monkeypatch.setattr(
         target_cli, "_refresh_remote", lambda *_a, **_k: (False, target_cli._TIMED_OUT)
     )
-    assert "behind=unmeasured (fetch timed out)" in target_cli._truthful_base(
+    assert "behind=unmeasured:fetch-timed-out" in target_cli._truthful_base(
         Path("/repo"), "origin/main"
     )
 
     monkeypatch.setattr(
         target_cli, "_refresh_remote", lambda *_a, **_k: (False, "fatal: repository not found")
     )
-    assert "behind=unmeasured (fetch failed)" in target_cli._truthful_base(
+    assert "behind=unmeasured:fetch-failed" in target_cli._truthful_base(
         Path("/repo"), "origin/main"
     )

@@ -2416,6 +2416,19 @@ def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
     return True, ""
 
 
+def _unmeasured_base(base_label: str, why: str) -> str:
+    """The base field when no distance was taken, as ONE parseable token.
+
+    The receipt is a whitespace-separated `key=value` line and this doc says
+    so, but the reason used to ride in parentheses: `behind=unmeasured (fetch
+    timed out)` split into `(fetch`, `timed` and `out)`, three tokens carrying
+    no key. A receipt that contradicts its own documented shape is the defect
+    this branch ships to delete, so `why` is a single hyphenated slug and the
+    whole field stays one token.
+    """
+    return f"{base_label} behind=unmeasured:{why}"
+
+
 def _truthful_base(cwd: Path, base_label: str) -> str:
     """The base label with a MEASURED distance, or an explicit unmeasured
     marker (x-d401 / x-3ae1).
@@ -2437,19 +2450,20 @@ def _truthful_base(cwd: Path, base_label: str) -> str:
         # `HEAD..<local-branch>` is exactly the stale-ref silent zero this
         # function exists to refuse. Fetching `origin main` and then measuring
         # against a local `main` would print a confident, wrong distance.
-        return f"{base_label} behind=unmeasured (base names no remote ref)"
+        return _unmeasured_base(base_label, "base-names-no-remote-ref")
     ok, err = _refresh_remote(cwd, remote, branch)
     if not ok:
         # Name the CAUSE. "fetch failed" over a timeout is the same
         # absence-as-verdict this receipt exists to delete: a slow network and
         # a refused remote are different facts, and only one of them means the
         # base is unreachable.
-        why = "fetch timed out" if err == _TIMED_OUT else "fetch failed"
-        return f"{base_label} behind=unmeasured ({why})"
+        return _unmeasured_base(
+            base_label, "fetch-timed-out" if err == _TIMED_OUT else "fetch-failed"
+        )
     count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")
     count = (count or "").strip()
     if not count.isdigit():
-        return f"{base_label} behind=unmeasured (rev-list failed)"
+        return _unmeasured_base(base_label, "rev-list-failed")
     return f"{base_label} behind={count}"
 
 
@@ -2669,8 +2683,8 @@ def _start_codex_native(
             typer.echo(
                 f"worktree={cwd}  app-owned=codex  .fno=ok  "
                 f"base={_truthful_base(cwd, base)}  "
-                f"node=already-claimed (holder {(info or {}).get('holder') or '?'}, "
-                f"state {(info or {}).get('state') or '?'})"
+                f"node=already-claimed holder={(info or {}).get('holder') or '?'} "
+                f"state={(info or {}).get('state') or '?'}"
             )
             if beastmode:
                 _warn_if_authority_not_granted(cwd)
@@ -3301,9 +3315,9 @@ def start(
         if verdict == "ours":
             typer.echo(
                 f"worktree={wt_path}  .fno={fno_state}  "
-                f"base={_truthful_base(wt_path, base_label)}  "
-                f"node=already-claimed (holder {(claim_info or {}).get('holder') or '?'}, "
-                f"state {(claim_info or {}).get('state') or '?'})"
+                f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
+                f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
+                f"state={(claim_info or {}).get('state') or '?'}"
             )
             if beastmode:
                 _warn_if_authority_not_granted(wt_path)
@@ -3339,7 +3353,7 @@ def start(
         )
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  "
-            f"base={_truthful_base(wt_path, base_label)}  "
+            f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
             f"node=reacquired (successor took over from {prior})"
         )
         typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

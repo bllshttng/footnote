@@ -8734,6 +8734,15 @@ fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
 /// every settled state: a no-reading row deserves a look before an idle one
 /// does. `Empty` (x-d401) is a pristine shell - nothing running, nothing done,
 /// the least severe reading there is.
+///
+/// NOT the same ordering as [`SEVERITY_ORDER`], and neither is "the single
+/// ordering authority" the two comments used to each claim. They answer
+/// different questions and have disagreed since before x-d401: this one
+/// answers WHICH ROW IS WORST, for a `min()` rollup and the navigator filter,
+/// so `Working` outranks `DoneUnseen`. `SEVERITY_ORDER` answers IN WHAT ORDER
+/// A SECTION'S COUNTS ARE LISTED AND TRUNCATED, where a finished-but-unseen
+/// row leads because it is the one asking for a human. Read whichever answers
+/// the question at hand, and change neither to "match" the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum PaneState {
     Blocked,
@@ -8758,6 +8767,14 @@ fn pane_state(badge: Option<AgentBadge>, seen: bool, activity: Option<ShellActiv
         Some(AgentBadge::Done) if seen => PaneState::Idle,
         Some(AgentBadge::Done) => PaneState::DoneUnseen,
         None => match activity {
+            // ACCEPTED COST, ruled 2026-08-26, do not relitigate: a bare shell
+            // running `less`, `nvim` or a long build also lands here, so it
+            // reads `Working` and holds an attention row it does not need.
+            // That is the cheaper error by design. This epic's founding
+            // measurement was four codex panes carrying `fno_id=-` while
+            // running `cargo test`, `fno doctor test` and `fno do pr wait`.
+            // Over-surfacing a shell costs one row; under-surfacing a working
+            // agent is the defect this branch ships to delete.
             Some(ShellActivity::Running) => PaneState::Working,
             Some(ShellActivity::Idle) => PaneState::Idle,
             Some(ShellActivity::Empty) => PaneState::Empty,
@@ -9815,8 +9832,20 @@ fn lattice_glyph(s: LatticeState) -> (char, u8) {
 /// sub-case of the same terminal bucket, just less certain, so it never
 /// outranks a live state. `Empty` (x-d401) sits after `Idle` and before the
 /// terminal pair: a pristine shell is less severe than any worker state but
-/// still a live pane, not a terminal one. The single ordering authority the
-/// fold and the truncation share.
+/// still a live pane, not a terminal one. The one ordering the fold and the
+/// truncation share.
+///
+/// NOT the same ordering as [`PaneState`]'s derive, and this comment used to
+/// claim to be "the single ordering authority" beside a sibling claiming the
+/// same thing, which cannot both be true. They answer different questions and
+/// have disagreed since before x-d401, on `Working` versus `DoneUnseen`. This
+/// one answers IN WHAT ORDER A SECTION'S COUNTS ARE LISTED AND TRUNCATED;
+/// `PaneState` answers WHICH ROW IS WORST for a `min()` rollup. A known
+/// consequence of the split, left as is: `Unmeasured` is now reachable for
+/// LIVE rows, and truncation drops from that end, so a narrow panel can keep
+/// a dead `✗` count and drop live `?` rows. Changing that is a display-policy
+/// decision, not a correctness fix - do not "align" the two lists to make it
+/// go away.
 const SEVERITY_ORDER: [LatticeState; 7] = [
     LatticeState::Blocked,
     LatticeState::DoneUnseen,

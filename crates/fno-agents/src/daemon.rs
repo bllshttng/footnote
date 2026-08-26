@@ -4819,6 +4819,19 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // `status` for the same reason, and the reason generalises: Python reads
+    // the input `row` and writes a SEPARATE `projected` dict, so every rule
+    // there sees the original. This twin mutates `row` in place, so any rule
+    // reading `status` after an earlier one rewrote it diverges from Python
+    // for that row. Today the two rules are mutually exclusive - `terminal`
+    // is `orphaned`/`exited` and this one needs `spawning` - so nothing
+    // changes; snapshot anyway, because relying on that exclusion is a rule
+    // no test states and the next rule added here will not know it.
+    let incoming_status = row
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let event_at = row_timestamp(row.get("last_event_at"));
     let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
     let terminal = matches!(
@@ -4845,7 +4858,7 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
     // keeps the token, and a missing `created_at` is absent age evidence,
     // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
     // rows read `spawning` for 3-16 hours while alive (x-0248).
-    if row.get("status").and_then(Value::as_str) == Some("spawning")
+    if incoming_status == "spawning"
         && row.get("pid_alive") == Some(&Value::Bool(true))
         // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
         // truncates, so a 600.5s-old row read `spawning` here and `live` in
