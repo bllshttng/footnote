@@ -117,7 +117,7 @@ pub(crate) fn apply_opencode_variant_at(
         return Err("OpenCode model is empty; cannot set effort".to_string());
     }
     if effort.is_empty() {
-        return Err("--effort requires a value".to_string());
+        return Err("--effort must be non-empty".to_string());
     }
     let parent = path
         .parent()

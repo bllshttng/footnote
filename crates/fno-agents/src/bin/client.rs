@@ -871,7 +871,7 @@ fn validate_effort_for_spawn(
         return Ok(());
     };
     if value.is_empty() {
-        return Err("--effort requires a value".to_string());
+        return Err("--effort must be non-empty".to_string());
     }
     if matches!(provider, "gemini" | "agy") {
         return Err(format!(
@@ -4875,11 +4875,11 @@ mod tests {
     fn empty_effort_is_rejected_but_opencode_values_are_passed_through() {
         assert_eq!(
             validate_effort_for_spawn("claude", "headless", Some("")),
-            Err("--effort requires a value".to_string())
+            Err("--effort must be non-empty".to_string())
         );
         assert_eq!(
             validate_effort_for_spawn("codex", "bg", Some("")),
-            Err("--effort requires a value".to_string())
+            Err("--effort must be non-empty".to_string())
         );
         assert!(validate_effort_for_spawn("opencode", "headless", Some("provider-value")).is_ok());
     }
