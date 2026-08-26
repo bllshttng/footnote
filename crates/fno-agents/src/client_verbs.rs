@@ -1105,12 +1105,17 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
                     .and_then(Value::as_str)
                     .filter(|x| !x.is_empty())
                     .unwrap_or("-");
+                let id = e
+                    .get("harness_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or("-");
                 let p = e
                     .get("harness")
                     .and_then(Value::as_str)
                     .or_else(|| e.get("provider").and_then(Value::as_str))
                     .unwrap_or("?");
-                format!("{n} (short={s}, {p})")
+                format!("{n} (session_id={id}, short={s}, {p})")
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1669,17 +1674,10 @@ fn find_manifest_for_session(session_id: &str) -> Option<ManifestIdentity> {
     None
 }
 
-/// Collision-safe 8-char handle from a session id (the final-eight convention),
-/// falling back to the whole trimmed id when shorter. The row's `short_id`, so
-/// `peek`/`ask`/`resume` resolve the adopted orphan.
+/// Canonical display handle from a session id. The row's `short_id` is a display
+/// value; durable joins use the full `harness_session_id`.
 fn derived_short_id(session_id: &str) -> String {
-    let s = session_id.trim();
-    let len = s.chars().count();
-    if len <= 8 {
-        s.to_string()
-    } else {
-        s.chars().skip(len - 8).collect()
-    }
+    crate::identity::canonical_handle(session_id.trim())
 }
 
 /// Derivable, stable row name for a synthesized entry so re-adopting upserts one
@@ -4037,10 +4035,17 @@ mod tests {
             claude_row("aa", "abcd1234", "11111111-0000-0000-0000-000000000000"),
             claude_row("bb", "abcd1234", "22222222-0000-0000-0000-000000000000"),
         ];
-        assert!(matches!(
-            find_agent_entry(&rows, "abcd1234"),
-            Err(ResolveError::Ambiguous(_))
-        ));
+        let error = find_agent_entry(&rows, "abcd1234").expect_err("short id is ambiguous");
+        let message = error.message();
+        assert!(message.contains("11111111-0000-0000-0000-000000000000"));
+        assert!(message.contains("22222222-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn adopted_display_id_uses_canonical_head_eight() {
+        let session = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4";
+
+        assert_eq!(derived_short_id(session), "019f48e1");
     }
 
     #[test]

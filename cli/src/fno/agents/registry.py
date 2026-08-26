@@ -550,7 +550,9 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
             distinct.append(entry)
     if len(distinct) > 1:
         cands = ", ".join(
-            f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
+            f"{getattr(e, 'name', '?')} "
+            f"(session_id={getattr(e, 'harness_session_id', '') or '-'}, "
+            f"short={getattr(e, 'short_id', '') or '-'}, "
             f"{getattr(e, 'harness', '?')})"
             for e in distinct
         )
