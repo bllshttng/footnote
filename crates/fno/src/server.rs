@@ -16765,9 +16765,12 @@ mod tests {
     #[test]
     fn spawn_receipt_removal_events_revoke_resume_facts() {
         let raw = concat!(
-            r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#, "\n",
-            r#"{"type":"agent_removed","data":{"name":"removed"}}"#, "\n",
-            r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#, "\n",
+            r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"removed"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#,
+            "\n",
             r#"{"type":"agent_row_reaped","data":{"name":"reaped","harness_session_id":"reaped-session"}}"#,
         );
         assert!(parse_spawn_receipts(raw).is_empty());
