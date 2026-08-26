@@ -1181,9 +1181,10 @@ def cmd_spawn(
         "--substrate",
         help=(
             "Session substrate (x-2c27): pane (mux-hosted PTY, the default; "
-            "4a-G2) | bg (claude --bg thread) | headless (-p/--exec one-shot). "
-            "Python owns the pane back half (fno mux pane run + registry mux "
-            "ref); bg/headless keep their existing lanes."
+            "4a-G2) | thread (claude --bg / opencode serve; bg is a deprecated "
+            "alias) | headless (-p/--exec one-shot). Python owns the pane back "
+            "half (fno mux pane run + registry mux ref); thread/headless keep "
+            "their existing lanes."
         ),
     ),
     headless: bool = typer.Option(
@@ -1308,7 +1309,7 @@ def cmd_spawn(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
             "pane substrate every provider honors it (claude/codex/gemini/agy/"
-            "opencode); on --substrate bg/headless it reaches claude and agy. "
+            "opencode); on --substrate thread/headless it reaches claude and agy. "
             "Unset = provider default; opencode defaults to zai-coding-plan/glm-5.3."
         ),
     ),
@@ -1322,8 +1323,9 @@ def cmd_spawn(
             "(or 'yolo'); codex a shortcut (full-auto|yolo) or <sandbox>:"
             "<approval> (e.g. workspace-write:on-request); opencode 'auto'; agy "
             "'skip'. An unmappable value errors before spawn. Mutually exclusive "
-            "with --yolo. Honored on claude bg/headless (Rust or Python fallback); "
-            "codex/gemini bg/headless one-shots reject it (use --substrate pane)."
+            "with --yolo. Honored on claude thread/headless (Rust or Python "
+            "fallback); codex/gemini thread/headless one-shots reject it (use "
+            "--substrate pane)."
         ),
     ),
     effort: str | None = typer.Option(
@@ -1340,9 +1342,9 @@ def cmd_spawn(
         "-r",
         help=(
             "Resume an existing claude session instead of starting fresh: the new "
-            "--bg supervisor continues that transcript (US4 bg-thread revival). "
+            "--bg supervisor continues that transcript (US4 thread revival). "
             "Accepts a full session uuid OR the 8-hex short-id shown in receipts "
-            "(x-f76e); with no --substrate it implies bg. claude + bg only."
+            "(x-f76e); with no --substrate it implies thread. claude + thread only."
         ),
     ),
     add_dir: str | None = typer.Option(
@@ -1441,7 +1443,7 @@ def cmd_spawn(
             "what you name - there is no --level, and a node that is not an epic "
             "is refused, since implementers get no crowns. Stamped with the "
             "grantor derived from THIS session, never self-declared. Works on "
-            "--substrate pane and bg (crown on bg is claude-only until the "
+            "--substrate pane and thread (crown on thread is claude-only until the "
             "court plumbing learns the opencode serve lane); refused on "
             "headless, whose one-shot exits before it can reign. If the caller "
             "already holds the named territory, add --succeed: that explicit "
@@ -1619,12 +1621,22 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    if substrate not in ("pane", "bg", "headless"):
+    if substrate not in ("pane", "thread", "bg", "headless"):
         print(
-            f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    if substrate == "bg":
+        print(
+            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
+            "the alias will be removed after one release",
+            file=sys.stderr,
+        )
+    # Keep the lower-level spawn branches stable while the public substrate
+    # vocabulary migrates to `thread`.
+    if substrate == "thread":
+        substrate = "bg"
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
     # composed-argv refusals live. The seam refuses the explicit-flag spelling
     # for the Rust-routed lane; this is the same refusal for the Python lane,

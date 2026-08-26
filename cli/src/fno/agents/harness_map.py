@@ -18,7 +18,7 @@ Verified facts (2026-07-13):
 - permission_bypass tokens mirror the provider adapters (claude.py,
   codex.py, gemini.py) - the flag a headless/bg worker needs so it never wedges
   on an approval prompt (the concrete cause of the manual-approve pain).
-- bg is claude (``claude --bg``) + opencode (a persistent session on a shared
+- thread is claude (``claude --bg``) + opencode (a persistent session on a shared
   ``opencode serve``, x-d9f9); every other harness falls back to ``headless``
   (Locked Decision 3, HARNESSES.md).
 - stop_hook is native for all THREE dispatchable harnesses: the autonomous
@@ -40,7 +40,7 @@ from fno.harness_names import KNOWN_HARNESSES
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
-# (autonomous `/target bg` + `/agent spawn`):
+# (autonomous `/target thread` + `/agent spawn`):
 #   "slash"       claude, agy, opencode -> "/[slash_prefix]verb ..." native slash
 #                 command; per-harness `slash_prefix` ("" for claude/agy, "fno:"
 #                 for opencode's plugin-namespaced palette + `run --command`)
@@ -119,8 +119,8 @@ def _refused_reason(harness: str) -> str:
 # capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
 # harness carries a `command_surface` (x-a5e4): the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
-# harness also carries `slash_prefix` (the plugin namespace). `bg` is claude
-# and opencode (the serve-HTTP worker lane).
+# harness also carries `slash_prefix` (the plugin namespace). `thread` is claude
+# and opencode (the serve-HTTP worker lane). `bg` remains a one-release input alias.
 #
 # Two pane capabilities, both EVIDENCE-GATED and read fail-closed (a missing key
 # reads false), because each one used to be a blanket rule that was true of at
@@ -182,7 +182,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
             "harness capability contract harness set diverges from KNOWN_HARNESSES"
         )
     required = {
-        "permission_bypass", "resume", "bg", "autonomous_pane", "route_on_pane",
+        "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
         "stop_hook", "command_surface", "permission_response", "resume_strategy",
         "model_switch_strategy",
         "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
@@ -513,9 +513,9 @@ def permission_response_keys(harness: str, action: str, rule_id: str) -> list[st
 
 
 def substrate_default(harness: str) -> str:
-    """Per-harness default substrate: ``bg`` where supported (claude, opencode),
+    """Per-harness default substrate: ``thread`` where supported (claude, opencode),
     else ``headless``. Pane permission is independent from substrate preference."""
-    return "bg" if capabilities(harness)["bg"] else "headless"
+    return "thread" if capabilities(harness)["thread"] else "headless"
 
 
 def effort_values(harness: str) -> list[str]:
@@ -530,7 +530,8 @@ def effort_values(harness: str) -> list[str]:
         return []
 
 
-_VALID_SUBSTRATES = ("bg", "headless", "pane")
+_VALID_SUBSTRATES = ("thread", "headless", "pane")
+_LEGACY_SUBSTRATE_ALIASES = {"bg": "thread"}
 # US3: the built-in verb allowlist (config.dispatch.allowed_verbs overrides).
 _DEFAULT_ALLOWED_VERBS = ("/target", "/think")
 # The env budget a brief must fit; 8 KB, measured in UTF-8 bytes (Locked
@@ -576,7 +577,7 @@ def resolve_dispatch(
     ``--harness`` resolution just wants the harness/substrate decision).
 
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
-    an explicit ``bg`` on a non-bg harness (pointing at ``headless``), an
+    an explicit ``thread`` on a harness without that lane (pointing at ``headless``), an
     unsupported autonomous ``pane``, an unknown trigger or substrate, or an
     empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
     (for tests)."""
@@ -629,15 +630,19 @@ def resolve_dispatch(
         chosen_substrate = substrate_default(chosen_harness)
         decision.append(f"substrate=default({chosen_substrate})")
 
+    if chosen_substrate in _LEGACY_SUBSTRATE_ALIASES:
+        decision.append("substrate=deprecated-alias(bg->thread)")
+        chosen_substrate = _LEGACY_SUBSTRATE_ALIASES[chosen_substrate]
     if chosen_substrate not in _VALID_SUBSTRATES:
         raise DispatchResolveError(
             f"unknown substrate {chosen_substrate!r}; "
             f"valid: {', '.join(_VALID_SUBSTRATES)}"
         )
-    if chosen_substrate == "bg" and not caps["bg"]:
+    if chosen_substrate == "thread" and not caps["thread"]:
         raise DispatchResolveError(
-            f"substrate 'bg' is unsupported on harness {chosen_harness!r} "
-            f"(bg is claude + opencode); use 'headless'"
+            f"substrate 'thread' is unsupported on harness {chosen_harness!r} "
+            f"(thread is claude + opencode; bg is claude + opencode as a deprecated alias); "
+            f"use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay
@@ -780,7 +785,7 @@ def resolve_dispatch(
         "stop_strategy": caps["stop_strategy"],
         "remove_strategy": caps["remove_strategy"],
         "session_binding": deepcopy(caps["session_binding"]),
-        "bg": caps["bg"],
+        "thread": caps["thread"],
         "effort_values": effort_values(chosen_harness),
         "env": env,
         "decision": decision,

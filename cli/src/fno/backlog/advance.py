@@ -1312,7 +1312,7 @@ def _spawn_worker(
     # detached thread, no short_id - so the clean exit IS the proof and we skip
     # the requirement (else the parse below would raise SpawnError, release the
     # reservation, and redispatch a node whose headless worker already ran).
-    if substrate != "bg":
+    if substrate != "thread":
         return "headless"
     # Keep scanning past a line that merely MENTIONS short_id but is not the JSON
     # receipt (banner/log noise) - only stop once a short_id is actually parsed.

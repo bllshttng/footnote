@@ -12,8 +12,8 @@ What each harness fundamentally is, from fno's point of view:
 
 | | claude | codex | gemini | agy | opencode |
 |---|---|---|---|---|---|
-| Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane, **bg**, headless |
-| Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | yes (a persistent session on a shared `opencode serve`, driven over HTTP) |
+| Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless |
+| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | yes (a persistent session on a shared `opencode serve`, driven over HTTP) |
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
 | Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
@@ -27,9 +27,9 @@ agy pane spawns trust the exact cwd before launch. The shared gate clears remain
 
 Known limitation: the agy seed receipt is unverified. Until action confirmation lands, `seed: submitted`, `readiness: live`, and `pane_observation: painted` do not prove that the worker consumed its seed. After spawning, run `fno agents peek <name>` and require a first worker action. If the exact pane stays idle, read its composer before you type anything. When the composer is EMPTY, recover once with `fno mux pane send <pane> --text '<prompt>' --raw --submit`, then peek again. When the composer already holds the seed, do NOT retype it, because a second `--text` write concatenates onto the buffer that is already there. The obvious remedy for that case does not work. Measured 2026-08-24 on a live agy pane, neither `--text '' --raw --submit` nor a bare carriage return submitted staged text. The cause is `submit_pane`, which sends one carriage return for every provider. Report a stranded composer rather than retyping into it. Do not re-seed a pane that is already working because that can queue a duplicate target.
 
-## The opencode bg serve lane
+## The opencode thread serve lane
 
-`spawn --harness opencode --substrate bg` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted:
+`spawn --harness opencode --substrate thread` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted. `bg` remains a deprecated input alias for one release:
 
 - fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG`. That config grants `permission."*" = "allow"`, the unattended posture other worker lanes get from their own bypass flag. An unanswered permission `ask` on a headless server is a hang, not a refusal.
 - The spawn mints a session with `POST /session?directory=<cwd>`, so one serve hosts workers across worktrees.
@@ -62,12 +62,12 @@ Permission responses are rule-gated. Without explicit authorization, a matched p
 | Verb | claude | codex | gemini | agy | opencode | What it does |
 |------|:---:|:---:|:---:|:---:|:---:|---|
 | `spawn "<prompt>"` | yes | yes | yes | yes | yes | Create + register a worker. Default substrate `pane` (mux-hosted PTY). |
-| `spawn --substrate bg` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other harness, pointing to `headless`. |
+| `spawn --substrate thread` | yes | no | no | no | no | Persistent detached `claude --bg` thread. Hard error on any other harness, pointing to `headless`. `bg` is a deprecated alias for one release. |
 | `spawn --substrate headless` / `--headless` / `-p` / `--once` | yes | yes | yes | yes | yes | One-shot: create + exchange + teardown. stdout is the harness reply. `-p` mirrors the harnesses' own one-shot short; `-H` is NOT a headless spelling, it selects the harness. OpenCode uses `opencode run`. |
 | `spawn --harness <h>` / `-H <h>` | selector | selector | selector | selector | selector | Canonical CLI-binary selector (`claude\|codex\|gemini\|opencode\|agy`); the `--harness` vocabulary the rest of fno uses. A model VENDOR (`zai`, ...) is never a harness value; that is `--provider`/`-P`, a separate axis. Reassigned from headless: `-H` now takes a harness value, not a one-shot toggle. |
-| `spawn --resume <uuid>` | yes (bg only) | no | no | no | no | **Revive a dead session**: mints a fresh detached bg thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate bg` and harness claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
-| `spawn --model <m>` | pane+bg+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the harness CLI. Every harness honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
-| `spawn --permission-mode <m>` | pane+bg+headless | pane | pane | pane | pane | Mapped approval mode (`claude -p`/`--bg` take it directly). Non-claude bg/headless lanes hardcode their own bypass form, so the flag is refused there (fail-closed, never silently dropped). Mutually exclusive with `--yolo`. |
+| `spawn --resume <uuid>` | yes (thread only) | no | no | no | no | **Revive a dead session**: mints a fresh detached thread seeded from the persisted transcript UUID, re-registers the row. Requires `--substrate thread` and harness claude. **Runtime caveat:** the `--resume` flag is wired only on the Python `cmd_spawn` path, so on an installed binary (default `auto`/`rust` runtime) the spawn auto-routes to the Rust client, which does not parse it; run it under `FNO_AGENTS_RUNTIME=python` until the flag joins the Python-only auto-route set. |
+| `spawn --model <m>` | pane+thread+headless | pane+headless | pane+headless | pane+headless | pane | Exact passthrough to the harness CLI. Every harness honors it on pane; the one-shot lanes forward it too (`codex exec --model`, `gemini --model`, `agy`, `claude -p --model`). |
+| `spawn --permission-mode <m>` | pane+thread+headless | pane | pane | pane | pane | Mapped approval mode (`claude -p`/`--bg` take it directly). Non-claude thread/headless lanes hardcode their own bypass form, so the flag is refused there (fail-closed, never silently dropped). Mutually exclusive with `--yolo`. |
 | `spawn "<prompt>" -- <flags...>` | pane only (all five) | | | | | Provider-CLI passthrough: every token after `--` is spliced into the harness's own pane argv, so a flag fno never declared needs no code change. Refused on bg/headless (those builders carry none of the pane's guards). The tokens ride the composed argv through the same refusals that govern fno's own flags: `-p`/`--print` (claude, agy), `--settings`/`--session-id` (happy lane), codex's bare `exec` and opencode's bare `run` (headless subcommands); a token duplicating a flag fno already emitted (`--model`, `--permission-mode`, `--name`, or an alias of a permission flag fno emitted, e.g. gemini `--yolo` vs `--approval-mode`) is a named refusal, not a silent last-wins. The parser stays strict: a typo'd fno flag before `--` still fails locally instead of being forwarded. |
 
 Retired creation verbs (each prints a pointer and exits non-zero, never a silent success): `host` and `promote` are gone - agent panes live in the mux now; use `fno agents spawn --name <n> --substrate pane`.
@@ -199,8 +199,8 @@ The verb reaches the same destination with none of that exposure.
 
 ## Why the asymmetries exist
 
-- **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
-- **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
+- **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the thread substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
+- **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no thread lane and no attach.
 - A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - Codex recovery uses that full thread ID as its only join.
 - `fno agents watchdog --only recoverable --since 24h --cwd PATH` subtracts registered Codex rows from recent exact-cwd rollouts.

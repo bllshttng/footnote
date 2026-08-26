@@ -235,6 +235,10 @@ def emit_spawned(
     spawned_by_session: Optional[str] = None,
     spawned_by_harness: Optional[str] = None,
     spawned_by_cwd: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+    cwd: Optional[str] = None,
+    model: Optional[str] = None,
+    substrate: Optional[str] = None,
 ) -> None:
     """Record one agent birth in the daemon lifecycle log (envelope format).
 
@@ -258,6 +262,14 @@ def emit_spawned(
     }
     if pid is not None:
         data["pid"] = pid
+    if harness_session_id:
+        data["harness_session_id"] = harness_session_id
+    if cwd:
+        data["cwd"] = cwd
+    if model:
+        data["model"] = model
+    if substrate:
+        data["substrate"] = substrate
     _emit_daemon_envelope(KIND_AGENT_SPAWNED, data)
 
 

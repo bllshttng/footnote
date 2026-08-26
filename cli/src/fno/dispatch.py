@@ -221,7 +221,7 @@ def cmd_resolve(
             if key in out:
                 typer.echo(f"{key}={out[key]}")
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
-        typer.echo(f"bg={out['bg']}")
+        typer.echo(f"thread={out['thread']}")
         typer.echo(f"resume={out['resume']}")
         # env carries TARGET_BRIEF (US3); consumers read it via -J JSON. A brief
         # can be multi-line, so key=value lines only report presence/size here.

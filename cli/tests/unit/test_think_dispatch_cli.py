@@ -251,7 +251,7 @@ def test_codex_json_dispatch_reaches_spawn_subprocess_and_parses_receipt(
         "--harness",
         "claude",
         "--substrate",
-        "bg",
+        "thread",
     ]
     assert "codex posture:" not in result.stdout
     assert "claude-bg-fallback" in result.stderr

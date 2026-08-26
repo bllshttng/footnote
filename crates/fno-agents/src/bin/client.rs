@@ -508,6 +508,13 @@ async fn run(args: Vec<String>) -> i32 {
             .get("substrate")
             .and_then(|v| v.as_str())
             .unwrap_or("pane");
+        // `thread` is the public substrate name. The lower-level dispatch arms
+        // retain their historical `bg` selector until their wire contract moves.
+        let substrate = if substrate == "thread" {
+            "bg"
+        } else {
+            substrate
+        };
         if let Err(message) = validate_spawn_placement(&params, substrate) {
             eprintln!("{message}");
             return 2;
@@ -893,6 +900,11 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         .get("substrate")
         .and_then(|v| v.as_str())
         .unwrap_or("pane");
+    let substrate = if substrate == "thread" {
+        "bg"
+    } else {
+        substrate
+    };
 
     // unwrap_or_default is acceptable HERE (unlike the ask pre-check, which
     // must exit 12 on a corrupt registry): this collision check is advisory;
@@ -1941,12 +1953,18 @@ fn build_request(verb: &str, rest: &[String]) -> Result<(String, Value), String>
                 // sole routing key the spawn arm reads (replaces --once).
                 let v = str_arg(&mut it, "--substrate")?;
                 match v.as_str() {
-                    Some("pane") | Some("bg") | Some("headless") => {
+                    Some("pane") | Some("thread") | Some("headless") => {
                         params.insert("substrate".into(), v);
+                    }
+                    Some("bg") => {
+                        eprintln!(
+                            "warning: substrate value 'bg' is deprecated; use 'thread' instead; the alias will be removed after one release"
+                        );
+                        params.insert("substrate".into(), Value::String("thread".into()));
                     }
                     other => {
                         return Err(format!(
-                            "--substrate must be one of: pane, bg, headless (got {})",
+                            "--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {})",
                             other.unwrap_or("")
                         ));
                     }
@@ -2896,7 +2914,7 @@ fn exit_code_for(code: ErrorCode) -> i32 {
 /// list against that set, so a new verb cannot land without a `--help` entry
 /// (ab-351427cb).
 const CLIENT_VERB_USAGE: &[&str] = &[
-    "spawn <name> --provider <p> [--substrate pane|bg|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
+    "spawn <name> --provider <p> [--substrate pane|thread|headless] [-s <squad>] [-x left|right|up|down] [--cwd <dir>|--fresh|--here] [--force] [--no-wait] --argv -- <cmd...>",
     "ask <name> <message> [--cwd <dir>|--fresh|--here]",
     "list [--all] [--status <live|orphaned|unknown>] [--progress <advancing|awaiting-operator|parked|refused|unknown>]",
     "status",
@@ -4306,8 +4324,9 @@ mod tests {
 
     #[test]
     fn spawn_substrate_bg_and_headless_suppress_interactive() {
-        // bg + headless are client-side one-shots: no host_mode, no mint.
-        for sub in ["bg", "headless"] {
+        // thread (with deprecated bg alias) + headless are client-side lanes:
+        // no host_mode, no mint.
+        for sub in ["thread", "bg", "headless"] {
             let args = vec![
                 "wk".to_string(),
                 "--harness".to_string(),
@@ -4316,7 +4335,8 @@ mod tests {
                 sub.to_string(),
             ];
             let (_m, params) = build_request("spawn", &args).unwrap();
-            assert_eq!(params["substrate"], sub);
+            let expected = if sub == "bg" { "thread" } else { sub };
+            assert_eq!(params["substrate"], expected);
             assert!(params.get("host_mode").is_none(), "{sub}: no host_mode");
             assert!(params.get("session_id").is_none(), "{sub}: no mint");
         }
@@ -4347,7 +4367,7 @@ mod tests {
             "--once".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        assert_eq!(params["substrate"], "bg");
+        assert_eq!(params["substrate"], "thread");
     }
 
     #[test]
@@ -4493,7 +4513,7 @@ mod tests {
             "--headless".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
-        assert_eq!(params["substrate"], "bg");
+        assert_eq!(params["substrate"], "thread");
     }
 
     #[test]

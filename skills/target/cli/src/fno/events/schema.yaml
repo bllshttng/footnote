@@ -1534,6 +1534,13 @@ event_types:
         version:
           type: string
           description: "Binary version string."
+        recovery_mode:
+          type: string
+          enum: [preserve, destructive]
+          description: "Whether startup recovery preserved or destructively archived/reaped records."
+        interrupted_write_temps:
+          type: integer
+          description: "Interrupted atomic-write temps detected during startup."
 
   - name: daemon_exited
     description: "fno-agents daemon process exited (clean shutdown or crash)."
@@ -1595,6 +1602,18 @@ event_types:
           type: string
         pid:
           type: integer
+        harness_session_id:
+          type: string
+          description: "Full harness resume identity captured at birth and retained outside the mutable registry."
+        cwd:
+          type: string
+          description: "Spawn cwd for the session receipt."
+        model:
+          type: string
+          description: "Resolved model requested for the spawned worker."
+        substrate:
+          type: string
+          description: "Spawn substrate: pane, bg, or headless."
         # Parent-edge provenance (x-30f6): the spawning session's ambient env,
         # captured at launch so a worker can be traced BACK to the conversation
         # that decided to spawn it. All optional; absent for legacy spawns.
@@ -1648,6 +1667,8 @@ event_types:
           type: boolean
         harness:
           type: string
+        harness_session_id:
+          type: [string, "null"]
         harness_row_id:
           type: [string, "null"]
         harness_removed:
@@ -2210,6 +2231,19 @@ event_types:
         unaddressed_blocking:
           type: integer
           description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
+    consumers: [operator]
+
+  - name: daemon_recovery_interrupted_temp
+    description: "Startup recovery detected an interrupted atomic-write temp and moved it out of the live store path when possible."
+    sources: [daemon]
+    data:
+      required: [name, outcome]
+      properties:
+        name: { type: string }
+        outcome:
+          type: string
+          enum: [quarantined, detected]
+        quarantined_to: { type: string }
     consumers: [operator]
 
   - name: termination

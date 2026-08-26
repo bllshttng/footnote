@@ -3,7 +3,7 @@ map_version = 9
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-bg = true
+thread = true
 autonomous_pane = false
 route_on_pane = true
 stop_hook = "native"
@@ -67,7 +67,7 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>mi
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
-bg = false
+thread = false
 autonomous_pane = true
 route_on_pane = false
 stop_hook = "native"
@@ -136,7 +136,7 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?reasoning\s+(?P<effort>minimal|low|m
 [harness.gemini]
 permission_bypass = ["--yolo"]
 resume = "native-continue"
-bg = false
+thread = false
 autonomous_pane = false
 route_on_pane = false
 stop_hook = "native"
@@ -195,7 +195,7 @@ status_pattern = ""
 [harness.agy]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-continue"
-bg = false
+thread = false
 autonomous_pane = false
 route_on_pane = false
 stop_hook = "native"
@@ -261,7 +261,7 @@ status_pattern = ""
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-bg = true
+thread = true
 autonomous_pane = false
 route_on_pane = false
 stop_hook = "native"

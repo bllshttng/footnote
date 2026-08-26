@@ -92,7 +92,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
 # long-form `--substrate <s>`. Neither parser learns a new vocabulary.
 # --------------------------------------------------------------------------- #
 
-_SUBSTRATES = ("pane", "bg", "headless")
+_SUBSTRATES = ("pane", "thread", "headless", "bg")
 
 # Flags on `spawn` that consume the following token. Needed to tell a flag's
 # VALUE apart from a positional when scanning for the NAME / substrate token. A
@@ -214,7 +214,7 @@ def _refuse_off_pane_passthrough(toks: Sequence[str], err: IO[str]) -> None:
     fence = next((i for i, t in enumerate(toks) if t == "--"), None)
     if fence is None:
         return
-    if _has_explicit_substrate(toks) not in ("bg", "headless"):
+    if _has_explicit_substrate(toks) not in ("thread", "bg", "headless"):
         return
     if len(toks) - fence - 1 > 1 or _positional_indices(toks[:fence]):
         print(f"fno agents spawn: {PASSTHROUGH_PANE_ONLY}", file=err)
@@ -704,17 +704,20 @@ def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> 
 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
-    resolved provider. ``bg`` is claude-only; ``pane``/``headless`` are universal.
-    An unknown value (or ``bg`` on a non-bg provider) degrades open (warn, skip) -
+    resolved provider. ``thread`` is claude/opencode-only; ``pane``/``headless`` are universal.
+    ``bg`` is accepted as a deprecated alias for ``thread``.
+    An unknown value (or ``thread`` on a non-thread provider) degrades open (warn, skip) -
     never injected to fail at the spawn parser (both exit 2 there otherwise)."""
     if substrate not in _SUBSTRATES:
         return False
-    if substrate != "bg":
+    if substrate == "bg":
+        substrate = "thread"
+    if substrate != "thread":
         return True
     try:
         from fno.agents.harness_map import capabilities
 
-        return bool(capabilities(provider)["bg"])
+        return bool(capabilities(provider)["thread"])
     except Exception:
         return provider == "claude"
 

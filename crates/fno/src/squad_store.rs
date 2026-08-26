@@ -135,6 +135,12 @@ pub struct StoredMember {
     /// `#[serde(default)]`, same no-quarantine rule as `tab_name`.
     #[serde(default)]
     pub worker: Option<String>,
+    /// Full harness session identity captured while the registry row exists.
+    /// The worker name remains the live join key, but row death can rewrite or
+    /// delete that name before restart restore runs. This durable fallback is
+    /// therefore audit and resume identity, never an attach-id prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
 }
 
 /// A durable per-squad identity for an UNNAMED squad, minted the first time it
@@ -1564,6 +1570,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness_session_id: None,
         }
     }
 
@@ -1805,6 +1812,7 @@ mod tests {
             tab_name: Some("lane".into()),
             cwd: Some("/repo/wt".into()),
             worker: Some("probe-x5f7f".into()),
+            harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[worker, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -1823,6 +1831,24 @@ mod tests {
     }
 
     #[test]
+    fn worker_member_roundtrips_full_harness_session_id() {
+        let raw = r#"{
+            "name":"targets",
+            "members":[{
+                "attach_id":"",
+                "worker":"t-x8a01-restore",
+                "harness_session_id":"01a03a85-1111-7222-8333-444455556666"
+            }]
+        }"#;
+        let squad: StoredSquad = serde_json::from_str(raw).expect("stored squad");
+        let encoded = serde_json::to_value(&squad).expect("serialize stored squad");
+        assert_eq!(
+            encoded["members"][0]["harness_session_id"], "01a03a85-1111-7222-8333-444455556666",
+            "the full resume key must survive a squads.json read/write"
+        );
+    }
+
+    #[test]
     fn hostile_worker_name_is_dropped_at_load() {
         // The load gate's argv-safety half: a worker name carrying a path
         // separator or a metacharacter never reaches a resume, exactly like a
@@ -1834,6 +1860,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: Some("a;rm -rf".into()),
+            harness_session_id: None,
         };
         upsert("work", "", &["/repo".into()], &[hostile, m("c19cd2c3")]).unwrap();
         let loaded = load();
@@ -2722,6 +2749,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness_session_id: None,
             }];
             assert_eq!(
                 prune_decision(&s, false, live_some, &no_cwds, &gone),
@@ -2916,6 +2944,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness_session_id: None,
         }];
         assert_eq!(
             prune_decision_at(
@@ -3071,6 +3100,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness_session_id: None,
         }
     }
 

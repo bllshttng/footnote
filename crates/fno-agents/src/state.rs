@@ -1500,6 +1500,26 @@ fn acquire_exclusive(lock_file: &Path) -> Result<File, StateError> {
     Ok(file)
 }
 
+/// Try to take the exclusive sidecar lock without interrupting startup
+/// recovery. A writer holding this lock owns the temp file and recovery must
+/// leave it alone for the next pass.
+pub(crate) fn try_lock_path_exclusive(path: &Path) -> Result<Option<File>, StateError> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path(path))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 /// Open (creating if needed) the lock sidecar and take a shared advisory lock,
 /// blocking until acquired. Multiple readers share; an exclusive writer
 /// excludes them. Same sidecar target as [`acquire_exclusive`].

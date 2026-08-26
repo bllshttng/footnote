@@ -2402,12 +2402,13 @@ class ThinkSpawnBlock(BaseModel):
         """Preserve previously accepted values without restoring authority.
 
         An absent key remains ``None`` so ``config.dispatch`` and its harness
-        default decide. A present malformed legacy value keeps the historical
-        fail-safe to Claude ``bg`` behavior.
+        default decide. ``bg`` remains accepted for one release, while new
+        configuration should use ``thread``. A present malformed value keeps
+        the historical fail-safe to Claude ``bg`` behavior.
         """
         if v is None or (isinstance(v, str) and not v.strip()):
             return None
-        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
+        if isinstance(v, str) and v.strip().lower() in {"pane", "thread", "bg", "headless"}:
             return v.strip().lower()
         return "bg"
 
@@ -2710,6 +2711,7 @@ class RecoveryBlock(BaseModel):
     watchdog: Literal["off", "report", "wake"] = "off"
     watchdog_mail_to: str = ""
     watchdog_reap: bool = False
+    startup_destructive: bool = False
     retire_grace_s: int = Field(default=900, ge=0)
 
 
@@ -3383,6 +3385,14 @@ class BranchBlock(BaseModel):
         return v
 
 
+class MuxRestoreBlock(BaseModel):
+    """Mux server-restart restoration settings."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    hold_workers: bool = True
+
+
 class MuxBlock(BaseModel):
     """fno mux (terminal multiplexer) settings (nested under 'config.mux').
 
@@ -3424,6 +3434,7 @@ class MuxBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     shell_integration: str = "mux-panes"
+    restore: MuxRestoreBlock = Field(default_factory=MuxRestoreBlock)
     # Which projects the backlog board renders (x-20f1). The graph is ONE store
     # tagged by project, so an unscoped board shows every project's work to
     # someone sitting in one checkout. `repo` (the default) scopes to this

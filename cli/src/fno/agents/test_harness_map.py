@@ -260,7 +260,7 @@ def test_default_harness_is_claude_bg_with_bypass():
     an approval prompt)."""
     out = _resolve(node_id="x-4d85")
     assert out["harness"] == "claude"
-    assert out["substrate"] == "bg"
+    assert out["substrate"] == "thread"
     assert out["command"] == "/target --no-merge x-4d85"
     assert out["permission_bypass"] == ["--dangerously-skip-permissions"]
 
@@ -269,7 +269,7 @@ def test_codex_defaults_to_headless():
     """Verify line: --harness codex resolves to the headless substrate."""
     out = _resolve(harness="codex")
     assert out["substrate"] == "headless"
-    assert out["bg"] is False
+    assert out["thread"] is False
     assert out["permission_bypass"] == ["--dangerously-bypass-approvals-and-sandbox"]
 
 
@@ -286,6 +286,18 @@ def test_explicit_bg_on_non_bg_harness_is_rejected():
     """bg is claude + opencode; an explicit bg on codex is a hard error -> headless."""
     with pytest.raises(DispatchResolveError, match="headless"):
         _resolve(harness="codex", substrate="bg")
+
+
+def test_bg_is_a_deprecated_alias_for_thread():
+    out = _resolve(harness="claude", substrate="bg")
+    assert out["substrate"] == "thread"
+    assert out["thread"] is True
+
+
+def test_thread_is_the_canonical_persistent_substrate():
+    out = _resolve(harness="claude", substrate="thread")
+    assert out["substrate"] == "thread"
+    assert out["thread"] is True
 
 
 def test_autonomous_pane_is_rejected():
@@ -399,7 +411,7 @@ def test_opencode_default_dispatch_renders_fno_slash():
     lane, x-d9f9) - no prose brief."""
     out = _resolve(harness="opencode", node_id="x-4d85")
     assert out["command"] == "/fno:target --no-merge x-4d85"
-    assert out["substrate"] == "bg"
+    assert out["substrate"] == "thread"
     assert out["command_surface"] == "slash"
 
 
@@ -516,8 +528,8 @@ def test_config_already_native_template_not_double_prefixed():
 
 
 def test_substrate_default_table():
-    assert substrate_default("claude") == "bg"
-    assert substrate_default("opencode") == "bg"
+    assert substrate_default("claude") == "thread"
+    assert substrate_default("opencode") == "thread"
     for h in ("codex", "gemini", "agy"):
         assert substrate_default(h) == "headless"
 
