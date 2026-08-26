@@ -52,18 +52,26 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
 DIFFICULTY_REQUIRED_AFTER = date(2026, 8, 26)
 
 
-def difficulty_gate_error(frontmatter: dict) -> str | None:
+def difficulty_gate_error(
+    frontmatter: dict, *, undatable_refuses: bool = True
+) -> str | None:
     """The date-keyed difficulty refusal for raw frontmatter, or None.
 
     ONE implementation shared by the model validator, the execution-scope
     early return in ``fno do plan validate``, and the intake lanes' prep
     gate: validate-plan.sh runs ``--execution``, which never reaches
     ``PlanFrontmatter``, so without this shared helper the gate a plan hits
-    at CREATION would drift from the one the model enforces later. An EMPTY
-    dict (the no-frontmatter plan, fail-soft by design) returns None; any
-    other frontmatter that cannot be dated - created absent or unreadable -
-    refuses with the cannot-read error, since an undatable plan cannot bind
-    the gate and the direct-intake lanes have no fallback dater.
+    at CREATION would drift from the one the model enforces later.
+
+    Undatable frontmatter (created absent from a non-empty dict, or present
+    in a shape the gate cannot read) is the one place the scopes legitimately
+    differ. The MINTING lanes (intake, the model) have no fallback dater, so
+    they refuse it (the default). The AUTHORING scope passes
+    ``undatable_refuses=False`` because validate-plan.sh dates those same
+    plans itself - a filename date for a plan whose frontmatter lacks
+    created, tolerant reads of compact spellings - and its tests pin that
+    contract; refusing here would preempt the validator's own dating. The
+    band refusal, once the plan IS dated post-gate, is identical everywhere.
     """
     created = frontmatter.get("created")
     if isinstance(created, datetime):
@@ -96,13 +104,18 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
         # would silently mint a bandless node on the direct-intake lanes
         # validate-plan.sh never reaches; the empty-dict case above is the
         # one no-frontmatter flow that keeps passing.
-        return (
-            "cannot read created: absent from frontmatter; the difficulty "
-            "gate needs a date. Set created: <YYYY-MM-DD> and, for "
-            "post-gate plans, difficulty: low, medium, high."
-        )
+        if undatable_refuses:
+            return (
+                "cannot read created: absent from frontmatter; the difficulty "
+                "gate needs a date. Set created: <YYYY-MM-DD> and, for "
+                "post-gate plans, difficulty: low, medium, high."
+            )
+        return None
     if created is None:
-        if not frontmatter:
+        if not frontmatter or not undatable_refuses:
+            # Empty dict: the no-frontmatter plan, fail-soft by design.
+            # Lenient scope: validate-plan.sh's own dating (filename date,
+            # tolerant reads) owns the plan this gate cannot date.
             return None
         # PRESENT but unreadable: returning None here would bypass the gate
         # in the --execution scope, which never reaches the model's own date

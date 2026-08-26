@@ -39,8 +39,10 @@ def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
     assert "difficulty is required" in result.output
     assert "low, medium, high" in result.output
 
-    # Round-11: the JSON violation names the axis the message is about -
-    # a cannot-read-created refusal is field "created", not "difficulty".
+    # Round-12: undatable created is LENIENT at the authoring scope -
+    # validate-plan.sh dates those plans itself (filename date, tolerant
+    # reads), so the gate defers instead of refusing; the refusal the
+    # minting lanes raise never appears here.
     no_created = tmp_path / "no-created.md"
     no_created.write_text("---\nnode: x-baef\nstatus: ready\n---\n# T\n\nBody.\n")
     import json as _json
@@ -48,10 +50,10 @@ def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
     r3 = runner.invoke(
         app, ["do", "plan", "validate", str(no_created), "--execution", "--json"]
     )
-    assert r3.exit_code == 1, r3.output
     payload = _json.loads(r3.output)
-    assert payload["violations"][0]["field"] == "created"
-    assert "absent from frontmatter" in payload["violations"][0]["message"]
+    assert not any(
+        "cannot read created" in v["message"] for v in payload["violations"]
+    ), "authoring scope defers undatable created to validate-plan.sh's own dating"
 
     on_gate = tmp_path / "on-gate.md"
     on_gate.write_text(

@@ -335,30 +335,30 @@ def validate(
         # branch's body checks nor PlanFrontmatter below, so a post-gate plan
         # with no difficulty sailed through authoring and only died later at
         # /fno:execute. Frontmatter outranks body: this fires first. Same
-        # helper the model validator uses - one gate.
+        # helper the model validator uses - one gate. AUTHORING lenience:
+        # validate-plan.sh dates undatable plans itself (filename date,
+        # tolerant reads), so an unreadable created defers to it here rather
+        # than refusing; the minting lanes keep the strict default.
         from fno.plan.schema import difficulty_gate_error
 
-        gate_error = difficulty_gate_error(doc.frontmatter)
+        gate_error = difficulty_gate_error(doc.frontmatter, undatable_refuses=False)
         if gate_error:
-            # The gate's own message names its axis: a cannot-read-created
-            # refusal is a created problem, not a difficulty one, and a
-            # consumer keying on field is pointed at the field to fix.
-            gate_field = (
-                "created" if gate_error.startswith("cannot read created") else "difficulty"
-            )
+            # Only the difficulty-required refusal can reach this scope:
+            # undatable created defers to validate-plan.sh's own dating, so
+            # the field is always the difficulty axis here.
             if json_out:
                 typer.echo(json.dumps({
                     "valid": False,
                     "path": str(resolved),
                     "scope": "execution",
-                    "violations": [{"field": gate_field, "message": gate_error}],
+                    "violations": [{"field": "difficulty", "message": gate_error}],
                     "warnings": [],
                 }))
             else:
                 typer.echo(
                     f"invalid execution: {resolved} (difficulty gate)", err=True
                 )
-                typer.echo(f"  {gate_field}: {gate_error}", err=True)
+                typer.echo(f"  difficulty: {gate_error}", err=True)
             raise typer.Exit(code=1)
 
         result = validate_execution(doc)
