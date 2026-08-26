@@ -190,3 +190,30 @@ def test_manifest_graph_node_id_fallback(tmp_path, monkeypatch) -> None:
     bare.write_text("session_id: 2782a6e1-aaaa-bbbb-cccc-dddddddddddd\n", encoding="utf-8")
     assert orch.manifest_graph_node_id(str(bare)) == ""
     assert orch.manifest_graph_node_id(str(tmp_path / "nope.md")) == ""
+
+
+def test_manifest_node_resolves_from_a_subdirectory(tmp_path, monkeypatch) -> None:
+    """The emit resolves `.fno` through the repo root, so a bare relative read
+    from a subdirectory found nothing and skipped the settle in silence.
+
+    The row then stays in_progress under a pid-anchored claim nothing
+    releases, and every later wave pass reads a peer hold that never existed.
+    """
+    orch = _load_orch()
+
+    root = tmp_path / "repo"
+    (root / ".fno").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-t1\n", encoding="utf-8"
+    )
+    sub = root / "cli" / "src"
+    sub.mkdir(parents=True)
+
+    monkeypatch.chdir(sub)
+    assert orch.manifest_graph_node_id() == "x-t1"
+
+    monkeypatch.chdir(tmp_path)
+    assert orch.manifest_graph_node_id() == "", (
+        "positive control: outside the repo there is still no node"
+    )

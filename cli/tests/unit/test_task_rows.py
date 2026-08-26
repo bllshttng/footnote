@@ -716,34 +716,3 @@ def test_reclaiming_a_done_row_keeps_a_claim_you_already_held(
     assert refused.exit_code == 3
     assert lock.exists(), "the claim this call did not take must survive its refusal"
     assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["holder"] == SID_A
-
-
-def test_manifest_node_resolves_from_a_subdirectory(tmp_path, monkeypatch):
-    """The emit resolves .fno through the repo root, so a bare relative read
-    from a subdirectory found nothing and skipped the settle in silence,
-    stranding the claim."""
-    import importlib.util
-
-    root = tmp_path / "repo"
-    (root / ".fno").mkdir(parents=True)
-    (root / ".git").mkdir()
-    (root / ".fno" / "target-state.md").write_text(
-        "graph_node_id: x-t1\n", encoding="utf-8"
-    )
-    sub = root / "cli" / "src"
-    sub.mkdir(parents=True)
-
-    spec = importlib.util.spec_from_file_location(
-        "orch_sub", Path("skills/execute/orchestrator.py").resolve()
-    )
-    orch = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(orch)
-
-    monkeypatch.chdir(sub)
-    assert orch.manifest_graph_node_id() == "x-t1"
-
-    monkeypatch.chdir(tmp_path)
-    assert orch.manifest_graph_node_id() == "", (
-        "positive control: outside the repo there is still no node"
-    )
