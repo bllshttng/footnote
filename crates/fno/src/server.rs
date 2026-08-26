@@ -968,7 +968,15 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
         .iter()
         .position(|t| t == "--resume" || t == "resume")
         .and_then(|i| tokens.get(i + 1))
-        .filter(|sid| !sid.is_empty() && !sid.contains('='))
+        // A FLAG is not a session id. `codex resume --last` resumes the most
+        // recent session without naming it, so the token after `resume` is
+        // `--last` and storing it yields a join key matching no row. The junk
+        // value is harmless; the MISS is not. `pane_resumes_session` is what
+        // keeps a row non-resumable while a pane runs that session, so a pane
+        // started this way leaves its row still offered as resumable, and one
+        // tap opens a SECOND WRITER on a live rollout. That is not
+        // theoretical: it happened in this branch's own review round.
+        .filter(|sid| !sid.is_empty() && !sid.contains('=') && !sid.starts_with('-'))
         .cloned()
 }
 
@@ -17688,6 +17696,21 @@ mod tests {
             resume_target_from_argv(&argv(&["claude", "--resume"])),
             None,
             "a resume flag with no following token parses nothing"
+        );
+        // (x-d401) A FLAG is not a session id. `codex resume --last` names no
+        // session, so storing `--last` yields a join key matching no row, and
+        // `pane_resumes_session` then fails to keep that row non-resumable
+        // while a pane runs it. One tap opens a second writer on a live
+        // rollout, so this filter is a safety guard, not tidiness.
+        assert_eq!(
+            resume_target_from_argv(&argv(&["codex", "resume", "--last"])),
+            None,
+            "a flag is not a session id"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["claude", "--resume", "--foo"])),
+            None,
+            "the claude form rejects a flag too"
         );
         assert_eq!(
             resume_target_from_argv(&argv(&["/bin/zsh"])),

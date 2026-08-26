@@ -387,3 +387,31 @@ def test_load_orientation_node_override(tmp_path, monkeypatch) -> None:
 
 def test_self_check_runs() -> None:
     orient._self_check()
+
+
+def test_build_report_resolves_the_plan_binding_exactly_once(monkeypatch, tmp_path):
+    """(x-d401) One fact, one read.
+
+    `build_report` used to resolve the binding for boundary-reconcile and then
+    let `_plan_line` re-derive it through a second `_bound_plan_path` call, so
+    the same fact was read twice per run. Two reads of one fact can disagree:
+    a concurrent `plan_path` edit between them, or a read that fails on only
+    one, leaves `plan:` and `boundary-reconcile:` describing different plans.
+    That is the drift `_bound_plan_path` was added to remove, reintroduced one
+    call later. Counting the RESOLVER, not `_graph_entry`, because other
+    orient lines read the graph for their own reasons.
+    """
+    calls = []
+    real = orient._bound_plan_path
+
+    def _counting(plan_path, project_root, node_id):
+        calls.append(node_id)
+        return real(plan_path, project_root, node_id)
+
+    monkeypatch.setattr(orient, "_graph_entry", lambda n, r: {"plan_path": ""})
+    monkeypatch.setattr(orient, "_bound_plan_path", _counting)
+    # An EMPTY manifest plan_path is the carrier miss that reaches the
+    # resolver; a populated one short-circuits and proves nothing.
+    orient.build_report(tmp_path, node_id="x-1", plan_path=None)
+
+    assert len(calls) == 1, f"the binding must be resolved once, got {len(calls)}"
