@@ -6639,9 +6639,35 @@ pub fn classify_coverage_tiled(
                 if verdict == "pass" {
                     continue;
                 }
+                // A RETRACTION is a fail row carrying retracts_attester, and
+                // local_latest_passes drops the pass it names. Admitting it
+                // here would re-mint at the revoked head the very coverage
+                // the revocation exists to destroy, so a revoke would ADD
+                // coverage. It is not a review round; it is the undoing of
+                // one.
+                if val
+                    .pointer("/data/retracts_attester")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                // The same zero-evidence guard the pass scan applies. A row
+                // that measured no lines and no files read nothing, whatever
+                // its verdict says, and counting it past the cap would let a
+                // hand-crafted or pre-guard fail row mint Covered(1).
+                if zero_evidence_attestation(&val) {
+                    continue;
+                }
                 let Some(reviewer) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
                     continue;
                 };
+                // Normalized exactly as the pass scan normalizes it (6086):
+                // a `/code-review` fail row beside a `code-review` pass is
+                // ONE reviewer, and an unnormalized compare here would slip
+                // past the dedup below and count it twice.
+                let reviewer = reviewer.trim_start_matches('/');
                 let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
                     continue;
                 };

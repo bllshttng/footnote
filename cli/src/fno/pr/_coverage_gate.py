@@ -101,7 +101,15 @@ def _pr_author_login(pr_number: int, repo: str) -> Optional[str]:
         from fno.pr._proc import run
         from fno.pr._rest import fetch_pr_info_rest
 
-        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=run)
+        # Bounded like _pr_reviews, and for the same reason: this runs inside
+        # `fno do pr merge`, and bare `run` passes timeout=None and does not
+        # catch TimeoutExpired, so a stalled gh would hang the merge verb
+        # rather than fail closed.
+        def _bounded(cmd, **kwargs):
+            kwargs.setdefault("timeout", 30.0)
+            return run(cmd, **kwargs)
+
+        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=_bounded)
         return str((info or {}).get("author") or "") or None
     except Exception:  # noqa: BLE001 - an unreadable author fails closed below
         return None
@@ -120,9 +128,12 @@ def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
     arm (the receipt survives both verdicts): the recovery from a wrong
     refusal is one command; the recovery from a wrong merge is a revert.
     """
-    from fno.pr import _reviews
-
     try:
+        # Inside the try: an unreadable label state must not open the valve,
+        # and an ImportError here is one more way to be unreadable. Hoisting
+        # it out would propagate out of coverage_verdict instead.
+        from fno.pr import _reviews
+
         held, actor = _reviews._override_label_actor(pr_number, repo, _reviews.run)
     except Exception:  # noqa: BLE001 - an unreadable label is not an override
         return False, "", ""
@@ -895,7 +906,7 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
     fires on a broken read would decline review remainder the budget may
     not have spent.
     """
-    from fno.pr._internal_gh import _rest_pages, _rest_runner
+    from fno.pr._internal_gh import _rest_pages
     from fno.pr._proc import run
     from fno.pr._rest import _repo_slug
 
@@ -904,15 +915,21 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
         return run(cmd, **kwargs)
 
     try:
-        rest_runner = _rest_runner("gh", _bounded)
         slug = _repo_slug(repo, _bounded)
         if not slug:
             return None
+        # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
+        # _quota.delegate_environment(), which strips the quota proxy from
+        # PATH so the proxy's own delegate call does not recurse. That is
+        # right inside _internal_gh and wrong from here: this gate is a proxy
+        # CLIENT, and every sibling read in this module (_repo_slug just
+        # above, _pr_head_oid, _pr_author_login) is brokered. Stamping it
+        # here would spend the shared quota unmetered.
         rows, _reason = _rest_pages(
             f"repos/{slug}/pulls/{pr_number}/reviews",
             "pull reviews",
             cwd=repo,
-            runner=rest_runner,
+            runner=_bounded,
         )
         if rows is None:
             return None

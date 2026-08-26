@@ -1086,6 +1086,113 @@ fn round_budget_no_reviews_evidence_keeps_the_events_only_answer() {
 
 // --- the round cap under the operator's ruling: file the rest, keep the hard ---
 
+/// The three admission rules the pass scan applies, on the spent-budget fail
+/// arm that re-implements them. Each case is a chain that tiles with the
+/// budget spent, differing only in the one row the arm must refuse.
+fn cap_verdict_count_for(repo: &std::path::Path, rows: &[String]) -> usize {
+    let events = events_file(repo, rows);
+    let tiling = tiling_for(repo, &events);
+    assert!(tiling.tiled, "chain must tile: {:?}", tiling.gaps);
+    assert!(tiling.rounds_exhausted, "budget must be spent for this arm");
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &git(repo, &["rev-parse", "HEAD"]),
+        Some(&tiling),
+        None,
+        false,
+    );
+    rep.verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .count()
+}
+
+#[test]
+fn cap_a_retraction_never_mints_coverage_at_the_head_it_revoked() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 4);
+    // A retraction is a fail row carrying retracts_attester, and
+    // local_latest_passes drops the pass it names. If the spent-budget arm
+    // admits it too, a REVOKE adds the coverage it exists to destroy.
+    // The revoked reviewer's ONLY row is the retraction. A retraction that
+    // replaces one of its own live fails would leave the count unchanged and
+    // hide the defect, so the specimen is a reviewer whose whole presence in
+    // the chain IS the revocation.
+    let retraction = {
+        let mut row: serde_json::Value =
+            serde_json::from_str(&attestation("peer", &shas[2], &head, "fail")).unwrap();
+        row["data"]["retracts_attester"] = serde_json::json!("sess-a");
+        row.to_string()
+    };
+    let rows = vec![
+        attestation("code-review", &base, &shas[0], "fail"),
+        attestation("code-review", &shas[0], &shas[2], "fail"),
+        attestation("code-review", &shas[2], &head, "fail"),
+        retraction,
+    ];
+    // The control first: the same chain WITHOUT the retraction is covered by
+    // one verdict, so a 1 below is the arm working, not the arm dead.
+    assert_eq!(cap_verdict_count_for(repo, &rows[..3]), 1);
+    // With it, still 1. A 2 here is `peer` counted as Reviewed on the
+    // strength of a row that REVOKES a review.
+    assert_eq!(cap_verdict_count_for(repo, &rows), 1);
+}
+
+#[test]
+fn cap_a_zero_evidence_fail_row_never_counts() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 4);
+    // A row that measured no lines and no files read nothing, whatever its
+    // verdict says. The pass scan refuses it by name; the fail arm must too,
+    // or a hand-crafted row mints Covered(1) past the cap.
+    let hollow = {
+        let mut row: serde_json::Value =
+            serde_json::from_str(&attestation("hollow-reviewer", &shas[2], &head, "fail")).unwrap();
+        row["data"]["reviewed_line_count"] = serde_json::json!(0);
+        row["data"]["reviewed_file_count"] = serde_json::json!(0);
+        row.to_string()
+    };
+    let rows = vec![
+        attestation("code-review", &base, &shas[0], "fail"),
+        attestation("code-review", &shas[0], &shas[2], "fail"),
+        attestation("code-review", &shas[2], &head, "fail"),
+        hollow,
+    ];
+    // One real reviewer counts; the hollow row adds nothing.
+    assert_eq!(cap_verdict_count_for(repo, &rows), 1);
+}
+
+#[test]
+fn cap_a_slash_prefixed_reviewer_is_the_same_reviewer() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 4);
+    // The pass scan normalizes the leading slash. Without the same
+    // normalization here, `/code-review` and `code-review` are two reviewers
+    // and the count doubles - the exact double count the dedup guards.
+    let slashed = {
+        let mut row: serde_json::Value =
+            serde_json::from_str(&attestation("/code-review", &shas[2], &head, "fail")).unwrap();
+        row["data"]["attester_session_id"] = serde_json::json!("sess-b");
+        row.to_string()
+    };
+    let rows = vec![
+        attestation("code-review", &base, &shas[0], "fail"),
+        attestation("code-review", &shas[0], &shas[2], "fail"),
+        slashed,
+    ];
+    assert_eq!(cap_verdict_count_for(repo, &rows), 1);
+}
+
 #[test]
 fn cap_a_reviewer_with_both_a_pass_and_a_fail_link_counts_once() {
     let tmp = TempDir::new().unwrap();
