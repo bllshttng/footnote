@@ -182,29 +182,21 @@ def test_configured_prefix_mint_and_resolve(tmp_graph, monkeypatch):
     assert entries[0]["priority"] == "p1"
 
 
-def test_update_model_tier_valid_writes_node(tmp_graph):
+def test_update_model_tier_refuses_and_names_difficulty(tmp_graph):
+    """AC1-ERR (x-baef): --model-tier is a refusing tombstone. It exits 2 with
+    a message naming --difficulty and writes nothing - not the band, not the
+    retired key, not a history entry. The old handler wrote BOTH keys and
+    skipped difficulty_history; a refusal is the one behavior that replaces
+    all three spellings of that write."""
     r = _invoke("backlog", "add", "Tiered Feature")
     nid = json.loads(r.output)["id"]
-    r2 = _invoke("backlog", "update", nid, "--model-tier", "LOW")
-    assert r2.exit_code == 0, r2.output
-    assert _read_graph(tmp_graph)[0]["model_tier"] == "low"  # normalized
-
-
-def test_update_model_tier_invalid_exits_2(tmp_graph):
-    r = _invoke("backlog", "add", "Tiered Feature")
-    nid = json.loads(r.output)["id"]
-    r2 = runner.invoke(app, ["backlog", "update", nid, "--model-tier", "turbo"])
+    r2 = runner.invoke(app, ["backlog", "update", nid, "--model-tier", "high"])
     assert r2.exit_code == 2
-    assert "invalid --model-tier" in r2.output
-    assert "model_tier" not in _read_graph(tmp_graph)[0]
-
-
-def test_update_model_tier_null_clears(tmp_graph):
-    r = _invoke("backlog", "add", "Tiered Feature")
-    nid = json.loads(r.output)["id"]
-    _invoke("backlog", "update", nid, "--model-tier", "high")
-    _invoke("backlog", "update", nid, "--model-tier", "null")
-    assert _read_graph(tmp_graph)[0]["model_tier"] is None
+    assert "--difficulty" in r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert "model_tier" not in node
+    assert node.get("difficulty") is None
+    assert not node.get("difficulty_history")
 
 
 def test_update_difficulty_records_history(tmp_graph):
@@ -222,6 +214,26 @@ def test_update_difficulty_records_history(tmp_graph):
 
     _invoke("backlog", "update", nid, "--difficulty", "high")
     assert len(_read_graph(tmp_graph)[0]["difficulty_history"]) == 2
+
+
+def test_update_difficulty_supersedes_retired_model_tier(tmp_graph):
+    """x-baef round-3: the canonical write clears the retired spelling, so
+    following the tombstone's own prescription can never manufacture a
+    both-spellings row the migration would then refuse batch-wide; a null
+    difficulty_history row also survives the write instead of crashing it."""
+    r = _invoke("backlog", "add", "Legacy Band")
+    nid = json.loads(r.output)["id"]
+    entries = _read_graph(tmp_graph)
+    entries[0]["model_tier"] = "high"
+    entries[0]["difficulty_history"] = None
+    tmp_graph.write_text(json.dumps({"entries": entries}))
+
+    r2 = _invoke("backlog", "update", nid, "--difficulty", "high")
+    assert r2.exit_code == 0, r2.output
+    node = _read_graph(tmp_graph)[0]
+    assert node["difficulty"] == "high"
+    assert "model_tier" not in node
+    assert [h["source"] for h in node["difficulty_history"]] == ["update"]
 
 
 def test_update_blocks_everything_alone_acks_existing_p0(tmp_graph):

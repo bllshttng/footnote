@@ -791,7 +791,10 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
         return {}
 
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    # lstrip the UTF-8 BOM: str.strip() keeps it, so a Windows-authored plan
+    # whose first line is BOM+'---' would read as no-frontmatter here (and
+    # in _has_frontmatter_block), silently un-dating the plan.
+    if not lines or lines[0].lstrip("\ufeff").strip() != "---":
         return {}
 
     end_idx: int | None = None
@@ -821,6 +824,24 @@ def _read_plan_frontmatter(plan_path: str) -> dict:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+def _has_frontmatter_block(plan_path: str) -> bool:
+    """True when the file OPENS a ``---`` frontmatter block, whatever is in it.
+
+    ``_read_plan_frontmatter`` fails soft to ``{}`` both for a file with no
+    block (a valid state callers route on) and for a block it cannot parse.
+    The difficulty gate must pass the first and refuse the second, so it
+    needs the one bit the ``{}`` return conflates.
+    """
+    try:
+        with open(plan_path, "r", encoding="utf-8", errors="replace") as fh:
+            first = fh.readline()
+    except OSError:
+        return False
+    # Same BOM lstrip as _read_plan_frontmatter, so the two readers agree
+    # that a BOM+'---' opener IS a frontmatter block.
+    return first.lstrip("\ufeff").strip() == "---"
 
 
 def _list_known_projects() -> set[str]:
@@ -1236,6 +1257,29 @@ def _prepare_intake(
             "title": title,
         }
 
+    # The difficulty gate lives HERE - after the already-intaked short
+    # circuit (an idempotent re-run of a plan already on the graph stays a
+    # no-op even when the file is undatable), before every lane that would
+    # mint or mutate a node: the single-file lane (real and dry-run) and the
+    # multi lane's per-file try/except (a refused file skips, never aborts
+    # the batch). Inside the mutator it fired after the dry-run preview and,
+    # on the multi real lane, escaped the lock body.
+    from fno.plan.schema import difficulty_gate_error
+
+    gate_error = difficulty_gate_error(fm)
+    if gate_error is None and not fm and _has_frontmatter_block(plan_path):
+        # _read_plan_frontmatter conflates "no block" (fine) with "block
+        # present but unparseable"; the second is undatable, and the empty-
+        # dict carve-out would mint a bandless node out of broken YAML.
+        raise ValueError(
+            f"{plan_path}: cannot parse frontmatter; the difficulty gate "
+            "cannot date the plan. Fix the YAML block, then set created: "
+            "<YYYY-MM-DD> and, for post-gate plans, difficulty: "
+            "low, medium, high."
+        )
+    if gate_error:
+        raise ValueError(f"{plan_path}: {gate_error}")
+
     node_spec = {
         "plan_path": plan_path,
         "roadmap_id": roadmap_id,
@@ -1455,7 +1499,11 @@ def normalize_type(value: object) -> str:
 
 def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     from datetime import datetime, timezone
-    from fno.graph._constants import normalize_difficulty, validate_priority_write
+    from fno.graph._constants import (
+        append_difficulty_history,
+        normalize_difficulty,
+        validate_priority_write,
+    )
 
     project, node_cwd, fm = resolve_node_project_and_cwd(
         spec["plan_path"], spec.get("cli_project"), entries
@@ -1482,17 +1530,24 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     mission_from_msg_id: Optional[str] = fm.get("mission_from_msg_id") or None
 
     raw_difficulty = fm.get("difficulty")
-    if raw_difficulty is None:
-        raw_difficulty = fm.get("model_tier")
-        if raw_difficulty is not None:
-            sys.stderr.write(
-                "warning: plan frontmatter model_tier is deprecated; "
-                "use difficulty\n"
-            )
+    if raw_difficulty is None and fm.get("model_tier") is not None:
+        # The compat read died with the field (x-baef); a plan still spelling
+        # the band as model_tier must hear it lost, not lose it silently.
+        sys.stderr.write(
+            f"warning: {spec['plan_path']}: frontmatter model_tier is retired "
+            "and no longer read; set difficulty: low|medium|high to carry "
+            "the band\n"
+        )
     try:
         difficulty = normalize_difficulty(raw_difficulty)
-    except ValueError as exc:
-        raise ValueError(f"{spec['plan_path']}: {exc}") from exc
+    except (ValueError, AttributeError, TypeError) as exc:
+        # AttributeError joins ValueError: a non-string difficulty (an
+        # unquoted YAML int or list) dies inside strip()/lower() before the
+        # band check and would surface as a traceback, not this message.
+        raise ValueError(
+            f"{spec['plan_path']}: invalid difficulty {raw_difficulty!r} "
+            "(expected one of: low, medium, high)"
+        ) from exc
     blocks_everything = fm.get("blocks_everything") is True or str(
         fm.get("blocks_everything", "")
     ).strip().lower() == "true"
@@ -1503,7 +1558,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
     except ValueError as exc:
         raise ValueError(f"{spec['plan_path']}: {exc}") from exc
 
-    return {
+    node = {
         "id": mint_node_id({e.get("id") for e in entries if e.get("id")}),
         "parent": None,
         "title": spec["title"],
@@ -1516,15 +1571,7 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "priority": spec["priority"],
         "blocks_everything": blocks_everything,
         "difficulty": difficulty,
-        "difficulty_history": (
-            [{
-                "value": difficulty,
-                "source": "blueprint",
-                "ts": datetime.now(timezone.utc).isoformat(),
-            }]
-            if difficulty is not None
-            else []
-        ),
+        "difficulty_history": [],
         "domain": "code",
         "blocked_by": spec["deps"],
         "session_id": None,
@@ -1557,6 +1604,14 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "mission_slug": mission_slug,
         "mission_from_msg_id": mission_from_msg_id,
     }
+    if difficulty is not None:
+        # The one append shape every difficulty writer uses (x-baef): a
+        # hand-rolled birth entry here would drift from the helper the
+        # claim, update, and migration lanes all share.
+        append_difficulty_history(
+            node, difficulty, "blueprint", datetime.now(timezone.utc).isoformat()
+        )
+    return node
 
 
 def _collect_intake_paths(args) -> list[str]:

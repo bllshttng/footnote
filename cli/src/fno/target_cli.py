@@ -2074,26 +2074,32 @@ def _find_node(node_id: str) -> Optional[dict]:
 
 
 def _resolve_node_model(
-    node_id: str, *, explicit: Optional[str] = None, provider: Optional[str] = None
+    node_id: str,
+    *,
+    explicit: Optional[str] = None,
+    provider: Optional[str] = None,
+    include_difficulty: bool = False,
 ) -> tuple[Optional[str], str]:
-    """``(model, decision_source)`` for a node's ``model`` pin / ``model_tier``.
+    """``(model, decision_source)`` for a node's ``model`` pin.
 
     The single Python projection of ``route_resolve`` at the ``target start`` seam
-    (the same precedence ``advance.py`` uses), so tier resolution lives in exactly
+    (the same precedence ``advance.py`` uses), so pin resolution lives in exactly
     ONE place. An explicit ``-m`` wins without loading the node. ``provider`` scopes
-    tier resolution to the spawn harness so a tier never yields a cross-harness
-    pick; None defaults to ``claude`` (the bg spawn default -- a bg worker is
+    resolution to the spawn harness so a pick never crosses harnesses;
+    None defaults to ``claude`` (the bg spawn default -- a bg worker is
     always claude regardless of the invoking harness, so scoping by the ambient
     harness would mis-resolve; Locked 3 intent is the incident bg-default lane).
     ``model`` is None -> the spawn path uses the provider default. Strictly
     non-fatal: any error degrades to the explicit value or the provider default,
     so a dispatch never fails because of the routing layer (inherited Locked 10).
 
-    ``difficulty`` is deliberately NOT resolved here: advance's dispatch seams
-    defer it to the capacity grid (``advance._spawn_worker``), and a static pin
-    at start would suppress the same grid for a bare ``target start`` - the
-    exact upstream pin the deferral exists to remove. A difficulty-only node
-    starts on the provider default.
+    ``difficulty`` is deliberately NOT resolved here by default: advance's
+    dispatch seams defer it to the capacity grid, and a static pin at start
+    would suppress the same grid for a bare ``target start``. A lane whose
+    spawn argv pins ``--harness`` stands that grid down and has no receiving
+    end - the bash dispatch lane (``resolve-model``) - so it passes
+    ``include_difficulty=True`` and resolves the band itself (the resolution
+    ``model_tier`` gave it before the field retired).
     """
     try:
         from fno import route_resolve
@@ -2102,7 +2108,9 @@ def _resolve_node_model(
         model, source, _chain = route_resolve.resolve_dispatch_model(
             explicit=explicit,
             task_model=(node or {}).get("model"),
-            task_tier=(node or {}).get("model_tier"),
+            task_difficulty=(
+                (node or {}).get("difficulty") if include_difficulty else None
+            ),
             provider=provider or "claude",
         )
         return model, source
@@ -2145,19 +2153,25 @@ def resolve_model(
         help="Retired: the harness axis is --harness.",
     ),
 ) -> None:
-    """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
+    """Print the dispatch model a node resolves to (its ``model`` pin).
 
     The one Python projection of ``route_resolve`` for bash dispatchers
-    (``dispatch-node.sh``), so a tiered node's worker spawns on the tier model
+    (``dispatch-node.sh``), so a pinned node's worker spawns on the pin
     without bash ever reimplementing resolution. Prints the resolved model on
-    stdout, or nothing when the node has no pin/tier (the caller uses the harness
+    stdout, or nothing when the node has no pin (the caller uses the harness
     default). Never fails a dispatch: any error prints nothing.
     """
     from fno._flag_aliases import refuse_retired_provider
 
     refuse_retired_provider(_provider_tombstone)
 
-    model, _source = _resolve_node_model(_resolve_node_id(node), provider=harness)
+    # include_difficulty: the bash dispatch lane pins --harness in its spawn
+    # argv, which stands inject_spawn_defaults' grid down - there is no grid
+    # receiving end here, so the band resolves statically (the resolution
+    # model_tier gave this lane before the field retired).
+    model, _source = _resolve_node_model(
+        _resolve_node_id(node), provider=harness, include_difficulty=True
+    )
     if model and harness and not _model_reachable_by(model, harness):
         return  # a pin resolves unfiltered; the guard drops a cross-harness pin
     if model:
@@ -2696,8 +2710,12 @@ def _start_codex_native(
         )
         return
 
+    # include_difficulty mirrors the pinned-harness rule at the worktree
+    # start site: an operator --harness pin reaches the worker's spawn argv
+    # and stands the capacity grid down, so the band resolves here; unpinned
+    # it defers to the grid.
     resolved_model, source = _resolve_node_model(
-        node, explicit=model, provider=harness
+        node, explicit=model, provider=harness, include_difficulty=bool(harness)
     )
     cmd = _resolve_fno_cmd() + ["do", "target", "init", "--input", node]
     if plan_path:
@@ -3363,12 +3381,15 @@ def start(
             _warn_no_merge_dropped()
         return
 
-    # Project the node's model pin / tier into init's dispatch pin so a bare
-    # start on a tiered node carries the resolved model (x-d7a7). An explicit -m
-    # wins (precedence, resolved inside the helper); no pin/tier -> None ->
-    # nothing forwarded, byte-identical to pre-change. Never blocks (Locked 10).
+    # Project the node's model pin into init's dispatch pin (x-d7a7). An
+    # explicit -m wins (precedence, resolved inside the helper); no pin ->
+    # None -> nothing forwarded. When the operator pinned --harness the
+    # worker's spawn argv carries it, which stands the spawn-CLI capacity
+    # grid down - no grid receiving end - so the difficulty band resolves
+    # statically here; unpinned, the band defers to that grid. Never blocks
+    # (Locked 10).
     model, decision_source = _resolve_node_model(
-        node, explicit=model, provider=harness
+        node, explicit=model, provider=harness, include_difficulty=bool(harness)
     )
 
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node

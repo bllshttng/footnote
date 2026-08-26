@@ -93,7 +93,7 @@ def test_ac1_hp_intake_adopts_plan(tmp_graph, tmp_path):
     canonical value, not the legacy one.
     """
     plan = tmp_path / "fake-plan.md"
-    plan.write_text("---\ntitle: My Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: My Plan\n---\n# Body\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n")
     r = _invoke("backlog", "intake", str(plan))
     assert r.exit_code == 0, r.output
     assert "intake ab-" in r.output or "ab-" in r.output
@@ -109,7 +109,7 @@ def test_ac1_hp_intake_adopts_plan(tmp_graph, tmp_path):
 def test_adopt_alias_is_gone(tmp_graph, tmp_path):
     """`fno backlog adopt <plan>` exits non-zero (alias removed); `intake` is in --help."""
     plan = tmp_path / "fake-plan2.md"
-    plan.write_text("---\ntitle: My Plan 2\n---\n# Body\n")
+    plan.write_text("---\ncreated: 2026-05-05\ntitle: My Plan 2\n---\n# Body\n")
 
     r = _invoke("backlog", "adopt", str(plan))
     assert r.exit_code != 0, (
@@ -301,7 +301,7 @@ def test_intake_project_flag_overrides_frontmatter(tmp_graph, tmp_path):
     """--project beats frontmatter beats cwd inference."""
     plan = tmp_path / "plan-A.md"
     plan.write_text(
-        "---\nproject: from-frontmatter\n---\n# title\nbody\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
+        "---\ncreated: 2026-05-05\nproject: from-frontmatter\n---\n# title\nbody\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
     )
     r = _invoke("--json", "backlog", "intake", str(plan), "--project", "from-flag")
     assert r.exit_code == 0, r.output
@@ -316,7 +316,7 @@ def test_intake_warns_when_project_not_in_settings(tmp_graph, tmp_path, monkeypa
     """Resolved project not in any settings workspace -> stderr warning, exit 0."""
     plan = tmp_path / "plan-B.md"
     plan.write_text(
-        "---\nproject: brand-new-project\n---\n# title\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
+        "---\ncreated: 2026-05-05\nproject: brand-new-project\n---\n# title\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
     )
 
     # Project-local settings declares only 'existing-project'
@@ -343,7 +343,7 @@ def test_intake_warns_when_project_not_in_settings(tmp_graph, tmp_path, monkeypa
 def test_intake_empty_project_flag_errors(tmp_graph, tmp_path):
     """--project '' is rejected with exit 1."""
     plan = tmp_path / "plan-C.md"
-    plan.write_text("---\nproject: foo\n---\n")
+    plan.write_text("---\ncreated: 2026-05-05\nproject: foo\n---\n")
 
     r = _invoke("backlog", "intake", str(plan), "--project", "")
     assert r.exit_code == 1, r.output
@@ -448,7 +448,7 @@ def test_intake_routes_to_frontmatter_project_end_to_end(tmp_graph, tmp_path, mo
     # Plan declares project: from-frontmatter
     plan = tmp_path / "plan-shared-vault.md"
     plan.write_text(
-        "---\nproject: from-frontmatter\n---\n# title\nbody\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
+        "---\ncreated: 2026-05-05\nproject: from-frontmatter\n---\n# title\nbody\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n| `cli/src/fno/example.py` | modify |\n"
     )
     # Isolate from any settings.yaml that would emit a workspace warning
     fake_home = tmp_path / "home"

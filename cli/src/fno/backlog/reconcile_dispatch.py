@@ -134,11 +134,10 @@ def _contract_dependents(closed_node_id: str) -> list[dict]:
             # x-571f: carry the model pin so the reconcile worker (a /target
             # --reconcile build) honors it, not just advance's dependents.
             # difficulty rides alongside so the grid resolver sees the work axis;
-            # provider so the tier scopes to (and the worker spawns on) the same
+            # provider so the band scopes to (and the worker spawns on) the same
             # harness as the other dispatch paths (x-da6e).
             "model": e.get("model"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
-            "model_tier": e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             "provider": e.get("provider"),
         })
     return out
@@ -374,8 +373,7 @@ def fire_pending_reconcile(node_id: str, root: Path | str) -> Optional[AdvanceRe
                 dep = {"id": node_id, "project": e.get("project"),
                        "slug": e.get("slug") or e.get("title"), "cwd": e.get("cwd"),
                        "model": e.get("model"),
-                       "difficulty": e.get("difficulty") or e.get("model_tier"),
-                       "model_tier": e.get("model_tier"),
+                       "difficulty": e.get("difficulty"),
                        "provider": e.get("provider")}
                 break
         if dep is None:

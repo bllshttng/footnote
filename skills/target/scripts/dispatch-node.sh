@@ -473,14 +473,15 @@ for id in "${NODES[@]}"; do
   # error (the same trap the --cwd branches below avoid). Empty pin -> zero args =
   # byte-identical to today; fail-open on a bad read since jq // empty yields "".
   model_pin="$(printf '%s' "$node_json" | jq -r '.model // empty' 2>/dev/null || true)"
-  # x-d7a7: no exact `.model` pin? resolve the node's `model_tier` via the single
-  # Python projection (`fno do target resolve-model` -> route_resolve) so a tiered
-  # node's worker spawns on the tier model too - bash never resolves. Scope the
+  # x-d7a7: no exact `.model` pin? resolve the node's band via the single
+  # Python projection (`fno do target resolve-model` -> route_resolve) so a
+  # pinned node's worker spawns on the resolved model too - bash never
+  # resolves. Scope the
   # pick to the RESOLVED dispatch provider (x-567d), not a hardcoded `claude`: a
-  # tier that resolves to a model of a DIFFERENT harness is dropped to the
+  # resolution that lands on a model of a DIFFERENT harness is dropped to the
   # provider default rather than passed as an invalid `<provider> --model
   # <foreign>` (the cross-harness mismatch obs 100675 named). Empty output (no
-  # pin/tier, cross-harness pick, or any resolve error) -> zero args.
+  # pin, cross-harness pick, or any resolve error) -> zero args.
   if [[ -z "$model_pin" ]]; then
     model_pin="$(fno do target resolve-model "$id" --harness "$DISPATCH_PROVIDER" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
   fi

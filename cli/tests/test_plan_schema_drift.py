@@ -89,6 +89,11 @@ DESIGN_SPEC = (
     / "skills/blueprint/references/single-doc-spec.md"
 )
 
+QUICK_TEMPLATE = (
+    Path(__file__).resolve().parents[2]
+    / "skills/blueprint/references/quick-template.md"
+)
+
 
 def _design_template() -> str:
     """The ```markdown design-doc block from single-doc-spec.md.
@@ -149,6 +154,7 @@ def test_design_template_actually_validates() -> None:
         .replace("<node id; a scalar, never a list>", "x-9999")
         .replace("<node id>", "x-9999")
         .replace("<YYYY-MM-DD>", "2026-07-28")
+        .replace("<low | medium | high>", "medium")
         .replace("light|standard|deep", "standard")
         .replace("[<artifacts actually read>]", "[probe.py]")
         .replace("<absorb | append | proceed_alone>", "proceed_alone")
@@ -158,6 +164,34 @@ def test_design_template_actually_validates() -> None:
         f"so it is no longer validating the real shape: {filled!r}"
     )
     PlanFrontmatter(**yaml.safe_load(filled))  # raises ValidationError on drift
+
+
+def test_design_template_shows_difficulty() -> None:
+    """x-baef: the gate now demands ``difficulty`` on every post-gate plan, and
+    the field stays Pydantic-optional so the required-subset test above cannot
+    see it. Name it directly or the template can silently drop the one key the
+    gate refuses to default."""
+    frontmatter = _design_template().split("---")[1]
+    shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))
+    assert "difficulty" in shown, (
+        f"{DESIGN_SPEC.name}'s frontmatter template omits `difficulty`; a plan "
+        "written to it after 2026-08-26 fails validation on a key the author "
+        "was never shown"
+    )
+
+
+def test_quick_template_shows_difficulty() -> None:
+    """The same guard for quick-template.md, the /blueprint quick surface; a
+    template the gate's own PR taught can lose the key just as silently."""
+    blocks = re.findall(r"```markdown\n(.*?)```", QUICK_TEMPLATE.read_text(encoding="utf-8"), re.S)
+    assert blocks, f"{QUICK_TEMPLATE.name} lost its markdown template block"
+    frontmatter = blocks[0].split("---")[1]
+    shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))
+    assert "difficulty" in shown, (
+        f"{QUICK_TEMPLATE.name}'s frontmatter template omits `difficulty`; a "
+        "quick plan written to it after 2026-08-26 fails validation on a key "
+        "the author was never shown"
+    )
 
 
 def test_design_template_carries_the_section_blueprint_builds_tasks_from() -> None:
