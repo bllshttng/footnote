@@ -40,7 +40,13 @@ _HARNESS_TOKENS = ("claude", "codex", "gemini", "opencode", "agy")
 # `Codex Framework.framework` exe paths whose segments are not `codex`.
 _SEGMENT_TOKENS = frozenset(t for t in _HARNESS_TOKENS if t != "claude")
 
-_PSUTIL_ERRORS = (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess)
+_PSUTIL_ERRORS = (
+    psutil.NoSuchProcess,
+    psutil.AccessDenied,
+    psutil.ZombieProcess,
+    PermissionError,
+)
+_START_ERRORS = (*_PSUTIL_ERRORS, ValueError)
 
 
 def _candidate_strings(proc: psutil.Process) -> Iterator[tuple[str, bool]]:
@@ -132,7 +138,7 @@ def resolve_session_pid(from_pid: Optional[int] = None) -> Optional[int]:
     start = from_pid if from_pid is not None else os.getppid()
     try:
         proc: Optional[psutil.Process] = psutil.Process(start)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+    except _START_ERRORS:
         # ValueError covers a negative/zero start pid; all degrade to None.
         return None
 
@@ -166,7 +172,7 @@ def resolve_session_harness(from_pid: Optional[int] = None) -> Optional[str]:
     start = from_pid if from_pid is not None else os.getppid()
     try:
         proc: Optional[psutil.Process] = psutil.Process(start)
-    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+    except _START_ERRORS:
         return None
     depth = 0
     while proc is not None and depth < _MAX_DEPTH:

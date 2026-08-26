@@ -3114,7 +3114,7 @@ def cmd_intake(
 # -- update --
 
 
-@cli.command("note", hidden=True)
+@cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
@@ -3128,6 +3128,7 @@ def cmd_note(
     ``task_done``/``run_summary`` (x-2057); it is also hand-runnable.
     """
     from fno.graph.store import append_progress_note
+    from fno.claims.self_identity import resolve_self_identity
 
     text = text.strip()
     if not text:
@@ -3135,6 +3136,14 @@ def cmd_note(
         raise typer.Exit(code=1)
 
     note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    try:
+        identity = resolve_self_identity()
+    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
+        identity = None
+    if identity is not None and identity.session_id:
+        note["source_session_id"] = identity.session_id
+    if identity is not None and identity.harness:
+        note["source_harness"] = identity.harness
     found, _ = append_progress_note(_graph_path(), task_id, note)
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)

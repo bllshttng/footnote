@@ -166,6 +166,16 @@ def test_spawn_brief_quoting_enact_is_not_a_law_action() -> None:
     assert gate.evaluate(_payload(command), arm=lambda **kwargs: {}) is None
 
 
+def test_canonical_enact_text_quoted_as_backlog_decision_data_is_not_decided() -> None:
+    gate = _gate()
+    command = (
+        'fno backlog decide x-90f5 '
+        f'"The gate rejected {COMMAND} even though this is quoted evidence."'
+    )
+
+    assert gate.evaluate(_payload(command), arm=lambda **kwargs: {}) is None
+
+
 def test_missing_session_and_arm_failure_deny() -> None:
     gate = _gate()
     missing = gate.evaluate(_payload(session_id=""), arm=lambda **kwargs: {})

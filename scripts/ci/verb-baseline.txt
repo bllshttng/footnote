@@ -91,6 +91,7 @@ inbox law enact
 inbox law inspect
 inbox law prepare
 inbox law resume
+inbox law set
 inbox notify
 inbox outstanding ask
 inbox outstanding clear !--origin
@@ -105,6 +106,7 @@ law enact
 law inspect
 law prepare
 law resume
+law set
 lint
 loops
 loops resume-all

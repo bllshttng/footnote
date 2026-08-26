@@ -84,6 +84,8 @@ def _canonical_fields(
     rationale: str | None,
     options: Iterable[str] | None,
     supersedes: str | None,
+    graduation: str | None,
+    graduation_ref: str | None,
 ) -> dict[str, Any]:
     normalized_subject = subject.strip()
     normalized_decision = decision.strip()
@@ -111,12 +113,19 @@ def _canonical_fields(
             raise ProposalValidationError(
                 f"supersedes decision {normalized_supersedes} does not exist"
             )
+    from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
+
+    try:
+        graduation_data = graduation_or_guidance(graduation, graduation_ref)
+    except InvalidGraduationError as exc:
+        raise ProposalValidationError(str(exc)) from exc
     return {
         "subject": normalized_subject,
         "decision": normalized_decision,
         "rationale": normalized_rationale,
         "options": normalized_options,
         "supersedes": normalized_supersedes,
+        "graduation": graduation_data,
     }
 
 
@@ -214,6 +223,8 @@ def prepare_proposal(
     rationale: str | None = None,
     options: Iterable[str] | None = None,
     supersedes: str | None = None,
+    graduation: str | None = None,
+    graduation_ref: str | None = None,
 ) -> dict[str, Any]:
     _prune()
     fields = _canonical_fields(
@@ -222,6 +233,8 @@ def prepare_proposal(
         rationale=rationale,
         options=options,
         supersedes=supersedes,
+        graduation=graduation,
+        graduation_ref=graduation_ref,
     )
     from fno.decide import list_decisions
 
@@ -364,7 +377,17 @@ def _validate_operator_consent(
         _receipt_hash(receipt), receipt_hash
     ):
         raise InvalidOperatorConsentError("approval receipt is invalid")
-    fields = {key: proposal.get(key) for key in ("subject", "decision", "rationale", "options", "supersedes")}
+    fields = {
+        key: proposal.get(key)
+        for key in (
+            "subject",
+            "decision",
+            "rationale",
+            "options",
+            "supersedes",
+            "graduation",
+        )
+    }
     if fields != expected or _content_hash(fields) != consent.content_hash:
         raise InvalidOperatorConsentError("proposal content mismatch")
     return proposal
@@ -454,6 +477,7 @@ def enact_proposal(
         rationale=proposal["rationale"],
         options=proposal["options"],
         supersedes=proposal["supersedes"],
+        graduation=proposal["graduation"],
         # The permission click proves a chat approval, never a human origin
         # (ruling d-15ddfab0: origin_provenance not_exposed), so the row
         # never claims the operator lane.
@@ -495,7 +519,60 @@ def _json(value: Any) -> None:
     typer.echo(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
-law_app = typer.Typer(help="Compose and enact human-approved project law.")
+law_app = typer.Typer(
+    help="Record operator law directly or enact a staged agent draft.",
+)
+
+
+@law_app.command("set")
+def record_command(
+    subject: str = typer.Argument(..., help="Subject governed by the law."),
+    decision: str = typer.Argument(..., help="Operator workaround or policy."),
+    rationale: str | None = typer.Option(None, "--rationale"),
+    option: list[str] = typer.Option([], "--option"),
+    supersedes: str | None = typer.Option(None, "--supersedes"),
+    graduation: str | None = typer.Option(None, "--graduation"),
+    graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
+) -> None:
+    """Record law in one call when the operator is the author."""
+    from fno.decide import (
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+        record_decision,
+    )
+    from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
+
+    try:
+        graduation_data = graduation_or_guidance(graduation, graduation_ref)
+        result = record_decision(
+            subject=subject,
+            decision=decision,
+            rationale=rationale,
+            options=list(option) or None,
+            supersedes=supersedes,
+            authority_source="operator",
+            graduation=graduation_data,
+        )
+    except InvalidGraduationError as exc:
+        typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
+        raise typer.Exit(2) from exc
+    except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+        typer.echo(
+            f"fno law: refused: {exc}. Append agent findings with "
+            "`fno backlog note <node> <text>`.",
+            err=True,
+        )
+        raise typer.Exit(3) from exc
+    except IndexWriteError as exc:
+        typer.echo(
+            f"fno law: recorded {exc.decision_id} to the project journal, but "
+            "the recall index write failed. Run `fno backlog decide-reindex`; "
+            "do not re-run the law command.",
+            err=True,
+        )
+        raise typer.Exit(1) from exc
+    typer.echo(result["decision_id"])
 
 
 @law_app.command("prepare")
@@ -505,6 +582,8 @@ def prepare_command(
     rationale: str = typer.Option(..., "--rationale"),
     option: list[str] = typer.Option([], "--option"),
     supersedes: str | None = typer.Option(None, "--supersedes"),
+    graduation: str | None = typer.Option(None, "--graduation"),
+    graduation_ref: str | None = typer.Option(None, "--graduation-ref"),
 ) -> None:
     _json(
         prepare_proposal(
@@ -513,6 +592,8 @@ def prepare_command(
             rationale=rationale,
             options=option,
             supersedes=supersedes,
+            graduation=graduation,
+            graduation_ref=graduation_ref,
         )
     )
 

@@ -127,6 +127,20 @@ def legacy_record(
         help="How the decider was entitled to decide: 'operator', 'crown', "
         "'agent', or 'beastmode'. Omit to resolve it from the current session.",
     ),
+    graduation: Optional[str] = typer.Option(
+        None,
+        "--graduation",
+        help="enforced, guidance, or should-be-enforced-but-i-did-not.",
+    ),
+    graduation_ref: Optional[str] = typer.Option(
+        None,
+        "--graduation-ref",
+        help=(
+            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
+            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
+            "Follow-up: node:<id>."
+        ),
+    ),
 ) -> None:
     """Warn once, then delegate the old spelling to the backlog leaf."""
     typer.echo(_DEPRECATION_NOTICE, err=True)
@@ -142,6 +156,8 @@ def legacy_record(
         decided_by=decided_by,
         authority=authority,
         origin=None,
+        graduation=graduation,
+        graduation_ref=graduation_ref,
     )
 
 
@@ -156,6 +172,8 @@ def _record(
     decided_by: Optional[str],
     authority: Optional[str],
     origin: Optional[str],
+    graduation: Optional[str],
+    graduation_ref: Optional[str],
 ) -> None:
     """Record a decision as a durable event plus a graph projection."""
     if not decision or not subject:
@@ -172,6 +190,7 @@ def _record(
         UnattributedAuthorityError,
         record_decision,
     )
+    from fno.decide.graduation import InvalidGraduationError, graduation_or_guidance
 
     # Validated here, on the write path, and deliberately NOT in schema.yaml:
     # rows already on disk carry invented `crown-l2-<node>` spellings, and a
@@ -188,6 +207,7 @@ def _record(
         raise typer.Exit(2)
 
     try:
+        graduation_data = graduation_or_guidance(graduation, graduation_ref)
         result = record_decision(
             decision=decision,
             subject=subject,
@@ -198,6 +218,7 @@ def _record(
             # who quotes only decided_by must never be handed a name an agent
             # typed. Authority stays stated, validated against the enum above.
             authority_source=authority,
+            graduation=graduation_data,
             origin=origin,
             rationale=rationale,
             options=list(option) or None,
@@ -206,12 +227,16 @@ def _record(
     except UnknownOriginError as exc:
         typer.echo(f"decide: refused. {exc}", err=True)
         raise typer.Exit(3)
+    except InvalidGraduationError as exc:
+        typer.echo(f"backlog decide: refused. {exc}. Nothing was recorded.", err=True)
+        raise typer.Exit(2)
     except RefusedAuthorityError as exc:
         typer.echo(
-            f"decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record under operator authority. If only the operator can "
-            "settle this, use `fno inbox outstanding ask`. If ruling as an agent, "
-            "drop --authority operator; it records agent coordination.",
+            f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
+            "cannot record decisions. Decisions are operator-authored through "
+            "`fno law set <subject> <decision>`. Append agent findings without "
+            "replacing node details with "
+            "`fno backlog note <node> <text>`.",
             err=True,
         )
         raise typer.Exit(3)
@@ -219,9 +244,10 @@ def _record(
         typer.echo(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
-            "authority is never inherited by silence. Run it from a terminal, "
-            "join the session so a handle can be stamped, or drop --authority "
-            "operator to record it in the unattributed lane.",
+            "authority is never inherited by silence. Run "
+            "`fno law set <subject> <decision>` from an attended operator terminal. "
+            "Append agent findings with "
+            "`fno backlog note <node> <text>`.",
             err=True,
         )
         raise typer.Exit(3)
@@ -305,6 +331,20 @@ def backlog_decide(
         "--authority",
         help="How the decider was entitled to decide.",
     ),
+    graduation: Optional[str] = typer.Option(
+        None,
+        "--graduation",
+        help="enforced, guidance, or should-be-enforced-but-i-did-not.",
+    ),
+    graduation_ref: Optional[str] = typer.Option(
+        None,
+        "--graduation-ref",
+        help=(
+            "Enforced: test:<nodeid>; file|doc:<path>[:<line>]=>marker:<text>; "
+            "gate:<cmd>=>marker:<text>; default:<key>=<value>. "
+            "Follow-up: node:<id>."
+        ),
+    ),
     origin: Optional[str] = typer.Option(
         None,
         "--origin",
@@ -345,6 +385,8 @@ def backlog_decide(
         decided_by=decided_by,
         authority=authority,
         origin=origin,
+        graduation=graduation,
+        graduation_ref=graduation_ref,
     )
 
 
@@ -454,7 +496,7 @@ def list_cmd(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        metavar="live|expired|superseded|retracted|unscoped|all",
+        metavar="live|retired|expired|superseded|retracted|unscoped|all",
         help="Filter by the derived lifecycle state.",
     ),
     review_list: bool = typer.Option(
@@ -490,7 +532,7 @@ def backlog_decisions(
     state: Optional[str] = typer.Option(
         None,
         "--state",
-        metavar="live|expired|superseded|retracted|unscoped|all",
+        metavar="live|retired|expired|superseded|retracted|unscoped|all",
         help="Filter by the derived lifecycle state.",
     ),
     review_list: bool = typer.Option(

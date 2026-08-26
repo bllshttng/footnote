@@ -221,13 +221,13 @@ def test_ac1_hp_triage_projects_empty_graph(tmp_graph):
 
 
 # ---------------------------------------------------------------------------
-# x-71b6 In-N-Out tiering: `fno backlog --help` advertises 11 verbs; the rest
+# x-71b6 In-N-Out tiering: `fno backlog --help` advertises 12 verbs; the rest
 # are hidden but invocable, with sibling pointers on the advertised verbs.
 # ---------------------------------------------------------------------------
 
 _ADVERTISED_BACKLOG_VERBS = {
     "add", "idea", "get", "update", "view", "find", "next", "done", "defer",
-    "rank", "triage",
+    "rank", "triage", "note",
 }
 
 
