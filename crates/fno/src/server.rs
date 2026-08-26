@@ -5309,6 +5309,7 @@ impl Core {
             AgentNoPaneReason::MissingSessionId => "session id is missing",
             AgentNoPaneReason::UnsupportedHarness => "harness cannot resume sessions",
             AgentNoPaneReason::BackendNotLive => "backend liveness is unconfirmed",
+            AgentNoPaneReason::LivenessUnmeasured => "liveness was never measured",
         }
     }
 
