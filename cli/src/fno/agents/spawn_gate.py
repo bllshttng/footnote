@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Literal, NoReturn, Optional
 from urllib.parse import unquote
 
+from fno.agents.row_contradiction import project_row
 from fno.harness_identity import claude_transport_short_id
 
 # Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
@@ -215,6 +216,11 @@ class LiveWorker:
     #: Cost is attributed through this field so a shared ceiling can be
     #: divided without minting a second budget record.
     spawned_by: Optional[str] = None
+    #: (x-d401) Why ``status`` is not the registry's stored token, when it is
+    #: not: a row the contradiction rules rewrote (e.g. a `spawning` token a
+    #: live pid outlived renders `live` + basis `stale-spawning-live-pid`).
+    #: None means the stored token passed through untouched.
+    status_basis: Optional[str] = None
 
 
 @dataclass
@@ -390,6 +396,43 @@ def census() -> LiveCensus:
         substrate = "pane" if getattr(row, "mux", None) else (
             "bg" if bg_alive else "worker"
         )
+        session_pid = resolve_session_pid(
+            harness=row.harness,
+            short_id=row.short_id,
+            session_id=row.harness_session_id,
+            pid=row.pid,
+            socket_map=sock_map,
+        )
+        # (x-d401) The stored token goes through the contradiction rules with
+        # the liveness this census ALREADY measured: a `spawning` token a
+        # live pid outlived renders the movement-derived state with a basis
+        # naming the contradiction, never a bare `spawning` for a working
+        # row. Fires only on positive liveness (measured-live pid, or a
+        # session pid the rendezvous actually resolved); unknown keeps the
+        # token.
+        projected = project_row(
+            {
+                "status": str(row.status),
+                "created_at": row.created_at,
+                # `row.pid is None` guards the second disjunct, and the guard is
+                # load-bearing. `resolve_session_pid` FALLS BACK to the recorded
+                # pid: every non-claude harness returns it unchanged, and so does
+                # a claude row that misses the socket map. So a bare
+                # `session_pid is not None` is true whenever `row.pid` is set,
+                # including for a row whose liveness this census just failed to
+                # read and warned about as "process incarnation unreadable"
+                # above. That handed an UNMEASURED pid to the rule as positive
+                # liveness, and the rule then rewrote a parked `spawning` row to
+                # `live` under a basis naming a measurement nobody took. The
+                # rendezvous case this disjunct exists for is the one where no
+                # pid was recorded and the socket map supplied it.
+                "pid_alive": pid_state is True
+                or (row.pid is None and session_pid is not None),
+            }
+        )
+        status_basis = projected.get("basis") if projected.get(
+            "status"
+        ) != str(row.status) else None
         out.workers.append(
             LiveWorker(
                 source="fno",
@@ -397,16 +440,11 @@ def census() -> LiveCensus:
                 harness=row.harness,
                 substrate=substrate,
                 pid=row.pid,
-                status=str(row.status),
+                status=str(projected.get("status", row.status)),
+                status_basis=status_basis,
                 session_id=row.harness_session_id,
                 spawned_by=row.spawned_by_session,
-                session_pid=resolve_session_pid(
-                    harness=row.harness,
-                    short_id=row.short_id,
-                    session_id=row.harness_session_id,
-                    pid=row.pid,
-                    socket_map=sock_map,
-                ),
+                session_pid=session_pid,
             )
         )
 

@@ -191,7 +191,13 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # dropped the keys. Measured 2026-08-20: 0 of 37 live rows carried either. The
 # bump is not for a new Python field - it is what turns a pre-v16 binary's
 # SILENT erasure into a loud refusal, the same reason v11-v14 bumped.
-SCHEMA_VERSION = 16
+# v17 (x-d401): additive `model_basis` - whether `model` was REQUESTED at spawn
+# or VERIFIED off a pane status. Same additive-optional shape and same
+# forward-compat rationale as v11-v14: asdict emits the key on every written
+# row, so without the bump a pre-v17 reader sees an unknown key AT its own
+# schema (read_forward is strictly greater-than), reaches AgentEntry(**row) and
+# TypeErrors - the PR #364 brick. The bump makes it a version gap instead.
+SCHEMA_VERSION = 17
 
 
 class RegistryVersionError(RuntimeError):
@@ -243,6 +249,14 @@ class AgentEntry:
     aliases: list[str] = field(default_factory=list)
     provider: Optional[str] = None
     model: Optional[str] = None
+    # (x-d401) The basis for `model`: "requested" (stamped at spawn from the
+    # flag or route the caller named) or "verified" (read back from a verified
+    # pane status). A bare model is two facts in one field - the x-aa8e
+    # shape - so the pair travels together. None on rows that predate the
+    # field or carry no model. Additive-optional; stays OUT of the list-row
+    # projection (model is a projection omission by standing ruling: intended
+    # configuration must not surface as observed runtime truth).
+    model_basis: Optional[str] = None
     effort: Optional[str] = None
     created_at: str = field(default_factory=_utc_now_iso)
     status: AgentStatus = "live"
@@ -1502,6 +1516,12 @@ def register_existing_session(
                 if provider is not None:
                     entry.provider = provider
                 if model is not None:
+                    # Only a CHANGED model re-bases. The SessionStart hook
+                    # re-fires register after every resume, and restamping the
+                    # SAME model would downgrade a `verified` basis (read back
+                    # off a pane status) to this call's mere intent.
+                    if entry.model != model:
+                        entry.model_basis = "requested"
                     entry.model = model
                 if effort is not None:
                     entry.effort = effort
@@ -1548,6 +1568,7 @@ def register_existing_session(
             harness=harness,
             provider=provider,
             model=model,
+            model_basis="requested" if model is not None else None,
             effort=effort,
             harness_session_id=session_id,
             cwd=cwd,
@@ -1771,6 +1792,7 @@ def project_verified_tier(
                 f"registry row {name!r} was not restamped to session {session_id!r}"
             )
         target.model = model
+        target.model_basis = "verified"
         target.effort = effort
         result.append(target)
         return entries

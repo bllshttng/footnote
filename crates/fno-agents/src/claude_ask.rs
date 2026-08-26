@@ -2956,12 +2956,36 @@ pub fn dispatch_claude_spawn(
             );
         }
     };
-    // Locked Decision 5: name the applied mode (flag or yolo-derived) so an audit
-    // of "why did this worker have edit rights" has a durable answer. Only when
-    // set, so the unset receipt is byte-identical (AC7). Values are exact
-    // passthrough, so escape `"` defensively.
+    // Locked Decision 5, renamed by x-74ea/x-d401: name the REQUESTED mode
+    // (flag or yolo-derived) so an audit of "why did this worker have edit
+    // rights" has a durable answer - and only as a request, because fno
+    // cannot back the outcome (a forced-default environment ignores the flag
+    // while the old key read as an applied grant). Only when set, so the
+    // unset receipt is byte-identical (AC7). Values are exact passthrough and
+    // nothing validates them against a closed set before here, so use the same
+    // full JSON-string encode as `model_field` below - a `"`-only escape
+    // diverges on a backslash and can emit invalid JSON.
     let perm_field = match effective_mode.filter(|m| !m.is_empty()) {
-        Some(m) => format!(r#", "permission_mode": "{}""#, m.replace('"', "\\\"")),
+        // RAW string, not escaped quotes: `check-reachable-paths.sh` normalizes
+        // a literal by stripping `\.` escapes, so the escaped spelling folds to
+        // `, permission_mode_requested: {}` and stops matching the Python twin.
+        // The pair is still real, so keep it SPELLED as a twin rather than
+        // retiring its baseline row - a guard dropped is worse than a guard
+        // that made us pick a string form.
+        Some(m) => format!(r#", "permission_mode_requested": {}"#, json_string_ascii(m)),
+        None => String::new(),
+    };
+    // (x-d401, seventh surface) The model the worker was launched with: an
+    // explicit --model reaches claude as its own flag, so it wins the receipt
+    // too - Python's `model or route_model` rule verbatim; this Rust lane is
+    // reached only without a route flag, so no route twin exists here.
+    // Absent when none was named: the honest absence, never a defaulted name
+    // that reads as a measurement.
+    // Placed before `status`, where Python's cmd_spawn puts it, and encoded
+    // with the same full JSON-string encode Python's `json.dumps` applies -
+    // a `"`-only escape diverges on a backslash and can emit invalid JSON.
+    let model_field = match model.filter(|m| !m.is_empty()) {
+        Some(m) => format!(", \"model\": {}", json_string_ascii(m)),
         None => String::new(),
     };
     // x-85fe: append the effective launch dir on the default canonical move
@@ -2981,7 +3005,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude"{model_field}, "status": "{receipt_status}"{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,
@@ -3570,7 +3594,15 @@ fn create(
         short_id: short_id.clone(),
         legacy_provider: String::new(),
         provider: Some("anthropic".to_string()),
-        model: None,
+        // (x-d401) The model the worker was launched with, and the basis
+        // marking it REQUESTED - this is the spawn's own claim, never an
+        // observed reading. The caller's model was in hand here and was
+        // dropped (receipt named it, row read None), the exact
+        // presence-discarded half of the predicate.
+        model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        model_basis: model
+            .filter(|m| !m.is_empty())
+            .map(|_| "requested".to_string()),
         effort: None,
         // Canonical identity at birth (x-ec59); harness_session_id mirrors the
         // resolved uuid. A bounded miss stays a named spawning row below.

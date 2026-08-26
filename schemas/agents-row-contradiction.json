@@ -184,6 +184,146 @@
         "liveness_origin": "survivor",
         "liveness_origin_basis": null
       }
+    },
+    {
+      "name": "spawning token outlived by a live pid renders the movement-derived state",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "live",
+        "basis": "stale-spawning-live-pid"
+      }
+    },
+    {
+      "name": "spawning with no live pid yet is telling the truth",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": null,
+        "pid_alive": false
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with a live pid younger than the spawn timeout keeps its token",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-21T00:59:30Z",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with unknown pid liveness keeps its token",
+      "row": {
+        "status": "spawning",
+        "created_at": "2026-08-20T12:00:00Z",
+        "pid": 123
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "spawning with no created_at has no age evidence to contradict",
+      "row": {
+        "status": "spawning",
+        "pid": 123,
+        "pid_alive": true
+      },
+      "expected": {
+        "status": "spawning"
+      }
+    },
+    {
+      "name": "a working supervisor word superseded by a fired falsifier is marked",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "reachability": "unreachable",
+        "basis": "process-gone"
+      },
+      "expected": {
+        "live_status_basis": "contradicted-by-process-gone"
+      }
+    },
+    {
+      "name": "a needs-input word superseded by a falsifier is equally contradicted",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "Needs input",
+        "reachability": "unreachable",
+        "basis": "pane-gone"
+      },
+      "expected": {
+        "live_status_basis": "contradicted-by-pane-gone"
+      }
+    },
+    {
+      "name": "a superseded word with a reachable verdict is not a contradiction",
+      "row": {
+        "status": "live",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "reachability": "reachable",
+        "basis": "transcript"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
+    },
+    {
+      "name": "an idle supervisor word superseded by a falsifier claims nothing",
+      "row": {
+        "status": "orphaned",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "idle",
+        "reachability": "unreachable",
+        "basis": "process-gone"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
+    },
+    {
+      "name": "a row with no supersession carries no contradiction basis",
+      "row": {
+        "status": "live",
+        "live_status": "working",
+        "reachability": "reachable",
+        "basis": "transcript"
+      },
+      "expected": {
+        "live_status_basis": null
+      }
+    },
+    {
+      "name": "a contradiction names the falsifier that ARRIVED, not one a later rule wrote",
+      "row": {
+        "status": "orphaned",
+        "basis": "process-gone",
+        "reachability": "unreachable",
+        "live_status": "Stalled (claim stale)",
+        "superseded_live_status": "working",
+        "last_event_at": "2026-08-21T00:59:30Z",
+        "last_reconciled_at": "2026-08-21T00:50:00Z"
+      },
+      "expected": {
+        "status": "unknown",
+        "basis": "stale-verdict-fresher-event",
+        "live_status_basis": "contradicted-by-process-gone"
+      }
     }
   ]
 }

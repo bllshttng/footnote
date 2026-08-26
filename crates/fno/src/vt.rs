@@ -19,6 +19,23 @@ use alacritty_terminal::term::{point_to_viewport, viewport_to_point, Config, Ter
 use alacritty_terminal::vte::ansi::{Color as VtColor, NamedColor, Processor, Rgb};
 
 use crate::proto::{cell_flags, BlockDir, BlockMeta, BlockSel, Cell, Color, Frame};
+use serde::{Deserialize, Serialize};
+
+/// (x-d401) What the pane's own OSC 133 evidence says about its shell: a
+/// four-way reading, never a blind default. `Unmeasured` when no marker was
+/// ever seen (nothing here is knowable - the reading the old render folded
+/// into `Idle`), `Running` when a command block is open, `Empty` when the
+/// shell drew a prompt and ran nothing, `Idle` when a block completed and the
+/// prompt is back. A rendered value must be a function of this signal, never
+/// of which builder produced it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellActivity {
+    Unmeasured,
+    Running,
+    Empty,
+    Idle,
+}
 
 /// One resolved link: the validated URL plus every VISIBLE pane-local cell
 /// belonging to it (the hover affordance's underline span). Built only by
@@ -302,7 +319,26 @@ impl Pane {
     /// job, leaves a block). Anything the shell has touched fails this, so
     /// take-over never reaps live work (the P1 the tcgetpgrp check missed).
     pub fn is_pristine_idle_shell(&self) -> bool {
-        self.saw_marker && self.open.is_none() && self.blocks.is_empty()
+        matches!(self.shell_activity(), ShellActivity::Empty)
+    }
+
+    /// (x-d401) The pane's shell activity as a four-way reading. This is the
+    /// ONE predicate the takeover gate and the sideline render both consume:
+    /// `is_pristine_idle_shell` is `matches!(.., Empty)` over it, and the
+    /// bare-pane sideline row carries it so a render can distinguish a live
+    /// workload from an un-integrated shell instead of folding both into
+    /// `Idle`.
+    pub fn shell_activity(&self) -> ShellActivity {
+        if !self.saw_marker {
+            return ShellActivity::Unmeasured;
+        }
+        if self.open.is_some() {
+            return ShellActivity::Running;
+        }
+        if self.blocks.is_empty() {
+            return ShellActivity::Empty;
+        }
+        ShellActivity::Idle
     }
 
     /// Snapshot the ACTIVE grid (alt screen included - `Term` swaps grids
@@ -2871,6 +2907,42 @@ mod tests {
         let mut ran = Pane::new(6, 40);
         ran.feed(b"\x1b]133;C\x07out\x1b]133;D;0\x07\x1b]133;A\x07");
         assert!(!ran.is_pristine_idle_shell(), "a command has already run");
+    }
+
+    #[test]
+    fn shell_activity_names_what_the_pane_knows() {
+        // (x-d401) One reading for four realities. A pane that never spoke OSC 133
+        // is UNMEASURED, never idle; an open command block is Running; a prompt
+        // that ran nothing is Empty; a completed block is Idle. The takeover gate
+        // is exactly the Empty reading - one predicate, no second copy to drift.
+        let mut pane = Pane::new(6, 40);
+        assert_eq!(
+            pane.shell_activity(),
+            ShellActivity::Unmeasured,
+            "no OSC 133 markers seen"
+        );
+        pane.feed(b"\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert_eq!(
+            pane.shell_activity(),
+            ShellActivity::Empty,
+            "prompt drawn, nothing run"
+        );
+        assert!(pane.is_pristine_idle_shell(), "Empty == the takeover gate");
+        let mut running = Pane::new(6, 40);
+        running.feed(b"\x1b]133;A\x07\x1b]133;C\x07");
+        assert_eq!(
+            running.shell_activity(),
+            ShellActivity::Running,
+            "a command is running"
+        );
+        let mut ran = Pane::new(6, 40);
+        ran.feed(b"\x1b]133;C\x07out\x1b]133;D;0\x07\x1b]133;A\x07");
+        assert_eq!(
+            ran.shell_activity(),
+            ShellActivity::Idle,
+            "a command has already run"
+        );
+        assert!(!ran.is_pristine_idle_shell(), "Idle is not pristine");
     }
 
     #[test]

@@ -30,7 +30,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 import typer
 
@@ -2317,15 +2317,22 @@ def _codex_desktop_handoff_policy(repo_root: Path) -> Optional[Any]:
 def _remote_base_ref(cwd: Path, *, fetch: bool = False) -> str:
     """Verified remote default-branch ref used by native target bootstrap."""
     if fetch:
-        refreshed = subprocess.run(
-            ["git", "-C", str(cwd), "fetch", "--quiet", "origin"],
-            capture_output=True,
-            text=True,
-        )
-        if refreshed.returncode != 0:
+        ok, err = _refresh_remote(cwd, "origin")
+        if not ok and err == _TIMED_OUT:
+            # The bound is this branch's addition; before it, a slow fetch just
+            # finished. Refusing here would break a cold start that used to
+            # work, so say the freshness is unproven and let the ref check
+            # below be the gate. A stale ref is not silently blessed: the
+            # receipt's own base line reports `behind=unmeasured`.
+            typer.echo(
+                "fno do target start: remote refresh timed out; "
+                "resolving the base against possibly stale refs.",
+                err=True,
+            )
+        elif not ok:
             typer.echo(
                 "fno do target start: could not refresh remote base: "
-                f"{refreshed.stderr.strip() or 'git fetch origin failed'}",
+                f"{err or 'git fetch origin failed'}",
                 err=True,
             )
             raise typer.Exit(code=1)
@@ -2351,13 +2358,123 @@ def _base_receipt(cwd: Path, base: str, *, head: str = "HEAD") -> str:
     return f"{base}@{fork[:12]}"
 
 
+_REFRESHED_REMOTES: set = set()
+
+# `_refresh_remote`'s stderr value when the fetch hit its own 60s bound rather
+# than answering. A sentinel, not prose: a caller deciding whether to refuse
+# must not have to pattern-match a message that a rewording could change.
+_TIMED_OUT = "fetch timed out after 60s"
+
+# Remotes whose fetch already burned the full bound in THIS process, keyed by
+# `(cwd, remote)`. A start resolves the base ref and then measures the
+# distance, two fetches of the same remote; without this the second one pays
+# another 60s to re-learn that the network is slow, so a cold start on a bad
+# link stalls for two minutes before printing an unmeasured base either way.
+# Deliberately NOT folded into `_REFRESHED_REMOTES`: that set means "this ref
+# is fresh", and a timeout proves the opposite.
+_TIMED_OUT_REMOTES: set = set()
+
+
+def _refresh_remote(cwd: Path, remote: str, *refspec: str) -> Tuple[bool, str]:
+    """One fetch per (repo, remote, refspec) per process (x-3ae1).
+
+    Shared by the base-ref resolution and the truthful-base measurement so a
+    start that already refreshed origin never pays a second network round
+    trip for the same information. The REFSPEC is part of the key, and the
+    subsumption runs ONE way: a whole-remote `fetch origin` satisfies a later
+    `fetch origin main`, never the reverse. Keying on the remote alone let a
+    narrow fetch suppress a broad one, which resolves the base against a ref
+    only one branch was fetched into. Returns ``(ok, stderr)`` - git's own
+    message, because "fetch failed" cannot tell auth from DNS from a typo."""
+    key = (str(cwd), remote, refspec)
+    whole_remote = (str(cwd), remote, ())
+    if key in _REFRESHED_REMOTES or whole_remote in _REFRESHED_REMOTES:
+        return True, ""
+    if (str(cwd), remote) in _TIMED_OUT_REMOTES:
+        return False, _TIMED_OUT
+    try:
+        fetched = subprocess.run(
+            ["git", "-C", str(cwd), "fetch", "--quiet", remote, *refspec],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        _TIMED_OUT_REMOTES.add((str(cwd), remote))
+        # A TIMEOUT is not a fetch verdict, and callers must be able to tell it
+        # apart. Before this bound existed the fetch simply ran to completion,
+        # so treating a slow-but-working network as a hard failure would refuse
+        # a cold start that used to succeed. `_TIMED_OUT` is the marker; the
+        # base-ref path warns and carries on, and the measurement path already
+        # degrades to `behind=unmeasured`.
+        return False, _TIMED_OUT
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    if fetched.returncode != 0:
+        return False, (fetched.stderr or "").strip()
+    _REFRESHED_REMOTES.add(key)
+    return True, ""
+
+
+def _unmeasured_base(base_label: str, why: str) -> str:
+    """The base field when no distance was taken, as ONE parseable token.
+
+    The receipt is a whitespace-separated `key=value` line and this doc says
+    so, but the reason used to ride in parentheses: `behind=unmeasured (fetch
+    timed out)` split into `(fetch`, `timed` and `out)`, three tokens carrying
+    no key. A receipt that contradicts its own documented shape is the defect
+    this branch ships to delete, so `why` is a single hyphenated slug and the
+    whole field stays one token.
+    """
+    return f"{base_label} behind=unmeasured:{why}"
+
+
+def _truthful_base(cwd: Path, base_label: str) -> str:
+    """The base label with a MEASURED distance, or an explicit unmeasured
+    marker (x-d401 / x-3ae1).
+
+    A bare ref reads as a distance: ``rev-list --count HEAD..origin/main``
+    consults the LOCAL ref, so a branch dozens of commits behind answers 0
+    whenever the ref is stale, and the caller learns otherwise only at PR
+    conflict time. The receipt either fetches and prints the real count, or
+    says the distance was not measured. Never a silent zero.
+    """
+    if base_label == "in-place":
+        return base_label
+    # A `_base_receipt` label carries `@<fork-sha>` provenance; the distance
+    # is measured against the bare ref underneath it.
+    bare = base_label.rpartition("@")[0] or base_label
+    remote, _, branch = bare.partition("/")
+    if not branch:
+        # No `<remote>/<branch>` shape means the label names a LOCAL ref, and
+        # `HEAD..<local-branch>` is exactly the stale-ref silent zero this
+        # function exists to refuse. Fetching `origin main` and then measuring
+        # against a local `main` would print a confident, wrong distance.
+        return _unmeasured_base(base_label, "base-names-no-remote-ref")
+    ok, err = _refresh_remote(cwd, remote, branch)
+    if not ok:
+        # Name the CAUSE. "fetch failed" over a timeout is the same
+        # absence-as-verdict this receipt exists to delete: a slow network and
+        # a refused remote are different facts, and only one of them means the
+        # base is unreachable.
+        return _unmeasured_base(
+            base_label, "fetch-timed-out" if err == _TIMED_OUT else "fetch-failed"
+        )
+    count = _git_out(cwd, "rev-list", "--count", f"HEAD..{bare}")
+    count = (count or "").strip()
+    if not count.isdigit():
+        return _unmeasured_base(base_label, "rev-list-failed")
+    return f"{base_label} behind={count}"
+
+
 def _request_codex_native_handoff(
     repo_root: Path, node: str, policy: Any, base: str
 ) -> None:
     """Emit the supported same-thread Desktop handoff receipt and stop."""
     typer.echo(
         "native-handoff=required "
-        f"project={policy.project} canonical={repo_root} base={base} node={node}\n"
+        f"project={policy.project} canonical={repo_root} "
+        f"base={_truthful_base(repo_root, base)} node={node}\n"
         "Use `/worktree` or **Hand off -> Worktree** in Codex Desktop, select "
         "the remote main branch, then rerun:\n"
         f"  fno do target start {node}\n"
@@ -2537,7 +2654,8 @@ def _start_codex_native(
                 )
                 raise typer.Exit(code=1)
             typer.echo(
-                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+                f"worktree={cwd}  app-owned=codex  .fno=ok  "
+                f"base={_truthful_base(cwd, base)}  "
                 "node=unclaimed"
             )
             if beastmode:
@@ -2563,15 +2681,18 @@ def _start_codex_native(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
-                "node=already-claimed"
+                f"worktree={cwd}  app-owned=codex  .fno=ok  "
+                f"base={_truthful_base(cwd, base)}  "
+                f"node=already-claimed holder={(info or {}).get('holder') or '?'} "
+                f"state={(info or {}).get('state') or '?'}"
             )
             if beastmode:
                 _warn_if_authority_not_granted(cwd)
             return
         _reacquire_node_claim(node, cwd, info)
         typer.echo(
-            f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  node=reacquired"
+            f"worktree={cwd}  app-owned=codex  .fno=ok  "
+            f"base={_truthful_base(cwd, base)}  node=reacquired"
         )
         return
 
@@ -2632,7 +2753,8 @@ def _start_codex_native(
         claim_state = "claimed"
     model_note = f"  model={resolved_model} ({source})" if resolved_model else ""
     typer.echo(
-        f"worktree={cwd}  app-owned=codex  .fno=ok  base={base}  "
+        f"worktree={cwd}  app-owned=codex  .fno=ok  "
+        f"base={_truthful_base(cwd, base)}  "
         f"node={claim_state}{model_note}"
     )
 
@@ -3192,8 +3314,10 @@ def start(
             raise typer.Exit(code=1)
         if verdict == "ours":
             typer.echo(
-                f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
-                f"node=already-claimed"
+                f"worktree={wt_path}  .fno={fno_state}  "
+                f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
+                f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
+                f"state={(claim_info or {}).get('state') or '?'}"
             )
             if beastmode:
                 _warn_if_authority_not_granted(wt_path)
@@ -3228,7 +3352,8 @@ def start(
             else "no prior claim"
         )
         typer.echo(
-            f"worktree={wt_path}  .fno={fno_state}  base={base_label}  "
+            f"worktree={wt_path}  .fno={fno_state}  "
+            f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
             f"node=reacquired (successor took over from {prior})"
         )
         typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
@@ -3275,6 +3400,7 @@ def start(
     #    auditable (x-d7a7); absent -> today's line, byte-identical.
     model_note = f"  model={model} ({decision_source})" if model else ""
     typer.echo(
-        f"worktree={wt_path}  .fno={fno_state}  base={base_label}  node=claimed{model_note}"
+        f"worktree={wt_path}  .fno={fno_state}  "
+        f"base={_truthful_base(wt_path, base_label)}  node=claimed{model_note}"
     )
     typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)

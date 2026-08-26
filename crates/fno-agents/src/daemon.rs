@@ -3428,6 +3428,7 @@ fn build_claude_stream_entry(
         legacy_provider: String::new(),
         provider: None,
         model: None,
+        model_basis: None,
         effort: None,
         harness: Some("claude".into()),
         harness_session_id: Some(uuid.into()),
@@ -4808,7 +4809,32 @@ fn row_timestamp(value: Option<&Value>) -> Option<chrono::DateTime<chrono::Utc>>
 /// Refuse a row-level verdict when the same emitted row carries fresher
 /// evidence against it. This is deliberately pure and shared by the fixture
 /// test with Python; the caller supplies all fields before the row is written.
-fn apply_row_contradiction(row: &mut Map<String, Value>) {
+/// `now` is injected so the fixture's fixed clock and production's wall clock
+/// assert the same rules.
+fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<chrono::Utc>) {
+    // The falsifier as it ARRIVED, snapshotted before any rule below rewrites
+    // `basis`. Python's `_supervisor_contradicted` reads the input mapping, so
+    // reading the mutated map here would name a different falsifier than the
+    // twin for the same row, and the shared fixture has no case where two
+    // rules fire together to catch it.
+    let incoming_basis = row
+        .get("basis")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    // `status` for the same reason, and the reason generalises: Python reads
+    // the input `row` and writes a SEPARATE `projected` dict, so every rule
+    // there sees the original. This twin mutates `row` in place, so any rule
+    // reading `status` after an earlier one rewrote it diverges from Python
+    // for that row. Today the two rules are mutually exclusive - `terminal`
+    // is `orphaned`/`exited` and this one needs `spawning` - so nothing
+    // changes; snapshot anyway, because relying on that exclusion is a rule
+    // no test states and the next rule added here will not know it.
+    let incoming_status = row
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let event_at = row_timestamp(row.get("last_event_at"));
     let reconciled_at = row_timestamp(row.get("last_reconciled_at"));
     let terminal = matches!(
@@ -4833,6 +4859,25 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         );
     }
 
+    // (x-d401) A stored `spawning` token a live pid has outlived: the token
+    // stopped being a measurement. Fires only on POSITIVE liveness (the
+    // caller measured a live pid and injected `pid_alive: true`); unknown
+    // keeps the token, and a missing `created_at` is absent age evidence,
+    // not staleness. Mirrors `_spawning_outlived_by_a_live_pid` in Python;
+    // rows read `spawning` for 3-16 hours while alive (x-0248).
+    if incoming_status == "spawning"
+        && row.get("pid_alive") == Some(&Value::Bool(true))
+        // `> Duration::seconds(600)`, not `num_seconds() > 600`: num_seconds
+        // truncates, so a 600.5s-old row read `spawning` here and `live` in
+        // Python, whose timedelta compare keeps the fraction.
+        && row_timestamp(row.get("created_at"))
+            .is_some_and(|created_at| now - created_at > chrono::Duration::seconds(600))
+    {
+        row.insert("status".into(), json!("live"));
+        row.insert("basis".into(), json!("stale-spawning-live-pid"));
+    }
+    row.remove("pid_alive");
+
     // Both keys ALWAYS ride the row, as `reachability`/`basis` and
     // `progress`/`progress_basis` already do on this same row. A conditional
     // key cannot be told apart from a producer that forgot to set one, and the
@@ -4843,6 +4888,29 @@ fn apply_row_contradiction(row: &mut Map<String, Value>) {
         "liveness_origin_basis".into(),
         origin_basis.map_or(Value::Null, |basis| json!(basis)),
     );
+    // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
+    // that beat it: `superseded_live_status` is a caller-injected input (like
+    // `pid`), popped here; only the basis key survives, null when no
+    // supersession happened. Mirrors `_supervisor_contradicted` in Python.
+    let superseded = row
+        .get("superseded_live_status")
+        .and_then(Value::as_str)
+        .is_some_and(|word| {
+            let lower = word.to_ascii_lowercase();
+            lower == "working" || lower == "needs input"
+        });
+    let contradicted = superseded
+        && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
+        && !incoming_basis.is_empty();
+    row.insert(
+        "live_status_basis".into(),
+        if contradicted {
+            json!(format!("contradicted-by-{incoming_basis}"))
+        } else {
+            Value::Null
+        },
+    );
+    row.remove("superseded_live_status");
 }
 
 /// Parse one row timestamp into `(value, basis)`, separating absent from
@@ -5431,7 +5499,15 @@ where
                     "project_root": e.project_root,
                 });
                 if let Some(object) = row.as_object_mut() {
-                    apply_row_contradiction(object);
+                    // No `pid_alive` injection here: this row's `status` is
+                    // `rendered_status`, which `rendered_status_from_truth`
+                    // draws from a closed set of live/orphaned/unknown, so the
+                    // stale-spawning rule cannot match it. Injecting the input
+                    // would be a guard that never fires, reading as coverage.
+                    // The rule's one live carrier is Python's
+                    // `spawn_gate.census` (`fno agents top`), which measures
+                    // liveness itself and renders the stored token.
+                    apply_row_contradiction(object, chrono::Utc::now());
                     object.remove("pid_start_time");
                 }
                 row
@@ -8018,6 +8094,7 @@ mod tests {
             legacy_provider: "claude".into(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: None,
             // x-7bcd: needs a resolvable handle (leg 3); deterministic per
@@ -9417,6 +9494,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             legacy_provider: String::new(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             ..ask_row("keying", None)
         };
@@ -10335,6 +10413,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 legacy_provider: "codex".into(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: None,
                 harness_session_id: None,
@@ -10416,6 +10495,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 legacy_provider: "codex".into(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: None,
                 harness_session_id: None,
@@ -10565,6 +10645,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 legacy_provider: "codex".into(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: None,
                 harness_session_id: None,
@@ -11031,6 +11112,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 legacy_provider: "codex".into(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: None,
                 harness_session_id: None,
@@ -11192,6 +11274,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             legacy_provider: "codex".into(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: None,
             harness_session_id: None,
@@ -11241,6 +11324,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             legacy_provider: "codex".into(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: None,
             harness_session_id: None,
@@ -12679,6 +12763,7 @@ done
                 legacy_provider: "claude".into(),
                 provider: None,
                 model: None,
+                model_basis: None,
                 effort: None,
                 harness: None,
                 harness_session_id: None,
@@ -12730,6 +12815,7 @@ done
             legacy_provider: String::new(),
             provider: None,
             model: None,
+            model_basis: None,
             effort: None,
             harness: Some("codex".into()),
             harness_session_id: None,
@@ -12900,9 +12986,14 @@ done
             "/../../schemas/agents-row-contradiction.json"
         ));
         let fixture: Value = serde_json::from_str(FIXTURE).expect("fixture is valid JSON");
+        let now = chrono::DateTime::parse_from_rfc3339(
+            fixture["now"].as_str().expect("fixture now is a string"),
+        )
+        .expect("fixture now is a timestamp")
+        .with_timezone(&chrono::Utc);
         for case in fixture["cases"].as_array().expect("cases is an array") {
             let mut row = case["row"].as_object().expect("row is an object").clone();
-            apply_row_contradiction(&mut row);
+            apply_row_contradiction(&mut row, now);
             for (key, expected) in case["expected"].as_object().expect("expected is an object") {
                 assert_eq!(row.get(key), Some(expected), "case={}", case["name"]);
             }

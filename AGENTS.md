@@ -32,12 +32,12 @@ Traps a fresh agent re-hits because they are not yet a lint, guard or refusal. I
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read, proving this corpus reached its harness. A unit test asserts it: `kdc-delivery-sentinel-1932`.
 
-### Orienter output, claim snapshots, and liveness probes have all lied
+### Claim snapshots and liveness probes have both lied
 
-Receipts, manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. `fno do target start` can print `plan: none` with a plan bound, or `base=origin/main` on a stale branch. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno agents claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base; skip the fetch and a stale ref answers 0).
+Manifest snapshots, process argv and liveness probes have each lied about a live session. Only the live lockfile and the transcript stayed truthful. A manifest's `target_claim_*` fields are an init-time snapshot and can name a respawned supervisor pid. A row's argv-derived fields can outlive the process they describe. Verify ownership against the live lockfile (`fno agents claim status node:<id>`, real holder) and liveness against the transcript, never a stored snapshot.
 
-- specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
-- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live holder, verifies the base) and transcript-keyed liveness.
+- specimens: manifest `target_claim_*` fields are an init-time snapshot, never ownership truth.
+- graduates-to: transcript-keyed liveness.
 - added: 2026-07-23
 
 ### Assert a positive marker, never an absence

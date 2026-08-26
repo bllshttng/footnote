@@ -1055,6 +1055,7 @@ fn dispatch_create(
         legacy_provider: String::new(),
         provider: None,
         model: None,
+        model_basis: None,
         effort: None,
         harness: Some("gemini".to_string()),
         harness_session_id: Some(session_id.clone()),

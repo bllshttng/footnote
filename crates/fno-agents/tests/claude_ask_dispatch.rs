@@ -368,7 +368,108 @@ fn spawn_yolo_maps_to_bypass_permissions() {
     );
     let receipt: serde_json::Value =
         serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
-    assert_eq!(receipt["permission_mode"], "bypassPermissions");
+    // (x-74ea / x-d401) The receipt names the REQUESTED mode - fno can back
+    // the request, never the outcome (a forced-default environment ignores
+    // the flag while the old key read as an applied grant).
+    assert_eq!(receipt["permission_mode_requested"], "bypassPermissions");
+    assert!(
+        receipt.get("permission_mode").is_none(),
+        "the outcome-shaped key must be gone"
+    );
+}
+
+// (x-d401, seventh surface) The bg receipt names the model it launched with.
+// An explicit --model reaches claude as its own flag (build_argv) and beats
+// any inherited env, so it wins the receipt too - Python's
+// `receipt_model = model or route_model` rule; the Rust lane is reached only
+// without a route flag, so no route twin exists here. The registry row this
+// spawn writes must carry the same value (AC7-HP's row half).
+#[test]
+fn spawn_receipt_names_the_model_it_launched_with() {
+    let home = AgentsHome::at(tmpdir("model-home"));
+    let ch = ClaudeHome::at(tmpdir("model-claude"));
+    let cwd = tmpdir("model-cwd");
+    let bin = tmpdir("model-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+    let argv_file = cwd.join("argv.txt");
+    let sessions = ch.sessions_dir();
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "modelworker",
+        "hi",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_ARGV", argv_file.to_str().unwrap()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
+        Some("opus"),
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    let argv = std::fs::read_to_string(&argv_file).unwrap();
+    assert!(
+        argv.contains("--model") && argv.contains("opus"),
+        "argv: {argv}"
+    );
+    let receipt: serde_json::Value =
+        serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
+    assert_eq!(receipt["model"], "opus", "receipt: {receipt}");
+    // AC7-HP's row half: the registry row carries the same value, WITH the
+    // basis marking it intended (never a bare model a reader could take for
+    // an observed reading).
+    let reg = std::fs::read_to_string(home.registry_json()).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&reg).unwrap();
+    let row = &v["agents"][0];
+    assert_eq!(row["model"], "opus", "row: {row}");
+    assert_eq!(row["model_basis"], "requested", "row: {row}");
+}
+
+#[test]
+fn spawn_receipt_without_a_model_carries_no_model_key() {
+    let home = AgentsHome::at(tmpdir("nomodel-home"));
+    let ch = ClaudeHome::at(tmpdir("nomodel-claude"));
+    let cwd = tmpdir("nomodel-cwd");
+    let bin = tmpdir("nomodel-bin");
+    install_fake_claude(&bin);
+    let path = path_with(&bin);
+    let sessions = ch.sessions_dir();
+
+    let out = dispatch_claude_spawn(
+        &home,
+        &ch,
+        "nomodelworker",
+        "hi",
+        "fno",
+        &cwd,
+        false,
+        None,
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_CLAUDE_SESSIONS", sessions.to_str().unwrap()),
+        ],
+        None,
+        None,
+        None,
+        fno_agents::claude_ask::HarnessFlags::default(),
+        false,
+    );
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    let receipt: serde_json::Value =
+        serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
+    assert!(
+        receipt.get("model").is_none(),
+        "no model named -> the key stays absent (the honest absence): {receipt}"
+    );
 }
 
 // --- follow-up ---

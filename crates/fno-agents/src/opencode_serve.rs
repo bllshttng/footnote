@@ -782,6 +782,9 @@ fn dispatch_opencode_serve_inner(
         legacy_provider: String::new(),
         provider: Some("opencode".to_string()),
         model: model.filter(|m| !m.is_empty()).map(str::to_string),
+        model_basis: model
+            .filter(|m| !m.is_empty())
+            .map(|_| "requested".to_string()),
         effort: None,
         harness: Some("opencode".to_string()),
         harness_session_id: Some(session_id.clone()),

@@ -22,6 +22,7 @@
     "last_event_at",
     "last_message",
     "live_status",
+    "live_status_basis",
     "observed_model",
     "log_path",
     "crown",
