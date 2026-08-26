@@ -68,6 +68,42 @@ def _row_exists(name: str, harness: str) -> bool:
         return True
 
 
+def _predecessor_reachable(name: str, harness: str) -> Optional[bool]:
+    """Return transcript-backed predecessor reachability for a restamp."""
+    from fno.agents.registry import load_registry
+
+    try:
+        entry = next(
+            (
+                candidate
+                for candidate in load_registry()
+                if candidate.harness == harness
+                and (candidate.name == name or name in candidate.aliases)
+            ),
+            None,
+        )
+    except Exception:
+        return None
+    if entry is None or not entry.harness_session_id:
+        return None
+
+    from fno.agents.reachability import REACHABLE, UNREACHABLE, reachability
+
+    try:
+        reading = reachability(
+            entry.name,
+            pid=None if entry.mux else entry.pid,
+            pid_start_time=None if entry.mux else entry.pid_start_time,
+        )
+    except Exception:
+        return None
+    if reading.verdict == REACHABLE:
+        return True
+    if reading.verdict == UNREACHABLE:
+        return False
+    return None
+
+
 def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     """Re-point a SPAWNED worker's own row at its live session id, then stop.
 
@@ -118,8 +154,12 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
             # True can only mean the row predates this restamp, so a None beside
             # it really is "already current".
             existed = _row_exists(agent_self, harness)
+            predecessor_reachable = _predecessor_reachable(agent_self, harness)
             entry = restamp_harness_session_id(
-                name=agent_self, harness=harness, session_id=session_id
+                name=agent_self,
+                harness=harness,
+                session_id=session_id,
+                predecessor_reachable=predecessor_reachable,
             )
             if entry is not None or existed:
                 break

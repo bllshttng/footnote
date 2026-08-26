@@ -1638,6 +1638,7 @@ def restamp_harness_session_id(
     name: str,
     harness: str,
     session_id: str,
+    predecessor_reachable: Optional[bool] = None,
     registry_path: Optional[Path] = None,
 ) -> Optional[AgentEntry]:
     """Re-point a spawned worker's row at the session id its harness now uses.
@@ -1663,8 +1664,9 @@ def restamp_harness_session_id(
     A crowned row is never re-pointed in place: this path has no liveness witness
     for the predecessor, so it appends an independently addressable branch with
     no crown and keeps the predecessor's authority on its original session.
-    Uncrowned rows retain the in-place correction because there is no authority
-    to duplicate.
+    An explicit reachability result classifies every row: live predecessors
+    branch, dead predecessors succeed in place, and unknown uncrowned rows retain
+    the historical correction because there is no authority to duplicate.
     """
     if not name or not session_id or not harness:
         return None
@@ -1678,10 +1680,14 @@ def restamp_harness_session_id(
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
-            if any(
+            crown_present = any(
                 getattr(entry, field) is not None
                 for field in ("crown_level", "crown_scope", "crown_grantor")
-            ):
+            )
+            transition = classify_session_transition(
+                stale, session_id, predecessor_reachable
+            )
+            if transition == "branch" or (crown_present and transition == "deferred"):
                 existing = next(
                     (
                         candidate

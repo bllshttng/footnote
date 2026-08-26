@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
-from fno.harness_identity import parse_canonical_identity, resolve_owned_identity
+from fno.harness_identity import (
+    parse_canonical_identity,
+    resolve_attester_identity,
+    resolve_owned_identity,
+    session_identity_key,
+)
 
 
 def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
@@ -33,15 +38,42 @@ def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
     from fno.claims.session_pid import resolve_session_harness
 
     true_harness = resolve_session_harness()
-    prove = None if true_harness is None else (lambda harness, sid: harness == true_harness)
-
     canonical = parse_canonical_identity(env)
     if canonical.disposition not in {"complete", "name_only"}:
-        return resolve_owned_identity(env, prove=prove)
+        fallback_prove = (
+            None if true_harness is None else (lambda harness, sid: harness == true_harness)
+        )
+        return resolve_owned_identity(env, prove=fallback_prove)
+
+    try:
+        attested_session_id, witness = resolve_attester_identity(env)
+    except Exception:
+        attested_session_id, witness = "", ""
+    canonical_session_id = canonical.session_id or attested_session_id
+    canonical_proven = bool(
+        true_harness
+        and canonical.harness == true_harness
+        and witness == "process"
+        and canonical_session_id
+        and attested_session_id
+        and session_identity_key(canonical_session_id)
+        == session_identity_key(attested_session_id)
+    )
+
+    def prove(harness: str, session_id: str) -> Optional[bool]:
+        if harness != true_harness:
+            return False
+        if not canonical_proven:
+            return None
+        return session_identity_key(session_id) == session_identity_key(canonical_session_id)
 
     def collide(_harness: str, session_id: str) -> Optional[str]:
         from fno.agents.registry import row_owning_session_id
 
         return row_owning_session_id(session_id)
 
-    return resolve_owned_identity(env, prove=prove, collide=collide)
+    return resolve_owned_identity(
+        env,
+        prove=prove,
+        collide=None if canonical_proven else collide,
+    )
