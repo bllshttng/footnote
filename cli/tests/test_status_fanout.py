@@ -786,7 +786,7 @@ def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
 
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     monkeypatch.setattr(
-        "fno.agents.self_stamp.resolve_self_identity",
+        "fno.claims.self_identity.resolve_self_identity",
         lambda: SimpleNamespace(session_id=session_id, harness="codex"),
     )
 

@@ -3119,7 +3119,7 @@ def cmd_note(
     ``task_done``/``run_summary`` (x-2057); it is also hand-runnable.
     """
     from fno.graph.store import append_progress_note
-    from fno.agents.self_stamp import resolve_self_identity
+    from fno.claims.self_identity import resolve_self_identity
 
     text = text.strip()
     if not text:
