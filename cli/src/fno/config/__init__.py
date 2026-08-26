@@ -295,6 +295,8 @@ class RenderTargetConfig(BaseModel):
     @field_validator("path")
     @classmethod
     def _plain_path(cls, v: str) -> str:
+        from pathlib import Path as _Path
+
         v = v.strip()
         if not v:
             raise ValueError("backlog.render_targets path must not be empty")
@@ -302,11 +304,29 @@ class RenderTargetConfig(BaseModel):
         # The auto-render fires from arbitrary project and agent cwds, so a
         # relative path would scatter a copy of the public board into each
         # one. Absolute (or ~/-rooted) only.
-        if not os.path.isabs(os.path.expanduser(v)):
+        expanded = _Path(os.path.expanduser(v))
+        if not expanded.is_absolute():
             raise ValueError(
                 "backlog.render_targets path must be absolute or ~/-rooted "
                 f"(it is written from arbitrary cwds), got: {v!r}"
             )
+        # A target resolving onto a graph state file would os.replace() public
+        # HTML over it on every mutation. Reject at load; resolution itself is
+        # best-effort (a path that cannot resolve skips only this check).
+        try:
+            from fno.graph import _constants as _gc
+
+            resolved = expanded.resolve()
+            for state_path in (_gc.GRAPH_JSON, _gc.GRAPH_MD, _gc.GRAPH_HTML):
+                if resolved == _Path(state_path).resolve():
+                    raise ValueError(
+                        f"backlog.render_targets path {v!r} collides with the "
+                        f"graph state file {state_path}; refusing to overwrite it"
+                    )
+        except ValueError:
+            raise
+        except Exception:
+            pass
         return v
 
     @field_validator("project")

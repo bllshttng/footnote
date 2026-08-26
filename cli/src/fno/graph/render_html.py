@@ -163,7 +163,9 @@ _DEFAULT_WIP_CAPS = {"now": 20, "next": 50}
 
 
 def _load_wip_caps() -> dict[str, int]:
-    """Read ``config.kanban.wip_caps`` from the GLOBAL settings file directly.
+    """Read ``config.kanban.wip_caps`` from the GLOBAL config file directly
+    (config.toml-first candidates, via ``read_global_block``; same walk and
+    rationale as ``_load_obsidian_vault``).
 
     Returns a ``{column_lower: positive_int}`` map. Defensive by construction:
     the HTML auto-render fires inside ``locked_mutate_graph``, so a malformed

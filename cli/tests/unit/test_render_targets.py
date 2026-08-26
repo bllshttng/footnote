@@ -146,6 +146,15 @@ def test_misspelled_target_key_rejected():
     assert "projectio" in str(exc.value)
 
 
+def test_state_file_collision_rejected(_isolate):
+    import fno.graph._constants as gc
+    from fno.config import RenderTargetConfig
+
+    with pytest.raises(Exception) as exc:
+        RenderTargetConfig.model_validate({"path": str(gc.GRAPH_MD), "project": "fno"})
+    assert "collides" in str(exc.value)
+
+
 def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, capsys):
     global_cfg = tmp_path / "config.toml"
     global_cfg.write_text("[backlog]\n", encoding="utf-8")

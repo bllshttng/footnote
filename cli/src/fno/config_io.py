@@ -218,24 +218,59 @@ def config_read_candidates(paths: list[Path]) -> list[Path]:
 
 
 def read_global_block(block: str) -> dict[str, object] | None:
-    """Read one top-level block from the GLOBAL config file, config.toml first.
+    """Read one top-level block from the GLOBAL config files, config.toml first.
 
     Shared home for the global-only reads that fire inside the graph renders
     (obsidian vault, kanban wip caps, backlog render targets): each must see
     the operator's flat ``~/.fno/config.toml`` and not just the legacy
     ``settings.yaml``, none may raise into a mutation, and none may grow
-    another hand-rolled copy of the candidate walk. Returns the first
-    candidate's block that carries the key, else ``None``; a present-but-
-    non-dict block also returns ``None`` (the caller's absent-block path).
+    another hand-rolled copy of the candidate walk.
+
+    Candidates are deep-merged per key (config.toml winning), matching
+    ``load_settings`` semantics, so a partial config.toml cannot shadow a key
+    that still lives only in the legacy settings.yaml. The parse is cached
+    per process, keyed by each candidate's (mtime_ns, size): every block
+    reader shares ONE parse per mutation, and an edit is visible on the very
+    next call. Returns ``None`` when no global file defines the block or the
+    block is not a table (the caller's absent-block path).
     """
     try:
-        for candidate in config_read_candidates([_global_settings_path()]):
-            if not candidate.is_file():
-                continue
-            data = read_config_flat(candidate)
-            if block in data:
-                value = data[block]
-                return value if isinstance(value, dict) else None
-        return None
+        data = _global_merged_config()
+        if block not in data:
+            return None
+        value = data[block]
+        return value if isinstance(value, dict) else None
     except Exception:
         return None
+
+
+# Single-slot cache: (stat fingerprint, merged data). A long-lived process
+# holds at most one entry; any candidate edit changes the fingerprint and
+# reparses on the next read.
+_GLOBAL_MERGED_CACHE: tuple[tuple[tuple[str, int, int], ...], dict[str, object]] | None = None
+
+
+def _global_merged_config() -> dict[str, object]:
+    global _GLOBAL_MERGED_CACHE
+    candidates = config_read_candidates([_global_settings_path()])
+    fingerprint: list[tuple[str, int, int]] = []
+    for candidate in candidates:
+        try:
+            st = candidate.stat()
+        except OSError:
+            continue
+        fingerprint.append((str(candidate), st.st_mtime_ns, st.st_size))
+    key = tuple(fingerprint)
+    if _GLOBAL_MERGED_CACHE is not None and _GLOBAL_MERGED_CACHE[0] == key:
+        return _GLOBAL_MERGED_CACHE[1]
+    # Earlier candidates (config.toml) win: merge each successive file UNDER
+    # the ones before it.
+    merged: dict[str, object] = {}
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        data = read_config_flat(candidate)
+        if data:
+            merged = _deep_merge(data, merged)
+    _GLOBAL_MERGED_CACHE = (key, merged)
+    return merged
