@@ -598,7 +598,7 @@ def _ready_blockers(
             # re-derives): a board reading several PRs must tell "needs
             # another review round" from "cannot be cleared by reviewing" -
             # the two prescribe opposite next actions.
-            if coverage.get("rounds_exhausted") is True:
+            if coverage.get("impossible") is True:
                 blockers.append("review_coverage_impossible")
             elif corroboration and (ok or failed == "uncovered"):
                 blockers.append("review_coverage_corroboration")

@@ -297,7 +297,7 @@ Do not infer the verdict from exit code, non-empty prose, sentiment, or a hand-w
 
 Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them. P3 nits are optional - call them out, let the user choose.
 
-**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. Report the blocking findings and the two remedies to the operator. The remedies are a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
+**Termination (the round budget).** A blocking finding is cleared by fixing it. The next review covers the fix delta. Nothing else clears it on your own signature. A non-blocking finding needs no action to clear the gate. Answer it in thread or skip it. Note the skip rather than arguing with it. When the gate reports IMPOSSIBLE, stop. Do not request another review. At the round cap without a hard finding the gate FILES the remainder and the PR merges, so a fourth round is never the answer. Report the blocking findings and the two remedies to the operator. The remedies are a non-author GitHub approval on the PR, or the coverage-override label. A refused gate escalates.
 
 ### 6. ATTEST (only with `--attest`) - the identity-free local gate
 

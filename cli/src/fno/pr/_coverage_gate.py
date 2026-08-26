@@ -286,8 +286,8 @@ def coverage_verdict(
     chain = attestation_chain(
         repo, head_branch=refs[1] if refs else "", head=head
     )
-    disposition_text, disposition_note, disposition_named = disposition_refusal(
-        chain, cov, repo
+    disposition_text, disposition_note, disposition_named, disposition_hard = (
+        disposition_refusal(chain, cov, repo)
     )
     max_rounds = resolved_max_rounds(repo)
     rounds = rounds_since_last_pass(chain)
@@ -295,15 +295,38 @@ def coverage_verdict(
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
     # why it spun - so the budget check must not live inside the covered arm.
-    # Fires only when findings are non-terminal AND the rounds are spent;
-    # either alone keeps its ordinary verdict.
+    # Fires only when a HARD finding (CONFIRMED correctness or security) is
+    # non-terminal AND the rounds are spent; either alone keeps its ordinary
+    # verdict.
+    filed_note = ""
     if disposition_named and rounds > max_rounds:
-        return (
-            IMPOSSIBLE,
-            _impossible_refusal(rounds, max_rounds, ", ".join(disposition_named)),
-            "",
-            "",
+        if disposition_hard:
+            return (
+                IMPOSSIBLE,
+                _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
+                "",
+                "",
+            )
+        # The operator's ruling on the cap: the PR merges with its remaining
+        # findings FILED as nodes, never dropped. The class gate is what makes
+        # this safe - nothing here is a confirmed correctness or security
+        # defect. A finding the gate cannot file is one it must not wave
+        # through, so a filing failure refuses.
+        try:
+            filed = file_findings_at_cap(disposition_named, pr_number, repo)
+        except Exception as exc:  # noqa: BLE001 - never drop a finding silently
+            return (
+                REFUSED,
+                f"round cap reached ({rounds}/{max_rounds}) but filing the "
+                f"remaining finding(s) failed, so nothing was waived: {exc}",
+                "",
+                recompute_note,
+            )
+        filed_note = (
+            f"{len(filed)} finding(s) filed at the round cap ({rounds}/{max_rounds}): "
+            + ", ".join(f"{k} -> {n}" for k, n in zip(disposition_named, filed))
         )
+        disposition_text = ""
 
     if covered and corroboration:
         return REFUSED, corroboration, "", recompute_note
@@ -315,21 +338,8 @@ def coverage_verdict(
             remaining = _rounds_remaining_note(rounds, max_rounds)
             note = "; ".join(x for x in (recompute_note, remaining) if x)
             return REFUSED, disposition_text, "", note
-        if disposition_note and recompute_note:
-            return (
-                COVERED,
-                "",
-                (cov.get("head_sha") or "") if cov else "",
-                f"{recompute_note} [{disposition_note}]",
-            )
-        if disposition_note:
-            return (
-                COVERED,
-                "",
-                (cov.get("head_sha") or "") if cov else "",
-                disposition_note,
-            )
-        return COVERED, "", (cov.get("head_sha") or "") if cov else "", recompute_note
+        notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
+        return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
         # fails the count conjunct, but the truer refusal names the policy and
@@ -509,17 +519,39 @@ def _resolved_categories(repo: str) -> frozenset[str]:
         return GATE_NONBLOCKING_CATEGORIES
 
 
+#: The two categories the round cap can never file away. The class gate is
+#: what makes file-the-remainder safe: noise can be filed, a CONFIRMED
+#: correctness or security defect cannot. Mirrors ``HARD_CATEGORIES`` in the
+#: Rust gate.
+HARD_CATEGORIES = frozenset({"correctness", "security"})
+
+
+def _hard_finding(primitive: Any) -> bool:
+    """A CONFIRMED correctness or security finding: the one shape the round
+    cap keeps IMPOSSIBLE for. Read from the same primitive fields the gate
+    re-derives blockingness from, never the producer's count."""
+    if not isinstance(primitive, dict):
+        return True
+    verdict = primitive.get("verdict")
+    if not (isinstance(verdict, str) and verdict.strip().lower() == "confirmed"):
+        return False
+    category = primitive.get("category")
+    return isinstance(category, str) and category.strip().lower() in HARD_CATEGORIES
+
+
 def disposition_refusal(
     chain: list[dict], cov: Optional[dict], repo: str = "."
-) -> Tuple[str, str, list]:
+) -> Tuple[str, str, list, list]:
     """The refusal when a blocking finding in the chain is non-terminal.
 
-    Returns ``(refusal, note, named)``: the refusal sentence (empty when
-    everything terminal), the by-class note for a covered answer, and the
-    sorted finding keys that are non-terminal or uncorroborated - the third
-    element is what the IMPOSSIBLE verdict names, because its sentence must
-    NOT carry the fix-delta remedy the REFUSED sentence teaches (that remedy
-    is exactly what an exhausted loop must stop being told).
+    Returns ``(refusal, note, named, hard)``: the refusal sentence (empty
+    when everything terminal), the by-class note for a covered answer, the
+    sorted finding keys that are non-terminal or uncorroborated, and the
+    subset of those that are HARD (a CONFIRMED correctness or security
+    finding, or the truncated remainder). At the round cap the hard subset
+    is what keeps IMPOSSIBLE; the rest are filed as nodes and the PR merges.
+    Neither list carries the fix-delta remedy the REFUSED sentence teaches -
+    that remedy is exactly what an exhausted loop must stop being told.
 
     A finding is terminal when it is fixed (and the chain moved past the round
     that raised it), non-blocking by the gate's own re-derivation, declined
@@ -529,7 +561,7 @@ def disposition_refusal(
     that is the whole difference between this gate and the exploit.
     """
     if not chain:
-        return "", "", []
+        return "", "", [], []
     allow = _resolved_categories(repo)
     # Latest disposition per finding_key across the chain, plus the round
     # each blocking finding was raised in (a fixed finding is terminal only
@@ -557,6 +589,7 @@ def disposition_refusal(
             "truncated remainder is non-terminal, so the gate refuses rather "
             "than trust a count it cannot re-derive",
             "",
+            ["(truncated remainder)"],
             ["(truncated remainder)"],
         )
 
@@ -591,6 +624,11 @@ def disposition_refusal(
         else:
             nonterminal.append(key)
 
+    hard = sorted(
+        key
+        for key in (*nonterminal, *uncorroborated)
+        if _hard_finding(findings_by_key.get(key))
+    )
     if nonterminal:
         keys = sorted(nonterminal)
         return (
@@ -599,6 +637,7 @@ def disposition_refusal(
             "the fix delta, nothing else clears it on your own signature",
             "",
             keys,
+            hard,
         )
     if uncorroborated:
         keys = sorted(uncorroborated)
@@ -608,6 +647,7 @@ def disposition_refusal(
             "session's head-pinned attestation, or a non-author GitHub approval",
             "",
             keys,
+            hard,
         )
     by_class = [
         key
@@ -619,7 +659,7 @@ def disposition_refusal(
         if by_class
         else ""
     )
-    return "", note, []
+    return "", note, [], []
 
 
 # --- The round budget and the fourth verdict --------------------------------
@@ -678,6 +718,65 @@ def resolved_max_rounds(repo: str) -> int:
         return DEFAULT_MAX_ROUNDS
     except Exception:  # noqa: BLE001 - unreadable config keeps the shipped default
         return DEFAULT_MAX_ROUNDS
+
+
+def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str]:
+    """File each remaining finding as a backlog node at the round cap.
+
+    The operator's ruling on the cap: the PR merges with its remaining
+    findings FILED, never dropped. Idempotent on the finding key (a re-run of
+    the gate, or the merge verb after a status read, must not mint twice):
+    an existing node whose title carries the key is reused. Returns the node
+    ids in key order. Raises on any failure - a finding the gate cannot file
+    is a finding it must not wave through, so the caller refuses.
+    """
+    import re
+
+    from fno.pr._proc import run
+
+    ids: list[str] = []
+    for key in keys:
+        title = f"review finding filed at round cap: {key}"
+        found = run(["fno", "backlog", "find", title], cwd=repo)
+        existing = None
+        if found.ok:
+            for line in found.stdout.splitlines():
+                if key in line:
+                    match = re.search(r"\b[a-z]+-[0-9a-f]{4,}\b", line)
+                    if match:
+                        existing = match.group(0)
+                        break
+        if existing:
+            ids.append(existing)
+            continue
+        made = run(
+            [
+                "fno",
+                "backlog",
+                "idea",
+                title,
+                "--type",
+                "bug",
+                "--details",
+                (
+                    f"Filed by the review-coverage gate at the round cap on PR "
+                    f"{pr_number}. The finding was still non-terminal when the "
+                    "review budget was spent; it was not CONFIRMED correctness or "
+                    "security, so the PR merged and the finding lands here rather "
+                    "than being dropped."
+                ),
+            ],
+            cwd=repo,
+        )
+        if not made.ok:
+            raise RuntimeError(
+                f"filing {key} failed: {(made.stderr or made.stdout).strip()}"
+            )
+        match = re.search(r"\b[a-z]+-[0-9a-f]{4,}\b", made.stdout)
+        if not match:
+            raise RuntimeError(f"filing {key} returned no node id: {made.stdout.strip()}")
+        ids.append(match.group(0))
+    return ids
 
 
 def _impossible_refusal(

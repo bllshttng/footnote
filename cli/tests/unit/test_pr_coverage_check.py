@@ -940,7 +940,12 @@ def _ac7_round(ts: str, verdict: str, head: str, dispositions=None):
         "findings": [
             {
                 "category": "security",
-                "verdict": None,
+                # CONFIRMED is what makes this finding HARD: under the
+                # operator's round-cap ruling only a CONFIRMED correctness or
+                # security finding still reaches IMPOSSIBLE at the cap. The
+                # softer shapes are filed and the PR merges (see the
+                # file-at-cap tests below).
+                "verdict": "CONFIRMED",
                 "blocking": True,
                 "has_required_fields": True,
                 "finding_key": "hooks/git-protection.py:302:security",
@@ -1062,15 +1067,20 @@ def test_ac7_impossible_refuses_the_merge_with_its_own_name(
 
 
 def test_ac7_status_names_its_own_blocker(monkeypatch, tmp_path):
-    """`fno do pr status` renders the exhausted budget as
-    review_coverage_impossible, distinct from review_coverage_uncovered."""
+    """`fno do pr status` renders the IMPOSSIBLE row as
+    review_coverage_impossible, distinct from review_coverage_uncovered.
+
+    It reads `impossible`, never the raw `rounds_exhausted`: under the
+    operator's round-cap ruling an exhausted budget alone MERGES (the
+    remainder is filed), so naming the blocker off the budget flag would
+    hold every capped PR the law says should land."""
     from fno.pr import _status
 
     blockers = _status._ready_blockers(
         True,
         "green",
         0,
-        {"coverage": "uncovered", "rounds_exhausted": True},
+        {"coverage": "uncovered", "rounds_exhausted": True, "impossible": True},
         review_lane=True,
         head="",
         code_review_required=False,
@@ -1078,6 +1088,20 @@ def test_ac7_status_names_its_own_blocker(monkeypatch, tmp_path):
     )
     assert "review_coverage_impossible" in blockers
     assert "review_coverage_uncovered" not in blockers
+
+    # The demotion, pinned: a spent budget with no hard finding is not a
+    # blocker of its own - those findings are filed and the PR merges.
+    soft = _status._ready_blockers(
+        True,
+        "green",
+        0,
+        {"coverage": "uncovered", "rounds_exhausted": True, "impossible": False},
+        review_lane=True,
+        head="",
+        code_review_required=False,
+        repo=str(tmp_path),
+    )
+    assert "review_coverage_impossible" not in soft
 
 
 def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
@@ -1153,3 +1177,176 @@ def test_ac7_exhausted_rounds_with_no_blocking_findings_stay_covered(
     )
     assert state == _coverage_gate.COVERED
     assert refusal == ""
+
+
+# ---- the round cap under operator law: file the rest, keep the hard ----
+#
+# The operator's ruling: at the cap the PR MERGES with its remaining findings
+# FILED as nodes, never dropped. The exception is a CONFIRMED correctness or
+# security finding, which keeps IMPOSSIBLE and the human lever. One review
+# stays the floor, so an unreviewed PR is still uncovered.
+
+
+def _soft_round(ts: str, head: str, dispositions=None):
+    """A fail round whose finding is blocking but NOT hard (unconfirmed)."""
+    data = {
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s-cap",
+        "attester_session_id": "sess-author",
+        "branch": "feature/x-8439",
+        "reviewed_base_sha": "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
+        "reviewed_head_sha": head,
+        "reviewed_file_count": 3,
+        "reviewed_line_count": 40,
+        "findings_blocking": 1,
+        "findings": [
+            {
+                "category": "correctness",
+                "verdict": None,
+                "blocking": True,
+                "has_required_fields": True,
+                "finding_key": "cli/src/fno/pr/_merge.py:77:correctness",
+            }
+        ],
+    }
+    if dispositions is not None:
+        data["dispositions"] = dispositions
+    return {"ts": ts, "type": "review_attestation", "source": "hook", "data": data}
+
+
+def _seed_soft_cap(tmp_path, rounds=3):
+    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
+        for i in range(rounds):
+            fh.write(json.dumps(_soft_round(stamps[i], heads[i])) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "ts": "2026-08-25T22:01:00Z",
+                    "type": "review_coverage",
+                    "source": "hook",
+                    "data": {
+                        "pr": 42,
+                        "coverage": "covered",
+                        "review_state": "reviewed",
+                        "reviewed_count": 1,
+                        "self_attested_count": 1,
+                        "head_sha": FIXTURE_HEAD,
+                        "verdicts": [
+                            {
+                                "producer": "local_attestation",
+                                "name": "code-review",
+                                "verdict": "reviewed",
+                                "attestation_origin": "self_attested",
+                                "reviewed_sha": FIXTURE_HEAD,
+                                "freshness": "fresh",
+                            }
+                        ],
+                    },
+                }
+            )
+            + "\n"
+        )
+
+
+def test_cap_files_the_soft_remainder_and_covers(monkeypatch, tmp_path):
+    """Operator law: at the cap a non-hard finding is FILED and the PR merges.
+    The note names the finding and the node it landed in, so nothing is
+    dropped silently."""
+    _specimen_gates(monkeypatch)
+    _seed_soft_cap(tmp_path, rounds=3)
+    calls = []
+
+    def fake_file(keys, pr_number, repo):
+        calls.append((tuple(keys), pr_number))
+        return ["x-9f01" for _ in keys]
+
+    monkeypatch.setattr(_coverage_gate, "file_findings_at_cap", fake_file)
+    state, refusal, _head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, refusal
+    assert refusal == ""
+    assert calls == [(("cli/src/fno/pr/_merge.py:77:correctness",), 42)]
+    assert "filed at the round cap (3/2)" in note
+    assert "cli/src/fno/pr/_merge.py:77:correctness -> x-9f01" in note
+
+
+def test_cap_keeps_impossible_for_a_confirmed_security_finding(monkeypatch, tmp_path):
+    """The exception the law names: a CONFIRMED security finding still refuses
+    with IMPOSSIBLE and the human lever, and is never filed away."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    monkeypatch.setattr(
+        _coverage_gate,
+        "file_findings_at_cap",
+        lambda *a, **k: pytest.fail("a hard finding must never be filed at the cap"),
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.IMPOSSIBLE
+    assert "hooks/git-protection.py:302:security" in refusal
+    assert "non-author GitHub approval" in refusal
+
+
+def test_cap_refuses_when_filing_fails(monkeypatch, tmp_path):
+    """A finding the gate cannot file is one it must not wave through."""
+    _specimen_gates(monkeypatch)
+    _seed_soft_cap(tmp_path, rounds=3)
+
+    def boom(keys, pr_number, repo):
+        raise RuntimeError("backlog unavailable")
+
+    monkeypatch.setattr(_coverage_gate, "file_findings_at_cap", boom)
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "nothing was waived" in refusal
+    assert "backlog unavailable" in refusal
+
+
+def test_under_the_cap_a_soft_finding_still_blocks(monkeypatch, tmp_path):
+    """One review is the floor and the budget still bites: at two rounds the
+    same soft finding REFUSES rather than being filed."""
+    _specimen_gates(monkeypatch)
+    _seed_soft_cap(tmp_path, rounds=2)
+    monkeypatch.setattr(
+        _coverage_gate,
+        "file_findings_at_cap",
+        lambda *a, **k: pytest.fail("nothing is filed under the budget"),
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "cli/src/fno/pr/_merge.py:77:correctness" in refusal
+
+
+def test_file_findings_at_cap_is_idempotent_on_the_finding_key(monkeypatch, tmp_path):
+    """A re-run of the gate must not mint a second node for one finding."""
+    from fno.pr._proc import Result
+
+    seen = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(cmd)
+        if cmd[:3] == ["fno", "backlog", "find"]:
+            return Result(0, "x-77aa  review finding filed at round cap: a.py:1:correctness\n", "")
+        raise AssertionError(f"unexpected shell call: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", fake_run)
+    ids = _coverage_gate.file_findings_at_cap(
+        ["a.py:1:correctness"], 42, str(tmp_path)
+    )
+    assert ids == ["x-77aa"]
+    assert not any(c[:3] == ["fno", "backlog", "idea"] for c in seen)

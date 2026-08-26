@@ -2725,6 +2725,7 @@ fn read_pr_info(
         stale_bots,
         unaddressed_findings,
         coverage,
+        impossible,
     ) = if login_skipped {
         // No GitHub logins to poll (nothing configured, or no_external): skip
         // the gh review reads entirely (fewer calls + no spurious gh-error
@@ -2773,12 +2774,13 @@ fn read_pr_info(
             "none".to_string(),
             reviewers_ok
                 && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
-                && blockers.is_empty(),
+                && !blockers_withhold(&blockers, tiling.rounds_exhausted),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             Vec::new(),
             coverage,
+            blockers_impossible(&blockers, tiling.rounds_exhausted),
         )
     } else {
         // Read 3: top-level reviews + issue comments
@@ -3013,18 +3015,14 @@ fn read_pr_info(
         // this field and never consults coverage, so without this line the
         // loop can finish a PR the merge gate refuses on the same row - the
         // two surfaces this repo keeps unified would split under the flag.
+        // Locked Decision 1, same conjunct as the solo lane arm.
+        let blockers =
+            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
         let reviewed = (info.all_required_passed() || local_recovery)
             && CoverageReport::corroboration_term(require_corroboration, self_attested_alone)
             && unaddressed.is_empty()
             && reviewers_ok
-            // Locked Decision 1, same conjunct as the solo lane arm.
-            && disposition_blockers(
-                &events_text,
-                &head_branch,
-                head_sha,
-                self_attested_alone,
-            )
-            .is_empty();
+            && !blockers_withhold(&blockers, tiling.rounds_exhausted);
         (
             activity_ts,
             reviewed,
@@ -3033,8 +3031,13 @@ fn read_pr_info(
             info.stale_bots,
             unaddressed,
             coverage,
+            blockers_impossible(&blockers, tiling.rounds_exhausted),
         )
     };
+    // The IMPOSSIBLE predicate rides the row beside the raw budget flag, so
+    // the status surface can name it without re-running the disposition scan.
+    let mut tiling = tiling;
+    tiling.impossible = impossible;
 
     // Emit coverage every gate eval so the Python readers (the merge primitive
     // and the polling command) and audit see one coherent, fresh number rather
@@ -5391,6 +5394,13 @@ pub struct RangeTiling {
     /// Advisory on this struct - the merge gate re-derives before refusing -
     /// but the status surface reads it to name its own blocker.
     pub rounds_exhausted: bool,
+    /// Whether the exhausted budget leaves a HARD non-terminal finding (a
+    /// CONFIRMED correctness or security finding): only those keep the
+    /// IMPOSSIBLE verdict. Every other non-terminal finding is filed at the
+    /// cap and the PR merges (the operator's ruling on the round cap).
+    /// Filled by `read_pr_info` after the disposition scan, since it needs
+    /// the corroboration state the arms compute.
+    pub impossible: bool,
 }
 
 // --- The disposition-complete pass condition, Rust gate side ----------------
@@ -5445,6 +5455,47 @@ pub struct DispositionBlocker {
     /// "open", "fixed-unreviewed", "declined-uncorroborated",
     /// "declined-without-reason", or "truncated-remainder".
     pub axis: &'static str,
+    /// A CONFIRMED correctness or security finding (or the truncated
+    /// remainder, which cannot be inspected). At the round cap only a hard
+    /// blocker withholds the merge; the rest are filed as nodes.
+    pub hard: bool,
+}
+
+/// The two categories the round cap can never file away: a finding the
+/// reviewer CONFIRMED as a correctness or security defect. The class gate is
+/// what makes file-the-remainder safe - noise can be filed, a confirmed bug
+/// cannot - so this reads the same primitive fields `gate_finding_blocks`
+/// re-derives from, never the producer's count.
+const HARD_CATEGORIES: &[&str] = &["correctness", "security"];
+
+fn hard_finding(primitive: &Value) -> bool {
+    let verdict = primitive
+        .get("verdict")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if !verdict.trim().eq_ignore_ascii_case("confirmed") {
+        return false;
+    }
+    let category = primitive
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    HARD_CATEGORIES.contains(&category.as_str())
+}
+
+/// Whether the blockers still withhold `reviewed`. Under the budget every
+/// blocker withholds. At the cap only a hard one does: the rest are filed by
+/// the merge gate and the PR merges (one review stays the floor - an empty
+/// chain never reaches here with rounds spent).
+pub fn blockers_withhold(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
+    blockers.iter().any(|b| b.hard || !rounds_exhausted)
+}
+
+/// The IMPOSSIBLE predicate: rounds spent AND a hard blocker remains.
+pub fn blockers_impossible(blockers: &[DispositionBlocker], rounds_exhausted: bool) -> bool {
+    rounds_exhausted && blockers.iter().any(|b| b.hard)
 }
 
 /// The non-terminal blocking findings in the PR's attestation chain.
@@ -5548,6 +5599,7 @@ pub fn disposition_blockers(
         blockers.push(DispositionBlocker {
             finding_key: "(truncated remainder)".to_string(),
             axis: "truncated-remainder",
+            hard: true,
         });
     }
     for (key, primitive, raised) in &findings {
@@ -5558,6 +5610,7 @@ pub fn disposition_blockers(
             None => blockers.push(DispositionBlocker {
                 finding_key: key.clone(),
                 axis: "open",
+                hard: hard_finding(primitive),
             }),
             Some(("fixed", _)) => {
                 // Terminal only when a LATER round reviewed the fix delta.
@@ -5565,6 +5618,7 @@ pub fn disposition_blockers(
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "fixed-unreviewed",
+                        hard: hard_finding(primitive),
                     });
                 }
             }
@@ -5573,11 +5627,13 @@ pub fn disposition_blockers(
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "declined-without-reason",
+                        hard: hard_finding(primitive),
                     });
                 } else if self_attested_alone {
                     blockers.push(DispositionBlocker {
                         finding_key: key.clone(),
                         axis: "declined-uncorroborated",
+                        hard: hard_finding(primitive),
                     });
                 }
             }
@@ -5586,6 +5642,7 @@ pub fn disposition_blockers(
             Some(_) => blockers.push(DispositionBlocker {
                 finding_key: key.clone(),
                 axis: "open",
+                hard: hard_finding(primitive),
             }),
         }
     }
@@ -6414,6 +6471,7 @@ fn coverage_event_data_tiled(
         // before refusing (Locked Decision 6: never trust a producer count).
         data["rounds_used"] = serde_json::json!(t.rounds_used);
         data["rounds_exhausted"] = serde_json::json!(t.rounds_exhausted);
+        data["impossible"] = serde_json::json!(t.impossible);
     }
     data
 }

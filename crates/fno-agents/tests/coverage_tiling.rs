@@ -891,3 +891,75 @@ fn round_budget_exhausted_needs_more_than_max() {
         "max_rounds is a budget, not an off-by-one"
     );
 }
+
+// --- the round cap under the operator's ruling: file the rest, keep the hard ---
+
+#[test]
+fn cap_only_a_confirmed_correctness_or_security_finding_is_hard() {
+    use fno_agents::loopcheck::{blockers_impossible, blockers_withhold};
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([
+            finding("a.py:1:security", "security", Some("CONFIRMED"), true),
+            finding("b.py:2:correctness", "correctness", None, true),
+            finding("c.py:3:performance", "performance", Some("CONFIRMED"), true),
+        ]),
+        serde_json::json!([]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(blockers.len(), 3);
+    let hard: Vec<&str> = blockers
+        .iter()
+        .filter(|b| b.hard)
+        .map(|b| b.finding_key.as_str())
+        .collect();
+    // CONFIRMED security is hard. Unconfirmed correctness is not. CONFIRMED
+    // performance is not - the two categories are the whole list.
+    assert_eq!(hard, vec!["a.py:1:security"]);
+    // Under the budget every blocker withholds; at the cap only the hard one.
+    assert!(blockers_withhold(&blockers, false));
+    assert!(blockers_withhold(&blockers, true));
+    assert!(blockers_impossible(&blockers, true));
+    assert!(!blockers_impossible(&blockers, false));
+}
+
+#[test]
+fn cap_with_only_fileable_findings_stops_withholding() {
+    use fno_agents::loopcheck::{blockers_impossible, blockers_withhold};
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([finding("b.py:2:correctness", "correctness", None, true)]),
+        serde_json::json!([]),
+        false,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, true);
+    assert_eq!(blockers.len(), 1);
+    assert!(!blockers[0].hard);
+    assert!(
+        blockers_withhold(&blockers, false),
+        "under the budget it still blocks"
+    );
+    assert!(
+        !blockers_withhold(&blockers, true),
+        "at the cap it is filed, not held"
+    );
+    assert!(!blockers_impossible(&blockers, true));
+}
+
+#[test]
+fn cap_truncated_remainder_is_always_hard() {
+    use fno_agents::loopcheck::blockers_withhold;
+    let events = [dispositions_event(
+        SPECIMEN_HEAD,
+        serde_json::json!([]),
+        serde_json::json!([]),
+        true,
+    )]
+    .join("\n");
+    let blockers = disposition_blockers(&events, BRANCH, SPECIMEN_HEAD, false);
+    assert!(blockers[0].hard, "what cannot be inspected cannot be filed");
+    assert!(blockers_withhold(&blockers, true));
+}
