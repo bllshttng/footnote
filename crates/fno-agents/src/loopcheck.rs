@@ -3769,6 +3769,33 @@ fn post_coverage_status(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The `failure` status description for an uncovered head.
+///
+/// NEVER names a harness-specific verb, and the rule is the whole reason this
+/// is a named function rather than an inline format. This description is ONE
+/// string on a shared GitHub commit status: written once by whichever harness
+/// happened to publish it, then read by every harness, every CI runner, and
+/// every human on the PR page. Embedding the publisher's own verb hands a
+/// claude `/code-review ...` to a codex worker, which has no such command -
+/// measured, not theoretical. The harness-neutral command named here resolves
+/// the right verb LOCALLY, on whatever harness runs it, which is the only
+/// place that resolution is correct.
+///
+/// The worker's own held reason (`coverage_receipt_line`) still names the
+/// sized verb, and rightly: that text is read in the session that produced
+/// it, on that session's harness. Shared artifact, neutral; local text,
+/// sized. That is the line.
+///
+/// Stays well inside GitHub's 140-char description cap at any realistic PR
+/// number, so there is no length branch to get wrong.
+fn uncovered_status_description(pr_head_oid: &str, pr_number: i64) -> String {
+    format!(
+        "no covered review at {}; run `fno do target request-self-review --pr {}`",
+        short_sha(pr_head_oid),
+        pr_number
+    )
+}
+
 fn publish_coverage_status(
     gh_bin: &str,
     cwd: &Path,
@@ -3888,32 +3915,7 @@ fn publish_coverage_status(
     } else if matches!(coverage.coverage, Coverage::Unknown) {
         ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
-        // The sized invocation rides along when it fits: GitHub caps this
-        // description at 140 chars and rejects an overflow whole, which would
-        // lose the entire marker, not just the hint. Computed HERE, in the
-        // only arm that renders it: an eager call-site argument would spawn
-        // the fno bridge subprocess on covered, no-lane, and early-return
-        // paths that never show a hint.
-        let self_review_hint = ambient_self_review_hint(cwd);
-        let base = format!(
-            "no covered review at {}; run the review verb at HEAD",
-            short_sha(pr_head_oid)
-        );
-        // No hint (or no room for one) is the case a CI runner hits, where
-        // `fno` does not resolve. The bare stem names no producer, so it sends
-        // the human reading the PR page nowhere. Name the emitter instead - it
-        // fits inside the 140-char cap, and the sized verb still wins when the
-        // bridge did resolve.
-        let description = match self_review_hint.as_deref() {
-            Some(hint) if base.len() + hint.len() + 6 <= 140 => {
-                format!("{base} - `{hint}`")
-            }
-            _ => format!(
-                "no covered review at {}; review at HEAD, then skills/review/scripts/emit-attestation.sh <reviewer>",
-                short_sha(pr_head_oid)
-            ),
-        };
-        ("failure", description)
+        ("failure", uncovered_status_description(pr_head_oid, pr_number))
     };
     post_coverage_status(
         gh_bin,
@@ -10875,16 +10877,6 @@ fn sized_self_review_hint(fno_bin: &str, cwd: &Path, harness: Option<&str>) -> O
     }
 }
 
-/// `sized_self_review_hint` with the ambient fno binary and author harness, for
-/// callers (publish_coverage_status's uncovered arm) that never threaded those
-/// through. Same resolution discipline as the `fno inbox notify` bridge and the
-/// unattested-reviewer render: ambient markers over threading, so call sites
-/// stay single-arg.
-fn ambient_self_review_hint(cwd: &Path) -> Option<String> {
-    let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-    sized_self_review_hint(&fno_bin, cwd, crate::claims::resolve_harness().as_deref())
-}
-
 /// Unwrap a YAML scalar to the string a YAML parser would produce.
 ///
 /// Decoding escapes is not cosmetic: the recommended block form routinely
@@ -13890,6 +13882,38 @@ mod tests {
         let line = coverage_receipt_line(&old_commit, None, None);
         assert!(line.contains("ask for a re-read"), "{line}");
         assert!(!line.contains("upgrade gh"), "{line}");
+    }
+
+    #[test]
+    fn the_published_status_never_names_a_harness_specific_verb() {
+        // The shared commit status is read by every harness. A claude verb
+        // baked in by a claude publisher is a command a codex worker does not
+        // have. Measured: the live status on this very PR read
+        // "/code-review high --comment" because a claude session published it.
+        let d = uncovered_status_description("8411cde1aa2b0000000000000000000000000000", 1201);
+
+        // The POSITIVE marker first: assert the neutral command IS present.
+        // An absence-only test passes on an empty string, or on a render that
+        // never ran, and would not notice this function returning "".
+        assert!(
+            d.contains("fno do target request-self-review --pr 1201"),
+            "must name the harness-neutral command: {d}"
+        );
+        assert!(d.contains("8411cde1"), "must name the uncovered head: {d}");
+
+        // Then the absence, pinned per harness so a future edit that reaches
+        // for the publisher's own verb fails here rather than in a codex
+        // worker's session.
+        for verb in ["/code-review", "/review", "/fno:review", "--comment"] {
+            assert!(
+                !d.contains(verb),
+                "harness-specific verb `{verb}` leaked into the shared status: {d}"
+            );
+        }
+
+        // GitHub rejects an over-long description WHOLE, losing the marker
+        // rather than truncating it, so the cap is load-bearing.
+        assert!(d.len() <= 140, "over GitHub's 140-char cap ({}): {d}", d.len());
     }
 
     #[test]
