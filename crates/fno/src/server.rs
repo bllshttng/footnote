@@ -1467,17 +1467,26 @@ struct HeldWorker {
 }
 
 fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
-    let mut receipts = HashMap::new();
+    let mut receipts: HashMap<String, HeldWorker> = HashMap::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
-        if value.get("type").and_then(|v| v.as_str()) != Some("agent_spawned") {
-            continue;
-        }
         let Some(data) = value.get("data").and_then(|v| v.as_object()) else {
             continue;
         };
+        match value.get("type").and_then(|v| v.as_str()) {
+            Some("agent_removed") | Some("agent_row_reaped") => {
+                let session_id = data.get("harness_session_id").and_then(|v| v.as_str());
+                let name = data.get("name").and_then(|v| v.as_str());
+                receipts.retain(|id, facts| {
+                    session_id != Some(id.as_str()) && name != Some(facts.name.as_str())
+                });
+                continue;
+            }
+            Some("agent_spawned") => {}
+            _ => continue,
+        }
         if data.get("substrate").and_then(|v| v.as_str()) != Some("pane") {
             continue;
         }
@@ -5641,7 +5650,6 @@ impl Core {
             }
             Some(m) => {
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
-                return; // already a live member - no duplicate
             }
             None => {
                 let cwd = (!cwd.is_empty()).then(|| cwd.to_string());
@@ -16752,6 +16760,48 @@ mod tests {
         assert_eq!(receipt.name, "old-name");
         assert_eq!(receipt.harness, "codex");
         assert_eq!(receipt.cwd, "/repo");
+    }
+
+    #[test]
+    fn spawn_receipt_removal_events_revoke_resume_facts() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#, "\n",
+            r#"{"type":"agent_removed","data":{"name":"removed"}}"#, "\n",
+            r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#, "\n",
+            r#"{"type":"agent_row_reaped","data":{"name":"reaped","harness_session_id":"reaped-session"}}"#,
+        );
+        assert!(parse_spawn_receipts(raw).is_empty());
+    }
+
+    #[test]
+    fn existing_worker_member_persists_a_new_session_identity() {
+        let _scratch = StoreScratch::new("member-session-id");
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(1, 1),
+        );
+        core.squad_members.insert(
+            1,
+            vec![crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("worker".into()),
+                harness_session_id: None,
+            }],
+        );
+
+        core.record_worker_member(1, "worker", 1, "/repo", Some("session-new"));
+
+        let stored = crate::squad_store::load();
+        assert_eq!(
+            stored.squads[0].members[0].harness_session_id.as_deref(),
+            Some("session-new")
+        );
     }
 
     #[test]

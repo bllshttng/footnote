@@ -396,6 +396,23 @@ fn quarantine_interrupted_write_temps(home: &AgentsHome, emitter: &EventEmitter)
             if !(name.starts_with('.') && (name.contains(".tmp.") || name.ends_with(".part"))) {
                 continue;
             }
+            let target_name = name
+                .strip_prefix('.')
+                .and_then(|name| name.split_once(".tmp.").map(|(target, _)| target))
+                .or_else(|| {
+                    name.strip_prefix('.')
+                        .and_then(|name| name.strip_suffix(".part"))
+                });
+            let Some(target_name) = target_name else {
+                continue;
+            };
+            let target = dir.join(target_name);
+            let Ok(Some(_lock)) = state::try_lock_path_exclusive(&target) else {
+                continue;
+            };
+            if !entry.path().exists() {
+                continue;
+            }
             let _ = std::fs::create_dir_all(&quarantine);
             let dest = quarantine.join(format!("{}-{}", now_compact(), name));
             let outcome = if std::fs::rename(entry.path(), &dest).is_ok() {
@@ -11103,6 +11120,29 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 && e["data"]["name"] == ".registry.json.tmp.75348"
         }));
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn recovery_does_not_quarantine_a_temp_held_by_an_active_writer() {
+        let home = tmp_home("recover-active-temp");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        state::update_registry(&home.registry_json(), |_| {}).unwrap();
+        let temp = home.root().join(".registry.json.tmp.active");
+        std::fs::write(&temp, b"partial").unwrap();
+        let lock_path =
+            std::path::PathBuf::from(format!("{}.lock", home.registry_json().display()));
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        lock.lock().unwrap();
+
+        let found = quarantine_interrupted_write_temps(&home, &emitter);
+
+        assert!(found.is_empty());
+        assert!(temp.exists(), "active writer temp must remain in place");
     }
 
     #[test]
