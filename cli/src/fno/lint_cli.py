@@ -45,6 +45,12 @@ CHECKS: dict[str, str] = {
 # These are the knobs a maintainer touches to widen a surface, on purpose, in
 # a one-line diff that shows up in review. New verbs default to hidden, but
 # hidden roots still consume the namespace cap.
+#
+# ROOT_NAMESPACE: 12 is the operator's ceiling ("10-12 max for fno",
+# d-cf2d6fe1). Today is ELEVEN - agents, backlog, config, do, doctor, help,
+# inbox, mux, update, version, whoami (x-6233 folds) - so exactly one slot
+# of headroom remains. The next root verb is a deliberate act with a name
+# attached: fold or retire before raising this.
 MENU_CAP_ROOT_NAMESPACE = 12
 MENU_CAP_TOP_LEVEL = 10
 MENU_CAP_SUB_APP = 12
@@ -161,7 +167,9 @@ def _root_namespace_names() -> list[str]:
     from fno.verb_moves import VERB_MOVES
 
     root = typer.main.get_command(root_app)
-    names = set(root.list_commands(click.Context(root)))
+    # Same cast as _visible_command_names: get_command is typed as bare
+    # Command, and the group methods are what the count needs.
+    names = set(cast("click.Group", root).list_commands(click.Context(root)))
     names.update(LAZY_SUBCOMMANDS)
     names.update(_EAGER_COMMAND_HELP)
     names.difference_update(VERB_MOVES)

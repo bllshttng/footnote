@@ -10,7 +10,7 @@ REPO_ROOT = Path(__file__).parents[3]
 GATE_PATH = REPO_ROOT / "hooks" / "law-authority-gate.py"
 PROPOSAL_ID = "lp-0123456789ab"
 CONTENT_HASH = "a" * 64
-COMMAND = f"fno law enact --proposal {PROPOSAL_ID} --hash {CONTENT_HASH}"
+COMMAND = f"fno inbox law enact --proposal {PROPOSAL_ID} --hash {CONTENT_HASH}"
 
 
 def _gate():
@@ -103,9 +103,9 @@ def test_malformed_or_wrapped_commands_deny() -> None:
     commands = (
         f"bash -lc '{COMMAND}'",
         f"{COMMAND} && echo bypass",
-        f"fno law enact --hash {CONTENT_HASH} --proposal {PROPOSAL_ID}",
-        f"fno law enact --proposal {PROPOSAL_ID} --hash {'b' * 64}",
-        f"fno law enact --proposal ../{PROPOSAL_ID} --hash {CONTENT_HASH}",
+        f"fno inbox law enact --hash {CONTENT_HASH} --proposal {PROPOSAL_ID}",
+        f"fno inbox law enact --proposal {PROPOSAL_ID} --hash {'b' * 64}",
+        f"fno inbox law enact --proposal ../{PROPOSAL_ID} --hash {CONTENT_HASH}",
     )
 
     for command in commands:
@@ -129,7 +129,7 @@ def test_spawn_brief_quoting_enact_is_not_a_law_action() -> None:
     gate = _gate()
     command = (
         'fno agents spawn --name law-worker '
-        '"Explain why fno law enact requires attended human approval."'
+        '"Explain why fno inbox law enact requires attended human approval."'
     )
 
     assert gate.evaluate(_payload(command), arm=lambda **kwargs: {}) is None

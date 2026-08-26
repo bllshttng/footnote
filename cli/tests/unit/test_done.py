@@ -240,7 +240,7 @@ def test_scenario6_err_non_code_no_artifact_exits_2(tmp_graph, monkeypatch):
     }])
     _stub_subprocess(monkeypatch, branch="main", pr_view_rc=1)
     before = _read(tmp_graph)
-    result = runner.invoke(app, ["done", "ab-res00001"])
+    result = runner.invoke(app, ["done", "Research task"])
     assert result.exit_code == 2
     combined = result.stdout + (result.stderr or "")
     assert "research" in combined
@@ -731,7 +731,7 @@ def test_ac4_hp_current_pr_success_no_stderr(tmp_graph, monkeypatch):
         pr_view_rc=0,
         pr_view_stderr="",
     )
-    result = runner.invoke(app, ["done", "ab-ac4hp001"])
+    result = runner.invoke(app, ["done", "HP target"])
     assert result.exit_code == 0, result.output
     entry = _read(tmp_graph)[0]
     assert entry["status"] == "done"
@@ -757,7 +757,7 @@ def test_ac4_err_gh_fails_no_explicit_args_prints_stderr(tmp_graph, monkeypatch)
         pr_view_rc=1,
         pr_view_stderr="gh: not authenticated",
     )
-    result = runner.invoke(app, ["done", "ab-ac4er001"], catch_exceptions=False)
+    result = runner.invoke(app, ["done", "ERR target"], catch_exceptions=False)
     assert result.exit_code == 0, result.output
     # stderr must contain the prefix and the captured gh error.
     combined_err = result.output  # CliRunner mixes stderr into output by default

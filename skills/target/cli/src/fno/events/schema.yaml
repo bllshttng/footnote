@@ -2456,7 +2456,7 @@ event_types:
 
   - name: operator_decision
     retention: durable
-    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno backlog decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno backlog decisions` reads. See docs/architecture/decision-record.md."
+    description: "A decision the operator (or an agent under a beastmode grant) made, recorded so it survives the session and the compaction that eats the transcript it was stated in. Emitted from `fno outstanding clear --answer` (the answer IS the decision) and from `fno inbox decide` (a ruling with no question on file). Two producers, both explicit: automatic recording needs a classifier deciding what counts as a ruling, which is judgment on a truncated view. supersedes makes overturning explicit so two decisions on one subject order themselves and a reader of the older one can tell it is not current. Written twice on one call: to the project journal (durability, GC-exempt by the explicit retention above) and to the machine-wide ~/.fno/decisions.jsonl index, which is what `fno inbox decisions` reads. See docs/architecture/decision-record.md."
     sources: [target, hook, subagent, test]
     data:
       required: [decision_id, decision]
@@ -2481,7 +2481,7 @@ event_types:
           description: "Optional. When the question was asked; age is the attention signal."
         subject:
           type: string
-          description: "Optional. The node, file, or area the decision governs. The recovery key: `fno backlog decisions <subject>` and the graph projection read it."
+          description: "Optional. The node, file, or area the decision governs. The recovery key: `fno inbox decisions <subject>` and the graph projection read it."
         expiry_ref:
           type: object
           description: "Optional exact coordination closure reference. Node refs name node_id. PR refs name repository and number, with an optional URL."
@@ -2509,7 +2509,7 @@ event_types:
         supersedes:
           type: string
           description: "Optional. The decision_id this overturns, when it overturns one."
-    consumers: [operator, fno backlog decisions]
+    consumers: [operator, fno inbox decisions]
 
   - name: decision_retracted
     retention: durable
@@ -2545,7 +2545,7 @@ event_types:
         authority_source:
           type: string
           description: "Optional authority lane used for the retraction."
-    consumers: [operator, fno backlog decisions]
+    consumers: [operator, fno inbox decisions]
 
   - name: agent_raw_inject
     retention: durable

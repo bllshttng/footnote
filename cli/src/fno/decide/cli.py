@@ -26,8 +26,8 @@ shim_app = typer.Typer(
 decide_app = shim_app
 
 _DEPRECATION_NOTICE = (
-    "fno decide is now `fno backlog decide` (`fno decide list` -> "
-    "`fno backlog decisions`, `fno decide reindex` -> `fno backlog "
+    "fno decide is now `fno inbox decide` (`fno decide list` -> "
+    "`fno inbox decisions`, `fno decide reindex` -> `fno backlog "
     "decide-reindex`). This spelling is removed next release."
 )
 

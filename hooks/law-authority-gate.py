@@ -58,12 +58,12 @@ def _contains_enact_action(command: Any) -> bool:
             else:
                 segment.append(token)
     except ValueError:
-        return bool(re.match(r"^\s*fno\s+law\s+enact\b", command))
+        return bool(re.match(r"^\s*fno\s+inbox\s+law\s+enact\b", command))
     if segment:
         segments.append(segment)
 
     for tokens in segments:
-        if tokens[:3] == ["fno", "law", "enact"]:
+        if tokens[:4] == ["fno", "inbox", "law", "enact"]:
             return True
         for index, token in enumerate(tokens[:-1]):
             if token in {"bash", "sh", "zsh"} and tokens[index + 1] in {"-c", "-lc"}:
@@ -79,13 +79,13 @@ def _parse_command(command: Any) -> tuple[str, str] | None:
         tokens = shlex.split(command, posix=True)
     except ValueError:
         return None
-    if len(tokens) != 7:
+    if len(tokens) != 8:
         return None
-    if tokens[0:4] != ["fno", "law", "enact", "--proposal"]:
+    if tokens[0:5] != ["fno", "inbox", "law", "enact", "--proposal"]:
         return None
-    if tokens[5] != "--hash":
+    if tokens[6] != "--hash":
         return None
-    proposal_id, content_hash = tokens[4], tokens[6]
+    proposal_id, content_hash = tokens[5], tokens[7]
     if not PROPOSAL_ID.fullmatch(proposal_id) or not CONTENT_HASH.fullmatch(content_hash):
         return None
     canonical = f"fno inbox law enact --proposal {proposal_id} --hash {content_hash}"

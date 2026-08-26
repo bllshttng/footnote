@@ -5,13 +5,13 @@ A ruling stated in chat dies with the context. Weeks later, the operator asks, "
 ## The verb
 
 ```bash
-fno backlog decide pr-1234 "recall moves to a machine-wide index" \
+fno inbox decide pr-1234 "recall moves to a machine-wide index" \
   --rationale "the global journal rotates and a union read is 793 MB" \
   --option "global journal" --option "machine-wide index"
 
-fno backlog decisions pr-1234  # newest first, superseded rows marked
-fno backlog decisions --lane law         # only operator-entitled rulings
-fno backlog decisions                    # the recent decisions across every subject
+fno inbox decisions pr-1234  # newest first, superseded rows marked
+fno inbox decisions --lane law         # only operator-entitled rulings
+fno inbox decisions                     # the recent decisions across every subject
 fno backlog decide-reindex                 # backfill records written before the index
 ```
 
@@ -19,7 +19,7 @@ The old `fno inbox decide` spelling remains as a one-release compatibility shim.
 
 ## Two producers, both explicit
 
-`fno backlog decide` records a ruling that has no question on file. `fno outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
+`fno inbox decide` records a ruling that has no question on file. `fno outstanding clear --answer` records the answer to an open `operator_question`, because an answered question IS a decision.
 
 Both are explicit on purpose. Automatic classification of "was that a ruling?" is judgment on a truncated view, which `docs/architecture/memory-system.md` records as deprecated for cause.
 

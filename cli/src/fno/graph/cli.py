@@ -8669,18 +8669,16 @@ def cmd_done(
 
     # The rich surface delegates (x-6233): any ported flag, a fuzzy query
     # (title substring), or a missing id (branch auto-detect) routes to the
-    # implementation that already owns those paths. A bare node id keeps THIS
-    # command's gates, stamp, and dependent cascade - the canonical close.
-    if (
-        backfill
-        or force_overwrite
-        or pr is not None
-        or pr_url is not None
-        or link is not None
-        or note is not None
+    # implementation that already owns those paths - and only when NO close
+    # flag is set, because the delegate has no --force/--reason/--skip-stamp
+    # and would drop them. A bare node id keeps THIS command's gates, stamp,
+    # and dependent cascade - the canonical close.
+    _delegate = not _close_flags and (
+        _rich_flags
         or task_id is None
         or not has_node_id_prefix(task_id)
-    ):
+    )
+    if _delegate:
         from fno.done.cli import done_command
 
         done_command(
@@ -8693,6 +8691,14 @@ def cmd_done(
             force_overwrite=force_overwrite,
         )
         return
+    if task_id is None:
+        typer.echo(
+            "Error: an explicit node id is required with the close flags "
+            "(--force/--reason/--skip-stamp); branch auto-detect applies to "
+            "the completion surface only",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
     from fno.graph._reconcile import node_pr_refs

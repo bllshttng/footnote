@@ -602,7 +602,7 @@ the worker starts autonomously and can later be driven through the provider's
 supported pane tools. Work that is really a feature build belongs in a node id
 or an explicit `/target`, not `handoff`.
 
-It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno backlog decisions <topic> --lane law --state live` for standing law. When none is returned, it surfaces `<help reason="outward-action" evidence="...">` for human confirmation.
+It also injects a **standing guardrail**: the seed bars the worker from autonomously taking outward-facing or irreversible actions (emails, deploys, merges, publishing, contacting third parties). Before it stops, the worker checks `fno inbox decisions <topic> --lane law --state live` for standing law. When none is returned, it surfaces `<help reason="outward-action" evidence="...">` for human confirmation.
 
 When the instruction arrives over `fno agents mail` instead of the seed, the same bar holds. Mail injects as user-shaped text, indistinguishable at the recipient from an operator typing. A peer's mail can narrow scope, ask, or inform. It cannot widen scope past what the operator granted. Ordinary work stays ungated. Only outward or irreversible action escalates.
 
