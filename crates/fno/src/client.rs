@@ -1454,7 +1454,8 @@ struct SearchView {
 /// same per-key re-read discipline as the selector/search), so a layout push
 /// under an open navigator is reflected at once.
 struct NavView {
-    /// Incremental text filter (substring, case-insensitive) over row labels.
+    /// Incremental text filter (substring, case-insensitive) over row match
+    /// keys: label + pane id + node id + slug + workspace (x-e10f).
     query: String,
     /// The active state chip; `None` = all states. `Tab` cycles it.
     state_filter: Option<PaneState>,
@@ -4996,27 +4997,45 @@ impl View {
     fn nav_rows(&self) -> Vec<NavRow> {
         let mut out = Vec::new();
         let cross = |sq: u64| (sq != self.layout.active_squad).then_some(sq);
+        // (x-e10f) The pane -> work-queue join behind "find by node": an agent
+        // row's pane is the pane a card's `pane_id` names when that node is in
+        // flight, so the card carries the node id and title-slug the pane's own
+        // row can be searched by.
+        let card_for_pane = |pid: Option<u64>| -> Option<&BacklogCard> {
+            self.layout
+                .backlog
+                .iter()
+                .find(|c| c.pane_id.is_some_and(|cp| Some(cp) == pid))
+        };
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
             // CycleSection): the navigator is a jump, never a view-state cycle.
-            out.push(NavRow {
-                label: s.name.clone(),
-                state: PaneState::Idle,
-                goto_squad: None,
-                goto_tab: None,
-                hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
-            });
-            for (t, tab) in s.tabs.iter().enumerate() {
-                let tab_text = tab_label_text(&tab.name, t, tab.named);
-                out.push(NavRow {
-                    label: format!("{} › {}", s.name, tab_text),
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: s.name.clone(),
                     state: PaneState::Idle,
-                    // SelectTab resolves the squad server-side, so one command
-                    // switches squad+tab (row_action's tab arm, gemini review).
                     goto_squad: None,
                     goto_tab: None,
-                    hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
-                });
+                    hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
+                }
+                .with_match_key(&[]),
+            );
+            for (t, tab) in s.tabs.iter().enumerate() {
+                let tab_text = tab_label_text(&tab.name, t, tab.named);
+                out.push(
+                    NavRow {
+                        match_key: String::new(),
+                        label: format!("{} › {}", s.name, tab_text),
+                        state: PaneState::Idle,
+                        // SelectTab resolves the squad server-side, so one command
+                        // switches squad+tab (row_action's tab arm, gemini review).
+                        goto_squad: None,
+                        goto_tab: None,
+                        hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
+                    }
+                    .with_match_key(&[s.name.clone()]),
+                );
                 // Plain panes of the tab (v22): a pane already shown as an agent
                 // row is skipped (the agent row is the richer view of the same
                 // pane); the rest become goto-able so a bare shell pane in any
@@ -5025,13 +5044,17 @@ impl View {
                     if self.layout.agents.iter().any(|a| a.pane_id == Some(p.id)) {
                         continue;
                     }
-                    out.push(NavRow {
-                        label: format!("{} › {} › {}", s.name, tab_text, p.label),
-                        state: PaneState::Idle,
-                        goto_squad: cross(s.id),
-                        goto_tab: Some(tab.id),
-                        hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
-                    });
+                    out.push(
+                        NavRow {
+                            match_key: String::new(),
+                            label: format!("{} › {} › {}", s.name, tab_text, p.label),
+                            state: PaneState::Idle,
+                            goto_squad: cross(s.id),
+                            goto_tab: Some(tab.id),
+                            hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
+                        }
+                        .with_match_key(&[p.id.to_string(), s.name.clone()]),
+                    );
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
@@ -5045,56 +5068,84 @@ impl View {
                     Some(TabContext::Ordinal(n)) => format!("{} › {} ·{n}", s.name, a.name),
                     None => format!("{} › {}", s.name, a.name),
                 };
-                out.push(NavRow {
-                    label,
-                    state: nav_agent_state(a),
-                    // Switch to the agent's squad first when it is not active, so
-                    // the following FocusPane lands there (the server resolves the
-                    // pane's tab on focus; the ordinal is display-only).
-                    goto_squad: cross(s.id),
-                    goto_tab: None,
-                    hit: agent_hit(a, self.layout.active_squad),
-                });
+                let card = card_for_pane(a.pane_id);
+                out.push(
+                    NavRow {
+                        match_key: String::new(),
+                        label,
+                        state: nav_agent_state(a),
+                        // Switch to the agent's squad first when it is not active, so
+                        // the following FocusPane lands there (the server resolves the
+                        // pane's tab on focus; the ordinal is display-only).
+                        goto_squad: cross(s.id),
+                        goto_tab: None,
+                        hit: agent_hit(a, self.layout.active_squad),
+                    }
+                    .with_match_key(&[
+                        a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                        card.map(|c| c.id.clone()).unwrap_or_default(),
+                        card.map(|c| c.slug.clone()).unwrap_or_default(),
+                        s.name.clone(),
+                    ]),
+                );
             }
         }
         // Orphan agents (no live squad), mirroring display_rows' orphan section.
         for a in self.layout.agents.iter().filter(
             |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
         ) {
-            out.push(NavRow {
-                label: a.name.clone(),
-                state: nav_agent_state(a),
-                goto_squad: None,
-                goto_tab: None,
-                hit: agent_hit(a, self.layout.active_squad),
-            });
+            let card = card_for_pane(a.pane_id);
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: a.name.clone(),
+                    state: nav_agent_state(a),
+                    goto_squad: None,
+                    goto_tab: None,
+                    hit: agent_hit(a, self.layout.active_squad),
+                }
+                .with_match_key(&[
+                    a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                    card.map(|c| c.id.clone()).unwrap_or_default(),
+                    card.map(|c| c.slug.clone()).unwrap_or_default(),
+                ]),
+            );
         }
         // Work-queue cards: goto opens the dispatch confirm / focuses the worker
         // (card_hit), no squad switch. A blocked/in-flight card reads as
         // Blocked/Working so the state filter surfaces stuck work uniformly.
         for c in &self.layout.backlog {
             let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-            out.push(NavRow {
-                label: format!("{label} {}", c.priority),
-                state: card_state(c),
-                goto_squad: None,
-                goto_tab: None,
-                hit: self.card_hit(c),
-            });
+            out.push(
+                NavRow {
+                    match_key: String::new(),
+                    label: format!("{label} {}", c.priority),
+                    state: card_state(c),
+                    goto_squad: None,
+                    goto_tab: None,
+                    hit: self.card_hit(c),
+                }
+                .with_match_key(&[
+                    c.id.clone(),
+                    c.slug.clone(),
+                    c.pane_id.map(|p| p.to_string()).unwrap_or_default(),
+                ]),
+            );
         }
         out
     }
 
     /// The navigator rows matching the current text + state filter (x-653d),
     /// recomputed per keypress (no cache): case-insensitive substring on the
-    /// label AND the state chip when one is set. Text and state compose (both
-    /// must match); letters only ever edit the query (Locked 5).
+    /// match key (label + identity, x-e10f) AND the state chip when one is set.
+    /// Text and state compose (both must match); letters only ever edit the
+    /// query (Locked 5).
     fn nav_filtered(&self, nav: &NavView) -> Vec<NavRow> {
         let q = nav.query.to_lowercase();
         self.nav_rows()
             .into_iter()
             .filter(|r| nav.state_filter.is_none_or(|s| r.state == s))
-            .filter(|r| q.is_empty() || r.label.to_lowercase().contains(&q))
+            .filter(|r| q.is_empty() || r.match_key.contains(&q))
             .collect()
     }
 
@@ -8981,9 +9032,17 @@ const NEEDS_WINDOW_SECS: u64 = 24 * 60 * 60;
 /// borrow) so goto can mutate the view after the catalog is built; recomputed
 /// per keypress, never cached.
 struct NavRow {
-    /// The searchable, displayed label (e.g. `nairobi › build` or
-    /// `nairobi › claude#3`). The text filter matches here, case-insensitively.
+    /// The displayed label (e.g. `nairobi › build` or `nairobi › claude#3`).
+    /// Rendering only - the text filter matches [`NavRow::match_key`].
     label: String,
+    /// (x-e10f) The searchable identity, composed at build time and NEVER
+    /// displayed: `label` plus the mux pane id, the bound node id, the
+    /// title-slug and the workspace name, lowercased and space-joined. The
+    /// text filter matches HERE, so a row is findable by what it IS (pane
+    /// `307`, node `x-6233`, a slug) not just by its label text. A row whose
+    /// hit is invisible in the label shows the matched token
+    /// ([`nav_overlay_lines`]) - a hit with no visible reason reads as a bug.
+    match_key: String,
     /// Derived rollup state, for the state filter + the leading glyph.
     state: PaneState,
     /// Switch to this squad before applying `hit`, when it is not already the
@@ -9000,6 +9059,38 @@ struct NavRow {
     /// FocusPane/AttachAgent for an agent, the dispatch confirm / focus for a
     /// card, or a [`ChromeHit::Notice`] that keeps the navigator open.
     hit: ChromeHit,
+}
+
+impl NavRow {
+    /// (x-e10f) Fill `match_key` from the row's own label plus its resolved
+    /// identity `tokens`. The one population path for every row class, so the
+    /// searchable identity cannot drift from the row that renders it.
+    fn with_match_key(mut self, tokens: &[String]) -> Self {
+        self.match_key = nav_match_key(&self.label, tokens);
+        self
+    }
+}
+
+/// (x-e10f) Compose a nav row's searchable identity: the label plus every
+/// non-empty token, lowercased and space-joined. An unresolved field
+/// contributes NO token, so a squad row without a node binding is not made
+/// matchable by the empty string.
+fn nav_match_key(label: &str, tokens: &[String]) -> String {
+    let mut key = label.to_lowercase();
+    for t in tokens {
+        if !t.is_empty() {
+            key.push(' ');
+            key.push_str(&t.to_lowercase());
+        }
+    }
+    key
+}
+
+/// (x-e10f) Whether a nav row's goto lands on pane `pid`: every pane-hosted
+/// row class (a plain pane, a pane-hosted agent) applies `FocusPane(pid)`.
+/// The cursor-seed predicate for opening the navigator on the focused pane.
+fn nav_row_targets_pane(r: &NavRow, pid: u64) -> bool {
+    matches!(&r.hit, ChromeHit::Cmds(cs) if cs.iter().any(|c| matches!(c, Command::FocusPane(p) if *p == pid)))
 }
 
 /// The navigator state of an agent row: an exited pane reads `Idle` (finished,
@@ -9864,8 +9955,11 @@ fn nav_glyph(s: PaneState) -> char {
 
 /// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
 /// line, then one line per FILTERED row with a leading state glyph and the
-/// cursor row marked `▸`. An empty result renders a single `no matches` line
-/// (the key handler BELs). `rows` is pre-filtered; `cursor` is pre-clamped.
+/// cursor row marked `▸`. A row that matched an identity token invisible in
+/// its label appends that token as a `·<token>` suffix (x-e10f), so a hit
+/// always shows WHY it hit - a row that appears arbitrary reads as a bug. An
+/// empty result renders a single `no matches` line (the key handler BELs).
+/// `rows` is pre-filtered; `cursor` is pre-clamped.
 fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
     let chip = match nav.state_filter {
         None => "all",
@@ -9882,10 +9976,27 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         lines.push(pad_to("   no matches", NAV_OVERLAY_W));
         return lines;
     }
+    let q = nav.query.to_lowercase();
     for (i, r) in rows.iter().enumerate() {
         let marker = if i == nav.cursor { '▸' } else { ' ' };
+        // The reason token: a match-key token that contains the query while
+        // the label does not. A query that hits the visible label appends
+        // nothing (AC4-UI: the row renders exactly as before).
+        let label_lower = r.label.to_lowercase();
+        let label = if q.is_empty() || label_lower.contains(&q) {
+            r.label.clone()
+        } else {
+            match r
+                .match_key
+                .split(' ')
+                .find(|t| t.contains(&q) && !label_lower.contains(t))
+            {
+                Some(token) => format!("{} ·{token}", r.label),
+                None => r.label.clone(),
+            }
+        };
         lines.push(pad_to(
-            &format!(" {marker} {} {}", nav_glyph(r.state), r.label),
+            &format!(" {marker} {} {}", nav_glyph(r.state), label),
             NAV_OVERLAY_W,
         ));
     }
@@ -12134,16 +12245,28 @@ async fn dispatch_event(
             } else {
                 // Row 0 is NOT always actionable: Extended opens on the inert
                 // column header, where the cursor would paint nothing and Enter
-                // would only ring. Anchor onto the first actionable row instead.
-                view.selector = view.selector_anchor(0);
+                // would only ring. Seed from the FOCUSED pane's row (x-e10f:
+                // opening must land where you already are, not row one - the
+                // confirmed `ctrl+w goes to the top each time` defect); a pane
+                // with no visible row (a scratch pane, a folded section) falls
+                // back to the old row-zero anchor, never an invalid index.
+                // `selector_anchor` still steps off inert rows in both
+                // directions from whatever seed it gets.
+                let seed = view
+                    .agent_row_index_for_pane(view.layout.focus)
+                    .unwrap_or(0);
+                view.selector = view.selector_anchor(seed);
                 // An explicit open is a full modal, never a motion-fresh
                 // hover-arm - clear any stale hover flag so j/k and typing are
                 // owned by the selector, not disarmed on the first non-verb key.
                 view.sel_hover_armed = false;
                 view.sel_esc.clear();
                 // Open at the top: a stale offset from a prior session must
-                // not hide row 0 (x-a621).
+                // not hide row 0 (x-a621). Then re-follow the SEEDED cursor -
+                // offset 0 can leave it scrolled off-screen, and Enter must
+                // act on a visible row.
                 view.sideline_offset = 0;
+                view.clamp_sideline_offset();
             }
         }
         Event::OpenAnswers => {
@@ -12303,10 +12426,19 @@ async fn dispatch_event(
             // bytes after the chord can't leak to the pane (like SearchOpen).
             // No width gate: draw_lines_overlay clips a tiny terminal, and a
             // zero-squad session shows an explicit `no matches` (AC1-EDGE).
+            // (x-e10f) Seed from the focused pane so the navigator opens on
+            // the row you are already at; the filter is empty at open, so the
+            // filtered list IS nav_rows() here. A focused pane with no row (a
+            // scratch pane) opens at row zero (AC7-EDGE).
+            let seed = view
+                .nav_rows()
+                .iter()
+                .position(|r| nav_row_targets_pane(r, view.layout.focus))
+                .unwrap_or(0);
             view.nav = Some(NavView {
                 query: String::new(),
                 state_filter: None,
-                cursor: 0,
+                cursor: seed,
             });
             view.nav_esc.clear();
             return Ok(DispatchFlow::Break);
@@ -14960,14 +15092,20 @@ enum NavKey {
     Esc,
     Up,
     Down,
+    /// (x-e10f) Bare Right: reach the selected row (the Enter/goto arm).
+    Right,
+    /// (x-e10f) Bare Left: close (the Esc arm) - back to the pane you came
+    /// from. The overlay owns every keystroke, so a bare arrow is free.
+    Left,
     ShiftTab,
 }
 
 /// Fold navigator-mode bytes. Identical escape-carry semantics to
 /// [`fold_search_input`] (whole CSI consumed, split sequences carried across
-/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`, and
-/// Shift-Tab `ESC [ Z` finals become [`NavKey::Up`]/[`Down`]/[`ShiftTab`] so the
-/// navigator can move its cursor and reverse-cycle the state chip. A modified
+/// reads via `esc`), except the arrow-Up `ESC [ A`, arrow-Down `ESC [ B`,
+/// arrow-Right/Left `ESC [ C`/`ESC [ D`, and Shift-Tab `ESC [ Z` finals become
+/// [`NavKey::Up`]/[`Down`]/[`Right`]/[`Left`]/[`ShiftTab`] so the navigator can
+/// move its cursor, goto, close, and reverse-cycle the state chip. A modified
 /// arrow (`ESC [ 1 ; 5 A`) shares the final byte and maps to the same motion -
 /// harmless. All other finals are swallowed, same leak-safety as search.
 fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
@@ -15011,6 +15149,8 @@ fn fold_nav_input(esc: &mut Vec<u8>, bytes: &[u8]) -> Vec<NavKey> {
                         match b {
                             b'A' => keys.push(NavKey::Up),
                             b'B' => keys.push(NavKey::Down),
+                            b'C' => keys.push(NavKey::Right),
+                            b'D' => keys.push(NavKey::Left),
                             b'Z' => keys.push(NavKey::ShiftTab),
                             _ => {}
                         }
@@ -15117,7 +15257,8 @@ async fn search_keys(
 /// Printable bytes edit the text filter (Locked 5: letters are ALWAYS query
 /// text, never state keys); Backspace widens; `Tab`/`Shift-Tab` cycle the state
 /// chip forward/back; `Up`/`Down` (or `Ctrl-p`/`Ctrl-n`) move the cursor over the
-/// filtered rows (clamped, no wrap); Enter goto's the row; Esc closes. Uses
+/// filtered rows (clamped, no wrap); Enter or bare `Right` goto's the row;
+/// `Esc` or bare `Left` closes (x-e10f). Uses
 /// [`fold_nav_input`]'s split-arrow fold (which surfaces the motion finals while
 /// swallowing every other escape) and a per-key re-read so an Esc mid-chunk
 /// swallows the chunk's remainder (ab-63b44059).
@@ -15136,7 +15277,7 @@ async fn nav_keys(
             break;
         }
         match key {
-            NavKey::Esc => {
+            NavKey::Esc | NavKey::Left => {
                 view.nav = None;
                 view.nav_esc.clear();
                 break;
@@ -15144,6 +15285,10 @@ async fn nav_keys(
             // Arrows mirror Ctrl-p/Ctrl-n; Shift-Tab reverses the state ring.
             NavKey::Up => view.nav_move_cursor(-1),
             NavKey::Down => view.nav_move_cursor(1),
+            // (x-e10f) Bare Right reaches the selected row - the same
+            // nav_goto the Enter arm calls, so substrate behavior (attach a
+            // thread, focus a pane, refuse with a notice) is the same too.
+            NavKey::Right => nav_goto(view, sock_w).await?,
             NavKey::ShiftTab => {
                 view.nav_cycle_state_rev();
                 view.nav_ring_if_empty();
@@ -28208,6 +28353,71 @@ mod tests {
     }
 
     #[test]
+    fn nav_filter_matches_pane_id_node_id_and_slug() {
+        // x-e10f AC1-HP/AC2-HP/AC3-HP: the query matches what the row IS, not
+        // just its label. Pane 307 is the screenshot specimen (live, running
+        // x-8a01, `find > 307` said `no matches`); x-6233 is the bound node;
+        // the slug is the node's title-slug. All three find the pane's row.
+        let mut v = two_pane_view();
+        // A plain (non-agent) pane 307 in notes' first tab, plus an agent on
+        // pane 11 working in-flight node x-6233 - both row classes must match.
+        v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
+            id: 307,
+            label: "shell".into(),
+        }];
+        v.layout.agents = vec![agent_row("claude", 11, None, false)];
+        v.layout.backlog = vec![BacklogCard {
+            id: "x-6233".into(),
+            slug: "mux-navigator-matches-by-identity".into(),
+            priority: "p1".into(),
+            state: CardState::InFlight,
+            pane_id: Some(11),
+            attach_id: None,
+            where_hint: None,
+            project: None,
+            lane: None,
+            plan_path: None,
+            head: false,
+        }];
+        let rows = |q: &str| {
+            let nav = NavView {
+                query: q.into(),
+                state_filter: None,
+                cursor: 0,
+            };
+            v.nav_filtered(&nav)
+        };
+        let hits_pane = |r: &NavRow| {
+            matches!(
+                &r.hit,
+                ChromeHit::Cmds(cs) if cs.iter().any(|c| matches!(c, Command::FocusPane(p) if *p == 307))
+            )
+        };
+        assert!(
+            rows("307").iter().any(hits_pane),
+            "the plain pane row is found by its mux pane id, not its label"
+        );
+        assert!(
+            rows("307").iter().all(|r| !r.label.contains("307")),
+            "the hit is invisible in every matched label - it matched the key"
+        );
+        assert!(
+            rows("x-6233").iter().any(|r| r.label.contains("claude")),
+            "the agent row working x-6233 is found by node id via the pane join"
+        );
+        assert!(
+            rows("matches-by-identity")
+                .iter()
+                .any(|r| r.label.contains("claude")),
+            "the agent row is found by its bound node's title-slug, invisible in its label"
+        );
+        assert!(
+            rows("notes").iter().any(|r| r.label == "notes"),
+            "label substrings still match (the workspace half of the ask)"
+        );
+    }
+
+    #[test]
     fn nav_rows_fold_done_through_the_seen_bit() {
         // AC1-HP/AC2-HP (x-4328), at the navigator seam: a seen Done row
         // folds to Idle (the unseen glyph clears); an unseen Done row stays
@@ -28307,6 +28517,135 @@ mod tests {
         let rows = v.nav_filtered(&empty);
         let lines = nav_overlay_lines(&rows, &empty);
         assert!(lines.iter().any(|l| l.contains("no matches")));
+    }
+
+    #[test]
+    fn nav_overlay_lines_show_the_matched_identity_token() {
+        // x-e10f AC4-UI: a hit on an invisible identity token appends the
+        // matched token as a `·<token>` suffix; a query that hits the visible
+        // label appends nothing (the row renders exactly as before).
+        let mut v = two_pane_view();
+        v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
+            id: 307,
+            label: "shell".into(),
+        }];
+        let unseen = NavView {
+            query: "307".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&unseen);
+        let lines = nav_overlay_lines(&rows, &unseen);
+        let hit = lines
+            .iter()
+            .find(|l| l.contains("·307"))
+            .expect("the pane-id hit names its reason");
+        assert!(hit.contains("shell"), "the label still renders: {hit:?}");
+        let visible = NavView {
+            query: "shell".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&visible);
+        let lines = nav_overlay_lines(&rows, &visible);
+        assert!(
+            lines.iter().all(|l| !l.contains("·")),
+            "a label match appends no reason token"
+        );
+    }
+
+    #[tokio::test]
+    async fn selector_opens_on_the_focused_panes_row() {
+        // x-e10f AC6-HP: prefix+w opens on the FOCUSED pane's row, not the
+        // first actionable one - the operator-confirmed `ctrl+w goes to the
+        // top of the sideline each time` defect. AC7-EDGE: a focused pane with
+        // no visible row opens on the old row-zero anchor, never an invalid
+        // index.
+        let mut v = two_pane_view(); // focus = pane 11, the SECOND agent row
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::OpenSelector, &mut buf)
+            .await
+            .unwrap();
+        let sel = v.selector.expect("selector opened");
+        assert!(
+            matches!(v.display_rows()[sel], DisplayRow::Agent(a) if a.pane_id == Some(11)),
+            "cursor rests on the focused pane's row, not row zero"
+        );
+        v.layout.focus = 99; // no row hosts pane 99
+        dispatch_event(&mut v, Event::OpenSelector, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(
+            v.selector,
+            v.selector_anchor(0),
+            "an unfocusable seed falls back to the row-zero anchor"
+        );
+    }
+
+    #[tokio::test]
+    async fn navigator_opens_on_the_focused_panes_row_and_re_anchors_on_filter() {
+        // x-e10f: prefix+f opens on the focused pane's row (the same seed the
+        // global chord rides, AC11's client half); the filter-change
+        // cursor = 0 sites keep re-anchoring (ruling d-771c1d85, AC8-FR); a
+        // focused pane with no row opens at zero (AC7-EDGE).
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        dispatch_event(&mut v, Event::OpenNav, &mut buf)
+            .await
+            .unwrap();
+        let cursor = v.nav.as_ref().unwrap().cursor;
+        let rows = v.nav_filtered(v.nav.as_ref().unwrap());
+        assert_ne!(cursor, 0, "pane 11's row is not the first row");
+        assert!(
+            nav_row_targets_pane(&rows[cursor], 11),
+            "opens on the focused pane 11's row"
+        );
+        v.nav_cycle_state();
+        assert_eq!(
+            v.nav.as_ref().unwrap().cursor,
+            0,
+            "a state-filter change still re-anchors to zero"
+        );
+        v.nav = None;
+        v.layout.focus = 99; // no row hosts pane 99
+        dispatch_event(&mut v, Event::OpenNav, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.nav.as_ref().unwrap().cursor, 0);
+    }
+
+    #[tokio::test]
+    async fn global_chord_opens_the_sideline_on_the_focused_row() {
+        // x-e10f AC11-HP: ESC[1;7D with no prefix opens the sideline seeded on
+        // the focused pane's row. AC12 (consumed, never forwarded) is asserted
+        // at the scanner in keys.rs; this proves the emitted event lands the
+        // SEEDED selector, end to end through dispatch_event.
+        let mut v = two_pane_view();
+        v.layout.agents = vec![
+            agent_row("alpha", 10, None, false),
+            agent_row("omega", 11, None, false),
+        ];
+        let events = crate::keys::Scanner::default().scan(b"\x1b[1;7D", Instant::now());
+        let mut buf: Vec<u8> = Vec::new();
+        for ev in events {
+            if let Event::Forward(chunk) = &ev {
+                panic!("AC12: the chord leaked to the pane: {chunk:?}");
+            }
+            dispatch_event(&mut v, ev, &mut buf).await.unwrap();
+        }
+        let sel = v.selector.expect("the chord opened the sideline");
+        assert!(
+            matches!(v.display_rows()[sel], DisplayRow::Agent(a) if a.pane_id == Some(11)),
+            "seeded on the focused pane's row"
+        );
     }
 
     #[test]
@@ -28465,6 +28804,46 @@ mod tests {
         );
         nav_keys(&mut v, b"\x1bx", &mut buf).await.unwrap();
         assert!(v.nav.is_none(), "Esc closes; the trailing x is swallowed");
+    }
+
+    #[tokio::test]
+    async fn nav_keys_bare_right_gotos_and_left_closes() {
+        // x-e10f AC9-HP/AC10-ERR: bare Right reaches the selected row through
+        // the same nav_goto Enter uses (a refusal keeps the overlay open and
+        // sends nothing - the Notice path is nav_goto's, not new logic), and
+        // bare Left closes like Esc. Bare arrows never leak to the pane.
+        let mut v = unified_rows_view();
+        let idx = v
+            .nav_rows()
+            .iter()
+            .position(|r| r.label.starts_with("x-blk"))
+            .unwrap();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: idx,
+        });
+        v.notice = None;
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[C", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "a Notice row sends nothing on Right");
+        assert!(v.notice.is_some(), "the refusal names itself");
+        assert!(v.nav.is_some(), "AC10-ERR: the overlay stays open");
+        nav_keys(&mut v, b"\x1b[D", &mut buf).await.unwrap();
+        assert!(v.nav.is_none(), "bare Left closes, like Esc");
+        assert!(buf.is_empty(), "arrows never leak to the pane");
+        // AC9-HP positive half: Right on an actionable row acts and closes,
+        // exactly like Enter (row 0 is the active squad's SelectSquad row).
+        let mut v = two_pane_view();
+        v.nav = Some(NavView {
+            query: String::new(),
+            state_filter: None,
+            cursor: 0,
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        nav_keys(&mut v, b"\x1b[C", &mut buf).await.unwrap();
+        assert!(!buf.is_empty(), "Right on an actionable row acts");
+        assert!(v.nav.is_none(), "and closes the overlay, like Enter");
     }
 
     #[tokio::test]

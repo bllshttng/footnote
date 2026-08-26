@@ -281,6 +281,14 @@ pub const PANE_IDS_REPEAT_WINDOW: Duration = Duration::from_millis(750);
 const PASTE_OPEN: &[u8] = b"\x1b[200~";
 const PASTE_CLOSE: &[u8] = b"\x1b[201~";
 
+/// (x-e10f) The GLOBAL sideline chord's prefix: Ctrl+Opt+arrow is
+/// `ESC [ 1 ; 7 X` (xterm modifier 7 = 1 + Alt 2 + Ctrl 4), the rung above
+/// the prefix-gated ctrl(5)/shift(2) arrows in [`esc_chord`]. Shared by the
+/// `ChordEsc` scanner branch (which holds and releases candidates against it)
+/// and [`esc_chord`] itself, so the scanner and the parser cannot disagree
+/// about what the chord looks like. Only `D` (Left) is bound.
+const GLOBAL_CHORD_PREFIX: &[u8] = b"\x1b[1;7";
+
 /// One scanned outcome. `Forward` chunks are byte-exact pass-through - bare
 /// bytes are NEVER re-encoded (AC2-UI).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,6 +370,13 @@ enum State {
     /// Bytes forward; `usize` is the rolling PASTE_OPEN match index (how
     /// many marker bytes the forwarded tail already matches).
     Normal(usize),
+    /// (x-e10f) Accumulating a GLOBAL chord candidate that began in `Normal`
+    /// (Ctrl+Opt+Left = `ESC [ 1 ; 7 D`): bytes are HELD, not forwarded, and
+    /// release to the pane the moment the sequence diverges from the chord
+    /// prefix - with the paste-open roll re-run over the released bytes - so
+    /// a partial chord never leaks mid-sequence and a lone Esc is released as
+    /// soon as the next byte says it is not the chord.
+    ChordEsc(Vec<u8>),
     /// Saw the prefix; the next key (or escape sequence) is a chord.
     Prefix,
     /// Accumulating an escape sequence after the prefix (arrows / Ctrl-arrows
@@ -436,6 +451,14 @@ impl Scanner {
                         self.repeat = None;
                         flush(&mut plain, &mut out);
                         self.state = State::Prefix;
+                    } else if b == 0x1b {
+                        // (x-e10f) A bare ESC may open the global sideline
+                        // chord (Ctrl+Opt+Left). Hold it in ChordEsc instead
+                        // of forwarding; it releases on the next byte unless
+                        // the chord prefix keeps matching. A non-repeat byte
+                        // disarms the repeat window, like any other.
+                        self.repeat = None;
+                        self.state = State::ChordEsc(vec![0x1b]);
                     } else if self.repeat_armed(RepeatAction::Resize, now) {
                         let Event::Cmd(Command::ResizeDir(dir)) = self.chord(b) else {
                             self.repeat = None;
@@ -473,6 +496,40 @@ impl Scanner {
                         } else {
                             State::Normal(idx)
                         };
+                    }
+                }
+                State::ChordEsc(mut seq) => {
+                    // (x-e10f) Held global-chord candidate. Accumulate only
+                    // while the bytes still spell the Ctrl+Opt-arrow prefix;
+                    // a completed prefix plus its final byte resolves through
+                    // `esc_chord` - the SAME parse the prefix path uses, not a
+                    // second parser. Anything else releases the whole sequence
+                    // to the pane with the paste-open roll re-run over it
+                    // (rolling from 0 is exact here: the sequence starts ESC,
+                    // and `roll` lands on 1 for an ESC from any prior index).
+                    seq.push(b);
+                    if GLOBAL_CHORD_PREFIX.starts_with(&seq) {
+                        self.state = State::ChordEsc(seq);
+                    } else if seq.len() == GLOBAL_CHORD_PREFIX.len() + 1 {
+                        match esc_chord(&seq) {
+                            EscScan::Complete(ev) => {
+                                // Consumed, never forwarded: the accepted cost
+                                // of a global grab (AC12) - a program inside a
+                                // pane that binds Ctrl+Opt+Arrow loses it.
+                                flush(&mut plain, &mut out);
+                                out.push(ev);
+                                self.state = State::Normal(0);
+                            }
+                            // The unbound Ctrl+Opt arrows (A/B/C): not ours,
+                            // forward them exactly as before this chord.
+                            _ => {
+                                let idx = release_to_plain(&mut plain, &seq);
+                                self.state = paste_state(idx);
+                            }
+                        }
+                    } else {
+                        let idx = release_to_plain(&mut plain, &seq);
+                        self.state = paste_state(idx);
                     }
                 }
                 State::Paste(close_idx) => {
@@ -593,6 +650,29 @@ impl Scanner {
 fn flush(plain: &mut Vec<u8>, out: &mut Vec<Event>) {
     if !plain.is_empty() {
         out.push(Event::Forward(std::mem::take(plain)));
+    }
+}
+
+/// (x-e10f) Release a held global-chord candidate to the forwarded stream,
+/// re-running the paste-open roll over every released byte (the hold paused
+/// the roll, so it catches up byte-for-byte). Rolling from 0 is exact: the
+/// candidate starts with ESC, and `roll` reaches 1 on an ESC from ANY prior
+/// index, so the first released byte erases whatever index was held.
+fn release_to_plain(plain: &mut Vec<u8>, seq: &[u8]) -> usize {
+    let mut idx = 0;
+    for &b in seq {
+        plain.push(b);
+        idx = roll(idx, b, PASTE_OPEN);
+    }
+    idx
+}
+
+/// The scanner state a paste-open roll index leaves behind.
+fn paste_state(idx: usize) -> State {
+    if idx == PASTE_OPEN.len() {
+        State::Paste(0)
+    } else {
+        State::Normal(idx)
     }
 }
 
@@ -1153,15 +1233,18 @@ enum EscScan {
     Invalid,
 }
 
-/// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1 ; 5 A..D` -> resize)
-/// and Shift-arrows (`ESC [ 1 ; 2 A..D` -> move the pane, x-aa95) after the
+/// Arrows (`ESC [ A..D` -> focus), Ctrl-arrows (`ESC [ 1 ; 5 A..D` -> resize),
+/// Shift-arrows (`ESC [ 1 ; 2 A..D` -> move the pane, x-aa95) after the
+/// prefix, and the one GLOBAL rung: Ctrl+Opt-Left (`ESC [ 1 ; 7 D` -> open
+/// the sideline, x-e10f), which the `ChordEsc` branch also reaches without a
 /// prefix. Anything that stops matching every prefix is swallowed as one Bell.
 /// (The paste-open marker is peeled off by the caller before this runs.)
 ///
 /// Shift-arrow rather than shifted `HJKL`, which the resize binds already own:
 /// the arrow forms share one modifier ladder (plain focus -> ctrl resize ->
 /// shift move), so the move bind reads as one more rung rather than as a
-/// letter picked because the obvious one was taken.
+/// letter picked because the obvious one was taken. Ctrl+Opt (modifier 7) is
+/// the free rung above them, and only Left is bound on it.
 fn esc_chord(seq: &[u8]) -> EscScan {
     const PLAIN: &[u8] = b"\x1b[";
     const CTRL: &[u8] = b"\x1b[1;5";
@@ -1205,7 +1288,19 @@ fn esc_chord(seq: &[u8]) -> EscScan {
             None => EscScan::Invalid,
         };
     }
-    if seq.len() < 6 && (CTRL.starts_with(seq) || SHIFT.starts_with(seq)) {
+    // Complete Ctrl+Opt-arrow: ESC [ 1 ; 7 X. Only Left (D) is bound - the
+    // sideline chord. From the prefix this rung is Invalid on the other
+    // finals (one Bell, like any unbound chord); from the global ChordEsc
+    // branch the caller forwards them instead.
+    if seq.len() == 6 && seq.starts_with(GLOBAL_CHORD_PREFIX) {
+        return match seq[5] {
+            b'D' => EscScan::Complete(Event::OpenSelector),
+            _ => EscScan::Invalid,
+        };
+    }
+    if seq.len() < 6
+        && (CTRL.starts_with(seq) || SHIFT.starts_with(seq) || GLOBAL_CHORD_PREFIX.starts_with(seq))
+    {
         return EscScan::Partial;
     }
     if seq.len() < 3 && PLAIN.starts_with(seq) {
@@ -1847,6 +1942,64 @@ mod tests {
     }
 
     #[test]
+    fn client_keys_global_ctrl_opt_left_opens_selector_consumed() {
+        // x-e10f AC12: ESC[1;7D with NO prefix fires OpenSelector and the
+        // bytes are consumed, never forwarded - the accepted cost of a global
+        // grab (a pane program binding Ctrl+Opt+Arrow loses it). Surrounding
+        // typing still forwards, in order, on both sides of the chord.
+        assert_eq!(scan_all(&[b"\x1b[1;7D"]), vec![Event::OpenSelector]);
+        assert_eq!(
+            scan_all(&[b"ls\r\x1b[1;7Dmore"]),
+            vec![
+                Event::Forward(b"ls\r".to_vec()),
+                Event::OpenSelector,
+                Event::Forward(b"more".to_vec()),
+            ]
+        );
+        // Split across reads at an awkward boundary, like every other chord.
+        assert_eq!(scan_all(&[b"\x1b[1;", b"7D"]), vec![Event::OpenSelector]);
+        // The prefix path reaches the same rung: prefix + Ctrl+Opt+Left is
+        // the same event through the same parse.
+        assert_eq!(scan_all(&[b"\x02\x1b[1;7D"]), vec![Event::OpenSelector]);
+        // The UNBOUND Ctrl+Opt arrows are not ours: they forward, as before.
+        assert_eq!(
+            forwarded_only(&scan_all(&[b"\x1b[1;7C"])),
+            b"\x1b[1;7C".to_vec()
+        );
+    }
+
+    #[test]
+    fn client_keys_global_chord_hold_releases_non_chord_escapes() {
+        // x-e10f: the hold is invisible to everything that is not the chord -
+        // bare arrows, Opt+arrow word motion, Alt+x, a lone Esc answered by a
+        // later key, and whole pastes all forward byte-exact, paste mode
+        // still engages under the hold, and the chord fires after a
+        // released near-miss.
+        assert_eq!(forwarded_only(&scan_all(&[b"\x1b[C"])), b"\x1b[C".to_vec());
+        assert_eq!(
+            forwarded_only(&scan_all(&[b"\x1b[1;3D"])),
+            b"\x1b[1;3D".to_vec(),
+            "Opt+Left word motion is modifier 3, not 7"
+        );
+        assert_eq!(forwarded_only(&scan_all(&[b"\x1bx"])), b"\x1bx".to_vec());
+        assert_eq!(
+            forwarded_only(&scan_all(&[b"\x1b", b"j"])),
+            b"\x1bj".to_vec(),
+            "a lone Esc releases when the next byte says not-the-chord"
+        );
+        let mut paste = Vec::new();
+        paste.extend_from_slice(PASTE_OPEN);
+        paste.extend_from_slice(b"pasted");
+        paste.extend_from_slice(PASTE_CLOSE);
+        let events = scan_all(&[&paste]);
+        assert_eq!(forwarded_only(&events), paste);
+        assert_eq!(
+            scan_all(&[b"\x1b[1;3D\x1b[1;7D"]),
+            vec![Event::Forward(b"\x1b[1;3D".to_vec()), Event::OpenSelector,]
+        );
+    }
+
+    #[test]
     fn client_keys_ctrl_backslash_forwards_to_the_pane() {
         // Locked 11: the raw-0x1C detach is gone - Ctrl-\ is an ordinary
         // byte again (SIGQUIT reaches the child; AC5-UI's second half).
@@ -2012,19 +2165,23 @@ mod tests {
 
     #[test]
     fn repeat_window_esc_disarms_immediately() {
-        // AC5-FR: Esc is the explicit hatch - it disarms and is processed as
-        // today (forwarded), and no resize fires from it.
+        // AC5-FR: Esc is the explicit hatch - it disarms the window and no
+        // resize fires from it. Since x-e10f a lone ESC is also the first
+        // byte of the global chord, so it is HELD until the next byte says
+        // it is not the chord (ChordEsc); it then forwards with that byte,
+        // byte-exact. The disarm itself is unchanged and immediate.
         let mut s = Scanner::default();
         let t0 = Instant::now();
         s.scan(b"\x02K", t0);
         assert_eq!(
             s.scan(b"\x1b", t0 + Duration::from_millis(50)),
-            vec![Event::Forward(b"\x1b".to_vec())]
+            Vec::<Event>::new(),
+            "the lone ESC is held for chord disambiguation, not swallowed"
         );
         assert_eq!(
             s.scan(b"K", t0 + Duration::from_millis(80)),
-            vec![Event::Forward(b"K".to_vec())],
-            "disarmed by Esc: bare K forwards"
+            vec![Event::Forward(b"\x1bK".to_vec())],
+            "disarmed by Esc: the released ESC and the bare K forward, no resize"
         );
     }
 
