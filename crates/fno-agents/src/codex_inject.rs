@@ -553,7 +553,7 @@ fn review_start_audit_fields_with_origin(
     fields.insert(
         "payload".into(),
         audit_payload
-            .map(|payload| payload.chars().take(512).collect::<String>())
+            .map(str::to_string)
             .unwrap_or_else(|| {
                 format!(
                     "review/start {} delivery={}",
@@ -575,38 +575,67 @@ fn review_start_audit_fields_with_origin(
     if let Some(origin) = audit_origin {
         fields.insert("origin".into(), origin.into());
     }
-    insert_review_start_failure_reason(&mut fields, failure_reason);
+    if let Some(reason) = failure_reason {
+        fields.insert("reason".into(), reason.into());
+    }
+    fit_review_start_audit_fields(&mut fields);
     fields
 }
 
-fn insert_review_start_failure_reason(
-    fields: &mut serde_json::Map<String, serde_json::Value>,
-    failure_reason: Option<&str>,
-) {
-    let Some(reason) = failure_reason else {
+fn fit_review_start_audit_fields(fields: &mut serde_json::Map<String, serde_json::Value>) {
+    if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
         return;
-    };
-    let mut end = reason.len().min(crate::events::MAX_EVENT_PAYLOAD_BYTES);
-    while !reason.is_char_boundary(end) {
-        end -= 1;
     }
-    if end < reason.len() {
-        fields.insert("reason_truncated".into(), true.into());
-    }
-    loop {
-        fields.insert("reason".into(), reason[..end].into());
-        let payload_len = serde_json::to_string(fields)
-            .map(|payload| payload.len())
-            .unwrap_or(usize::MAX);
-        if payload_len <= crate::events::MAX_EVENT_PAYLOAD_BYTES || end == 0 {
+    for key in [
+        "payload",
+        "target_cwd",
+        "sender",
+        "origin",
+        "target_session",
+        "reason",
+    ] {
+        shrink_review_start_audit_field(fields, key);
+        if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
             return;
         }
-        fields.insert("reason_truncated".into(), true.into());
-        end -= 1;
-        while !reason.is_char_boundary(end) {
-            end -= 1;
+    }
+}
+
+fn shrink_review_start_audit_field(
+    fields: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) {
+    let Some(value) = fields
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    fields.insert(format!("{key}_truncated"), true.into());
+    let boundaries: Vec<usize> = value
+        .char_indices()
+        .map(|(index, _)| index)
+        .chain(std::iter::once(value.len()))
+        .collect();
+    let mut low = 0;
+    let mut high = boundaries.len() - 1;
+    while low < high {
+        let middle = (low + high + 1) / 2;
+        fields.insert(key.to_string(), value[..boundaries[middle]].into());
+        if review_start_audit_payload_len(fields) <= crate::events::MAX_EVENT_PAYLOAD_BYTES {
+            low = middle;
+        } else {
+            high = middle - 1;
         }
     }
+    fields.insert(key.to_string(), value[..boundaries[low]].into());
+}
+
+fn review_start_audit_payload_len(fields: &serde_json::Map<String, serde_json::Value>) -> usize {
+    serde_json::to_string(fields)
+        .map(|payload| payload.len())
+        .unwrap_or(usize::MAX)
 }
 
 /// The `fno-agents review-start` verb entry: parse CLI, drive the round-trip,
@@ -1218,6 +1247,36 @@ mod tests {
         let recorded = event["data"]["reason"].as_str().unwrap();
         assert!(long_reason.starts_with(recorded));
         assert!(recorded.len() < long_reason.len());
+    }
+
+    #[test]
+    fn review_start_audit_budgets_all_variable_fields() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("events.jsonl");
+        let large = "x".repeat(512);
+        let fields = review_start_audit_fields_with_origin(
+            &large,
+            "baseBranch:origin/main",
+            ReviewDelivery::Inline,
+            Some(&large),
+            Some(&large),
+            Some(&large),
+            Some(&large),
+            Some(&large),
+        );
+        crate::events::EventEmitter::new(&path, "daemon")
+            .emit_fields("agent_raw_inject", fields)
+            .unwrap();
+        let raw = std::fs::read_to_string(path).unwrap();
+        let event: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(event["type"], "agent_raw_inject");
+        assert_eq!(event["data"]["payload_truncated"], true);
+        assert_eq!(event["data"]["sender_truncated"], true);
+        assert_eq!(event["data"]["target_cwd_truncated"], true);
+        assert_eq!(event["data"]["origin_truncated"], true);
+        assert_eq!(event["data"]["target_session_truncated"], true);
+        assert_eq!(event["data"]["reason_truncated"], true);
+        assert!(!event["data"]["reason"].as_str().unwrap().is_empty());
     }
 
     #[tokio::test]
