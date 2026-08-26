@@ -9948,8 +9948,11 @@ fn nav_glyph(s: PaneState) -> char {
 
 /// Build the navigator overlay lines (x-653d): a top `find › <query>  [chip]`
 /// line, then one line per FILTERED row with a leading state glyph and the
-/// cursor row marked `▸`. An empty result renders a single `no matches` line
-/// (the key handler BELs). `rows` is pre-filtered; `cursor` is pre-clamped.
+/// cursor row marked `▸`. A row that matched an identity token invisible in
+/// its label appends that token as a `·<token>` suffix (x-e10f), so a hit
+/// always shows WHY it hit - a row that appears arbitrary reads as a bug. An
+/// empty result renders a single `no matches` line (the key handler BELs).
+/// `rows` is pre-filtered; `cursor` is pre-clamped.
 fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
     let chip = match nav.state_filter {
         None => "all",
@@ -9966,10 +9969,23 @@ fn nav_overlay_lines(rows: &[NavRow], nav: &NavView) -> Vec<String> {
         lines.push(pad_to("   no matches", NAV_OVERLAY_W));
         return lines;
     }
+    let q = nav.query.to_lowercase();
     for (i, r) in rows.iter().enumerate() {
         let marker = if i == nav.cursor { '▸' } else { ' ' };
+        // The reason token: a match-key token that contains the query while
+        // the label does not. A query that hits the visible label appends
+        // nothing (AC4-UI: the row renders exactly as before).
+        let label_lower = r.label.to_lowercase();
+        let label = if q.is_empty() || label_lower.contains(&q) {
+            r.label.clone()
+        } else {
+            match r.match_key.split(' ').find(|t| t.contains(&q) && !label_lower.contains(t)) {
+                Some(token) => format!("{} ·{token}", r.label),
+                None => r.label.clone(),
+            }
+        };
         lines.push(pad_to(
-            &format!(" {marker} {} {}", nav_glyph(r.state), r.label),
+            &format!(" {marker} {} {}", nav_glyph(r.state), label),
             NAV_OVERLAY_W,
         ));
     }
@@ -28458,6 +28474,41 @@ mod tests {
         let rows = v.nav_filtered(&empty);
         let lines = nav_overlay_lines(&rows, &empty);
         assert!(lines.iter().any(|l| l.contains("no matches")));
+    }
+
+    #[test]
+    fn nav_overlay_lines_show_the_matched_identity_token() {
+        // x-e10f AC4-UI: a hit on an invisible identity token appends the
+        // matched token as a `·<token>` suffix; a query that hits the visible
+        // label appends nothing (the row renders exactly as before).
+        let mut v = two_pane_view();
+        v.layout.squads[1].tabs[0].panes = vec![PaneMeta {
+            id: 307,
+            label: "shell".into(),
+        }];
+        let unseen = NavView {
+            query: "307".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&unseen);
+        let lines = nav_overlay_lines(&rows, &unseen);
+        let hit = lines
+            .iter()
+            .find(|l| l.contains("·307"))
+            .expect("the pane-id hit names its reason");
+        assert!(hit.contains("shell"), "the label still renders: {hit:?}");
+        let visible = NavView {
+            query: "shell".into(),
+            state_filter: None,
+            cursor: 0,
+        };
+        let rows = v.nav_filtered(&visible);
+        let lines = nav_overlay_lines(&rows, &visible);
+        assert!(
+            lines.iter().all(|l| !l.contains("·")),
+            "a label match appends no reason token"
+        );
     }
 
     #[test]
