@@ -5653,12 +5653,13 @@ impl Core {
             .iter()
             .map(|pane| pane.and_then(|pid| self.pane_tab_name(sid, pid)))
             .collect();
-        let worker_facts: HashMap<String, (String, String)> = self
-            .agents
-            .iter()
-            .filter_map(Self::worker_facts)
-            .map(|facts| (facts.name, (facts.harness, facts.harness_session_id)))
-            .collect();
+        let mut worker_facts: HashMap<String, Vec<(String, String)>> = HashMap::new();
+        for facts in self.agents.iter().filter_map(Self::worker_facts) {
+            worker_facts
+                .entry(facts.name)
+                .or_default()
+                .push((facts.harness, facts.harness_session_id));
+        }
         if let Some(list) = self.squad_members.get_mut(&sid) {
             for (m, resolved) in list.iter_mut().zip(names) {
                 // Only overwrite when the member's pane resolved to a tab
@@ -5692,9 +5693,11 @@ impl Core {
                 let Some(worker) = member.worker.as_deref() else {
                     continue;
                 };
-                if let Some((harness, session_id)) = worker_facts.get(worker) {
-                    member.harness = Some(harness.clone());
-                    member.harness_session_id = Some(session_id.clone());
+                if let Some(candidates) = worker_facts.get(worker) {
+                    if let [(harness, session_id)] = candidates.as_slice() {
+                        member.harness = Some(harness.clone());
+                        member.harness_session_id = Some(session_id.clone());
+                    }
                 }
             }
         }
@@ -9898,27 +9901,45 @@ impl Core {
                         self.worker_pane.remove(&name);
                     }
                 }
-                let stored_member = self
+                let stored_members: Vec<_> = self
                     .squad_members
                     .values()
                     .flatten()
-                    .find(|member| {
+                    .filter(|member| {
                         !member.tombstone && member.worker.as_deref() == Some(name.as_str())
                     })
-                    .cloned();
+                    .cloned()
+                    .collect();
+                if stored_members.len() > 1 {
+                    self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                    return Flow::Continue;
+                }
+                let stored_member = stored_members.into_iter().next();
                 let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
                     Ok(receipts) => (receipts, None),
                     Err(error) => (HashMap::new(), Some(error)),
                 };
                 let facts = {
-                    let Some(a) = self.agents.iter().find(|a| {
-                        stored_member
-                            .as_ref()
-                            .map(|member| worker_registry_match(member, a, &name))
-                            .unwrap_or(a.name == name)
-                    }) else {
-                        self.notice(client_id, "no such agent");
-                        return Flow::Continue;
+                    let candidates: Vec<&RegistryAgent> = self
+                        .agents
+                        .iter()
+                        .filter(|a| {
+                            stored_member
+                                .as_ref()
+                                .map(|member| worker_registry_match(member, a, &name))
+                                .unwrap_or(a.name == name)
+                        })
+                        .collect();
+                    let a = match candidates.as_slice() {
+                        [] => {
+                            self.notice(client_id, "no such agent");
+                            return Flow::Continue;
+                        }
+                        [one] => *one,
+                        _ => {
+                            self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                            return Flow::Continue;
+                        }
                     };
                     let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                         self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
@@ -9958,9 +9979,12 @@ impl Core {
                     .squad_members
                     .iter()
                     .find(|(_, members)| {
-                        members
-                            .iter()
-                            .any(|member| member.worker.as_deref() == Some(name.as_str()))
+                        members.iter().any(|member| {
+                            stored_member
+                                .as_ref()
+                                .is_some_and(|stored| stored == member)
+                                || member.worker.as_deref() == Some(name.as_str())
+                        })
                     })
                     .map(|(sid, _)| *sid)
                     .or_else(|| {
@@ -21081,6 +21105,43 @@ mod tests {
             member.harness_session_id.as_deref(),
             Some("full-codex-session")
         );
+    }
+
+    #[test]
+    fn persist_squad_does_not_bind_an_ambiguous_worker_name() {
+        let _s = StoreScratch::new("persist-worker-ambiguous");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("reused-name".into()),
+                harness: None,
+                harness_session_id: None,
+            }],
+        );
+        let mut first = bg_row("reused-name", "/repo", None);
+        first.harness = Some("codex".into());
+        first.harness_session_id = Some("session-one".into());
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        core.persist_squad(7);
+
+        let member = crate::squad_store::load().squads[0].members[0].clone();
+        assert!(member.harness.is_none());
+        assert!(member.harness_session_id.is_none());
     }
 
     #[test]
