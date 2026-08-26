@@ -1,7 +1,7 @@
 ---
 name: review
-description: "Review a diff or a research brief. Routes to the internal multi-agent sigma panel (default), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief', 'declare this reviewed'."
-argument-hint: "[sigma|peer|research|declare]  (peer: [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] [focus...]; research: [brief.md])   e.g. (bare = sigma), `peer 657 codex --attest`, `peer adversarial codex`, `research out/topic.md`, `declare`"
+description: "Review a diff or a research brief. Routes to the fno-owned inline review lane (default), the sigma panel (explicit), a cross-model second opinion (peer), the advisory research-verify panel for a doc deliverable (research), or a self-cert attestation for the config.review.reviewers gate (declare). Use when: 'review this', 'code review', 'is this ready', 'get a second opinion', 'have codex review this PR', 'review this research brief', 'declare this reviewed'."
+argument-hint: "[sigma|peer|research|declare]  (peer: [adversarial] [--attest|--post] [PR#|branch] [codex|gemini] [focus...]; research: [brief.md])   e.g. (bare = the fno review lane), `sigma`, `peer 657 codex --attest`, `peer adversarial codex`, `research out/topic.md`, `declare`"
 requires:
   binaries:
     - "fno >= 0.1"
@@ -17,7 +17,8 @@ requires:
 
 | Mode | What runs | Shared object |
 |------|-----------|---------------|
-| `sigma` (default) | internal multi-agent review panel with observed runtime attribution | the diff |
+| default (bare) | the fno review lane: inline angles, dedup, three-state verify, one attestation | the diff |
+| `sigma` | internal multi-agent review panel with observed runtime attribution (explicit token only) | the diff |
 | `peer` | a cross-model second opinion, optionally producing a verdict-gated local attestation | the diff |
 | `research` | advisory research-verify panel (fact-checker / citation-auditor / contradiction-finder / completeness-critic) | a `doc` deliverable (brief + sources sidecar) |
 
@@ -27,8 +28,8 @@ This is a **router**, not a monolith. It parses the first argument as a mode, an
 
 Parse the first argument token:
 
-- **no argument** -> mode is `sigma`. Print exactly: `running sigma (default)` and continue to Step 2.
-- **`sigma`** -> mode is `sigma`. Print `running sigma`. The remaining tokens, if any, are ignored by sigma (it auto-detects local commits vs PR context). Continue to Step 2.
+- **no argument** -> mode is the default lane. Print exactly: `running fno review lane (default)` and continue to Step 2.
+- **`sigma`** -> mode is `sigma`, the legacy six-agent panel. Print `running sigma (explicit; the default lane is `/fno:review`)`. The remaining tokens, if any, are ignored by sigma (it auto-detects local commits vs PR context). Continue to Step 2-sigma.
 - **`peer`** -> mode is `peer`. Print `running peer review (cross-model)`. The remaining tokens are peer's own arguments (`[PR#|branch] [codex|gemini]`). Continue to Step 3.
 - **`research`** -> mode is `research`. Print `running research-verify (advisory)`. The remaining tokens, if any, are the brief path. Continue to Step 4.
 - **`declare`** -> mode is `declare`. Print `emitting self-cert attestation (declare)`. Continue to Step 5.
@@ -36,16 +37,16 @@ Parse the first argument token:
 
   ```
   unknown review mode: '<token>'
-  valid modes: sigma (default), peer, research, declare
+  valid modes: sigma, peer, research, declare (bare = the fno review lane)
   ```
 
   and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default.
 
-> Note: a PR number or branch is NOT a bare `/review` argument. To review PR 657 with the internal panel, run `/review sigma` from a checkout of that branch (sigma auto-detects PR context); to get a cross-model read on PR 657, run `/review peer 657`.
+> Note: a PR number or branch is NOT a bare `/review` argument. To review PR 657 with the default lane, run `/fno:review` from a checkout of that branch; to get a cross-model read on PR 657, run `/review peer 657`.
 
-## Step 2: sigma mode (internal six-agent panel)
+## Step 2: the default mode (the fno review lane)
 
-### 2a. Empty-diff guard (before any dispatch)
+### 2a. Empty-diff guard (before anything runs)
 
 If there is nothing to review, report it and exit cleanly - never dispatch agents against an empty diff:
 
@@ -68,7 +69,13 @@ fi
 
 (If `origin/main` is not the right base for this repo, set `BASE` accordingly.)
 
-### 2b. Run the panel
+### 2b. Run the lane
+
+Load [single-lane.md](references/single-lane.md) and execute it in full, in this context. The lane runs inline as ordinary tool calls: finder angles, dedup, three-state verify, cite-or-drop, carry-forward, then the classified emit. It dispatches no subagents and fires no native review verb.
+
+## Step 2-sigma: sigma mode (the legacy panel, explicit token only)
+
+### 2b-sigma. Run the panel
 
 Load [sigma.md](references/sigma.md) and execute it in full, in this context. That reference is the canonical six-agent review process. It dispatches the reviewer subagents via the **Task/Agent tool**, never by invoking another skill at runtime.
 
@@ -113,6 +120,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 `sigma`, `peer`, `code-review`, and `declare` are local review producers. Each emits the SAME head-pinned `review_attestation` event via `scripts/emit-attestation.sh <reviewer>` on a pass - the single producer surface loop-check reads:
 
+- **the fno lane** (the default) emits `code-review` through the lane's emit step ([single-lane.md](references/single-lane.md)): `pass` only when `fno do review classify` yields zero blocking findings, `fail` carrying the classified record. One contract, one emit path, no hook-availability dependency.
 - **sigma** emits `sigma` when the panel returns with no unaddressed blocking finding (see [sigma.md](references/sigma.md)).
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
 - **code-review** emits `code-review` via `hooks/code-review-attest.sh`, which classifies the findings the native review produced and emits on EITHER outcome: a clean review emits `pass`, a review with findings emits `fail` carrying the per-finding record (`findings`, `findings_blocking`, `dispositions`) that the disposition-complete gate reads. Claude accepts the structured findings report on `PostToolUse(ReportFindings)` and the Skill-tool `SubagentStop` shape. Codex accepts only a `Stop` payload whose exact `turn_id` has one readable structured completion in either the direct `exited_review_mode` form with `payload.review_output`, or the `item_completed` form with an `ExitedReviewMode` item. Both require an object-valued `findings` array; `last_assistant_message` is not verdict evidence. The Codex registration runs before the target stop gate, so a clean `/review` needs no remembered second command. `skills/review/scripts/emit-attestation.sh code-review` is recovery only when the hook was unavailable or failed, never permission to attest a verdict the review did not produce. The same label can be emitted by a spawned reviewer citizen, a separate session the author launches to run `/code-review` in its own worktree, which is the one path that yields an `other_session` origin rather than `self_attested`; see the spawned-reviewer lane in the review-lanes architecture doc.
