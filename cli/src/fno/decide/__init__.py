@@ -1071,7 +1071,6 @@ def list_decisions(
     rows, damaged = _read_index(_index_path())
     from fno.decide.catalog import load_catalog
     from fno.decide.graduation import registered_retirement
-    from fno.decide.graduation import registered_retirement
 
     catalog = load_catalog()
     local_decisions = [
