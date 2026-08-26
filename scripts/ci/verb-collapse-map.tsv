@@ -279,6 +279,7 @@ do resume receipt show	T1	do resume receipt show	1
 do resume receipt validate	T1	do resume receipt validate	3
 do resume receipt write	T1	do resume receipt write	2
 do review	T1	do review	27
+do review classify	T1	do review classify	8
 do state archive	T1	do state archive	1
 do state init	T1	do state init	3
 do state set	T1	do state set	20

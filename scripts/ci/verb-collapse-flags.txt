@@ -8,8 +8,9 @@ agents heal-token !--all-sources
 agents heal-token !--cross-project
 agents list !--provider
 agents mail hold-release !--poll-s
-agents mail send !--provider
+agents mail pane-prepare !--session
 agents mail send !--origin
+agents mail send !--provider
 agents spawn !--output-format
 agents spawn !--squad
 agents worker external !--pr
@@ -21,8 +22,8 @@ backlog add !--tag
 backlog advance !--continuation
 backlog cost !--session
 backlog decide !--decision
-backlog decide !--subject
 backlog decide !--origin
+backlog decide !--subject
 backlog decide-retract !--origin
 backlog decisions !--subject
 backlog idea !--tag
@@ -49,8 +50,9 @@ do target resolve-model !--provider
 do target start !--provider
 doctor footprint !--cause-only
 mail hold-release !--poll-s
-mail send !--provider
+mail pane-prepare !--session
 mail send !--origin
+mail send !--provider
 paths handoff !--session
 resume receipt validate !--session
 resume receipt write !--session
@@ -62,5 +64,3 @@ target resolve-model !--provider
 target start !--provider
 worker external !--pr
 worker review !--session
-agents mail pane-prepare !--session
-mail pane-prepare !--session
