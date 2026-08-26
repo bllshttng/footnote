@@ -8,6 +8,7 @@ from typing import Any, Mapping, Optional, Tuple
 
 _TERMINAL_STATUSES = {"orphaned", "exited"}
 _RESUME_BAND_SECONDS = 600
+_MESSAGE_EVENT_SKEW_SECONDS = 2
 
 # A start token at or below this reads as clock ticks since boot, not epoch
 # microseconds, so it cannot be compared to created_at. Both languages share
@@ -92,7 +93,11 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
     ):
         projected["status"] = "unknown"
         projected["basis"] = "stale-verdict-fresher-event"
-    if message_at is not None and event_at is not None and message_at > event_at:
+    if (
+        message_at is not None
+        and event_at is not None
+        and (message_at - event_at).total_seconds() > _MESSAGE_EVENT_SKEW_SECONDS
+    ):
         projected["last_message_at"] = None
         projected["last_message_at_basis"] = "refused-newer-than-transcript"
 

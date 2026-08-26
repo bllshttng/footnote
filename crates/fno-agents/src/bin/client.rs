@@ -428,7 +428,7 @@ async fn run(args: Vec<String>) -> i32 {
                     return 12;
                 }
             };
-            if registry.find(&agent_name).is_none() {
+            if registry.find_name_or_full_session_id(&agent_name).is_none() {
                 // Event parity: Python's dispatch_ask emits agent_ask_failed
                 // stage="unknown-name" before raising; this pre-check is the
                 // only emitter on the Rust CLI path (the lib None-arms are
@@ -690,7 +690,9 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 
     let provider_param = params.get("provider").and_then(|v| v.as_str());
     let registry = load_registry(&home.registry_json()).unwrap_or_default();
-    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
+    let existing_provider = registry
+        .find_name_or_full_session_id(name)
+        .map(|e| e.harness_name().to_string());
 
     // Provider mismatch: an existing claude agent plus a conflicting --provider
     // flag. Python's select_provider rejects this as a mismatch; without the

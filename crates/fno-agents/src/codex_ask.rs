@@ -914,8 +914,16 @@ pub fn dispatch_codex_ask(
 
     let events = home.events_jsonl();
     let registry_path = home.registry_json();
+    let lock_name = load_registry(&registry_path)
+        .ok()
+        .and_then(|registry| {
+            registry
+                .find_name_or_full_session_id(name)
+                .map(|entry| entry.name.clone())
+        })
+        .unwrap_or_else(|| name.to_string());
 
-    let _lock = match AgentLock::acquire(home, name, LOCK_ACQUIRE_TIMEOUT) {
+    let _lock = match AgentLock::acquire(home, &lock_name, LOCK_ACQUIRE_TIMEOUT) {
         Ok(l) => l,
         Err(()) => {
             emit_event(
@@ -930,9 +938,9 @@ pub fn dispatch_codex_ask(
             return AskOutcome::err(
                 format!(
                     "lock timeout for agent {:?} after {:.1}s{}",
-                    name,
+                    lock_name,
                     LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
-                    holder_note(home, name)
+                    holder_note(home, &lock_name)
                 ),
                 11,
             );
@@ -956,7 +964,7 @@ pub fn dispatch_codex_ask(
         }
     };
 
-    let existing = registry.find(name).cloned();
+    let existing = registry.find_name_or_full_session_id(name).cloned();
 
     match existing {
         None => {
@@ -980,17 +988,20 @@ pub fn dispatch_codex_ask(
                 16,
             )
         }
-        Some(entry) => dispatch_resume(
-            home,
-            &events,
-            &registry_path,
-            name,
-            &entry,
-            message,
-            from_name,
-            yolo,
-            timeout,
-        ),
+        Some(entry) => {
+            let resolved_name = entry.name.clone();
+            dispatch_resume(
+                home,
+                &events,
+                &registry_path,
+                &resolved_name,
+                &entry,
+                message,
+                from_name,
+                yolo,
+                timeout,
+            )
+        }
     }
 }
 
@@ -1522,7 +1533,9 @@ pub fn maybe_run_codex_ask(
             return Some(12);
         }
     };
-    let existing_provider = registry.find(name).map(|e| e.harness_name().to_string());
+    let existing_provider = registry
+        .find_name_or_full_session_id(name)
+        .map(|e| e.harness_name().to_string());
 
     // Provider mismatch guard (mirrors claude path).
     if let (Some(ep), Some(pp)) = (existing_provider.as_deref(), provider_param) {

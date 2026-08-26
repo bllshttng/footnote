@@ -719,7 +719,17 @@ def tick() -> None:
                         )
                         recoverable_results.extend(results)
                         for result_item in results:
-                            if result_item["outcome"] in {"applied", "refused"}:
+                            # A refused recovery candidate is refound and
+                            # refused again by every tick until it ages out of
+                            # the recency window; publish it once per verdict
+                            # signature (the gate the scan verdicts already
+                            # use), not once per 600s forever. An applied row
+                            # registered and never recurs, so it always
+                            # publishes.
+                            if result_item["outcome"] == "applied" or (
+                                result_item["outcome"] == "refused"
+                                and result_item["session_id"] in fresh_ids
+                            ):
                                 _wd.emit_event(
                                     "watchdog_applied"
                                     if result_item["outcome"] == "applied"
@@ -730,6 +740,36 @@ def tick() -> None:
                                         "detail": result_item["detail"],
                                     },
                                 )
+                # A deferred candidate published nothing this tick, but the
+                # sweep signature written above already claims its sid. Strip
+                # deferred sids back out and rewrite the file, or the
+                # freshness gate would suppress that candidate's refusal for
+                # the rest of its recency window.
+                deferred_sids = {
+                    item["session_id"]
+                    for item in recoverable_results
+                    if item["outcome"] == "deferred"
+                }
+                if deferred_sids:
+                    events_sig = _wd.verdict_signature(payload)
+                    stripped_sig = ";".join(
+                        part
+                        for part in events_sig.split(";")
+                        if ":" not in part
+                        or part.split(":", 1)[0] not in deferred_sids
+                    )
+                    if stripped_sig != events_sig:
+                        _wd.write_sweep_file(
+                            "tick",
+                            payload["counts"],
+                            now,
+                            signature,
+                            events_signature=stripped_sig,
+                            terminal_harness_rows=payload.get(
+                                "terminal_harness_rows", 0
+                            ),
+                            recoverable_count=payload.get("recoverable_count"),
+                        )
                 counts = " ".join(
                     f"{k}={v}" for k, v in sorted(payload["counts"].items())
                 )

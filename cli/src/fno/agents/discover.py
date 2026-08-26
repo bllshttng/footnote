@@ -28,6 +28,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
@@ -375,6 +376,10 @@ class RecoverableCodexRollout:
     cwd: str
     rollout_path: Path
     mtime: float
+    transcript_usable: bool = False
+    last_event_at: Optional[str] = None
+    last_turn_marker: Optional[str] = None
+    unusable_reason: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -387,6 +392,61 @@ class CodexRecoveryScan:
     malformed_count: int
     unreadable_count: int
     failures: tuple[str, ...]
+
+    @property
+    def usable_recoverable(self) -> tuple[RecoverableCodexRollout, ...]:
+        return tuple(row for row in self.recoverable if row.transcript_usable)
+
+    @property
+    def usable_recoverable_count(self) -> int:
+        return len(self.usable_recoverable)
+
+
+def _is_canonical_full_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError):
+        return False
+
+
+def _codex_rollout_usability(
+    rollout_path: Path,
+    *,
+    session_id: str,
+    cwd: str,
+    sessions_dir: Path,
+) -> tuple[bool, Optional[str], Optional[str], Optional[str]]:
+    from fno.agents.peek import recent_records
+
+    try:
+        records = recent_records(
+            "codex",
+            session_id,
+            cwd,
+            1,
+            codex_sessions_dir=sessions_dir,
+            transcript_path=rollout_path,
+        )
+    except (OSError, UnicodeError, ValueError):
+        return False, None, None, "transcript_unreadable"
+    if not records:
+        return False, None, None, "no_readable_transcript_turn"
+    marker = " ".join((records[-1].text or "").split())[:200] or None
+    if marker is None:
+        return False, None, None, "no_readable_transcript_turn"
+    timestamp = records[-1].timestamp
+    if not timestamp:
+        return False, None, None, "transcript_timestamp_unreadable"
+    try:
+        parsed_timestamp = _dt.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        if parsed_timestamp.tzinfo is None:
+            raise ValueError("transcript timestamp lacks a timezone")
+        last_event_at = parsed_timestamp.astimezone(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError:
+        return False, None, None, "transcript_timestamp_unreadable"
+    return True, last_event_at, marker, None
 
 
 def scan_recoverable_codex_rollouts(
@@ -515,6 +575,12 @@ def scan_recoverable_codex_rollouts(
             failures.append(f"rollout schema failed: {rollout_path}: id is not a string")
             malformed_count += 1
             continue
+        if not _is_canonical_full_uuid(session_id):
+            failures.append(
+                f"rollout schema failed: {rollout_path}: id is not a canonical full UUID"
+            )
+            malformed_count += 1
+            continue
         if not isinstance(rollout_cwd, str):
             failures.append(f"rollout schema failed: {rollout_path}: cwd is not a string")
             malformed_count += 1
@@ -524,12 +590,24 @@ def scan_recoverable_codex_rollouts(
         seen.add(session_id)
         if rollout_cwd != target_cwd or session_id in registered_ids:
             continue
+        usable, last_event_at, last_turn_marker, unusable_reason = (
+            _codex_rollout_usability(
+                rollout_path,
+                session_id=session_id,
+                cwd=rollout_cwd,
+                sessions_dir=root,
+            )
+        )
         recoverable.append(
             RecoverableCodexRollout(
                 session_id=session_id,
                 cwd=rollout_cwd,
                 rollout_path=rollout_path,
                 mtime=mtime,
+                transcript_usable=usable,
+                last_event_at=last_event_at,
+                last_turn_marker=last_turn_marker,
+                unusable_reason=unusable_reason,
             )
         )
 

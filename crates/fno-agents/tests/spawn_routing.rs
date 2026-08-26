@@ -889,6 +889,59 @@ fn client_ask_unknown_name_exits_16() {
     );
 }
 
+#[test]
+fn client_ask_full_codex_session_id_resumes_named_row() {
+    let _guard = PATH_MUTEX.lock().unwrap();
+    let home_dir = tmpdir("cli-ask-full-codex-home");
+    let bin_dir = tmpdir("cli-ask-full-codex-bin");
+    let cwd = tmpdir("cli-ask-full-codex-cwd");
+    let session_id = "01a03a0e-0fa6-7661-b194-7520ce5ea6e2";
+    let addressed_session_id = session_id.to_ascii_uppercase();
+    let marker = "RECOVERY-RESUME-OK-client";
+    install_fake_codex(&bin_dir, session_id, marker);
+    let log_path = home_dir.join("agents/full-id/output.jsonl");
+    let registry = format!(
+        r#"{{"schema_version":3,"agents":[{{"name":"01a03a0e","provider":"codex","cwd":"{}","codex_session_id":"{}","status":"orphaned","created_at":"2026-08-25T00:00:00Z","log_path":"{}"}}]}}"#,
+        cwd.display(),
+        session_id,
+        log_path.display()
+    );
+    fs::write(home_dir.join("registry.json"), registry).unwrap();
+    let bin = find_client_bin();
+    if !bin.exists() {
+        eprintln!(
+            "skipping client_ask_full_codex_session_id_resumes_named_row: binary not found at {:?}",
+            bin
+        );
+        return;
+    }
+
+    let out = std::process::Command::new(&bin)
+        .args([
+            "ask",
+            &addressed_session_id,
+            &format!("Reply exactly {marker}"),
+        ])
+        .env("FNO_SPAWN_GATE", "0")
+        .env("FNO_E2E", "1")
+        .env("FNO_AGENTS_HOME", &home_dir)
+        .env("PATH", path_with(&bin_dir))
+        .current_dir(&cwd)
+        .output()
+        .expect("failed to run fno-agents");
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "full-id ask failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), marker);
+    let persisted = fs::read_to_string(home_dir.join("registry.json")).unwrap();
+    assert!(persisted.contains("last_message_at"), "{persisted}");
+    assert!(persisted.contains("\"name\": \"01a03a0e\""), "{persisted}");
+}
+
 /// x-2c27: `spawn --once` is the back-compat alias for `--substrate headless`.
 /// For claude that is the `claude -p` one-shot lane - NOT the `--bg` thread.
 /// It must NOT exit 2, must NOT print the old "--once not supported" message,

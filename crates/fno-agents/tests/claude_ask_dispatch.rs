@@ -441,6 +441,74 @@ fn followup_socket_reply_stamps_live_and_emits() {
 }
 
 #[test]
+fn followup_accepts_full_session_id_and_stamps_named_row() {
+    use std::os::unix::net::UnixListener;
+    let home = AgentsHome::at(tmpdir("fu-full-home"));
+    let claude_root = tmpdir("fu-full-claude");
+    let ch = ClaudeHome::at(&claude_root);
+    let cwd = tmpdir("fu-full-cwd");
+
+    let session_id = "12345678-1234-4234-8234-123456789abc";
+    let body = format!(
+        r#"{{"schema_version":3,"agents":[{{"name":"alice","provider":"claude","cwd":"/tmp","claude_short_id":"abcd1234","claude_session_uuid":"{}","status":"live","created_at":"2026-05-27T00:00:00Z","log_path":null}}]}}"#,
+        session_id
+    );
+    let registry_path = home.registry_json();
+    fs::create_dir_all(registry_path.parent().unwrap()).unwrap();
+    fs::write(&registry_path, body).unwrap();
+
+    let sessions = claude_root.join(".claude").join("sessions");
+    let jobs = claude_root.join(".claude").join("jobs").join("abcd1234");
+    fs::create_dir_all(&sessions).unwrap();
+    fs::create_dir_all(&jobs).unwrap();
+    let sock = short_sock();
+    let listener = UnixListener::bind(&sock).unwrap();
+    fs::write(
+        sessions.join("999.json"),
+        format!(
+            r#"{{"jobId":"abcd1234","kind":"bg","messagingSocketPath":"{}","sessionId":"{}"}}"#,
+            sock.to_str().unwrap(),
+            session_id
+        ),
+    )
+    .unwrap();
+
+    let jobs_t = jobs.clone();
+    let handle = std::thread::spawn(move || loop {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = Vec::new();
+        let _ = conn.read_to_end(&mut buf);
+        if buf.is_empty() {
+            continue; // liveness probe
+        }
+        write_state(&jobs_t, "completed", "2026-05-27T10:00:09Z", "FULL-ID-OK");
+        break;
+    });
+
+    let out = dispatch_claude_ask(
+        &home,
+        &ch,
+        &session_id.to_ascii_uppercase(),
+        "ping",
+        "fno",
+        &cwd,
+        false,
+        Some(Duration::from_secs(3)),
+        &[],
+    );
+    handle.join().unwrap();
+    cleanup_sock(&sock);
+    assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+    assert_eq!(out.stdout, "FULL-ID-OK");
+    let registry_body = fs::read_to_string(&registry_path).unwrap();
+    assert!(registry_body.contains("last_message_at"), "{registry_body}");
+    assert!(
+        registry_body.contains("\"name\": \"alice\""),
+        "{registry_body}"
+    );
+}
+
+#[test]
 fn followup_socket_null_without_truth_exit_13_preserves_status() {
     let home = AgentsHome::at(tmpdir("orph-home"));
     let claude_root = tmpdir("orph-claude");

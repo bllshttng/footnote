@@ -2695,7 +2695,19 @@ pub fn dispatch_claude_ask(
     let events = home.events_jsonl();
     let registry_path = home.registry_json();
 
-    let _lock = match AgentLock::acquire(home, name, LOCK_ACQUIRE_TIMEOUT) {
+    // A full-session-id token must resolve to the row's canonical name BEFORE
+    // the lock: locking the raw token would let one agent be addressed under
+    // two locks. Same idiom as dispatch_codex_ask.
+    let lock_name = load_registry(&registry_path)
+        .ok()
+        .and_then(|registry| {
+            registry
+                .find_name_or_full_session_id(name)
+                .map(|entry| entry.name.clone())
+        })
+        .unwrap_or_else(|| name.to_string());
+
+    let _lock = match AgentLock::acquire(home, &lock_name, LOCK_ACQUIRE_TIMEOUT) {
         Ok(l) => l,
         Err(()) => {
             emit_event(
@@ -2706,11 +2718,14 @@ pub fn dispatch_claude_ask(
             return AskOutcome::err(
                 // Python: f"lock timeout for agent {name!r} after {timeout}s"
                 // + holder_note(), with timeout=30.0 (float) -> "...after 30.0s".
+                // The message names the REQUESTED token (Python never rebinds
+                // `name`), while holder_note reads the lock that actually
+                // timed out, the resolved canonical name.
                 format!(
                     "lock timeout for agent {} after {:.1}s{}",
                     py_repr(name),
                     LOCK_ACQUIRE_TIMEOUT.as_secs_f64(),
-                    holder_note(home, name)
+                    holder_note(home, &lock_name)
                 ),
                 11,
             );
@@ -2737,20 +2752,23 @@ pub fn dispatch_claude_ask(
             return AskOutcome::err(format!("registry read failed: {}", e), 12);
         }
     };
-    let existing = registry.find(name).cloned();
+    let existing = registry.find_name_or_full_session_id(name).cloned();
 
     match existing {
-        Some(entry) => followup(
-            home,
-            claude_home,
-            &events,
-            &registry_path,
-            name,
-            &entry,
-            message,
-            from_name,
-            timeout,
-        ),
+        Some(entry) => {
+            let resolved_name = entry.name.clone();
+            followup(
+                home,
+                claude_home,
+                &events,
+                &registry_path,
+                &resolved_name,
+                &entry,
+                message,
+                from_name,
+                timeout,
+            )
+        }
         None => {
             // ask never creates (Task 1.3a): unknown-name -> exit 16, byte-parity
             // with Python's dispatch_ask after Task 1.1.

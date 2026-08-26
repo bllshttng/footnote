@@ -430,8 +430,14 @@ def adopt_store_hit(
     registry_path: Optional[Path] = None,
     *,
     token: Optional[str] = None,
+    log_path: str = "",
 ) -> "AgentEntry":
     """Register one verified and project-confined hit as an adopted orphan.
+
+    ``log_path`` is the follow-up transcript path for the adopted row; a
+    caller that adopts for a lane which will resume the thread by full
+    session id passes it HERE so the row is complete at the moment it
+    lands, not patched in a second write the caller must survive.
 
     This function does not scan harness stores or establish project membership.
     Batch callers must first pass their hits through :func:`confine_store_hits`.
@@ -464,6 +470,7 @@ def adopt_store_hit(
             # this field to answer "footnote-spawned?" with unknown rather than
             # with the absence of an operator marker.
             origin="adopted",
+            log_path=log_path,
             registry_path=registry_path,
         )
     except AgentResolutionError:
@@ -483,7 +490,7 @@ def adopt_store_hit(
         return AgentEntry(
             name=_fallback_name(hit.session_id),
             cwd=hit.cwd,
-            log_path="",
+            log_path=log_path,
             harness=hit.harness,
             harness_session_id=hit.session_id,
             status="orphaned",

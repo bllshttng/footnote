@@ -17,6 +17,7 @@
 //! - **`state.status` is canonical; `registry.status` is a projection** (LD10).
 //!   This module stores both; conflict resolution (state wins) is the daemon's.
 
+use crate::identity::session_handle_tier;
 use crate::AgentStatus;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -162,6 +163,18 @@ impl Registry {
     /// Find an entry by agent name.
     pub fn find(&self, name: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Find an entry by agent name or its canonical full harness session id.
+    pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
+        self.entries.iter().find(|entry| {
+            entry.name == token
+                || entry
+                    .harness_session_id
+                    .as_deref()
+                    .and_then(|session_id| session_handle_tier(token, session_id))
+                    == Some(0)
+        })
     }
 
     /// Mutable find by agent name.

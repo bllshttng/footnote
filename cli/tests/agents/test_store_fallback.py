@@ -191,6 +191,7 @@ def test_direct_and_single_token_adoption_share_register_kwargs(
         "short_id": "c655c326",
         "status": "orphaned",
         "origin": "adopted",
+        "log_path": "",
         "registry_path": registry,
     }
 

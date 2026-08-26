@@ -2361,6 +2361,141 @@ class TestTickRecordsAndDeadline:
             ("stale-row", None, "blocked 14h")
         ]
 
+    def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
+        """An unusable recoverable is refound every tick until it ages out.
+
+        The event lane must say so once per verdict change, not once per 600s
+        forever; an applied row never recurs, so it always publishes."""
+        import typer
+        from typer.testing import CliRunner
+        from unittest.mock import MagicMock
+
+        from fno.agents import watchdog
+        from fno.pr_watch import cli as prcli
+        from fno.pr_watch._dispatch import TickResult
+
+        monkeypatch.setenv("FNO_PR_WATCH_TICK_TIMEOUT", "60")
+        settings = MagicMock()
+        settings.pr_watch.enabled = True
+        settings.pr_watch.max_age_days = 30
+        settings.pr_watch.retries = 3
+        settings.pr_watch.graphql_min_remaining = 200
+        settings.recovery.enabled = True
+        settings.recovery.watchdog = "wake"
+        settings.recovery.watchdog_mail_to = ""
+        settings.autonomy.enabled = True
+        monkeypatch.setattr(prcli, "load_settings", lambda: settings)
+        monkeypatch.setattr(
+            "fno.pr_watch._dispatch.tick",
+            lambda **kw: TickResult(open_prs=0, acted=0),
+        )
+        monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *a, **k: 0)
+        monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **kw: ([], 0))
+        monkeypatch.setattr(prcli, "_emit_event", lambda *a, **k: True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path])
+        monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
+        monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
+
+        sweep_payload = {
+            "verdicts": [],
+            "counts": {},
+            "warnings": [],
+        }
+        monkeypatch.setattr(
+            watchdog, "run_sweep", lambda **kw: (sweep_payload, [])
+        )
+        monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
+        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+        sweep_writes = []
+        monkeypatch.setattr(
+            watchdog,
+            "write_sweep_file",
+            lambda *a, **k: sweep_writes.append(k.get("events_signature", "")),
+        )
+        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
+        monkeypatch.setattr(
+            "fno.agents.stale_escalate.escalate_stale",
+            lambda rows, **kwargs: ([], "q-none"),
+        )
+
+        def _recovery_row(sid):
+            return watchdog.Row(
+                sid, sid, "orphaned", None, str(tmp_path), "adopted"
+            )
+
+        def _recovery_verdict(sid):
+            return watchdog.Verdict(
+                sid, sid, "orphaned", watchdog.RECOVERABLE,
+                "rollout unusable", "refuse",
+            )
+
+        recovery_payload = {
+            "generated_at": "2026-08-25T00:00:00Z",
+            "verdicts": [
+                _recovery_verdict("sid-fresh")._asdict(),
+                _recovery_verdict("sid-defer")._asdict(),
+            ],
+            "counts": {watchdog.RECOVERABLE: 2},
+            "warnings": [],
+            "complete": True,
+            "scanned_count": 2,
+            "malformed_count": 0,
+            "unreadable_count": 0,
+            "cwd": str(tmp_path),
+            "recoverable_count": 2,
+            "usable_recoverable_count": 0,
+            "unusable_recoverable_count": 2,
+        }
+
+        class _Scan:
+            complete = True
+            recoverable = ()
+
+        monkeypatch.setattr(
+            watchdog,
+            "run_recoverable_sweep",
+            lambda **kw: (
+                recovery_payload,
+                [_recovery_row("sid-fresh"), _recovery_row("sid-defer")],
+                _Scan(),
+            ),
+        )
+        # Only sid-fresh is new this tick; sid-old was already published.
+        monkeypatch.setattr(
+            watchdog, "fresh_non_leave", lambda *a, **k: {"sid-fresh"}
+        )
+        monkeypatch.setattr(
+            watchdog,
+            "apply_recoverable",
+            lambda *a, **kw: [
+                {"session_id": "sid-fresh", "outcome": "refused", "detail": "unusable"},
+                {"session_id": "sid-old", "outcome": "refused", "detail": "unusable"},
+                {"session_id": "sid-applied", "outcome": "applied", "detail": "adopted"},
+                {"session_id": "sid-defer", "outcome": "deferred", "detail": "later"},
+            ],
+        )
+        watchdog_events = []
+        monkeypatch.setattr(
+            watchdog,
+            "emit_event",
+            lambda kind, data, **kw: watchdog_events.append((kind, data)),
+        )
+
+        app = typer.Typer()
+        app.command()(prcli.tick)
+        result = CliRunner().invoke(app, [])
+
+        assert result.exit_code == 0, result.output
+        refusals = [d for kind, d in watchdog_events if kind == "watchdog_refused"]
+        applied = [d for kind, d in watchdog_events if kind == "watchdog_applied"]
+        assert [d["row_id"] for d in refusals] == ["sid-fresh"]
+        assert [d["row_id"] for d in applied] == ["sid-applied"]
+        # The deferred candidate published nothing, so the rewritten sweep
+        # signature must not claim its sid: the next tick sees it fresh.
+        assert any("sid-defer:" in sig for sig in sweep_writes)
+        assert "sid-defer:" not in sweep_writes[-1]
+        assert "sid-fresh:" in sweep_writes[-1]
+
     def test_sweep_failure_end_record_reads_degraded(self, monkeypatch):
         """AC4-EDGE at the CLI boundary: the end record distinguishes degraded."""
         from fno.pr_watch._dispatch import TickResult

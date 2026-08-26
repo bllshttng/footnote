@@ -1554,6 +1554,174 @@ def test_recoverable_sweep_zero_is_positive_evidence(monkeypatch, tmp_path):
     assert payload["counts"] == {watchdog.RECOVERABLE: 0}
 
 
+def _recovery_candidate(tmp_path, index, *, usable=True):
+    from fno.agents.discover import RecoverableCodexRollout
+
+    session_id = f"01a039bb-0000-7000-8000-{index:012x}"
+    rollout = tmp_path / f"rollout-{session_id}.jsonl"
+    records = [
+        {
+            "type": "session_meta",
+            "payload": {"id": session_id, "cwd": str(tmp_path)},
+        }
+    ]
+    if usable:
+        records.append(
+            {
+                "timestamp": "2026-08-16T18:40:00Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "resume marker"}],
+                },
+            }
+        )
+    rollout.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+    mtime = rollout.stat().st_mtime
+    last_event_at = "2026-08-16T18:40:00Z"
+    return RecoverableCodexRollout(
+        session_id=session_id,
+        cwd=str(tmp_path),
+        rollout_path=rollout,
+        mtime=mtime,
+        transcript_usable=usable,
+        last_event_at=last_event_at if usable else None,
+        last_turn_marker="resume marker" if usable else None,
+        unusable_reason=None if usable else "no_readable_transcript_turn",
+    )
+
+
+def test_recoverable_sweep_reports_discovered_usable_and_unusable_counts(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    usable = _recovery_candidate(tmp_path, 1)
+    unusable = _recovery_candidate(tmp_path, 2, usable=False)
+    scan = CodexRecoveryScan((usable, unusable), True, 2, 0, 0, ())
+
+    payload, rows, result = watchdog.run_recoverable_sweep(
+        cwd=tmp_path,
+        recency_seconds=24 * 3600,
+        now_s=NOW_1840,
+        scan_fn=lambda *args, **kwargs: scan,
+    )
+
+    assert result is scan
+    assert len(rows) == 2
+    assert payload["recoverable_count"] == 2
+    assert payload["usable_recoverable_count"] == 1
+    assert payload["unusable_recoverable_count"] == 1
+    by_id = {row["row_id"]: row for row in payload["verdicts"]}
+    assert by_id[usable.session_id]["action"] == "adopt"
+    assert by_id[unusable.session_id]["action"] == "refuse"
+    assert "no_readable_transcript_turn" in by_id[unusable.session_id]["basis"]
+
+
+def test_recoverable_sweep_filters_one_explicit_full_session_id(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    first = _recovery_candidate(tmp_path, 20)
+    selected = _recovery_candidate(tmp_path, 21)
+    scan = CodexRecoveryScan((first, selected), True, 2, 0, 0, ())
+
+    payload, rows, filtered = watchdog.run_recoverable_sweep(
+        cwd=tmp_path,
+        recency_seconds=24 * 3600,
+        now_s=NOW_1840,
+        scan_fn=lambda *args, **kwargs: scan,
+        session_id=selected.session_id,
+    )
+
+    assert [row.session_id for row in filtered.recoverable] == [selected.session_id]
+    assert [row.row_id for row in rows] == [selected.session_id]
+    assert payload["recoverable_count"] == 1
+    assert payload["usable_recoverable_count"] == 1
+    assert payload["selected_session_id"] == selected.session_id
+
+
+def test_recoverable_apply_refuses_unusable_candidate_without_writing(tmp_path):
+    from fno.agents.discover import CodexRecoveryScan
+
+    candidate = _recovery_candidate(tmp_path, 3, usable=False)
+    adopted = []
+
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
+        scope_cwd=tmp_path,
+        adopt_fn=lambda *args, **kwargs: adopted.append(args),
+    )
+
+    assert adopted == []
+    assert results == [
+        {
+            "session_id": candidate.session_id,
+            "outcome": "refused",
+            "reason": "transcript_unusable",
+            "transcript_usable": False,
+            "detail": "transcript_unusable: no_readable_transcript_turn",
+        }
+    ]
+
+
+def test_recoverable_apply_refuses_transcript_loss_after_adoption(tmp_path):
+    from types import SimpleNamespace
+    from fno import paths
+    from fno.agents.discover import CodexRecoveryScan
+
+    candidate = _recovery_candidate(tmp_path, 4)
+    registry_rows = []
+
+    def adopt(_hit, **_kwargs):
+        registry_rows.append(
+            SimpleNamespace(
+                harness="codex",
+                harness_session_id=candidate.session_id,
+                cwd=candidate.cwd,
+                origin="adopted",
+                name="01a039bb",
+                log_path=str(
+                    paths.state_dir() / "agents" / candidate.session_id / "output.jsonl"
+                ),
+            )
+        )
+        candidate.rollout_path.write_text(
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {
+                        "id": candidate.session_id,
+                        "cwd": candidate.cwd,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def update_registry(updater, **_kwargs):
+        registry_rows[:] = updater(list(registry_rows))
+        return list(registry_rows)
+
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
+        scope_cwd=tmp_path,
+        adopt_fn=adopt,
+        confine_fn=lambda token, hits, **kwargs: hits,
+        load_registry_fn=lambda path: list(registry_rows),
+        update_registry_fn=update_registry,
+    )
+
+    assert registry_rows == []
+    assert results[0]["outcome"] == "refused"
+    assert results[0]["reason"] == "transcript_changed"
+    assert results[0]["transcript_usable"] is False
+    assert results[0]["registry_rollback"] == "removed"
+    assert "applied" not in results[0]["detail"]
+
+
 def test_recoverable_apply_requires_complete_coverage_before_adoption(monkeypatch, tmp_path):
     from fno.agents.discover import CodexRecoveryScan
 
@@ -1621,30 +1789,78 @@ def test_cli_recoverable_dry_run_prints_completed_zero(monkeypatch, tmp_path, ca
         cwd=str(tmp_path),
     )
 
-    assert "recoverable=0 complete=true" in capsys.readouterr().out
+    assert (
+        "recoverable=0 usable=0 unusable=0 complete=true"
+        in capsys.readouterr().out
+    )
+
+
+def test_cli_recoverable_json_apply_names_result_counts(monkeypatch, tmp_path, capsys):
+    from fno.agents import cli as agents_cli
+    from fno.agents.discover import CodexRecoveryScan
+
+    scan = CodexRecoveryScan((), True, 0, 0, 0, ())
+    payload = {
+        "generated_at": "2026-08-16T18:40:00Z",
+        "verdicts": [],
+        "counts": {watchdog.RECOVERABLE: 0},
+        "warnings": [],
+        "complete": True,
+        "scanned_count": 0,
+        "malformed_count": 0,
+        "unreadable_count": 0,
+        "cwd": str(tmp_path),
+        "recoverable_count": 0,
+        "usable_recoverable_count": 0,
+        "unusable_recoverable_count": 0,
+    }
+    results = [
+        {"session_id": "one", "outcome": "applied", "detail": "ok"},
+        {"session_id": "two", "outcome": "refused", "detail": "no"},
+        {"session_id": "three", "outcome": "deferred", "detail": "later"},
+    ]
+    monkeypatch.setattr(
+        watchdog,
+        "run_recoverable_sweep",
+        lambda **kwargs: (payload, [], scan),
+    )
+    monkeypatch.setattr(watchdog, "apply_recoverable", lambda *args, **kwargs: results)
+    monkeypatch.setattr(watchdog, "write_sweep_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *args, **kwargs: None)
+    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+
+    agents_cli.cmd_watchdog(
+        json_out=True,
+        apply=True,
+        apply_all=False,
+        only=watchdog.RECOVERABLE,
+        mail_to="",
+        since="24h",
+        cwd=str(tmp_path),
+    )
+
+    rendered = json.loads(capsys.readouterr().out)
+    assert rendered["result_counts"] == {
+        "applied": 1,
+        "refused": 1,
+        "deferred": 1,
+    }
 
 
 def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
     from types import SimpleNamespace
-    from fno.agents.discover import CodexRecoveryScan, RecoverableCodexRollout
+    from fno import paths
+    from fno.agents.discover import CodexRecoveryScan
 
-    session_id = "019f48e1-apply-candidate"
-    rollout = tmp_path / "rollout.jsonl"
-    rollout.write_text(
-        json.dumps({
-            "type": "session_meta",
-            "payload": {"id": session_id, "cwd": str(tmp_path)},
-        }) + "\n",
-        encoding="utf-8",
-    )
-    candidate = RecoverableCodexRollout(
-        session_id, str(tmp_path), rollout, NOW_1840
-    )
+    candidate = _recovery_candidate(tmp_path, 5)
+    session_id = candidate.session_id
     scan = CodexRecoveryScan((candidate,), True, 1, 0, 0, ())
     adopted = []
+    adopt_kwargs = {}
 
     def adopt(hit, **kwargs):
         adopted.append(hit)
+        adopt_kwargs.update(kwargs)
 
     results = watchdog.apply_recoverable(
         scan,
@@ -1657,24 +1873,63 @@ def test_recoverable_apply_checks_the_exact_adopted_registry_row(tmp_path):
             cwd=str(tmp_path),
             origin="adopted",
             name="019f48e1",
+            log_path=str(
+                paths.state_dir() / "agents" / session_id / "output.jsonl"
+            ),
         )],
     )
 
+    # The follow-up path rides the adoption write, not a later patch.
+    assert adopt_kwargs["log_path"] == str(
+        paths.state_dir() / "agents" / session_id / "output.jsonl"
+    )
+
     assert len(adopted) == 1
-    assert results == [{
-        "session_id": session_id,
-        "outcome": "applied",
-        "detail": f"adopted {session_id} handle=019f48e1",
-    }]
+    assert results == [
+        {
+            "session_id": session_id,
+            "outcome": "applied",
+            "transcript_usable": True,
+            "last_event_at": candidate.last_event_at,
+            "last_turn_marker": candidate.last_turn_marker,
+            "registry_row_count": 1,
+            "detail": f"adopted {session_id} handle=019f48e1",
+        }
+    ]
+
+
+def test_recoverable_apply_refuses_a_row_without_the_follow_up_path(tmp_path):
+    from types import SimpleNamespace
+    from fno.agents.discover import CodexRecoveryScan
+
+    candidate = _recovery_candidate(tmp_path, 7)
+    session_id = candidate.session_id
+
+    results = watchdog.apply_recoverable(
+        CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
+        scope_cwd=tmp_path,
+        adopt_fn=lambda hit, **kwargs: None,
+        confine_fn=lambda token, hits, **kwargs: hits,
+        load_registry_fn=lambda path: [SimpleNamespace(
+            harness="codex",
+            harness_session_id=session_id,
+            cwd=candidate.cwd,
+            origin="adopted",
+            name="019f48e1",
+            log_path="",
+        )],
+    )
+
+    assert results[0]["outcome"] == "refused"
+    assert results[0]["reason"] == "adoption_failed"
+    assert "follow-up path" in results[0]["detail"]
 
 
 def test_recoverable_apply_names_a_vanished_candidate(tmp_path):
-    from fno.agents.discover import CodexRecoveryScan, RecoverableCodexRollout
+    from fno.agents.discover import CodexRecoveryScan
 
-    session_id = "019f48e1-vanished-candidate"
-    candidate = RecoverableCodexRollout(
-        session_id, str(tmp_path), tmp_path / "gone.jsonl", NOW_1840
-    )
+    candidate = _recovery_candidate(tmp_path, 6)
+    candidate.rollout_path.unlink()
     results = watchdog.apply_recoverable(
         CodexRecoveryScan((candidate,), True, 1, 0, 0, ()),
         scope_cwd=tmp_path,
