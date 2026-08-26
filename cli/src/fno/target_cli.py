@@ -2076,13 +2076,13 @@ def _find_node(node_id: str) -> Optional[dict]:
 def _resolve_node_model(
     node_id: str, *, explicit: Optional[str] = None, provider: Optional[str] = None
 ) -> tuple[Optional[str], str]:
-    """``(model, decision_source)`` for a node's ``model`` pin / ``model_tier``.
+    """``(model, decision_source)`` for a node's ``model`` pin.
 
     The single Python projection of ``route_resolve`` at the ``target start`` seam
-    (the same precedence ``advance.py`` uses), so tier resolution lives in exactly
+    (the same precedence ``advance.py`` uses), so pin resolution lives in exactly
     ONE place. An explicit ``-m`` wins without loading the node. ``provider`` scopes
-    tier resolution to the spawn harness so a tier never yields a cross-harness
-    pick; None defaults to ``claude`` (the bg spawn default -- a bg worker is
+    resolution to the spawn harness so a pick never crosses harnesses;
+    None defaults to ``claude`` (the bg spawn default -- a bg worker is
     always claude regardless of the invoking harness, so scoping by the ambient
     harness would mis-resolve; Locked 3 intent is the incident bg-default lane).
     ``model`` is None -> the spawn path uses the provider default. Strictly
@@ -2102,7 +2102,6 @@ def _resolve_node_model(
         model, source, _chain = route_resolve.resolve_dispatch_model(
             explicit=explicit,
             task_model=(node or {}).get("model"),
-            task_tier=(node or {}).get("model_tier"),
             provider=provider or "claude",
         )
         return model, source
@@ -2145,12 +2144,12 @@ def resolve_model(
         help="Retired: the harness axis is --harness.",
     ),
 ) -> None:
-    """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
+    """Print the dispatch model a node resolves to (its ``model`` pin).
 
     The one Python projection of ``route_resolve`` for bash dispatchers
-    (``dispatch-node.sh``), so a tiered node's worker spawns on the tier model
+    (``dispatch-node.sh``), so a pinned node's worker spawns on the pin
     without bash ever reimplementing resolution. Prints the resolved model on
-    stdout, or nothing when the node has no pin/tier (the caller uses the harness
+    stdout, or nothing when the node has no pin (the caller uses the harness
     default). Never fails a dispatch: any error prints nothing.
     """
     from fno._flag_aliases import refuse_retired_provider

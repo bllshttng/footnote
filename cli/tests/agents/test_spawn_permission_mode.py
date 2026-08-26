@@ -425,7 +425,7 @@ def test_think_worker_scopes_tier_to_resolved_dispatch_harness(monkeypatch):
         None,
         "slug",
         model="",
-        node={"model_tier": "high"},
+        node={"difficulty": "high"},
     )
 
     cmd = captured["cmd"]

@@ -47,7 +47,7 @@ def _patch_spawn(monkeypatch):
     def fake(node_id, node_cwd, node_slug=None, *, reconcile_manifest=None, model=None,
              provider=None, node=None):
         calls.append({"node": node_id, "cwd": node_cwd, "manifest": reconcile_manifest,
-                      "model": model, "provider": provider})
+                      "model": model, "provider": provider, "dep": node})
         return "short123"
     monkeypatch.setattr(rd, "_spawn_worker", fake)
     return calls
@@ -89,16 +89,16 @@ def test_reconcile_threads_node_model_pin(iso, tmp_path, monkeypatch):
     assert calls[0]["model"] == "fable"
 
 
-def test_reconcile_threads_node_model_tier(iso, tmp_path, monkeypatch):
-    # AC7 (x-da6e): a TIERED dependent (no model pin) must resolve its tier on
-    # reconcile too -- the old raw `dep.get("model")` read passed None, silently
-    # dropping the tier. Scoped to claude, the pick must map to the claude harness.
-    from fno.adapters.providers import benchmarks as bm
-
+def test_reconcile_defers_node_difficulty_to_spawn_grid(iso, tmp_path, monkeypatch):
+    # x-da6e + x-baef: the dep dict carries the difficulty axis so the
+    # spawn-CLI grid can resolve it, but reconcile does NOT statically pin a
+    # model from a band (the same deferral advance's dispatch seams use). The
+    # old test asserted the retired model_tier statically resolved here; that
+    # path bypassed resolve_difficulty=False and died with the field.
     sm.write("x-dep", [{"stub_id": "a", "file": "f", "kind": "fn"}], tmp_path,
              contract_test="true")
     dep = _dep(tmp_path)
-    dep["model_tier"] = "medium"
+    dep["difficulty"] = "medium"
     dep["provider"] = "claude"
     _patch_deps(monkeypatch, [dep])
     calls = _patch_spawn(monkeypatch)
@@ -106,11 +106,10 @@ def test_reconcile_threads_node_model_tier(iso, tmp_path, monkeypatch):
     res = rd.dispatch_reconcile_for_blocker(closed_node_id="x-blk", events_path=iso)
 
     assert res[0].decision == "dispatched"
-    picked = calls[0]["model"]
-    assert picked is not None  # tier resolved, not dropped to None
-    assert bm.reachable(picked)[0] == "claude"  # scoped to the claude lane
-    # the worker must spawn on the SAME provider the model was resolved for,
-    # else it is claude --model <foreign> (gemini HIGH / codex P2 on PR #258).
+    # deferred, not dropped: no static model, but the band rides on the dep
+    # the spawn receives, and the provider still scopes the spawn lane.
+    assert calls[0]["model"] is None
+    assert calls[0]["dep"]["difficulty"] == "medium"
     assert calls[0]["provider"] == "claude"
 
 
@@ -122,7 +121,7 @@ def test_contract_dependents_copies_provider(monkeypatch, tmp_path):
     graph = [
         {"id": "x-blk", "status": "done"},
         {"id": "x-dep", "blocked_by": ["x-blk"], "dep": "contract",
-         "provider": "claude", "model_tier": "medium"},
+         "provider": "claude", "difficulty": "medium"},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda _p: graph)
     monkeypatch.setattr("fno.paths.graph_json", lambda: "ignored")

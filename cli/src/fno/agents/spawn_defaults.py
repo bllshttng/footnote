@@ -1222,7 +1222,7 @@ def inject_spawn_defaults(
             if node:
                 capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
                 grid_candidate, _grid_chain = route_resolve.resolve_grid(
-                    node.get("difficulty") or node.get("model_tier"),
+                    node.get("difficulty"),
                     node.get("priority"),
                     capacity,
                 )

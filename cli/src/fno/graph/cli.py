@@ -4561,13 +4561,10 @@ def cmd_next(
             "cwd": e.get("cwd"),
             "size": e.get("size"),
             "plan_path": e.get("plan_path"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
-            # model_tier rides alongside it so the dispatch-time tier resolver
-            # sees the annotation (else it silently falls back to the default).
             "model": e.get("model"),
-            "model_tier": e.get("model_tier"),
             # x-0676: the per-node dispatch overrides must ride in the next-JSON so
             # `advance`'s resolver routing (US1) actually fires for real graph nodes
             # (which come from this summary), not only for tests that inject them.
@@ -4973,15 +4970,13 @@ def cmd_ready(
             "project": e.get("project"),
             "cwd": e.get("cwd"),
             "parent": e.get("parent"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             # select_lane_fill's dispatch-time collision gate compares plan file
             # surfaces; without this it has nothing to read.
             "plan_path": e.get("plan_path"),
             # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
             # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
-            # model_tier rides alongside so the tier resolver sees the annotation.
             "model": e.get("model"),
-            "model_tier": e.get("model_tier"),
         }
         for e in ready
     ]
@@ -12043,6 +12038,37 @@ def cmd_migrate_priorities(
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
+@cli.command("migrate-difficulty", hidden=True)
+def cmd_migrate_difficulty(
+    apply: bool = typer.Option(
+        False, "--apply", help="Move each model_tier band onto difficulty and drop the retired key."
+    ),
+) -> None:
+    """Dry-run or apply the one-shot model_tier -> difficulty migration."""
+    from fno.graph.migrations import migrate_model_tier
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    def _run(entries: list[dict]) -> dict:
+        try:
+            return migrate_model_tier(entries, apply=apply)
+        except ValueError as exc:
+            typer.echo(f"fno backlog migrate-difficulty: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+    if apply:
+        holder: list[dict] = []
+
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(_run(entries))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    else:
+        receipt = _run(read_graph(_graph_path()))
+    typer.echo(json.dumps(receipt, sort_keys=True))
+
+
 # -- rank --
 
 
@@ -12798,8 +12824,6 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
     from fno.graph._constants import normalize_difficulty
 
     raw_difficulty = frontmatter.get("difficulty")
-    if raw_difficulty is None:
-        raw_difficulty = frontmatter.get("model_tier")
     for entry in es:
         if entry.get("id") != claim_id:
             continue
@@ -14007,6 +14031,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "note",
         "remove",
         "migrate-priorities",
+        "migrate-difficulty",
         "reopen",
         "supersede",
         "unsupersede",

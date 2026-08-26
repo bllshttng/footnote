@@ -366,18 +366,22 @@ def test_advance_threads_node_pins_to_spawn(iso, monkeypatch):
     assert captured == {"model": "glm-4.7", "provider": "codex"}
 
 
-def test_direct_dependents_carry_model_tier(monkeypatch):
-    """Codex P2: the reduced dependent dict must carry model_tier so the tier
-    resolver sees it on the cross-project/dependent dispatch path."""
+def test_direct_dependents_carry_difficulty(monkeypatch):
+    """Codex P2 ported (x-baef): the reduced dependent dict carries the
+    work-difficulty axis only; a model_tier-only row falls through to no band,
+    proving the compat read is gone rather than merely unused."""
     graph = [
         {"id": "ab-closed11", "project": "fno"},
         {"id": "ab-dep00001", "project": "fno", "blocked_by": ["ab-closed11"],
-         "status": "ready", "model_tier": "high", "cwd": "/w"},
+         "status": "ready", "difficulty": "high", "cwd": "/w"},
+        {"id": "ab-dep00002", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "ready", "model_tier": "low", "cwd": "/w"},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
-    deps = adv._direct_dependents("ab-closed11", "fno")
-    assert deps and deps[0]["id"] == "ab-dep00001"
-    assert deps[0]["model_tier"] == "high"
+    deps = {d["id"]: d for d in adv._direct_dependents("ab-closed11", "fno")}
+    assert deps["ab-dep00001"]["difficulty"] == "high"
+    assert deps["ab-dep00002"]["difficulty"] is None
+    assert all("model_tier" not in d for d in deps.values())
 
 
 def test_direct_dependents_admit_plan_less_idea(monkeypatch):
@@ -404,16 +408,17 @@ def test_direct_dependents_admit_plan_less_idea(monkeypatch):
     assert "ab-block01" not in ids
 
 
-def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
-    """AC3-HP wiring: a node's model_tier resolves to a concrete --model at the
-    advance spawn (no snapshot -> the deterministic static table)."""
+def test_advance_model_tier_only_resolves_no_model(iso, monkeypatch):
+    """AC4-HP negative half (x-baef): a node carrying only the retired
+    model_tier key resolves nothing at the advance spawn; the compat read is
+    gone, so the row reads as band-less and defers to the spawn-seam grid."""
     captured = {}
 
     def spawn(node_id, node_cwd, node_slug=None, model=None, provider=None, **kwargs):
         captured.update(model=model)
         return "sid"
 
-    # Force the static table so the resolution is deterministic in CI.
+    # Force the static table so any accidental resolution would be visible.
     from fno.adapters.providers import benchmarks as _bm
     monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
 
@@ -422,7 +427,7 @@ def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     monkeypatch.setattr(adv, "_spawn_worker", spawn)
     res = adv.advance(project="fno", events_path=iso)
     assert res.decision == "dispatched"
-    assert captured["model"] == "glm-4.7"  # STATIC_TIERS['low'][0]
+    assert captured["model"] is None
 
 
 def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):

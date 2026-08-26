@@ -755,9 +755,9 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
 
 
 def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
-    """The start seam pins only model/model_tier: a canonical difficulty defers
-    to the capacity grid at the spawn seam (parity with advance's dispatch),
-    while the legacy tier pin still resolves statically."""
+    """The start seam pins only model: a canonical difficulty defers to the
+    capacity grid at the spawn seam (parity with advance's dispatch), and the
+    retired model_tier key reads as unset (x-baef AC4-HP negative half)."""
     monkeypatch.setattr(
         target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "high"}
     )
@@ -765,15 +765,15 @@ def test_resolve_node_model_defers_difficulty_to_grid(monkeypatch):
     assert model is None
     assert source == "provider-default"
 
-    monkeypatch.setattr(
-        target_cli, "_find_node", lambda node_id: {"id": node_id, "model_tier": "low"}
-    )
     from fno.adapters.providers import benchmarks as _bm
 
     monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+    monkeypatch.setattr(
+        target_cli, "_find_node", lambda node_id: {"id": node_id, "model_tier": "low"}
+    )
     model, source = target_cli._resolve_node_model("x-def2")
-    assert model == "glm-4.7"  # STATIC_TIERS['low'][0]
-    assert source == "task-tier(low)"
+    assert model is None
+    assert source == "provider-default"
 
 
 def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, monkeypatch):

@@ -69,3 +69,46 @@ def rollback_legacy_p0(entries: list[dict]) -> dict[str, int]:
         )
         row["priority"] = "p0"
     return {"restored_to_p0": len(candidates)}
+
+
+def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
+    """Move the retired ``model_tier`` band onto ``difficulty``, once, audibly.
+
+    The compat window closed with zero rows carrying both spellings (measured
+    across the whole graph 2026-08-26), so a row holding both today means a
+    writer re-added the retired key after the tombstone; that row is refused
+    rather than guessed at.
+    """
+    conflict_ids = sorted(
+        str(row.get("id", "?"))
+        for row in entries
+        if isinstance(row, dict)
+        and row.get("model_tier") is not None
+        and row.get("difficulty") is not None
+    )
+    if conflict_ids:
+        raise ValueError(
+            "rows carry both difficulty and model_tier; resolve by hand "
+            "before migrating: " + ", ".join(conflict_ids)
+        )
+    pending = [
+        row for row in entries
+        if isinstance(row, dict) and row.get("model_tier") is not None
+    ]
+    receipt: dict = {
+        "candidates": [row.get("id") for row in pending],
+        "candidate_count": len(pending),
+        "apply": apply,
+    }
+    if not apply:
+        return receipt
+
+    now = datetime.now(timezone.utc).isoformat()
+    for row in pending:
+        band = row.pop("model_tier")
+        row["difficulty"] = band
+        row.setdefault("difficulty_history", []).append(
+            {"value": band, "source": "migration", "ts": now}
+        )
+    receipt["migrated"] = len(pending)
+    return receipt
