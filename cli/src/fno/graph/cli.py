@@ -6452,6 +6452,7 @@ def cmd_roadmap(
     )
     from fno.graph.render_html import (
         atomic_write_documents,
+        leak_offender_lines,
         load_render_entries,
         public_title_leaks,
     )
@@ -6474,11 +6475,8 @@ def cmd_roadmap(
     offenders = public_title_leaks(public_projection_entries(entries, resolved_project))
     if offenders:
         typer.echo("Error: public title leak gate refused output:", err=True)
-        for node_id, title, classes in offenders:
-            typer.echo(
-                f"  {node_id}: {','.join(classes)}: {title}",
-                err=True,
-            )
+        for line in leak_offender_lines(offenders):
+            typer.echo(line, err=True)
         raise typer.Exit(code=1)
 
     md = render_public_roadmap_md(entries, resolved_project)

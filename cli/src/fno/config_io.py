@@ -215,3 +215,27 @@ def config_read_candidates(paths: list[Path]) -> list[Path]:
     """config.toml-first read candidates for a list of settings.yaml locations
     (public alias of ``_prefer_toml`` for direct-file readers)."""
     return _prefer_toml(paths)
+
+
+def read_global_block(block: str) -> dict[str, object] | None:
+    """Read one top-level block from the GLOBAL config file, config.toml first.
+
+    Shared home for the global-only reads that fire inside the graph renders
+    (obsidian vault, kanban wip caps, backlog render targets): each must see
+    the operator's flat ``~/.fno/config.toml`` and not just the legacy
+    ``settings.yaml``, none may raise into a mutation, and none may grow
+    another hand-rolled copy of the candidate walk. Returns the first
+    candidate's block that carries the key, else ``None``; a present-but-
+    non-dict block also returns ``None`` (the caller's absent-block path).
+    """
+    try:
+        for candidate in config_read_candidates([_global_settings_path()]):
+            if not candidate.is_file():
+                continue
+            data = read_config_flat(candidate)
+            if block in data:
+                value = data[block]
+                return value if isinstance(value, dict) else None
+        return None
+    except Exception:
+        return None

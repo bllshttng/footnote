@@ -281,11 +281,12 @@ class RenderTargetConfig(BaseModel):
 
     Every graph mutation re-renders each configured target through the shared
     public title leak gate (one renderer, one gate - never a second HTML
-    author). An unknown ``projection`` raises at config load so a typo is a
-    loud error rather than a target that silently never renders.
+    author). Unknown values AND unknown keys raise at config load: a typo'd
+    ``projection`` value or a misspelled ``projectio`` key must be a loud
+    error, never a target that silently renders the wrong projection.
     """
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="forbid")
 
     path: str
     project: str

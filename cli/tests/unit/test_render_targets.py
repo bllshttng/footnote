@@ -136,6 +136,16 @@ def test_relative_target_path_rejected():
     assert "absolute" in str(exc.value)
 
 
+def test_misspelled_target_key_rejected():
+    from fno.config import RenderTargetConfig
+
+    with pytest.raises(Exception) as exc:
+        RenderTargetConfig.model_validate(
+            {"path": "~/v/x.html", "project": "fno", "projectio": "roadmap"}
+        )
+    assert "projectio" in str(exc.value)
+
+
 def test_project_local_rows_warn_not_render(_isolate, tmp_path, monkeypatch, capsys):
     global_cfg = tmp_path / "config.toml"
     global_cfg.write_text("[backlog]\n", encoding="utf-8")

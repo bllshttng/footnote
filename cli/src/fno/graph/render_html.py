@@ -96,6 +96,15 @@ def public_title_leaks(entries: list[dict]) -> list[tuple[str, str, tuple[str, .
     return offenders
 
 
+def leak_offender_lines(offenders: list[tuple[str, str, tuple[str, ...]]]) -> list[str]:
+    """One refusal line per offender, shared by the manual roadmap verb and
+    the auto-render so the two leak-gate reports cannot drift apart."""
+    return [
+        f"  {node_id}: {','.join(classes)}: {title}"
+        for node_id, title, classes in offenders
+    ]
+
+
 def atomic_write_documents(documents: dict[Path, str]) -> None:
     """Stage every document before replacing any destination."""
     staged: list[tuple[Path, str]] = []
@@ -118,28 +127,26 @@ def atomic_write_documents(documents: dict[Path, str]) -> None:
 
 
 def _load_obsidian_vault() -> str | None:
-    """Read ``config.obsidian.vault`` from the GLOBAL settings file directly.
+    """Read ``config.obsidian.vault`` from the GLOBAL config file directly.
 
-    Reads ``~/.fno/settings.yaml`` (or whatever ``FNO_GLOBAL_SETTINGS_PATH``
-    resolves to). Deliberately bypasses ``load_settings()`` because that loader
-    walks project-local-first-then-global and stops at the first match: when a
-    backlog mutation fires from a project whose own ``.fno/settings.yaml``
-    lacks an obsidian block, the project-local file shadows the global one and
-    the auto-render writes ``~/.fno/graph.html`` (a global artifact) with
-    vault=None, zeroing out every Obsidian deep link.
+    Walks the config.toml-first global candidates via ``read_global_block``
+    (``~/.fno/config.toml``, then the legacy ``settings.yaml``). Deliberately
+    bypasses ``load_settings()`` because that loader walks project-local-first
+    and stops at the first match: when a backlog mutation fires from a project
+    whose own ``.fno/settings.yaml`` lacks an obsidian block, the
+    project-local file shadows the global one and the auto-render writes
+    ``~/.fno/graph.html`` (a global artifact) with vault=None, zeroing out
+    every Obsidian deep link.
 
     Vault is a global concept (which vault holds the plan files) and graph.html
     is a global artifact, so the source of truth must be the global file.
     """
     try:
         # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-        from fno.config_io import _global_settings_path, read_config_flat
+        from fno.config_io import read_global_block
 
-        path = _global_settings_path()
-        if not path.is_file():
-            return None
-        obs = read_config_flat(path).get("obsidian") or {}
-        if not isinstance(obs, dict) or not obs.get("enabled"):
+        obs = read_global_block("obsidian") or {}
+        if not obs.get("enabled"):
             return None
         vault = obs.get("vault")
         if isinstance(vault, str) and vault.strip():
@@ -170,13 +177,10 @@ def _load_wip_caps() -> dict[str, int]:
     """
     try:
         # Function-local: keep graph-module load free of config_io's pydantic/yaml.
-        from fno.config_io import _global_settings_path, read_config_flat
+        from fno.config_io import read_global_block
 
-        path = _global_settings_path()
-        if not path.is_file():
-            return dict(_DEFAULT_WIP_CAPS)
-        kanban = read_config_flat(path).get("kanban")
-        if not isinstance(kanban, dict) or "wip_caps" not in kanban:
+        kanban = read_global_block("kanban")
+        if kanban is None or "wip_caps" not in kanban:
             return dict(_DEFAULT_WIP_CAPS)
         raw = kanban.get("wip_caps")
         if not isinstance(raw, dict):

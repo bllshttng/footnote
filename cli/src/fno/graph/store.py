@@ -1082,17 +1082,6 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             render_graph_html(_archived, html_target)
         except OSError as e:
             print(f"Warning: graph.html render failed: {e}", file=sys.stderr)
-        # Operator-configured project-scoped public projections (x-9415),
-        # through the same leak gate as the manual roadmap verb. CANONICAL
-        # ONLY: a tmp graph.json in a test must never write the operator's
-        # real public targets. Fail-open like the renders above - graph.json
-        # is already written; render_configured_targets itself never raises.
-        if is_canonical:
-            try:
-                from fno.graph.roadmap_public import render_configured_targets
-                render_configured_targets(_archived)
-            except Exception as e:
-                print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
         # Wake the active-backlog drain daemon (node x-c070): a mutation may have
         # produced a fresh ready node. Best-effort; the daemon's poll floor is the
         # guarantee, so a failed touch is harmless and never wedges the mutation.
@@ -1108,6 +1097,21 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     # mutexes never hold the graph lock (see the closure hook above).
     for entry_id, rung in closure_releases:
         release_node_claim_at_closure(entry_id, rung=rung)
+    # Operator-configured project-scoped public projections (x-9415), through
+    # the same leak gate as the manual roadmap verb. CANONICAL ONLY: a tmp
+    # graph.json in a test must never write the operator's real public
+    # targets. Runs AFTER the flock drops, unlike the state_dir renders above:
+    # these paths are operator-chosen, and a stalled (not erroring) target
+    # filesystem - a cloud-synced vault - must never hold the graph lock every
+    # backlog verb in the fleet waits on. atomic_write_documents makes a
+    # concurrent render last-wins, never partial. Fail-open: graph.json is
+    # already written; render_configured_targets itself never raises.
+    if is_canonical:
+        try:
+            from fno.graph.roadmap_public import render_configured_targets
+            render_configured_targets(_archived)
+        except Exception as e:
+            print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
     return result
 
 

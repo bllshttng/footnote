@@ -137,48 +137,36 @@ def render_public_backlog_html(entries: list[dict], project: str) -> str:
 def _configured_targets() -> "list[RenderTargetConfig]":
     """Read ``config.backlog.render_targets`` from the GLOBAL config file.
 
-    Walks the config.toml-first candidates (``_global_settings_path`` alone
-    names the legacy ``settings.yaml``; the operator's list lives in
-    ``~/.fno/config.toml``), for the same recorded reason as
-    ``render_html._load_obsidian_vault``: this runs inside
-    ``locked_mutate_graph`` and ``load_settings()`` stops at a project-local
-    file that would shadow the operator's global list. Runs after graph.json
-    is already written, so every failure degrades to ``[]`` instead of raising
-    into the mutation.
+    Goes through ``read_global_block`` (config.toml-first candidates) for the
+    same recorded reason as ``render_html._load_obsidian_vault``: this runs
+    right after ``locked_mutate_graph`` commits and ``load_settings()`` stops
+    at a project-local file that would shadow the operator's global list.
+    Every failure degrades to ``[]`` with a warning instead of raising into
+    the mutation.
     """
     try:
         # Function-local: keep graph-module imports free of config's pydantic.
         from fno.config import RenderTargetConfig
-        from fno.config_io import (
-            _global_settings_path,
-            config_read_candidates,
-            read_config_flat,
-        )
+        from fno.config_io import read_global_block
 
+        backlog = read_global_block("backlog") or {}
+        rows = backlog.get("render_targets")
+        if rows is not None and not isinstance(rows, list):
+            print(
+                "Warning: backlog.render_targets is not an array of tables; "
+                "ignoring it",
+                file=sys.stderr,
+            )
+            rows = None
         out: list[RenderTargetConfig] = []
-        for candidate in config_read_candidates([_global_settings_path()]):
-            if not candidate.is_file():
-                continue
-            backlog = read_config_flat(candidate).get("backlog")
-            if not isinstance(backlog, dict) or "render_targets" not in backlog:
-                continue
-            rows = backlog["render_targets"]
-            if not isinstance(rows, list):
+        for row in rows or []:
+            try:
+                out.append(RenderTargetConfig.model_validate(row))
+            except Exception as exc:
                 print(
-                    "Warning: backlog.render_targets is not an array of tables; "
-                    "ignoring it",
+                    f"Warning: skipping malformed backlog.render_targets row: {exc}",
                     file=sys.stderr,
                 )
-                break
-            for row in rows:
-                try:
-                    out.append(RenderTargetConfig.model_validate(row))
-                except Exception as exc:
-                    print(
-                        f"Warning: skipping malformed backlog.render_targets row: {exc}",
-                        file=sys.stderr,
-                    )
-            break
         _warn_shadowed_local_rows(out)
         return out
     except Exception as exc:
@@ -230,7 +218,11 @@ def render_configured_targets(entries: list[dict]) -> None:
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
     byte-unchanged and names every offender; it still only skips the target."""
-    from fno.graph.render_html import atomic_write_documents, public_title_leaks
+    from fno.graph.render_html import (
+        atomic_write_documents,
+        leak_offender_lines,
+        public_title_leaks,
+    )
 
     for target in _configured_targets():
         out = Path(os.path.expanduser(target.path))
@@ -264,8 +256,8 @@ def render_configured_targets(entries: list[dict]) -> None:
                     f"{len(offenders)} offending title(s); target left unchanged",
                     file=sys.stderr,
                 )
-                for node_id, title, classes in offenders:
-                    print(f"  {node_id}: {','.join(classes)}: {title}", file=sys.stderr)
+                for line in leak_offender_lines(offenders):
+                    print(line, file=sys.stderr)
                 continue
             atomic_write_documents({out: html})
         except Exception as exc:
