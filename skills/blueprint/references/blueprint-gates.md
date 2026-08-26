@@ -235,7 +235,7 @@ Precedence is `model:` (exact) over the provider default. An exact pin on the sa
 
 ```bash
 # Plan frontmatter `difficulty:` (scope to the frontmatter block).
-DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^difficulty:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
+DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^difficulty:[[:space:]]*/,""); sub(/[[:space:]]*#.*$/,""); print; exit}' "$PLAN_INDEX")"
 [[ -n "$DIFFICULTY" ]] && fno backlog update "$NODE_ID" --difficulty "$DIFFICULTY"
 ```
 

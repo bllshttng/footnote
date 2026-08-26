@@ -98,17 +98,25 @@ def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
     """
     migratable: list[str] = []
     divergent: list[str] = []
+    from fno.graph._constants import normalize_difficulty
+
     for row in entries:
         if not isinstance(row, dict) or row.get("model_tier") is None:
             continue
         rid = str(row.get("id", "?"))
         band = _retired_band(row)
         current = row.get("difficulty")
+        if isinstance(current, str):
+            try:
+                current = normalize_difficulty(current)
+            except ValueError:
+                pass  # garbage canonical band: the divergent lane names both
         if current is not None and band is not None and band != current:
             divergent.append(rid)
         else:
-            # model_tier-only rows, same-band pairs, and a garbage retired
-            # key under a live difficulty: all drain without a judgment.
+            # model_tier-only rows, same-band pairs (case-folded), and a
+            # garbage retired key under a live difficulty: all drain without
+            # a judgment.
             migratable.append(rid)
     return migratable, divergent
 
@@ -127,6 +135,7 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
 
     _migratable, divergent = split_retired_tier_rows(entries)
     if divergent:
+        _divergent_ids = set(divergent)
         raise ValueError(
             "rows carry difficulty and a DIVERGENT model_tier; pick the band "
             "with `fno backlog update <id> --difficulty <band>` (which clears "
@@ -136,7 +145,7 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
                 f"difficulty={row.get('difficulty')!r}"
                 for row in entries
                 if isinstance(row, dict)
-                and str(row.get("id", "?")) in set(divergent)
+                and str(row.get("id", "?")) in _divergent_ids
             )
         )
     invalid = sorted(

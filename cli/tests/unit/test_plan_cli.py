@@ -25,6 +25,28 @@ def test_plan_help_renders():
     assert "graduate" in result.stdout
 
 
+def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
+    """x-baef round-5: validate-plan.sh runs --execution, which never reaches
+    PlanFrontmatter, so the difficulty gate must fire in THAT scope - a
+    post-gate plan with no difficulty is refused at authoring time, quoting
+    the bands; the on-gate twin passes the gate."""
+    post_gate = tmp_path / "post-gate.md"
+    post_gate.write_text(
+        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-27\n---\n# T\n\nBody.\n"
+    )
+    result = runner.invoke(app, ["do", "plan", "validate", str(post_gate), "--execution"])
+    assert result.exit_code == 1, result.output
+    assert "difficulty is required" in result.output
+    assert "low, medium, high" in result.output
+
+    on_gate = tmp_path / "on-gate.md"
+    on_gate.write_text(
+        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-26\n---\n# T\n\nBody.\n"
+    )
+    result2 = runner.invoke(app, ["do", "plan", "validate", str(on_gate), "--execution"])
+    assert "difficulty is required" not in result2.output
+
+
 def test_plan_stamp_help_renders():
     result = runner.invoke(app, ["do", "plan", "stamp", "--help"])
     assert result.exit_code == 0

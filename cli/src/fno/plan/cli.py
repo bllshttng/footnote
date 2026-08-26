@@ -330,6 +330,31 @@ def validate(
     if execution:
         from fno.plan.execution_validation import validate_execution
 
+        # The creation-time half of the difficulty gate (x-baef round-5):
+        # validate-plan.sh runs --execution, which used to reach neither this
+        # branch's body checks nor PlanFrontmatter below, so a post-gate plan
+        # with no difficulty sailed through authoring and only died later at
+        # /fno:execute. Frontmatter outranks body: this fires first. Same
+        # helper the model validator uses - one gate.
+        from fno.plan.schema import difficulty_gate_error
+
+        gate_error = difficulty_gate_error(doc.frontmatter)
+        if gate_error:
+            if json_out:
+                typer.echo(json.dumps({
+                    "valid": False,
+                    "path": str(resolved),
+                    "scope": "execution",
+                    "violations": [{"field": "difficulty", "message": gate_error}],
+                    "warnings": [],
+                }))
+            else:
+                typer.echo(
+                    f"invalid execution: {resolved} (difficulty gate)", err=True
+                )
+                typer.echo(f"  difficulty: {gate_error}", err=True)
+            raise typer.Exit(code=1)
+
         result = validate_execution(doc)
         if result.violations:
             violations = [
