@@ -7574,8 +7574,7 @@ impl Core {
                                 // signal, but the vt reading is still real and
                                 // one field away: keep it so the client can
                                 // show activity when the badge goes quiet.
-                                pane_activity: pane_entry
-                                    .map(|e| e.vt.shell_activity()),
+                                pane_activity: pane_entry.map(|e| e.vt.shell_activity()),
                             }
                         }
                         None => {
