@@ -340,6 +340,8 @@ run has a bound node (`.fno/target-state.md` `graph_node_id`, read with
 `target_state_field` from `scripts/lib/target-guard.sh`):
 
 ```bash
+# shellcheck source=scripts/lib/target-guard.sh
+source "$(git rev-parse --show-toplevel)/scripts/lib/target-guard.sh"
 NODE_ID=$(target_state_field graph_node_id)
 if [[ -n "$NODE_ID" ]]; then
   fno backlog task update "$NODE_ID" "$TASK_ID" --status in_progress
