@@ -6926,22 +6926,43 @@ struct ReconcileSweepResult {
 /// subprocess per row and is not getting a second.
 ///
 /// `probe` is injected so this is testable without shelling out.
+fn predecessor_reachability(session_id: &str) -> Option<bool> {
+    crate::claude_ask::family1_truth_probe(session_id).and_then(|probe| {
+        match probe.reachability.as_deref() {
+            Some("reachable") => Some(true),
+            Some("unreachable") => Some(false),
+            _ => None,
+        }
+    })
+}
+
 fn late_bind_codex_sessions(
     home: &AgentsHome,
     emitter: &EventEmitter,
     probe: &dyn Fn(u32) -> Option<String>,
 ) -> Result<(), String> {
+    late_bind_codex_sessions_with_transition(home, emitter, probe, &predecessor_reachability)
+}
+
+fn late_bind_codex_sessions_with_transition(
+    home: &AgentsHome,
+    emitter: &EventEmitter,
+    probe: &dyn Fn(u32) -> Option<String>,
+    transition_probe: &dyn Fn(&str) -> Option<bool>,
+) -> Result<(), String> {
     let registry = state::load_registry(&home.registry_json()).unwrap_or_default();
-    let candidates: Vec<(String, u32)> = registry
+    let candidates: Vec<(String, u32, Option<String>)> = registry
         .entries
         .iter()
         .filter(|e| {
             e.harness_name() == "codex"
                 && e.mux.is_some()
-                && e.harness_session_id.is_none()
                 && e.pid.is_some_and(|p| pid_is_ours(p, e.pid_start_time))
         })
-        .filter_map(|e| e.pid.map(|p| (e.name.clone(), p)))
+        .filter_map(|e| {
+            e.pid
+                .map(|p| (e.name.clone(), p, e.harness_session_id.clone()))
+        })
         .collect();
     // A collision on one candidate must not starve the rest: every candidate
     // in this tick gets attempted, and the first write failure is what's
@@ -6950,20 +6971,53 @@ fn late_bind_codex_sessions(
     // starving every sibling candidate's bind, forever, since candidates are
     // rescanned in the same registry order on every subsequent sweep.
     let mut first_error: Option<String> = None;
-    for (name, pid) in candidates {
+    for (name, pid, predecessor) in candidates {
         let Some(sid) = probe(pid) else { continue };
+        if predecessor.as_deref() == Some(sid.as_str()) {
+            continue;
+        }
+        let predecessor_reachable = predecessor.as_deref().and_then(transition_probe);
+        let classification = predecessor.as_deref().map(|previous| {
+            state::classify_session_transition(previous, &sid, predecessor_reachable)
+        });
+        if predecessor.is_some() && predecessor_reachable.is_none() {
+            continue;
+        }
+        let branch_name = format!("{name}-branch-{}", canonical_handle(&sid));
+        let mut applied_transition: Option<state::SessionTransition> = None;
         let bound = match state::update_registry(&home.registry_json(), |r| {
-            let Some(e) = r.find_mut(&name) else {
-                return false;
-            };
             // A concurrent writer may have bound this row (or reaped it) since
             // the candidate scan above; never clobber a session id that
             // arrived in between.
-            if e.harness_session_id.is_some() {
-                return false;
+            let current = r
+                .find(&name)
+                .and_then(|entry| entry.harness_session_id.clone());
+            match (current.as_deref(), classification, predecessor_reachable) {
+                (None, None, None) => {
+                    let Some(e) = r.find_mut(&name) else {
+                        return false;
+                    };
+                    e.harness_session_id = Some(sid.clone());
+                    true
+                }
+                (Some(previous), Some(_), Some(reachable)) if previous != sid => {
+                    match apply_session_transition(
+                        r,
+                        &name,
+                        &sid,
+                        Some(reachable),
+                        &branch_name,
+                        &sid,
+                    ) {
+                        Ok(applied) => {
+                            applied_transition = Some(applied);
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                }
+                _ => false,
             }
-            e.harness_session_id = Some(sid.clone());
-            true
         }) {
             Ok(bound) => bound,
             Err(error) => {
@@ -6982,14 +7036,26 @@ fn late_bind_codex_sessions(
             }
         };
         if bound {
-            let _ = emitter.emit_fields(
-                "agent_late_bind",
-                json_obj(&[
-                    ("name", Value::String(name)),
-                    ("pid", Value::Number(pid.into())),
-                    ("harness_session_id", Value::String(sid)),
-                ]),
-            );
+            let transition = applied_transition.map(|value| {
+                Value::String(
+                    match value {
+                        state::SessionTransition::Succession => "succession",
+                        state::SessionTransition::Branch => "branch",
+                        state::SessionTransition::Deferred => "deferred",
+                    }
+                    .to_string(),
+                )
+            });
+            let mut fields = vec![
+                ("name", Value::String(name)),
+                ("pid", Value::Number(pid.into())),
+                ("harness_session_id", Value::String(sid)),
+            ];
+            if let (Some(predecessor), Some(transition)) = (predecessor, transition) {
+                fields.push(("predecessor_session_id", Value::String(predecessor)));
+                fields.push(("transition", transition));
+            }
+            let _ = emitter.emit_fields("agent_late_bind", json_obj(&fields));
         }
     }
     match first_error {
@@ -7036,6 +7102,24 @@ pub(crate) fn apply_session_transition(
         state::SessionTransition::Branch => {
             if branch_name.is_empty() || branch_fno_id.is_empty() {
                 return Err("branch needs a distinct name and fno_id".to_string());
+            }
+            if registry
+                .entries
+                .iter()
+                .any(|entry| entry.name == branch_name)
+            {
+                return Err(format!(
+                    "branch name {branch_name:?} already has a registry row"
+                ));
+            }
+            if registry
+                .entries
+                .iter()
+                .any(|entry| entry.fno_id.as_deref() == Some(branch_fno_id))
+            {
+                return Err(format!(
+                    "branch fno_id {branch_fno_id:?} already has a registry row"
+                ));
             }
             if registry
                 .entries
@@ -12354,10 +12438,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         })
         .unwrap();
 
-        late_bind_codex_sessions(&home, &emitter, &|_| {
-            panic!("an already-bound row must not be re-probed")
-        })
-        .unwrap();
+        late_bind_codex_sessions(&home, &emitter, &|_| Some("already-there".to_string())).unwrap();
 
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert_eq!(
@@ -12367,6 +12448,89 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 .as_deref(),
             Some("already-there")
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_applies_a_dead_predecessor_succession() {
+        let home = tmp_home("late-bind-succession");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut entry = codex_pane_row("pane-a");
+            entry.pid = Some(me);
+            entry.pid_start_time = Some(my_start);
+            entry.harness_session_id = Some("session-a".into());
+            entry.fno_id = Some("thread-a".into());
+            r.entries.push(entry);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions_with_transition(
+            &home,
+            &emitter,
+            &|_| Some("session-b".to_string()),
+            &|session| (session == "session-a").then_some(false),
+        )
+        .unwrap();
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let entry = reg.find("pane-a").unwrap();
+        assert_eq!(entry.harness_session_id.as_deref(), Some("session-b"));
+        assert_eq!(entry.predecessor_session_ids, vec!["session-a"]);
+        assert!(read_events(&home).iter().any(|event| {
+            event.get("type").and_then(Value::as_str) == Some("agent_late_bind")
+                && event
+                    .get("data")
+                    .and_then(|data| data.get("transition"))
+                    .and_then(Value::as_str)
+                    == Some("succession")
+        }));
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn late_bind_preserves_a_live_predecessor_and_creates_a_clean_branch_row() {
+        let home = tmp_home("late-bind-branch");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let me = std::process::id();
+        let Some(my_start) = process_start_time(me) else {
+            return;
+        };
+        state::update_registry(&home.registry_json(), |r| {
+            let mut entry = codex_pane_row("pane-a");
+            entry.pid = Some(me);
+            entry.pid_start_time = Some(my_start);
+            entry.harness_session_id = Some("session-a".into());
+            entry.fno_id = Some("thread-a".into());
+            r.entries.push(entry);
+        })
+        .unwrap();
+
+        late_bind_codex_sessions_with_transition(
+            &home,
+            &emitter,
+            &|_| Some("session-b".to_string()),
+            &|session| (session == "session-a").then_some(true),
+        )
+        .unwrap();
+
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(reg.entries.len(), 2);
+        let predecessor = reg.find("pane-a").unwrap();
+        assert_eq!(predecessor.harness_session_id.as_deref(), Some("session-a"));
+        let branch = reg
+            .entries
+            .iter()
+            .find(|entry| entry.harness_session_id.as_deref() == Some("session-b"))
+            .expect("branch session row");
+        assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-a"));
+        assert_eq!(branch.fno_id.as_deref(), Some("session-b"));
+        assert!(branch.short_id.is_empty());
+        assert!(branch.mux.is_none());
         std::fs::remove_dir_all(home.root()).ok();
     }
 

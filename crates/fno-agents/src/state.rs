@@ -109,15 +109,18 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // write re-serialized the row from the typed struct and dropped them. Measured
 // 2026-08-20: 0 of 37 live rows carried either key. The bump is what turns a
 // pre-v16 binary's SILENT erasure into a loud refusal, which is the same
-// reason v11-v14 bumped for their own mirrors. Accepted set widens to 1..=17.
-// v17 adds predecessor/fork lineage fields; an older writer must refuse rather
-// than erase those fields during a read-modify-write.
+// reason v11-v14 bumped for their own mirrors.
 //
 // v17 (x-d401) adds `model_basis`, the requested-vs-verified qualifier on
 // `model`. Same rationale as v16: a pre-v17 binary re-serializes the row from
 // its typed struct and drops the key, and a pre-v17 Python reader would see an
 // unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 17;
+//
+// v18 adds predecessor/fork lineage fields. An older writer must refuse rather
+// than erase those fields during a read-modify-write.
+//
+// Accepted set widens to 1..=18.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 18;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -806,6 +809,23 @@ impl RegistryEntry {
         branch.harness_session_id = Some(successor_session_id.to_string());
         branch.predecessor_session_ids.clear();
         branch.forked_from_session_id = Some(predecessor_session_id.to_string());
+        branch.short_id.clear();
+        branch.session_id = None;
+        branch.claude_session_uuid = None;
+        branch.codex_session_id = None;
+        branch.gemini_session_id = None;
+        branch.messaging_socket_path = None;
+        branch.mcp_channel_id = None;
+        branch.cc_session_id = None;
+        branch.pid = None;
+        branch.pid_start_time = None;
+        branch.log_path = None;
+        branch.last_message_at = None;
+        branch.last_reconciled_at = None;
+        branch.inside_leg = None;
+        branch.screen_state = None;
+        branch.exited_at = None;
+        branch.mux = None;
         branch
     }
 
@@ -2077,6 +2097,14 @@ mod tests {
         let mut predecessor = sample_entry("worker");
         predecessor.fno_id = Some("thread-a".into());
         predecessor.harness_session_id = Some("session-a".into());
+        predecessor.short_id = "transport-a".into();
+        predecessor.session_id = Some("session-a".into());
+        predecessor.codex_session_id = Some("session-a".into());
+        predecessor.log_path = Some("/tmp/session-a.log".into());
+        predecessor.mux = Some(MuxRef {
+            session: "main".into(),
+            pane_id: 4,
+        });
 
         assert!(predecessor.apply_succession("session-a", "session-b"));
         assert_eq!(predecessor.fno_id.as_deref(), Some("thread-a"));
@@ -2091,6 +2119,12 @@ mod tests {
         assert_eq!(branch.forked_from_session_id.as_deref(), Some("session-b"));
         assert_eq!(branch.fno_id.as_deref(), Some("thread-c"));
         assert_ne!(predecessor.fno_id, branch.fno_id);
+        assert!(branch.short_id.is_empty());
+        assert!(branch.session_id.is_none());
+        assert!(branch.codex_session_id.is_none());
+        assert!(branch.log_path.is_none());
+        assert!(branch.mux.is_none());
+        assert!(branch.pid.is_none());
     }
 
     #[test]

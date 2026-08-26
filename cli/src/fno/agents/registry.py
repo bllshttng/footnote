@@ -191,15 +191,15 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # dropped the keys. Measured 2026-08-20: 0 of 37 live rows carried either. The
 # bump is not for a new Python field - it is what turns a pre-v16 binary's
 # SILENT erasure into a loud refusal, the same reason v11-v14 bumped.
-# v17 adds classified session lineage. Older readers must refuse rather than
-# silently erase predecessor or fork provenance on a read-modify-write.
 # v17 (x-d401): additive `model_basis` - whether `model` was REQUESTED at spawn
 # or VERIFIED off a pane status. Same additive-optional shape and same
 # forward-compat rationale as v11-v14: asdict emits the key on every written
 # row, so without the bump a pre-v17 reader sees an unknown key AT its own
 # schema (read_forward is strictly greater-than), reaches AgentEntry(**row) and
 # TypeErrors - the PR #364 brick. The bump makes it a version gap instead.
-SCHEMA_VERSION = 17
+# v18 adds classified session lineage. Older readers must refuse rather than
+# silently erase predecessor or fork provenance on a read-modify-write.
+SCHEMA_VERSION = 18
 
 
 class RegistryVersionError(RuntimeError):

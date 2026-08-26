@@ -978,6 +978,9 @@ def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]
 def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
     """Return every nonblank canonical or legacy ambient session id."""
     environ = os.environ if env is None else env
+    _identity, disposition, _markers = _resolve_canonical_identity(environ)
+    if disposition in {"invalid", "contradiction"}:
+        return set()
     ids = {
         session_id
         for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)

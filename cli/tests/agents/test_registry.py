@@ -697,7 +697,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 17
+    assert SCHEMA_VERSION == 18
 
 
 def test_session_lineage_fields_round_trip() -> None:
