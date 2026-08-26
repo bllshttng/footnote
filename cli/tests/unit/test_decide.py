@@ -1505,6 +1505,28 @@ def test_list_derives_and_filters_authority_lanes_in_the_engine(
     assert excluded == []
 
 
+def test_enacted_substrate_ruling_is_positive_post_cutover_law(index: Path):
+    from fno.decide import list_decisions
+
+    _write_decision_index(
+        index,
+        {
+            "ts": "2026-08-26T11:32:36.748486Z",
+            "decision_id": "d-dbf83820",
+            "subject": "substrate",
+            "decision": "thread is an fno-layer construct",
+            "decided_by": "operator",
+            "attested_by": "operator",
+            "authority_source": "chat_attested",
+        },
+    )
+
+    _, rows, damaged = list_decisions("substrate", lane="law", state="live")
+
+    assert damaged == 0
+    assert [row["decision_id"] for row in rows] == ["d-dbf83820"]
+
+
 def test_registered_graduation_reads_retired_with_positive_evidence(index: Path):
     from fno.decide import list_decisions
 
