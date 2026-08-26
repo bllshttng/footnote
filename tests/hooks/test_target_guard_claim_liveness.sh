@@ -96,6 +96,15 @@ target_is_active "/nonexistent/target-state.md"; check "missing file -> not acti
 ) && rc=$? || rc=$?
 check "fail-open under set -euo pipefail (bare call, no claim key)" 0 "$rc"
 
+# --- Session ownership: only a positive mismatch makes a live target inactive. ---
+f="$(manifest "input: x-7a6d" "harness_session_id: resident-session")"
+target_is_active "$f" "visitor-session"; check "positive session mismatch -> inactive" 1 $?
+target_is_active "$f" "resident-session"; check "matching session -> active" 0 $?
+target_is_active "$f" ""; check "empty caller session -> active (fail open)" 0 $?
+
+f="$(manifest "input: x-7a6d" "harness_session_id: null")"
+target_is_active "$f" "visitor-session"; check "null manifest session -> active (fail open)" 0 $?
+
 echo "----"
 echo "passed=$pass failed=$fail"
 [ "$fail" -eq 0 ]
