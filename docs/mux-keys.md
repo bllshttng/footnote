@@ -16,6 +16,8 @@ Why this chord: plain `Ctrl+arrow` is macOS Mission Control, so it never reaches
 
 The cost, accepted: the sequence is consumed by the mux and never forwarded to the pane. A program inside a pane that binds `Ctrl+Opt+arrow` loses it. `Opt+arrow` alone (word motion) is untouched. That is modifier 3, not 7.
 
+A bare `Esc` is the first byte of the chord, so the mux holds it briefly to see what follows. If nothing follows within 40ms, the Esc forwards to the pane exactly as typed. Esc-to-cancel in vim or fzf never waits on the next keystroke. The chord itself arrives as one read, so the hold never costs a real chord.
+
 Emulators: iTerm2, Ghostty, kitty and WezTerm emit the xterm CSI form. Verify yours before relying on it: run `cat -v`, press `Ctrl+Opt+Left`, expect `^[[1;7D`. If your emulator sends something else, bind what it sends.
 
 ## Inside the navigator

@@ -442,7 +442,14 @@ impl Scanner {
     pub fn scan(&mut self, bytes: &[u8], now: Instant) -> Vec<Event> {
         let mut out = Vec::new();
         let mut plain: Vec<u8> = Vec::new();
-        for &b in bytes {
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            i += 1;
+            // (x-e10f fix) A released chord candidate re-dispatches its LAST
+            // byte through the Normal arms (see ChordEsc below): replay drops
+            // the pre-increment so the same byte runs again in the new state.
+            let mut replay = false;
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
                     if b == self.keymap.prefix {
@@ -503,10 +510,13 @@ impl Scanner {
                     // while the bytes still spell the Ctrl+Opt-arrow prefix;
                     // a completed prefix plus its final byte resolves through
                     // `esc_chord` - the SAME parse the prefix path uses, not a
-                    // second parser. Anything else releases the whole sequence
-                    // to the pane with the paste-open roll re-run over it
-                    // (rolling from 0 is exact here: the sequence starts ESC,
-                    // and `roll` lands on 1 for an ESC from any prior index).
+                    // second parser. On divergence everything EXCEPT the
+                    // diverging byte releases to the pane (paste-open roll
+                    // re-run over it; rolling from 0 is exact because the
+                    // candidate starts ESC) and the diverging byte RE-DISPATCHES
+                    // through the Normal arms - a lone Esc answered by the
+                    // prefix key must still enter Prefix, exactly as it did
+                    // before the hold (the F2 regression the first cut shipped).
                     seq.push(b);
                     if GLOBAL_CHORD_PREFIX.starts_with(&seq) {
                         self.state = State::ChordEsc(seq);
@@ -520,16 +530,19 @@ impl Scanner {
                                 out.push(ev);
                                 self.state = State::Normal(0);
                             }
-                            // The unbound Ctrl+Opt arrows (A/B/C): not ours,
-                            // forward them exactly as before this chord.
+                            // An unbound Ctrl+Opt final: release + re-dispatch.
                             _ => {
-                                let idx = release_to_plain(&mut plain, &seq);
+                                let held = &seq[..seq.len() - 1];
+                                let idx = release_to_plain(&mut plain, held);
                                 self.state = paste_state(idx);
+                                replay = true;
                             }
                         }
                     } else {
-                        let idx = release_to_plain(&mut plain, &seq);
+                        let held = &seq[..seq.len() - 1];
+                        let idx = release_to_plain(&mut plain, held);
                         self.state = paste_state(idx);
+                        replay = true;
                     }
                 }
                 State::Paste(close_idx) => {
@@ -579,9 +592,37 @@ impl Scanner {
                     }
                 }
             }
+            if replay {
+                i -= 1;
+            }
         }
         flush(&mut plain, &mut out);
         out
+    }
+
+    /// (x-e10f) A global-chord candidate is held, waiting for more bytes.
+    /// The client read loop polls this to arm its quiet-window flush, the
+    /// analog of tmux's escape-time: a lone Esc must not wait for the next
+    /// keypress forever.
+    pub fn chord_pending(&self) -> bool {
+        matches!(self.state, State::ChordEsc(_))
+    }
+
+    /// (x-e10f fix) Release a held global-chord candidate once input has gone
+    /// quiet past the flush window: the held bytes forward to the pane exactly
+    /// as a divergence release would send them, and the paste-open roll
+    /// resumes where the hold paused it. `None` when nothing is held. This is
+    /// the F1 fix: without it, Esc-to-cancel inside a pane (vim, fzf) stalled
+    /// until the next keystroke.
+    pub fn flush_chord(&mut self) -> Option<Event> {
+        if let State::ChordEsc(seq) = std::mem::replace(&mut self.state, State::Normal(0)) {
+            let mut plain = Vec::new();
+            let idx = release_to_plain(&mut plain, &seq);
+            self.state = paste_state(idx);
+            (!plain.is_empty()).then(|| Event::Forward(plain))
+        } else {
+            None
+        }
     }
 
     /// A prefix chord is mid-flight (US4): the client arms the which-key
@@ -1149,6 +1190,15 @@ pub fn meta_rows() -> Vec<(String, String, KeySection)> {
         (
             format!("{p} {p}"),
             format!("literal {p}"),
+            KeySection::Global,
+        ),
+        // (x-e10f) The global sideline chord: a multi-byte CSI, so it lives
+        // HERE with the other display-only rows rather than in the single-byte
+        // key_bindings table the modal executes from - the scanner's ChordEsc
+        // branch dispatches it, not chord().
+        (
+            "Ctrl+Opt+Left".into(),
+            "sideline (global, no prefix)".into(),
             KeySection::Global,
         ),
         // (x-f300) The dead-row removal paths. Bare sideline keys, not chords -
@@ -1939,6 +1989,57 @@ mod tests {
         );
         // A non-arrow escape after prefix is swallowed as one Bell.
         assert_eq!(scan_all(&[b"\x02\x1b[Z"]), vec![Event::Bell]);
+    }
+
+    #[test]
+    fn esc_released_by_the_prefix_byte_still_enters_prefix() {
+        // F2 on PR 1194: Esc followed by the prefix key must open the selector,
+        // not forward a literal prefix byte whose argument leaks into the pane.
+        // The released candidate's LAST byte re-dispatches through the Normal
+        // arms, so the pre-chord behavior is exact.
+        assert_eq!(
+            scan_all(&[b"\x1b", b"\x02", b"w"]),
+            vec![Event::Forward(b"\x1b".to_vec()), Event::OpenSelector]
+        );
+        assert_eq!(
+            scan_all(&[b"\x1b\x02%"]),
+            vec![
+                Event::Forward(b"\x1b".to_vec()),
+                Event::Cmd(Command::SplitH)
+            ]
+        );
+        // A near-miss CSI ahead of the prefix: same re-dispatch of the tail.
+        assert_eq!(
+            scan_all(&[b"\x1b[1;3\x02%"]),
+            vec![
+                Event::Forward(b"\x1b[1;3".to_vec()),
+                Event::Cmd(Command::SplitH)
+            ]
+        );
+    }
+
+    #[test]
+    fn flush_chord_releases_a_quiet_candidate_and_keeps_scanning() {
+        // F1 on PR 1194: a lone Esc held for the global chord must not wait
+        // for the next keypress forever (vim/fzf Esc-to-cancel stalled). After
+        // the client's quiet window, flush_chord forwards the held bytes and
+        // the scanner stays whole.
+        let now = Instant::now();
+        let mut s = Scanner::default();
+        assert_eq!(
+            s.scan(b"\x1b", now),
+            Vec::<Event>::new(),
+            "held, not forwarded yet"
+        );
+        assert!(s.chord_pending());
+        assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b".to_vec())));
+        assert!(!s.chord_pending());
+        assert_eq!(s.scan(b"\x02%", now), vec![Event::Cmd(Command::SplitH)]);
+        assert_eq!(s.flush_chord(), None, "nothing held: a no-op");
+        // A partial multi-byte candidate flushes the same way.
+        let mut s = Scanner::default();
+        assert_eq!(s.scan(b"\x1b[1;", now), Vec::<Event>::new());
+        assert_eq!(s.flush_chord(), Some(Event::Forward(b"\x1b[1;".to_vec())));
     }
 
     #[test]

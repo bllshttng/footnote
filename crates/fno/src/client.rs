@@ -246,6 +246,14 @@ const FOOTER_MENU: &str = "☰ menu";
 /// How long a pending prefix chord waits before the which-key hint paints
 /// (US4, AC4-HP). `prefix+?` shows the full table instantly instead.
 const HINT_DELAY: Duration = Duration::from_millis(400);
+/// (x-e10f fix) How long a held global-chord candidate (a lone Esc so far)
+/// waits for the chord's remaining bytes before flushing to the pane - the
+/// tmux escape-time analog. A terminal delivers a whole CSI in one read, so
+/// anything still pending after this window is a bare Esc (or a torn write
+/// older than the window), and Esc-to-cancel inside a pane must not stall
+/// until the next keystroke. 40ms: far above intra-CSI byte gaps, far below
+/// the latency a typist feels.
+const CHORD_FLUSH_AFTER: Duration = Duration::from_millis(40);
 /// Transient notice lifetime on the tab bar.
 const NOTICE_TTL: Duration = Duration::from_secs(3);
 
@@ -5000,42 +5008,42 @@ impl View {
         // (x-e10f) The pane -> work-queue join behind "find by node": an agent
         // row's pane is the pane a card's `pane_id` names when that node is in
         // flight, so the card carries the node id and title-slug the pane's own
-        // row can be searched by.
+        // row can be searched by. Built ONCE per catalog rebuild (F5 on PR
+        // 1194): a linear backlog scan per agent row was O(agents x backlog)
+        // on every keypress.
+        let mut card_by_pane: std::collections::HashMap<u64, &BacklogCard> =
+            std::collections::HashMap::new();
+        for c in &self.layout.backlog {
+            if let Some(p) = c.pane_id {
+                card_by_pane.entry(p).or_insert(c);
+            }
+        }
         let card_for_pane = |pid: Option<u64>| -> Option<&BacklogCard> {
-            self.layout
-                .backlog
-                .iter()
-                .find(|c| c.pane_id.is_some_and(|cp| Some(cp) == pid))
+            pid.and_then(|p| card_by_pane.get(&p)).copied()
         };
         for s in &self.layout.squads {
             // Always SelectSquad (unlike the sideline's active-squad
             // CycleSection): the navigator is a jump, never a view-state cycle.
-            out.push(
-                NavRow {
-                    match_key: String::new(),
-                    label: s.name.clone(),
-                    state: PaneState::Idle,
-                    goto_squad: None,
-                    goto_tab: None,
-                    hit: ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
-                }
-                .with_match_key(&[]),
-            );
+            out.push(NavRow::new(
+                s.name.clone(),
+                PaneState::Idle,
+                None,
+                None,
+                ChromeHit::Cmds(vec![Command::SelectSquad(s.id)]),
+                &[],
+            ));
             for (t, tab) in s.tabs.iter().enumerate() {
                 let tab_text = tab_label_text(&tab.name, t, tab.named);
-                out.push(
-                    NavRow {
-                        match_key: String::new(),
-                        label: format!("{} › {}", s.name, tab_text),
-                        state: PaneState::Idle,
-                        // SelectTab resolves the squad server-side, so one command
-                        // switches squad+tab (row_action's tab arm, gemini review).
-                        goto_squad: None,
-                        goto_tab: None,
-                        hit: ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
-                    }
-                    .with_match_key(&[s.name.clone()]),
-                );
+                out.push(NavRow::new(
+                    format!("{} › {}", s.name, tab_text),
+                    PaneState::Idle,
+                    // SelectTab resolves the squad server-side, so one command
+                    // switches squad+tab (row_action's tab arm, gemini review).
+                    None,
+                    None,
+                    ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
+                    &[s.name.clone()],
+                ));
                 // Plain panes of the tab (v22): a pane already shown as an agent
                 // row is skipped (the agent row is the richer view of the same
                 // pane); the rest become goto-able so a bare shell pane in any
@@ -5044,17 +5052,14 @@ impl View {
                     if self.layout.agents.iter().any(|a| a.pane_id == Some(p.id)) {
                         continue;
                     }
-                    out.push(
-                        NavRow {
-                            match_key: String::new(),
-                            label: format!("{} › {} › {}", s.name, tab_text, p.label),
-                            state: PaneState::Idle,
-                            goto_squad: cross(s.id),
-                            goto_tab: Some(tab.id),
-                            hit: ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
-                        }
-                        .with_match_key(&[p.id.to_string(), s.name.clone()]),
-                    );
+                    out.push(NavRow::new(
+                        format!("{} › {} › {}", s.name, tab_text, p.label),
+                        PaneState::Idle,
+                        cross(s.id),
+                        Some(tab.id),
+                        ChromeHit::Cmds(vec![Command::FocusPane(p.id)]),
+                        &[p.id.to_string(), s.name.clone()],
+                    ));
                 }
             }
             for a in self.layout.agents.iter().filter(|a| a.squad == Some(s.id)) {
@@ -5069,25 +5074,22 @@ impl View {
                     None => format!("{} › {}", s.name, a.name),
                 };
                 let card = card_for_pane(a.pane_id);
-                out.push(
-                    NavRow {
-                        match_key: String::new(),
-                        label,
-                        state: nav_agent_state(a),
-                        // Switch to the agent's squad first when it is not active, so
-                        // the following FocusPane lands there (the server resolves the
-                        // pane's tab on focus; the ordinal is display-only).
-                        goto_squad: cross(s.id),
-                        goto_tab: None,
-                        hit: agent_hit(a, self.layout.active_squad),
-                    }
-                    .with_match_key(&[
+                out.push(NavRow::new(
+                    label,
+                    nav_agent_state(a),
+                    // Switch to the agent's squad first when it is not active, so
+                    // the following FocusPane lands there (the server resolves the
+                    // pane's tab on focus; the ordinal is display-only).
+                    cross(s.id),
+                    None,
+                    agent_hit(a, self.layout.active_squad),
+                    &[
                         a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
                         card.map(|c| c.id.clone()).unwrap_or_default(),
                         card.map(|c| c.slug.clone()).unwrap_or_default(),
                         s.name.clone(),
-                    ]),
-                );
+                    ],
+                ));
             }
         }
         // Orphan agents (no live squad), mirroring display_rows' orphan section.
@@ -5095,42 +5097,36 @@ impl View {
             |a| !matches!(a.squad, Some(id) if self.layout.squads.iter().any(|s| s.id == id)),
         ) {
             let card = card_for_pane(a.pane_id);
-            out.push(
-                NavRow {
-                    match_key: String::new(),
-                    label: a.name.clone(),
-                    state: nav_agent_state(a),
-                    goto_squad: None,
-                    goto_tab: None,
-                    hit: agent_hit(a, self.layout.active_squad),
-                }
-                .with_match_key(&[
+            out.push(NavRow::new(
+                a.name.clone(),
+                nav_agent_state(a),
+                None,
+                None,
+                agent_hit(a, self.layout.active_squad),
+                &[
                     a.pane_id.map(|p| p.to_string()).unwrap_or_default(),
                     card.map(|c| c.id.clone()).unwrap_or_default(),
                     card.map(|c| c.slug.clone()).unwrap_or_default(),
-                ]),
-            );
+                ],
+            ));
         }
         // Work-queue cards: goto opens the dispatch confirm / focuses the worker
         // (card_hit), no squad switch. A blocked/in-flight card reads as
         // Blocked/Working so the state filter surfaces stuck work uniformly.
         for c in &self.layout.backlog {
             let label = if c.slug.is_empty() { &c.id } else { &c.slug };
-            out.push(
-                NavRow {
-                    match_key: String::new(),
-                    label: format!("{label} {}", c.priority),
-                    state: card_state(c),
-                    goto_squad: None,
-                    goto_tab: None,
-                    hit: self.card_hit(c),
-                }
-                .with_match_key(&[
+            out.push(NavRow::new(
+                format!("{label} {}", c.priority),
+                card_state(c),
+                None,
+                None,
+                self.card_hit(c),
+                &[
                     c.id.clone(),
                     c.slug.clone(),
                     c.pane_id.map(|p| p.to_string()).unwrap_or_default(),
-                ]),
-            );
+                ],
+            ));
         }
         out
     }
@@ -9062,12 +9058,29 @@ struct NavRow {
 }
 
 impl NavRow {
-    /// (x-e10f) Fill `match_key` from the row's own label plus its resolved
-    /// identity `tokens`. The one population path for every row class, so the
-    /// searchable identity cannot drift from the row that renders it.
-    fn with_match_key(mut self, tokens: &[String]) -> Self {
-        self.match_key = nav_match_key(&self.label, tokens);
-        self
+    /// (x-e10f fix) The ONLY construction path: `match_key` is composed from
+    /// `label` + `tokens` here, so a row can never exist with an unset key.
+    /// The first cut left the field as `String::new()` at every literal plus
+    /// a chained `with_match_key` call - a row class that forgot the chain
+    /// compiled fine and rendered fine but was unfindable by EVERY query,
+    /// including its own label (F4 on PR 1194). Construction now carries the
+    /// invariant.
+    fn new(
+        label: String,
+        state: PaneState,
+        goto_squad: Option<u64>,
+        goto_tab: Option<u64>,
+        hit: ChromeHit,
+        tokens: &[String],
+    ) -> Self {
+        Self {
+            match_key: nav_match_key(&label, tokens),
+            label,
+            state,
+            goto_squad,
+            goto_tab,
+            hit,
+        }
     }
 }
 
@@ -10551,6 +10564,12 @@ async fn attach_and_run(
     // (US4). Client-local; the scanner state is the single source of truth
     // for WHETHER a chord is pending, this only remembers SINCE WHEN.
     let mut prefix_since: Option<Instant> = None;
+    // (x-e10f fix) When the held global-chord candidate started, for the
+    // quiet-window flush (the tmux escape-time analog): a lone Esc must reach
+    // the pane even when no further byte ever arrives. The scanner state is
+    // the truth for WHETHER a candidate is held; this only remembers SINCE
+    // WHEN, exactly like `prefix_since`.
+    let mut chord_since: Option<Instant> = None;
     // Carries a partial SGR mouse report split across reads (mouse.rs).
     let mut mouse_carry: Vec<u8> = Vec::new();
     // Clipboard delivery runs on a blocking thread and reports its outcome back
@@ -10737,6 +10756,11 @@ async fn attach_and_run(
         }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
+        // (x-e10f fix) The held global-chord candidate's quiet-window flush
+        // deadline. A whole CSI arrives in one read, so a candidate still
+        // pending after this window is a lone Esc (or a torn write older than
+        // the window) and must not wait for the next keypress.
+        let chord_flush_deadline = chord_since.map(|t| t + CHORD_FLUSH_AFTER);
         let pane_ids_deadline = view.pane_ids_until;
         // The which-key hint fires once per pending chord (US4, AC4-HP).
         let hint_deadline = if view.hint {
@@ -10997,6 +11021,14 @@ async fn attach_and_run(
                                 prefix_since = None;
                                 view.hint = false;
                             }
+                            // (x-e10f fix) Same one-way sync for a held global
+                            // chord candidate: arm the quiet-window flush once,
+                            // clear it when the candidate resolves or releases.
+                            if scanner.chord_pending() {
+                                chord_since.get_or_insert_with(Instant::now);
+                            } else {
+                                chord_since = None;
+                            }
                             if let Err(e) = compositor.draw(&view.compose()) {
                                 break Err(format!("draw: {e}"));
                             }
@@ -11229,6 +11261,22 @@ async fn attach_and_run(
                 view.notice = None;
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
+                }
+            }
+            _ = async {
+                match chord_flush_deadline {
+                    Some(d) => tokio::time::sleep(d.saturating_duration_since(Instant::now())).await,
+                    None => std::future::pending().await,
+                }
+            }, if chord_flush_deadline.is_some() => {
+                // (x-e10f fix) Quiet window elapsed with a candidate still
+                // held: release it to the pane. No redraw needed beyond the
+                // send - the pane's own output will repaint when it reacts.
+                chord_since = None;
+                if let Some(event) = scanner.flush_chord() {
+                    if let Err(e) = dispatch_event(&mut view, event, &mut sock_w).await {
+                        break Err(e);
+                    }
                 }
             }
             _ = async {
