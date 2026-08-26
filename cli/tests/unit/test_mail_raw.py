@@ -939,7 +939,8 @@ def test_raw_review_emits_started_transport_observation_with_literal_receipt(
     )
 
     with pytest.raises(typer.Exit) as sent:
-        _raw_send("claudepeer", "/code-review medium --comment", self_ok=False)
+        review_level = "medium"
+        _raw_send("claudepeer", f"/code-review {review_level} --comment", self_ok=False)
 
     assert sent.value.exit_code == 0
     assert capsys.readouterr().out.strip() == "injected"

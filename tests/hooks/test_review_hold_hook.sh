@@ -102,9 +102,10 @@ run_hook acquire "$(skill_call "/code-review <level> --comment")"
 expect_registered "skill=/code-review with args"
 
 echo "-- a review start records a positive invocation marker and joins the hold --"
-run_hook acquire "$(jq -nc --arg cwd "$WORK" \
+review_level="medium"
+run_hook acquire "$(jq -nc --arg cwd "$WORK" --arg level "$review_level" \
   '{hook_event_name:"PreToolUse", tool_name:"Skill", cwd:$cwd,
-    session_id:"sess-started", tool_input:{skill:"/code-review medium --comment"}}')"
+    session_id:"sess-started", tool_input:{skill:("/code-review " + $level + " --comment")}}')"
 expect_registered "review start telemetry: hold"
 if grep -q 'review_invocation' "$EVENTS"; then
   pass "review start telemetry: invocation event"

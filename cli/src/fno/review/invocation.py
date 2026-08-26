@@ -26,7 +26,12 @@ def mint_invocation_id() -> str:
 def _home(home: Path | None) -> Path:
     if home is not None:
         return Path(home)
-    return Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
+    configured_home = os.environ.get("FNO_HOME")
+    if configured_home:
+        return Path(configured_home)
+    from fno import paths
+
+    return paths.state_dir()
 
 
 def pending_invocation_path(target_session_id: str, *, home: Path | None = None) -> Path:
