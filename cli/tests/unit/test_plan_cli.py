@@ -41,9 +41,17 @@ def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
 
     on_gate = tmp_path / "on-gate.md"
     on_gate.write_text(
-        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-26\n---\n# T\n\nBody.\n"
+        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-26\n---\n"
+        "# T\n\n## Execution Strategy\n\n```yaml\n"
+        "execution_mode: sequential\n"
+        "waves:\n  - wave: 1\n    mode: sequential\n    name: w\n    tasks: ['1.1']\n"
+        "tasks:\n  - id: '1.1'\n    title: t\n    surface: ['cli/x.py']\n"
+        "    verify: pytest cli/x.py -q\n"
+        "    acceptance: [AC1-ERR]\n"
+        "```\n"
     )
     result2 = runner.invoke(app, ["do", "plan", "validate", str(on_gate), "--execution"])
+    assert result2.exit_code == 0, result2.output
     assert "difficulty is required" not in result2.output
 
 

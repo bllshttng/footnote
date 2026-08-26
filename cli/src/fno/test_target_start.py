@@ -504,7 +504,7 @@ def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_p
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda node, explicit=None, provider=None: (None, "provider-default"),
+        lambda node, explicit=None, provider=None, **_kw: (None, "provider-default"),
     )
     setup_calls = []
     monkeypatch.setattr(
@@ -555,7 +555,7 @@ def test_native_codex_initial_free_text_receipt_is_unclaimed(
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda node, explicit=None, provider=None: (None, "provider-default"),
+        lambda node, explicit=None, provider=None, **_kw: (None, "provider-default"),
     )
 
     def fake_run(args, **kwargs):
@@ -1871,7 +1871,7 @@ def test_no_merge_reaches_init_argv_on_codex_native_path(monkeypatch, tmp_path):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda node, explicit=None, provider=None: (None, "provider-default"),
+        lambda node, explicit=None, provider=None, **_kw: (None, "provider-default"),
     )
 
     def fake_run(args, **kwargs):

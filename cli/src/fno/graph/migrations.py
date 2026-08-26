@@ -122,6 +122,16 @@ def split_retired_tier_rows(entries: list[dict]) -> tuple[list[str], list[str]]:
     return drainable, needs_decision
 
 
+def _retired_tier_pending(entries: list[dict]) -> list[dict]:
+    """The rows still carrying model_tier - the ONE walk behind the ids and
+    the mutation, so the classifier and the verb cannot disagree on what
+    counts as a candidate."""
+    return [
+        row for row in entries
+        if isinstance(row, dict) and row.get("model_tier") is not None
+    ]
+
+
 def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     """Move the retired ``model_tier`` band onto ``difficulty``, once, audibly.
 
@@ -135,25 +145,23 @@ def migrate_model_tier(entries: list[dict], *, apply: bool = False) -> dict:
     """
     from fno.graph._constants import append_difficulty_history
 
+    pending = _retired_tier_pending(entries)
     _drainable, needs_decision = split_retired_tier_rows(entries)
     if needs_decision:
         _decision_ids = set(needs_decision)
+        named = [
+            f"{row.get('id', '?')} model_tier={row.get('model_tier')!r} "
+            f"difficulty={row.get('difficulty')!r}"
+            for row in pending
+            if str(row.get("id", "?")) in _decision_ids
+        ]
         raise ValueError(
             "rows need a hand-picked band before migrating; pick it with "
             "`fno backlog update <id> --difficulty <band>` (which also clears "
             "the retired key): "
-            + ", ".join(
-                f"{row.get('id', '?')} model_tier={row.get('model_tier')!r} "
-                f"difficulty={row.get('difficulty')!r}"
-                for row in entries
-                if isinstance(row, dict)
-                and str(row.get("id", "?")) in _decision_ids
-            )
+            + ", ".join(named[:8])
+            + (f" ... (+{len(named) - 8} more)" if len(named) > 8 else "")
         )
-    pending = [
-        row for row in entries
-        if isinstance(row, dict) and row.get("model_tier") is not None
-    ]
     receipt: dict = {
         "candidates": [row.get("id") for row in pending],
         "candidate_count": len(pending),

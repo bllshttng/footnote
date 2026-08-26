@@ -338,9 +338,12 @@ def append_difficulty_history(
     The ONE append shape every difficulty writer uses. `or []`, never
     setdefault: a hand-edited row can carry ``difficulty_history: null``
     and setdefault hands that null straight to .append (AttributeError
-    mid-mutator, before the write lands).
+    mid-mutator, before the write lands). A truthy NON-list is the same
+    hazard one type over, so the guard is isinstance, not truthiness.
     """
-    history = row.get("difficulty_history") or []
+    history = row.get("difficulty_history")
+    if not isinstance(history, list):
+        history = []
     history.append({"value": value, "source": source, "ts": ts})
     row["difficulty_history"] = history
 

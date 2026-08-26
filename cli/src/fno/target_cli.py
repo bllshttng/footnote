@@ -2710,8 +2710,12 @@ def _start_codex_native(
         )
         return
 
+    # include_difficulty mirrors the pinned-harness rule at the worktree
+    # start site: an operator --harness pin reaches the worker's spawn argv
+    # and stands the capacity grid down, so the band resolves here; unpinned
+    # it defers to the grid.
     resolved_model, source = _resolve_node_model(
-        node, explicit=model, provider=harness
+        node, explicit=model, provider=harness, include_difficulty=bool(harness)
     )
     cmd = _resolve_fno_cmd() + ["do", "target", "init", "--input", node]
     if plan_path:
@@ -3377,12 +3381,15 @@ def start(
             _warn_no_merge_dropped()
         return
 
-    # Project the node's model pin / tier into init's dispatch pin so a bare
-    # start on a tiered node carries the resolved model (x-d7a7). An explicit -m
-    # wins (precedence, resolved inside the helper); no pin/tier -> None ->
-    # nothing forwarded, byte-identical to pre-change. Never blocks (Locked 10).
+    # Project the node's model pin into init's dispatch pin (x-d7a7). An
+    # explicit -m wins (precedence, resolved inside the helper); no pin ->
+    # None -> nothing forwarded. When the operator pinned --harness the
+    # worker's spawn argv carries it, which stands the spawn-CLI capacity
+    # grid down - no grid receiving end - so the difficulty band resolves
+    # statically here; unpinned, the band defers to that grid. Never blocks
+    # (Locked 10).
     model, decision_source = _resolve_node_model(
-        node, explicit=model, provider=harness
+        node, explicit=model, provider=harness, include_difficulty=bool(harness)
     )
 
     # 3. Init the session FROM the worktree (binds owner_cwd, claims the node

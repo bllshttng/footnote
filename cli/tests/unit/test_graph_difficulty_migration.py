@@ -1,9 +1,9 @@
 """AC5-HP (x-baef): the one-shot model_tier -> difficulty graph migration.
 
-Dry-run by default, --apply to write, idempotent on the second run, and loud
-on a row carrying both spellings (measured impossible at migration time, so
-one appearing means a writer re-added the retired key and the verb refuses
-rather than guessing which band wins).
+Dry-run by default, --apply to write, idempotent on the second run. Same-band
+both-spellings pairs drain (the retired --model-tier handler wrote both keys
+with equal bands, so those are the machine-created shape); a DIVERGENT pair
+or a garbage band with no canonical field is refused, never guessed at.
 """
 from __future__ import annotations
 
@@ -75,7 +75,7 @@ def test_migrate_difficulty_dry_run_apply_then_empty(tmp_graph):
     assert receipt3["candidates"] == []
 
 
-def test_migrate_difficulty_refuses_rows_carrying_both_spellings(tmp_graph):
+def test_migrate_difficulty_refuses_divergent_pairs(tmp_graph):
     tmp_graph.write_text(json.dumps({"entries": [
         {"id": "x-0001", "model_tier": "high", "difficulty": "low"},
     ]}))

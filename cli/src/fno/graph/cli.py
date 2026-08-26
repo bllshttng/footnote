@@ -9991,13 +9991,17 @@ def cmd_reconcile(
     # here can never drift from the verdict the verb delivers.
     from fno.graph.migrations import split_retired_tier_rows
 
+    def _name_ids(ids: list[str]) -> str:
+        # The one truncation shape both advisories share; a third copy is
+        # how the cap drifts between them.
+        return ", ".join(ids[:5]) + ("..." if len(ids) > 5 else "")
+
     _drainable, _needs_decision = split_retired_tier_rows(entries)
     if _drainable:
         typer.echo(
             f"reconcile: {len(_drainable)} row(s) still carry the retired "
             "model_tier key ("
-            + ", ".join(_drainable[:5])
-            + ("..." if len(_drainable) > 5 else "")
+            + _name_ids(_drainable)
             + "); run `fno backlog migrate-difficulty --apply` (same-band "
             "pairs drain, band-less rows gain their band)",
             err=True,
@@ -10006,8 +10010,7 @@ def cmd_reconcile(
         typer.echo(
             f"reconcile: {len(_needs_decision)} row(s) need a hand-picked "
             "band (divergent or unparseable model_tier; "
-            + ", ".join(_needs_decision[:5])
-            + ("..." if len(_needs_decision) > 5 else "")
+            + _name_ids(_needs_decision)
             + "); migrate-difficulty refuses them - pick the band with "
             "`fno backlog update <id> --difficulty <band>`, which also "
             "clears the retired key",
@@ -12877,8 +12880,15 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
         if raw_difficulty is not None:
             try:
                 revised_difficulty = normalize_difficulty(raw_difficulty)
-            except ValueError as exc:
-                typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
+            except (ValueError, AttributeError, TypeError):
+                # AttributeError joins ValueError: a non-string difficulty
+                # dies inside strip()/lower() before the band check; warn and
+                # leave the band unchanged rather than traceback mid-claim.
+                typer.echo(
+                    f"warning: invalid difficulty {raw_difficulty!r}; "
+                    "difficulty left unchanged",
+                    err=True,
+                )
             else:
                 entry["difficulty"] = revised_difficulty
                 # Same drain cmd_update got: the canonical write supersedes

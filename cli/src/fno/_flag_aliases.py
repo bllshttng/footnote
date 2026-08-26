@@ -88,16 +88,21 @@ PROVIDER_AXIS_TOMBSTONE = (
 )
 
 
-def refuse_retired_provider(value: object) -> None:
-    """Exit 2 with the axis map when the retired ``--provider`` is passed.
+def _refuse_retired(value: object, message: str) -> None:
+    """Exit 2 with ``message`` when a retired flag's tombstone was passed.
 
-    Pairs with a hidden ``_provider_tombstone: typer.Option(None, "--provider",
-    hidden=True)`` parameter on each migrated verb. Call it at the top of the
-    command body; it is a no-op when the flag was not given.
+    The one shape behind every retired-flag tombstone; a caller pairs it with
+    a hidden ``typer.Option(None, "<flag>", hidden=True)`` parameter and calls
+    the thin wrapper at the top of the command body. No-op when not given.
     """
     if _passed(_coerce(value)):
-        typer.echo(PROVIDER_AXIS_TOMBSTONE, err=True)
+        typer.echo(message, err=True)
         raise typer.Exit(code=2)
+
+
+def refuse_retired_provider(value: object) -> None:
+    """Exit 2 with the axis map when the retired ``--provider`` is passed."""
+    _refuse_retired(value, PROVIDER_AXIS_TOMBSTONE)
 
 
 #: The difficulty-axis tombstone (x-baef). ``model_tier`` was the retired
@@ -114,12 +119,5 @@ MODEL_TIER_TOMBSTONE = (
 
 
 def refuse_retired_model_tier(value: object) -> None:
-    """Exit 2 naming the survivor when the retired ``--model-tier`` is passed.
-
-    Pairs with a hidden ``_model_tier_tombstone: typer.Option(None,
-    "--model-tier", hidden=True)`` parameter. Call it at the top of the
-    command body; it is a no-op when the flag was not given.
-    """
-    if _passed(_coerce(value)):
-        typer.echo(MODEL_TIER_TOMBSTONE, err=True)
-        raise typer.Exit(code=2)
+    """Exit 2 naming the survivor when the retired ``--model-tier`` is passed."""
+    _refuse_retired(value, MODEL_TIER_TOMBSTONE)

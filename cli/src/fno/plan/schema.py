@@ -57,20 +57,29 @@ def difficulty_gate_error(frontmatter: dict) -> str | None:
     created = frontmatter.get("created")
     if isinstance(created, datetime):
         created = created.date()
+    elif isinstance(created, date):
+        pass  # a YAML-parsed date object is already the answer
     elif isinstance(created, str):
         try:
             created = date.fromisoformat(created.strip()[:10])
         except ValueError:
-            # PRESENT but unreadable: returning None here would bypass the
-            # gate in the --execution scope, which never reaches the model's
-            # own date validation (x-baef round-6 finding 2). An ABSENT
-            # created still returns None - validate-plan.sh's filename-date
-            # fallback owns that case.
-            return (
-                f"cannot read created: {created!r}; the difficulty gate needs "
-                "a date. Set created: <YYYY-MM-DD> and, for post-gate plans, "
-                "difficulty: low, medium, high."
-            )
+            created = None
+    else:
+        # int/list/None-ish scalars: an unquoted YAML int (20260827) would
+        # otherwise fall through the isinstance(date) test and bypass the
+        # gate everywhere (pydantic even coerces it to an epoch date in the
+        # model scope, reading post-gate as pre-gate).
+        created = None
+    if "created" in frontmatter and created is None:
+        # PRESENT but unreadable: returning None here would bypass the gate
+        # in the --execution scope, which never reaches the model's own date
+        # validation. An ABSENT created still returns None below -
+        # validate-plan.sh's filename-date fallback owns that case.
+        return (
+            f"cannot read created: {frontmatter.get('created')!r}; the difficulty gate needs "
+            "a date. Set created: <YYYY-MM-DD> and, for post-gate plans, "
+            "difficulty: low, medium, high."
+        )
     if not isinstance(created, date) or created <= DIFFICULTY_REQUIRED_AFTER:
         return None
     band = frontmatter.get("difficulty")
@@ -250,6 +259,18 @@ class PlanFrontmatter(BaseModel):
     close_probes: str | list[Any] | None = None
     dispatch_hold: DispatchHoldBlock | None = None
     company_work: CompanyWorkRefs | None = None
+
+    @field_validator("created", mode="before")
+    @classmethod
+    def _created_must_be_dateable(cls, v: Any) -> Any:
+        # An unquoted YAML int (created: 20260827) coerces to an epoch date
+        # under the datetime|date union, reading a post-gate plan as
+        # pre-gate; refuse the type instead of guessing an epoch.
+        if isinstance(v, bool) or isinstance(v, (int, float)):
+            raise ValueError(
+                "created must be a date (YYYY-MM-DD), not a bare number"
+            )
+        return v
 
     @field_validator("status", mode="before")
     @classmethod

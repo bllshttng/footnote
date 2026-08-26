@@ -1492,8 +1492,13 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         )
     try:
         difficulty = normalize_difficulty(raw_difficulty)
-    except ValueError as exc:
-        raise ValueError(f"{spec['plan_path']}: {exc}") from exc
+    except (ValueError, AttributeError, TypeError) as exc:
+        # AttributeError joins ValueError: a non-string difficulty (an
+        # unquoted YAML int or list) dies inside strip()/lower() before the
+        # band check and would surface as a traceback, not this message.
+        raise ValueError(
+            f"{spec['plan_path']}: invalid difficulty {raw_difficulty!r}"
+        ) from exc
     blocks_everything = fm.get("blocks_everything") is True or str(
         fm.get("blocks_everything", "")
     ).strip().lower() == "true"
