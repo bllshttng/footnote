@@ -628,6 +628,26 @@ def test_restamp_branches_an_uncrowned_live_row(tmp_path: Path, monkeypatch) -> 
     assert entry.forked_from_session_id == BIRTH
 
 
+def test_restamp_refuses_a_stale_predecessor_observation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _spawned_row()
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=False,
+        expected_predecessor_session_id="session-captured-before-lock",
+    )
+
+    assert entry is None
+    assert load_registry()[0].harness_session_id == BIRTH
+
+
 def test_restamp_is_a_noop_when_the_id_already_matches(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import restamp_harness_session_id

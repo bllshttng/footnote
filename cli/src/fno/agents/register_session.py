@@ -68,8 +68,10 @@ def _row_exists(name: str, harness: str) -> bool:
         return True
 
 
-def _predecessor_reachable(name: str, harness: str) -> Optional[bool]:
-    """Return transcript-backed predecessor reachability for a restamp."""
+def _predecessor_observation(
+    name: str, harness: str
+) -> tuple[Optional[str], Optional[bool]]:
+    """Return the sampled predecessor ID and transcript reachability."""
     from fno.agents.registry import load_registry
 
     try:
@@ -83,9 +85,9 @@ def _predecessor_reachable(name: str, harness: str) -> Optional[bool]:
             None,
         )
     except Exception:
-        return None
+        return None, None
     if entry is None or not entry.harness_session_id:
-        return None
+        return None, None
 
     from fno.agents.reachability import REACHABLE, UNREACHABLE, reachability
 
@@ -96,12 +98,12 @@ def _predecessor_reachable(name: str, harness: str) -> Optional[bool]:
             pid_start_time=None if entry.mux else entry.pid_start_time,
         )
     except Exception:
-        return None
+        return entry.harness_session_id, None
     if reading.verdict == REACHABLE:
-        return True
+        return entry.harness_session_id, True
     if reading.verdict == UNREACHABLE:
-        return False
-    return None
+        return entry.harness_session_id, False
+    return entry.harness_session_id, None
 
 
 def _restamp(agent_self: str, harness: str, session_id: str) -> int:
@@ -154,12 +156,15 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
             # True can only mean the row predates this restamp, so a None beside
             # it really is "already current".
             existed = _row_exists(agent_self, harness)
-            predecessor_reachable = _predecessor_reachable(agent_self, harness)
+            expected_predecessor_session_id, predecessor_reachable = (
+                _predecessor_observation(agent_self, harness)
+            )
             entry = restamp_harness_session_id(
                 name=agent_self,
                 harness=harness,
                 session_id=session_id,
                 predecessor_reachable=predecessor_reachable,
+                expected_predecessor_session_id=expected_predecessor_session_id,
             )
             if entry is not None or existed:
                 break

@@ -1639,6 +1639,7 @@ def restamp_harness_session_id(
     harness: str,
     session_id: str,
     predecessor_reachable: Optional[bool] = None,
+    expected_predecessor_session_id: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> Optional[AgentEntry]:
     """Re-point a spawned worker's row at the session id its harness now uses.
@@ -1680,6 +1681,11 @@ def restamp_harness_session_id(
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
+            if (
+                expected_predecessor_session_id is not None
+                and stale != expected_predecessor_session_id
+            ):
+                return entries
             crown_present = any(
                 getattr(entry, field) is not None
                 for field in ("crown_level", "crown_scope", "crown_grantor")
