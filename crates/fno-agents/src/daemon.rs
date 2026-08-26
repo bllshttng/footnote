@@ -6476,6 +6476,7 @@ async fn handle_rm_with(
         "name": name,
         "registry_removed": true,
         "harness": entry.harness_name(),
+        "harness_session_id": entry.harness_session_id,
         "harness_row_id": harness_row_id,
         "harness_removed": harness_outcome.removed_json(),
         "harness_reason": harness_outcome.reason(),

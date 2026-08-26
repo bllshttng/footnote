@@ -1667,6 +1667,8 @@ event_types:
           type: boolean
         harness:
           type: string
+        harness_session_id:
+          type: [string, "null"]
         harness_row_id:
           type: [string, "null"]
         harness_removed:

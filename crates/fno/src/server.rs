@@ -1476,6 +1476,11 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             continue;
         };
         match value.get("type").and_then(|v| v.as_str()) {
+            Some("agent_row_reaped")
+                if data.get("resumable").and_then(|v| v.as_bool()) == Some(true) =>
+            {
+                continue;
+            }
             Some("agent_removed") | Some("agent_row_reaped") => {
                 let session_id = data.get("harness_session_id").and_then(|v| v.as_str());
                 let name = data.get("name").and_then(|v| v.as_str());
@@ -16767,13 +16772,20 @@ mod tests {
         let raw = concat!(
             r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_removed","data":{"name":"removed"}}"#,
+            r#"{"type":"agent_removed","data":{"name":"removed","harness_session_id":"removed-session"}}"#,
             "\n",
             r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
             r#"{"type":"agent_row_reaped","data":{"name":"reaped","harness_session_id":"reaped-session"}}"#,
         );
         assert!(parse_spawn_receipts(raw).is_empty());
+
+        let dormant = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","cwd":"/repo","substrate":"pane"}}"#,
+            "\n",
+            r#"{"type":"agent_row_reaped","data":{"name":"dormant","harness_session_id":"dormant-session","resumable":true}}"#,
+        );
+        assert_eq!(parse_spawn_receipts(dormant).len(), 1);
     }
 
     #[test]
