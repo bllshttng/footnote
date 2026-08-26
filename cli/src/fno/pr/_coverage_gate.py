@@ -492,6 +492,7 @@ def attestation_chain(
                                 "head_sha": data.get("head_sha", ""),
                                 "reviewed_base_sha": data.get("reviewed_base_sha", ""),
                                 "verdict": data.get("verdict", ""),
+                                "review_round": data.get("review_round"),
                                 "findings": data.get("findings"),
                                 "findings_truncated": data.get("findings_truncated") is True,
                                 "dispositions": data.get("dispositions"),
