@@ -2655,7 +2655,7 @@ fn read_pr_info(
     // review_coverage row). Fail-closed inside: any git failure answers
     // not-tiled and today's single-attestation rule stands alone.
     let events_text_for_tiling = std::fs::read_to_string(events_path).unwrap_or_default();
-    let tiling = compute_range_tiling(
+    let mut tiling = compute_range_tiling(
         git_bin,
         cwd,
         base_ref,
@@ -3030,6 +3030,23 @@ fn read_pr_info(
             .and_then(|v| v.as_array())
             .map(|v| v.as_slice())
             .unwrap_or(&[]);
+        // The reviews are in hand, so the round budget now counts BOTH
+        // evidence axes: the attestations above and the review objects
+        // here. A GitHub-App reviewer's rounds leave no attestation row
+        // anywhere, so without this refresh a connector-driven loop reads
+        // zero rounds and the cap cannot fire. The refreshed values feed
+        // every consumer below in this arm (the coverage classify, the
+        // withhold/impossible conjuncts, the emitted row). The no-external
+        // arm above keeps the events-only answer: it reads no reviews, so
+        // there is no second axis to count.
+        tiling.rounds_used = rounds_since_last_pass(
+            &events_text,
+            &head_branch,
+            head_sha,
+            Some(reviews_arr),
+            pr_author.as_deref(),
+        );
+        tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
         let comments_arr: &[Value] = reviews_json
             .get("comments")
             .and_then(|v| v.as_array())
@@ -5750,17 +5767,32 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
             .collect(),
     )
 }
-/// Review rounds since the last pass on this branch, from the attestation
-/// chain. A round is a review VERDICT since the last pass - CI failures, lint
-/// failures and rebases are not rounds - and a pass resets the counter. The
-/// declared `review_round` wins when present (the running max since the last
-/// reset); every event from before the field existed falls back to counting
-/// verdicts. Scoped exactly like the tiling and disposition scans: branch
-/// match, with the legacy exact-head admission. Pure: scans the events text,
-/// no IO. The Python gate-side mirror is `rounds_since_last_pass` in
-/// `_coverage_gate.py`; the two are held equal by the shared corpus.
-pub fn rounds_since_last_pass(events_text: &str, head_branch: &str, head_sha: &str) -> i64 {
+/// Review rounds since the last pass on this branch. A round is a review
+/// COMPLETION since the last pass, whatever its verdict - CI failures, lint
+/// failures and rebases are not rounds - and a pass resets the counter. Two
+/// evidence axes, because the lane that spun never emits an attestation:
+/// a GitHub-App reviewer's rounds exist only as its review objects. The
+/// events axis counts in-scope `review_attestation` rows (the declared
+/// `review_round` wins when present, the running max since the last reset;
+/// events from before the field existed fall back to counting verdicts).
+/// The reviews axis, when a payload is supplied, counts DISTINCT reviewed
+/// commits by anyone but the PR author, submitted after the newest in-scope
+/// pass - every fix moves the head, so one reviewed commit is one round.
+/// The answer is the MAX of the two, never the sum: a healthy lane leaves
+/// both traces per round and must not count it twice. Scoped exactly like
+/// the tiling and disposition scans: branch match, with the legacy
+/// exact-head admission. Pure: scans its inputs, no IO. The Python
+/// gate-side mirror is `rounds_since_last_pass` in `_coverage_gate.py`; the
+/// two are held equal by the shared corpus.
+pub fn rounds_since_last_pass(
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+    reviews: Option<&[Value]>,
+    pr_author: Option<&str>,
+) -> i64 {
     let mut rounds: i64 = 0;
+    let mut last_pass_ts = String::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5783,6 +5815,11 @@ pub fn rounds_since_last_pass(events_text: &str, head_branch: &str, head_sha: &s
         }
         if val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass") {
             rounds = 0;
+            last_pass_ts = val
+                .get("ts")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             continue;
         }
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
@@ -5790,7 +5827,54 @@ pub fn rounds_since_last_pass(events_text: &str, head_branch: &str, head_sha: &s
             _ => rounds += 1,
         }
     }
-    rounds
+    let events_rounds = rounds;
+    let Some(reviews) = reviews else {
+        return events_rounds;
+    };
+    // The reviews axis. An object counts when it names a real reviewed
+    // commit (state and commit.oid present), its author is not the PR
+    // author (an author reply is a review OBJECT but never a review ROUND),
+    // and it was submitted strictly after the newest pass - the reset must
+    // reach this axis too, or a pass never defuses the connector's spent
+    // rounds. ts_after, never a raw compare: offset-suffixed and Z-suffixed
+    // forms mis-order lexicographically.
+    let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for review in reviews {
+        if review
+            .get("state")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .is_empty()
+        {
+            continue;
+        }
+        let Some(oid) = review
+            .pointer("/commit/oid")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let author = review
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if pr_author
+            .map(|a| !a.is_empty() && author == a)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let submitted = review
+            .get("submittedAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !last_pass_ts.is_empty() && !ts_after(submitted, &last_pass_ts) {
+            continue;
+        }
+        counted.insert(oid);
+    }
+    events_rounds.max(counted.len() as i64)
 }
 
 /// Compute the range tiling for one PR's attestation chain.
@@ -5813,7 +5897,7 @@ pub fn compute_range_tiling(
     // Rounds do not depend on the git walk, so they are computed before the
     // fail-closed early returns: a merge-base failure answers tiling
     // not-tiled but the round budget honestly.
-    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha);
+    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None, None);
     tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
@@ -6676,6 +6760,14 @@ fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
     !staleness.is_empty() && staleness.iter().all(|v| v.reviewed_sha.is_empty())
 }
 
+/// The terminal act a spent round budget names, replacing the review-verb
+/// instruction in the uncovered arm. The verb is what restarted the loop;
+/// past the cap the receipt must not teach another round. It names the
+/// decline-file-merge act and the one operator lever that reopens review.
+/// Contains no slash-verb and never the words "review verb" - the corpus
+/// asserts both absences with a positive marker for this very string.
+const CAP_SPENT_TERMINAL_ACT: &str = "decline the remainder, file it with the declining identity and the reason, then merge; the operator lever is config.review.max_rounds";
+
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
 /// task 3.1). Printed from the coverage value at print time, never from a
 /// remembered gate verdict (receipts have lied before).
@@ -6684,7 +6776,17 @@ fn blind_to_reviewed_commits(rep: &CoverageReport) -> bool {
 /// (the Python single source). None keeps the levelless line - the hint is
 /// advisory, and its absence must read identically to a build without the
 /// render, never as a different verdict.
-pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str>) -> String {
+///
+/// `round_cap` is `Some((rounds_used, max_rounds))` ONLY when the round
+/// budget is already spent. The uncovered arm then names the terminal act
+/// instead of the review verb - the instruction that restarts the loop this
+/// cap exists to bound. None (the default at every under-cap call site)
+/// renders exactly the pre-cap line.
+pub fn coverage_receipt_line(
+    rep: &CoverageReport,
+    self_review_hint: Option<&str>,
+    round_cap: Option<(i64, i64)>,
+) -> String {
     match &rep.coverage {
         Coverage::Unknown => "review coverage: unknown (review read failed)".to_string(),
         Coverage::Covered(n) => {
@@ -6803,6 +6905,18 @@ pub fn coverage_receipt_line(rep: &CoverageReport, self_review_hint: Option<&str
                 format!(
                     "{} reviewed an older commit whose code no longer matches HEAD - ask for a re-read",
                     stale.join(", ")
+                )
+            } else if let Some((used, max)) = round_cap {
+                // The round budget is spent. Naming the review verb here is
+                // the instruction that restarts the loop this cap exists to
+                // bound: every fix moves HEAD, voids the attestation, and
+                // returns the worker to this exact line. So this arm names
+                // no verb at all - it names the terminal act (decline, file,
+                // merge) and the operator lever. The absent/stale arms above
+                // are untouched: they answer reviewer configuration, which
+                // the round budget neither causes nor cures.
+                format!(
+                    "the review round budget is spent ({used}/{max}) - {CAP_SPENT_TERMINAL_ACT}"
                 )
             } else {
                 // Both arms carry the ordering, because the verb alone does not
@@ -9230,6 +9344,10 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // The hint renders the exact sized invocation (Python
                         // single source) so an unreviewed-green termination
                         // names what to run, not just that something must be.
+                        // Past the round cap that hint becomes the loop: the
+                        // receipt then carries the spent budget and names the
+                        // terminal act instead. The max here is the same
+                        // resolve read_pr_info judged the tiling against.
                         let cov_line = coverage_receipt_line(
                             &pr_info.coverage,
                             sized_self_review_hint(
@@ -9238,6 +9356,12 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                                 author_harness.as_deref(),
                             )
                             .as_deref(),
+                            pr_info.range_tiling.rounds_exhausted.then(|| {
+                                (
+                                    pr_info.range_tiling.rounds_used,
+                                    settings.max_rounds.unwrap_or(2).max(1),
+                                )
+                            }),
                         );
                         let done_msg = format!(
                             "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
@@ -13572,7 +13696,7 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&rep, None);
+        let line = coverage_receipt_line(&rep, None, None);
         // Counted in the tally, NAMED in the next action - the same split the
         // absent bucket uses, and the reason the line carries no empty `()`.
         assert!(line.contains("1 stale,"), "{line}");
@@ -13603,7 +13727,7 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&rep, None);
+        let line = coverage_receipt_line(&rep, None, None);
         assert!(
             line.contains("no review carries a reviewed commit"),
             "{line}"
@@ -13623,7 +13747,7 @@ mod tests {
             "",
             "",
         );
-        let line = coverage_receipt_line(&old_commit, None);
+        let line = coverage_receipt_line(&old_commit, None, None);
         assert!(line.contains("ask for a re-read"), "{line}");
         assert!(!line.contains("upgrade gh"), "{line}");
     }
@@ -13650,12 +13774,59 @@ mod tests {
             "89bc0b91",
         );
         let hint = "/verb-from-the-builder --flags";
-        let line = coverage_receipt_line(&rep, Some(hint));
+        let line = coverage_receipt_line(&rep, Some(hint), None);
         assert!(line.contains("run the review verb at HEAD"), "{line}");
         assert!(line.contains(&format!("`{hint}`")), "{line}");
         // None must read identically to a build without the render.
-        let bare = coverage_receipt_line(&rep, None);
+        let bare = coverage_receipt_line(&rep, None, None);
         assert!(!bare.contains("verb-from-the-builder"), "{bare}");
+    }
+
+    #[test]
+    fn coverage_receipt_past_the_cap_names_the_terminal_act_and_no_verb() {
+        // The spent-budget arm. The uncovered receipt used to answer a worker
+        // past the round cap with "run the review verb at HEAD" - the exact
+        // instruction that restarts the loop the cap exists to bound. Past the
+        // cap the line must name the terminal act instead. Absences alone
+        // pass on a line that never rendered, so the render itself is
+        // asserted first, then the positive marker, then the four needles.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: Vec::new(),
+        };
+        let line = coverage_receipt_line(&rep, Some("/code-review high"), Some((3, 2)));
+        assert!(line.starts_with("review coverage:"), "{line}");
+        assert!(
+            line.contains("the review round budget is spent (3/2)"),
+            "{line}"
+        );
+        assert!(
+            line.contains(
+                "decline the remainder, file it with the declining identity and the reason, then merge"
+            ),
+            "{line}"
+        );
+        for needle in ["/code-review", "/review", "/fno:review", "review verb"] {
+            assert!(
+                !line.contains(needle),
+                "past-cap line names {needle}: {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_receipt_under_the_cap_keeps_the_review_verb() {
+        // The same uncovered report with the budget unspent: the verb arm is
+        // untouched, so the arm swap above did not eat the normal path.
+        let rep = CoverageReport {
+            github_approval_satisfies: false,
+            coverage: Coverage::Covered(0),
+            verdicts: Vec::new(),
+        };
+        let line = coverage_receipt_line(&rep, Some("/code-review high"), None);
+        assert!(line.contains("run the review verb at HEAD"), "{line}");
+        assert!(line.contains("`/code-review high`"), "{line}");
     }
 
     #[test]
