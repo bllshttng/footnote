@@ -290,7 +290,10 @@ def coverage_verdict(
         disposition_refusal(chain, cov, repo)
     )
     max_rounds = resolved_max_rounds(repo)
-    rounds = rounds_since_last_pass(chain)
+    # The budget counts BOTH evidence axes: a GitHub-App reviewer's rounds
+    # leave no attestation row, so the chain alone reads zero on exactly the
+    # lane that spins. A read failure keeps the events-only answer.
+    rounds = rounds_since_last_pass(chain, reviews=_pr_reviews(pr_number, repo))
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -714,27 +717,133 @@ IMPOSSIBLE_REMEDIES = (
 )
 
 
-def rounds_since_last_pass(chain: list[dict]) -> int:
-    """Review rounds since the last pass on the chain, oldest-first.
+def _ts_after(a: str, b: str) -> bool:
+    """True iff ``a`` is strictly after ``b``, both RFC3339. Unparseable
+    input answers False, matching the Rust-side ``ts_after``: a round is
+    never counted on a timestamp that cannot be read."""
+    try:
+        from datetime import datetime
 
-    A round is a review VERDICT since the last pass; a pass resets the
-    counter. The declared ``review_round`` wins when present (the running max
-    since the reset); every event from before the field existed falls back to
-    counting verdicts. The Rust-side mirror is
-    ``loopcheck::rounds_since_last_pass``; the two are held equal by the
-    shared corpus.
+        return datetime.fromisoformat(a) > datetime.fromisoformat(b)
+    except ValueError:
+        return False
+
+
+def rounds_since_last_pass(
+    chain: list[dict],
+    reviews: Optional[list[dict]] = None,
+) -> int:
+    """Review rounds since the last pass, oldest-first.
+
+    A round is a review COMPLETION since the last pass, whatever its
+    verdict, on two evidence axes; a pass resets both. The chain axis
+    counts attestation verdicts (the declared ``review_round`` wins when
+    present, the running max since the reset; events from before the field
+    existed fall back to counting verdicts). The reviews axis, when a
+    payload is supplied, counts DISTINCT reviewed commits submitted
+    strictly after the newest pass - a GitHub-App reviewer's rounds leave
+    no attestation row anywhere, so they exist only as review objects, and
+    every fix moves the head, making one reviewed commit one round. No
+    author filter: the codex cloud connector posts its review objects
+    under the PR author's own login (measured live - 116 of 117 objects on
+    the spinning specimen), so an author exclusion deletes the round trace
+    on exactly that lane, and reply volume is already neutral because the
+    unit is the distinct commit. The answer is the MAX of the two axes,
+    never the sum: a healthy lane leaves both traces per round. The
+    Rust-side mirror is ``loopcheck::rounds_since_last_pass``; the two are
+    held equal by the shared corpus.
     """
     rounds = 0
+    last_pass_ts = ""
     for event in chain:
         if event.get("verdict") == "pass":
             rounds = 0
+            last_pass_ts = str(event.get("ts") or "")
             continue
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
             rounds = max(rounds, declared)
         else:
             rounds += 1
-    return rounds
+    events_rounds = rounds
+    if reviews is None:
+        return events_rounds
+    counted: set[str] = set()
+    for review in reviews:
+        state = review.get("state")
+        if not isinstance(state, str) or not state:
+            continue
+        commit = review.get("commit")
+        oid = commit.get("oid") if isinstance(commit, dict) else None
+        if not isinstance(oid, str) or not oid:
+            continue
+        submitted = review.get("submittedAt")
+        if not isinstance(submitted, str):
+            submitted = ""
+        if last_pass_ts and not _ts_after(submitted, last_pass_ts):
+            continue
+        counted.add(oid)
+    return max(events_rounds, len(counted))
+
+
+def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
+    """The PR's review objects for the round budget, or None on any read
+    failure.
+
+    One REST pass over the reviews endpoint, paginated (a spun PR carries
+    well over the 100-row page). The field mapping is the one
+    ``_internal_gh._coverage_reviews`` applies, so this mirror sees the
+    same shape the Rust gate does. A read failure answers None: the round
+    budget then keeps its events-only answer rather than guessing - a cap
+    that fires on a broken read would decline review remainder the budget
+    may not have spent.
+    """
+    import json as _json
+
+    from fno.pr._internal_gh import _login
+    from fno.pr._proc import run
+    from fno.pr._rest import _repo_slug
+
+    try:
+        slug = _repo_slug(repo, run)
+        if not slug:
+            return None
+        res = run(
+            ["gh", "api", f"repos/{slug}/pulls/{pr_number}/reviews", "--paginate"],
+            cwd=repo,
+        )
+        if not res.ok:
+            return None
+        rows: list[dict] = []
+        decoder = _json.JSONDecoder()
+        text = (res.stdout or "").lstrip()
+        pos = 0
+        while pos < len(text):
+            obj, end = decoder.raw_decode(text, pos)
+            if isinstance(obj, list):
+                rows.extend(row for row in obj if isinstance(row, dict))
+            pos = end
+            while pos < len(text) and text[pos] in " \n\r\t":
+                pos += 1
+        return [
+            {
+                "author": {"login": _login(row)},
+                "state": row.get("state") if isinstance(row.get("state"), str) else "",
+                "submittedAt": (
+                    row.get("submitted_at")
+                    if isinstance(row.get("submitted_at"), str)
+                    else ""
+                ),
+                "commit": {
+                    "oid": row.get("commit_id")
+                    if isinstance(row.get("commit_id"), str)
+                    else ""
+                },
+            }
+            for row in rows
+        ]
+    except Exception:  # noqa: BLE001 - an instrument failure never fires the cap
+        return None
 
 
 def resolved_max_rounds(repo: str) -> int:

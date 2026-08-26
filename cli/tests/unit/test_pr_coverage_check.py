@@ -1558,3 +1558,128 @@ def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatc
     assert refusal, "never an empty refusal sentence"
     assert "required code-review has no head-pinned local pass" in refusal
     assert "filed at the round cap (3/2)" in note, "the filed node rides the note"
+# --- rounds the attestation chain never saw: the GitHub review axis ---
+# The Python half of the shared corpus. The Rust half lives in
+# crates/fno-agents/tests/coverage_tiling.rs under the same case names, and
+# the two must answer identically: the counter gates the merge on this side
+# and the stop hook on that one.
+
+_CONNECTOR = "chatgpt-codex-connector[bot]"
+_PR_AUTHOR = "bllshttng"
+
+
+def _review_object(login, state, commit, submitted_at):
+    """One review object in the shape both gates read (gh pr view / REST,
+    normalized): author.login, state, commit.oid, submittedAt."""
+    return {
+        "author": {"login": login},
+        "state": state,
+        "commit": {"oid": commit},
+        "submittedAt": submitted_at,
+    }
+
+
+def test_round_budget_counts_rounds_that_only_github_review_objects_saw():
+    """The connector lane: three review rounds, every one ended with
+    findings, NO attestation exists anywhere. Each fix moved the head and
+    the connector reviewed the new head, so the rounds exist only as three
+    distinct reviewed commits. The chain alone answers 0 and the cap cannot
+    fire; with the payload it must answer 3."""
+    chain: list[dict] = []
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T15:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
+
+
+def test_round_budget_pass_resets_the_github_axis_too():
+    """A clean pass at 12:00 resets both axes: the connector review at 11:00
+    is a spent round, the two reviews after the pass are fresh rounds. The
+    answer is 2, never 3."""
+    chain = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass", "ts": "2026-08-26T12:00:00Z"},
+    ]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T15:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
+
+
+def test_round_budget_counts_review_objects_posted_under_the_pr_author_login():
+    """The measured specimen: the codex cloud connector posts its review
+    objects under the PR AUTHOR's own login - 116 of 117 objects on the
+    branch that spun, one burst per reviewed commit. An author filter
+    deletes the round trace on exactly that lane, so there is none: three
+    bursts at three distinct commits under the author login are three
+    rounds, and reply volume inside one burst is one round."""
+    reviews = [
+        _review_object(_PR_AUTHOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c1", "2026-08-26T11:05:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c2", "2026-08-26T12:00:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c3", "2026-08-26T13:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass([], reviews=reviews) == 3
+
+
+def test_round_budget_takes_the_max_not_the_sum_of_both_axes():
+    """A healthy lane leaves BOTH traces per round: a fail attestation and a
+    connector review of the same head. Two rounds, not four."""
+    chain = [{"verdict": "fail", "ts": "2026-08-26T10:00:00Z"}, {"verdict": "fail"}]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T12:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
+
+
+def test_round_budget_no_reviews_evidence_keeps_the_events_only_answer():
+    """No payload (the read failed, or the caller had none): behavior is
+    exactly the events-only answer."""
+    chain = [{"verdict": "fail"}, {"verdict": "fail"}]
+    assert _coverage_gate.rounds_since_last_pass(chain) == 2
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=None) == 2
+
+
+def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
+    """The helper reads the REST reviews endpoint (paginated, concatenated
+    arrays) and maps fields into the shape the counter consumes; a failed
+    read answers with no payload so the budget keeps its events-only
+    answer."""
+    from fno.pr._proc import Result
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "pulls/42" in joined and cmd[0] == "gh":
+            # Two concatenated pages, the shape gh api --paginate emits.
+            return Result(
+                0,
+                '[{"user":{"login":"bllshttng"},"state":"COMMENTED",'
+                '"submitted_at":"2026-08-26T11:00:00Z","commit_id":"c1"},'
+                '{"user":{"login":"chatgpt-codex-connector[bot]"},'
+                '"state":"COMMENTED",'
+                '"submitted_at":"2026-08-26T12:00:00Z","commit_id":"c2"}]'
+                '[{"user":{"login":"chatgpt-codex-connector[bot]"},'
+                '"state":"APPROVED",'
+                '"submitted_at":"2026-08-26T13:00:00Z","commit_id":"c3"}]',
+                "",
+            )
+        raise AssertionError(f"unexpected shell call: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", fake_run)
+    monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
+    reviews = _coverage_gate._pr_reviews(42, "/repo")
+    assert [r["commit"]["oid"] for r in reviews] == ["c1", "c2", "c3"]
+    assert reviews[1]["author"]["login"] == "chatgpt-codex-connector[bot]"
+    assert reviews[2]["submittedAt"] == "2026-08-26T13:00:00Z"
+
+    # A failed read fails open to the events-only budget, never an exception.
+    def failing_run(cmd, **kwargs):
+        return Result(1, "", "boom")
+
+    monkeypatch.setattr("fno.pr._proc.run", failing_run)
+    assert _coverage_gate._pr_reviews(42, "/repo") is None

@@ -794,10 +794,7 @@ fn round_budget_counts_verdicts_since_the_last_pass() {
         ],
     );
     // The pass resets: one round since.
-    assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &shas[3], None, None),
-        1
-    );
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, &shas[3], None), 1);
     // Drop the pass from the chain: three rounds.
     let no_pass = events_file(
         repo,
@@ -807,10 +804,7 @@ fn round_budget_counts_verdicts_since_the_last_pass() {
             attestation_round("code-review", &shas[1], &shas[2], "fail", None),
         ],
     );
-    assert_eq!(
-        rounds_since_last_pass(&no_pass, BRANCH, &shas[2], None, None),
-        3
-    );
+    assert_eq!(rounds_since_last_pass(&no_pass, BRANCH, &shas[2], None), 3);
 }
 
 #[test]
@@ -828,7 +822,7 @@ fn round_budget_declared_review_round_wins_when_present() {
         ],
     );
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, head.as_str(), None, None),
+        rounds_since_last_pass(&events, BRANCH, head.as_str(), None),
         3
     );
 }
@@ -850,7 +844,7 @@ fn round_budget_off_branch_events_do_not_count() {
     );
     // Only the on-branch verdict counts: one round, not two.
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, head.as_str(), None, None),
+        rounds_since_last_pass(&events, BRANCH, head.as_str(), None),
         1
     );
 }
@@ -937,7 +931,7 @@ fn round_budget_counts_rounds_that_only_github_review_objects_saw() {
         review_object(CONNECTOR, "COMMENTED", &shas[2], "2026-08-26T15:00:00Z"),
     ];
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews), Some(PR_AUTHOR)),
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
         3
     );
 }
@@ -975,30 +969,35 @@ fn round_budget_pass_resets_the_github_axis_too() {
         review_object(CONNECTOR, "COMMENTED", &shas[3], "2026-08-26T15:00:00Z"),
     ];
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews), Some(PR_AUTHOR)),
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
         2
     );
 }
 
 #[test]
-fn round_budget_pr_author_review_objects_never_count() {
+fn round_budget_counts_review_objects_posted_under_the_pr_author_login() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
     let (_base, shas, head) = repo_with(repo, 4);
-    // The author's replies are review objects too (one per REST reply), but
-    // they are not review rounds: only the connector's review at one commit
-    // counts, never the author's three.
+    // The measured specimen: the codex cloud connector posts its review
+    // objects under the PR AUTHOR's own login - 116 of 117 objects on the
+    // branch that spun, one burst per reviewed commit, each body opening
+    // with the connector's own review banner. An author filter deletes the
+    // round trace on exactly that lane, so there is none: three bursts at
+    // three distinct commits under the author login are three rounds, and
+    // reply volume inside one burst is one round.
     let events = events_file(repo, &[]);
     let reviews = vec![
         review_object(PR_AUTHOR, "COMMENTED", &shas[0], "2026-08-26T11:00:00Z"),
+        review_object(PR_AUTHOR, "COMMENTED", &shas[0], "2026-08-26T11:05:00Z"),
         review_object(PR_AUTHOR, "COMMENTED", &shas[1], "2026-08-26T12:00:00Z"),
         review_object(PR_AUTHOR, "COMMENTED", &shas[2], "2026-08-26T13:00:00Z"),
-        review_object(CONNECTOR, "COMMENTED", &shas[0], "2026-08-26T14:00:00Z"),
     ];
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews), Some(PR_AUTHOR)),
-        1
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
+        3,
+        "reply volume at one commit is one round; three commits are three"
     );
 }
 
@@ -1022,7 +1021,7 @@ fn round_budget_takes_the_max_not_the_sum_of_both_axes() {
         review_object(CONNECTOR, "COMMENTED", &shas[2], "2026-08-26T12:00:00Z"),
     ];
     assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews), Some(PR_AUTHOR)),
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
         2
     );
 }
@@ -1042,10 +1041,7 @@ fn round_budget_no_reviews_evidence_keeps_the_events_only_answer() {
             attestation_round("code-review", &shas[1], &shas[2], "fail", None),
         ],
     );
-    assert_eq!(
-        rounds_since_last_pass(&events, BRANCH, &head, None, None),
-        2
-    );
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, &head, None), 2);
 }
 
 // --- the round cap under the operator's ruling: file the rest, keep the hard ---

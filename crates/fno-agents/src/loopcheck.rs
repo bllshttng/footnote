@@ -3039,13 +3039,8 @@ fn read_pr_info(
         // withhold/impossible conjuncts, the emitted row). The no-external
         // arm above keeps the events-only answer: it reads no reviews, so
         // there is no second axis to count.
-        tiling.rounds_used = rounds_since_last_pass(
-            &events_text,
-            &head_branch,
-            head_sha,
-            Some(reviews_arr),
-            pr_author.as_deref(),
-        );
+        tiling.rounds_used =
+            rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
         let comments_arr: &[Value] = reviews_json
             .get("comments")
@@ -5771,13 +5766,17 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// COMPLETION since the last pass, whatever its verdict - CI failures, lint
 /// failures and rebases are not rounds - and a pass resets the counter. Two
 /// evidence axes, because the lane that spun never emits an attestation:
-/// a GitHub-App reviewer's rounds exist only as its review objects. The
-/// events axis counts in-scope `review_attestation` rows (the declared
-/// `review_round` wins when present, the running max since the last reset;
-/// events from before the field existed fall back to counting verdicts).
-/// The reviews axis, when a payload is supplied, counts DISTINCT reviewed
-/// commits by anyone but the PR author, submitted after the newest in-scope
-/// pass - every fix moves the head, so one reviewed commit is one round.
+/// its rounds exist only as GitHub review objects. The events axis counts
+/// in-scope `review_attestation` rows (the declared `review_round` wins
+/// when present, the running max since the last reset; events from before
+/// the field existed fall back to counting verdicts). The reviews axis,
+/// when a payload is supplied, counts DISTINCT reviewed commits submitted
+/// after the newest in-scope pass - every fix moves the head, so one
+/// reviewed commit is one round. No author filter: the codex cloud
+/// connector posts its review objects under the PR author's own login
+/// (measured live - 116 of 117 objects on the spinning specimen), so an
+/// author exclusion deletes the round trace on exactly that lane, and
+/// volume is already neutral because the unit is the distinct commit.
 /// The answer is the MAX of the two, never the sum: a healthy lane leaves
 /// both traces per round and must not count it twice. Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy
@@ -5789,7 +5788,6 @@ pub fn rounds_since_last_pass(
     head_branch: &str,
     head_sha: &str,
     reviews: Option<&[Value]>,
-    pr_author: Option<&str>,
 ) -> i64 {
     let mut rounds: i64 = 0;
     let mut last_pass_ts = String::new();
@@ -5832,12 +5830,14 @@ pub fn rounds_since_last_pass(
         return events_rounds;
     };
     // The reviews axis. An object counts when it names a real reviewed
-    // commit (state and commit.oid present), its author is not the PR
-    // author (an author reply is a review OBJECT but never a review ROUND),
-    // and it was submitted strictly after the newest pass - the reset must
-    // reach this axis too, or a pass never defuses the connector's spent
-    // rounds. ts_after, never a raw compare: offset-suffixed and Z-suffixed
-    // forms mis-order lexicographically.
+    // commit (state and commit.oid present) and was submitted strictly
+    // after the newest in-scope pass - the reset must reach this axis too,
+    // or a pass never defuses the spent rounds. Any login may carry it: the
+    // codex cloud connector posts its review objects under the PR author's
+    // own login, so an author filter deletes the trace on exactly that
+    // lane, and reply volume is already neutral because the unit is the
+    // DISTINCT commit. ts_after, never a raw compare: offset-suffixed and
+    // Z-suffixed forms mis-order lexicographically.
     let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for review in reviews {
         if review
@@ -5855,16 +5855,6 @@ pub fn rounds_since_last_pass(
         else {
             continue;
         };
-        let author = review
-            .pointer("/author/login")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if pr_author
-            .map(|a| !a.is_empty() && author == a)
-            .unwrap_or(false)
-        {
-            continue;
-        }
         let submitted = review
             .get("submittedAt")
             .and_then(|v| v.as_str())
@@ -5897,7 +5887,7 @@ pub fn compute_range_tiling(
     // Rounds do not depend on the git walk, so they are computed before the
     // fail-closed early returns: a merge-base failure answers tiling
     // not-tiled but the round budget honestly.
-    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None, None);
+    tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
