@@ -294,10 +294,10 @@ review_event_data="$(jq -cn \
   --argjson subagent_count "$subagent_count" \
   '{invocation_id:$invocation_id,stage:$stage,verb:$verb,args_raw:$args_raw,level:$level,level_source:$level_source,flags:$flags,transport:$transport,initiator:$initiator,target_session_id:$target_session_id,head_sha:$head_sha,branch:$branch,execution_context:$execution_context,output_contract:$output_contract,subagent_count:$subagent_count} | if $model_family == "" then . else .model_family=$model_family end' \
   2>/dev/null || true)"
-if [[ -n "$review_event_data" ]]; then
-  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" \
-    --events "$repo_root/.fno/events.jsonl" >/dev/null 2>&1 || true
-fi
+# The started row emits ONLY past every refusal point (the findings-file
+# checks below are the last of them): a refused run writes zero events, and
+# a started row with no attestation row is the lost-review marker, so a
+# refusal must not manufacture one. The emit itself sits after those checks.
 
 # Record WHICH MODEL rendered the verdict. Model routing stamps ANTHROPIC_MODEL
 # (and every tier var) for the whole worker process, so a worker routed to a
@@ -394,6 +394,10 @@ if [[ -n "$findings_file" ]]; then
     echo "emit-attestation: classify produced no parsable record for $findings_file; no event emitted" >&2
     exit 2
   fi
+fi
+if [[ -n "$review_event_data" ]]; then
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon -d "$review_event_data" \
+    --events "$repo_root/.fno/events.jsonl" >/dev/null 2>&1 || true
 fi
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
