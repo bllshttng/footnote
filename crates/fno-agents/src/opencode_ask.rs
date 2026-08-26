@@ -165,8 +165,7 @@ fn run_opencode(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.current_dir(cwd);
-    cmd.env("FNO_AGENT_SELF", agent_self);
-    cmd.env("FNO_AGENT_HARNESS", "opencode");
+    crate::claims::stamp_command_env(&mut cmd, Some(agent_self), "opencode", None);
     // Own process group so SIGTERM/SIGKILL/SIGINT reach opencode's subshells.
     unsafe {
         cmd.pre_exec(|| {

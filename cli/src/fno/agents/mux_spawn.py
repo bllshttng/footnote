@@ -1381,6 +1381,7 @@ def _mesh_env_wrapper(
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
     seed_provenance: Optional[dict[str, str]] = None,
+    session_id: Optional[str] = None,
 ) -> list[str]:
     """Prefix ``argv`` with ``env(1)`` carrying the mesh identity the daemon
     worker used to set on its PTY child (worker.rs), plus any role-routing env
@@ -1409,8 +1410,11 @@ def _mesh_env_wrapper(
     pairs = [
         f"FNO_AGENT_SELF={name}",
         f"FNO_AGENT_HARNESS={provider}",
+        f"FNO_HARNESS_NAME={provider}",
         f"FNO_AGENT_ROW_PENDING={name}",
     ]
+    if session_id and session_id.strip():
+        pairs.append(f"FNO_HARNESS_SESSION_ID={session_id.strip()}")
     from fno.setup.github_cli import worker_environment
 
     proxy_env = worker_environment(os.environ)
@@ -3419,6 +3423,7 @@ def dispatch_spawn_pane(
         account_env,
         route_env,
         seed_prov,
+        session_id=session_uuid,
     )
 
     registry_path = paths.agents_registry_path()

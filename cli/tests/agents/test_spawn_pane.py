@@ -882,6 +882,8 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert tail[0] == "env"
     assert "FNO_AGENT_SELF=peer" in tail
     assert "FNO_AGENT_HARNESS=claude" in tail
+    assert "FNO_HARNESS_NAME=claude" in tail
+    assert f"FNO_HARNESS_SESSION_ID={result.session_uuid}" in tail
     assert "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" in tail
     # The provider argv is interactive claude with the pinned session id and the
     # worker's own display name (x-c028: without `--name` claude inherits one
@@ -1608,12 +1610,30 @@ def test_mesh_env_wrapper_scrubs_inherited_session_identity() -> None:
         for token in wrapper
         if isinstance(token, str) and "=" in token and not token.startswith("-")
     }
+    assert "FNO_HARNESS_NAME=claude" in wrapper
     for name in AMBIENT_IDENTITY_ENV:
+        if name == "FNO_HARNESS_NAME":
+            continue
         assert name not in assignments, f"identity marker {name} re-exported"
 
     # Routing survives the scrub: route and account vars are untouched.
     assert "ANTHROPIC_API_KEY=sk-route" in wrapper
     assert "CLAUDE_CONFIG_DIR=/acct" in wrapper
+
+
+def test_mesh_env_wrapper_stamps_canonical_harness_identity() -> None:
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    wrapper = _mesh_env_wrapper(
+        "child-1",
+        "claude",
+        role=None,
+        argv=["claude", "--print", "hi"],
+        session_id="11111111-1111-4111-8111-111111111111",
+    )
+
+    assert "FNO_HARNESS_NAME=claude" in wrapper
+    assert "FNO_HARNESS_SESSION_ID=11111111-1111-4111-8111-111111111111" in wrapper
 
 
 def test_mesh_env_wrapper_scrubs_identity_for_every_provider() -> None:
@@ -1631,6 +1651,10 @@ def test_mesh_env_wrapper_scrubs_identity_for_every_provider() -> None:
         }
         assert "CLAUDE_CODE_SESSION_ID" in unset_names
         assert "CODEX_THREAD_ID" in unset_names
+        assert f"FNO_HARNESS_NAME={provider}" in wrapper
+        assert not any(
+            token.startswith("FNO_HARNESS_SESSION_ID=") for token in wrapper
+        )
 
 
 def test_mesh_env_wrapper_forwards_the_graphql_proxy_path(monkeypatch) -> None:

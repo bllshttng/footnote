@@ -140,10 +140,18 @@ A literal like `agy` or `openclaw` under a provider-named binding is still a def
 | `config.agents.defaults.effort`, `config.agents.profiles.<verb>.effort` | effort | |
 | `config.agents.defaults.provider`, `config.agents.profiles.<verb>.provider` | harness | the field name is parked by the value rule; the resolver receipt names the axis it feeds, not the field |
 | `FNO_AGENT_HARNESS` | harness | injected at spawn, read for identity |
+| `FNO_HARNESS_NAME` | harness | fno-owned canonical family stamp on spawned children; vendor markers remain the fallback for operator-started or adopted sessions |
+| `FNO_HARNESS_SESSION_ID` | harness session identity | fno-owned exact bound harness session id; absent when the launcher does not know it before exec |
 | spawn/register receipt `harness` | harness | |
 | spawn/register receipt `provider` | provider | present only when a route was applied |
 | spawn/register receipt `model` | model | effective model; an explicit `--model` wins over `--route` |
 | `observed_model` | model | the sole answer to "what is this worker actually running" |
+
+## Canonical spawned-session identity
+
+`FNO_HARNESS_NAME` identifies the harness family fno launched, while `FNO_HARNESS_SESSION_ID` carries the exact harness session id only when that id is bound before exec. A launcher clears inherited canonical and vendor identity markers before applying its own values. A name-only canonical stamp is valid and constrains vendor fallback to the same family; a session-id-only or blank partial stamp is invalid. A complete canonical pair that disagrees with the winning vendor resolver marker refuses rather than guessing.
+
+The fifteen vendor-owned markers in `HARNESS_SESSION_MARKERS`, `LEGACY_HARNESS_SESSION_MARKERS`, `SELF_SET_HARNESS_MARKERS`, and `_EXTRA_IDENTITY_NAMES` remain the compatibility fallback for sessions fno did not launch, including operator-started and adopted sessions. They are consistency evidence when a canonical stamp is present, not a replacement for the canonical pair. `FNO_HARNESS_CI` is deliberately undefined and absent; `CODEX_CI` remains a scrub-only Codex marker rather than a portable CI semantic.
 
 ## Prior attempts
 

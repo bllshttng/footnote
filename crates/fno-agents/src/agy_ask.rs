@@ -419,10 +419,7 @@ fn run_agy(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.current_dir(popen_cwd);
-    if let Some(name) = agent_self {
-        cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_HARNESS", "agy");
-    }
+    crate::claims::stamp_command_env(&mut cmd, agent_self, "agy", None);
     // Own process group so SIGTERM/SIGKILL/SIGINT reach agy's subshells.
     unsafe {
         cmd.pre_exec(|| {

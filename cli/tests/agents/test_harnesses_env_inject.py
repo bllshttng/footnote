@@ -54,6 +54,8 @@ def test_claude_bg_create_injects_agent_env(
     assert env is not None, "expected env kwarg to subprocess.run"
     assert env["FNO_AGENT_SELF"] == "alpha"
     assert env["FNO_AGENT_HARNESS"] == "claude"
+    assert env["FNO_HARNESS_NAME"] == "claude"
+    assert "FNO_HARNESS_SESSION_ID" not in env
     # Parent env must be preserved (sample check on PATH)
     assert "PATH" in env, "spawn env should inherit parent PATH"
 
@@ -95,6 +97,8 @@ def test_codex_create_threads_agent_self_to_run_codex(
     assert env is not None
     assert env["FNO_AGENT_SELF"] == "beta"
     assert env["FNO_AGENT_HARNESS"] == "codex"
+    assert env["FNO_HARNESS_NAME"] == "codex"
+    assert "FNO_HARNESS_SESSION_ID" not in env
     assert "PATH" in env
 
 

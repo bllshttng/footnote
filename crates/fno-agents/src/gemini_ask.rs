@@ -444,10 +444,7 @@ fn run_gemini(
     if let Some(cwd) = popen_cwd {
         cmd.current_dir(cwd);
     }
-    if let Some(name) = agent_self {
-        cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_HARNESS", "gemini");
-    }
+    crate::claims::stamp_command_env(&mut cmd, agent_self, "gemini", None);
     // Own process group so SIGTERM/SIGKILL/SIGINT reach gemini's subshells.
     unsafe {
         cmd.pre_exec(|| {

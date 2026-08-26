@@ -175,6 +175,9 @@ def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None
     assert bg_envs, "no --bg subprocess env was captured"
     child_env = bg_envs[-1]
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "claude"
+            continue
         assert marker not in child_env, f"bg child inherited identity marker {marker}"
 
 
@@ -196,6 +199,9 @@ def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -
     assert explicit_envs, "headless spawn inherited the parent env with no scrub"
     child_env = explicit_envs[-1]
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "claude"
+            continue
         assert marker not in child_env, f"headless child inherited identity marker {marker}"
 
 
@@ -304,6 +310,9 @@ def test_codex_spawn_scrubs_inherited_codex_identity_set(
     child_env = captured["env"]
     assert child_env is not None
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "codex"
+            continue
         assert marker not in child_env, f"codex child inherited identity marker {marker}"
 
 

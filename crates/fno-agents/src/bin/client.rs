@@ -766,6 +766,7 @@ fn maybe_run_claude_ask(home: &AgentsHome, params: &Value, name: &str) -> Option
 /// `harness_identity.HARNESS_SESSION_MARKERS`; cross-language drift is caught by
 /// the pytest `test_harness_markers_match_client_rs`, which reads this const from
 /// source (the Rust unit test only guards Rust-internal edits).
+#[allow(dead_code)]
 const HARNESS_MARKERS: &[(&str, &str)] = &[
     ("CODEX_THREAD_ID", "codex"),
     ("CLAUDE_CODE_SESSION_ID", "claude"),
@@ -781,17 +782,14 @@ const HARNESS_MARKERS: &[(&str, &str)] = &[
 /// none, fall through to the builtin `claude`. Never guesses. `lookup` is
 /// injectable so tests don't touch process-global env.
 fn infer_dispatch_provider(lookup: impl Fn(&str) -> Option<String>) -> &'static str {
-    let mut inferred: Option<&'static str> = None;
-    for (marker, harness) in HARNESS_MARKERS {
-        if lookup(marker).is_some_and(|v| !v.trim().is_empty()) {
-            match inferred {
-                None => inferred = Some(harness),
-                Some(h) if h == *harness => {}
-                Some(_) => return "claude", // two distinct harnesses -> ambiguous
-            }
-        }
+    match fno_agents::claims::resolve_harness_from(lookup).as_deref() {
+        Some("claude") => "claude",
+        Some("codex") => "codex",
+        Some("gemini") => "gemini",
+        Some("opencode") => "opencode",
+        Some("agy") => "agy",
+        _ => "claude",
     }
-    inferred.unwrap_or("claude")
 }
 
 /// Route a codex `ask` to the client-side `codex exec` path, bypassing the
@@ -3122,6 +3120,22 @@ mod tests {
                 ("CODEX_SESSION_ID", "s"),
             ])),
             "codex"
+        );
+    }
+
+    #[test]
+    fn infer_dispatch_provider_uses_canonical_spawn_stamp() {
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("FNO_HARNESS_NAME", "codex")])),
+            "codex"
+        );
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[
+                ("FNO_HARNESS_NAME", "claude"),
+                ("FNO_HARNESS_SESSION_ID", "claude-session"),
+                ("CODEX_THREAD_ID", "codex-session"),
+            ])),
+            "claude"
         );
     }
 

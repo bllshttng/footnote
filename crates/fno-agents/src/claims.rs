@@ -1182,6 +1182,166 @@ pub(crate) const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
     ("OPENCODE_SESSION_ID", "opencode"),
 ];
 
+pub(crate) const LEGACY_HARNESS_SESSION_MARKERS: &[(&str, &str)] =
+    &[("CLAUDE_SESSION_ID", "claude")];
+
+const FNO_HARNESS_NAME: &str = "FNO_HARNESS_NAME";
+const FNO_HARNESS_SESSION_ID: &str = "FNO_HARNESS_SESSION_ID";
+
+pub(crate) const AMBIENT_IDENTITY_NAMES: &[&str] = &[
+    FNO_HARNESS_NAME,
+    FNO_HARNESS_SESSION_ID,
+    "CODEX_THREAD_ID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_SESSION_ID",
+    "GEMINI_SESSION_ID",
+    "OPENCODE_SESSION_ID",
+    "CLAUDE_SESSION_ID",
+    "CLAUDECODE",
+    "CLAUDECODE_SESSION_ID",
+    "HERMES_SESSION_ID",
+    "TARGET_SESSION_ID",
+    "CODEX_CI",
+    "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    "CODEX_SHELL",
+    "CODEX_COMPANION_SESSION_ID",
+    "CODEX_COMPANION_TRANSCRIPT_PATH",
+];
+
+/// Clear inherited session identity before stamping the values owned by this
+/// launcher. Routing and authentication variables remain untouched.
+pub(crate) fn stamp_command_env(
+    command: &mut std::process::Command,
+    agent_self: Option<&str>,
+    harness: &str,
+    session_id: Option<&str>,
+) {
+    for name in AMBIENT_IDENTITY_NAMES {
+        command.env_remove(name);
+    }
+    if let Some(name) = agent_self {
+        command.env("FNO_AGENT_SELF", name);
+    }
+    command.env("FNO_AGENT_HARNESS", harness);
+    command.env(FNO_HARNESS_NAME, harness);
+    if let Some(session_id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+        command.env(FNO_HARNESS_SESSION_ID, session_id);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CanonicalDisposition {
+    Absent,
+    Invalid,
+    NameOnly,
+    Complete,
+}
+
+fn canonical_identity_from(
+    get: impl Fn(&str) -> Option<String>,
+) -> (Option<String>, Option<String>, CanonicalDisposition) {
+    let raw_name = get(FNO_HARNESS_NAME);
+    let raw_session = get(FNO_HARNESS_SESSION_ID);
+    let name_present = raw_name.is_some();
+    let session_present = raw_session.is_some();
+    let name = raw_name.as_deref().unwrap_or_default().trim().to_string();
+    let session = raw_session
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !name_present && !session_present {
+        return (None, None, CanonicalDisposition::Absent);
+    }
+    if !name_present || name.is_empty() || (session_present && session.is_empty()) {
+        return (None, None, CanonicalDisposition::Invalid);
+    }
+    if !session_present {
+        return (None, Some(name), CanonicalDisposition::NameOnly);
+    }
+    (Some(session), Some(name), CanonicalDisposition::Complete)
+}
+
+fn same_session_id(left: &str, right: &str) -> bool {
+    if left.starts_with("ses_") || right.starts_with("ses_") {
+        left == right
+    } else {
+        left.eq_ignore_ascii_case(right)
+    }
+}
+
+fn vendor_identity_from(get: &impl Fn(&str) -> Option<String>) -> (Option<(String, String)>, bool) {
+    let mut family: Option<&'static str> = None;
+    let mut session: Option<String> = None;
+    for (marker, harness) in HARNESS_SESSION_MARKERS
+        .iter()
+        .chain(LEGACY_HARNESS_SESSION_MARKERS.iter())
+    {
+        let Some(value) = get(marker)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        match family {
+            None => {
+                family = Some(harness);
+                session = Some(value);
+            }
+            Some(previous) if previous != *harness => return (None, true),
+            Some(_) => {}
+        }
+    }
+    (
+        family
+            .zip(session)
+            .map(|(harness, session)| (harness.to_string(), session)),
+        false,
+    )
+}
+
+fn resolve_identity_from(get: impl Fn(&str) -> Option<String>) -> (Option<String>, Option<String>) {
+    let (canonical_session, canonical_harness, disposition) = canonical_identity_from(&get);
+    let (vendor, vendor_ambiguous) = vendor_identity_from(&get);
+    match disposition {
+        CanonicalDisposition::Absent => vendor.map_or((None, None), |(harness, session)| {
+            (Some(session), Some(harness))
+        }),
+        CanonicalDisposition::Invalid => (None, None),
+        CanonicalDisposition::NameOnly => {
+            let Some(harness) = canonical_harness else {
+                return (None, None);
+            };
+            if vendor_ambiguous {
+                return (None, None);
+            }
+            match vendor {
+                Some((vendor_harness, session)) if vendor_harness == harness => {
+                    (Some(session), Some(harness))
+                }
+                Some(_) => (None, None),
+                None => (None, Some(harness)),
+            }
+        }
+        CanonicalDisposition::Complete => {
+            let (Some(session), Some(harness)) = (canonical_session, canonical_harness) else {
+                return (None, None);
+            };
+            if vendor_ambiguous {
+                return (None, None);
+            }
+            match vendor {
+                Some((vendor_harness, vendor_session))
+                    if vendor_harness != harness || !same_session_id(&vendor_session, &session) =>
+                {
+                    (None, None)
+                }
+                _ => (Some(session), Some(harness)),
+            }
+        }
+    }
+}
+
 /// Resolve the owning harness from the ambient process environment. `None` when
 /// no marker is set (a bare shell / daemon) - the claim then reads as unknown,
 /// never blocking dispatch on a missing tag.
@@ -1211,19 +1371,7 @@ pub fn resolve_harness() -> Option<String> {
 /// sometimes untagged. Keep it that way - resolving by precedence here would
 /// reintroduce the leak on the one path the Python gate cannot see.
 pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
-    let mut resolved: Option<&'static str> = None;
-    for (marker, harness) in HARNESS_SESSION_MARKERS {
-        if get(marker).map(|v| !v.trim().is_empty()).unwrap_or(false) {
-            if let Some(prev) = resolved {
-                if prev != *harness {
-                    return None;
-                }
-            } else {
-                resolved = Some(*harness);
-            }
-        }
-    }
-    resolved.map(|h| h.to_string())
+    resolve_identity_from(get).1
 }
 
 /// The spawn-time parent edge (x-132c), the Rust mirror of Python's
@@ -1252,26 +1400,8 @@ pub fn ambient_parent_edge_from(
         .or_else(|| std::env::current_dir().ok())
         .map(|p| p.to_string_lossy().trim().to_string())
         .filter(|s| !s.is_empty());
-    let mut family: Option<&'static str> = None;
-    let mut session: Option<String> = None;
-    for (marker, harness) in HARNESS_SESSION_MARKERS {
-        let Some(value) = get(marker)
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty())
-        else {
-            continue;
-        };
-        match family {
-            None => {
-                family = Some(harness);
-                session = Some(value);
-            }
-            Some(prev) if prev != *harness => return (None, None, cwd),
-            // Same family: the earlier (higher-precedence) marker keeps the id.
-            Some(_) => {}
-        }
-    }
-    (session, family.map(|h| h.to_string()), cwd)
+    let (session, harness) = resolve_identity_from(get);
+    (session, harness, cwd)
 }
 
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
@@ -2611,6 +2741,81 @@ mod tests {
         );
         // No markers -> None (unknown), never a panic.
         assert_eq!(resolve_harness_from(|_| None), None);
+    }
+
+    #[test]
+    fn canonical_pair_resolves_harness_and_parent_session_before_vendor_markers() {
+        let session = "11111111-1111-4111-8111-111111111111";
+        let get = |key: &str| match key {
+            "FNO_HARNESS_NAME" => Some("claude".to_string()),
+            "FNO_HARNESS_SESSION_ID" => Some(session.to_string()),
+            _ => None,
+        };
+
+        assert_eq!(resolve_harness_from(&get).as_deref(), Some("claude"));
+        assert_eq!(ambient_parent_edge_from(&get).0.as_deref(), Some(session));
+        assert_eq!(ambient_parent_edge_from(get).1.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn canonical_partial_and_vendor_contradictions_refuse() {
+        assert_eq!(
+            resolve_harness_from(|key| {
+                (key == "FNO_HARNESS_SESSION_ID").then(|| "session-only".to_string())
+            }),
+            None
+        );
+        assert_eq!(
+            resolve_harness_from(|key| match key {
+                "FNO_HARNESS_NAME" => Some("claude".to_string()),
+                "FNO_HARNESS_SESSION_ID" => Some("claude-session".to_string()),
+                "CODEX_THREAD_ID" => Some("codex-session".to_string()),
+                _ => None,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn command_stamp_scrubs_all_identity_and_sets_only_bound_session() {
+        let mut command = std::process::Command::new("sh");
+        command.env("CODEX_THREAD_ID", "parent");
+        command.env(FNO_HARNESS_NAME, "parent");
+        stamp_command_env(
+            &mut command,
+            Some("child"),
+            "claude",
+            Some(" 11111111-1111-4111-8111-111111111111 "),
+        );
+        let values: std::collections::HashMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+
+        assert_eq!(
+            values.get("FNO_AGENT_SELF").map(String::as_str),
+            Some("child")
+        );
+        assert_eq!(
+            values.get("FNO_AGENT_HARNESS").map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            values.get(FNO_HARNESS_NAME).map(String::as_str),
+            Some("claude")
+        );
+        assert_eq!(
+            values.get(FNO_HARNESS_SESSION_ID).map(String::as_str),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert!(!values.contains_key("CODEX_THREAD_ID"));
     }
 
     #[test]

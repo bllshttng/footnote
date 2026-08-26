@@ -716,8 +716,7 @@ fn dispatch_opencode_serve_inner(
             }
         }
         cmd.current_dir(cwd);
-        cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_HARNESS", "opencode");
+        crate::claims::stamp_command_env(&mut cmd, Some(name), "opencode", Some(&session_id));
         // A shell exporting both color knobs (NO_COLOR + FORCE_COLOR, common
         // in prompt frameworks) crashes the opencode writer at module load
         // (assertion trace in its color init, seen live 2026-08-23). The

@@ -32,7 +32,7 @@ from __future__ import annotations
 import os
 from typing import Mapping, Optional
 
-from fno.harness_identity import HARNESS_SESSION_MARKERS
+from fno.harness_identity import resolve_harness_identity
 
 # decision_source vocabulary surfaced in the spawn receipt so a dispatch's
 # provider choice is auditable after the fact. The resolver emits this subset.
@@ -54,11 +54,7 @@ def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[
     different harnesses remain ambiguous and fall through to None.
     """
     environ = os.environ if env is None else env
-    present: list[str] = []
-    for marker, harness in HARNESS_SESSION_MARKERS:
-        if (environ.get(marker) or "").strip() and harness not in present:
-            present.append(harness)
-    return present[0] if len(present) == 1 else None
+    return resolve_harness_identity(environ).harness
 
 
 def resolve_dispatch_provider(

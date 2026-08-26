@@ -450,6 +450,7 @@ fn run_codex(
     expect_session: bool,
     popen_cwd: Option<&Path>,
     agent_self: Option<&str>,
+    bound_session_id: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     use std::process::{Command, Stdio};
 
@@ -473,11 +474,7 @@ fn run_codex(
         cmd.current_dir(cwd);
     }
 
-    // Set agent env vars when we know who we are (create path with agent_self).
-    if let Some(name) = agent_self {
-        cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_HARNESS", "codex");
-    }
+    crate::claims::stamp_command_env(&mut cmd, agent_self, "codex", bound_session_id);
 
     // Put the child in its own process group so SIGTERM/SIGKILL propagate
     // to codex's subshells (sandbox tooling). Python uses start_new_session=True.
@@ -787,7 +784,7 @@ pub fn codex_create(
         });
     }
     let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort, add_dir);
-    run_codex(&argv, output_path, timeout, true, None, agent_self)
+    run_codex(&argv, output_path, timeout, true, None, agent_self, None)
 }
 
 /// Spawn `codex exec resume <session_id> --json ...` from `cwd`.
@@ -822,7 +819,15 @@ pub fn codex_resume(
         });
     }
     let argv = build_argv_resume(cwd, session_id, &full_prompt, eff, reasoning_effort);
-    run_codex(&argv, output_path, timeout, false, Some(cwd), None)
+    run_codex(
+        &argv,
+        output_path,
+        timeout,
+        false,
+        Some(cwd),
+        None,
+        Some(session_id),
+    )
 }
 
 // ===========================================================================
