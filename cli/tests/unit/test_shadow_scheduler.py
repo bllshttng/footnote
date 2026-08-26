@@ -128,6 +128,27 @@ def test_no_surface_in_a_held_domain_carries_the_same_domain_annotation(
     ]
 
 
+def test_collision_error_in_a_held_domain_carries_the_same_domain_annotation(
+    monkeypatch, tmp_path
+):
+    """The annotation is symmetric across the unevaluated class: the gate-error
+    twin of no-surface carries `+same-domain` too, so the report can explain
+    either serialized unknown."""
+
+    def boom(node, inflight):
+        if node["id"] == "n-b":
+            raise RuntimeError("collision index unreadable")
+        return None
+
+    monkeypatch.setattr(advance, "_high_collision", boom)
+    _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "code")))
+    r = advance.schedule_shadow(2, claims_root=tmp_path)
+    assert [d["id"] for d in r["selected"]] == ["n-a"]
+    assert [(d["id"], d["reason"]) for d in r["unevaluated"]] == [
+        ("n-b", "unevaluated:collision-error+same-domain:code")
+    ]
+
+
 def test_file_collision_is_serialized(monkeypatch, tmp_path):
     _ready(monkeypatch, _nodes(("n-a", "code"), ("n-b", "docs")))
     # n-b collides with in-flight n-a once n-a is selected.

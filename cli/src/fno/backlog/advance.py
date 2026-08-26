@@ -836,7 +836,8 @@ def _classify_lane_candidate(
       ``unevaluated:collision-error`` the collision gate raised, so safety is
         unknown for the same reason and gets the same fail-open treatment. It is
         a stated verdict rather than a swallowed error precisely so it cannot
-        reach the frontier looking like a clean comparison.
+        reach the frontier looking like a clean comparison. Carries the same
+        ``+same-domain:<domain>`` annotation when the domain is held.
     """
     from fno.claims.lanes import find_lane_slot
 
@@ -867,7 +868,10 @@ def _classify_lane_candidate(
         _LOG.warning(
             "collision gate UNEVALUATED for %s: %s", node.get("id"), exc,
         )
-        return f"{_UNEVALUATED_PREFIX}collision-error"
+        token = f"{_UNEVALUATED_PREFIX}collision-error"
+        if domain and domain in used_domains:
+            token += f"+same-domain:{domain}"
+        return token
     if hit is not None:
         return f"{_HIGH_COLLISION_PREFIX}{hit.with_node_id}"
     return None

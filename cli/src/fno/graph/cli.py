@@ -4959,8 +4959,8 @@ def cmd_lane_fill(
     surfaces co-schedule (epic x-42d5, group 2). Read-only by
     default; ``--claim``
     atomically holds a dispatch-time lane slot per node - what the dispatcher
-    does before spawn (Locked Decision #8). ``max_lanes < 2`` prints ``[]``
-    (sequential: use ``fno backlog next``).
+    does before spawn (Locked Decision #8). ``max_lanes < 1`` prints ``[]``
+    (a single lane is the daemon's sequential path).
     """
     from fno.backlog.advance import select_lane_fill
 
@@ -5002,8 +5002,8 @@ def cmd_dispatch_lanes(
     isolates a worktree off origin/main, seeds its per-lane
     ``.fno/config.local.toml`` (x-cbce: own project.id), and
     spawns a detached ``/target --no-merge`` worker rooted there. Prints one JSON
-    receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
-    nothing (sequential: use ``fno backlog advance`` / ``next``).
+    receipt per lane (``status`` dispatched | skipped). ``max_lanes < 1`` spawns
+    nothing (a single lane is the daemon's sequential path).
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
@@ -12578,13 +12578,24 @@ def _do_intake_multi(
         )
         raise typer.Exit(code=4)
 
+    preview_entries = read_graph(_graph_path())
     # Unlike the per-file refusals inside the mutator (which skip one file and
     # land the rest), a surface-less plan refuses the WHOLE batch here, before
     # any write: the rule is knowable up front and a half-landed batch is what
-    # the caller would otherwise have to unwind by hand.
-    _refuse_surfaceless_intake(concrete_files, allow_no_surface=allow_no_surface)
+    # the caller would otherwise have to unwind by hand. Already-intaked plans
+    # are exempt - they are a no-op for this verb (the single lane prints
+    # 'already intaked' and exits 0), and refusing a plain re-run over one
+    # would blame a file this run was never going to touch.
+    from fno.graph._intake import _match_plan_in_graph
 
-    preview_entries = read_graph(_graph_path())
+    _refuse_surfaceless_intake(
+        [
+            f for f in concrete_files
+            if _match_plan_in_graph(preview_entries, f, roadmap_id) is None
+        ],
+        allow_no_surface=allow_no_surface,
+    )
+
     if roadmap_id and not args.force_new_roadmap:
         has_roadmap = any(e.get("roadmap_id") == roadmap_id for e in preview_entries)
         if not has_roadmap:

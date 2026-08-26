@@ -307,6 +307,36 @@ def test_surface_refusal_reads_cli_paths_cwd_relative(tmp_path, monkeypatch):
         _refuse_surfaceless_intake(["../missing.md"], allow_no_surface=False)
 
 
+def test_multi_intake_exempts_already_intaked_surfaceless_plan(
+    fixture_graph, tmp_path, capsys
+):
+    """An already-bound surface-less plan is a no-op for this verb (the single
+    lane prints 'already intaked' and exits 0), so re-running a batch that
+    contains one must not refuse the rest."""
+    from types import SimpleNamespace
+
+    bound = _surfaceless_plan(tmp_path, title="Bound surfaceless")
+    entries = _read_entries(fixture_graph)
+    entries.append(
+        _node("ab-b0nd0001", title="Owner of the surfaceless plan",
+              plan_path=str(bound), status="ready")
+    )
+    fixture_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    (tmp_path / "fresh").mkdir()
+    fresh = _write_quick_plan(tmp_path / "fresh", title="Fresh surface plan")
+
+    args = SimpleNamespace(
+        deps=None, priority=None, points=None, project=None, title=None, force_new_roadmap=False,
+    )
+    _do_intake_multi(
+        args, [str(bound), str(fresh)], roadmap_id=None, dry_run=False
+    )
+    captured = capsys.readouterr()
+    assert "already intaked ab-b0nd0001" in captured.out
+    titles = [e.get("title") for e in _read_entries(fixture_graph)]
+    assert any("Fresh surface plan" in (t or "") for t in titles)
+
+
 # -- _resolve_claim --
 
 
