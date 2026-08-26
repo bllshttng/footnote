@@ -69,29 +69,27 @@ def test_menu_caps_passes_once_remedy_applied(monkeypatch):
 
 
 def test_root_namespace_names_pin_today_by_name():
-    """AC2-HP: today's Python roots plus the two Rust roots are explicit."""
+    """AC2-HP/AC4-HP: the folded surface is eleven, pinned by name.
+
+    The pre-fold red state (20 real roots failing at cap 12) is the branch's
+    own history: the gate commit landed first and the folds brought it green.
+    This pin holds the ELEVEN (d-b93d7754) - agents, backlog, config, do,
+    doctor, help, inbox, mux, update, version, whoami - so the next root
+    addition is a named event, not a drift.
+    """
     names = set(L._root_namespace_names())
     assert names == {
         "agents",
         "backlog",
         "config",
-        "decide",
         "do",
         "doctor",
-        "done",
         "help",
         "inbox",
-        "law",
-        "mail",
         "mux",
-        "project",
-        "runtime",
-        "test",
         "update",
         "version",
         "whoami",
-        "workspace",
-        "yard",
     }
 
 
@@ -102,27 +100,33 @@ def test_root_namespace_excludes_a_move_and_counts_a_hidden_root(monkeypatch):
     monkeypatch.setitem(
         cli_mod.LAZY_SUBCOMMANDS,
         "hidden-fixture",
-        ("fno.test:app", "fixture", {"hidden": True}),
+        ("fno.test_cmd:test_command", "fixture", {"hidden": True}),
     )
     names = set(L._root_namespace_names())
     assert "hidden-fixture" in names
     assert "annotate" not in names
-    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 12)
+    # One below the count WITH the fixture: the hidden registration pushed
+    # the namespace over, which is the exact regression (a hidden verb that
+    # moves no number) this gate exists to kill.
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", len(names) - 1)
     result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 1, result.output
-    assert "hidden-fixture" in result.output
+    assert "root namespace has" in result.output
 
 
-def test_root_namespace_cap_fails_on_today_surface(monkeypatch):
-    """AC1-HP: today's roots fail the 12-root cap and name overage."""
-    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 12, raising=False)
+def test_root_namespace_cap_fails_and_names_the_overage(monkeypatch):
+    """AC1-HP shape, post-fold: an over-cap namespace fails, names the verbs
+    over, and never offers hiding as a remedy (hiding is the evasion the
+    rewritten gate exists to kill)."""
+    today = len(L._root_namespace_names())
+    assert today == 11, f"surface drifted from eleven: {L._root_namespace_names()}"
+    monkeypatch.setattr(L, "MENU_CAP_ROOT_NAMESPACE", 10)
     result = runner.invoke(_lint_command(), ["menu-caps"])
     assert result.exit_code == 1, result.output
-    assert "root namespace has 20 real verbs" in result.output
+    assert f"root namespace has {today} real verbs (cap 10)" in result.output
     assert "over the cap:" in result.output
     assert "mark it hidden" not in result.output
-    assert "project" in result.output
-    assert "version" in result.output
+    assert "whoami" in result.output
 
 
 def _make_group(n_visible: int, n_hidden: int) -> click.Group:
