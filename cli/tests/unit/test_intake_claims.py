@@ -611,6 +611,34 @@ def test_intake_claim_records_blueprint_difficulty(fixture_graph, tmp_path, caps
     assert target["difficulty_history"][-1]["source"] == "blueprint"
 
 
+def test_intake_claim_blueprint_confirmation_still_appends(fixture_graph, tmp_path, capsys):
+    """AC6-HP (x-baef): a blueprint that CONFIRMS the filed band still appends
+    an entry, and the filed estimate survives as the first history row - the
+    filed-versus-revised delta undercounts agreement if confirmations are
+    dropped."""
+    graph_file = fixture_graph
+    entries = json.loads(graph_file.read_text())["entries"]
+    filed = next(e for e in entries if e["id"] == "ab-1dea1234")
+    filed["difficulty"] = "medium"
+    filed["difficulty_history"] = [
+        {"value": "medium", "source": "filed", "ts": "2026-08-26T00:00:00+00:00"}
+    ]
+    graph_file.write_text(json.dumps({"entries": entries}) + "\n")
+
+    plan = _write_quick_plan(
+        tmp_path,
+        title="Difficulty confirmation",
+        claims="ab-1dea1234",
+        difficulty="medium",
+    )
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    target = next(e for e in _read_entries(fixture_graph) if e["id"] == "ab-1dea1234")
+    assert target["difficulty"] == "medium"
+    assert [h["source"] for h in target["difficulty_history"]] == ["filed", "blueprint"]
+    assert target["difficulty_history"][0]["value"] == "medium"
+
+
 def test_intake_claim_carries_p0_acknowledgment(fixture_graph, tmp_path, capsys):
     """Claimed intake preserves the plan's validated p0 acknowledgment."""
     plan = tmp_path / "p0-claim.md"

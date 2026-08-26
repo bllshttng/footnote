@@ -219,14 +219,16 @@ unchanged (surface the error, do not fabricate a pin). When `/blueprint`
 decomposes a scope:epic into child nodes, apply the same transcription to each
 child id it creates. No pin present -> write nothing (no `--model` call).
 
-### Model Routing (tier assignment, parallel to executor routing)
+### Model Routing (difficulty revision, parallel to executor routing)
 
-Beyond an exact pin, a plan may express a **minimum quality tier** and let
-dispatch pick the cheapest reachable model that clears it (pareto routing). This
-mirrors executor routing: judged once at planning time, honored at every
-dispatch, and unset = today's provider default (no behavior change).
+Beyond an exact pin, a plan carries a **work-difficulty band** that dispatch
+joins with live provider capacity (pareto routing). This mirrors executor
+routing: judged once at planning time, honored at every dispatch, and a missing
+band on a pre-gate plan changes nothing (the provider default).
 
-Assign a tier per the task's nature, one line of rationale each:
+`difficulty` is required in plan frontmatter for plans created after 2026-08-26,
+so the transcription below always runs. Assign the band per the task's nature,
+one line of rationale each:
 
 - **`low`** - mechanical work: a rename, a codemod, a doc tweak, boilerplate.
 - **`medium`** - a standard feature or fix that needs real reasoning but no
@@ -234,21 +236,26 @@ Assign a tier per the task's nature, one line of rationale each:
 - **`high`** - gate semantics, security, concurrency, migrations, or an
   architecture decision where a weaker model's error is expensive.
 
-Precedence is `model:` (exact) over `model_tier:` (tier) over the provider
-default; an exact pin on the same task wins. Transcribe a plan-wide default from
-frontmatter onto the node (AFTER `$NODE_ID` is minted), idempotently:
+The blueprint phase is the sanctioned second write: the planner has read the
+code and knows more than the filer did. Record BOTH the filed estimate and the
+blueprint revision - the intake path appends a `source: "blueprint"` history
+entry rather than overwriting, because the filed-versus-revised delta is the
+only signal that eventually says whether filers estimate well.
+
+Precedence is `model:` (exact) over the provider default; an exact pin on the
+same task wins. Transcribe the band from frontmatter onto the node (AFTER
+`$NODE_ID` is minted), idempotently:
 
 ```bash
-# Plan frontmatter `model_tier:` (scope to the frontmatter block).
-MODEL_TIER="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^model_tier:/{sub(/^model_tier:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
-[[ -n "$MODEL_TIER" ]] && fno backlog update "$NODE_ID" --model-tier "$MODEL_TIER"
+# Plan frontmatter `difficulty:` (scope to the frontmatter block).
+DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^difficulty:[[:space:]]*/,""); print; exit}' "$PLAN_INDEX")"
+[[ -n "$DIFFICULTY" ]] && fno backlog update "$NODE_ID" --difficulty "$DIFFICULTY"
 ```
 
-`fno backlog update --model-tier` validates the band (`high|medium|low`); an
+`fno backlog update --difficulty` validates the band (`high|medium|low`); an
 invalid value exits non-zero and leaves the node unchanged (surface it, do not
-fabricate a tier). Per-task tiers ride in task blocks as `model_tier:` lines
-(the do-phase reads them the same way it reads `executor:` task blocks). No tier
-and no pin present -> write nothing.
+fabricate a band). The retired `--model-tier` spelling exits 2 with a message
+naming `--difficulty`.
 
 ## Blueprint Provenance Stamp (x-b6e4)
 
