@@ -263,3 +263,20 @@ def test_fno_repo_root_is_honored(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("FNO_REPO_ROOT", str(root))
     monkeypatch.chdir(tmp_path)
     assert orch.manifest_graph_node_id() == "x-ENV"
+
+
+def test_a_stale_repo_root_env_falls_through(tmp_path, monkeypatch) -> None:
+    """resolve_repo_root only WARNS on a foreign root, so a stale exported
+    FNO_REPO_ROOT (canonical checkout, session in a worktree) must not blank
+    every boundary and leak every task claim for the run."""
+    orch = _load_orch()
+
+    root = tmp_path / "repo"
+    (root / ".fno").mkdir(parents=True)
+    (root / ".git").mkdir()
+    (root / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-REAL\n", encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path / "gone"))
+    monkeypatch.chdir(root)
+    assert orch.manifest_graph_node_id() == "x-REAL"

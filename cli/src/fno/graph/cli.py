@@ -6716,6 +6716,33 @@ def cmd_task_update(
         holder = _ident.session_id if (_ident.session_id and _ident.harness) else None
     key = task_key(node_id, task_id)
 
+    if owner:
+        # `--owner` is the escape this verb's own refusals advertise for a
+        # holder that is GONE. release_claim is non-strict (it unlinks whenever
+        # the names match), so honoring it against a LIVE claim deletes a
+        # running worker's claim and the next in_progress succeeds on an empty
+        # key: the double-dispatch these verbs exist to close. The pid is the
+        # discriminator, not the name - a claim anchored to OUR session pid is
+        # ours to settle even when identity is otherwise unprovable.
+        from fno.claims.core import claim_status as _live_check
+
+        try:
+            _st = _live_check(key)
+        except Exception:  # noqa: BLE001 - an unreadable claim blocks nothing
+            _st = {}
+        if (
+            _st.get("state") == "live"
+            and _st.get("holder") == owner
+            and _st.get("pid") != resolve_session_pid()
+        ):
+            typer.echo(
+                f"{key} is held LIVE by {owner} (pid={_st.get('pid')}); "
+                "--owner is the escape for a holder that is gone, not a way "
+                "to take a claim from a running worker",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+
     def _set_row(mutate) -> Optional[dict]:
         found: list[dict] = []
 

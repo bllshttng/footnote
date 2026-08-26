@@ -813,3 +813,46 @@ def test_done_with_no_provable_identity_stops_instead_of_looking_held(
     assert refused.exit_code == 4
     assert refused.exit_code != 3, "3 reads as a peer hold and is retried forever"
     assert SID_A in refused.output, "the refusal names the owner to pass as --owner"
+
+
+# -- review round 6 --
+
+
+def test_owner_cannot_take_a_live_claim(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`--owner` is the escape this verb's refusals advertise for a holder
+    that is GONE.
+
+    release_claim is non-strict, so honoring it against a live claim deletes a
+    running worker's claim and the next in_progress succeeds on an empty key.
+    The pid discriminates: a claim anchored to OUR session pid is ours.
+    """
+    other = subprocess.Popen(["/bin/sleep", "30"])
+    try:
+        lock = claim_path(task_key("x-t1", "1.1"), root=claims_root)
+        assert _task_update(
+            monkeypatch, other.pid, "x-t1", "1.1", "--status", "in_progress",
+            "--owner", SID_A,
+        ).exit_code == 0
+        assert claim_status(task_key("x-t1", "1.1"), root=claims_root)["state"] == "live"
+
+        refused = _task_update(
+            monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done",
+            "--owner", SID_A,
+        )
+        assert refused.exit_code == 3
+        assert "held LIVE" in refused.output
+        assert lock.exists(), "a live worker's claim must survive the refusal"
+        assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "in_progress"
+    finally:
+        other.kill()
+        other.wait()
+
+    ok = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done", "--owner", SID_A
+    )
+    assert ok.exit_code == 0, (
+        "positive control: once that holder is gone the same call settles"
+    )
+    assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"

@@ -1057,7 +1057,12 @@ def _manifest_path(state_path: str) -> Path:
     env = os.environ.get("FNO_REPO_ROOT")
     if env:
         candidate = Path(env) / given
-        return candidate if candidate.exists() else given
+        if candidate.exists():
+            return candidate
+        # Fall through rather than give up: resolve_repo_root only WARNS on a
+        # foreign root, so a stale exported FNO_REPO_ROOT (canonical checkout,
+        # session in a worktree) would otherwise blank every boundary and leak
+        # every task claim for the run.
     here = Path.cwd().resolve()
     # Find the root FIRST, then search only within it. Searching on the way up
     # and stopping at the root afterwards climbs to the filesystem root when
