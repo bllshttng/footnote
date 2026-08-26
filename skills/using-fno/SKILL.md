@@ -36,6 +36,8 @@ Everything else stays invocable by full name: `/fno:blueprint`, `/fno:execute` (
 
 Atomic, lock-protected, schema-validated. Use for exact state transitions, not orchestration.
 
+Substrate vocabulary: `pane` is mux-hosted, `thread` is the persistent conversation lane, and `headless` is one-shot. `bg` is a deprecated input alias for `thread` for one release; new commands and capability keys use `thread`.
+
 | Verb family | What it owns |
 |-------------|--------------|
 | `fno doctor event emit\|audit` | events.jsonl writes + audit. |

@@ -35,7 +35,7 @@ pub struct HarnessContract {
 pub struct HarnessCapabilities {
     pub permission_bypass: Vec<String>,
     pub resume: String,
-    pub bg: bool,
+    pub thread: bool,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,
     pub stop_hook: String,

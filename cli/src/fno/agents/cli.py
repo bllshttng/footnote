@@ -1619,12 +1619,22 @@ def cmd_spawn(
     # "claude peers are persistent bg threads" refusal.
     if once and substrate == "pane":
         substrate = "headless"
-    if substrate not in ("pane", "bg", "headless"):
+    if substrate not in ("pane", "thread", "bg", "headless"):
         print(
-            f"--substrate must be one of: pane, bg, headless (got {substrate})",
+            f"--substrate must be one of: pane, thread, headless (bg is a deprecated alias; got {substrate})",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+    if substrate == "bg":
+        print(
+            "warning: substrate value 'bg' is deprecated; use 'thread' instead; "
+            "the alias will be removed after one release",
+            file=sys.stderr,
+        )
+    # Keep the lower-level spawn branches stable while the public substrate
+    # vocabulary migrates to `thread`.
+    if substrate == "thread":
+        substrate = "bg"
     # x-1caa AC7: passthrough tokens only ride the PANE argv, where the
     # composed-argv refusals live. The seam refuses the explicit-flag spelling
     # for the Rust-routed lane; this is the same refusal for the Python lane,
