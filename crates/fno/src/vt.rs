@@ -516,7 +516,7 @@ impl Pane {
         points
             .iter()
             .filter_map(|p| point_to_viewport(d, *p))
-            .filter(|p| (p.line as usize) < rows)
+            .filter(|p| p.line < rows)
             .map(|p| (p.line as u16, p.column.0 as u16))
             .collect()
     }

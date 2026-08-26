@@ -1728,8 +1728,8 @@ pub fn lineage_layout<T>(
     // Defensive tail: nothing should reach here unemitted (every row is a root
     // or a descendant of one), but a forest the walk could not classify still
     // renders rather than vanishing.
-    for i in 0..n {
-        if !emitted[i] {
+    for (i, was_emitted) in emitted.iter().enumerate().take(n) {
+        if !was_emitted {
             order.push(i);
         }
     }

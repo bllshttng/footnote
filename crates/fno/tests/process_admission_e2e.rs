@@ -43,19 +43,22 @@ fn ac1_hp_sync_output_preserves_implicit_capture() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn ac1_hp_async_output_preserves_implicit_capture() {
     isolate_admission_state();
-    let _env_lock = ADMISSION_ENV_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let previous = std::env::var_os("FNO_PROCESS_ADMISSION_MAX");
-    std::env::set_var("FNO_PROCESS_ADMISSION_MAX", "512");
-    let mut command = fno::process_admission::tokio_command("printf");
-    command.arg("async-capture");
-    let output = fno::process_admission::tokio_output(&mut command)
-        .await
-        .unwrap();
+    let output = {
+        let _env_lock = ADMISSION_ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        std::env::set_var("FNO_PROCESS_ADMISSION_MAX", "512");
+        let mut command = fno::process_admission::tokio_command("printf");
+        command.arg("async-capture");
+        fno::process_admission::tokio_output(&mut command)
+            .await
+            .unwrap()
+    };
     restore_max_processes(previous);
     assert_eq!(output.stdout, b"async-capture");
 }

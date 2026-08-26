@@ -183,10 +183,9 @@ impl AdmissionPermit {
         }
         let path = admission_marker_path()?;
         let start = crate::proto::pid_start_time(pid).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("process start time unavailable for child pid {pid}"),
-            )
+            io::Error::other(format!(
+                "process start time unavailable for child pid {pid}"
+            ))
         })?;
         let mut markers = OpenOptions::new().create(true).append(true).open(&path)?;
         #[cfg(unix)]
@@ -465,7 +464,7 @@ fn test_permit(scope: Scope, count: usize, ceiling: usize) -> AdmissionPermit {
 }
 
 fn admission_io_error(error: AdmissionFailure) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, error.to_string())
+    io::Error::other(error.to_string())
 }
 
 pub fn std_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
@@ -554,6 +553,7 @@ fn acquire_lock() -> Result<File, String> {
         .create(true)
         .read(true)
         .write(true)
+        .truncate(false)
         .open(&path)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     #[cfg(unix)]

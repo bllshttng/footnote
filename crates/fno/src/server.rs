@@ -2860,7 +2860,7 @@ impl Core {
         {
             let id = self.next_pane_id;
             self.next_pane_id = id.saturating_add(1);
-            return Ok(id);
+            Ok(id)
         }
         #[cfg(not(test))]
         {
@@ -6249,16 +6249,23 @@ impl Core {
         }
         let mut pruned_workers = 0usize;
         #[cfg(test)]
-        let hold_override = HOLD_WORKERS_OVERRIDE.with(|slot| *slot.borrow());
+        let hold_workers = HOLD_WORKERS_OVERRIDE.with(|slot| {
+            slot.borrow().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .as_deref()
+                    .map(crate::digest_overlay::mux_restore_hold_workers)
+                    .unwrap_or(true)
+            })
+        });
         #[cfg(not(test))]
-        let hold_override: Option<bool> = None;
-        let hold_workers = hold_override.unwrap_or_else(|| {
+        let hold_workers = {
             std::env::current_dir()
                 .ok()
                 .as_deref()
                 .map(crate::digest_overlay::mux_restore_hold_workers)
                 .unwrap_or(true)
-        });
+        };
         let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
             Ok(receipts) => (receipts, None),
             Err(error) => {
@@ -6352,10 +6359,10 @@ impl Core {
                                     })
                             });
                         let pane = if let Some(facts) = held {
-                            self.hold_worker_pane(facts, rows, cols, &cwd0).map(|pid| {
-                                held_workers_total += 1;
-                                pid
-                            })
+                            self.hold_worker_pane(facts, rows, cols, &cwd0)
+                                .inspect(|_| {
+                                    held_workers_total += 1;
+                                })
                         } else {
                             let reason = restore_worker_refusal_reason(
                                 m,
@@ -6364,9 +6371,8 @@ impl Core {
                                 &spawn_receipts,
                             );
                             self.refused_worker_pane(worker_name, &reason, rows, cols, &cwd0)
-                                .map(|pid| {
+                                .inspect(|_| {
                                     refused_workers_total += 1;
-                                    pid
                                 })
                         };
                         match pane {

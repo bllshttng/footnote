@@ -2951,7 +2951,7 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     // verb forever over no divergence.
     let mut under_config = false;
     let value = body.lines().find_map(|l| {
-        let indented = l.starts_with(|c| c == ' ' || c == '\t');
+        let indented = l.starts_with([' ', '\t']);
         let (key, val) = l.split_once(':')?;
         let key = key.trim();
         if !indented {
@@ -3042,6 +3042,7 @@ pub fn legacy_fallback_allowed() -> bool {
 /// (client.rs, x-0296's NEVER-stderr rule).
 static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
 
+#[allow(dead_code)]
 fn record_config_warning(msg: String, remedy: String) {
     let _ = CONFIG_WARNING.set((msg, remedy));
 }

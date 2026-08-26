@@ -619,7 +619,7 @@ impl Scanner {
             let mut plain = Vec::new();
             let idx = release_to_plain(&mut plain, &seq);
             self.state = paste_state(idx);
-            (!plain.is_empty()).then(|| Event::Forward(plain))
+            (!plain.is_empty()).then_some(Event::Forward(plain))
         } else {
             None
         }

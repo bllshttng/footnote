@@ -479,7 +479,7 @@ fn loaded_from_raw(path: &std::path::Path, raw: String) -> Loaded {
             let can_quarantine = assert_writable().is_ok();
             #[cfg(test)]
             let can_quarantine = true;
-            let quarantined = can_quarantine && std::fs::rename(&path, &aside).is_ok();
+            let quarantined = can_quarantine && std::fs::rename(path, &aside).is_ok();
             return Loaded {
                 notice: Some(if quarantined {
                     format!("quarantined corrupt squads.json to {}", aside.display())
@@ -769,13 +769,12 @@ impl MemberEvidence {
             .any(|key| self.live.contains(key))
         {
             MemberLiveness::Live
-        } else if keys
-            .into_iter()
-            .flatten()
-            .any(|key| self.dead.contains(key))
+        } else if self.complete_attach_set && !member.attach_id.is_empty()
+            || keys
+                .into_iter()
+                .flatten()
+                .any(|key| self.dead.contains(key))
         {
-            MemberLiveness::Dead
-        } else if self.complete_attach_set && !member.attach_id.is_empty() {
             MemberLiveness::Dead
         } else {
             MemberLiveness::Unknown

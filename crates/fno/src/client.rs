@@ -2354,6 +2354,7 @@ async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
+#[cfg(test)]
 fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
     build_sideline_menu_with_count(anchor, update, 0)
 }
@@ -5087,7 +5088,7 @@ impl View {
                     None,
                     None,
                     ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
-                    &[s.name.clone()],
+                    std::slice::from_ref(&s.name),
                 ));
                 // Plain panes of the tab (v22): a pane already shown as an agent
                 // row is skipped (the agent row is the richer view of the same
@@ -8417,6 +8418,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn append_sorted_agent_group<'a>(
     out: &mut Vec<(DisplayRow<'a>, usize)>,
     group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
@@ -22952,7 +22954,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
         assert_eq!(
-            v.rename.as_ref().map(|(t, _)| t.clone()),
+            v.rename.as_ref().map(|(t, _)| *t),
             Some(super::RenameTarget::Tab(want)),
             "the advertised key opened the rename overlay for this tab"
         );

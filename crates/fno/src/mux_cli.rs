@@ -2111,6 +2111,7 @@ fn prune_identity(sq: &crate::squad_store::PrunedSquad) -> String {
 }
 
 /// The one-line summary after a (dry-)run: count pruned plus why the rest stayed.
+#[allow(clippy::too_many_arguments)]
 fn print_prune_summary(
     verb: &str,
     n: usize,
@@ -2162,6 +2163,7 @@ fn print_prune_summary(
     println!("{}", parts.join("; "));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_prune_json(
     removed: &[crate::squad_store::PrunedSquad],
     dry_run: bool,
@@ -4115,6 +4117,7 @@ fn take_workspace_flag(
 /// reports. Every refusal (unknown location, cross-workspace ambiguity, a
 /// bare number whose ordinal and id readings disagree) prints and exits
 /// nonzero through `render_reply`.
+#[allow(clippy::too_many_arguments)]
 fn location_lookup(
     verb: &str,
     sel: &str,
@@ -4195,6 +4198,7 @@ fn location_lookup(
 /// branch when the agent resolver returns NotFound (x-1499): the shared head
 /// of `view` and `where`. Ambiguity keeps its own refusal; registry failures
 /// keep their own exit class.
+#[allow(clippy::too_many_arguments)]
 fn resolve_row_or_location(
     verb: &str,
     selector: &str,
@@ -5410,7 +5414,7 @@ fn prepare_pane_bytes(
         // The mail verbs' reasoned one-send exception, same flag on this lane.
         command.arg("--style-exception").arg(reason);
     }
-    let mut child = command
+    let child = command
         // Hand the child the path we resolved. It runs a nested `mux pane read`
         // for the prompt gate, and that hop resolves `FNO_BIN` or a bare `fno`
         // on PATH. We are here via `current_exe` precisely because `fno` may not
@@ -5421,7 +5425,7 @@ fn prepare_pane_bytes(
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let mut child = crate::process_admission::std_spawn(&mut child).map_err(|e| {
+    let mut child = crate::process_admission::std_spawn(child).map_err(|e| {
         format!(
             "envelope renderer ({}) could not start: {e}. Refusing to type an \
                  unattributed payload; pass --raw for a genuine keystroke.",
@@ -7515,7 +7519,7 @@ mod tests {
         .unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let FNO_BIN_GUARD_LOCK = FNO_BIN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
+        let fno_bin_guard_lock = FNO_BIN_GUARD.lock().unwrap_or_else(|p| p.into_inner());
         let payload = b"you should fix this; it breaks.".to_vec();
         let send_cmd = |raw: bool| PaneCmd::Send {
             pane: 7,
@@ -7531,7 +7535,7 @@ mod tests {
         let refused = dispatch("t", &sock, false, send_cmd(false));
         let raw_exit = dispatch("t", &sock, false, send_cmd(true));
         std::env::remove_var("FNO_BIN");
-        drop(FNO_BIN_GUARD_LOCK);
+        drop(fno_bin_guard_lock);
         let _ = std::fs::remove_file(&script);
         server.join().unwrap();
         let _ = std::fs::remove_file(&sock);

@@ -665,6 +665,7 @@ pub struct FakeClient {
     /// Initiator-only hover replies (v56): `(pane_id, seq, cells)`, newest
     /// last. Coordinates only - the URL never rides the reply, which is part
     /// of what the e2e test asserts.
+    #[allow(clippy::type_complexity)]
     pub link_hovers: Vec<(u64, u64, Vec<(u16, u16)>)>,
     /// Every absorbed message's kind, chronologically.
     pub order: Vec<Absorbed>,
