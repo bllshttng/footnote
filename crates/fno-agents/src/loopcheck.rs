@@ -3915,7 +3915,10 @@ fn publish_coverage_status(
     } else if matches!(coverage.coverage, Coverage::Unknown) {
         ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
-        ("failure", uncovered_status_description(pr_head_oid, pr_number))
+        (
+            "failure",
+            uncovered_status_description(pr_head_oid, pr_number),
+        )
     };
     post_coverage_status(
         gh_bin,
@@ -13888,8 +13891,8 @@ mod tests {
     fn the_published_status_never_names_a_harness_specific_verb() {
         // The shared commit status is read by every harness. A claude verb
         // baked in by a claude publisher is a command a codex worker does not
-        // have. Measured: the live status on this very PR read
-        // "/code-review high --comment" because a claude session published it.
+        // have. Measured: the live status on this very PR named the claude
+        // verb at a concrete <level>, because a claude session published it.
         let d = uncovered_status_description("8411cde1aa2b0000000000000000000000000000", 1201);
 
         // The POSITIVE marker first: assert the neutral command IS present.
@@ -13913,7 +13916,11 @@ mod tests {
 
         // GitHub rejects an over-long description WHOLE, losing the marker
         // rather than truncating it, so the cap is load-bearing.
-        assert!(d.len() <= 140, "over GitHub's 140-char cap ({}): {d}", d.len());
+        assert!(
+            d.len() <= 140,
+            "over GitHub's 140-char cap ({}): {d}",
+            d.len()
+        );
     }
 
     #[test]
