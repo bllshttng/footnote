@@ -56,7 +56,7 @@ backlog get
 backlog next
 backlog queued
 backlog reconcile
-backlog update !--tag !--untag
+backlog update !--model-tier !--tag !--untag
 bundle
 carveout
 claim

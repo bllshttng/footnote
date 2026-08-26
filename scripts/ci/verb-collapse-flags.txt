@@ -32,6 +32,7 @@ backlog retro run !--pr
 backlog retro run !--session
 backlog update !--tag
 backlog update !--untag
+backlog update !--model-tier
 do resume receipt validate !--session
 do resume receipt write !--session
 do review !--session
