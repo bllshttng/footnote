@@ -45,12 +45,9 @@ struct Entry {
 /// Resolved CLI/env inputs for one kill-check run.
 struct KillCheckArgs {
     plan_path: Option<String>,
-    /// `STATE_FILE` env / `--state-file` override. PARITY NOTE: in the bash,
-    /// this ONLY redirects `_kc_log_warn`'s append destination (line 45). The
-    /// actual field reads (`_kc_state_field` / `_kc_consecutive_failures`)
-    /// IGNORE `STATE_FILE` and always derive `<git-root>/.fno/target-state.md`,
-    /// because no caller passes them the optional explicit-path argument. We
-    /// reproduce that split faithfully: `state_file` feeds only the warn path.
+    /// `STATE_FILE` env / `--state-file` override for warnings and field reads.
+    /// The stop shim passes its session-resolved manifest here, so every
+    /// predicate and diagnostic reads the same target session.
     state_file: Option<String>,
     git_bin: String,
 }
@@ -136,10 +133,12 @@ fn resolve_warn_state_file(args: &KillCheckArgs) -> PathBuf {
 }
 
 /// State file for the FIELD reads (`_kc_state_field` /
-/// `_kc_consecutive_failures`). PARITY: the bash always derives
-/// `<git-root>/.fno/target-state.md` here and never consults `STATE_FILE`, so
-/// neither do we — `state_file` (the warn override) is deliberately not read.
+/// `_kc_consecutive_failures`). The explicit session-resolved path wins; direct
+/// CLI use without one keeps the git-root fallback.
 fn resolve_field_state_file(args: &KillCheckArgs) -> PathBuf {
+    if let Some(state_file) = &args.state_file {
+        return PathBuf::from(state_file);
+    }
     git_root(&args.git_bin).join(".fno/target-state.md")
 }
 
@@ -1143,6 +1142,8 @@ pub fn run_kill_check_capture(args: &[String]) -> (i32, String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn parse_cmp_iteration_forms() {
@@ -1234,5 +1235,42 @@ mod tests {
             Some("old_test.py")
         );
         assert_eq!(porcelain_candidate_path(" M src/main.rs"), None);
+    }
+
+    #[test]
+    fn explicit_state_file_controls_field_predicates() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        fs::create_dir_all(repo.join(".fno")).unwrap();
+        fs::write(repo.join(".fno/target-state.md"), "iteration: 1\n").unwrap();
+        let selected_state = temp.path().join("selected-target-state.md");
+        fs::write(&selected_state, "iteration: 20\n").unwrap();
+        let plan = temp.path().join("plan.md");
+        fs::write(
+            &plan,
+            "---\nkill_criteria:\n  - name: iteration_ceiling\n    predicate: iteration > 15\n    reason: too many\nstatus: ready\n---\n",
+        )
+        .unwrap();
+        let git = temp.path().join("git");
+        fs::write(
+            &git,
+            format!("#!/bin/sh\nprintf '%s\\n' '{}'\n", repo.display()),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&git).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&git, permissions).unwrap();
+
+        let (code, stdout, stderr) = run_kill_check_capture(&[
+            plan.to_string_lossy().into_owned(),
+            "--state-file".into(),
+            selected_state.to_string_lossy().into_owned(),
+            "--git-bin".into(),
+            git.to_string_lossy().into_owned(),
+        ]);
+
+        assert_eq!(code, 1);
+        assert_eq!(stdout, "KILL_CRITERIA_FIRED iteration_ceiling|too many\n");
+        assert!(stderr.is_empty());
     }
 }
