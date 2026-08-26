@@ -845,6 +845,8 @@ mod tests {
 
     #[test]
     fn startup_destructive_recovery_defaults_off_and_reads_opt_in() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
         let cwd = tempfile::tempdir().unwrap();
         assert!(!startup_destructive_recovery_enabled(cwd.path()));
         std::fs::create_dir_all(cwd.path().join(".fno")).unwrap();
@@ -854,6 +856,7 @@ mod tests {
         )
         .unwrap();
         assert!(startup_destructive_recovery_enabled(cwd.path()));
+        clear_config_env();
     }
 
     #[test]

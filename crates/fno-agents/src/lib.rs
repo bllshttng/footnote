@@ -712,6 +712,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "daemon_socket_lost",
     "daemon_state",
     "daemon_recovery_error",
+    "daemon_recovery_interrupted_temp",
     // Binary-version drift (daemon-emitted, plan ab-1891cdff): advisory note that
     // the daemon could not fingerprint its own executable at startup, so every
     // client drift check fails safe to Unknown.

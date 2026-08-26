@@ -725,7 +725,7 @@ def test_spawn_worker_default_substrate_bg(monkeypatch):
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker("ab-2222aaaa", "/w")
     cmd = captured["cmd"]
-    assert cmd[cmd.index("--substrate") + 1] == "bg"
+    assert cmd[cmd.index("--substrate") + 1] == "thread"
 
 
 def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
@@ -1659,13 +1659,13 @@ def test_spawn_worker_passes_substrate_bg(monkeypatch):
     sid = adv._spawn_worker("ab-2222aaaa", "/tmp/x", "some-slug")
     assert sid == "abc12345"  # receipt parse unchanged
     cmd = captured["cmd"]
-    assert "--substrate" in cmd and cmd[cmd.index("--substrate") + 1] == "bg"
+    assert "--substrate" in cmd and cmd[cmd.index("--substrate") + 1] == "thread"
     i = cmd.index("--harness")
-    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "bg"]
+    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "thread"]
 
 
 def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
-    """AC4-EDGE: the G4 `--reconcile` variant still carries `--substrate bg`
+    """AC4-EDGE: the G4 `--reconcile` variant still carries `--substrate thread`
     (substrate is orthogonal to the /target ... --reconcile payload token)."""
     captured = _capture_spawn_argv(monkeypatch)
     sid = adv._spawn_worker(
@@ -1674,7 +1674,7 @@ def test_spawn_worker_reconcile_keeps_substrate_bg(monkeypatch):
     assert sid == "abc12345"
     cmd = captured["cmd"]
     i = cmd.index("--harness")
-    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "bg"]
+    assert cmd[i : i + 4] == ["--harness", "claude", "--substrate", "thread"]
     assert any("--reconcile /tmp/m.md ab-2222aaaa" in tok for tok in cmd)
 
 
