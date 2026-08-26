@@ -22,11 +22,21 @@ import tomli_w
 from fno.agents import dispatch as dispatch_mod
 
 
+@pytest.fixture(autouse=True)
+def _isolate_config_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sanctioned test runner exports FNO_CONFIG; these fixtures own config."""
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "config.toml"))
+
+
 def _write_config(tmp_path: Path, *, pick_on_launch: bool) -> None:
     alt, main = tmp_path / "claude-alt", tmp_path / "claude-main"
     for d in (alt, main):
         d.mkdir(exist_ok=True)
-        (d / ".credentials.json").write_text("{}")
+        (d / ".credentials.json").write_text(
+            '{"claudeAiOauth":{"accessToken":"test-token","refreshToken":"test-refresh"}}'
+        )
     (tmp_path / ".fno").mkdir(exist_ok=True)
     (tmp_path / ".fno" / "config.toml").write_text(
         tomli_w.dumps({
@@ -57,6 +67,7 @@ def armed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """readyrule EXHAUSTED, makers OK, picking armed."""
     _write_config(tmp_path, pick_on_launch=True)
     _pin_config(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
 
     from fno.adapters.providers.runtime_state import write_usage_snapshot

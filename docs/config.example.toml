@@ -211,14 +211,12 @@ dedupe_dead_duplicates = false
 auto_launch_on_blueprint = false
 
 [target.handoff]
-# Enable target self-handoff at pipeline boundaries.
+# Enable explicit target capability escalation.
 enabled = true
-# Context-used %% that triggers a wave-boundary handoff.
+# Context-used %% that triggers a general-session compact nudge.
 used_pct_trigger = 50
-# Context-used %% that triggers a king handoff (below used_pct_trigger).
+# Context-used %% that triggers an earlier king compact nudge.
 king_used_pct_trigger = 40
-# Max handoff generations before refusing further delegation.
-generation_cap = 4
 
 [target.blast]
 # Enable blast-radius routing.

@@ -9,6 +9,7 @@ account (AC1-HP), and a resolver refusal fails closed before any spawn
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -73,6 +74,41 @@ def test_account_overlay_threads_to_pane_and_receipt(monkeypatch, runner):
         next(ln for ln in result.output.splitlines() if ln.startswith("{"))
     )
     assert receipt["account"] == "readyrule"
+
+
+def test_dispatch_account_threads_to_pane_and_receipt(monkeypatch, runner):
+    """Capability handoff can prove the destination provider record from receipt."""
+    received = _stub_pane_path(monkeypatch)
+    from fno.adapters.providers import dispatch, loader
+
+    monkeypatch.setattr(
+        loader,
+        "load_providers",
+        lambda **_kwargs: SimpleNamespace(
+            by_id={"makers": SimpleNamespace(harness="claude")}
+        ),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_env",
+        lambda *_args, **_kwargs: {"CLAUDE_CONFIG_DIR": "/x/.claude-makers"},
+    )
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        [
+            "spawn", "--name", "w1", "hi", "--harness", "claude",
+            "--dispatch-account", "makers", "--here",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert received["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude-makers"}
+    receipt = json.loads(
+        next(ln for ln in result.output.splitlines() if ln.startswith("{"))
+    )
+    assert receipt["dispatch_account"] == "makers"
 
 
 def test_account_refusal_fails_closed(monkeypatch, runner):

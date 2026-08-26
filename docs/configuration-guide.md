@@ -83,10 +83,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `done_probes` | list[str] | `[]` | advanced | Repo-wide ship-gate probes: shell commands loop-check runs (60s each, cap 3 per source) before it will grant DonePRGreen, alongside any a plan declares. Both lists must pass; a plan can add probes and can never silence these. A probe is an OBSERVATION - one that mutates the repo races the session's own edits, and its only backstops are the timeout and the block reason. |
 | `target.dedupe_dead_duplicates` | bool | `false` | never | Opt-in cleanup of provably-dead duplicate state files. |
 | `target.auto_launch_on_blueprint` | bool | `false` | advanced | Auto-launch a bg /target worker when a node reaches ready via /blueprint. |
-| `target.handoff.enabled` | bool | `true` | advanced | Enable target self-handoff at pipeline boundaries. |
-| `target.handoff.used_pct_trigger` | int | `50` | never | Context-used %% that triggers a wave-boundary handoff. |
-| `target.handoff.king_used_pct_trigger` | int | `40` | advanced | Context-used %% that triggers a king handoff (below used_pct_trigger). |
-| `target.handoff.generation_cap` | int | `4` | never | Max handoff generations before refusing further delegation. |
+| `target.handoff.enabled` | bool | `true` | advanced | Enable explicit target capability escalation. |
+| `target.handoff.used_pct_trigger` | int | `50` | never | Context-used %% that triggers a general-session compact nudge. |
+| `target.handoff.king_used_pct_trigger` | int | `40` | advanced | Context-used %% that triggers an earlier king compact nudge. |
 | `target.blast.enabled` | bool | `false` | never | Enable blast-radius routing. |
 | `target.blast.downgrade` | bool | `true` | never | Allow token-saving downgrades in blast routing. |
 | `target.blast.reuse_loc_manifest` | bool | `true` | never | Include loc-ratchet globs in the blast map. |

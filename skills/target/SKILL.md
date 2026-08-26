@@ -37,7 +37,7 @@ That is the whole job when a backlog node or plan is already bound. `fno do targ
 
 **Which path you are on is a READ, not a guess** - dispatch off the node's real state (`fno backlog get <id>`), never self-classification:
 
-- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. The idea-first work (think, blueprint, discovery) is already done - do not re-open it or load its references. Two things still scale with the run and are NOT skipped: the **size profile** (S/M/L) sets the post-build phases (M adds docs + external; L adds adversarial, browser, clean - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md)), and a **multi-wave** plan invokes the wave-boundary handoff at each wave ([references/self-handoff.md](references/self-handoff.md)). A flat single-file plan (the dominant case) has neither and also skips `ph_write`.
+- **ready node** (a plan is bound and its frontmatter reads `status: ready`): you are on the spine above. The idea-first work (think, blueprint, discovery) is already done - do not re-open it or load its references. The **size profile** (S/M/L) still sets the post-build phases (M adds docs + external; L adds adversarial, browser, clean - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md)). Multi-wave plans continue in this session across wave boundaries. A flat single-file plan also skips `ph_write`.
 - **design-rung node** (a plan is bound but its frontmatter still reads `status: design`): take the `/blueprint`-first branch below, then the spine.
 - **bare idea** (no plan): take the `/blueprint`-first branch below, then the spine.
 
@@ -277,7 +277,7 @@ fi
 
 ### 4. Execute Pipeline
 
-**Boundary handoff + cross-project routing.** For a multi-wave plan, INVOKE the handoff helper (`handoff.sh --boundary wave`) at every wave boundary (and at the blueprint->do boundary) - always invoke it, never skip it: its pressure probe parks itself when context is low and spawns a fresh-context successor when context is high, so skipping it silently drops that succession and a high-context run barrels into later waves. A legacy `cross_project: true` manifest routes to spawn-into-project rather than a (removed) parallel pipeline. The helper contract, the `RESULT: BLOCKED` claim-wait stop, and the decision-line exit table are in [references/self-handoff.md](references/self-handoff.md) - load it at a boundary. Never invoke a handoff mid-wave or mid-task.
+**Capability escalation + cross-project routing.** Context pressure is handled by compaction and never triggers a fresh session. Continue across blueprint/do and wave boundaries in this session. Only an external operator or supervising king may invoke the explicit capability-escalation transaction after selecting a stronger destination. Its proof and decision-line contract are in [references/self-handoff.md](references/self-handoff.md). A legacy `cross_project: true` manifest still routes foreign work through spawn-into-project rather than a removed parallel pipeline.
 
 ---
 
@@ -383,7 +383,7 @@ Loaded by state — the "read X when Y" load conditions are inline above; this i
 - [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md) - Attended Claude Plan-Mode backfill front door
 - [references/plan-mode-backfill.md](references/plan-mode-backfill.md) - Backfill adapter mechanics (deeper contract)
 - [references/ship-and-promise.md](references/ship-and-promise.md) - Draining reviews + local review gates before `<promise>`
-- [references/self-handoff.md](references/self-handoff.md) - Pipeline-boundary handoff + retired cross-project routing
+- [references/self-handoff.md](references/self-handoff.md) - Explicit capability escalation + retired cross-project routing
 - [references/phase-handoff.md](references/phase-handoff.md) - Best-effort per-phase handoff artifacts (multi-phase only)
 - [references/pipeline-and-philosophy.md](references/pipeline-and-philosophy.md) - Full phase map + compose-don't-hardcode rationale
 - [references/completion-model.md](references/completion-model.md) - Completion internals: manifest, stop-hook shim, loop-check verb, done() reads, backstop, TerminationReason

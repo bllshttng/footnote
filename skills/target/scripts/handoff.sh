@@ -6,7 +6,7 @@
 # the helper performs all state mutations; the LLM performs only step 9 (close).
 #
 # Usage:
-#   handoff.sh --boundary <blueprint-do|wave> [--flags "<modifiers>"]
+#   handoff.sh --harness <harness> --model <model> [--account <id>]
 #
 # Output (one machine-parseable decision line on stdout):
 #   delegated <node> child=<name> session=<sid> generation=<N>    exit 0
@@ -32,18 +32,38 @@ _EXIT_USAGE=2
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-BOUNDARY=""
-CHILD_FLAGS=""
+BOUNDARY="capability"
+DEST_HARNESS=""
+DEST_MODEL=""
+DEST_ACCOUNT=""
+DEST_DISPATCH_ACCOUNT=""
+DEST_EFFORT=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --boundary)
-      BOUNDARY="${2:-}"
+    --harness)
+      DEST_HARNESS="${2:-}"
       shift 2
       ;;
-    --flags)
-      CHILD_FLAGS="${2:-}"
+    --model)
+      DEST_MODEL="${2:-}"
       shift 2
+      ;;
+    --account)
+      DEST_ACCOUNT="${2:-}"
+      shift 2
+      ;;
+    --dispatch-account)
+      DEST_DISPATCH_ACCOUNT="${2:-}"
+      shift 2
+      ;;
+    --effort)
+      DEST_EFFORT="${2:-}"
+      shift 2
+      ;;
+    --boundary|--flags)
+      echo "handoff: capability escalation requires --harness and --model; boundary triggers are retired" >&2
+      exit "$_EXIT_USAGE"
       ;;
     --)
       shift
@@ -59,8 +79,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-if [ -z "$BOUNDARY" ]; then
-  echo "usage: handoff.sh --boundary <blueprint-do|wave> [--flags \"<modifiers>\"]" >&2
+if [ -z "$DEST_HARNESS" ] || [ -z "$DEST_MODEL" ]; then
+  echo "handoff: capability escalation requires --harness and --model" >&2
+  exit "$_EXIT_USAGE"
+fi
+if [ -n "$DEST_ACCOUNT" ] && [ -n "$DEST_DISPATCH_ACCOUNT" ]; then
+  echo "handoff: pass only one of --account or --dispatch-account" >&2
   exit "$_EXIT_USAGE"
 fi
 
@@ -100,20 +124,10 @@ if [ -f "$_CONFIG_SH" ]; then
   # Set LOCAL_SETTINGS relative to FNO_DIR so config works in sandbox
   LOCAL_SETTINGS="$FNO_DIR/config.toml"
   source "$_CONFIG_SH"
-  GENERATION_CAP=$(get_config "target.handoff.generation_cap" "4")
-  USED_PCT_TRIGGER=$(get_config "target.handoff.used_pct_trigger" "50")
   HANDOFF_ENABLED=$(get_config "target.handoff.enabled" "true")
 else
-  GENERATION_CAP="4"
-  USED_PCT_TRIGGER="50"
   HANDOFF_ENABLED="true"
 fi
-
-# Both are the config-side operand of an integer `[` test whose failure mode is
-# OPEN (see the _USED_PCT guard below), so a typo'd config value would spawn a
-# handoff instead of parking. Fall back to the documented default.
-case "$GENERATION_CAP"   in ''|*[!0-9]*) GENERATION_CAP="4"    ;; esac
-case "$USED_PCT_TRIGGER" in ''|*[!0-9]*) USED_PCT_TRIGGER="50" ;; esac
 
 # ---------------------------------------------------------------------------
 # Helper: emit an event to events.jsonl
@@ -231,35 +245,11 @@ SESSION_ID="$(_parse_manifest_field "$STATE_FILE" "session_id")"
 PLAN_PATH="$(_parse_manifest_field "$STATE_FILE" "plan_path")"
 TARGET_SIZE="$(_parse_manifest_field "$STATE_FILE" "target_size")"
 AUTO_MERGE_APPROVED="$(_parse_manifest_field "$STATE_FILE" "auto_merge_approved")"
-# Current key is claude_session_id; fall back to the pre-rename claude_transcript_id
-# for one release so an in-flight manifest written by an older binary still resolves.
-TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_session_id")"
-[ -n "$TRANSCRIPT_ID" ] || TRANSCRIPT_ID="$(_parse_manifest_field "$STATE_FILE" "claude_transcript_id")"
 NODE_ID="$(_validate_node_id "$(_parse_body_field "$STATE_FILE" "graph_node_id")")"
 CLAIM_KEY="$(_parse_body_field "$STATE_FILE" "target_claim_key")"
 CLAIM_HOLDER="$(_parse_body_field "$STATE_FILE" "target_claim_holder")"
 _CLAIM_TTL_RAW="$(_parse_body_field "$STATE_FILE" "target_claim_ttl")"
 CLAIM_TTL="${_CLAIM_TTL_RAW:-2h}"
-
-# Owning harness of THIS (parent) session, from the ambient session markers in
-# the same precedence order as cli/src/fno/harness_identity.py (x-efc7). The
-# successor name is namespaced by it (tgt-<node>-<harness>-gN) so two dispatchers
-# on different harnesses cannot collide on one registry name (x-3e70: codex's
-# self-handoff died on `agent tgt-fc7-g2 already exists` after fno-loop dispatched
-# a claude worker of the same name). Unknown/no-marker defaults to `claude`,
-# which both preserves the legacy claude lineage and stays distinct from a codex
-# lineage's name.
-# Default-then-strip (whitespace-only markers count as unset, matching the
-# Rust/Python resolvers' .trim()/.strip()); the `:-` default keeps the `//`
-# expansion safe under `set -u` on an unset marker.
-_cx_m="${CODEX_THREAD_ID:-}"; _cl_m="${CLAUDE_CODE_SESSION_ID:-}"
-_cs_m="${CODEX_SESSION_ID:-}"; _gm_m="${GEMINI_SESSION_ID:-}"
-if [ -n "${_cx_m//[[:space:]]/}" ]; then _HARNESS="codex"
-elif [ -n "${_cl_m//[[:space:]]/}" ]; then _HARNESS="claude"
-elif [ -n "${_cs_m//[[:space:]]/}" ]; then _HARNESS="codex"
-elif [ -n "${_gm_m//[[:space:]]/}" ]; then _HARNESS="gemini"
-else _HARNESS="claude"
-fi
 
 if [ -z "$SESSION_ID" ]; then
   echo "parked null reason=\"manifest missing session_id\""
@@ -358,78 +348,21 @@ if [ -f "$SENTINEL" ]; then
   exit "$_EXIT_PARKED"
 fi
 
-# Generation cap check
-# child_gen = 2 + (count of THIS harness's `delegated` events for this node_id).
-# Scoping the count to (node, harness) keeps each lineage's generation monotonic
-# and its cap independent - a codex lineage's handoffs never consume a claude
-# lineage's budget (x-3e70). Pre-change events carry no harness field and so do
-# not match, which is correct: their names lacked the harness infix too, so a
-# reset count can never re-mint an existing name.
+# Capability escalation has one configured destination rung. Historical
+# boundary delegations do not consume it; one prior capability delegation does.
 _PRIOR_COUNT=0
 if [ -f "$EVENTS_FILE" ]; then
   set +o pipefail
   _PRIOR_COUNT="$(grep '"type":"delegated"' "$EVENTS_FILE" 2>/dev/null \
     | grep "\"node_id\":\"${NODE_ID}\"" 2>/dev/null \
-    | grep "\"harness\":\"${_HARNESS}\"" 2>/dev/null \
+    | grep '"handoff_kind":"capability_escalation"' 2>/dev/null \
     | wc -l | tr -d ' ' || echo 0)"
   set -o pipefail
 fi
-CHILD_GEN="$((2 + _PRIOR_COUNT))"
-if [ "$CHILD_GEN" -gt "$GENERATION_CAP" ]; then
-  echo "parked $NODE_ID reason=\"chain-exhausted: generation $CHILD_GEN exceeds cap $GENERATION_CAP\""
+CHILD_GEN=2
+if [ "$_PRIOR_COUNT" -gt 0 ]; then
+  echo "parked $NODE_ID reason=\"chain-exhausted: capability escalation already spent\""
   exit "$_EXIT_PARKED"
-fi
-
-# Pressure boundary check (wave only)
-if [ "$BOUNDARY" = "wave" ]; then
-  # Resolve transcript path
-  _TRANSCRIPT_PATH=""
-  if [ -n "$TRANSCRIPT_ID" ]; then
-    # Claude Code project-dir encoding: both / and . in the cwd path are
-    # replaced by - to form the directory name under ~/.claude/projects/.
-    # Pure parameter expansion (bash 3.2+): single-pass bracket-class replacement.
-    _ENCODED_CWD="${PWD//[\/.]/-}"
-    _TRANSCRIPT_PATH="$HOME/.claude/projects/$_ENCODED_CWD/$TRANSCRIPT_ID.jsonl"
-  fi
-
-  # Locate context-probe.sh (same script directory, or on PATH)
-  _PROBE_SCRIPT="$_SCRIPT_DIR/context-probe.sh"
-  if [ ! -f "$_PROBE_SCRIPT" ]; then
-    _PROBE_SCRIPT="$(command -v context-probe.sh 2>/dev/null || true)"
-  fi
-
-  _PROBE_EXIT=3
-  _PROBE_OUT=""
-  if [ -n "$_PROBE_SCRIPT" ] && [ -f "$_PROBE_SCRIPT" ] && [ -n "$_TRANSCRIPT_PATH" ]; then
-    # Capture the probe's OWN status. A trailing `|| true` here makes the next
-    # `$?` read that `true` (always 0), swallowing the probe's exit 3 - an
-    # unreadable transcript then skipped the park below and fell through to a
-    # spawn it should never have attempted (x-f804).
-    _PROBE_OUT="$(bash "$_PROBE_SCRIPT" "$_TRANSCRIPT_PATH" 2>/dev/null)" \
-      && _PROBE_EXIT=0 || _PROBE_EXIT=$?
-  fi
-
-  if [ "$_PROBE_EXIT" -ne 0 ]; then
-    # Emit handoff_probe_unreadable and park
-    _emit_event "handoff_probe_unreadable" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"probe_exit\":$_PROBE_EXIT,\"transcript_path\":\"${_TRANSCRIPT_PATH:-}\"}"
-    echo "parked $NODE_ID reason=\"no-pressure: probe returned exit $_PROBE_EXIT (unreadable)\""
-    exit "$_EXIT_PARKED"
-  fi
-
-  set +o pipefail
-  _USED_PCT="$(printf '%s' "$_PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
-  set -o pipefail
-  # jq prints NOTHING (rc 0) on empty stdin - `// 0` defaults a null FIELD, not
-  # absent INPUT - so `|| echo 0` never fires and a blank value reaches `[`.
-  # `[ "" -lt N ]` errors and returns 2, which `if` reads as "else": the park
-  # is skipped and the failure is OPEN. Same integer-shape guard the probe
-  # applies to its own inputs.
-  case "$_USED_PCT" in ''|*[!0-9]*) _USED_PCT=0 ;; esac
-  if [ "$_USED_PCT" -lt "$USED_PCT_TRIGGER" ]; then
-    echo "parked $NODE_ID reason=\"no-pressure: used_pct=$_USED_PCT < trigger=$USED_PCT_TRIGGER\""
-    exit "$_EXIT_PARKED"
-  fi
 fi
 
 # Emit-capability preflight: emit `delegated` kind against a throwaway temp file
@@ -448,7 +381,112 @@ if [ "$_PREFLIGHT_OK" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Step 2: Write handoff brief artifact
+# Step 2: Prove the selected destination can infer and use this worktree
+# ---------------------------------------------------------------------------
+_NODE_SLUG="$(fno backlog get "$NODE_ID" 2>/dev/null | jq -r '.slug // empty' 2>/dev/null || true)"
+_NODE_SLUG="$(printf '%s' "$_NODE_SLUG" | tr '[:upper:]_' '[:lower:]-' \
+  | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-48)"
+[ -n "$_NODE_SLUG" ] || _NODE_SLUG="work"
+CHILD_NAME="target-${NODE_ID}-${_NODE_SLUG}-g${CHILD_GEN}"
+_CAPABILITY_NONCE="${HANDOFF_CAPABILITY_NONCE:-$(date +%s)-$$-${RANDOM:-0}}"
+_CAPABILITY_CWD="${HANDOFF_CAPABILITY_EXPECTED_CWD:-$PWD}"
+_CAPABILITY_ROOT="${HANDOFF_CAPABILITY_EXPECTED_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || true)}"
+if [ -z "$_CAPABILITY_ROOT" ]; then
+  echo "parked $NODE_ID reason=\"capability_probe: git root unreadable\""
+  exit "$_EXIT_PARKED"
+fi
+_CAPABILITY_DIGEST="$(printf '%s\n%s\n%s' \
+  "$_CAPABILITY_NONCE" "$_CAPABILITY_CWD" "$_CAPABILITY_ROOT" \
+  | shasum -a 256 | awk '{print $1}')"
+_CAPABILITY_EXPECTED="FNO_CAPABILITY_READY:${_CAPABILITY_DIGEST}"
+_CAPABILITY_PROMPT="Read-only capability probe. Run pwd and git rev-parse --show-toplevel. Compute SHA-256 over these three newline-separated values with no trailing newline: nonce '${_CAPABILITY_NONCE}', the exact pwd output, and the exact git-root output. Reply with exactly FNO_CAPABILITY_READY:<digest> and nothing else."
+
+_SPAWN_ACCOUNT_ARGS=()
+[ -n "$DEST_ACCOUNT" ] && _SPAWN_ACCOUNT_ARGS=(--account "$DEST_ACCOUNT")
+[ -n "$DEST_DISPATCH_ACCOUNT" ] && _SPAWN_ACCOUNT_ARGS=(--dispatch-account "$DEST_DISPATCH_ACCOUNT")
+_SPAWN_EFFORT_ARGS=()
+[ -n "$DEST_EFFORT" ] && _SPAWN_EFFORT_ARGS=(--effort "$DEST_EFFORT")
+
+_ASK_RC=0
+_ASK_OUT=""
+_ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
+_ASK_OUT="$(fno agents spawn --substrate pane \
+  --harness "$DEST_HARNESS" --model "$DEST_MODEL" \
+  ${_SPAWN_ACCOUNT_ARGS[@]+"${_SPAWN_ACCOUNT_ARGS[@]}"} \
+  ${_SPAWN_EFFORT_ARGS[@]+"${_SPAWN_EFFORT_ARGS[@]}"} \
+  --cwd "$PWD" --name "$CHILD_NAME" "$_CAPABILITY_PROMPT" \
+  2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
+_ASK_ERR="$(cat "$_ASK_ERR_FILE" 2>/dev/null)"; rm -f "$_ASK_ERR_FILE"
+
+set +o pipefail
+_SPAWN_RECEIPT="$(printf '%s\n' "$_ASK_OUT" | jq -c \
+  'select(type == "object" and (.name // "") != "")' 2>/dev/null | head -1 || true)"
+set -o pipefail
+_RECEIPT_NAME="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.name // empty' 2>/dev/null || true)"
+_RECEIPT_HARNESS="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.harness // empty' 2>/dev/null || true)"
+_RECEIPT_MODEL="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.model // empty' 2>/dev/null || true)"
+_RECEIPT_ACCOUNT="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.account // .dispatch_account // empty' 2>/dev/null || true)"
+_RECEIPT_BOUND="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.bound // false' 2>/dev/null || true)"
+_RECEIPT_READINESS="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r '.readiness // empty' 2>/dev/null || true)"
+CHILD_SID="$(printf '%s' "$_SPAWN_RECEIPT" | jq -r \
+  '(.session_id | select(. != "")) // (.short_id | select(. != "")) // empty' \
+  2>/dev/null || true)"
+_EXPECTED_ACCOUNT="${DEST_ACCOUNT:-$DEST_DISPATCH_ACCOUNT}"
+
+_CAPABILITY_FAILURE=""
+if [ "$_ASK_RC" -ne 0 ] || [ -z "$_SPAWN_RECEIPT" ]; then
+  _CAPABILITY_FAILURE="spawn rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
+elif [ "$_RECEIPT_NAME" != "$CHILD_NAME" ]; then
+  _CAPABILITY_FAILURE="receipt name $_RECEIPT_NAME != $CHILD_NAME"
+elif [ "$_RECEIPT_HARNESS" != "$DEST_HARNESS" ]; then
+  _CAPABILITY_FAILURE="receipt harness $_RECEIPT_HARNESS != $DEST_HARNESS"
+elif [ "$_RECEIPT_MODEL" != "$DEST_MODEL" ]; then
+  _CAPABILITY_FAILURE="receipt model $_RECEIPT_MODEL != $DEST_MODEL"
+elif [ -n "$_EXPECTED_ACCOUNT" ] && [ "$_RECEIPT_ACCOUNT" != "$_EXPECTED_ACCOUNT" ]; then
+  _CAPABILITY_FAILURE="receipt account $_RECEIPT_ACCOUNT != $_EXPECTED_ACCOUNT"
+elif [ "$_RECEIPT_BOUND" != "true" ]; then
+  _CAPABILITY_FAILURE="child is not bound"
+elif [ "$_RECEIPT_READINESS" != "ready" ]; then
+  _CAPABILITY_FAILURE="child readiness is ${_RECEIPT_READINESS:-unknown}, not ready"
+elif [ -z "$CHILD_SID" ]; then
+  _CAPABILITY_FAILURE="spawn receipt has no child session identity"
+fi
+
+_TRUTH_HANDLE="${CHILD_SID:-$CHILD_NAME}"
+_CAPABILITY_ELAPSED=0
+_CAPABILITY_TIMEOUT="${HANDOFF_CAPABILITY_TIMEOUT:-$VERIFY_TIMEOUT}"
+_CAPABILITY_INTERVAL="${HANDOFF_CAPABILITY_INTERVAL:-1}"
+while [ -z "$_CAPABILITY_FAILURE" ] && [ "$_CAPABILITY_ELAPSED" -lt "$_CAPABILITY_TIMEOUT" ]; do
+  _TRUTH_OUT="$(fno agents truth "$_TRUTH_HANDLE" --json 2>/dev/null || true)"
+  _TRUTH_MESSAGE="$(printf '%s' "$_TRUTH_OUT" | jq -r '.last_message // empty' 2>/dev/null || true)"
+  _TRUTH_MODEL_KIND="$(printf '%s' "$_TRUTH_OUT" | jq -r '.observed_model.kind // empty' 2>/dev/null || true)"
+  _TRUTH_MODEL="$(printf '%s' "$_TRUTH_OUT" | jq -r '.observed_model.model // empty' 2>/dev/null || true)"
+  if [ "$_TRUTH_MESSAGE" = "$_CAPABILITY_EXPECTED" ] \
+      && [ "$_TRUTH_MODEL_KIND" = "observed" ] \
+      && [ "$_TRUTH_MODEL" = "$DEST_MODEL" ]; then
+    break
+  fi
+  sleep "$_CAPABILITY_INTERVAL" 2>/dev/null || true
+  _CAPABILITY_ELAPSED=$((_CAPABILITY_ELAPSED + _CAPABILITY_INTERVAL))
+done
+if [ -z "$_CAPABILITY_FAILURE" ] \
+    && { [ "${_TRUTH_MESSAGE:-}" != "$_CAPABILITY_EXPECTED" ] \
+      || [ "${_TRUTH_MODEL_KIND:-}" != "observed" ] \
+      || [ "${_TRUTH_MODEL:-}" != "$DEST_MODEL" ]; }; then
+  _CAPABILITY_FAILURE="truth mismatch: message/model did not prove destination within ${_CAPABILITY_TIMEOUT}s"
+fi
+
+if [ -n "$_CAPABILITY_FAILURE" ]; then
+  fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
+  fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
+  _emit_event "handoff_failed" \
+    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"capability_probe\",\"detail\":\"$(printf '%s' "$_CAPABILITY_FAILURE" | tr '\n' ' ' | cut -c1-300)\"}"
+  echo "parked $NODE_ID reason=\"capability_probe: $_CAPABILITY_FAILURE\""
+  exit "$_EXIT_PARKED"
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Write handoff brief artifact
 # Convention: .fno/artifacts/handoff/{boundary}-{session_id}.md
 # ---------------------------------------------------------------------------
 mkdir -p "$ARTIFACTS_DIR"
@@ -474,7 +512,7 @@ delegated remaining pipeline work to generation ${CHILD_GEN}.
 The successor session should re-enter via: /fno:target ${NODE_ID}
 with the same worktree, branch, and .fno/ state as this session.
 
-Successor name: tgt-${NODE_ID:3:8}-${_HARNESS}-g${CHILD_GEN}
+Successor name: ${CHILD_NAME}
 BRIEFEOF
 fi
 
@@ -607,14 +645,8 @@ fi
 # restore the manifest MUST exit 12.
 
 # ---------------------------------------------------------------------------
-# Step 6: Spawn successor
+# Step 7: Submit the target command to the proven successor
 # ---------------------------------------------------------------------------
-# Child name: tgt-<node-8hex-suffix>-<harness>-g<child_gen>. The harness infix
-# namespaces the name by the parent lineage so two dispatchers on different
-# harnesses cannot collide on one registry name (x-3e70).
-_NODE_8HEX="${NODE_ID:3:8}"
-CHILD_NAME="tgt-${_NODE_8HEX}-${_HARNESS}-g${CHILD_GEN}"
-
 # Build command: inject the refusal flag when auto_merge_approved != true.
 # The flag is the attributable carrier in the command; the exported env var is
 # the MECHANICAL carrier (x-9d11): the successor's init folds TARGET_NO_MERGE
@@ -633,44 +665,33 @@ fi
 if [ -n "$TARGET_SIZE" ]; then
   SPAWN_FLAGS="$SPAWN_FLAGS $TARGET_SIZE"
 fi
-# User-supplied flags override/extend
-if [ -n "$CHILD_FLAGS" ]; then
-  SPAWN_FLAGS="$SPAWN_FLAGS $CHILD_FLAGS"
-fi
 SPAWN_FLAGS="$(printf '%s' "$SPAWN_FLAGS" | sed 's/^[[:space:]]*//' | sed 's/[[:space:]]*$//')"
 
+case "$DEST_HARNESS" in
+  codex) _TARGET_VERB='$fno:target' ;;
+  opencode) _TARGET_VERB='/fno:target' ;;
+  *) _TARGET_VERB='/fno:target' ;;
+esac
 if [ -n "$SPAWN_FLAGS" ]; then
-  CHILD_CMD="/fno:target $SPAWN_FLAGS $NODE_ID"
+  CHILD_CMD="$_TARGET_VERB $SPAWN_FLAGS $NODE_ID"
 else
-  CHILD_CMD="/fno:target $NODE_ID"
+  CHILD_CMD="$_TARGET_VERB $NODE_ID"
 fi
 
 _ASK_RC=0
 _ASK_OUT=""
-# Group 1 (ab-8b3e4fe0): creation moved off `ask` - `spawn --harness claude`
-# builds the same `claude --bg --name` launch (subscription lane) and prints a
-# compact JSON receipt {"name", "short_id", "harness", "status"}. stderr goes
-# to a temp file, NOT 2>&1: a stderr warning must never pollute the JSON
-# receipt parse below (house rule; gemini review PR #457).
+# The child already proved it can infer and use this worktree. Submit only after
+# the parent claim is released, so the child's target init can acquire the node.
 _ASK_ERR_FILE="$(mktemp 2>/dev/null || printf '%s' "${TMPDIR:-/tmp}/handoff-spawn-$$.err")"
-_ASK_OUT="$(fno agents spawn --harness claude --cwd "$PWD" --name "$CHILD_NAME" "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
+_ASK_OUT="$(fno agents mail send "$_TRUTH_HANDLE" --raw "$CHILD_CMD" 2>"$_ASK_ERR_FILE")" || _ASK_RC=$?
 _ASK_ERR="$(cat "$_ASK_ERR_FILE" 2>/dev/null)"; rm -f "$_ASK_ERR_FILE"
 
-# Parse short_id from the clean-stdout JSON receipt line (grep first as
-# defense in depth). grep/jq exit nonzero on no match; protect against
-# pipefail propagation.
-set +o pipefail
-CHILD_SID="$(printf '%s\n' "$_ASK_OUT" | grep -F '"short_id"' | head -1 | jq -r '.short_id // empty' 2>/dev/null || true)"
-set -o pipefail
-
-# Only a nonzero launch rc is a spawn failure. A clean rc with an empty
-# CHILD_SID (unparseable/truncated receipt) is NOT a failure: the child may be
-# live. It falls through to Step 7's name-keyed registry poll, the authoritative
-# liveness oracle (Locked Decision 1) - the receipt short_id is audit data, not
-# launch proof. Conflating the two used to park the parent while a receiptless
-# child kept running, splitting the branch across two workers (x-1adb).
+# Only a nonzero raw-submit rc is a delivery failure. Task execution is proven
+# separately after this step; a send receipt is never treated as consumption.
 if [ "$_ASK_RC" -ne 0 ] || printf '%s\n' "$_ASK_OUT" | grep -q '"status":[[:space:]]*"refused"'; then
-  # Spawn failure: unwind in order
+  fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
+  fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
+  # Target-seed failure: unwind in order
   #   (a) re-acquire node:<id> FIRST; capture the rc
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
@@ -683,8 +704,8 @@ if [ "$_ASK_RC" -ne 0 ] || printf '%s\n' "$_ASK_OUT" | grep -q '"status":[[:spac
     FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
       --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
     _emit_event "handoff_failed" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"spawn_failed + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC); claim may be held by another worker\"}"
-    echo "handoff-claim-lost $NODE_ID reason=\"re-acquire failed after spawn_failed; claim may be held by another worker - parent must NOT continue this node\""
+      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"target_seed + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC); claim may be held by another worker\"}"
+    echo "handoff-claim-lost $NODE_ID reason=\"re-acquire failed after target_seed; claim may be held by another worker - parent must NOT continue this node\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
@@ -696,93 +717,82 @@ if [ "$_ASK_RC" -ne 0 ] || printf '%s\n' "$_ASK_OUT" | grep -q '"status":[[:spac
   FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
 
-  _FAIL_DETAIL="spawn rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
+  _FAIL_DETAIL="target seed rc=$_ASK_RC${_ASK_ERR:+: $(printf '%s' "$_ASK_ERR" | tr '\n' ' ' | cut -c1-160)}"
 
   if [ "$_RESTORE_RC" -ne 0 ]; then
     _emit_event "handoff_failed" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"restore_failed\",\"detail\":\"spawn_failed + restore mv failed\"}"
-    echo "handoff-restore-failed $NODE_ID reason=\"spawn_failed + restore_failed\""
+      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"restore_failed\",\"detail\":\"target_seed + restore mv failed\"}"
+    echo "handoff-restore-failed $NODE_ID reason=\"target_seed + restore_failed\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
   _emit_event "handoff_failed" \
-    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"spawn_failed\",\"detail\":\"${_FAIL_DETAIL}\"}"
+    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"target_seed\",\"detail\":\"${_FAIL_DETAIL}\"}"
 
-  echo "parked $NODE_ID reason=\"spawn failed: $_FAIL_DETAIL\""
+  echo "parked $NODE_ID reason=\"target_seed: $_FAIL_DETAIL\""
   exit "$_EXIT_PARKED"
 fi
 
 # ---------------------------------------------------------------------------
-# Step 7: Verify child registered in registry (poll up to VERIFY_TIMEOUT)
+# Step 8: Prove the child executed target and owns the new manifest
 # ---------------------------------------------------------------------------
 _VERIFY_ELAPSED=0
-_CHILD_LIVE=0
+_CHILD_TARGET_READY=0
+_CHILD_EXPECTED_HOLDER="target-session:$CHILD_SID"
 while [ "$_VERIFY_ELAPSED" -lt "$VERIFY_TIMEOUT" ]; do
-  set +o pipefail
-  _LIST_ROW="$(fno agents list 2>/dev/null \
-    | jq -c --arg n "$CHILD_NAME" '.agents[]? | select(.name==$n)' 2>/dev/null \
-    | head -1 || true)"
-  _LIST_STATUS="$(printf '%s' "$_LIST_ROW" | jq -r '.status // empty' 2>/dev/null || true)"
-  set -o pipefail
-  if [ "$_LIST_STATUS" = "live" ]; then
-    _CHILD_LIVE=1
-    # Backfill child identity from the live registry row when the spawn receipt
-    # yielded no short_id, so a receiptless-but-live child commits as a real
-    # delegation instead of parking (x-1adb). to_session stays CHILD_NAME; a row
-    # that also lacks short_id/session_id leaves CHILD_SID empty -> "unknown".
-    if [ -z "$CHILD_SID" ]; then
-      # jq's // treats "" as truthy, and registry.py defaults short_id to ""
-      # (not null) for non-stream rows, so select(. != "") is required for the
-      # fallback to session_id to fire on an empty short_id (gemini PR #378).
-      set +o pipefail
-      CHILD_SID="$(printf '%s' "$_LIST_ROW" | jq -r '(.short_id | select(. != "")) // (.session_id | select(. != "")) // empty' 2>/dev/null || true)"
-      set -o pipefail
-    fi
+  _CHILD_CLAIM="$(FNO_CLAIMS_ROOT="$HOME" fno agents claim status "node:$NODE_ID" 2>/dev/null || true)"
+  _CHILD_HOLDER="$(printf '%s' "$_CHILD_CLAIM" | jq -r '.holder // empty' 2>/dev/null || true)"
+  _CHILD_MANIFEST_SESSION=""
+  _CHILD_MANIFEST_NODE=""
+  if [ -f "$STATE_FILE" ]; then
+    _CHILD_MANIFEST_SESSION="$(_parse_manifest_field "$STATE_FILE" "harness_session_id")"
+    [ -n "$_CHILD_MANIFEST_SESSION" ] \
+      || _CHILD_MANIFEST_SESSION="$(_parse_manifest_field "$STATE_FILE" "claude_session_id")"
+    _CHILD_MANIFEST_NODE="$(_validate_node_id "$(_parse_body_field "$STATE_FILE" "graph_node_id")")"
+  fi
+  if [ "$_CHILD_HOLDER" = "$_CHILD_EXPECTED_HOLDER" ] \
+      && [ "$_CHILD_MANIFEST_SESSION" = "$CHILD_SID" ] \
+      && [ "$_CHILD_MANIFEST_NODE" = "$NODE_ID" ]; then
+    _CHILD_TARGET_READY=1
     break
   fi
   sleep "$VERIFY_INTERVAL" 2>/dev/null || true
   _VERIFY_ELAPSED=$((_VERIFY_ELAPSED + VERIFY_INTERVAL))
 done
 
-if [ "$_CHILD_LIVE" -eq 0 ]; then
-  # Verify failed: unwind in order
-  #   (a) re-acquire node:<id> FIRST; capture the rc
+if [ "$_CHILD_TARGET_READY" -eq 0 ]; then
+  fno agents stop "$CHILD_NAME" >/dev/null 2>&1 || true
+  FNO_CLAIMS_ROOT="$HOME" fno agents claim release "node:$NODE_ID" \
+    --holder "$_CHILD_EXPECTED_HOLDER" >/dev/null 2>&1 || true
+  fno agents rm "$CHILD_NAME" >/dev/null 2>&1 || true
+
   _REACQ_RC=0
   FNO_CLAIMS_ROOT="$HOME" fno agents claim acquire "node:$NODE_ID" \
     --holder "$CLAIM_HOLDER" --ttl "$CLAIM_TTL" >/dev/null 2>&1 || _REACQ_RC=$?
-
   if [ "$_REACQ_RC" -ne 0 ]; then
-    # Re-acquire failed: another worker may now hold the claim.
-    # Do NOT restore the manifest (leave it archived so this session closes
-    # safely). Release the dispatch reservation and exit 12.
     FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
       --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
     _emit_event "handoff_failed" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"verify_timeout + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC); claim may be held by another worker\"}"
-    echo "handoff-claim-lost $NODE_ID reason=\"re-acquire failed after verify_timeout; claim may be held by another worker - parent must NOT continue this node\""
+      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"reacquire_failed\",\"detail\":\"target_execution + re-acquire node:$NODE_ID failed (rc=$_REACQ_RC)\"}"
+    echo "handoff-claim-lost $NODE_ID reason=\"re-acquire failed after target_execution; parent must NOT continue this node\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
-  #   (b) restore archived manifest
   _RESTORE_RC=0
+  rm -f "$STATE_FILE" 2>/dev/null || true
   mv "$ARCHIVED_STATE" "$STATE_FILE" 2>/dev/null || _RESTORE_RC=$?
-
-  #   (c) release dispatch reservation
   FNO_CLAIMS_ROOT="$HOME" fno agents claim release "$DISPATCH_KEY" \
     --holder "$DISPATCH_HOLDER" >/dev/null 2>&1 || true
-
   if [ "$_RESTORE_RC" -ne 0 ]; then
-    # Restore failed: emit restore_failed (supersedes verify_timeout in the event log)
     _emit_event "handoff_failed" \
-      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"restore_failed\",\"detail\":\"verify_timeout + restore mv failed\"}"
-    echo "handoff-restore-failed $NODE_ID reason=\"verify_timeout + restore_failed\""
+      "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"restore_failed\",\"detail\":\"target_execution + restore mv failed\"}"
+    echo "handoff-restore-failed $NODE_ID reason=\"target_execution + restore_failed\""
     exit "$_EXIT_RESTORE_FAILED"
   fi
 
   _emit_event "handoff_failed" \
-    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"verify_timeout\",\"detail\":\"child $CHILD_NAME not live within ${VERIFY_TIMEOUT}s\"}"
-
-  echo "parked $NODE_ID reason=\"verify timeout: child $CHILD_NAME not live within ${VERIFY_TIMEOUT}s\""
+    "{\"node_id\":\"$NODE_ID\",\"session_id\":\"$SESSION_ID\",\"reason\":\"target_execution\",\"detail\":\"child claim/manifest proof missing or mismatched after ${VERIFY_TIMEOUT}s\"}"
+  echo "parked $NODE_ID reason=\"target_execution: child claim/manifest proof missing or mismatched\""
   exit "$_EXIT_PARKED"
 fi
 
@@ -790,12 +800,10 @@ fi
 # Step 8: Commit the delegation
 # ---------------------------------------------------------------------------
 
-# 8a. Emit delegated event. child_session degrades to "unknown" only when
-# neither the receipt nor the registry row carried a short_id/session_id
-# (AC4-EDGE); correctness rides on to_session=CHILD_NAME, not this field.
-_CHILD_SESSION="${CHILD_SID:-unknown}"
+# 8a. Emit delegated only after capability and target-execution proof.
+_CHILD_SESSION="$CHILD_SID"
 _emit_event "delegated" \
-  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$_CHILD_SESSION\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN,\"harness\":\"$_HARNESS\"}"
+  "{\"node_id\":\"$NODE_ID\",\"from_session\":\"$SESSION_ID\",\"to_session\":\"$CHILD_NAME\",\"child_session\":\"$_CHILD_SESSION\",\"boundary\":\"$BOUNDARY\",\"generation\":$CHILD_GEN,\"harness\":\"$DEST_HARNESS\",\"model\":\"$DEST_MODEL\",\"account\":\"${DEST_ACCOUNT:-$DEST_DISPATCH_ACCOUNT}\",\"handoff_kind\":\"capability_escalation\"}"
 
 # 8b. Emit session_satisfied (trigger=delegated)
 # Compute gate_state_hash from archived manifest (sha256 of the file, or "none")

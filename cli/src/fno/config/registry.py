@@ -243,10 +243,9 @@ FIELD_META: dict[str, Meta] = {
     "target.auto_launch_on_blueprint": Meta(
         "advanced", "Auto-launch a bg /target worker when a node reaches ready via /blueprint.",
     ),
-    "target.handoff.enabled": Meta("advanced", "Enable target self-handoff at pipeline boundaries."),
-    "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a wave-boundary handoff."),
-    "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers a king handoff (below used_pct_trigger)."),
-    "target.handoff.generation_cap": Meta("never", "Max handoff generations before refusing further delegation."),
+    "target.handoff.enabled": Meta("advanced", "Enable explicit target capability escalation."),
+    "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a general-session compact nudge."),
+    "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers an earlier king compact nudge."),
     "target.blast.enabled": Meta("never", "Enable blast-radius routing."),
     "target.blast.downgrade": Meta("never", "Allow token-saving downgrades in blast routing."),
     "target.blast.reuse_loc_manifest": Meta("never", "Include loc-ratchet globs in the blast map."),

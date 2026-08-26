@@ -178,7 +178,7 @@ config:
       API_TIMEOUT_MS: "3000000"
 ```
 
-A `[1m]` worker auto-injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The `[1m]` variant already selects the 1M context; this var is the compaction threshold (how full the window gets before compaction), capped at the model window, so a value of `1000000` is a no-op (no compaction before the ceiling). The king handoff nudge fires at ~40%; 800000 (~80%) is the backstop above it. Override it via `extra_env` only to tune the backstop - setting `1000000` re-removes it.
+A `[1m]` worker injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The variant already selects the 1M context. This variable only sets the compaction threshold, capped at the model window. A value of `1000000` is therefore a no-op. The king compact nudge fires near 40%. The 800000 backstop fires near 80%. Override it through `extra_env` only to tune that backstop.
 
 The built-in `zai` provider already routes the background (haiku) tier to the cheaper `glm-4.7`. Opus/sonnet run `glm-5.3`, while judgment-light background traffic stays cheap on the same provider.
 

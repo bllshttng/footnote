@@ -242,8 +242,7 @@ fi
 # 4. Caller-is-holder gate (absorbs cv-60186ad3, plan sec 2.4).
 #    If the invoking session's target-state.md has graph_node_id == this node,
 #    we ARE the live worker on this node. Blind-spawning a second worker would
-#    violate the one-worker-per-node invariant. Park instead and let the LLM
-#    invoke handoff.sh explicitly at the blueprint->do boundary.
+#    violate the one-worker-per-node invariant, so continue in this session.
 #
 #    Degrade safely: if the manifest is unreadable for any reason, fall through
 #    to today's blind-spawn behavior (absence of evidence of holding != holding).
@@ -257,7 +256,7 @@ if [[ -f "$_MANIFEST" ]]; then
     | sed "s/^graph_node_id:[[:space:]]*//" | tr -d '"' | tr -d "'" \
     | tr -d ' ' || true)"
   if [[ -n "$_MANIFEST_NODE" && "$_MANIFEST_NODE" == "$node" ]]; then
-    echo "parked $node reason=\"caller-is-holder: structural handoff at blueprint->do is the sanctioned path (skills/target/scripts/handoff.sh); not blind-spawning\""
+    echo "parked $node reason=\"caller-is-holder: continue in this session; not blind-spawning a duplicate\""
     exit 0
   fi
 fi

@@ -1386,22 +1386,12 @@ class ReviewBlock(BaseModel):
 
 
 class HandoffBlock(BaseModel):
-    """Self-handoff settings (nested under 'config.target.handoff').
+    """Capability escalation plus the shared context-compact thresholds.
 
-    Controls the sanctioned session-succession protocol (ab-534bcc55) that lets
-    a /target session hand the rest of its pipeline to a fresh-context successor
-    at pipeline boundaries instead of carrying earlier-phase context baggage.
-
-    Locked Decisions 6-8 (plan sec "Locked Decisions"):
-      6. Boundary-agnostic primitive, staged wiring; generation cap 4.
-      7. Transcript-derived context probe is the only pressure source; probe
-         failure = no handoff (fail-safe).
-      8. used_pct_trigger default 50, boundary-only evaluation.
-
-    Shell consumer: skills/target/scripts/handoff.sh reads these via
-    get_config "target.handoff.*" (GENERATION_CAP, USED_PCT_TRIGGER,
-    HANDOFF_ENABLED) with defaults matching these values exactly. Keep both
-    in sync when changing defaults.
+    ``enabled`` gates the explicit escalation transaction. Context pressure is
+    handled by ``hooks/context-nudge.sh`` and compaction, never by succession.
+    The historical generation knob is intentionally absent: one externally
+    selected destination is one escalation rung.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1409,7 +1399,6 @@ class HandoffBlock(BaseModel):
     enabled: bool = True
     used_pct_trigger: int = 50
     king_used_pct_trigger: int = 40
-    generation_cap: int = 4
 
     @field_validator("used_pct_trigger")
     @classmethod
@@ -1435,7 +1424,7 @@ class HandoffBlock(BaseModel):
 
     @model_validator(mode="after")
     def king_trigger_below_teammate_trigger(self) -> "HandoffBlock":
-        """A king hands off EARLIER than a teammate, so an EXPLICITLY-set
+        """A king compacts EARLIER than a teammate, so an EXPLICITLY-set
         king_used_pct_trigger must stay strictly below used_pct_trigger. The
         refusal MESSAGE is the deliverable: the failure mode this prevents is a
         future reader "tidying" 40 up to 50, and the rationale lands in front of
@@ -1456,24 +1445,12 @@ class HandoffBlock(BaseModel):
                 "config.target.handoff.king_used_pct_trigger must be BELOW "
                 "used_pct_trigger "
                 f"(got {self.king_used_pct_trigger}, teammate trigger "
-                f"{self.used_pct_trigger}). A king hands off earlier than a "
+                f"{self.used_pct_trigger}). A king compacts earlier than a "
                 "teammate on purpose: a worker's degradation costs one node, "
                 "a king's propagates into every ruling it issues and every "
                 "worker it routes, and the handoff itself costs context."
             )
         return self
-
-    @field_validator("generation_cap")
-    @classmethod
-    def generation_cap_positive(cls, v: int) -> int:
-        """A cap below 1 would immediately refuse every handoff attempt."""
-        if v < 1:
-            raise ValueError(
-                "config.target.handoff.generation_cap must be >= 1; "
-                f"got {v}"
-            )
-        return v
-
 
 class BlastConfig(BaseModel):
     """Blast-radius router settings (nested under 'config.target.blast', x-518f).

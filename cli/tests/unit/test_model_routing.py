@@ -622,7 +622,7 @@ def test_one_m_suffix_injects_compact_window() -> None:
     assert route is not None
     # 800000, not 1000000: the [1m] variant already selects the 1M context, so a
     # 1M threshold is a no-op (no compaction before the ceiling). 800000 is the
-    # ~80% backstop above the ~40% king handoff nudge.
+    # ~80% backstop above the ~40% king compact nudge.
     assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "800000"
 
 
