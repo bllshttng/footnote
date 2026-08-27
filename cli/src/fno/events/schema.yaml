@@ -296,7 +296,7 @@ event_types:
           description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."
         review_round:
           type: integer
-          description: "The branch-scoped round this verdict is (a review VERDICT since the last pass; CI failures, lint failures and rebases are not rounds). The round budget (config.review.max_rounds) counts these. OPTIONAL."
+          description: "The declared round this verdict is, as a running max across the PR's life (a review VERDICT; CI failures, lint failures and rebases are not rounds). The round budget (config.review.max_rounds) counts these. OPTIONAL."
         dispositions:
           type: array
           description: "The author's recorded disposition per finding_key for THIS round: `fixed`, `declined` (with a non-empty reason), or `nonblocking`. A declined BLOCKING finding is terminal only with corroboration the author cannot mint alone - see docs/architecture/review-coverage-termination.md. OPTIONAL."
@@ -497,7 +497,7 @@ event_types:
               description: "reviewed_head_sha of every range that participated in the chain. A local_attestation verdict whose reviewed_sha is here counts as Reviewed when tiled is true, whatever its single-sha freshness says."
         rounds_used:
           type: integer
-          description: "Review rounds since the last pass on this branch (a round is a review VERDICT since the last pass; CI failures, lint failures and rebases are not rounds; a pass resets the counter). Computed by the Rust producer from the same chain, same scoping as the tiling walk, and re-derived by the Python merge gate before it refuses - never trusted off this row for a gate decision (the status surface reads the flag below to name its blocker)."
+          description: "Review rounds across the whole life of the PR (a round is a review VERDICT; CI failures, lint failures and rebases are not rounds; a pass is one round like any verdict and refunds nothing). Computed by the Rust producer from the same chain, same scoping as the tiling walk, and re-derived by the Python merge gate before it refuses - never trusted off this row for a gate decision (the status surface reads the flag below to name its blocker)."
         rounds_exhausted:
           type: boolean
           description: "Whether rounds_used exceeds the resolved config.review.max_rounds (default 2). The raw budget fact: at the cap the PR merges with its remaining findings filed as nodes, unless a hard finding remains (see impossible)."
