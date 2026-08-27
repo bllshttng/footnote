@@ -2424,7 +2424,7 @@ def _unmeasured_base(base_label: str, why: str) -> str:
     return f"{base_label} behind=unmeasured:{why}"
 
 
-def _truthful_base(cwd: Path, base_label: str) -> str:
+def _truthful_base(cwd: Path, base_label: str, *, measure: bool = True) -> str:
     """The base label with a MEASURED distance, or an explicit unmeasured
     marker (x-d401 / x-3ae1).
 
@@ -2433,9 +2433,17 @@ def _truthful_base(cwd: Path, base_label: str) -> str:
     whenever the ref is stale, and the caller learns otherwise only at PR
     conflict time. The receipt either fetches and prints the real count, or
     says the distance was not measured. Never a silent zero.
+
+    ``measure=False`` is the idempotent path's spelling: the same renderer,
+    but the distance is skipped without touching the network. ONE renderer
+    decides the shape of every base receipt - an in-place run reads bare
+    everywhere (there is no base ref to be behind), a ref reads with its
+    distance or an explicit unmeasured token.
     """
     if base_label == "in-place":
         return base_label
+    if not measure:
+        return _unmeasured_base(base_label, "idempotent-path-does-no-network")
     # A `_base_receipt` label carries `@<fork-sha>` provenance; the distance
     # is measured against the bare ref underneath it.
     bare = base_label.rpartition("@")[0] or base_label
@@ -3314,7 +3322,7 @@ def start(
         if verdict == "ours":
             typer.echo(
                 f"worktree={wt_path}  .fno={fno_state}  "
-                f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
+                f"base={_truthful_base(cwd, base_label, measure=False)}  "
                 f"node=already-claimed holder={(claim_info or {}).get('holder') or '?'} "
                 f"state={(claim_info or {}).get('state') or '?'}"
             )
@@ -3352,7 +3360,7 @@ def start(
         )
         typer.echo(
             f"worktree={wt_path}  .fno={fno_state}  "
-            f"base={_unmeasured_base(base_label, 'idempotent-path-does-no-network')}  "
+            f"base={_truthful_base(cwd, base_label, measure=False)}  "
             f"node=reacquired (successor took over from {prior})"
         )
         typer.echo(f"cd {wt_path} to continue the pipeline.", err=True)
