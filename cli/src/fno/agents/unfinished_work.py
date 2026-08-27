@@ -295,6 +295,10 @@ def classify(
     if not obs.graph_ok:
         _mark_unknown(KIND_STARTED, "graph unreadable")
         _mark_unknown(KIND_DONE_AHEAD, "graph unreadable")
+        # PR candidates are enumerated FROM the graph: an unreadable graph is
+        # zero candidates for a reason, which is the unmeasurable case, not
+        # a clean zero.
+        _mark_unknown(KIND_PR, "graph unreadable")
     if not obs.claims_ok:
         _mark_unknown(KIND_STARTED, "claims unreadable")
     if not obs.registry_ok:
@@ -651,12 +655,10 @@ def _read_registry_rows(path: Optional[Path] = None) -> tuple[dict, bool]:
     a genuine read failure, which reads every candidate unmeasurable."""
     import os
 
+    from fno import paths as _paths
+
     override = os.environ.get("WORKTREE_STATUS_REGISTRY")
-    target = (
-        Path(override)
-        if override
-        else (path or Path.home() / ".fno" / "agents" / "registry.json")
-    )
+    target = Path(override) if override else (path or _paths.agents_registry_path())
     if not target.exists():
         return {}, True
     try:
@@ -678,6 +680,26 @@ def _read_registry_rows(path: Optional[Path] = None) -> tuple[dict, bool]:
 
 def _session_handle(row: dict) -> Optional[str]:
     return row.get("harness_session_id") or row.get("short_id") or None
+
+
+def _main_worktree(listed: list, runner=None) -> str:
+    """The repository's main worktree path from any linked row: the shared
+    git dir. A normal repo answers ``<repo>/.git``; a bare container answers
+    the bare repo itself (there is no main tree to exclude). Falls back to
+    the first listed row only when git will not answer."""
+    for _branch, path in listed[:1]:
+        proc = _run_git(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=Path(path),
+            runner=runner,
+        )
+        if proc.returncode == 0:
+            common = (proc.stdout or "").strip()
+            if common.endswith("/.git"):
+                return str(Path(common).parent)
+            if common:
+                return common
+    return str(Path(listed[0][1]))
 
 
 def _parse_iso_epoch(stamp) -> Optional[float]:
@@ -755,11 +777,13 @@ def collect_observations(
         except Exception as exc:  # noqa: BLE001 - a failed listing is a warning
             warnings.append(f"worktree list failed for {root}: {exc}")
             listed = []
-        # The listing's first row is the repository's MAIN worktree: clearing
-        # verbs name it, never whichever linked worktree happened to run the
-        # report (a finding that says "cd <some worktree>" targets the wrong
-        # checkout).
-        main_path = str(Path(listed[0][1])) if listed else str(root)
+        # The repository's main worktree, resolved from the shared git dir
+        # rather than the listing's first row: a bare worktree-container
+        # contributes no main row at all, so "first listed" would name a
+        # linked tree and silently exclude it from the dirty dimension.
+        # Clearing verbs name the main tree, never whichever linked worktree
+        # happened to run the report.
+        main_path = _main_worktree(listed, runner) if listed else str(root)
         fetched_ok[main_path] = fetch_origin_main(Path(root), runner=runner)
         if not fetched_ok[main_path]:
             warnings.append(f"git fetch origin main failed for {root}")
@@ -800,7 +824,27 @@ def collect_observations(
         if not handle:
             return None
         if handle in probe_cache:
-            return probe_cache[handle]
+            cached = probe_cache[handle]
+            # A later pass may carry claim evidence the first touch lacked
+            # (the registry pass runs before the node pass). Merge the more
+            # informative reading rather than baking in whichever pass
+            # touched the handle first: claim state and its pid are facts
+            # about the handle, not about the pass that found them.
+            if claim_view and cached.claim_state is None:
+                merged = OwnerProbe(
+                    handle=handle,
+                    pid_alive=(
+                        cached.pid_alive
+                        if cached.pid_alive is not None
+                        else _default_pid_alive(claim_view.get("pid"))
+                    ),
+                    transcript_age_s=cached.transcript_age_s,
+                    claim_state=(claim_view or {}).get("state"),
+                    stored_exited=cached.stored_exited,
+                )
+                probe_cache[handle] = merged
+                return merged
+            return cached
         claim_state = (claim_view or {}).get("state")
         stored_exited = any(
             row.get("status") == "exited"
@@ -1034,17 +1078,22 @@ def publish_report(
     except Exception as exc:  # noqa: BLE001 - mail never breaks the report
         note(f"watchdog mail failed: {exc}")
 
-    prev_events_sig = wd._last_unfinished_signature()
+    # The event gate is its own stamp, advanced by this publish regardless of
+    # the mail outcome: with no recipient configured the mail stamp rightly
+    # never moves, and chaining the event gate to it would re-emit every
+    # finding on every cadence.
+    prev_events_sig = wd._last_unfinished_events_signature()
+    events_sig = snapshot_signature(snapshot)
     wd.write_sweep_file(
         source,
-        dict(payload["counts"]),
+        None,
         now_s,
-        signature,
-        events_signature=snapshot_signature(snapshot),
+        None,
         unfinished={
             "counts": payload["counts"],
             "complete": payload["complete"],
             "signature": signature,
+            "events_signature": events_sig,
         },
     )
 

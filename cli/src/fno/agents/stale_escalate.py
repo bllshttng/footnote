@@ -14,6 +14,13 @@ from pathlib import Path
 MARKER = "watchdog-unfinished-work"
 MAX_LISTED_ROWS = 10
 
+#: Severity order for the question's rows and its ask line: the same order
+#: the report's digest uses, so "clear the top finding first" names the
+#: finding the digest lists first, not whichever sorts alphabetically.
+from fno.agents.unfinished_work import DIMENSIONS as _DIMENSIONS  # noqa: E402
+
+_SEVERITY = {kind: i for i, kind in enumerate(_DIMENSIONS)}
+
 
 def dedupe_key(identities: "list[str]") -> str:
     joined = "\n".join(sorted(set(identities)))
@@ -23,7 +30,7 @@ def dedupe_key(identities: "list[str]") -> str:
 def _unique(findings):
     return sorted(
         {f"{f.kind}:{f.subject}": f for f in findings}.values(),
-        key=lambda f: f"{f.kind}:{f.subject}",
+        key=lambda f: (_SEVERITY.get(f.kind, len(_SEVERITY)), f.subject),
     )
 
 

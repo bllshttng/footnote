@@ -2093,11 +2093,11 @@ def sweep_path() -> Path:
 
 def write_sweep_file(
     source: str,
-    counts: dict,
+    counts: Optional[dict],
     now_s: float,
-    signature: str = "",
+    signature: Optional[str] = None,
     *,
-    events_signature: str = "",
+    events_signature: Optional[str] = None,
     terminal_harness_rows: int = 0,
     recoverable_count: Optional[int] = None,
     unfinished: Optional[dict] = None,
@@ -2129,6 +2129,17 @@ def write_sweep_file(
         # "FLEET WATCHDOG STALE, last sweep 0m old" - a line that blames the
         # daemon for the operator having looked.
         last_tick = now_s if source == "tick" else _last_tick_epoch()
+        # The verdict lane's top-level stamps (counts, signature,
+        # events_signature, terminal_harness_rows) belong to the session
+        # verdict cadence. A REPORT write must not speak for that lane: it
+        # carries the previous values through (None means carry), exactly
+        # the protection the tick cadence stamp already gets.
+        if counts is None:
+            counts = previous.get("counts") or {}
+        if signature is None:
+            signature = str(previous.get("signature") or "")
+        if events_signature is None:
+            events_signature = str(previous.get("events_signature") or "")
         payload: dict[str, Any] = {
             "source": source,
             "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
@@ -2145,20 +2156,22 @@ def write_sweep_file(
             payload["recoverable_count"] = previous["recoverable_count"]
         if unfinished is not None:
             payload["unfinished_counts"] = dict(unfinished.get("counts") or {})
-            payload["unfinished_complete"] = bool(unfinished.get("complete"))
             payload["unfinished_work_complete"] = bool(unfinished.get("complete"))
             payload["unfinished_signature"] = str(unfinished.get("signature") or "")
-        elif isinstance(previous.get("unfinished_work_complete"), bool):
+            payload["unfinished_events_signature"] = str(
+                unfinished.get("events_signature") or ""
+            )
+        else:
             # An apply/diagnostic run must not erase the report's evidence
             # any more than a hand-run may erase the tick's.
-            payload["unfinished_counts"] = previous.get("unfinished_counts") or {}
-            payload["unfinished_complete"] = previous.get("unfinished_complete")
-            payload["unfinished_work_complete"] = previous.get(
-                "unfinished_work_complete"
-            )
-            payload["unfinished_signature"] = str(
-                previous.get("unfinished_signature") or ""
-            )
+            for key in (
+                "unfinished_counts",
+                "unfinished_work_complete",
+                "unfinished_signature",
+                "unfinished_events_signature",
+            ):
+                if key in previous:
+                    payload[key] = previous[key]
         if recovery_events_signature is not None:
             payload["recovery_events_signature"] = recovery_events_signature
         elif isinstance(previous.get("recovery_events_signature"), str):
@@ -2170,6 +2183,22 @@ def write_sweep_file(
         path.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
+
+
+def _last_unfinished_events_signature() -> str:
+    """The report EVENT lane's gate. Keyed on the finding-set identity and
+    advanced by every publish, independent of the mail stamp: with no mail
+    recipient configured the mail gate legitimately never advances, and an
+    event gate chained to it would re-emit every finding every tick."""
+    try:
+        return str(
+            json.loads(sweep_path().read_text(encoding="utf-8")).get(
+                "unfinished_events_signature"
+            )
+            or ""
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
 
 
 def _last_recovery_events_signature() -> str:

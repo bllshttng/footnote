@@ -4066,9 +4066,99 @@ def test_ac9_manual_and_tick_stamps_agree_for_one_snapshot(tmp_path, monkeypatch
     tick = json.loads(sweep_file.read_text())
 
     assert manual["unfinished_counts"] == tick["unfinished_counts"]
-    assert manual["unfinished_complete"] == tick["unfinished_complete"] is True
+    assert manual["unfinished_work_complete"] == tick["unfinished_work_complete"] is True
     assert manual["unfinished_signature"] == tick["unfinished_signature"]
     assert manual["source"] == "manual" and tick["source"] == "tick"
+
+
+def test_report_event_gate_advances_without_a_mail_recipient(tmp_path, monkeypatch):
+    """The event gate is its own stamp: with watchdog_mail_to empty the mail
+    stamp never moves, and a gate chained to it would re-emit every finding
+    event on every cadence. The second publish of an unchanged finding set
+    emits no finding events."""
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    events = []
+    monkeypatch.setattr(watchdog, "emit_event", lambda kind, data: events.append(kind))
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(_se, "escalate_unfinished", lambda f, **kw: ("none", ""))
+
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+    first = [e for e in events if e == "watchdog_unfinished_work_finding"]
+    assert len(first) == 1
+
+    events.clear()
+    uw.publish_report(snap, source="manual", now_s=NOW_1840 + 600, mail_to="")
+    assert not [e for e in events if e == "watchdog_unfinished_work_finding"]
+
+
+def test_report_write_preserves_the_verdict_lanes_stamps(tmp_path, monkeypatch):
+    """The report and the verdict lane share one sweep file. A report write
+    must carry the verdict lane's stamps through untouched, or the next
+    --apply run re-mails an unchanged verdict digest."""
+    import fno.paths as paths_mod
+
+    sweep_file = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(_se, "escalate_unfinished", lambda f, **kw: ("none", ""))
+
+    watchdog.write_sweep_file(
+        "manual", {"wake": 1}, NOW_1840, "row-a:wake", events_signature="row-a:wake"
+    )
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+
+    after = json.loads(sweep_file.read_text())
+    assert after["counts"] == {"wake": 1}
+    assert after["signature"] == "row-a:wake"
+    assert after["events_signature"] == "row-a:wake"
+    assert after["unfinished_work_complete"] is True
+
+
+def test_graph_failure_marks_the_pr_dimension_unknown():
+    """PR candidates are enumerated from the graph, so an unreadable graph
+    is zero candidates for a reason: the unmeasurable case, never a clean
+    zero."""
+    snap = uw.classify(_uw_obs(graph_ok=False))
+    assert snap.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+def test_ask_line_names_the_severity_order_not_the_alphabet():
+    """The question's ask says 'clear the top finding first': top means the
+    digest's severity order, and a dirty-worktree subject that sorts before
+    a started node alphabetically must not win the slot."""
+    from fno.agents import stale_escalate as se
+
+    started = uw.Finding(
+        kind=uw.KIND_STARTED,
+        subject="x-1",
+        basis="in_progress, claim free",
+        clear_command="/fno:target x-1",
+    )
+    dirty = uw.Finding(
+        kind=uw.KIND_DIRTY,
+        subject="/w/aaa",
+        basis="3 dirty path(s)",
+        clear_command="git -C /w/aaa status",
+    )
+    key = se.dedupe_key([f"{f.kind}:{f.subject}" for f in (started, dirty)])
+    text = se.question_text([dirty, started], key)
+    # The listed order is severity order, and the ask line names the first
+    # of that order.
+    assert text.index("started_free_claim x-1") < text.index("dirty_ownerless_worktree /w/aaa")
+    assert se._ask_line([dirty, started]) == "/fno:target x-1"
 
 
 # --- two defects the first live sweep caught -------------------------------

@@ -4307,8 +4307,6 @@ def cmd_watchdog(
         for warning in payload.get("warnings") or []:
             print(f"  {warning}", file=sys.stderr)
         raise typer.Exit(code=3)
-    from fno.paths import resolve_repo_root  # noqa: F401 - diagnostic path context
-
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
     ]
