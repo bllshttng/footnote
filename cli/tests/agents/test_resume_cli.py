@@ -69,9 +69,8 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     assert res.exit_code == 0
     assert res.exec_argv[0] == "codex"
     # The subcommand and the full session id come from the capability
-    # contract, in that order. Asserted by relative position rather than by
-    # tail slice: modal-clearing flags are appended after the id, which the
-    # codex parser accepts.
+    # contract, in that order. Nothing trails the positional: codex's globals
+    # (the -c grant, --cd) all sit before the subcommand.
     assert "resume" in res.exec_argv
     sid = "00000000-1111-2222-3333-444444444444"
     assert res.exec_argv.index("resume") < res.exec_argv.index(sid)
@@ -1460,7 +1459,7 @@ def test_script_wrapped_attach_uses_bsd_form_on_real_bsd_platform_strings(monkey
         assert cmd == "script -q /dev/null claude attach deadbeef", platform
 
 
-def test_codex_resume_argv_clears_both_modals_and_places_the_worktree() -> None:
+def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
     """A codex resume must land in the row's own tree.
 
     Codex asks session-directory vs current-directory and defaults to the

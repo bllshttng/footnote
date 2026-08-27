@@ -1716,7 +1716,11 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
     // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
     // lane that does not. `-c` is kept because one grant builder serves both.)
     if provider == "codex" {
-        if let Some(cwd) = cwd {
+        // `.filter` so an empty cwd is treated as absent, exactly as Python's
+        // `if cwd` does for both the grant and --cd. Without it this splices a
+        // bare `--cd ""`, which codex cannot start on, and the parity test does
+        // not exercise the empty string.
+        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
             let grant_len = grant.len();
             if !grant.is_empty() {
