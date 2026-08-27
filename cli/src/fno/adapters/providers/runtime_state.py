@@ -228,14 +228,17 @@ def _fold_legacy_state_files() -> None:
             src = _read_disk_payload(legacy) or {}
             health = _parse_state_payload(dst)
             for pid, entry in _parse_state_payload(src).items():
-                prior = health.get(pid)
-                if prior is None or _ts(entry.last_error_at) > _ts(prior.last_error_at):
+                prior_health = health.get(pid)
+                if (
+                    prior_health is None
+                    or _ts(entry.last_error_at) > _ts(prior_health.last_error_at)
+                ):
                     health[pid] = entry
             usage = _parse_usage_payload(dst)
-            for pid, entry in _parse_usage_payload(src).items():
-                prior = usage.get(pid)
-                if prior is None or _ts(entry.probed_at) > _ts(prior.probed_at):
-                    usage[pid] = entry
+            for uid, snap in _parse_usage_payload(src).items():
+                prior_snap = usage.get(uid)
+                if prior_snap is None or _ts(snap.probed_at) > _ts(prior_snap.probed_at):
+                    usage[uid] = snap
             now = time.time()
             health, _dropped = _drop_stale(health, now)
             _write_state_atomic(
