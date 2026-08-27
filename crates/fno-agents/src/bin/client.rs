@@ -282,6 +282,12 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "attach" {
         return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
     }
+    // `recover` (x-d285): hidden-but-invocable manual restoration of a recorded
+    // session under its account/route, with explicit two-id selection. Reads
+    // the registry and resolver directly, no daemon RPC.
+    if verb == "recover" {
+        return fno_agents::client_verbs::run_recover(&args[1..], &AgentsHome::from_env());
+    }
     if verb == "logs" {
         return fno_agents::client_verbs::run_logs(&args[1..], &AgentsHome::from_env()).await;
     }

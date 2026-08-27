@@ -218,6 +218,13 @@ RUST_CLIENT_VERBS = frozenset(
         # also satisfy it. Dispatched directly in client.rs before
         # build_request (no daemon RPC, no Python impl).
         "review-coverage",
+        # Manual session restoration (x-d285): hidden-but-invocable operator
+        # escape hatch that restores a recorded session under its account and
+        # route, refusing until ``--session`` selects between a fork's two
+        # recorded ids. Dispatched directly in client.rs before build_request
+        # (no daemon RPC, no Python impl); this entry keeps the
+        # client.rs<->router parity test in sync and provides the help line.
+        "recover",
     }
 )
 
@@ -388,6 +395,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
+    "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
