@@ -371,6 +371,11 @@ _FROM_NAME_DEFAULT = "fno"
 _FROM_NAME_FORBIDDEN_CHARS = frozenset('"<>&')
 _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 
+# (x-07c2) `fno mux thread` exit for "no live mux server" - mirrors the Rust
+# EXIT_NO_SERVER. On this code `attach_agent` falls through to the inline
+# path; every other non-zero exit is a server refusal it surfaces.
+_MUX_THREAD_NO_SERVER = 24
+
 # x-c393: how recent an inside_leg report must be for a worker to count as
 # "provably live" when a follow-up fails to route. Mirrors the Rust
 # PROVABLY_LIVE_WINDOW_SECS; `fno agents reconcile` (the `claude logs` probe) is
@@ -5019,6 +5024,40 @@ def attach_agent(name: str) -> AttachResult:
         ) from exc
     else:
         existing, name = resolved.entry, resolved.entry.name
+
+    # (x-07c2) Mux-aware branch: with a live mux server this verb drives the
+    # ONE dedicated thread pane and prints where it landed. The tier decides
+    # what the pane runs, server-side (attach / peek --follow / the locate
+    # screen), so the verb serves every harness, not only claude. Exit 21 is
+    # "no live mux server": fall through to the inline path below unchanged.
+    from fno.agents.mux_spawn import _run_mux
+
+    try:
+        landed = _run_mux(["mux", "thread", name], subprocess.run, timeout=15)
+    except DispatchAskError:
+        # A missing fno binary or a hung mux is not a reason to lose the
+        # inline path; it reports the same way the inline spawn would.
+        landed = None
+    if landed is not None and landed.returncode == 0:
+        sys.stdout.write(landed.stdout)
+        events.emit(
+            "agent_attached",
+            name=name,
+            provider=existing.harness or "claude",
+            route="mux-thread-pane",
+        )
+        return AttachResult(
+            name=name,
+            provider=existing.harness or "claude",
+            exit_code=0,
+        )
+    if landed is not None and landed.returncode != _MUX_THREAD_NO_SERVER:
+        # The server answered with a refusal: surface it verbatim rather than
+        # silently falling through to an attach it just refused.
+        raise DispatchAskError(
+            (landed.stderr or landed.stdout or "fno mux thread refused").strip(),
+            exit_code=1,
+        )
 
     if existing.harness in ("codex", "gemini"):
         sys.stderr.write(

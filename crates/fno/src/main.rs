@@ -78,6 +78,8 @@ enum Role {
     /// location; a selector naming no agent is retried as a tab location -
     /// ordinal, stable id, or name (x-1499).
     MuxWhere(Vec<OsString>),
+    /// (x-07c2, hidden) `mux thread <name>`: drive the dedicated thread pane.
+    MuxThread(Vec<OsString>),
     /// (x-b80d) `mux view <selector> [--url] [--fzf] [--json]`: point the
     /// operator's view at the pane hosting an agent, selected by node id,
     /// slug, or name; a selector naming no agent focuses the tab at that
@@ -224,6 +226,9 @@ fn decide_role(args: &[OsString], is_tty: bool) -> Role {
             Some("tab") if args.len() > 2 => Role::MuxTab(args[2..].to_vec()),
             Some("layout") if args.len() > 2 => Role::MuxLayout(args[2..].to_vec()),
             Some("where") if args.len() > 2 => Role::MuxWhere(args[2..].to_vec()),
+            // (x-07c2, hidden) thread: drive the dedicated thread pane for a
+            // row from outside the TUI - the door `fno agents attach` uses.
+            Some("thread") if args.len() > 2 => Role::MuxThread(args[2..].to_vec()),
             // (x-b80d) view: focus a pane by node id/slug/name; --fzf picks.
             // An explicit -h/--help prints the usage banner (the verb family's
             // one self-teaching surface) rather than parsing as a selector.
@@ -358,6 +363,7 @@ fn main() {
         Role::MuxTab(rest) => exit_mux(mux_cli::tab(&rest, env_session.as_deref())),
         Role::MuxLayout(rest) => exit_mux(mux_cli::layout(&rest, env_session.as_deref())),
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
+        Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
         Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
         Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest)),
         Role::Client(flag) => {

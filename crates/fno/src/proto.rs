@@ -766,6 +766,13 @@ pub enum ControlVerb {
     /// "your pane is gone" and "nobody is watching" are different problems, and a
     /// third ("your mux is not running") is the CLI's own connect failure.
     PaneFocus { pane: u64 },
+    /// (x-07c2) Reach a row through the ONE dedicated thread pane: the
+    /// outside-the-TUI door behind `fno agents attach <name>`. `name` is the
+    /// registry name or the 8-hex attach id. The reply is the landing
+    /// (`Notice` carrying where it opened/repointed/focused) or an `Err`
+    /// naming the refusal. Runs the exact command path a TUI reach runs, so
+    /// the two doors cannot drift.
+    ThreadPane { name: String },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
