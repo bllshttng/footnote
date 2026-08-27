@@ -13199,10 +13199,13 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
         // not just what it ran. Bare commands keep today's shape.
         let claim = cmd.find(" # ").map(|idx| cmd[idx + 3..].trim().to_string());
         let outcome = run_probe(cmd, work_dir, PROBE_TIMEOUT);
+        // One source for the row's verdict vocabulary, borrowed before the
+        // consuming match moves the outcome's fields.
+        let verdict = outcome.verdict();
         let entry = match outcome {
             ProbeOutcome::Pass { stdout } => serde_json::json!({
                 "cmd": cmd,
-                "verdict": "PASS",
+                "verdict": verdict,
                 "claim": claim,
                 "stdout": stdout,
             }),
@@ -13214,7 +13217,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                 }
                 serde_json::json!({
                     "cmd": cmd,
-                    "verdict": "SKIP",
+                    "verdict": verdict,
                     "claim": claim,
                     "stdout": "",
                 })
@@ -13225,7 +13228,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                 }
                 serde_json::json!({
                     "cmd": cmd,
-                    "verdict": "BLOCKED",
+                    "verdict": verdict,
                     "claim": claim,
                     "why": why,
                 })
@@ -13239,7 +13242,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                 }
                 serde_json::json!({
                     "cmd": cmd,
-                    "verdict": "FAIL",
+                    "verdict": verdict,
                     "claim": claim,
                     "code": code,
                     "stdout": stdout,
@@ -16751,11 +16754,13 @@ git_bounded();";
     #[test]
     fn block_reason_names_the_reviewers_gate_not_a_bot() {
         // AC2: the old string claimed a bot had not reviewed while
-        // required_bots was empty and the real blocker was local.
+        // required_bots was empty and the real blocker was local. sigma is
+        // retired, so the unmet reason names the lane, never a panel run.
         let reason = build_block_reason(&reviewers_gate_pr(), "abc", true, true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("sigma"), "got: {reason}");
-        assert!(reason.contains("/fno:review sigma"), "got: {reason}");
+        assert!(reason.contains("/fno:review"), "got: {reason}");
+        assert!(!reason.contains("/fno:review sigma"), "got: {reason}");
         assert!(!reason.contains("bot reviewer"), "got: {reason}");
     }
 
@@ -17340,46 +17345,24 @@ git_bounded();";
 
     #[test]
     fn reviewer_invocation_resolves_the_author_harness_verb() {
-        // Per-harness: code-review names the harness's own verb. A codex author
-        // is told /review, a claude author /code-review; unknown harness falls
-        // back to the scalar, which is the portable fno do review - never
-        // claude's verb silently.
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("codex")),
-            Some(("/review", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("claude")),
-            Some(("/code-review <level> --comment", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("opencode")),
-            Some(("/review-changes", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("agy")),
-            Some(("/fno:review", false))
-        );
+        // The owned lane is the invocation on EVERY harness: an inline lane
+        // runs wherever the plugin runs, so a transport-dependent verb here
+        // would be the fragile part. sigma is retired and also names the lane
+        // (the refusal tells a wedged session what to run instead).
+        for harness in ["codex", "claude", "opencode", "agy"] {
+            assert_eq!(
+                reviewer_invocation_for("code-review", Some(harness)),
+                Some(("/fno:review", false)),
+                "harness {harness} must name the portable lane"
+            );
+        }
         assert_eq!(
             reviewer_invocation_for("code-review", None),
             Some(("/fno:review", false))
         );
         assert_eq!(
             reviewer_invocation_for("sigma", Some("codex")),
-            Some(("/fno:review sigma", false))
-        );
-        // The codex and opencode self-review verbs must stay bare: prose after
-        // the codex verb flips it to a no-merge-base review target (a verified
-        // constraint, not a style), and opencode's grammar is unverified.
-        let (codex_verb, _) = reviewer_invocation_for("code-review", Some("codex")).unwrap();
-        assert!(
-            !codex_verb.chars().any(|c| c.is_whitespace()),
-            "codex self-review verb must be bare, got {codex_verb:?}"
-        );
-        let (opencode_verb, _) = reviewer_invocation_for("code-review", Some("opencode")).unwrap();
-        assert!(
-            !opencode_verb.chars().any(|c| c.is_whitespace()),
-            "opencode self-review verb must stay bare until its grammar is verified, got {opencode_verb:?}"
+            Some(("/fno:review", false))
         );
     }
 
