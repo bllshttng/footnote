@@ -359,7 +359,9 @@ def test_resume_argv_repins_bounded_posture_but_not_yolo(tmp_path, monkeypatch):
     repo = _init_repo(tmp_path / "repo")
     seen = []
 
-    def fake_run(*, argv, output_path, timeout, expect_session, popen_cwd):
+    def fake_run(
+        *, argv, output_path, timeout, expect_session, popen_cwd, bound_session_id=None
+    ):
         seen.append(argv)
         return None
 
