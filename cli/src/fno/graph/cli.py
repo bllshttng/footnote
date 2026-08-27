@@ -6505,6 +6505,476 @@ def cmd_session_reap_open(
 cli.add_typer(session_app, name="session", hidden=True)
 
 
+# -- task rows + task claims (epic x-09d7 group 3) --
+
+task_app = typer.Typer(
+    name="task",
+    help="Task-grain rows and the task claim on status transition (x-09d7).",
+    no_args_is_help=True,
+    add_completion=False,
+)
+
+
+@task_app.callback()
+def _task_callback() -> None:
+    """Keep ``list``/``update`` real subcommands (single-command Typer collapse)."""
+
+
+#: An unreadable graph on a task verb. Distinct from 3, which the wave loop
+#: reads as "a peer holds it, skip this round" (see waves.md 3e).
+TASK_GRAPH_UNREADABLE_EXIT = 5
+
+#: This node has no task grain to guard, so the caller dispatches unguarded
+#: exactly as a run with no bound node does. A node with no bound plan and a
+#: non-graph tracker backend both land here. Neither is a stop: the first is
+#: one live node in five, and the second is every node in a tracker-backend
+#: project, so reading either as a refusal halts a wave that used to run.
+TASK_NO_GRAIN_EXIT = 6
+
+
+def _task_plan_or_exit(node_token: str, graph_path: Path) -> tuple[str, str]:
+    """Resolve NODE to ``(node_id, plan_path)``; exit 1/2 on the named refusals.
+
+    Reads through the CALLER's ``graph_path`` (a redirect seam): the tracker
+    guard lives on the tracker-owned task verbs that call this. An unreadable
+    graph is its own TASK_GRAPH_UNREADABLE_EXIT refusal, never a misread
+    "node does not resolve" and never the 3 that means "a peer holds it, skip
+    this round" - a corrupt graph must stop a wave, not make it skip every
+    task and log each one as peer-held. A bound plan that is not a readable
+    file is a named refusal, never a traceback: rows derive from the plan, so
+    an unreadable plan is a stop, not an empty list.
+    """
+    from fno.graph.collision import resolve_plan_path
+    from fno.graph.fuzzy import resolve_node
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
+
+    try:
+        entries = read_graph_strict(graph_path)
+    except GraphUnreadableError as e:
+        typer.echo(
+            f"Could not read the graph cleanly, so '{node_token}' cannot be "
+            f"resolved: {e}",
+            err=True,
+        )
+        raise typer.Exit(code=TASK_GRAPH_UNREADABLE_EXIT)
+    match = resolve_node(node_token, entries)
+    if match.kind != "exact":
+        typer.echo(f"Error: node '{node_token}' does not resolve to a node", err=True)
+        raise typer.Exit(code=1)
+    entry = match.candidates[0]
+    plan_path = entry.get("plan_path") or ""
+    if not plan_path:
+        typer.echo(
+            f"no plan bound to {entry.get('id')}; no task grain to guard",
+            err=True,
+        )
+        raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
+    # The graph stores plan_path absolute, `~`-prefixed, or repo-relative, so a
+    # raw Path() read refuses two of the three forms and the caller dispatches
+    # unclaimed - the double-dispatch these verbs exist to close.
+    resolved = resolve_plan_path(plan_path)
+    if not resolved.is_file():
+        typer.echo(f"plan file for {entry.get('id')} is not readable: {plan_path}", err=True)
+        raise typer.Exit(code=1)
+    return entry["id"], str(resolved)
+
+
+def _task_ids_or_exit(plan_path: str) -> list[str]:
+    """Plan task ids, or a named exit-1 refusal on a malformed plan.
+
+    A plan with a broken Execution Strategy fence must refuse like every
+    other task-verb failure mode, never exit through a parser traceback.
+    """
+    from fno.graph.tasks import derive_task_ids
+
+    try:
+        ids = derive_task_ids(Path(plan_path))
+    except Exception as exc:  # noqa: BLE001 - stop-not-traceback contract
+        typer.echo(f"plan parse failed for {plan_path}: {exc}", err=True)
+        raise typer.Exit(code=1)
+    if not ids:
+        # A plan declaring `waves:` and no top-level `tasks:` parses fine and
+        # derives nothing. That is the same "no grain here" as an unbound
+        # plan, not the exit 2 that halts a wave which ran before task rows
+        # existed.
+        typer.echo(f"no tasks declared by {plan_path}", err=True)
+        raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
+    return ids
+
+
+@task_app.command("list")
+def cmd_task_list(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex with a bound plan."),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit rows as JSON."),
+) -> None:
+    """List the node's task rows, materializing any the plan adds.
+
+    The first read of a node with a bound plan writes the missing ``pending``
+    rows, so a peer never sees a node whose tasks are invisible until someone
+    starts one. Once every plan task id has a row, the read is read-only: a
+    polling fleet does not take the graph lock and re-render the board on a
+    steady-state no-op.
+    """
+    from pathlib import Path
+
+    from fno.graph.store import locked_mutate_graph, read_graph
+    from fno.graph.tasks import ensure_task_rows
+
+    node_id, plan_path = _task_plan_or_exit(node, _graph_path())
+    ids = _task_ids_or_exit(plan_path)
+
+    def _print(rows: list[dict]) -> None:
+        if json_output:
+            typer.echo(json.dumps({"node": node_id, "tasks": rows}, indent=2))
+            return
+        for r in rows:
+            typer.echo(f"{r.get('id')}\t{r.get('status')}\t{r.get('owner') or '-'}")
+
+    # Fast path: every plan id already has a row -> print without the lock.
+    # An id-less plan with no rows has nothing to materialize on ANY poll, so
+    # it refuses here too rather than paying a full locked write each time.
+    for e in read_graph(_graph_path()):
+        if isinstance(e, dict) and e.get("id") == node_id:
+            rows = [r for r in e.get("tasks") or [] if isinstance(r, dict)]
+            known = {r.get("id") for r in rows}
+            if all(i in known for i in ids):
+                if rows:
+                    _print(rows)
+                    return
+                if not ids:
+                    typer.echo(f"no tasks declared by {plan_path}", err=True)
+                    raise typer.Exit(code=2)
+            break
+
+    materialized: list[dict] = []
+
+    def mutator(entries):
+        for e in entries:
+            if isinstance(e, dict) and e.get("id") == node_id:
+                materialized.extend(ensure_task_rows(e, Path(plan_path), ids))
+                break
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+    if not materialized:
+        typer.echo(f"no tasks declared by {plan_path}", err=True)
+        raise typer.Exit(code=2)
+    _print(materialized)
+
+
+@task_app.command("update")
+def cmd_task_update(
+    node: str = typer.Argument(..., help="Node id / slug / bare-hex with a bound plan."),
+    task_id: str = typer.Argument(..., help="Task id as declared by the plan."),
+    status: str = typer.Option(
+        ..., "--status", help="pending | in_progress | done."
+    ),
+    owner: Optional[str] = typer.Option(
+        None,
+        "--owner",
+        help=(
+            "Full harness session id of the holder (tests / operators). Default: "
+            "this session's proven id; never a head-8 handle - a codex UUIDv7 "
+            "head-8 is a ~65.5s clock bucket two workers can share."
+        ),
+    ),
+) -> None:
+    """Transition one task row; the claim IS the transition.
+
+    ``--status in_progress`` takes the ``task:<node>:<task>`` claim FIRST
+    (exit 3 naming the holder when a peer owns it, exit 4 when no session id
+    is provable and none was passed), then writes the row. ``--status done``
+    writes the row and releases the claim. ``--status pending`` is the
+    holder-only give-back for a blocked or failed task.
+    """
+    from pathlib import Path
+
+    from fno.claims.core import (
+        ClaimContended,
+        ClaimHeldByOther,
+        ClaimValidationError,
+    )
+    from fno.claims.self_identity import resolve_self_identity
+    from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
+    from fno.claims.tasks import acquire_task, release_task, task_key
+    from fno.graph.store import locked_mutate_graph
+    from fno.graph.tasks import TASK_STATUSES
+
+    if status not in TASK_STATUSES:
+        typer.echo(
+            f"invalid --status {status!r}; one of {', '.join(TASK_STATUSES)}", err=True
+        )
+        raise typer.Exit(code=2)
+    node_id, plan_path = _task_plan_or_exit(node, _graph_path())
+    ids = _task_ids_or_exit(plan_path)
+    if task_id not in ids:
+        typer.echo(
+            f"task '{task_id}' not in plan {plan_path}; plan tasks: "
+            f"{', '.join(ids) or '(none)'}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # The claims layer's identity resolver (the same one self_stamp's
+    # resolve_self_session_id delegates to); the graph layer may not import
+    # fno.agents. Same semantics: no session id unless a harness is proven too.
+    if owner:
+        holder: Optional[str] = owner
+    else:
+        _ident = resolve_self_identity()
+        holder = _ident.session_id if (_ident.session_id and _ident.harness) else None
+    key = task_key(node_id, task_id)
+
+    if owner:
+        # `--owner` is the escape this verb's own refusals advertise for a
+        # holder that is GONE. release_claim is non-strict (it unlinks whenever
+        # the names match), so honoring it against a LIVE claim deletes a
+        # running worker's claim and the next in_progress succeeds on an empty
+        # key: the double-dispatch these verbs exist to close. The pid is the
+        # discriminator, not the name - a claim anchored to OUR session pid is
+        # ours to settle even when identity is otherwise unprovable.
+        from fno.claims.core import claim_status as _live_check
+
+        try:
+            _st = _live_check(key)
+        except Exception:  # noqa: BLE001 - an unreadable claim blocks nothing
+            _st = {}
+        if (
+            _st.get("state") == "live"
+            and _st.get("holder") == owner
+            and _st.get("pid") != resolve_session_pid()
+        ):
+            typer.echo(
+                f"{key} is held LIVE by {owner} (pid={_st.get('pid')}); "
+                "--owner is the escape for a holder that is gone, not a way "
+                "to take a claim from a running worker",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+
+    def _set_row(mutate) -> Optional[dict]:
+        found: list[dict] = []
+
+        def mutator(entries):
+            for e in entries:
+                if isinstance(e, dict) and e.get("id") == node_id:
+                    from fno.graph.tasks import ensure_task_rows
+
+                    ensure_task_rows(e, Path(plan_path), ids)
+                    for row in e.get("tasks") or []:
+                        if isinstance(row, dict) and row.get("id") == task_id:
+                            mutate(row)
+                            found.append(dict(row))
+                            break
+                    break
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        return found[0] if found else None
+
+    def _release_claim_or_note() -> None:
+        if holder:
+            release_task(node_id, task_id, holder)
+        else:
+            # done/give-back from a context with no provable session id: the
+            # row write (the record) must not fail on identity. The claim is
+            # pid-liveness anchored, so it frees when its process dies.
+            typer.echo(
+                f"claim {key} not released (no provable holder); "
+                "pid-liveness clears it",
+                err=True,
+            )
+
+    if status == "in_progress":
+        if not holder:
+            typer.echo(
+                "cannot prove a session id for the holder; "
+                "pass --owner <full-session-id>",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        pid = resolve_session_pid()
+        if pid is None:
+            # An unprovable pid would anchor the claim to this short-lived CLI
+            # process: it dies on exit, the claim reads stale, and a peer
+            # steals the task mid-flight - the exact double-dispatch the
+            # transition exists to prevent. Refuse instead of degrading.
+            typer.echo(
+                "cannot prove a session pid for the claim; "
+                "set FNO_SESSION_PID or run inside a harness session",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        harness = resolve_session_harness()
+        # acquire_task succeeds idempotently for a caller that ALREADY holds
+        # the key, so releasing on a later refusal would drop a claim this
+        # call never took and leave a live worker unclaimed.
+        from fno.claims.core import claim_status as _claim_status
+
+        try:
+            _before = _claim_status(key)
+            # `holder` is reported for a STALE claim too, so name-only would
+            # read a resumed session's dead claim as one this call holds. The
+            # acquire then mints a genuinely new live claim that no refusal
+            # path releases. Task claims carry ttl_ms=None, so live/stale is
+            # the whole vocabulary here.
+            held_before = (
+                _before.get("holder") == holder and _before.get("state") == "live"
+            )
+        except Exception:  # noqa: BLE001 - an unreadable claim is not a held one
+            held_before = False
+
+        def _release_if_taken() -> None:
+            if not held_before:
+                release_task(node_id, task_id, holder)
+
+        try:
+            acquire_task(node_id, task_id, holder, pid=pid, harness=harness)
+        except ClaimHeldByOther as exc:
+            typer.echo(
+                f"another holder owns {key} ({exc.holder}, pid={exc.pid})", err=True
+            )
+            raise typer.Exit(code=3)
+        except ClaimContended as exc:
+            # Recovery-mutex contention, not a live holder: skip this round
+            # like a held task; a later pass re-runs the same command.
+            typer.echo(f"task claim contention on {key}: {exc}", err=True)
+            raise typer.Exit(code=3)
+        except ClaimValidationError as exc:
+            typer.echo(f"invalid task claim key {key}: {exc}", err=True)
+            raise typer.Exit(code=2)
+        claimed_at = datetime.now(timezone.utc).isoformat()
+        reopen_refused: list[str] = []
+
+        def _claim_row(row) -> None:
+            # A done row is shipped work; re-opening it from stale per-checkout
+            # state re-dispatches a finished task, so the transition refuses.
+            if row.get("status") == "done":
+                reopen_refused.append(str(row.get("id")))
+                return
+            row.update(
+                {"status": "in_progress", "owner": holder, "claimed_at": claimed_at}
+            )
+
+        try:
+            row = _set_row(_claim_row)
+        except (Exception, SystemExit):
+            # SystemExit too: locked_mutate_graph exits (does not raise) on a
+            # corrupt graph, and an exited write must release like a raised one
+            # or the claim outlives the failed transition held by the session
+            # pid.
+            _release_if_taken()
+            raise
+        if reopen_refused:
+            _release_if_taken()
+            typer.echo(
+                f"task {task_id} is done; re-offering shipped work is refused",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+        if row is None:
+            _release_if_taken()
+            typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+            raise typer.Exit(code=1)
+        typer.echo(f"{key} in_progress holder={holder}")
+        return
+
+    if status == "done":
+        # The row write is holder-guarded like the give-back: a non-holder
+        # marking a live task done leaves the peer working a task the board
+        # reports finished. An UNowned row (never claimed) accepts done from
+        # anyone - there is no in-flight worker to contradict.
+        done_refused: list[str] = []
+
+        def _done_row(row) -> None:
+            owner_now = row.get("owner")
+            if owner_now and owner_now != (holder or ""):
+                done_refused.append(str(owner_now))
+                return
+            row.update({"status": "done"})
+
+        row = _set_row(_done_row)
+        if done_refused and not holder:
+            # 4, not 3: the boundary settle passes no --owner, and waves.md 3e
+            # turns a 3 into a peer hold the wave retries forever. This is an
+            # identity failure, which is a stop that names its own fix.
+            typer.echo(
+                f"task {task_id} is owned by {done_refused[0]} and this "
+                "context cannot prove a session id; re-run with "
+                f"--owner {done_refused[0]}",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+        if done_refused:
+            # The owner check has no liveness test, so a reaped or handed-off
+            # holder would wedge the row at in_progress forever. Name the
+            # escape here, where the caller reads the refusal.
+            typer.echo(
+                f"task {task_id} held by {done_refused[0]}; only the holder "
+                "can mark it done. If that holder is gone, re-run with "
+                f"--owner {done_refused[0]}",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+        if row is None:
+            typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+            raise typer.Exit(code=1)
+        _release_claim_or_note()
+        typer.echo(f"{key} done")
+        return
+
+    # pending: the holder-only give-back. The owner check runs INSIDE the
+    # locked mutation: a check on a pre-read row could clobber a row a peer
+    # claimed between the read and the write, advertising a live task as free.
+    if not holder:
+        typer.echo(
+            "cannot prove a session id for the holder; "
+            "pass --owner <full-session-id>",
+            err=True,
+        )
+        raise typer.Exit(code=4)
+    refused_owner: list[str] = []
+    giveback_done_refused: list[str] = []
+
+    def _give_back(row) -> None:
+        # `done` leaves `owner` set, so the holder's own later `blocked` emit
+        # passes the owner check and reopens shipped work; an unowned done row
+        # would accept a give-back from anyone. Refuse both, as _claim_row does.
+        if row.get("status") == "done":
+            giveback_done_refused.append(str(row.get("id")))
+            return
+        owner_now = row.get("owner")
+        if owner_now and owner_now != holder:
+            refused_owner.append(str(owner_now))
+            return
+        row.update({"status": "pending", "owner": None})
+        row.pop("claimed_at", None)
+
+    row = _set_row(_give_back)
+    if giveback_done_refused:
+        typer.echo(
+            f"task {task_id} is done; giving shipped work back is refused",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    if refused_owner:
+        typer.echo(
+            f"task {task_id} held by {refused_owner[0]}; "
+            "only the holder can give it back. If that holder is gone, "
+            f"re-run with --owner {refused_owner[0]}",
+            err=True,
+        )
+        raise typer.Exit(code=3)
+    if row is None:
+        typer.echo(f"node {node_id} or task {task_id} vanished at write time", err=True)
+        raise typer.Exit(code=1)
+    release_task(node_id, task_id, holder)
+    typer.echo(f"{key} pending (given back by {holder})")
+
+
+cli.add_typer(task_app, name="task", hidden=True)
+
+
 # -- backfill-slugs --
 
 # -- view --
@@ -14148,6 +14618,9 @@ _TRACKER_OWNED_VERBS = frozenset(
         "batch prepare",
         "batch ship",
         "batch ship-closeable",
+        # task rows + task claims write graph state (list materializes rows)
+        "task list",
+        "task update",
     }
 )
 
@@ -14202,6 +14675,12 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
 )
 
 
+#: Tracker-owned verbs whose refusal a caller must read as "no grain here",
+#: not as a stop. Under a non-graph backend there are no task rows at all, so
+#: a wave has nothing to guard and dispatches exactly as it did before.
+_NO_GRAIN_ON_EXTERNAL_BACKEND = frozenset({"task list", "task update"})
+
+
 def _refuse_tracker_owned_on_external_backend(label: str) -> None:
     """The shared external-backend refusal for a tracker-owned backlog verb.
 
@@ -14218,6 +14697,8 @@ def _refuse_tracker_owned_on_external_backend(label: str) -> None:
             f"tracker by its id.",
             err=True,
         )
+        if label in _NO_GRAIN_ON_EXTERNAL_BACKEND:
+            raise typer.Exit(code=TASK_NO_GRAIN_EXIT)
         raise typer.Exit(code=1)
 
 
@@ -14238,6 +14719,7 @@ def iter_backlog_registry():
         ("relatedness", _relatedness_cli),
         ("epic", _epic_cli),
         ("session", session_app),
+        ("task", task_app),
         ("collisions", collisions_app),
     ]
 

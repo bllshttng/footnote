@@ -119,6 +119,15 @@ Completed: 2026-01-24T14:45:00Z
 ### Wave 2: Core Rewrite (PARTIAL)
 ```
 
+### After a Peer-Hold Skip
+
+A task another session's claim owns gets `[~]`, not `[!]`. Nothing failed. Another worker is on it (see the task-claim step in [waves.md](waves.md)). `get_completed_tasks_from_state` matches only `[x]`, so a `[~]` task stays re-offerable on a later pass once the peer releases.
+
+```markdown
+# Task held by a peer session
+- [~] 2.3: Add telemetry - held by 2782a6e1-aaaa-bbbb-cccc-dddddddddddd
+```
+
 ## Parsing STATE.md
 
 Python helper for reading state:

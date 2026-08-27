@@ -966,22 +966,144 @@ def emit_status_event(
     for flag, val in (("--run", run), ("--node", node), ("--task", task), ("--outcome", outcome)):
         if val:
             argv += [flag, val]
+    return _shell_fno(argv, f"{event_type} emit")
+
+
+def _shell_fno(argv: List[str], what: str) -> bool:
+    """Run one best-effort ``fno`` subprocess for a boundary side effect.
+
+    The one runner for every non-fatal boundary shell (the event emit, the
+    task-claim settle): missing fno, a raise, and a non-zero exit each log one
+    stderr note and return False. Never raises, so a boundary side effect can
+    never fail the task or the run.
+    """
+    # 15s bounds an append-only event emit. The task-claim settle is a full
+    # graph mutation behind the fleet-wide flock (recompute, JSON write,
+    # sha256 sidecar, whole-board render), and a SIGKILL mid-settle strands a
+    # pid-anchored claim that never goes stale, so the row reads peer-held for
+    # the rest of the run. Give a settle the longer bound.
+    timeout = 120 if "task" in argv[:4] else 15
     try:
-        result = subprocess.run(argv, check=False, capture_output=True, timeout=15)
+        result = subprocess.run(argv, check=False, capture_output=True, timeout=timeout)
     except FileNotFoundError:
-        print(f"orchestrator: note: fno unavailable, skipped {event_type} emit", file=sys.stderr)
+        print(f"orchestrator: note: fno unavailable, skipped {what}", file=sys.stderr)
         return False
-    except Exception as exc:  # noqa: BLE001 - emission must never wedge the run
-        print(f"orchestrator: note: {event_type} emit failed (non-fatal): {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 - a boundary side effect never wedges the run
+        print(f"orchestrator: note: {what} failed (non-fatal): {exc}", file=sys.stderr)
         return False
     if result.returncode != 0:
         print(
-            f"orchestrator: note: {event_type} emit rejected (non-fatal): "
+            f"orchestrator: note: {what} rejected (non-fatal): "
             f"{result.stderr.decode('utf-8', 'replace').strip()}",
             file=sys.stderr,
         )
         return False
     return True
+
+
+#: Boundary outcomes that release the claim as done.
+_TERMINAL_OUTCOMES = ("SUCCESS", "DONE_WITH_CONCERNS")
+#: Boundary outcomes that give the task back to pending. NOT "": the `blocked`
+#: branch hardcodes "FAILED", so an empty outcome can only arrive from a
+#: `task_done` whose optional --outcome was omitted - giving a task that just
+#: committed back to pending, for a peer to claim and re-run.
+_GIVEBACK_OUTCOMES = ("FAILED", "BLOCKED")
+
+
+def release_task_claim_at_boundary(node: str, task: str, outcome: str) -> bool:
+    """Settle the task claim at a task boundary (x-09d7 group 3).
+
+    ``done`` after a terminal outcome, ``pending`` (the holder-only give-back)
+    after ``blocked``/``FAILED``, so the next ready worker can pick the task
+    up. The outcome vocabulary is CLOSED: an unrecognized spelling
+    (``success``, ``PARTIAL``) settles NOTHING and says so - mapping strays to
+    the give-back would release a finished task's claim mid-flight. Non-fatal
+    by the same contract as the emit itself: one stderr note and False on any
+    failure, never an exception. A give-back by a caller that is not the
+    holder is refused (exit 3) by the verb; that refusal lands here as the
+    same non-fatal note.
+    """
+    if outcome in _TERMINAL_OUTCOMES:
+        status_verb = "done"
+    elif outcome in _GIVEBACK_OUTCOMES:
+        status_verb = "pending"
+    else:
+        print(
+            f"orchestrator: note: unknown task outcome {outcome!r}; task claim "
+            "not settled",
+            file=sys.stderr,
+        )
+        return False
+    argv = ["fno", "backlog", "task", "update", node, task, "--status", status_verb]
+    return _shell_fno(argv, "task claim settle")
+
+
+def _manifest_path(state_path: str) -> Path:
+    """``state_path`` if it is absolute or already resolves from cwd, else the
+    first hit walking up to the repo root.
+
+    The emit CLI resolves its own ``.fno`` through ``resolve_repo_root()``. A
+    bare relative default only agrees with it when cwd IS the root, so from a
+    subdirectory the emit still stamped the node while the settle read nothing
+    and skipped - leaving the row in_progress under a claim nothing releases,
+    which every later pass then reads as peer-held. This module is stdlib-only
+    by design (it shells out to fno), so the walk stands in for the import: it
+    honors ``FNO_REPO_ROOT`` (the resolver's first tier) and is bounded by the
+    repo root, because a walk that is not bounded finds a STRANGER's manifest.
+    """
+    given = Path(state_path)
+    if given.is_absolute() or given.exists():
+        return given
+    env = os.environ.get("FNO_REPO_ROOT")
+    if env:
+        candidate = Path(env) / given
+        if candidate.exists():
+            return candidate
+        # Fall through rather than give up: resolve_repo_root only WARNS on a
+        # foreign root, so a stale exported FNO_REPO_ROOT (canonical checkout,
+        # session in a worktree) would otherwise blank every boundary and leak
+        # every task claim for the run.
+    here = Path.cwd().resolve()
+    # Find the root FIRST, then search only within it. Searching on the way up
+    # and stopping at the root afterwards climbs to the filesystem root when
+    # there is no repo at all, and the first `.fno/target-state.md` it meets
+    # there belongs to somebody else: task ids like "1.1" exist in nearly every
+    # plan, so the settle would then land on an unrelated node.
+    root = next((d for d in (here, *here.parents) if (d / ".git").exists()), None)
+    if root is None:
+        return given
+    for parent in (here, *here.parents):
+        candidate = parent / given
+        if candidate.exists():
+            return candidate
+        if parent == root:
+            break
+    return given
+
+
+def manifest_graph_node_id(state_path: str = ".fno/target-state.md") -> str:
+    """The bound node id from the session manifest, or ``""``.
+
+    The same best-effort substring scan the emit CLI's envelope fallback uses
+    (work coordinates fall back to the manifest when the flags are empty), so
+    the documented bare ``--emit-boundary task_done --task N.M`` (no --node)
+    still settles the task claim. A missing or unreadable manifest yields ""
+    and the settle is skipped.
+    """
+    try:
+        text = _manifest_path(state_path).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        # UnicodeDecodeError is a ValueError and escapes a bare OSError catch,
+        # so one non-UTF-8 byte in the manifest would raise out of the
+        # --emit-boundary handler that never fails the run.
+        return ""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("graph_node_id:"):
+            val = stripped[len("graph_node_id:") :].strip().strip('"').strip()
+            if val and val != "null":
+                return val
+    return ""
 
 
 def get_blocked_tasks_from_state(state_path: str) -> List[str]:
@@ -1303,6 +1425,29 @@ if __name__ == "__main__":
             outcome=b_opts["--outcome"],
             data=b_data,
         )
+        # The boundary every outcome already passes through is also the one
+        # place the task claim taken at dispatch gets settled (x-09d7 g3):
+        # done releases it, blocked/FAILED gives it back to pending. The event
+        # TYPE is gated, not just trusted: a typo'd type carrying --task must
+        # not reach the give-back and release a live worker's claim. The node
+        # falls back to the manifest exactly as the emit envelope does - the
+        # documented per-task invocations pass --task only.
+        if b_opts["--task"] and b_type in ("task_done", "blocked"):
+            settle_node = b_opts["--node"] or manifest_graph_node_id()
+            if settle_node:
+                release_task_claim_at_boundary(
+                    settle_node,
+                    b_opts["--task"],
+                    b_opts["--outcome"] if b_type == "task_done" else "FAILED",
+                )
+            else:
+                # Silence here reads exactly like a settle that succeeded,
+                # while the claim is still held.
+                print(
+                    f"orchestrator: note: no node for task {b_opts['--task']}; "
+                    "task claim not settled",
+                    file=sys.stderr,
+                )
         sys.exit(0)
 
     # Handle --agent flag first (standalone command, no index needed)
