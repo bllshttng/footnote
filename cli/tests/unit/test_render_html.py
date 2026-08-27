@@ -696,3 +696,27 @@ def test_every_status_and_type_has_a_class_the_stylesheet_defines():
     for status, colour in _DASHBOARD_STATUS_COLORS.items():
         token = colour.removeprefix("var(").removesuffix(")")
         assert f"{token}:" in _DASHBOARD_CSS, f"{status} points at undefined {token}"
+
+
+def test_the_live_claim_is_keyed_on_local_not_on_projection(tmp_path: Path):
+    """A local board IS re-rendered on every graph mutation; a published one is
+    a snapshot at publish time. Saying either of the other is a lie about how
+    fresh the page is.
+
+    Keyed on `local`, because `render_graph_html` passes local=True and leaves
+    projection at its default. Keying on projection labelled the operator's own
+    live board a snapshot, which is the same defect pointed the other way, so
+    this asserts BOTH directions rather than only the published one.
+    """
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entries = [_entry("ab-14000001", project="fno", title="A node")]
+    local_path = tmp_path / "local.html"
+    render_graph_html(entries, local_path)
+    local = local_path.read_text()
+    public = render_public_backlog_html(entries, "fno")
+
+    assert "re-rendered on every graph mutation" in local
+    assert "snapshot" not in local.split("</header>")[0]
+    assert "snapshot" in public.split("</header>")[0]
+    assert "re-rendered on every graph mutation" not in public

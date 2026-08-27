@@ -35,7 +35,7 @@ class El {
     this.textContent = "";
     this._html = "";
     this.hidden = false;
-    this.id = "";
+    this._id = "";
     this._listeners = {};
     this.classList = new ClassList(this);
   }
@@ -46,6 +46,7 @@ class El {
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addEventListener(k, fn) { (this._listeners[k] ||= []).push(fn); }
   click() { (this._listeners.click || []).forEach((f) => f({ target: this })); }
+  fire(kind) { (this._listeners[kind] || []).forEach((f) => f({ target: this })); }
   closest(sel) {
     const want = sel.replace(".", "");
     let n = this;
@@ -59,6 +60,12 @@ class El {
     walk(this);
     return out;
   }
+  get id() { return this._id; }
+  // A row created by the board registers itself here. Seeding only the fixed
+  // control ids left getElementById(rowId) null forever, so every test of the
+  // anchor path returned at revealHash's `if (!row) return;` having asserted
+  // nothing. A guard that cannot reach its subject is not a guard.
+  set id(v) { this._id = v; if (v) byId.set(v, this); }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
   querySelectorAll(sel) {
     const m = sel.match(/^\[([\w-]+)(?:="?([^"\]]*)"?)?\]$/);
@@ -142,6 +149,7 @@ const api = {
     status: b.dataset.s,
     pressed: b.getAttribute("aria-pressed"),
   })),
+  statClasses: byId.get("stats").children.map((d) => d.className),
   rowHtml: rows.map((r) => ({
     id: r.id,
     type: r.dataset.type,
@@ -166,6 +174,14 @@ if (act) {
     if (row) row.querySelector(".rmain").click();
     api.detail = row ? (row.querySelector(".detail") || {}).innerHTML || "" : null;
   }
+  // Typing in the search box re-renders. The reveal bug only shows up on the
+  // SECOND render: revealHash cleared is-hidden directly and render() then
+  // reassigned className wholesale, so the anchored row vanished on a keystroke.
+  if (kind === "search") {
+    const q = byId.get("q");
+    q.value = arg || "";
+    q.fire("input");
+  }
   const after = board.descendants.filter((n) => n.classList.contains("row"));
   api.after = {
     totalRows: after.length,
@@ -178,6 +194,11 @@ if (act) {
     // What the board PERSISTED. The blank-board bug survived a reload
     // because an active-but-empty selection was written back.
     persisted: store.get("fno-kanban-project-state") || null,
+    // Whether the row named by location.hash is still on screen.
+    revealedVisible: process.env.BOARD_HASH
+      ? !(byId.get(process.env.BOARD_HASH.replace(/^#/, "")) || { classList: { contains: () => true } })
+          .classList.contains("is-hidden")
+      : null,
   };
 }
 

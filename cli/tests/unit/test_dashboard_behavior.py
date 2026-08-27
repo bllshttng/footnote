@@ -214,3 +214,72 @@ def test_a_child_names_its_parent_even_when_the_parent_is_out_of_scope(tmp_path:
     assert "Scoped kid" in text
     assert "ab-ep000002" in text, "the out-of-scope parent must still be named"
     assert "Foreign epic" in text
+
+
+def test_an_anchor_only_links_an_id_that_has_a_row(tmp_path: Path):
+    """Relations come from the whole graph; the board renders a subset.
+
+    A blocker that closed long ago, or a child in another project, has no row.
+    Linking it produced an anchor that set the hash and revealed nothing, which
+    reads as a broken page rather than as work that is simply not on this board.
+    """
+    entries = [
+        _entry("ab-11000001", title="On the board", blocked_by=["ab-11000002"]),
+        _entry("ab-11000003", title="Child here", parent="ab-11000001"),
+    ]
+    out = _run(tmp_path, entries, BOARD_ACTION="expand:ab-11000001")
+    detail = out["detail"]
+
+    assert 'href="#ab-11000003"' in detail, "a rendered child MUST be a link"
+    assert 'href="#ab-11000002"' not in detail, (
+        "an id with no row must not be a link: the anchor would reveal nothing"
+    )
+    assert "ab-11000002" in detail, "it must still be NAMED, just not linked"
+
+
+def test_a_revealed_row_survives_the_next_render(tmp_path: Path):
+    """The reveal bug only appears on the SECOND render.
+
+    revealHash cleared is-hidden directly, and render() reassigns className
+    wholesale, so the next keystroke in the search box hid the very row the
+    anchor had just jumped to.
+    """
+    entries = [
+        _entry("ab-12000001", title="alpha target"),
+        _entry("ab-12000002", title="zulu other"),
+    ]
+    out = _run(
+        tmp_path,
+        entries,
+        BOARD_HASH="#ab-12000001",
+        BOARD_ACTION="search:zulu",
+    )
+    assert out["after"]["revealedVisible"] is True, (
+        "the anchored row disappeared once a filter re-rendered the board"
+    )
+
+
+def test_the_stat_tiles_carry_their_status(tmp_path: Path):
+    """The .stat.is-* emphasis CSS was added and never wired: className was
+    assigned unconditionally, so Ready and Blocked rendered identically to
+    Total and the third slot of every statRows tuple sat unused."""
+    out = _run(tmp_path, [_entry("ab-13000001")])
+    classes = out["statClasses"]
+    assert "stat is-ready" in classes, f"no Ready emphasis: {classes}"
+    assert "stat is-blocked" in classes, f"no Blocked emphasis: {classes}"
+    assert "stat" in classes, "Total must stay unemphasised"
+
+
+def test_a_status_outside_the_vocabulary_still_renders_a_chip(tmp_path: Path):
+    """`.pill` carried only typography, so a priority, a size, a PR number and
+    any status with no `.s-*` rule rendered as loose uppercase text."""
+    from fno.graph.render_html import _DASHBOARD_CSS
+
+    base = [
+        line for line in _DASHBOARD_CSS.splitlines() if line.startswith(".pill {")
+    ]
+    assert base, "the .pill base rule vanished"
+    block = _DASHBOARD_CSS.split(".pill {", 1)[1].split("}", 1)[0]
+    assert "background:" in block, (
+        "the neutral chip base is gone; every unmodified pill renders as bare text"
+    )

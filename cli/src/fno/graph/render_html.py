@@ -352,6 +352,16 @@ _DASHBOARD_TYPE_FALLBACK = "t-other"
 
 _DASHBOARD_UNKNOWN_COLOR = "var(--muted)"
 
+
+def _dashboard_status_class(status: object) -> str:
+    """The `s-<status>` modifier, or "" for a status the stylesheet does not know.
+
+    An unknown status must fall through to the neutral `.pill` base rather than
+    emit a class with no rule, which renders as unstyled text.
+    """
+    name = str(status or "")
+    return f"s-{name}" if name in _DASHBOARD_STATUS_ORDER else ""
+
 _DASHBOARD_CSS = """\
 :root {
   --bg:#f6f5f9; --surface:#ffffff; --surface-2:#efedf4; --line:#dedae8;
@@ -407,7 +417,6 @@ _DASHBOARD_CSS = """\
 body { margin:0; background:var(--bg); color:var(--ink);
   font-family:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   font-size:15px; line-height:1.5; -webkit-font-smoothing:antialiased }
-.mono { font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace }
 .wrap { max-width:1240px; margin:0 auto; padding:32px 24px 96px; display:flex; flex-direction:column; gap:24px }
 header { display:flex; flex-direction:column; gap:10px }
 .eyebrow { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; letter-spacing:.13em;
@@ -475,14 +484,21 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
   padding:9px 15px; cursor:pointer; width:100%; background:none; border:0;
   font-family:inherit; color:var(--ink); text-align:left; font-size:14px }
 .rmain:hover { background:var(--surface-2) }
+/* A public board emits an empty .rid, so the fixed id column would be a
+   permanent empty gutter on every row. Collapse it where there are no ids. */
+body[data-local="false"] .rmain { grid-template-columns:0 1fr auto auto }
 .rid { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; color:var(--muted) }
 .rt { line-height:1.4; min-width:0; overflow-wrap:anywhere }
 .row[data-s=superseded] .rt { color:var(--muted); text-decoration:line-through;
   text-decoration-color:var(--sup); text-decoration-thickness:1px }
 .row[data-s=done] .rt { color:var(--ink-2) }
 .meta { display:flex; gap:5px; align-items:center; flex:0 0 auto }
+/* The neutral chip IS the base. A priority, a size, a PR number and any status
+   outside ORDER all render as a bare `pill` with no modifier, so a base that
+   carries only typography leaves them as loose uppercase text. */
 .pill { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; font-weight:500;
-  padding:2px 7px; border-radius:5px; letter-spacing:.04em; text-transform:uppercase; white-space:nowrap }
+  padding:2px 7px; border-radius:5px; letter-spacing:.04em; text-transform:uppercase; white-space:nowrap;
+  background:var(--surface-2); color:var(--ink-2) }
 .s-ready { background:var(--ready-bg); color:var(--ready); font-weight:600 }
 .s-done { background:var(--done-bg); color:var(--done) }
 .s-idea { background:var(--idea-bg); color:var(--idea) }
@@ -524,9 +540,6 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
 .blk .st { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:10.5px; padding:1px 6px;
   border-radius:4px; background:var(--surface); border:1px solid var(--line); color:var(--muted) }
 .blk .stale { color:var(--blocked); border-color:var(--blocked); font-weight:600 }
-.blk .cause { color:var(--muted); font-size:12.5px }
-.rblk { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--blocked);
-  white-space:nowrap }
 .planrow { display:flex; flex-wrap:wrap; gap:6px; align-items:stretch }
 .plan { flex:1 1 300px; min-width:0; font-family:"IBM Plex Mono",ui-monospace,monospace;
   font-size:11.5px; color:var(--ink-2); word-break:break-all; background:var(--surface);
@@ -537,7 +550,6 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
   display:inline-flex; align-items:center; gap:5px; text-decoration:none }
 .pbtn:hover { border-color:var(--accent); color:var(--accent) }
 .pbtn.primary { border-color:var(--accent); color:var(--accent); background:var(--accent-soft) }
-.pbtn.ok { border-color:var(--done); color:var(--done); background:var(--done-bg) }
 .pbtn:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
 .none, .empty { padding:26px 15px; color:var(--muted); text-align:center; font-size:14px }
 footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); padding-top:14px;
@@ -545,6 +557,7 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); p
 footer span { font-family:"IBM Plex Mono",ui-monospace,monospace }
 @media (max-width:720px) {
   .rmain { grid-template-columns:66px 1fr; row-gap:5px }
+  body[data-local="false"] .rmain { grid-template-columns:0 1fr }
   .meta, .dot { grid-column:2; white-space:normal }
   .detail { padding-left:15px }
   .ghead .tw { display:none }
@@ -584,11 +597,11 @@ _DASHBOARD_JS = """\
   }
   function saveProjects() { try { localStorage.setItem(PROJECT_KEY, JSON.stringify({selected:Array.from(state.projects), active:state.projectFilterActive})); } catch (e) {} }
   var statsEl = document.getElementById('stats');
-  var statRows = [['Total', NODES.length, ''], ['In progress', ALL.in_progress || 0, ''],
-    ['In review', ALL.in_review || 0, ''], ['Ready', ALL.ready || 0, ''], ['Blocked', ALL.blocked || 0, ''],
+  var statRows = [['Total', NODES.length, ''], ['In progress', ALL.in_progress || 0, 'is-prog'],
+    ['In review', ALL.in_review || 0, ''], ['Ready', ALL.ready || 0, 'is-ready'], ['Blocked', ALL.blocked || 0, 'is-blocked'],
     ['Design', ALL.design || 0, ''], ['Idea', ALL.idea || 0, ''], ['Deferred', ALL.deferred || 0, ''],
-    ['Done', ALL.done || 0, ''], ['Shipped', NODES.length ? Math.round(100 * (ALL.done || 0) / NODES.length) + '%' : '0%', '']];
-  statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat';
+    ['Done', ALL.done || 0, 'is-done'], ['Shipped', NODES.length ? Math.round(100 * (ALL.done || 0) / NODES.length) + '%' : '0%', 'is-done']];
+  statRows.forEach(function (s) { var d = document.createElement('div'); d.className = 'stat' + (s[2] ? ' ' + s[2] : '');
     d.innerHTML = '<div class=\"n\">' + s[1] + '</div><div class=\"k\">' + s[0] + '</div>'; statsEl.appendChild(d); });
   document.getElementById('totalCount').textContent = NODES.length;
   document.getElementById('planCount').textContent = NODES.filter(function (n) { return n.pl && n.s !== 'done' && n.s !== 'superseded'; }).length;
@@ -633,7 +646,7 @@ _DASHBOARD_JS = """\
   var groups = []; NODES.forEach(function (n) { if (groups.indexOf(n.g) < 0) groups.push(n.g); }); groups.sort();
   var groupSel = document.getElementById('groupSel'); groups.forEach(function (g) { var o = document.createElement('option'); o.value = g; o.textContent = g; groupSel.appendChild(o); });
   groupSel.addEventListener('change', function () { state.group = groupSel.value; render(); });
-  function fill(sel, key, prefix) { var vals = []; NODES.forEach(function (n) { if (n[key] && vals.indexOf(n[key]) < 0) vals.push(n[key]); }); vals.sort(); vals.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = prefix + ' ' + v; sel.appendChild(o); }); }
+  function fill(sel, key, prefix) { var vals = []; NODES.forEach(function (n) { if (n[key] && vals.indexOf(n[key]) < 0) vals.push(n[key]); }); vals.sort(); vals.forEach(function (v) { var o = document.createElement('option'); o.value = v; o.textContent = prefix ? prefix + ' ' + v : v; sel.appendChild(o); }); }
   fill(document.getElementById('typeSel'), 'ty', '');
   document.getElementById('typeSel').addEventListener('change', function (e) { state.ty = e.target.value; render(); });
   fill(document.getElementById('prioSel'), 'p', 'Priority'); fill(document.getElementById('sizeSel'), 'sz', 'Size');
@@ -671,17 +684,25 @@ _DASHBOARD_JS = """\
       + '<i style=\"width:' + (100 - pct) + '%;background:' + (COLORS.in_progress || '') + '\"></i></span>'
       + open + '/' + kids.length + '</span>';
   }
-  // Every node is already in the DOM, so a child link is an in-page anchor.
+  // Every RENDERED node is in the DOM, so a child link is an in-page anchor.
   // No server, no second page, and it works on a board opened from disk.
+  // Relations are built from the whole graph while the board renders a subset,
+  // so an id with no row must NOT become a link: the anchor would set the hash
+  // and reveal nothing, which reads as a broken page rather than as absent work.
+  var IDS = Object.create(null);
+  NODES.forEach(function (n) { IDS[n.id] = 1; });
   function nodeLink(id, label) {
+    if (!IDS[id]) return '<b class=\"nid\">' + esc(label || id) + '</b>';
     return '<a class=\"nid\" href=\"#' + esc(id) + '\">' + esc(label || id) + '</a>';
   }
-  function relatedBlock(cls, heading, items, linked) {
+  function relatedBlock(cls, heading, items) {
     if (!items || !items.length) return '';
     return '<div class=\"blk ' + cls + '\"><div class=\"h\">' + heading + '</div>'
       + items.map(function (b) {
-          return '<div class=\"item\">' + (linked ? nodeLink(b.id) : '<b class=\"nid\">' + esc(b.id) + '</b>')
-            + ' <span class=\"st\">' + esc(b.s) + '</span> ' + esc(b.t || '') + '</div>';
+          var st = b.s || '';
+          return '<div class=\"item\">' + nodeLink(b.id)
+            + ' <span class=\"st' + (st === 'not found' ? ' stale' : '') + '\">' + esc(st) + '</span> '
+            + esc(b.t || '') + '</div>';
         }).join('')
       + '</div>';
   }
@@ -690,11 +711,11 @@ _DASHBOARD_JS = """\
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + '</span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
-      + nodeLink(n.pa) + ' ' + esc(n.pt_ || '') + '</div></div>';
-    h += relatedBlock('kin', 'Children', n.ki, true);
-    h += relatedBlock('', 'Dependencies', n.bb, true);
-    h += relatedBlock('kin', 'Unblocks', n.su, true);
-    if (n.sb) h += relatedBlock('kin', 'Superseded by', [n.sb], true);
+      + nodeLink(n.pa) + (n.pt_ ? ' ' + esc(n.pt_) : ' <span class=\"st stale\">not found</span>') + '</div></div>';
+    h += relatedBlock('kin', 'Children', n.ki);
+    h += relatedBlock('', 'Dependencies', n.bb);
+    h += relatedBlock('kin', 'Unblocks', n.su);
+    if (n.sb) h += relatedBlock('kin', 'Superseded by', [n.sb]);
     if (n.d) h += '<p>' + esc(n.d) + '</p>'; else if (LOCAL) h += '<p>No description recorded.</p>';
     if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
     if (LOCAL && n.pr) h += '<div class=\"planrow\">' + (n.pu ? '<a class=\"pbtn primary\" href=\"' + esc(n.pu) + '\">PR #' + esc(n.pr) + '</a>' : '<span class=\"pill\">PR #' + esc(n.pr) + '</span>') + (n.pt ? '<span class=\"plan\">' + esc(n.pt) + '</span>' : '') + '</div>';
@@ -732,11 +753,15 @@ _DASHBOARD_JS = """\
       sections.push({ el:sec, bar:bar, count:count, rows:built });
     });
   }
+  // A revealed row survives re-render. Clearing is-hidden directly does not:
+  // render() reassigns className wholesale, so the next keystroke in the search
+  // box hid the very row an anchor had just jumped to.
+  var revealed = null;
   function render() {
     var shown = 0;
     sections.forEach(function (sec) {
       var vis = [];
-      sec.rows.forEach(function (r) { var ok = matches(r.node);
+      sec.rows.forEach(function (r) { var ok = matches(r.node) || r.node.id === revealed;
         r.el.className = 'row' + (ok ? '' : ' is-hidden'); if (ok) vis.push(r.node); });
       shown += vis.length;
       // Header count and stacked bar describe what is VISIBLE. Reading them off
@@ -762,7 +787,8 @@ _DASHBOARD_JS = """\
     if (!id) return;
     var row = document.getElementById(id);
     if (!row) return;
-    row.classList.remove('is-hidden');
+    revealed = id;
+    render();
     var sec = row.closest('.group');
     if (sec) { sec.classList.remove('is-hidden'); sec.dataset.open = 'true'; }
     var main = row.querySelector('.rmain');
@@ -922,17 +948,28 @@ def _dashboard_static_detail(row: dict[str, object], *, local: bool) -> str:
         parts.append(f'<span><b>size</b> {html.escape(str(row["sz"]))}</span>')
     parts.append("</div>")
     if local:
-        for heading, key in (("Dependencies", "bb"), ("Unblocks", "su")):
+        # `.blk` alone is the BLOCKED box (red border and fill). Only Dependencies
+        # earn that; a `kin` modifier neutralises it for everything else. The
+        # no-JS board is a real reading surface, so it uses the same vocabulary
+        # the scripted board does rather than a bare class that now means "red".
+        for heading, key, cls in (
+            ("Children", "ki", "blk kin"),
+            ("Dependencies", "bb", "blk"),
+            ("Unblocks", "su", "blk kin"),
+        ):
             related = row.get(key) or []
             if not isinstance(related, list) or not related:
                 continue
-            parts.append(f'<div class="blk"><div class="h">{heading}</div>')
+            parts.append(f'<div class="{cls}"><div class="h">{heading}</div>')
             for item in related:
                 if not isinstance(item, dict):
                     continue
+                status = str(item.get("s") or "unknown")
+                stale = " stale" if status == "not found" else ""
                 parts.append(
-                    f'<div class="item"><b>{html.escape(str(item.get("id") or "?"))}</b> '
-                    f'{html.escape(str(item.get("s") or "unknown"))} '
+                    f'<div class="item"><b class="nid">'
+                    f'{html.escape(str(item.get("id") or "?"))}</b> '
+                    f'<span class="st{stale}">{html.escape(status)}</span> '
                     f'{html.escape(str(item.get("t") or ""))}</div>'
                 )
             parts.append("</div>")
@@ -1001,7 +1038,8 @@ def _dashboard_static_html(
                 f'<div class="row" data-project="{project}" data-status="{html.escape(str(row.get("s") or ""), quote=True)}">'
                 f'<div class="rmain"><span class="rid">{node_id}</span>'
                 f'<span class="rt">{html.escape(str(row.get("t") or ""))}</span>'
-                f'<span class="meta"><span class="pill">{html.escape(str(row.get("s") or ""))}</span></span>'
+                f'<span class="meta"><span class="pill {_dashboard_status_class(row.get("s"))}">'
+                f'{html.escape(str(row.get("s") or ""))}</span></span>'
                 f'<span class="dot">{html.escape(str(row.get("u") or row.get("c") or ""))}</span></div>'
                 '<details class="fallback-detail"><summary>Details</summary>'
                 f'{_dashboard_static_detail(row, local=local)}</details></div>'
@@ -1040,24 +1078,47 @@ def _dashboard_html(
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     generated = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     # The original page said "snapshot" here, honestly, because a vault script
-    # rendered it and nothing re-ran that script. This one is written by the
-    # auto-render hook on every graph mutation, so it says so.
-    scope_note = "live \u00b7 re-rendered on every graph mutation"
+    # rendered it and nothing re-ran that script. A LOCAL board is written by
+    # the auto-render hook on every graph mutation, so it says so. A published
+    # board is not: it is a snapshot at publish time, and claiming otherwise on
+    # the surface strangers read is the same dishonesty this note replaced.
+    # Keyed on `local`, NOT on projection: render_graph_html passes local=True
+    # and leaves projection at its default, so keying on projection labels the
+    # operator's live board a snapshot, which is the same lie pointed the other
+    # way. A local board is written by the auto-render hook on every mutation;
+    # a published one is a snapshot taken when it was published.
+    if local:
+        scope_note = "live \u00b7 re-rendered on every graph mutation"
+        opens_note = "Opens on the live board. "
+    else:
+        scope_note = "snapshot \u00b7 rendered when published"
+        # roadmap opens with `done` pressed, so it does not open on live work.
+        opens_note = "" if projection == "roadmap" else "Opens on open work. "
     # Built outside the f-string: an escape inside an f-string EXPRESSION
     # is Python 3.12+, and this package targets 3.11.
     status_legend = " \u00b7 ".join(_DASHBOARD_STATUS_ORDER)
     static_board = _dashboard_static_html(
         rows, local=local, initial_done=projection == "roadmap"
     )
-    # The font link is the original design's, and the fallback stack carries
-    # the page when it cannot load (a file:// board offline, a locked-down
-    # network). Nothing else here reaches the network.
+    # The font is the original design's, so it stays; the LOAD is what must not
+    # block. A stylesheet in <head> is render-blocking, and a network that
+    # blackholes rather than refuses (captive portal, offline laptop, locked-down
+    # VPN) holds first paint for the full connect timeout. media="print" makes it
+    # non-blocking; onload promotes it once it has actually arrived, so the
+    # fallback stack paints immediately and the design arrives when it can.
+    # This is the ONLY thing here that reaches the network, and the board stays
+    # readable with no network at all.
+    font_href = (
+        "https://fonts.googleapis.com/css2?"
+        "family=IBM+Plex+Mono:wght@400;500;600&"
+        "family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    )
     fonts = (
         '<link rel="preconnect" href="https://fonts.googleapis.com">'
         '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
-        "family=IBM+Plex+Mono:wght@400;500;600&"
-        'family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">'
+        f'<link rel="stylesheet" href="{font_href}" media="print" '
+        "onload=\"this.media='all';this.onload=null\">"
+        f'<noscript><link rel="stylesheet" href="{font_href}"></noscript>'
     )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -1070,7 +1131,7 @@ def _dashboard_html(
         f' \u00b7 <span>{html.escape(scope_note)}</span></div>'
         f"<h1>{html.escape(title)}</h1>"
         '<p class="lede">Every open node, plus recently closed work for context. '
-        f'<b id="totalCount">{len(rows)}</b> nodes. Opens on the live board. '
+        f'<b id="totalCount">{len(rows)}</b> nodes. {opens_note}'
         '<b>Plan, unfinished</b> is the real queue: every node with a plan that has '
         'not shipped. Set <b>from</b> to a date to narrow the window. Click any row '
         'for its description, blockers and plan link.</p></header>'
