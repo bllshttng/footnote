@@ -4081,7 +4081,10 @@ config_dir = "~/.claude-alt"
         // its transcript still reads, so Follow, never Locate.
         assert_eq!(thread_reach(Some("claude"), None), Reach::Follow);
         assert_eq!(thread_reach(Some("codex"), None), Reach::Follow);
-        assert_eq!(thread_reach(Some("opencode"), None), Reach::Follow);
+        // opencode's history reads fine (recent_records supports it), but it
+        // writes a directory tree with no tailable file, so --follow has
+        // nothing to run - Locate, not Follow (PEEK_READER_HARNESSES doc).
+        assert_eq!(thread_reach(Some("opencode"), None), Reach::Locate);
         assert_eq!(thread_reach(Some("gemini"), None), Reach::Locate);
         assert_eq!(thread_reach(Some("agy"), None), Reach::Locate);
         // A harness the contract has never heard of, and a row with no
