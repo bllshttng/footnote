@@ -43,6 +43,14 @@ class _FakeProc:
 
 
 _RECEIPT = '{"name":"tgt-2222aaaa","short_id":"abc12345","provider":"claude","status":"live"}\n'
+# x-de10: a codex thread receipt carries short_id:"" with the FULL id under
+# harness_session_id/session_id - codex has no short id.
+_CODEX_THREAD_RECEIPT = (
+    '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
+    '"harness_session_id":"0198c0de-1111-7000-8000-00000000000a",'
+    '"session_id":"0198c0de-1111-7000-8000-00000000000a","status":"live",'
+    '"lane":"thread"}\n'
+)
 
 
 # ---------------------------------------------------------------------------
@@ -758,7 +766,7 @@ def test_spawn_worker_verb_normalizes_codex_thread(monkeypatch):
 
     def fake_run(cmd, **kw):
         captured["cmd"] = cmd
-        return _FakeProc(0, _RECEIPT)
+        return _FakeProc(0, _CODEX_THREAD_RECEIPT)
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
     adv._spawn_worker(
@@ -778,7 +786,7 @@ def test_spawn_worker_thread_without_session_id_refuses(monkeypatch):
         return _FakeProc(0, "the model reply text, no json receipt here")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    with pytest.raises(adv.SpawnError, match="no short_id receipt"):
+    with pytest.raises(adv.SpawnError, match="no launch-identity receipt"):
         adv._spawn_worker(
             "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target"
         )
@@ -1030,6 +1038,53 @@ def test_spawn_worker_exit0_no_receipt_raises_spawn_error(monkeypatch):
     )
     with pytest.raises(adv.SpawnError):
         adv._spawn_worker("ab-2222aaaa", None)
+
+
+# ---------------------------------------------------------------------------
+# x-de10: the launch identity. A codex thread receipt carries short_id:"" with
+# the FULL id under harness_session_id/session_id; the old short_id-only parse
+# raised SpawnError for every codex thread dispatch. A bare head-8 codex id is
+# refused by shape (the 65.5-second timestamp bucket, d-513d9d22).
+# ---------------------------------------------------------------------------
+
+def test_spawn_worker_accepts_codex_thread_full_id_receipt(monkeypatch):
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _CODEX_THREAD_RECEIPT)
+    )
+    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+    assert identity == "0198c0de-1111-7000-8000-00000000000a"
+
+
+def test_spawn_worker_refuses_codex_head8_launch_identity(monkeypatch):
+    head8_receipt = (
+        '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
+        '"harness_session_id":"01a025f8","status":"live","lane":"thread"}\n'
+    )
+    monkeypatch.setattr(
+        adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, head8_receipt)
+    )
+    with pytest.raises(adv.SpawnError) as excinfo:
+        adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+    assert "65.5" in str(excinfo.value) or "head-8" in str(excinfo.value)
+
+
+def test_spawn_worker_still_accepts_claude_head8_short_id(monkeypatch):
+    """A claude jobId head-8 is 32 random bits (UUIDv4) and stays a legal
+    launch identity; only codex is refused by shape."""
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, _RECEIPT))
+    assert adv._spawn_worker("ab-2222aaaa", None) == "abc12345"
+
+
+def test_spawn_worker_codex_receipt_with_only_session_id_key(monkeypatch):
+    """A receipt shape carrying only session_id (no harness_session_id) still
+    yields the full id."""
+    receipt = (
+        '{"name":"tgt-2222aaaa","short_id":"","harness":"codex",'
+        '"session_id":"0198c0de-2222-7000-8000-00000000000b","status":"live"}\n'
+    )
+    monkeypatch.setattr(adv.subprocess, "run", lambda cmd, **kw: _FakeProc(0, receipt))
+    identity = adv._spawn_worker("ab-2222aaaa", None, harness="codex")
+    assert identity == "0198c0de-2222-7000-8000-00000000000b"
 
 
 # ---------------------------------------------------------------------------

@@ -2130,3 +2130,95 @@ async fn registry_runtime_upgrade_refuses_a_partial_roster() {
     let _ = daemon.wait();
     std::fs::remove_dir_all(home.root()).ok();
 }
+
+/// x-de10 AC15 e2e: a codex THREAD row whose startup resume FAILS (its
+/// worktree was pruned while the daemon was away) is stamped `orphaned` by
+/// the recovery pass - never left reading `live` forever. The resume fails
+/// deterministically because the app-server cannot even spawn in a cwd that
+/// no longer exists.
+#[tokio::test]
+async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
+    let home = short_home();
+    home.ensure_root().unwrap();
+    let daemon_bin = PathBuf::from(DAEMON_BIN);
+
+    // Seed while the daemon is DOWN: a hosted codex thread row (empty
+    // short_id, interactive, full session id) whose cwd is gone.
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(state::RegistryEntry {
+            spawned_by_session: None,
+            spawned_by_harness: None,
+            spawned_by_cwd: None,
+            origin: None,
+            name: "thread-gone".into(),
+            short_id: String::new(),
+            legacy_provider: String::new(),
+            provider: Some("openai".into()),
+            model: None,
+            model_basis: None,
+            effort: None,
+            harness: Some("codex".into()),
+            harness_session_id: Some("0198c0de-3333-7000-8000-00000000000c".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            cwd: "/nonexistent-pruned-worktree".into(),
+            project_root: "/nonexistent-pruned-worktree".into(),
+            session_id: None,
+            spawn_trigger: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: Some("0198c0de-3333-7000-8000-00000000000c".into()),
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            cc_session_id: None,
+            host_mode: Some(state::HOST_MODE_INTERACTIVE.into()),
+            status: fno_agents::AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-08-27T00:00:00Z".into(),
+            pid: Some(999_999_999),
+            pid_start_time: None,
+            log_path: Some("/tmp/thread-gone-rollout.jsonl".into()),
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: None,
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+            route_settings_path: None,
+            fno_id: None,
+            delivery_policy: None,
+            sandbox_posture: Some("workspace-write".into()),
+        });
+    })
+    .unwrap();
+
+    let mut daemon = start_daemon(&home);
+
+    // The recovery pass runs asynchronously after startup; poll the registry
+    // until the row settles (or the bound expires).
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let status = loop {
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        let Some(entry) = reg.find("thread-gone") else {
+            panic!("thread-gone row must survive recovery");
+        };
+        if entry.status != fno_agents::AgentStatus::Live || Instant::now() > deadline {
+            break entry.status;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    };
+    assert_eq!(
+        status,
+        fno_agents::AgentStatus::Orphaned,
+        "a failed resume must settle the row Orphaned, never Live-forever"
+    );
+
+    unsafe {
+        libc::kill(daemon.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = daemon.wait();
+    std::fs::remove_dir_all(home.root()).ok();
+}

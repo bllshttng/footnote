@@ -394,11 +394,10 @@ async fn run(args: Vec<String>) -> i32 {
         .unwrap_or_default();
 
     let home = AgentsHome::from_env();
-    let codex_thread_target = fno_agents::state::load_registry(&home.registry_json())
-        .ok()
-        .is_some_and(|registry| {
-            fno_agents::codex_ask::is_codex_thread_target(&registry, &agent_name)
-        });
+    // x-de10 (AC20): the codex-thread-target lookup moved INTO the agent.ask
+    // block below, derived from the registry read already performed there. The
+    // old spot loaded the registry for EVERY client verb and swallowed read
+    // failures at `.ok()`.
 
     // Claude `ask` is handled entirely client-side (ab-cc926b4e): claude is a
     // `claude --bg` shellout, not a daemon-PTY agent, so it bypasses the daemon
@@ -412,32 +411,41 @@ async fn run(args: Vec<String>) -> i32 {
         // dispatch_ask after Task 1.1 (unknown-name check precedes provider
         // selection). Provider-mismatch logic (inside maybe_run_claude_ask) still
         // applies for existing rows.
+        //
+        // x-de10 (AC20): ONE registry read for the whole ask path. The
+        // codex-thread-target lookup below derives from THIS read - the old
+        // second load ran for EVERY client verb and swallowed failures at
+        // `.ok()`.
+        use fno_agents::claude_ask::{emit_event, py_repr};
+        use fno_agents::state::load_registry;
+        // A corrupt/unreadable registry must surface as exit 12 ("registry
+        // read failed"), NOT degrade to an empty registry where every name
+        // looks unknown (exit 16 + a forensically wrong unknown-name
+        // event). Python parity: dispatch_ask raises exit 12 on
+        // (OSError, ValueError, RegistryVersionError); the lib dispatch
+        // fns do the same. A MISSING file is not an error (load_registry
+        // returns the default). Sigma-review finding, this PR.
+        let registry = match load_registry(&home.registry_json()) {
+            Ok(r) => r,
+            Err(e) => {
+                emit_event(
+                    &home.events_jsonl(),
+                    "agent_ask_failed",
+                    &[
+                        ("stage", "registry-read".into()),
+                        ("name", agent_name.clone().into()),
+                        ("error", e.to_string().into()),
+                    ],
+                );
+                eprintln!("registry read failed: {e}");
+                return 12;
+            }
+        };
+        // A codex thread target falls through to the daemon ask below instead
+        // of the unresolvable-create error.
+        let codex_thread_target =
+            fno_agents::codex_ask::is_codex_thread_target(&registry, &agent_name);
         {
-            use fno_agents::claude_ask::{emit_event, py_repr};
-            use fno_agents::state::load_registry;
-            // A corrupt/unreadable registry must surface as exit 12 ("registry
-            // read failed"), NOT degrade to an empty registry where every name
-            // looks unknown (exit 16 + a forensically wrong unknown-name
-            // event). Python parity: dispatch_ask raises exit 12 on
-            // (OSError, ValueError, RegistryVersionError); the lib dispatch
-            // fns do the same. A MISSING file is not an error (load_registry
-            // returns the default). Sigma-review finding, this PR.
-            let registry = match load_registry(&home.registry_json()) {
-                Ok(r) => r,
-                Err(e) => {
-                    emit_event(
-                        &home.events_jsonl(),
-                        "agent_ask_failed",
-                        &[
-                            ("stage", "registry-read".into()),
-                            ("name", agent_name.clone().into()),
-                            ("error", e.to_string().into()),
-                        ],
-                    );
-                    eprintln!("registry read failed: {e}");
-                    return 12;
-                }
-            };
             if registry.find_name_or_full_session_id(&agent_name).is_none() {
                 // Event parity: Python's dispatch_ask emits agent_ask_failed
                 // stage="unknown-name" before raising; this pre-check is the
@@ -632,9 +640,40 @@ async fn run(args: Vec<String>) -> i32 {
             "fno-agents: could not resolve current dir ({e}); daemon will pick a fallback cwd"
         ),
     }
+    // x-de10 (AC19): for a codex THREAD spawn the daemon RPC is what creates
+    // the registry row, so the spawn gate is held across exactly this exchange
+    // (acquire before the write, release after the response read) - one gate
+    // evaluation per spawn, and the first spawn's row is counted before the
+    // second is evaluated. Other verbs skip this entirely. Read before
+    // `method`/`params` move into the request.
+    let daemon_bound_thread_spawn = method == "agent.spawn"
+        && params.get("provider").and_then(|v| v.as_str()) == Some("codex")
+        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread");
     let req = Request::new(1, method, params);
 
-    match call(&home, &daemon_bin, &req).await {
+    let daemon_spawn_gate = if daemon_bound_thread_spawn {
+        let flags = fno_agents::spawn_gate::GateFlags {
+            force: false,
+            no_wait: false,
+        };
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match fno_agents::spawn_gate::run_gate(
+            &config_cwd,
+            &home.registry_json(),
+            &agent_name,
+            "bg",
+            flags,
+        ) {
+            Ok(guard) => Some(guard),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
+
+    let call_result = call(&home, &daemon_bin, &req).await;
+    drop(daemon_spawn_gate);
+    match call_result {
         Ok(resp) => match resp.payload {
             ResponsePayload::Err(err) => {
                 eprintln!("fno-agents: {}", err.message);
@@ -1124,7 +1163,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // held across dispatch so the next waiter's count includes the newcomer
     // (bg: the mutex until the roster/registry row exists; headless: the
     // worker:<name> slot claim for the call duration), then dropped.
-    let mut gate_guard = if substrate == "pane" {
+    // x-de10 (AC19): the codex THREAD spawn's registry row is created by the
+    // DAEMON spawn RPC (the ("codex", "bg") arm below returns None), so a
+    // guard held here drops before any row exists and two rapid thread spawns
+    // both pass the cap. The gate moves to run(), wrapped around that RPC.
+    let codex_thread_fallthrough = provider == "codex" && substrate == "bg";
+    let mut gate_guard = if substrate == "pane" || codex_thread_fallthrough {
         None
     } else {
         let flags = fno_agents::spawn_gate::GateFlags {
