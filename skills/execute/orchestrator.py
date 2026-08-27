@@ -1526,6 +1526,21 @@ def _validate_frontmatter_via_schema(fm: Dict) -> Optional[str]:
     return None
 
 
+_WAVE_BANDS = ("low", "medium", "high")
+
+
+def _wave_band(value: object, fallback: str) -> str:
+    """The difficulty band a plan value names, else the fallback, else ''.
+
+    Only the three legal bands survive: any other spelling (a typo, an int,
+    True) reads as no band at all rather than leaking into `bands` output.
+    """
+    band = str(value or "").strip().lower()
+    if band in _WAVE_BANDS:
+        return band
+    return fallback if fallback in _WAVE_BANDS else ""
+
+
 def load_plan_strategy(
     plan_input: str,
 ) -> Optional[ExecutionStrategy]:
@@ -1632,7 +1647,7 @@ def load_plan_strategy(
     # Blueprint stamps difficulty per wave; the plan's frontmatter band is the
     # fallback so a partially-stamped strategy still reports a band. No model
     # or route lives here: the band is the axis, config maps it to a lane.
-    plan_band = str(doc.frontmatter.get("difficulty") or "").strip()
+    plan_band = _wave_band(doc.frontmatter.get("difficulty"), "")
     waves: List[Wave] = []
 
     for wave_data in raw.get("waves", []):
@@ -1649,7 +1664,7 @@ def load_plan_strategy(
                 mode=str(wave_data.get("mode", "sequential")),
                 tasks=tasks,
                 reason=str(wave_data.get("reason", "")),
-                difficulty=str(wave_data.get("difficulty") or plan_band or "").strip().lower(),
+                difficulty=_wave_band(wave_data.get("difficulty"), plan_band),
             )
         )
 
