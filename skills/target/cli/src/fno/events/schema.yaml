@@ -3825,6 +3825,68 @@ event_types:
           type: string
           description: "The named reason the action was refused."
 
+  - name: watchdog_unfinished_work_scan
+    description: "The unfinished-work report completed one scan. This is the freshness-bearing positive marker: it fires on every complete scan even when all four dimensions measured zero, because absence of findings is measured evidence, not a skipped read. An incomplete scan fires it with complete=false and names the unknown dimensions."
+    sources: [daemon]
+    data:
+      required: [complete, finding_count]
+      properties:
+        complete:
+          type: boolean
+          description: "True only when all four dimensions were measured. Any failed graph, claim, git, liveness, registry, or GitHub read reads false and the failed dimensions carry their warnings."
+        finding_count:
+          type: integer
+          description: "Total actionable findings across the four dimensions."
+        started_free_claim:
+          type: integer
+          description: "Measured count for the started-free-claim dimension; present when the dimension was measured."
+        done_ahead_of_main:
+          type: integer
+          description: "Measured count for the done-ahead-of-main dimension; present when the dimension was measured."
+        dirty_ownerless_worktree:
+          type: integer
+          description: "Measured count for the dirty-ownerless-worktree dimension; present when the dimension was measured."
+        open_pr_ownerless:
+          type: integer
+          description: "Measured count for the open-pr-ownerless dimension; present when the dimension was measured."
+        unknown_dimensions:
+          type: array
+          description: "Dimension names that read unknown, each with the source that failed."
+        warnings:
+          type: array
+          description: "Scan-level warnings naming unmeasurable inputs."
+
+  - name: watchdog_unfinished_work_finding
+    description: "One actionable unfinished-work finding the report emitted. Session bookkeeping never reaches this stream: the kind is an outcome dimension, the subject is the exact node, worktree path, or PR, and the clearing command is the one verb that moves the finding out of its class. Emitted once per finding identity until the identity changes."
+    sources: [daemon]
+    data:
+      required: [kind, subject, basis, clear_command]
+      properties:
+        kind:
+          type: string
+          description: "started_free_claim | done_ahead_of_main | dirty_ownerless_worktree | open_pr_ownerless."
+        subject:
+          type: string
+          description: "The stable subject: a node id, an absolute worktree path, or pr-<number>."
+        basis:
+          type: string
+          description: "The measured facts that made this a finding (idle age, ahead count, dirty count, PR age), so a reader can falsify the call."
+        clear_command:
+          type: string
+          description: "The one command or workflow that clears the finding."
+        node:
+          type: [string, "null"]
+          description: "The backlog node id, when one resolved."
+        pr_number:
+          type: integer
+          description: "The PR number, for the open-pr dimension."
+        cwd:
+          type: [string, "null"]
+          description: "The worktree path the verb targets, when one does."
+        age_s:
+          type: integer
+          description: "Idle or open age in seconds, when measured."
+
   - name: stranded_sweep
     description: "The three-way stranded-worktree classifier (git+graph+fleet join) recorded a STRANDED recovery act or a fail-open UNKNOWN row. STRANDED rows carry the push/backlog acts already taken; UNKNOWN rows carry only this event - report, never reap, and a row this cannot positively close is reported but never acted on."
     sources: [daemon]
