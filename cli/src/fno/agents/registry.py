@@ -1547,11 +1547,13 @@ def register_existing_session(
                     )
                 if provider is not None:
                     entry.provider = provider
-                if model is not None:
+                if model:
                     # Only a CHANGED model re-bases. The SessionStart hook
                     # re-fires register after every resume, and restamping the
                     # SAME model would downgrade a `verified` basis (read back
-                    # off a pane status) to this call's mere intent.
+                    # off a pane status) to this call's mere intent. An EMPTY
+                    # model is no model: the Rust twin filters on non-empty,
+                    # so `--model ''` must stamp neither side here either.
                     if entry.model != model:
                         entry.model_basis = "requested"
                     entry.model = model
@@ -1600,7 +1602,7 @@ def register_existing_session(
             harness=harness,
             provider=provider,
             model=model,
-            model_basis="requested" if model is not None else None,
+            model_basis="requested" if model else None,
             effort=effort,
             harness_session_id=session_id,
             cwd=cwd,

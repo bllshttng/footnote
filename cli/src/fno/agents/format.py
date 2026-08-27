@@ -33,7 +33,7 @@ JSON_SCHEMA_VERSION = 4
 # Basis values that are falsifiers rather than evidence: a positive
 # measurement that the worker is gone, which no other reading outranks.
 _FALSIFIER_BASES = {"process-gone", "pane-gone"}
-_PROJECTION_OMISSIONS = ("model",)
+_PROJECTION_OMISSIONS = ("model", "model_basis")
 
 
 def attention_rank(row: dict) -> int:

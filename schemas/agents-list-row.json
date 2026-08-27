@@ -36,13 +36,14 @@
     "liveness_origin",
     "liveness_origin_basis"
   ],
-  "projection_omissions": ["model"],
+  "projection_omissions": ["model", "model_basis"],
   "stored": {
     "provider": "The registry's spawn-stamped model vendor (v15+ axis), never inferred from `harness`. Restored to the projection by x-f273: the pre-v15 alias that carried the HARNESS value under this name was removed for lying, and that removal kept hiding the real vendor axis the rename had just created, so `fno agents list` answered null for a field the writer stored (30 of 31 live rows lost, 2026-08-22). `observed_model` remains the transcript-derived reading of what actually answered; this key answers which vendor's lane the row was minted for. Both serializers emit it or the parity asserts fail.",
     "effort": "The selected reasoning-effort value, passed through verbatim from the registry. It is a separate axis from harness, provider, model, and account; fno does not validate it against a provider or model allowlist."
   },
   "removed": {
-    "model": "OMITTED FROM THE ROW PROJECTION. Registry storage records intended model configuration, while `observed_model` is the actual transcript-derived reading. Do not expose intended configuration as though it were observed runtime truth."
+    "model": "OMITTED FROM THE ROW PROJECTION. Registry storage records intended model configuration, while `observed_model` is the actual transcript-derived reading. Do not expose intended configuration as though it were observed runtime truth.",
+    "model_basis": "OMITTED FROM THE ROW PROJECTION. The requested-vs-verified qualifier on the omitted `model` rides only registry storage (the ruling lives here now, not in a docstring): a projected basis would expose intended configuration as though it were observed runtime truth, the exact lie the `model` omission exists to prevent. Widening this list means editing this file, the Python `_PROJECTION_OMISSIONS`, and the Rust `LIST_PROJECTION_OMISSIONS` together; both language tests assert equality against this key."
   },
   "derived": {
     "address": "The mailbox address this row can actually receive at: `canonical_handle(harness_session_id)`, the first eight of the session id, which is the same string `fno agents mail drain-self` computes for itself. It exists because every other identifier in the row is something else. `name` is a spawn label and a name-lane durable write is the largest still-growing category of stranded mail; `handle` in the discovered lane is a friendly alias; `short_id` is a transport key that is null for most registry rows. A reader with no address column copies `name`, and that mail queues under a key nobody drains. Null when no identity was recorded - absence is reported as absence, never as a plausible-looking handle. Falls back to `short_id` for claude ONLY, where the transport key IS the first eight; a codex or opencode `short_id` is a daemon worker key and would advertise a mailbox that does not exist. Deliberately NOT promoted to the full session id on a first-eight collision: ambiguity detection already lives in the send resolver, which fails closed and names the candidates, and a second implementation here would be a second answer to one question.",

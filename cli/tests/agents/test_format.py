@@ -173,7 +173,7 @@ def test_render_json_for_populated_registry() -> None:
     assert parsed["count"] == 2
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
     assert parsed["filters_applied"] == filters
-    assert _contract()["projection_omissions"] == ["model"]
+    assert _contract()["projection_omissions"] == ["model", "model_basis"]
     assert parsed["fields_omitted"] == _contract()["projection_omissions"]
     assert len(parsed["agents"]) == 2
 
@@ -186,7 +186,7 @@ def test_render_json_for_empty_registry() -> None:
     assert parsed["agents"] == []
     assert parsed["count"] == 0
     assert parsed["schema_version"] == JSON_SCHEMA_VERSION
-    assert _contract()["projection_omissions"] == ["model"]
+    assert _contract()["projection_omissions"] == ["model", "model_basis"]
     assert parsed["fields_omitted"] == _contract()["projection_omissions"]
 
 
@@ -472,7 +472,8 @@ def test_serialize_entry_provider_names_vendor_not_harness(_unused=None) -> None
     assert row["provider"] != row["harness"]
     assert row["harness"] == "claude"
     assert "model" not in row
-    assert payload["fields_omitted"] == ["model"]
+    assert "model_basis" not in row
+    assert payload["fields_omitted"] == ["model", "model_basis"]
 
 
 # ---------------------------------------------------------------------------
