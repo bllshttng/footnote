@@ -1,13 +1,15 @@
 """``fno config route``: legible, on-the-fly provider route lanes.
 
-Four verbs over the existing per-spawn model-routing machinery
+Six verbs over the existing per-spawn model-routing machinery
 (``fno.agents.model_routing``), which stays the single source of the z.ai
 env-var contract:
 
-- ``ls``    - the effective merged table (built-ins + config), one row per role.
-- ``set``   - route a lane to ``provider/model`` (atomic config write).
-- ``unset`` - revert a lane (to its built-in default, or unrouted).
-- ``env``   - eval-able ``export`` block for an interactive session.
+- ``ls``        - the effective merged table (built-ins + config), one row per role.
+- ``set``       - route a lane to ``provider/model`` (atomic config write).
+- ``unset``     - revert a lane (to its built-in default, or unrouted).
+- ``env``       - eval-able ``export`` block for an interactive session.
+- ``inventory`` - the declared routing inventory read (also ``fno doctor route``).
+- ``init``      - append the shipped sample, commented out, to config.
 
 ``set``/``unset`` delegate to the existing atomic, file-locked ``fno config
 set``/``unset`` write path - there is no second config writer here. The roles
