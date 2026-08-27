@@ -946,6 +946,33 @@ def test_manifest_only_identity_refused_as_a_shared_anchor(
     assert ok.exit_code == 0, ok.output
 
 
+def test_manifest_anchor_is_found_from_a_subdirectory(
+    tmp_graph: Path,
+    tmp_path: Path,
+    claims_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The manifest read walks UP from cwd: a worker in a worktree subdirectory
+    still hits the shared-anchor refusal instead of waving the id through."""
+    manifest_dir = tmp_path / "wt2"
+    (manifest_dir / ".fno").mkdir(parents=True)
+    (manifest_dir / ".fno" / "target-state.md").write_text(
+        "fno_id: shared-fno-id\n", encoding="utf-8"
+    )
+    (manifest_dir / "sub").mkdir()
+    monkeypatch.chdir(manifest_dir / "sub")
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident("shared-fno-id", "claude", "single"),
+    )
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress"
+    )
+    assert refused.exit_code == 4
+    assert "shared" in refused.output
+
+
 def test_takeover_settles_a_gone_holder_under_the_takers_identity(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):

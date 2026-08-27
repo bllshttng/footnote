@@ -2275,7 +2275,9 @@ def cmd_spawn(
     # this spawn must not leak ITS name into the child. The pane lane
     # snapshots os.environ into pane_env below, and the bg/thread lanes hand
     # the detached session this process's environment, so one write covers
-    # both.
+    # both. Registered in prov_prev so the finally restores the caller's env,
+    # the same scoping contract FNO_NODE is pinned to.
+    prov_prev["FNO_WORKER_NAME"] = os.environ.get("FNO_WORKER_NAME")
     os.environ["FNO_WORKER_NAME"] = name
 
     # `--once` is the pre-substrate spelling of headless (the Rust client maps

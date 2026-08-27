@@ -82,10 +82,9 @@ def resolve_self_identity(
 
 
 #: Manifest body/frontmatter fields that carry an identity every fno process
-#: in the worktree can read. Read directly (the regex shape
-#: ``fno.claims.incarnation.resolve_fence_session_uuid`` already uses) rather
-#: than through ``fno.target.manifest`` - claims sits at the bottom of the
-#: stack and must not import the target layer.
+#: in the worktree can read. Read directly rather than through
+#: ``fno.target.manifest`` - claims sits at the bottom of the stack and must
+#: not import the target layer.
 _MANIFEST_IDENTITY_FIELDS = (
     "harness_session_id",
     "claude_session_id",
@@ -101,19 +100,30 @@ _PROVEN_DISPOSITIONS = frozenset({"canonical", "proven"})
 
 
 def _manifest_identity_values(project_root: Optional[Path]) -> frozenset:
-    manifest = (project_root or Path.cwd()) / ".fno" / "target-state.md"
-    try:
-        text = manifest.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return frozenset()
-    values = []
-    for field in _MANIFEST_IDENTITY_FIELDS:
-        m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
-        if m:
-            val = m.group(1).strip().strip("\"'")
-            if val and val != "null":
-                values.append(val)
-    return frozenset(values)
+    """The manifest's identity values, found by walking UP from CWD.
+
+    The caller may run from a subdirectory of the worktree, so a bare
+    ``cwd/.fno`` read would silently miss the manifest and wave a shared
+    anchor through. The walk stops at the first ``.fno/target-state.md``,
+    mirroring how a worktree root is discovered without shelling to git
+    (claims stays at the bottom of the stack).
+    """
+    start = Path(project_root) if project_root else Path.cwd()
+    for directory in (start, *start.parents):
+        manifest = directory / ".fno" / "target-state.md"
+        try:
+            text = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        values = []
+        for field in _MANIFEST_IDENTITY_FIELDS:
+            m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
+            if m:
+                val = m.group(1).strip().strip("\"'")
+                if val and val != "null":
+                    values.append(val)
+        return frozenset(values)
+    return frozenset()
 
 
 def resolve_task_holder(
