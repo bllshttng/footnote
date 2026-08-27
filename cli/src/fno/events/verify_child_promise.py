@@ -144,12 +144,13 @@ FanInKind: TypeAlias = Literal[
     "no_output",
 ]
 
-# One observed worker return: (node_id, kind). A ``None`` node_id OR a ``None``
-# kind means the return could not be attributed/classified - i.e. malformed.
-# The explicit kinds that carry no verdict ("runtime_failed" from an unparseable
-# claim, "unknown_terminal", "no_output") keep their name through the tally as
-# their own counters: an observed death is counted as itself, and a
-# could-not-tell says so rather than wearing a shapeless ``malformed``.
+# One observed worker return: (node_id, kind). A ``None`` KIND means the
+# return could not be classified at all - i.e. malformed. A ``None`` node_id
+# with a NAMED kind is unattributed but classified: the explicit kinds that
+# carry no verdict ("runtime_failed" from an unparseable claim,
+# "unknown_terminal", "no_output") keep their name through the tally as their
+# own counters, so an observed death is counted as itself and a could-not-tell
+# says so rather than wearing a shapeless ``malformed``.
 Observation: TypeAlias = tuple[Optional[str], Optional[FanInKind]]
 
 
