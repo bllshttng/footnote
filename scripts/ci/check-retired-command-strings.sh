@@ -117,20 +117,25 @@ fi
 #      `f"{short_id} to clean later."` on the next shipped a live
 #      instruction straight past a line-scoped scan
 #
-#   4. a leaf under a retired ROOT - `fno law set <subject>`. The registry
-#      retires two-token roots, so the placeholder sits one word further along
-#      than shapes 1-3 look, and `fno law set <subject> <decision>` shipped
-#      straight through a gate that was passing vacuously on it.
+# SUBVERB is why an earlier draft passed vacuously on `fno law set <subject>`.
+# The registry retires two-token ROOTS, but the string a reader copies names a
+# LEAF under one, so the argument sits a word further along than shapes 1-3
+# look. One optional lowercase word closes that, and it applies to all three
+# shapes: `fno law set {subject}` is an f-string, which is how nearly every
+# caller-facing string in cli/src is written, and a concrete short id is
+# strictly more copyable than a placeholder.
 #
-# Shape 4 pairs the optional word with `<...>` ONLY, never `{` or `$`. That is
-# the discriminator that keeps it from becoming noise: a documentation
-# placeholder a reader copies is angle-bracketed, while `{code}` and `$var` are
-# interpolation in a failure message that merely NAMES the shellout. Without
-# the narrowing, `format!("claude rm exited {code}")` matches and the gate
-# starts reporting the exact strings its own `retired-ok:` rule exists to
-# excuse. Widen further only with a specimen that a marker cannot cover.
-SUBVERB='([[:space:]]+[a-z][a-z-]*)?[[:space:]]+<'
-ARG="(${SUBVERB}"'|[[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8}|[[:space:]]*"[[:space:]]*$)'
+# This DOES catch descriptive strings of the same shape. The measured specimen
+# is `format!("claude rm exited {code}")` in daemon.rs, where `exited` reads as
+# a sub-verb to any regex. That is not a reason to narrow: it is the first kind
+# of string the `retired-ok:` marker exists to excuse, and the tree holds one
+# of them. Declaring one marker is cheaper than a blind spot that hides every
+# f-string instruction under a retired root. An earlier draft of THIS line
+# narrowed shape 4 to `<...>` only, on the theory that interpolation means
+# description; the daemon.rs specimen refutes it, since the brace there sits
+# after a word, not against the root.
+SUBVERB='([[:space:]]+[a-z][a-z-]*)?'
+ARG="${SUBVERB}"'([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8}|[[:space:]]*"[[:space:]]*$)'
 PATTERN=""
 for cmd in "${CMDS[@]}"; do
     PATTERN="${PATTERN}${PATTERN:+|}${cmd}${ARG}"
@@ -142,24 +147,20 @@ CANARY="run ${CMDS[0]} <short_id> to clean up"
 printf '%s\n' "$CANARY" | grep -qE "$PATTERN" ||
     fail "pattern does not match the canary; every future sweep would pass vacuously"
 
-# The sub-verb form needs its own canary, or SUBVERB could rot to a no-op and
-# the bare canary above would still pass. This is the shape that shipped.
-SUBVERB_CANARY="use \`${CMDS[0]} set <subject> <decision>\` instead"
-printf '%s\n' "$SUBVERB_CANARY" | grep -qE "$PATTERN" ||
-    fail "pattern misses the sub-verb form; a leaf under a retired root would pass"
+# The sub-verb form needs its own canaries, or SUBVERB could rot to a no-op
+# and the bare canary above would still pass. All three argument shapes are
+# asserted, because an earlier draft covered only the angle-bracket one and
+# let every f-string instruction under a retired root through.
+for shape in "set <subject> <decision>" "set {subject}" "set 7c5dcf5d"; do
+    printf '%s\n' "use \`${CMDS[0]} ${shape}\` instead" | grep -qE "$PATTERN" ||
+        fail "pattern misses sub-verb shape '${shape}'; a leaf under a retired root would pass"
+done
 
-# Two negative controls. Shape 4 is the one that can rot into noise, so both
-# strings it must NOT match are asserted here rather than left to a reviewer.
+# The negative control. A retired command NAMED rather than instructed must
+# stay clear, or the widening above has traded a blind spot for a flood.
 NEGATIVE_CANARY="${CMDS[0]} is now ${INSTEAD[0]}"
 printf '%s\n' "$NEGATIVE_CANARY" | grep -qE "$PATTERN" &&
     fail "pattern matches a descriptive mention; it would flood the report"
-
-# An interpolated failure message NAMES the shellout that failed. It is the
-# first kind of string `retired-ok:` exists to excuse, so the pattern must not
-# manufacture the hit that then needs excusing.
-INTERPOLATION_CANARY="format!(\"${CMDS[0]} exited {code}\")"
-printf '%s\n' "$INTERPOLATION_CANARY" | grep -qE "$PATTERN" &&
-    fail "sub-verb shape matches an interpolated failure message; narrow it"
 
 # --- 3. Scan the caller-facing surfaces ------------------------------------
 # A surface is a directory plus an extension, never a `**` pathspec (see the

@@ -1026,6 +1026,7 @@ fn run_claude_rm(short_id: &str) -> Result<(), String> {
                     .as_ref()
                     .map(|output| String::from_utf8_lossy(&output.stderr))
                     .unwrap_or_default();
+                // retired-ok: reports the shellout this code ran and its exit code; tells no reader to run it.
                 return Err(format!("claude rm exited {code}: {}", detail.trim()));
             }
             Ok(None) if std::time::Instant::now() < deadline => {
