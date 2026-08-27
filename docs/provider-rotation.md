@@ -1435,7 +1435,7 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   warns when a `config.review` required-bot's provider is `EXHAUSTED`, naming
   the reset, so a coming review-gate wedge surfaces immediately.
 
-When `defer_dispatch` is on, the probe runs. The knob is `false` by default. Off, `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `defer-dispatch-off`) before it ever calls the probe - see the CLI's DISARMED footer below.
+Looking at quota and acting on it are two decisions, and they have two knobs. `observe` arms the probe and the snapshot write and changes no dispatch decision. `defer_dispatch` arms the verdicts that hold or reroute a dispatch, and implies `observe`, because deferring requires looking. With neither set, `evaluate_quota_signal` short-circuits to `UNKNOWN` (reason `quota-observation-off`) before it ever calls the probe, so a fresh install makes no network call. With `observe` on and `defer_dispatch` off the probe runs, the snapshot lands, both verdicts stay false, and the reason reads `observed` rather than `probed` - a working meter with no behavioural change to dispatch. One knob used to decide both, so an operator who wanted the meter had to accept automatic deferral, and the safe choice was blindness.
 
 When the resolved signal is `UNKNOWN` for any reason and the launch proceeds anyway, one `quota_rotation_declined` event fires. It names the reason and the age of any usage snapshot. A launch that went out blind is now distinguishable in the journal from a system that never needed to rotate.
 
@@ -1449,7 +1449,9 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
   and `unknown (<slug>)` in human output, where the slug names the boundary that
   failed - `harness-unsupported` (no probe for this CLI), `auth-unsupported` (an
   api_key record; the probes read OAuth bearers), `unattributed` (no credential
-  provably this record's), `probe-failed`, `probe-error`, `record-missing`,
+  provably this record's), `credential-rejected` (the request WAS issued and the
+  endpoint answered 401/403 on every bearer, so the repair is a re-login rather
+  than a network investigation), `probe-failed`, `probe-error`, `record-missing`,
   `config-unreadable`, `no-windows`, or `not-probed` (no `--refresh` and no fresh
   snapshot). Capability is classified before attribution, so an unsupported harness
   or an api_key record is never reported as an account-binding fault it does not
@@ -1464,13 +1466,44 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
 
 `usage=never` names a record with no landed probe. `usage=<age> (STALE, ttl=<ttl>)` names a cached reading older than `probe_ttl_seconds`.
 
-When `defer_dispatch` is `false`, `list` also prints a one-line footer naming the disarmed knob. `defer_dispatch` defaults off, so a fresh install never probes. This display gap is what let quota-aware dispatch go unobserved for months.
+`list` prints a footer naming whichever half is off: `quota observation is OFF` when neither knob is set, and `observation is ON and rotation is DISARMED` when only `observe` is. Both default off, so a fresh install never probes. The footer recommends `observe` first because it is the reversible half. This display gap is what let quota-aware dispatch go unobserved for months.
+
+### A partial reading, a missing reset, and how precise a reading is
+
+Three shapes a snapshot can carry, each added because its absence had already produced a wrong answer.
+
+**A window with no reset is retained, not dropped.** `UsageWindow.resets_at` is optional. When the endpoint reports a limit and its utilization but no reset, the window is kept with `resets_at = None` and binds headroom on its percentage alone. Such a window can never be "already reset", so the check that exempts a stale window cannot exempt it: it always binds. Dropping it is what let a live z.ai response lose its binding five-hour cap and answer with a surviving one-minute tool limit at 0.6 percent, which reads as headroom. The sensor reported a healthy provider sitting inside its five-hour wall.
+
+**A response that was not read whole is marked `partial`.** The per-window guards are each correct about the row they reject, and none of them can see that a sibling row has answered in a rejected row's place. So the marker sits beside them, per RESPONSE rather than per window. A partial snapshot floors headroom at `LOW` and never returns `OK`. That converts "we never saw the window that matters" from an absence into a positive marker.
+
+**A reset is published as a window's own reset only when the distance to it fits the window's span.** Measured: z.ai's `TIME_LIMIT` row carries the PLAN-PERIOD reset, so a one-minute tool limit was published resetting five days out - false in whichever direction a consumer reads it. Where the span and the distance disagree the reset drops to `None`, which the retention rule above has already made a legal, binding shape. No reset is ever invented.
+
+**Every window label comes from the span the payload states.** `_label_for_minutes` is one vocabulary shared by every lane, so `weekly` cannot come to mean two spans. For codex, `primary` and `secondary` are an iteration order and nothing else: a live payload carried `primary.window_minutes = 10080` with `secondary` null, so keying the label on the position published the only window codex reports as `5h`. A sub-object with no `window_minutes` reads `unknown` rather than inheriting its position's assumption.
+
+**`UsageSnapshot.confidence` says how precise a reading is** - `exact`, `percent_only`, `estimated` or `unknown`. codex reports counts and reads `exact`; the claude OAuth endpoint reports a percentage alone and reads `percent_only`. A row already on disk reads `unknown`, never `exact`: an old row's precision is exactly what is not known. The field travels; acting on it is a routing decision and lives elsewhere.
+
+### A quota refusal carries a deadline derived from the window it names
+
+A provider 429 names two things: an absolute reset stamp and a window. Only the second is safe to read.
+
+The stamp carries no offset. Measured against a 10:00:26Z observation and the five-hour window the same message names, UTC+7, UTC+8 and UTC+9 all land inside that window, at +4.16h, +3.16h and +2.16h. The window constraint disambiguates nothing, so every parse of the stamp ships a timezone guess: guess late and a healthy lane stays locked, guess early and a dispatch walks into a live cap. `accounts.<id>.reset_timezone` remains the only way to resolve one, and absent it the stamp stays on the event as `reset_stamp_unparsed`, evidence and never an epoch.
+
+The window NAME has no such ambiguity. `reset_window_seconds_from` reads it, and the refusal's `resets_at` becomes the observation time plus that span, flagged `reset_is_derived`. It is a BOUND - never shorter than the real reset - and a later probe returning an unambiguous endpoint epoch supersedes it. A message naming no window still yields no deadline: an invented one is worse than an absent one. Before this, 27 recorded refusals carried `resets_at: null` beside a populated stamp, leaving every lock with nothing to expire on.
+
+### An abandoned failover says which branch abandoned it
+
+`failover_swapped` carries a `reason` whenever `redispatched` is false, decided where the give-up happens rather than inferred afterwards - the same model the probe's unknown slugs already use. Slugs: `no-session-uuid`, `transcript-not-visible`, `resume-spawn-failed`, `auto-switch-disarmed`, `node-missing`, `node-done`, `cwd-missing`, `stop-failed`, `claim-held`, `spawn-failed`, `chain-empty`, `all-tried`, `chain-malformed`, `active-record-unreadable`. The event writer refuses an abandonment with no reason.
+
+The measurement that motivated it: 20 recorded `failover_swapped` events, every one `redispatched: false`, with a single `failover_exhausted` beside them. Nineteen rotations reached a branch that emitted nothing, and one boolean stood in for at least six causes.
+
+One of those branches is also closed. `_resolve_session_uuid` reads `~/.claude/sessions/*.json` for the worker's `jobId`, and a supervisor's session file is removed when it exits - while recovery necessarily runs after it exits. It now falls back to the agents-registry row, which outlives the supervisor and still carries the full UUID in `harness_session_id`. The sessions file stays first: a live supervisor's `sessionId` is the authoritative resume key and the registry value merely records what it was. Only a full UUID that matches the short id is accepted.
 
 ### Config (`config.accounts.quota`)
 
 | Key | Default | Meaning |
 |---|---|---|
-| `defer_dispatch` | `false` | opt-in: autonomous paths may defer on quota |
+| `observe` | `false` | opt-in: probe quota on the dispatch path and record it, changing no decision |
+| `defer_dispatch` | `false` | opt-in: autonomous paths may defer on quota. Implies `observe` |
 | `defer_threshold_pct` | `90` | worst-window used % that marks `LOW` |
 | `probe_ttl_seconds` | `300` | snapshot freshness window |
 | `defer_horizon_minutes` | `60` | only defer on `LOW` when the reset is this close |
