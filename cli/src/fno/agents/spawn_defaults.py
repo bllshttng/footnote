@@ -1189,10 +1189,11 @@ def inject_spawn_defaults(
     explicit_vendor_present = explicit_vendor is not None
     explicit_route = _flag_present(out[1:], "--route")
     # A pinned substrate or permission-mode constrains which harness the argv
-    # can legally carry (bg is claude+opencode; a mapped --permission-mode is
-    # claude-only off pane), so a grid pair picked on capacity alone can build
-    # an argv the spawn gate exit-2 refuses. The operator named the lane, so
-    # the grid stands down and the ordinary defaults apply.
+    # can legally carry (thread needs the harness's journey-proven lane,
+    # claude only today; a mapped --permission-mode is claude-only off pane),
+    # so a grid pair picked on capacity alone can build an argv the spawn
+    # gate exit-2 refuses. The operator named the lane, so the grid stands
+    # down and the ordinary defaults apply.
     explicit_substrate_present = _flag_present(out[1:], "--substrate")
     explicit_permission_present = _flag_present(out[1:], "--permission-mode")
     profile_routing_pinned = bool(
@@ -1508,7 +1509,10 @@ def inject_spawn_defaults(
             elif cfg_substrate not in _SUBSTRATES:
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
             else:
-                reason = f"{prov} does not support substrate {cfg_substrate!r} (bg is claude + opencode)"
+                reason = (
+                    f"{prov} has no journey-proven thread lane (claude is the "
+                    "only one today); the spawn falls back to the pane default"
+                )
             print(
                 f"fno agents spawn: substrate skipped ({reason}); "
                 f"{substrate_rung}.substrate = {cfg_substrate!r} ignored",
@@ -1850,7 +1854,7 @@ def link_to_spawn_flags(link) -> List[str]:
 
     No new axis vocabulary: harness is ``-H``, the vendor/model route is
     ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is claude + opencode in the Rust client,
+    their own flags. ``--substrate bg`` is claude-only in the Rust client,
     so a codex link that left substrate unset resolves to a pane rather than
     being handed a substrate its harness rejects.
     """

@@ -652,7 +652,7 @@ def resolve_dispatch(
     ):
         raise DispatchResolveError(
             f"harness {chosen_harness!r} does not have the evidence-backed "
-            "autonomous_pane capability; use 'bg' or 'headless'"
+            "autonomous_pane capability; use 'headless' (or 'thread' on claude)"
         )
 
     # 3. command template. Precedence: explicit --command > node verb > config

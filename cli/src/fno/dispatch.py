@@ -91,7 +91,7 @@ def cmd_resolve(
     substrate: Optional[str] = typer.Option(
         None,
         "--substrate",
-        help="bg|headless|pane. Default: per-harness (claude + opencode=bg, else headless).",
+        help="bg|headless|pane. Default: per-harness (claude=bg, else headless; the thread lane must be journey-proven).",
     ),
     node: Optional[str] = typer.Option(
         None, "--node", "--id", help="Node id substituted into the command's {id}. Absent = template returned literally."

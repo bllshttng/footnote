@@ -16,7 +16,7 @@ What each harness fundamentally is, from fno's point of view:
 | Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) |
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
 | Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) |
-| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`) | `resume` |
+| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
