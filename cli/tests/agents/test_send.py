@@ -366,6 +366,156 @@ def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
     assert stranger_session not in envelope
 
 
+def test_dispatch_send_switchboard_identity_floored_on_self_proof_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The switchboard lane never receives a stranger as from_identity.
+
+    When the self proof owns ``from_name`` but the registry row resolved
+    against it names a same-bucket sibling, the envelope keeps the proven
+    self session while the daemon identity floors to unproven - matching
+    the old exact-name lookup, which found no row here.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from types import SimpleNamespace
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.harness_identity import canonical_handle
+
+    own_session = "aaaaaaaa-bbbb-7bbb-8bbb-777777777777"
+    stranger_session = "aaaaaaaa-cccc-7aac-8aac-777777777779"
+    assert canonical_handle(own_session) == canonical_handle(stranger_session)
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda *args, **kwargs: SimpleNamespace(
+            session_id=own_session, harness="codex", disposition="proven"
+        ),
+    )
+
+    write_registry(
+        [
+            AgentEntry(
+                name="same-bucket-stranger",
+                harness="codex",
+                harness_session_id=stranger_session,
+                short_id=canonical_handle(stranger_session),
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="99999999-9999-4999-8999-999999999999",
+                short_id="99999999",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ]
+    )
+    switchboard_calls: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_switchboard_exchange",
+        lambda *args, **kwargs: switchboard_calls.append((args, kwargs)) or True,
+    )
+
+    from fno.agents.dispatch import dispatch_send
+
+    result = dispatch_send(
+        name="red",
+        message="switchboard identity floors with the self proof",
+        provider=None,
+        cwd=tmp_path,
+        from_name=canonical_handle(own_session),
+    )
+
+    assert result.delivery == "hosted"
+    assert len(switchboard_calls) == 1
+    args, kwargs = switchboard_calls[0]
+    wrapped = args[2]
+    assert kwargs["from_identity"] is None
+    assert f'from_session="{own_session}"' in wrapped
+    assert stranger_session not in wrapped
+
+
+def test_dispatch_send_durable_fallback_resolves_sender_once(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A durable send with a caller-built ctx runs one sender resolution.
+
+    The fallback used to re-derive provenance the caller already carried,
+    so two resolutions could name different senders in one record.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from types import SimpleNamespace
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.harness_identity import canonical_handle
+
+    sender_session = "12345678-1234-4123-8123-123456789012"
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda *args, **kwargs: SimpleNamespace(
+            session_id=sender_session, harness="claude", disposition="single"
+        ),
+    )
+
+    write_registry(
+        [
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="abcdef01-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                short_id="abcdef01",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_switchboard_exchange",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mail_inject_claude",
+        lambda *_args, **_kwargs: False,
+    )
+    proof_calls: list[str] = []
+    real_proof = dispatch_mod._proven_self_sender
+
+    def counting_proof(from_name: str):
+        proof_calls.append(from_name)
+        return real_proof(from_name)
+
+    monkeypatch.setattr(dispatch_mod, "_proven_self_sender", counting_proof)
+
+    from fno.agents.dispatch import dispatch_send
+    from fno.bus.log import iter_messages
+
+    result = dispatch_send(
+        name="red",
+        message="one resolution per durable send",
+        provider=None,
+        cwd=tmp_path,
+        from_name=canonical_handle(sender_session),
+    )
+
+    assert result.delivery == "durable"
+    assert proof_calls == [canonical_handle(sender_session)]
+    record = next(m for m in iter_messages() if m.id == result.msg_id)
+    assert f'from_session="{sender_session}"' in record.body
+
+
 @pytest.mark.parametrize(
     ("sender_harness", "sender_session", "wire_harness"),
     [

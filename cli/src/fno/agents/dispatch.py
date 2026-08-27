@@ -5901,6 +5901,11 @@ class _MailCtx:
     # do not carry a minted id (relay hops), keeping the envelope byte-identical.
     id: Optional[str] = None
     origin: Optional[str] = None
+    # The raw sender provider (registry harness) behind `harness`, which is
+    # the one-way wire spelling (harness_for_provider). Carried so a durable
+    # write reusing this ctx stamps the structured provider_from with the
+    # same value the envelope was built from, never a second resolution.
+    provider: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -5942,6 +5947,7 @@ def _build_mail_ctx(
         to=to or None,
         id=id or None,
         from_session=from_session,
+        provider=provider_from,
     )
 
 
@@ -5984,8 +5990,11 @@ def _proven_self_sender(from_name: str) -> tuple[Optional[str], Optional[str]]:
 def _sender_provenance(
     sender: Optional[AgentEntry],
     from_name: str,
+    self_proof: Optional[tuple[Optional[str], Optional[str]]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
-    self_harness, self_session = _proven_self_sender(from_name)
+    self_harness, self_session = (
+        self_proof if self_proof is not None else _proven_self_sender(from_name)
+    )
     if self_session is not None:
         return self_harness, self_session
     if sender is None:
@@ -7754,6 +7763,7 @@ def _deliver_live(
                 harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
+                from_session=entry.harness_session_id or None,
                 origin="peer",
             )
     if _switchboard_exchange(
@@ -7872,10 +7882,10 @@ def _queue_durable_fallback(
         )
 
     msg_id = msg_id or generate_msg_id()
-    provider_from, from_session = _sender_provenance(
-        _resolve_sender_entry(entries, from_name), from_name
-    )
     if mail_ctx is None:
+        provider_from, from_session = _sender_provenance(
+            _resolve_sender_entry(entries, from_name), from_name
+        )
         mail_ctx = _build_mail_ctx(
             from_name,
             from_session,
@@ -7886,6 +7896,12 @@ def _queue_durable_fallback(
             id=msg_id,
             origin=origin,
         )
+    else:
+        # Reuse the caller's provenance instead of re-deriving it: the
+        # envelope body and the structured thread row must name the same
+        # sender, and a second resolution walk can only agree or diverge.
+        provider_from = mail_ctx.provider
+        from_session = mail_ctx.from_session
     # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
     # fills one whenever the caller passed none, so the envelope is always
     # wrapped from here on. The guard that used to stand here read as a real
@@ -8289,8 +8305,20 @@ def dispatch_send(
             from fno.inbox.store import generate_msg_id
 
             sender_entry = _resolve_sender_entry(entries, from_name)
+            self_proof = _proven_self_sender(from_name)
+            if self_proof[1] is not None and (
+                sender_entry is None
+                or getattr(sender_entry, "harness_session_id", None) != self_proof[1]
+            ):
+                # The self proof owns from_name but the registry row resolved
+                # against it names a different session (a same-bucket codex
+                # sibling): the envelope keeps the proven self, and the row
+                # must not reach the switchboard lane as from_identity - the
+                # daemon would attribute the stranger. Floor it to unproven,
+                # which is also what the old exact-name lookup left here.
+                sender_entry = None
             provider_from, from_session = _sender_provenance(
-                sender_entry, from_name
+                sender_entry, from_name, self_proof
             )
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
