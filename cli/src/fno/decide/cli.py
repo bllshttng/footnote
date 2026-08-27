@@ -233,9 +233,11 @@ def _record(
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record decisions. Decisions are operator-authored through "
-            "`fno law set <subject> <decision>`. Append agent findings without "
-            "replacing node details with "
+            "cannot record decisions. Decisions are operator-authored. From "
+            "chat, draft it with `/fno:law <the ruling>` and the operator's "
+            "approval records it in the law lane, no terminal needed. At a "
+            "terminal, `fno inbox law set <subject> <decision>` does it in one call. "
+            "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
@@ -245,8 +247,9 @@ def _record(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run "
-            "`fno law set <subject> <decision>` from an attended operator terminal. "
-            "Append agent findings with "
+            "`fno inbox law set <subject> <decision>` from an attended operator "
+            "terminal, or draft it from chat with `/fno:law <the ruling>` for "
+            "the operator to approve. Append agent findings with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
@@ -580,6 +583,31 @@ def _resolve_output_format(path: str, requested: Optional[str]) -> str:
     raise ValueError("--output needs a .json, .md, or .markdown suffix, or --format")
 
 
+_INVALID_AUTHORITY_SHOWN = 5
+
+
+def _invalid_authority_detail(quality: dict) -> str:
+    """Spell out the offending authority values, or say nothing.
+
+    The count alone never named `crown-l1`, `crown-l2-<node>` or `banana`, so
+    the tally that was supposed to catch a minted spelling could not report
+    one. Returns a leading-space suffix so callers append it unconditionally.
+    """
+    values = quality.get("invalid_authority_values") or []
+    if not values:
+        return ""
+    # Capped because the motivating value is `crown-l2-<node>`, one distinct
+    # spelling per node, over a machine-wide index. Uncapped, a large journal
+    # turns this summary into a single line of tens of kilobytes. The producer
+    # ranks by count descending, so the cap keeps the worst offenders.
+    shown = values[:_INVALID_AUTHORITY_SHOWN]
+    listed = ", ".join(f"{row['value']} x{row['count']}" for row in shown)
+    remaining = len(values) - len(shown)
+    if remaining > 0:
+        listed += f", +{remaining} more (see --json)"
+    return f" ({listed})"
+
+
 def _render_markdown(report: dict) -> str:
     lines = ["# Decision report", ""]
     if "groups" in report:
@@ -594,7 +622,8 @@ def _render_markdown(report: dict) -> str:
         quality = report.get("data_quality", {})
         lines.append(
             f"Data quality: {quality.get('subjectless', 0)} subjectless, "
-            f"{quality.get('invalid_authority', 0)} invalid authority value(s)."
+            f"{quality.get('invalid_authority', 0)} invalid authority value(s)"
+            f"{_invalid_authority_detail(quality)}."
         )
     else:
         lines.append(
@@ -665,7 +694,8 @@ def _list_decisions(
             typer.echo(
                 f"review list: {len(report['groups'])} group(s), "
                 f"{quality['subjectless']} subjectless, "
-                f"{quality['invalid_authority']} invalid authority value(s)",
+                f"{quality['invalid_authority']} invalid authority value(s)"
+                f"{_invalid_authority_detail(quality)}",
                 err=True,
             )
         return

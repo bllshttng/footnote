@@ -1257,6 +1257,10 @@ def review_list() -> dict[str, Any]:
     subjectless = 0
     subjectless_rows: list[dict[str, Any]] = []
     invalid_authority = 0
+    # A bare count cannot surface a SPELLING. `crown-l1` and two
+    # `crown-l2-<node>` values were minted by kings with no correct value to
+    # pass, and the tally that would have caught them only ever said how many.
+    invalid_authority_values: dict[str, int] = {}
 
     def review_row(row: dict) -> dict[str, Any]:
         return {
@@ -1285,6 +1289,8 @@ def review_list() -> dict[str, Any]:
             and authority not in READ_AUTHORITY_SOURCES
         ):
             invalid_authority += 1
+            key = str(authority)
+            invalid_authority_values[key] = invalid_authority_values.get(key, 0) + 1
         if row.get("lifecycle") != "live" or not subject:
             continue
         node_id = _resolved_node(subject, graph_entries)
@@ -1303,7 +1309,21 @@ def review_list() -> dict[str, Any]:
         "groups": groups,
         "data_quality": {
             "subjectless": subjectless,
+            # Kept as an integer beside the breakdown: --review-list --json is
+            # a read surface, so removing this key would break its readers.
             "invalid_authority": invalid_authority,
+            # A LIST, not a dict, because the order is the ranking. A dict
+            # carries rank only in its insertion order, and every serializer is
+            # free to drop that: `--output report.json` writes through
+            # `json.dumps(sort_keys=True)`, which would file `banana` above a
+            # 40-row `crown-l1`. A list survives any of them.
+            "invalid_authority_values": [
+                {"value": value, "count": count}
+                for value, count in sorted(
+                    invalid_authority_values.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )
+            ],
         },
         "damaged": damaged,
     }

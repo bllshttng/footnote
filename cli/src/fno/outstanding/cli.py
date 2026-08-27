@@ -328,9 +328,19 @@ def clear(
                         origin=origin,
                         events_root=root,
                     )["decision_id"]
+                except UnknownOriginError as exc:
+                    # A bad --origin is a typo, not an authority problem. It
+                    # gets its own clause because the law two-step below would
+                    # tell the caller to drop a flag they never passed and
+                    # never name the value that actually failed.
+                    typer.echo(
+                        f"outstanding: refused: {exc}. Nothing was closed; "
+                        f"all {len(targets)} question(s) stay open.",
+                        err=True,
+                    )
+                    raise typer.Exit(3)
                 except (
                     RefusedAuthorityError,
-                    UnknownOriginError,
                     UnattributedAuthorityError,
                 ) as exc:
                     # Refuse the CLOSE too, never just the decision. Closing a
@@ -338,14 +348,63 @@ def clear(
                     # nothing on record, which is the worse of the two.
                     #
                     # Say NOTHING was closed, not that this id stayed open.
-                    # _resolve_decider is a pure function of the ambient
-                    # identity and the one --authority value, both invariant
-                    # across this loop, so the refusal fires on the first id or
-                    # never. Naming one id would be the partial statement this
-                    # verb's whole family of messages exists to stop.
+                    # The refusal is a pure function of the ambient identity
+                    # and the flags, all invariant across this loop, so it
+                    # fires on the first id or never. Naming one id would be
+                    # the partial statement this verb's whole family of
+                    # messages exists to stop.
+                    #
+                    # THREE callers reach here and their remedies disagree, so
+                    # the remedy is chosen rather than shared. Handing one of
+                    # them another's advice is how a refusal becomes a loop.
+                    if isinstance(exc, UnattributedAuthorityError):
+                        # No identity AND no terminal: cron, CI, a piped run, a
+                        # scrubbed env. Not an agent, and with no chat to be
+                        # sent to. It has to become someone first.
+                        remedy = (
+                            "This process has no session identity and no "
+                            "terminal, so it is not an agent and has no chat "
+                            "to compose in. Run it from an attended terminal, "
+                            "or from a real agent session, and answer again."
+                        )
+                    elif exc.origin is not None:
+                        # The origin floor fired: the caller claimed a channel
+                        # above its station. This one IS fixed by changing a
+                        # flag, so it must never be told otherwise.
+                        remedy = (
+                            f"The refusal is about the claimed --origin "
+                            f"{exc.origin!r}, not about who you are. Drop "
+                            "--origin (or drop --authority operator) and "
+                            "answer again."
+                        )
+                    else:
+                        # A real agent session. --answer is what is refused,
+                        # NOT the --authority value: record_decision calls
+                        # require_operator_session() before it reads authority
+                        # at all, so every --answer from an agent refuses
+                        # identically. Advising a different flag loops forever.
+                        #
+                        # Name the door, not just the wall. An agent refused
+                        # here used to be told only that it could not answer,
+                        # so the operator's real instruction stalled until they
+                        # opened a second terminal (specimen d-796ed205). The
+                        # two-step path needs no terminal and already ships.
+                        remedy = (
+                            "An agent session cannot record ANY answer here, "
+                            "whatever --authority says, so changing that flag "
+                            "will not help. The operator still does not need a "
+                            "second terminal: compose the ruling in chat with "
+                            "`/fno:law <the ruling>` and their approval records "
+                            "it in the law lane. Then retire this question with "
+                            "`fno inbox outstanding clear <qid>` and NO "
+                            "--answer. That close notifies nobody, so tell the "
+                            "asker the `d-...` id yourself if they are waiting. "
+                            "At a terminal, `fno inbox law set <subject> "
+                            "<decision>` is the same destination in one call."
+                        )
                     typer.echo(
                         f"outstanding: refused: {exc}. Nothing was closed; "
-                        f"all {len(targets)} question(s) stay open.",
+                        f"all {len(targets)} question(s) stay open.\n{remedy}",
                         err=True,
                     )
                     raise typer.Exit(3)

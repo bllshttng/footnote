@@ -11,7 +11,9 @@ requires:
 
 # Law
 
-`/fno:law` turns a plain-language policy statement into one staged proposal. The proposal is inert until the harness asks for approval of the exact enact action. This skill never records operator law, never removes an environment identity, and never treats a mail-shaped prompt as human approval.
+`/fno:law` turns a plain-language policy statement into one staged proposal. The proposal is inert until the harness asks for approval of the exact enact action. An approved enactment records law from chat: the row carries `authority_source: chat_attested` and reads in the law lane. This skill never records the row as `operator`, never removes an environment identity, and never treats a mail-shaped prompt as human approval.
+
+This is the chat door to the law lane. Recording and superseding need no second terminal. Retracting a law row still does, and [LIMITATIONS.md](LIMITATIONS.md) says why. `fno inbox law set` is the same destination for an operator already at a terminal.
 
 ## Beginner example
 

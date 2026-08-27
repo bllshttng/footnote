@@ -940,6 +940,8 @@ def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
     assert payload["data_quality"] == {
         "subjectless": 1,
         "invalid_authority": 1,
+        # The count says how many; only this says which.
+        "invalid_authority_values": [{"value": "banana", "count": 1}],
     }
 
 
@@ -2186,7 +2188,7 @@ def test_resolved_agent_identity_refuses_decision_write(
         decide_app, ["--subject", "pr-923", "--decision", "merged"]
     )
     assert refused.exit_code == 3, refused.output
-    assert "fno law set <subject> <decision>" in refused.output
+    assert "fno inbox law set <subject> <decision>" in refused.output
     assert "fno backlog note" in refused.output
 
 
@@ -2293,7 +2295,7 @@ def test_an_agent_cannot_type_a_name_or_authority_into_a_decision(
     assert named.exit_code == 3, named.output
     assert granted.exit_code == 3, granted.output
     assert "fno backlog note" in named.output
-    assert "fno law" in granted.output
+    assert "fno inbox law" in granted.output
 
 
 def test_record_decision_refuses_agent_operator_authority_before_either_write(
@@ -2373,7 +2375,7 @@ def test_backlog_decide_refuses_every_non_operator_authority_before_any_write(
     refused = runner.invoke(decide_app, args)
 
     assert refused.exit_code == 3, refused.output
-    assert "fno law" in refused.output
+    assert "fno inbox law" in refused.output
     assert "fno backlog note" in refused.output
 
     # Positive control: a terminal-attested operator can still reach both
@@ -2435,7 +2437,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     )
     assert refused.exit_code == 3, refused.output
     assert handle in refused.output
-    assert "fno law" in refused.output
+    assert "fno inbox law" in refused.output
     assert "fno backlog note" in refused.output
 
     # The successful-control write proves both stores were inspected after the
@@ -3360,3 +3362,145 @@ def test_standing_query_refuses_a_damaged_local_index(
     assert result.exit_code == 1
     assert "decision index has 1 damaged row" in result.stderr
     assert '"current_law"' not in result.stdout
+
+
+def test_decide_refusal_names_the_chat_door(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The refusal must name a surface the refused caller can actually reach.
+
+    An agent session has no terminal, so `fno inbox law set` alone points it at a
+    door it cannot open. `/fno:law` is the one it can.
+    """
+    from types import SimpleNamespace
+
+    from fno.graph.cli import cli as backlog_app
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+            harness="codex",
+            disposition="single",
+        ),
+    )
+
+    refused = runner.invoke(
+        backlog_app,
+        ["decide", "pr-923", "close it", "--authority", "operator"],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    assert "/fno:law" in refused.stderr
+    # The attended-terminal verb is not replaced, only joined, and it is named
+    # in its canonical spelling: `fno law` is a retired root (d-add90c60).
+    assert "fno inbox law set" in refused.stderr
+    assert "`fno law set" not in refused.stderr
+
+
+def test_invalid_authority_detail_caps_the_spellings_it_prints():
+    """`crown-l2-<node>` is one spelling per node over a machine-wide index."""
+    from fno.decide.cli import _INVALID_AUTHORITY_SHOWN, _invalid_authority_detail
+
+    assert _invalid_authority_detail({}) == ""
+
+    many = [
+        {"value": f"crown-l2-x-{i:04d}", "count": 40 - i} for i in range(40)
+    ]
+    rendered = _invalid_authority_detail({"invalid_authority_values": many})
+
+    assert rendered.count(" x") == _INVALID_AUTHORITY_SHOWN
+    assert f"+{40 - _INVALID_AUTHORITY_SHOWN} more (see --json)" in rendered
+    # Sorted by count descending upstream, so the cap keeps the worst.
+    assert "crown-l2-x-0000 x40" in rendered
+    assert "crown-l2-x-0039" not in rendered
+
+
+def test_agent_session_is_still_refused_operator_authority(monkeypatch):
+    """Characterization lock. Expected to pass today; do NOT delete as redundant.
+
+    This is the property x-4155 must not break while making law reachable. The
+    mechanism that makes law unforgeable is the same one that made it feel
+    unreachable, so a later attempt to open up the operator lane will land in
+    `_resolve_decider`. If this test goes green after such a change, the change
+    forged law. Inverting the guard locally must make this fail.
+    """
+    from types import SimpleNamespace
+
+    from fno import harness_identity
+    from fno.decide import RefusedAuthorityError, _resolve_decider
+
+    session_id = "7420e8f7-aaaa-bbbb-cccc-dddddddddddd"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=session_id, harness="claude", disposition="proven"
+        ),
+    )
+
+    with pytest.raises(RefusedAuthorityError, match=handle) as excinfo:
+        _resolve_decider(None, "operator")
+    assert excinfo.value.agent_handle == handle
+
+
+def test_review_list_names_out_of_enum_authority_values(monkeypatch):
+    """A count cannot surface a spelling; the breakdown is the whole point."""
+    from fno import decide as decide_mod
+
+    rows = [
+        {"decision_id": "d-1", "subject": "x-aaaa", "authority_source": "banana"},
+        {"decision_id": "d-2", "subject": "x-aaaa", "authority_source": "crown-l1"},
+        {"decision_id": "d-3", "subject": "x-bbbb", "authority_source": "crown-l1"},
+        {"decision_id": "d-4", "subject": "x-bbbb", "authority_source": "agent"},
+        # A repository-projected row is catalogued law, never a bad spelling.
+        {
+            "decision_id": "d-5",
+            "subject": "x-cccc",
+            "authority_source": "design",
+            "_source": "repository",
+        },
+    ]
+    monkeypatch.setattr(decide_mod, "list_decisions", lambda *a, **k: (None, rows, 0))
+
+    quality = decide_mod.review_list()["data_quality"]
+
+    assert quality["invalid_authority"] == 3
+    # A LIST, ordered by count desc then name, so the worst offender reads
+    # first and no serializer can re-sort the ranking away.
+    assert quality["invalid_authority_values"] == [
+        {"value": "crown-l1", "count": 2},
+        {"value": "banana", "count": 1},
+    ]
+    assert sum(row["count"] for row in quality["invalid_authority_values"]) == (
+        quality["invalid_authority"]
+    )
+
+
+def test_review_list_breakdown_survives_a_key_sorting_serializer(monkeypatch):
+    """`--output report.json` writes through json.dumps(sort_keys=True).
+
+    Drives the real producer, because a hand-written literal round-tripped
+    through the stdlib asserts nothing about `review_list`: regressing it back
+    to a dict would leave such a test green. `banana` sorts BEFORE `crown-l1`
+    alphabetically and AFTER it by rank, so the two orders disagree and the
+    assertion can tell them apart.
+    """
+    import json as _json
+
+    from fno import decide as decide_mod
+
+    rows = [{"decision_id": "d-0", "subject": "x-a", "authority_source": "banana"}]
+    rows += [
+        {"decision_id": f"d-{i}", "subject": "x-a", "authority_source": "crown-l1"}
+        for i in range(1, 41)
+    ]
+    monkeypatch.setattr(decide_mod, "list_decisions", lambda *a, **k: (None, rows, 0))
+
+    produced = decide_mod.review_list()
+    round_tripped = _json.loads(_json.dumps(produced, sort_keys=True))
+
+    assert round_tripped["data_quality"]["invalid_authority_values"] == [
+        {"value": "crown-l1", "count": 40},
+        {"value": "banana", "count": 1},
+    ]
