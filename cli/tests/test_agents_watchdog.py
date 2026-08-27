@@ -3800,6 +3800,15 @@ def test_ac4_fetch_failure_and_garbage_count_are_unknown_never_a_count():
     assert uw.ahead_of_main(Path("/nope"), runner=_GarbageRun()) is None
 
 
+def test_vanished_cwd_degrades_to_unknown_never_a_crash(tmp_path):
+    """A git call whose cwd vanished (a worktree row deleted mid-scan) is an
+    unreadable read: the metric answers unknown, the report does not die."""
+    gone = tmp_path / "vanished"
+    assert uw.fetch_origin_main(gone) is False
+    assert uw.ahead_of_main(gone) is None
+    assert uw.dirty_path_count(gone) is None
+
+
 # --- AC5: dirty worktrees with no owner -----------------------------------
 
 
@@ -4115,7 +4124,8 @@ def test_report_write_preserves_the_verdict_lanes_stamps(tmp_path, monkeypatch):
     monkeypatch.setattr(_se, "escalate_unfinished", lambda f, **kw: ("none", ""))
 
     watchdog.write_sweep_file(
-        "manual", {"wake": 1}, NOW_1840, "row-a:wake", events_signature="row-a:wake"
+        "manual", {"wake": 1}, NOW_1840, "row-a:wake", events_signature="row-a:wake",
+        terminal_harness_rows=3,
     )
     snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
     uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
@@ -4124,6 +4134,7 @@ def test_report_write_preserves_the_verdict_lanes_stamps(tmp_path, monkeypatch):
     assert after["counts"] == {"wake": 1}
     assert after["signature"] == "row-a:wake"
     assert after["events_signature"] == "row-a:wake"
+    assert after["terminal_harness_rows"] == 3
     assert after["unfinished_work_complete"] is True
 
 

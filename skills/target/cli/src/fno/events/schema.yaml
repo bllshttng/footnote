@@ -3878,14 +3878,14 @@ event_types:
           type: [string, "null"]
           description: "The backlog node id, when one resolved."
         pr_number:
-          type: integer
-          description: "The PR number, for the open-pr dimension."
+          type: [integer, "null"]
+          description: "The PR number, for the open-pr dimension; null for non-PR findings."
         cwd:
           type: [string, "null"]
           description: "The worktree path the verb targets, when one does."
         age_s:
-          type: integer
-          description: "Idle or open age in seconds, when measured."
+          type: [integer, "null"]
+          description: "Idle or open age in seconds; null when unmeasured."
 
   - name: stranded_sweep
     description: "The three-way stranded-worktree classifier (git+graph+fleet join) recorded a STRANDED recovery act or a fail-open UNKNOWN row. STRANDED rows carry the push/backlog acts already taken; UNKNOWN rows carry only this event - report, never reap, and a row this cannot positively close is reported but never acted on."

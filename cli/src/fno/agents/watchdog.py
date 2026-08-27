@@ -2098,7 +2098,7 @@ def write_sweep_file(
     signature: Optional[str] = None,
     *,
     events_signature: Optional[str] = None,
-    terminal_harness_rows: int = 0,
+    terminal_harness_rows: Optional[int] = None,
     recoverable_count: Optional[int] = None,
     unfinished: Optional[dict] = None,
     recovery_events_signature: Optional[str] = None,
@@ -2112,10 +2112,9 @@ def write_sweep_file(
     said (the mail lane speaks on change, and so must the event lane).
 
     ``unfinished`` carries the unfinished-work report stamps (``counts``,
-    ``complete``, ``signature``). ``unfinished_work_complete`` is the positive
-    complete-scan marker the done probe reads: it is written on every report
-    run, True only when all four dimensions were measured, so an incomplete
-    read never certifies itself fresh."""
+    ``complete``, ``signature``). ``unfinished_work_complete`` is written on
+    every report run, True only when all four dimensions were measured, so an
+    incomplete read never certifies itself fresh."""
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2140,13 +2139,15 @@ def write_sweep_file(
             signature = str(previous.get("signature") or "")
         if events_signature is None:
             events_signature = str(previous.get("events_signature") or "")
+        if terminal_harness_rows is None:
+            terminal_harness_rows = int(previous.get("terminal_harness_rows") or 0)
         payload: dict[str, Any] = {
             "source": source,
             "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
             "counts": counts,
-            "terminal_harness_rows": terminal_harness_rows,
+            "terminal_harness_rows": int(terminal_harness_rows),
             "signature": signature,
             "events_signature": events_signature,
         }

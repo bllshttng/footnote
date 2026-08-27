@@ -587,15 +587,36 @@ def snapshot_payload(snapshot: Snapshot) -> dict:
 # --- the git metric: fresh origin/main, counted per worktree ------------------
 
 
-def _run_git(argv: list, *, cwd: Path, runner=None) -> subprocess.CompletedProcess:
+def _run_git(
+    argv: list, *, cwd: Path, runner=None, timeout: Optional[float] = None
+) -> subprocess.CompletedProcess:
     run = runner or subprocess.run
-    return run(argv, cwd=str(cwd), capture_output=True, text=True, check=False)
+    try:
+        return run(
+            argv, cwd=str(cwd), capture_output=True, text=True, check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", "timed out")
+    except OSError as exc:
+        # A vanished cwd is an unreadable read, not a crashed report.
+        return subprocess.CompletedProcess(argv, 1, "", str(exc))
+
+
+#: The fetch is the report's only network leg and the tick's deadline does
+#: not bound it: a stalled remote would hold the tick open until SIGALRM
+#: kills every later leg. Past this ceiling the repository reads unknown,
+#: the same verdict as any other failed fetch.
+FETCH_TIMEOUT_S = 120.0
 
 
 def fetch_origin_main(repo: Path, *, runner=None) -> bool:
     """One ``git fetch origin main`` per repository. Failure is a verdict
     (the metric for that repository reads unknown), never a guessed count."""
-    proc = _run_git(["git", "fetch", "origin", "main"], cwd=repo, runner=runner)
+    proc = _run_git(
+        ["git", "fetch", "origin", "main"], cwd=repo, runner=runner,
+        timeout=FETCH_TIMEOUT_S,
+    )
     return proc.returncode == 0
 
 
