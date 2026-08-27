@@ -55,6 +55,8 @@ Before reading the protocol below, rule it out. Codex has three re-entry lanes a
 
 Two flags on that lane close the modals recorded as blocking unattended restore. `--cd <DIR>` sets the working root. Codex then never renders its "use session directory or current directory" prompt. That prompt defaults to the canonical checkout, and the correct answer is the worktree. `--dangerously-bypass-hook-trust` runs enabled hooks without persisted trust, which clears the hooks-trust gate. Neither needs a protocol and both were answered by hand three times on 2026-08-25.
 
+**What fno's own resume lane applies is `--cd` alone.** Read the paragraph above as codex's capability, not as footnote's behavior. The gap is deliberate. A registry row records no sandbox posture. So the lane cannot tell a bounded worker from a yolo one, and a forced bypass resumes every bounded worker with approvals off. Hook trust needs that same operator choice, plus the installed-version gate the spawn lane already applies. So an unattended `fno agents resume` of a codex row with untrusted hooks still stalls on that prompt. Clearing it waits on an opt-in verb.
+
 **What rules `codex resume` out is not capability, it is the terminal.** With stdin redirected it exits 1 in under a tenth of a second:
 
 ```
