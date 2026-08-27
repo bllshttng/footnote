@@ -34,6 +34,7 @@ Three rules keep it from guessing:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -425,6 +426,53 @@ def confine_store_hits(
     )
 
 
+def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
+    """The adopted session's last transcript write, as a UTC stamp, or None.
+
+    None means the store held no transcript for this session, and ONLY that. It
+    is the reason the row's ``last_message_at`` was null for every non-claude
+    adoption: nothing here used to look, and the receipt then reported the
+    transcript unreadable, which is an absence read as an answer.
+
+    ``resolve_transcript`` is the shared per-harness resolver (it handles codex
+    and opencode as well as claude), so adopting a codex rollout does not need a
+    second copy of codex's date-partitioned path shape.
+
+    Only a per-session file (``kind == "jsonl"``) yields a stamp. opencode
+    resolves to its SHARED SQLite store, whose mtime is the last write by ANY
+    session; stamping that would be a plausible, near-always-wrong answer that
+    nothing downstream could falsify. A null the receipt explains is better.
+    """
+    from fno.provenance.resolver import resolve_transcript
+
+    try:
+        # Pass the SAME store roots the probes used. resolve_transcript's claude
+        # arm otherwise falls back to its import-time default projects root, so
+        # under FNO_CLAUDE_PROJECTS_DIR it reads a different tree than the one
+        # that produced this hit and the stamp is null every time - including in
+        # every test, where it is the one read that escapes the fixture roots.
+        resolved = resolve_transcript(
+            hit.harness,
+            hit.session_id,
+            hit.cwd,
+            projects_root=_claude_projects_dir(),
+            codex_sessions_dir=_codex_sessions_dir(),
+        )
+        if not resolved.resolved or not resolved.transcript_path:
+            return None
+        if resolved.kind != "jsonl":
+            return None
+        mtime = Path(resolved.transcript_path).stat().st_mtime
+    except Exception:  # noqa: BLE001 - a stamp is a nicety; adoption still lands
+        return None
+    return (
+        datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def adopt_store_hit(
     hit: StoreHit,
     registry_path: Optional[Path] = None,
@@ -453,6 +501,7 @@ def adopt_store_hit(
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
+    last_message_at = _transcript_last_write(hit)
     try:
         return register_existing_session(
             provider=hit.harness,
@@ -471,6 +520,7 @@ def adopt_store_hit(
             # with the absence of an operator marker.
             origin="adopted",
             log_path=log_path,
+            last_message_at=last_message_at,
             registry_path=registry_path,
         )
     except AgentResolutionError:

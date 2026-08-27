@@ -1039,3 +1039,300 @@ def test_peek_opencode_db_ties_render_deterministically(tmp_path):
     }
     assert len(seen) == 1, f"tie ordering not deterministic: {seen}"
     assert seen == {("a", "b", "c")}
+
+
+def test_peek_reads_adopted_orphan_row_instead_of_lying(tmp_path, monkeypatch):
+    """An adopted orphan is addressable: peek reads its transcript, never "not found".
+
+    ``fno agents adopt`` mints a codex row with status="orphaned" and (by
+    design, for a non-claude harness) an empty short_id. The live-session
+    resolver skips it because it is not alive, so peek answered "peer not found
+    in the registry" for a row it had already read, and pointed the caller back
+    at adopt: a closed loop that left a 2,830-line conversation unreachable
+    through the documented observe verb.
+    """
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    day = tmp_path / "sessions" / "2026" / "08" / "27"
+    day.mkdir(parents=True)
+    (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}}
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "orphaned ping"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    registry_path = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="01a04292",
+                harness="codex",
+                harness_session_id=session_id,
+                status="orphaned",
+                origin="adopted",
+                cwd="/tmp/proj",
+                log_path="",
+                short_id="",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+    # Addressable by the row name AND by the full session id adopt echoes back.
+    for handle in ("01a04292", session_id):
+        out, err = io.StringIO(), io.StringIO()
+        rc = peek(
+            handle,
+            stdout=out,
+            stderr=err,
+            resolve=lambda h: (None, ["someone-else"]),
+            projects_root=tmp_path,
+            codex_sessions_dir=tmp_path / "sessions",
+            mux_lookup=lambda h: None,
+        )
+        # Positive marker: the conversation itself, never merely a zero exit.
+        assert rc == 0, err.getvalue()
+        assert "orphaned ping" in out.getvalue()
+        assert "peer not found" not in err.getvalue()
+        assert "fno agents adopt" not in err.getvalue()
+
+
+def _adopted_codex_registry(tmp_path, monkeypatch, session_id, *, with_rollout=True):
+    """An adopted codex orphan: empty short_id, optional rollout on disk."""
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    if with_rollout:
+        day = tmp_path / "sessions" / "2026" / "08" / "27"
+        day.mkdir(parents=True, exist_ok=True)
+        (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}}
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "my own message"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    registry_path = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="01a04292",
+                harness="codex",
+                harness_session_id=session_id,
+                status="orphaned",
+                origin="adopted",
+                cwd="/tmp/proj",
+                log_path="",
+                short_id="",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+
+def test_peek_empty_short_id_never_matches_other_workers_events(tmp_path, monkeypatch):
+    """An empty short_id must not turn into the catch-all token ``worker:``.
+
+    ``wants`` interpolated ``f"worker:{short_id}"`` before filtering falsy
+    entries, so an empty short_id (every non-claude adopted orphan) produced the
+    bare literal "worker:", which the substring arm then matched against every
+    ``worker:<name>`` event source. peek rendered OTHER workers' status lines as
+    this session's, on the fast path, before its own transcript was read.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "\n".join(
+            [
+                json.dumps({"kind": "task_started", "source": "worker:someone-else"}),
+                json.dumps({"kind": "task_done", "source": "worker:another-worker"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        events_path=events,
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0, err.getvalue()
+    # Positive marker: THIS session's own transcript line is what was rendered.
+    assert "my own message" in out.getvalue()
+    assert "someone-else" not in out.getvalue()
+    assert "another-worker" not in out.getvalue()
+
+
+def test_peek_row_without_a_transcript_is_not_reported_idle(tmp_path, monkeypatch):
+    """A dead row whose store is gone must not answer "no activity yet".
+
+    The row resolves, so "peer not found" is wrong; the session ended, so idle
+    is wrong too. The module contract forbids a blank exit-0 a caller could read
+    as idle, which is exactly what an empty record list produced here.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id, with_rollout=False)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 13
+    assert "no activity yet" not in out.getvalue()
+    message = err.getvalue()
+    assert "registry row 01a04292 exists" in message
+    assert "no codex transcript resolved" in message
+
+
+def test_peek_follow_on_a_recovered_row_returns_instead_of_tailing(tmp_path, monkeypatch):
+    """--follow must not block forever on a session that cannot write again.
+
+    The follow loop exits only on rotation, a false ``is_live``, or Ctrl-C, and
+    ``cmd_peek`` passes no ``is_live``. On a recovered row all three are
+    unreachable, so the call hung after printing the tail.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        follow=True,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    assert "my own message" in out.getvalue()
+    message = err.getvalue()
+    assert "no writer to tail" in message
+    # Says what was measured, never that the session is dead: `row_derived`
+    # only means the live-session resolver missed, and liveness is `truth`'s.
+    assert "not a live session" not in message
+
+
+def test_peek_lines_zero_does_not_claim_the_store_is_gone(tmp_path, monkeypatch):
+    """``--lines 0`` is a request for no records, not evidence of a pruned store.
+
+    ``recent_records`` returns ``[]`` for at least four reasons. Reading that
+    one absence as one cause made peek answer "the row outlived its store" for
+    a rollout sitting readable on disk: both halves of the sentence false, and
+    the exact shape this module was just fixed for.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        lines=0,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    assert "outlived its store" not in err.getvalue()
+    assert "pruned" not in err.getvalue()
+
+
+def test_peek_resolved_but_empty_transcript_blames_neither_store_nor_idle(
+    tmp_path, monkeypatch
+):
+    """A transcript that resolves and reads empty gets a third answer.
+
+    Not "the store is gone" (it resolved) and not "no activity yet" (this row
+    answered no liveness probe). Report the measurement and stop.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id, with_rollout=False)
+    # A rollout carrying session_meta only: resolves, yields zero records.
+    day = tmp_path / "sessions" / "2026" / "08" / "27"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    message = err.getvalue()
+    assert "transcript resolved" in message
+    assert "no records were read" in message
+    assert "outlived its store" not in message
+    assert "no activity yet" not in out.getvalue()
+
+
+def test_status_events_with_nothing_to_scope_on_returns_nothing():
+    """An unidentifiable session must not inherit the whole shared events file.
+
+    ``wants`` could not be empty before the ``worker:`` fix (it always held that
+    literal). Now it can, and the scope test short-circuits on an empty set, so
+    every line would render as this session's status.
+    """
+    from fno.agents.peek import _status_events
+
+    assert _status_events(Path("/nonexistent"), "", "") == []

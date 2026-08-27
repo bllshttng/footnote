@@ -2833,26 +2833,53 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                 }
             }
             if source != AdoptSource::Registry {
-                match row.get("last_message_at").and_then(Value::as_str) {
-                    Some(stamp) => {
-                        let age = chrono::DateTime::parse_from_rfc3339(stamp)
-                            .ok()
-                            .and_then(|at| {
-                                let seconds =
-                                    (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
-                                        .num_seconds();
-                                (seconds >= 0).then_some(seconds as u64)
-                            });
-                        if let Some(age) = age {
-                            eprintln!(
-                                "adopted {name} (short_id={short})\n  last_activity_age_s={age} (from transcript mtime, read before the row write)"
-                            );
-                        }
+                // The receipt names the handle that ADDRESSES the row. For a
+                // non-claude harness `short_id` is empty by construction
+                // (`adopt_store_hit` fills it for claude alone, because it is
+                // claude's `attach <jobId>` transport key and nothing else's),
+                // so printing `short_id=` told a codex operator their recovery
+                // produced nothing to type. The row name is the address for
+                // every harness, and it is already on stdout.
+                let handle = if short.is_empty() {
+                    format!("address it as {name}")
+                } else {
+                    format!("short_id={short}")
+                };
+                let activity = match row.get("last_message_at").and_then(Value::as_str) {
+                    Some(stamp) => chrono::DateTime::parse_from_rfc3339(stamp)
+                        .ok()
+                        .and_then(|at| {
+                            let seconds = (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                                .num_seconds();
+                            (seconds >= 0).then_some(seconds as u64)
+                        })
+                        .map_or_else(
+                            // A stamp that will not parse, or one in the
+                            // future, is a broken instrument. Saying so beats
+                            // the previous silence, which printed no adopted
+                            // line at all and left the operator with a bare
+                            // name on stdout and no receipt.
+                            || format!("last_message_at={stamp} (unparseable or ahead of now)"),
+                            |age| {
+                                format!(
+                                    "last_activity_age_s={age} (from transcript mtime, read before the row write)"
+                                )
+                            },
+                        ),
+                    // Never "unreadable": nothing on this side read a
+                    // transcript. Name the resolver that actually ran, because
+                    // the two sources use different ones and only one of them
+                    // is store-wide. The manifest path resolves through
+                    // claude_adopt::transcript_activity, which is claude-only,
+                    // so a codex manifest adoption lands here with its rollout
+                    // sitting on disk; saying "the store held nothing" there
+                    // would be the same false absence this receipt just lost.
+                    None if source == AdoptSource::Manifest => {
+                        "no transcript resolved from the target manifest (that path resolves claude only); last_message_at=null".into()
                     }
-                    None => eprintln!(
-                        "adopted {name} (short_id={short})\n  transcript unreadable; last_message_at=null"
-                    ),
-                }
+                    None => "no transcript resolved for this session in the harness store; last_message_at=null".into(),
+                };
+                eprintln!("adopted {name} ({handle})\n  {activity}");
             }
             0
         }

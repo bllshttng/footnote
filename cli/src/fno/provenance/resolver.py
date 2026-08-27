@@ -120,8 +120,10 @@ def resolve_transcript(
     Parameters
     ----------
     harness:
-        Harness identifier, e.g. "claude", "codex", "gemini".  Only "claude"
-        is actively resolved; everything else returns resolved=False.
+        Harness identifier, e.g. "claude", "codex", "gemini".  "claude",
+        "codex" and "opencode" are actively resolved (see the arms below);
+        every other harness returns resolved=False, reason="harness-not-
+        supported".
     session_id:
         Full UUID-style session id OR an 8-hex prefix for a glob match.
         None/empty -> resolved=False immediately.

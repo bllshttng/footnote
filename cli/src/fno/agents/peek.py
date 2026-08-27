@@ -513,7 +513,24 @@ def _status_events(
     """
     if events_path is None:
         return []
-    wants = {v for v in (short_id, session_id, f"worker:{short_id}") if v}
+    # Build the `worker:` token only from a NON-EMPTY short_id. Interpolating an
+    # empty one yields the bare literal "worker:", which is truthy, survives the
+    # `if v` filter, and then matches every `worker:<name>` source through the
+    # substring arm below - so a row with no short_id (every non-claude adopted
+    # orphan) rendered OTHER workers' status lines as its own and returned them
+    # on the fast path, before its transcript was ever read.
+    tokens = [short_id, session_id]
+    if short_id:
+        tokens.append(f"worker:{short_id}")
+    wants = {v for v in tokens if v}
+    if not wants:
+        # Nothing identifies this session, so nothing in a SHARED events file
+        # can be attributed to it. Before the fix above `wants` always held the
+        # literal "worker:" and so was never empty; now that it can be, the
+        # `if wants and ...` scope test below would short-circuit and render
+        # every line in the file as this session's status - wider than the bug
+        # this function was just fixed for.
+        return []
     lines: list[str] = []
     try:
         with events_path.open("r", encoding="utf-8") as fh:
@@ -708,11 +725,15 @@ def _lookup_mux_pane(
 
 
 def _lookup_registry_row_exact(handle: str):
-    """Return the registry row whose stored name exactly matches ``handle``.
+    """Return the registry row whose stored name or session id matches ``handle``.
 
     This diagnostic runs only after transcript and mux resolution both miss.
-    It deliberately does not resolve aliases: the message must name the exact
-    requested row, and an unreadable registry contributes no diagnosis.
+    It deliberately does not resolve aliases or prefixes: the message must name
+    the exact requested row, and an unreadable registry contributes no
+    diagnosis. The session id is matched alongside the name because that is the
+    string ``fno agents adopt`` and ``fno agents peek``'s own miss text hand the
+    caller, and a row addressable by one spelling and not the other is the same
+    dead end by a shorter route.
     """
     from fno.agents.registry import load_registry
 
@@ -721,8 +742,80 @@ def _lookup_registry_row_exact(handle: str):
     except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
         return None
     return next(
-        (entry for entry in entries if getattr(entry, "name", None) == handle),
+        (
+            entry
+            for entry in entries
+            if getattr(entry, "name", None) == handle
+            or getattr(entry, "harness_session_id", None) == handle
+        ),
         None,
+    )
+
+
+class _RegistrySession:
+    """A registry row in the shape the record reader wants (attrs, by getattr).
+
+    Deliberately not a DiscoveredSession: that type answers "a live session was
+    found by scanning", and asserting it here would be the confident wrong
+    answer this whole path exists to stop making. This says only what the row
+    says.
+    """
+
+    __slots__ = ("agent", "session_id", "short_id", "cwd")
+
+    def __init__(self, agent: str, session_id: str, short_id: str, cwd: str):
+        self.agent = agent
+        self.session_id = session_id
+        self.short_id = short_id
+        self.cwd = cwd
+
+
+def _transcript_resolves(
+    agent: str,
+    session_id: str,
+    cwd: str,
+    projects_root: Optional[Path],
+    codex_sessions_dir: Optional[Path],
+) -> bool:
+    """True when this session's transcript exists in its harness store.
+
+    Distinct from ``_follow_target``, which answers "is there a single file to
+    TAIL" and so returns None for opencode by design. Here opencode resolves
+    like any other harness, because the question is whether the store still
+    holds the session at all.
+    """
+    from fno.provenance.resolver import resolve_transcript
+
+    try:
+        return resolve_transcript(
+            agent,
+            session_id,
+            cwd,
+            projects_root=projects_root,
+            codex_sessions_dir=codex_sessions_dir,
+        ).resolved
+    except Exception:  # noqa: BLE001 - an unreadable store answers "cannot say"
+        return False
+
+
+def _row_as_session(row) -> Optional[_RegistrySession]:
+    """Adapt a registry row to the reader's session shape, or None.
+
+    None when the row cannot name a conversation to read: no row, or no
+    ``harness_session_id``. The harness defaults to claude only when the row
+    records none, matching the reader's own default; a recorded harness is
+    always used, so a codex orphan is never read with claude's resolver.
+    """
+    if row is None:
+        return None
+    session_id = getattr(row, "harness_session_id", None)
+    if not session_id:
+        return None
+    return _RegistrySession(
+        agent=getattr(row, "harness", None) or "claude",
+        session_id=session_id,
+        short_id=getattr(row, "short_id", None) or "",
+        cwd=getattr(row, "cwd", None) or "",
     )
 
 
@@ -904,6 +997,10 @@ def peek(
     resolver = resolve if resolve is not None else _default_resolve
 
     session, suggestions = resolver(handle)
+    # True when `session` was rebuilt from a registry row rather than found by
+    # the live-session resolver. Such a session is dead by construction, which
+    # both the empty-transcript arm and the follow loop below must know.
+    row_derived = False
     if session is None:
         # The default substrate (a mux pane) is invisible to the live-session
         # resolver: its content is a PTY, not a transcript. Try the registry's
@@ -927,6 +1024,18 @@ def peek(
                 "harness_session_id is missing; worker identity is incomplete\n"
             )
             return EXIT_UNSUPPORTED
+        # A registered row the live resolver skipped because the session is not
+        # ALIVE. `resolve_or_suggest` answers "which LIVE session is this", and
+        # an adopted orphan is by definition not one, so a row minted by `fno
+        # agents adopt` fell straight through to the miss text below. That text
+        # says "the registry row is gone" and points back at adopt: a closed
+        # loop, and a false statement about a row this function has just read.
+        # The row carries the harness and the session id, which is all the
+        # reader needs, so read the conversation rather than deny it exists.
+        session = _row_as_session(row)
+        row_derived = session is not None
+
+    if session is None:
         # Name the instrument. Both reads above (the live-session resolver and
         # the mux-pane fallback) are registry-shaped, and the registry is not
         # the transcript: a reaped row leaves 4.9M of conversation on disk
@@ -996,6 +1105,33 @@ def peek(
         err.write(f"observe not yet supported for {exc.agent}\n")
         return EXIT_UNSUPPORTED
 
+    if not records and row_derived and lines > 0:
+        # An empty record list has at least four causes: the transcript did not
+        # resolve, --lines 0, a resolved-but-metadata-only claude stub, and
+        # opencode reading idle, locked and unknown-id all as empty. Only the
+        # FIRST justifies saying the store is gone, so ask the resolver rather
+        # than inferring a cause from the absence -- reading one absence as one
+        # cause is the defect this whole path exists to remove. (--lines 0 is
+        # excluded above: `cmd_peek` documents it as "0 for none", so an empty
+        # list there is the caller's own request, not a finding.)
+        if not _transcript_resolves(
+            agent, session_id, cwd, projects_root, codex_sessions_dir
+        ):
+            err.write(
+                f"registry row {handle} exists ({agent} session {session_id}), but no "
+                f"{agent} transcript resolved for it. The row outlived its store: the "
+                "session was pruned, or its store is not mounted here.\n"
+            )
+            return EXIT_NOT_FOUND
+        # The transcript IS there and read as empty. Still never "idle": this
+        # row did not answer a liveness probe, so say what was measured and
+        # leave the verdict to the caller.
+        err.write(
+            f"registry row {handle} exists and its {agent} transcript resolved, "
+            "but no records were read from it.\n"
+        )
+        return EXIT_OK
+
     if not records and not follow:
         _emit_no_activity(out, json_out)
         return EXIT_OK
@@ -1004,6 +1140,22 @@ def peek(
         _emit_record(out, rec, json_out)
     if not records:
         _emit_no_activity(out, json_out)
+
+    if follow and row_derived:
+        # Never tail a dead row. The follow loop leaves only on rotation, a
+        # false `is_live`, or Ctrl-C, and `cmd_peek` passes no `is_live`, so a
+        # `--follow` on an adopted orphan would block forever waiting for
+        # writes that cannot come. The tail above is the whole answer.
+        # Says only what was measured. `row_derived` means the live-session
+        # resolver did not match this handle, which is not proof the session is
+        # dead; liveness verdicts belong to `fno agents truth`. Refusing to
+        # tail is still right, because nothing here can observe the writer.
+        err.write(
+            f"--follow: {handle} resolved from its registry row, not from a live "
+            "session, so there is no writer to tail; showed the tail only. "
+            "For a liveness verdict: fno agents truth\n"
+        )
+        return EXIT_OK
 
     if follow:
         # Re-resolve the transcript path for the follow loop (records above came
