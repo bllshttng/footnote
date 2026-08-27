@@ -32,16 +32,24 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     # claims root into tmp so it lands in the same isolated dir as the explicit
     # lane-slot root (claims_root=tmp_path/"claims") and never touches ~/.fno.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
-    monkeypatch.setattr(advance, "_canonical_root", lambda: tmp_path / "canonical")
+    canonical = tmp_path / "canonical"
+    (canonical / ".git").mkdir(parents=True, exist_ok=True)
+    ready_rows = [dict(node) for node in ready]
+    for node in ready_rows:
+        node.setdefault("cwd", str(canonical))
+    monkeypatch.setattr(
+        advance, "_ready_nodes", lambda project=None, mission=None: list(ready_rows)
+    )
+    monkeypatch.setattr(advance, "_canonical_root", lambda: canonical)
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
 
-    calls: dict = {"worktrees": [], "spawns": []}
+    calls: dict = {"worktrees": [], "worktree_roots": [], "spawns": []}
 
     def fake_ensure(node_id, *, canonical_root, harness="claude"):
         wt = tmp_path / "wt" / node_id
         (wt / ".fno").mkdir(parents=True, exist_ok=True)
         calls["worktrees"].append((node_id, harness))
+        calls["worktree_roots"].append((node_id, canonical_root))
         return wt
 
     def fake_spawn(node_id, cwd, slug, model=None, provider=None, **kwargs):
@@ -53,6 +61,55 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     monkeypatch.setattr(advance, "_ensure_lane_worktree", fake_ensure)
     monkeypatch.setattr(advance, "_spawn_worker", fake_spawn)
     return calls
+
+
+def test_dispatch_uses_each_nodes_own_repository(tmp_path, monkeypatch):
+    foreign = tmp_path / "foreign"
+    (foreign / ".git").mkdir(parents=True)
+    ready = [{
+        "id": "n-foreign",
+        "domain": "code",
+        "title": "n-foreign",
+        "slug": "n-foreign",
+        "cwd": str(foreign),
+    }]
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    receipts = advance.dispatch_lanes(
+        1, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert calls["worktree_roots"] == [("n-foreign", foreign)]
+    assert receipts[0]["worktree"] == str(tmp_path / "wt" / "n-foreign")
+
+
+@pytest.mark.parametrize("cwd", ["", "missing"])
+def test_dispatch_skips_lane_with_unusable_node_root(tmp_path, monkeypatch, cwd):
+    value = "" if not cwd else str(tmp_path / cwd)
+    ready = [{
+        "id": "n-bad-root",
+        "domain": "code",
+        "title": "n-bad-root",
+        "slug": "n-bad-root",
+        "cwd": value,
+    }]
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    receipts = advance.dispatch_lanes(
+        1, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0]["node_id"] == "n-bad-root"
+    assert receipts[0]["status"] == "skipped"
+    assert receipts[0]["error"].startswith("lane-root: ")
+    assert "n-bad-root" in receipts[0]["error"]
+    if value:
+        assert value in receipts[0]["error"]
+    else:
+        assert "empty" in receipts[0]["error"]
+    assert calls["worktrees"] == []
+    assert find_lane_slot("n-bad-root", root=tmp_path / "claims") is None
 
 
 def test_lane_harness_resolution():

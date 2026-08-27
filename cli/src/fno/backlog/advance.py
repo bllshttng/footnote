@@ -1473,6 +1473,10 @@ class WorktreeEnsureError(RuntimeError):
     """`fno agents workspace worktree ensure` failed; the lane cannot be isolated, so it is skipped."""
 
 
+class LaneRootError(RuntimeError):
+    """A selected node has no repository where its lane can be isolated."""
+
+
 def _canonical_root() -> Path:
     """The canonical (main-checkout) repo root a lane worktree spawns from."""
     from fno.paths import resolve_canonical_repo_root
@@ -1480,12 +1484,27 @@ def _canonical_root() -> Path:
     return resolve_canonical_repo_root()
 
 
+def _node_repo_root(node: dict) -> Path:
+    """Resolve a selected node's own canonical repository root."""
+    raw = node.get("_resolved_cwd") or node.get("cwd")
+    node_id = node.get("id") or "unknown"
+    if not raw or not str(raw).strip():
+        raise LaneRootError(f"node {node_id} has empty cwd")
+    path = Path(str(raw)).expanduser()
+    from fno.paths import resolve_canonical_worktree
+
+    root = resolve_canonical_worktree(path) or path
+    if not (root / ".git").exists():
+        raise LaneRootError(f"node {node_id} cwd {path} has no .git")
+    return root.resolve()
+
+
 def _base_project_id(canonical_root: Path) -> str:
     """The shared project.id lane ids are derived from (fallback: repo basename)."""
     try:
-        from fno.config import load_settings
+        from fno.config import load_settings_for_repo
 
-        pid = load_settings().project.id
+        pid = load_settings_for_repo(canonical_root).project.id
         if pid:
             return pid
     except Exception:  # noqa: BLE001 - a settings read error must not crash dispatch
@@ -1734,8 +1753,7 @@ def dispatch_lanes(
         return []
 
     canonical = _canonical_root()
-    base_pid = _base_project_id(canonical)
-    ev_path = events_path or _events_path(project_root)
+    ev_path = events_path or _events_path(project_root or canonical)
 
     receipts: list[dict] = []
     for node in selected:
@@ -1757,13 +1775,19 @@ def dispatch_lanes(
                 )
             receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
 
+        try:
+            root = _node_repo_root(node)
+        except LaneRootError as exc:
+            _skip(f"lane-root: {exc}")
+            continue
+
         # The lane slot (parallel-lane:<id>) is invisible to the sequential
         # advance()/dispatch-node.sh path, which dedups on node:<id> + dispatch:<id>.
         # During the boot window before this lane's worker owns node:<id>, that
         # path would see the node as ready+unclaimed and double-launch it. Guard
         # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
         # TTL bridge) so the two dispatchers dedup against each other.
-        block_reason = _node_dispatch_block_reason(node_id, str(canonical))
+        block_reason = _node_dispatch_block_reason(node_id, str(root))
         if block_reason:
             _skip(block_reason)
             continue
@@ -1810,13 +1834,15 @@ def dispatch_lanes(
             lane_placement_harness = _lane_harness(lane_grid_harness or eff_provider)
             worktree = _ensure_lane_worktree(
                 node_id,
-                canonical_root=canonical,
+                canonical_root=root,
                 harness=lane_placement_harness,
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
-            if worktree.resolve() != canonical.resolve():
-                _seed_lane_local_settings(worktree, node_id, base_pid)
+            if worktree.resolve() != root.resolve():
+                _seed_lane_local_settings(
+                    worktree, node_id, _base_project_id(root)
+                )
             _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
             short_id = _spawn_worker(
                 node_id,
