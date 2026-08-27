@@ -83,6 +83,10 @@ _AUTHORED_POST_GATE_WITH_BAND = _AUTHORED_POST_GATE_NO_BAND.replace(
     "created: 2026-08-27", "created: 2026-08-27\ndifficulty: high"
 )
 
+_AUTHORED_POST_GATE_TYPO_BAND = _AUTHORED_POST_GATE_NO_BAND.replace(
+    "created: 2026-08-27", "created: 2026-08-27\ndifficulty: hihg"
+)
+
 # Authored pre-gate doc: the gate passes it bandless by design (x-baef
 # grandfathering - backfilling bands nobody judged fabricates estimates).
 _AUTHORED_PRE_GATE_NO_BAND = _AUTHORED_POST_GATE_NO_BAND.replace(
@@ -217,6 +221,23 @@ def test_author_set_band_is_preserved(tmp_path: Path) -> None:
     )
 
 
+def test_typoed_band_is_refused_not_coerced(tmp_path: Path) -> None:
+    """A present but out-of-vocabulary band is the author's error to see, not
+    a value to silently replace with the floor (review finding on the first
+    cut of the probe: it treated 'hihg' as absent and stamped 'low' over it,
+    pre-empting the schema refusal that names the bad value)."""
+    doc = tmp_path / "authored.md"
+    doc.write_text(_AUTHORED_POST_GATE_TYPO_BAND, encoding="utf-8")
+
+    rc, out = _mutate_doc.mutate(doc, mode="greenfield", rewrite=False)
+    assert rc == 3, f"expected the schema refusal, got rc={rc}: {out}"
+    assert "difficulty must be one of" in out, out
+
+    # Nothing was written; the author's typo is still on disk, not coerced.
+    fm = _frontmatter_of(doc.read_text(encoding="utf-8"))
+    assert fm.get("difficulty") == "hihg"
+
+
 def test_pre_gate_doc_is_left_bandless(tmp_path: Path) -> None:
     """The stamp is date-keyed, not blanket: a pre-gate doc passes bandless by
     design, and minting a band onto it would fabricate an estimate nobody
@@ -246,5 +267,39 @@ def test_finalize_writes_a_banded_doc(tmp_path: Path) -> None:
     fm = _frontmatter_of(out)
     assert fm.get("difficulty") in {"low", "medium", "high"}, (
         f"finalized doc carries no band: {fm.get('difficulty')!r}"
+    )
+    assert difficulty_gate_error(fm) is None
+
+
+def test_plan_mode_skeleton_is_born_passing_the_gate(tmp_path: Path) -> None:
+    """The plan-mode backfill skeleton is a third mint: it stamps a created
+    date, so it must stamp the canonical key and the band, or its doc is born
+    failing the gate (and undatable besides - the legacy created_at synonym
+    is read by no canonical reader)."""
+    import subprocess
+
+    native = tmp_path / "native.md"
+    native.write_text("# Approved native plan\n\nDo the thing.\n", encoding="utf-8")
+    out_doc = tmp_path / "backfilled.md"
+
+    proc = subprocess.run(
+        [
+            "bash",
+            str(_REPO_ROOT / "skills" / "target" / "scripts" / "backfill-plan.sh"),
+            "skeleton",
+            str(native),
+            str(out_doc),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    fm = _frontmatter_of(out_doc.read_text(encoding="utf-8"))
+    assert "created" in fm, (
+        f"skeleton mints no canonical created key: {sorted(fm)!r}"
+    )
+    assert fm.get("difficulty") in {"low", "medium", "high"}, (
+        f"skeleton carries no difficulty band: {fm.get('difficulty')!r}"
     )
     assert difficulty_gate_error(fm) is None

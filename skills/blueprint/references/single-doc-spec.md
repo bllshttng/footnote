@@ -75,11 +75,15 @@ BLUEPRINT_WRITE_ALLOWLIST = frozenset({
     "File Ownership Map",
     "Patterns to Reuse",
     "kill_criteria",
+    "execution_mode",
+    "waves",
+    "acceptance_contract",
     "consolidation",
+    "difficulty",
 })
 ```
 
-`assert_blueprint_can_write(section_name)` raises `OwnershipViolation` on any name outside the set. This is checked before each section write, not only at the end. Future skill additions must define their own allowlist constants; `BLUEPRINT_WRITE_ALLOWLIST` is never widened.
+`assert_blueprint_can_write(section_name)` raises `OwnershipViolation` on any name outside the set. This is checked before each section write, not only at the end. Future skill additions must define their own allowlist constants. The set widens only for a field a validator requires blueprint to write (`consolidation` for the 2026-08-17 gate, `difficulty` for the 2026-08-26 gate); each widening updates the exact-set pin in `cli/tests/unit/plan/test_ownership.py` in the same PR.
 
 ## Atomic mutation contract
 

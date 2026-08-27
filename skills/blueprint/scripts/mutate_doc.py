@@ -766,18 +766,20 @@ def _validate_proposed_frontmatter(new_fm: dict[str, Any]) -> str | None:
     return None  # rc 0 = valid; any other rc (e.g. import failure) = degrade to skip
 
 
-# Prints STAMP when adding the floor band is exactly what clears the gate's
-# refusal for this frontmatter, SKIP otherwise. Differential, so the gate
-# stays the single oracle: no second date parser, no refusal-message
-# matching. Runs out-of-process because the ambient python3 running /blueprint
-# has no pydantic (see _pydantic_python).
+# Prints STAMP when the band is absent or blank AND adding the floor band is
+# exactly what clears the gate's refusal for this frontmatter, SKIP otherwise.
+# Differential, so the gate stays the single oracle: no second date parser, no
+# refusal-message matching. Runs out-of-process because the ambient python3
+# running /blueprint has no pydantic (see _pydantic_python).
 _DIFFICULTY_PROBE_SNIPPET = r"""
 import json, sys
 from fno.plan.schema import difficulty_gate_error
 fm = json.load(sys.stdin)
+band = fm.get("difficulty")
+absent = band is None or (isinstance(band, str) and not band.strip())
 before = difficulty_gate_error(fm)
 after = difficulty_gate_error({**fm, "difficulty": "low"})
-print("STAMP" if (before is not None and after is None) else "SKIP")
+print("STAMP" if (absent and before is not None and after is None) else "SKIP")
 """
 
 
@@ -789,8 +791,10 @@ def _ensure_difficulty(new_fm: dict[str, Any]) -> None:
     born failing its own validator with no code change at all (x-e3d1). The
     probe above keeps the pre-gate contract intact: a plan created on or
     before the boundary passes bandless by design, and stamping a band onto
-    it would fabricate an estimate nobody made. An author-set band is never
-    touched (the probe only fires when the gate refuses the current shape).
+    it would fabricate an estimate nobody made. A PRESENT band is never
+    touched, in or out of vocabulary: the probe fires only for an absent or
+    blank one, so a typo'd band still reaches the schema check that names the
+    bad value instead of being silently coerced to the floor.
     Best-effort like _validate_proposed_frontmatter: no pydantic-capable
     interpreter means no oracle, so skip rather than block the save.
     """
