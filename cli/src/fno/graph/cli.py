@@ -6760,6 +6760,8 @@ def cmd_task_update(
                 err=True,
             )
             raise typer.Exit(code=4)
+    # The owner arm assigns a truthy owner; the resolver arm raised on empty.
+    assert holder is not None
     key = task_key(node_id, task_id)
 
     # The pid is the discriminator, not the name. A claim whose holder name
