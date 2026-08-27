@@ -792,3 +792,27 @@ def test_the_public_board_removes_the_id_track_not_just_its_width():
     # The narrow layout re-points meta and dot, which would otherwise address
     # a column that no longer exists on a public board.
     assert 'body[data-local="false"] .meta, body[data-local="false"] .dot { grid-column:1 }' in css
+
+
+def test_a_child_completed_at_beats_its_stale_open_status_in_the_parent_rollup():
+    """A legacy child carrying completed_at beside an open status must summarise
+    as done in the parent's `ki`, the same rule the child's own row already uses.
+    Without it kidBar() counts a finished child as open, so parent progress
+    contradicts the child row rendered directly beneath it."""
+    entries = [
+        _entry("ab-00000010", project="fno", title="parent"),
+        _entry(
+            "ab-00000011",
+            project="fno",
+            title="legacy child",
+            parent="ab-00000010",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000011"]["s"] == "done", "control: the child's own row"
+    assert rows["ab-00000010"]["ki"] == [
+        {"id": "ab-00000011", "s": "done", "t": "legacy child", "ty": "feature"}
+    ], "the parent rollup must agree with the child's own row"
