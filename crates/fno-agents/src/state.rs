@@ -116,15 +116,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // its typed struct and drops the key, and a pre-v17 Python reader would see an
 // unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
 //
-// v18 adds predecessor/fork lineage fields. An older writer must refuse rather
-// than erase those fields during a read-modify-write.
+// v18 adds predecessor/fork lineage fields. v19 (x-de10) adds
+// `sandbox_posture` - the sandbox posture a codex thread was launched with,
+// applied by `thread/resume` across a daemon restart. Same additive-optional
+// shape as v11-v18: skip-when-None keeps old rows slim, and the bump turns a
+// pre-v19 reader's silent erasure into a loud refusal.
 //
-// Accepted set widens to 1..=18.
-// v19 (x-de10) adds `sandbox_posture` - the sandbox posture a codex thread was
-// launched with, applied by `thread/resume` across a daemon restart. Same
-// additive-optional shape as v11-v18: skip-when-None keeps old rows slim, and
-// the bump turns a pre-v19 reader's silent erasure into a loud refusal.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 19;
+// v20 adds the account axis (`launch_account`) and the one optional
+// `related_session_id`. An older writer must refuse rather than erase those
+// fields during a read-modify-write. Accepted set widens to 1..=20.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 20;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 

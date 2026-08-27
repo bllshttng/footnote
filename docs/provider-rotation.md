@@ -428,7 +428,7 @@ refuses non-zero naming the file it could not restore.
 
 Which commands are relaunch doors is wider than this page once claimed, and the distinction is load-bearing. An earlier version held that `claude attach` opens a session that is still running, so attach cannot lose a route and had "nothing to do". The operator falsified that on 2026-08-23. Every re-entry door shells a fresh claude process. A fresh process re-resolves its account namespace from ambient env, so a re-entry launched from the wrong shell lands in the wrong config namespace. The transcript store is per-config-dir, so it either misses the session (loud) or bills the wrong account (silent). That claim is superseded. The table below is the replacement.
 
-Every door that re-enters or re-launches a Claude session, and what fno does at each. fno controls the first six. The last two are Claude-native transitions fno cannot block, only observe and record:
+Every door that re-enters or re-launches a Claude session, and what fno does at each. fno controls the first seven. The last two are Claude-native transitions fno cannot block, only observe and record. A fork is additive: the row keeps its primary id and gains at most one optional `related_session_id`. Both ids address the row. When both ids are recorded, `recover` is the selection verb.
 
 | Door | Starts a claude process? | Account + route handling |
 |---|---|---|
@@ -438,6 +438,7 @@ Every door that re-enters or re-launches a Claude session, and what fno does at 
 | mux attach gestures (`AttachAgent`, open-here, split/drop, restore, picker) | yes | resolve through the same re-entry plan. A resolver refusal starts no pane. |
 | mux `ResumeAgent` gesture | yes | run the same re-entry plan in the selected pane, never bare provider argv |
 | `fno agents spawn --resume <uuid>` (revive) | yes | restore the recorded route, or refuse (exit 2). The revived row inherits the source row's `launch_account`. |
+| `fno agents recover <agent> [--session <id>]` | yes | restore the selected id under the row's account and route, or refuse. With two recorded ids the verb refuses until `--session` names one. |
 | native background / left-arrow fork (Claude-owned) | yes, Claude's own | not blockable pre-transition. SessionStart observes and records the second id. |
 | explicit `--fork-session` / SessionStart `source=fork` | yes, Claude's own | same: apply the row's binding on any fno re-entry, and record the id |
 

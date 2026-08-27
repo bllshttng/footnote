@@ -17,10 +17,11 @@ What each harness fundamentally is, from fno's point of view:
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
 | Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` |
-| Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
+| Revive a **dead** session | `spawn --resume <uuid>` (bg lane) or `recover` | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
 The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+A claude re-entry door resolves the row's recorded account and route before launch, on every verb above (`attach`, `resume`, `spawn --resume`, `recover`). A row whose binding evidence is missing or stale refuses with the field named. A claude row can hold two valid session ids after a fork. `recover` is the verb that restores one: with two ids recorded it requires `--session <id>` to name the chosen one, and `--print-command` prints the inspection form without launching.
 Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt includes `status: live`, `session_id`, and the derived eight-character `short_id`. If binding expires, fno reaps the pane and exits nonzero. It does not return an unaddressable `status: spawning` receipt.
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.
