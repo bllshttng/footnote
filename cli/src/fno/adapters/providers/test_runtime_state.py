@@ -1420,16 +1420,23 @@ class TestLockAuthoritativeHeadroom:
         assert verdict.resets_at == pytest.approx(now + 3600)
         assert verdict.source == "lock"
 
-    def test_a_fresh_window_never_produces_exhausted_on_its_own(self, state_path):
-        """The window is enrichment: even 100% used only refines ok to LOW; only
-        a positive lock says EXHAUSTED."""
+    def test_a_fresh_fully_consumed_window_is_exhausted(self, state_path):
+        """A FRESH window at 100% is a positive marker a probe measured, so it
+        still reads EXHAUSTED and rotation failover keeps skipping the provider.
+        Only a STALE or ABSENT window contributes nothing; sub-100 windows only
+        refine ok to LOW."""
         now = time.time()
         self._write(state_path, usage=(now, [
             {"label": "weekly", "used_pct": 100.0, "resets_at": now + 86400},
         ]))
         verdict = headroom("acct")
-        assert verdict.state is HeadroomState.LOW
+        assert verdict.state is HeadroomState.EXHAUSTED
         assert verdict.source == "window"
+        self._write(state_path, usage=(now, [
+            {"label": "weekly", "used_pct": 95.0, "resets_at": now + 86400},
+        ]))
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.LOW
 
     def test_absent_window_and_no_lock_is_unknown_not_ok(self, state_path):
         now = time.time()

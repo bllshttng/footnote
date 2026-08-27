@@ -1227,6 +1227,11 @@ def inject_spawn_defaults(
     # decision: a flag on an unrelated axis never silently stands routing down.
     explicit_substrate = _has_explicit_substrate(out[1:])
     explicit_permission_value = _flag_value(out[1:], "--permission-mode")
+    if not explicit_permission_value and _has_permission_mode(out[1:]):
+        # --yolo/-Y are the same knob as --permission-mode (see
+        # _has_permission_mode), so the grid's permission filter must see them
+        # too or it can hand a yolo spawn a harness the spawn gate refuses.
+        explicit_permission_value = "yolo"
     node_id_present = (
         _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
     )
@@ -1239,15 +1244,21 @@ def inject_spawn_defaults(
 
             grid_node_entry = _grid_node(out[1:], env)
             if grid_node_entry:
-                capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
+                # ONE inventory resolution shared by the capacity read and the
+                # grid resolve; resolving twice would pay the config-plus-
+                # snapshot disk read twice on the dispatch hot path.
+                _grid_inventory = route_resolve.resolve_inventory()
+                capacity: dict[str, object] = dict(
+                    route_resolve.runtime_capacity(inventory=_grid_inventory)
+                )
                 # The planning/execution role comes from plan-presence, never
                 # plan quality: a /target on an unplanned node does planning
-                # work and bills at the planning tier (grill-3).
-                seed_verb = _profile_key(_seed_of(out[1:]))
+                # work and bills at the planning tier (grill-3). `verb` is the
+                # profile key already resolved above - the same rule.
                 grid_role: Optional[str] = None
-                if seed_verb in ("blueprint", "think"):
+                if verb in ("blueprint", "think"):
                     grid_role = "planning"
-                elif seed_verb == "target":
+                elif verb == "target":
                     grid_role = (
                         "execution" if (grid_node_entry.get("plan_path") or "").strip()
                         else "planning"
@@ -1273,6 +1284,7 @@ def inject_spawn_defaults(
                     permission_mode=explicit_permission_value,
                     role=grid_role,
                     protected_role=protected_name,
+                    inventory=_grid_inventory,
                 )
         except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
             grid_candidate = None

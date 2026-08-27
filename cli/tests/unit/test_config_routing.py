@@ -12,7 +12,9 @@ from pathlib import Path
 from fno.config import RoutingBlock, RoutingModelBlock, SettingsModel
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SAMPLE = _REPO_ROOT / "examples" / "routing.toml"
+# The sample lives INSIDE the package so an installed wheel finds it (the
+# events-schema precedent); a source checkout does too.
+_SAMPLE = _REPO_ROOT / "cli" / "src" / "fno" / "routing_sample.toml"
 
 
 def _settings(payload: dict) -> SettingsModel:
@@ -76,6 +78,18 @@ def test_shipped_sample_parses_and_declares_rows():
         assert row.get("name") and row.get("harness") and row.get("model"), row
     # the sample labels itself as read by no code path
     assert "NO CODE PATH READS THIS FILE" in _SAMPLE.read_text(encoding="utf-8")
+
+
+def test_sample_shows_one_model_two_access_paths():
+    """The access-path rule, demonstrated in the sample: the same model value
+    appears on two rows with two different cost profiles."""
+    data = tomllib.loads(_SAMPLE.read_text(encoding="utf-8"))
+    by_model: dict[str, list[float]] = {}
+    for row in data["routing"]["models"]:
+        by_model.setdefault(row["model"], []).append(row.get("cost_per_mtok_in"))
+    paired = [costs for costs in by_model.values() if len(costs) == 2]
+    assert paired, "the sample must show one model reached two ways"
+    assert all(c[0] != c[1] for c in paired)  # two profiles, never averaged
 
 
 def test_routing_model_block_defaults():

@@ -179,31 +179,34 @@ def _resolve_state_path(repo_root: Path | None = None) -> Path:
     state root (``~/.fno`` by default) via :func:`fno.paths.runtime_state_json`.
     The RECORD SET stays resolved per repo - it is config - which is the split
     the old project-local docstring conflated. ``repo_root`` no longer moves the
-    file and survives only for signature compatibility. The env override still
-    wins (it is how tests pin a state file). A first resolve folds any legacy
-    per-cwd file into the machine-wide one.
+    file and survives only to widen the legacy fold (its per-cwd file folds
+    too). The env override still wins (it is how tests pin a state file). A
+    first resolve folds any legacy per-cwd file into the machine-wide one.
     """
     override = os.environ.get("FNO_RUNTIME_STATE_PATH")
     if override:
         return Path(override)
-    _fold_legacy_state_files()
+    _fold_legacy_state_files(repo_root)
     from fno.paths import runtime_state_json
 
     return runtime_state_json()
 
 
-def _fold_legacy_state_files() -> None:
-    """Fold a legacy per-cwd state file into the machine-wide one. Newest wins.
+def _fold_legacy_state_files(repo_root: Path | None = None) -> None:
+    """Fold legacy per-cwd state files into the machine-wide one. Newest wins.
 
     ``_resolve_state_path`` used to return the RELATIVE ``RUNTIME_STATE_PATH``,
     so every distinct process cwd kept its own state file and the two halves of
     the signal sat in different ones (measured 2026-08-27: a live provider lock
-    in ``~/.fno`` beside a usage row in the repo). Merge per key -
-    provider_health by newest ``last_error_at``, usage by newest ``probed_at`` -
-    and leave the legacy file untouched rather than deleting it, so a rolled-back
-    binary loses nothing. Steady state pays two stats (the fold is skipped once
-    the machine-wide file is at least as new) and never runs under the env
-    override, which names one explicit file.
+    in ``~/.fno`` beside a usage row in the repo). Fold candidates are the
+    process cwd's file and, when a caller names one, ``repo_root``'s - a
+    cross-project dispatch's node repo is the one other location that matters.
+    Merge per key: provider_health by newest ``last_error_at``, usage by newest
+    ``probed_at``, cursors and window-opens by their newest inner timestamp.
+    Leave each legacy file untouched rather than deleting it, so a rolled-back
+    binary loses nothing. Steady state pays two stats per candidate (the fold
+    is skipped once the machine-wide file is at least as new) and never runs
+    under the env override, which names one explicit file.
     """
     try:
         from fno.paths import runtime_state_json
@@ -211,53 +214,77 @@ def _fold_legacy_state_files() -> None:
         target = runtime_state_json()
     except Exception:  # noqa: BLE001 - a path failure degrades to "no legacy"
         return
-    legacy = Path.cwd() / RUNTIME_STATE_PATH
-    try:
-        if not legacy.is_file():
-            return
-        if legacy.resolve() == target.resolve():
-            return
+    candidates = [Path.cwd() / RUNTIME_STATE_PATH]
+    if repo_root is not None:
+        candidates.append(Path(repo_root) / RUNTIME_STATE_PATH)
+    for legacy in candidates:
+        try:
+            _fold_one_legacy_file(target, legacy)
+        except (filelock.Timeout, OSError):
+            logger.warning(
+                "runtime_state: legacy per-cwd fold skipped for %s (lock/IO); "
+                "both files left as-is",
+                legacy,
+                exc_info=True,
+            )
+
+
+def _fold_one_legacy_file(target: Path, legacy: Path) -> None:
+    if not legacy.is_file():
+        return
+    if legacy.resolve() == target.resolve():
+        return
+    if target.is_file() and target.stat().st_mtime >= legacy.stat().st_mtime:
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.FileLock(str(_lock_path(target)), timeout=LOCK_TIMEOUT_SECONDS):
+        # Re-check under the lock: a racing process may have folded already.
         if target.is_file() and target.stat().st_mtime >= legacy.stat().st_mtime:
             return
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with filelock.FileLock(str(_lock_path(target)), timeout=LOCK_TIMEOUT_SECONDS):
-            # Re-check under the lock: a racing process may have folded already.
-            if target.is_file() and target.stat().st_mtime >= legacy.stat().st_mtime:
-                return
-            dst = _read_disk_payload(target) or {}
-            src = _read_disk_payload(legacy) or {}
-            health = _parse_state_payload(dst)
-            for pid, entry in _parse_state_payload(src).items():
-                prior_health = health.get(pid)
-                if (
-                    prior_health is None
-                    or _ts(entry.last_error_at) > _ts(prior_health.last_error_at)
+        dst = _read_disk_payload(target) or {}
+        src = _read_disk_payload(legacy) or {}
+        health = _parse_state_payload(dst)
+        for pid, entry in _parse_state_payload(src).items():
+            prior_health = health.get(pid)
+            if (
+                prior_health is None
+                or _ts(entry.last_error_at) > _ts(prior_health.last_error_at)
+            ):
+                health[pid] = entry
+        usage = _parse_usage_payload(dst)
+        for uid, snap in _parse_usage_payload(src).items():
+            prior_snap = usage.get(uid)
+            if prior_snap is None or _ts(snap.probed_at) > _ts(prior_snap.probed_at):
+                usage[uid] = snap
+        cursors = _parse_cursors_payload(dst)
+        for name, cur in _parse_cursors_payload(src).items():
+            prior_cur = cursors.get(name)
+            if (
+                prior_cur is None
+                or _ts(cur.last_rotated_at) > _ts(prior_cur.last_rotated_at)
+            ):
+                cursors[name] = cur
+        windows_opened = _parse_windows_opened(dst)
+        for wid, labels in _parse_windows_opened(src).items():
+            for label, opened in labels.items():
+                prior_open = (windows_opened.get(wid) or {}).get(label)
+                if prior_open is None or _ts(opened.get("opened_at")) > _ts(
+                    prior_open.get("opened_at")
                 ):
-                    health[pid] = entry
-            usage = _parse_usage_payload(dst)
-            for uid, snap in _parse_usage_payload(src).items():
-                prior_snap = usage.get(uid)
-                if prior_snap is None or _ts(snap.probed_at) > _ts(prior_snap.probed_at):
-                    usage[uid] = snap
-            now = time.time()
-            health, _dropped = _drop_stale(health, now)
-            _write_state_atomic(
-                target,
-                _serialize_state(
-                    ProviderRuntimeState(
-                        provider_health=health,
-                        combo_cursors=_parse_cursors_payload(dst),
-                        usage=usage,
-                        windows_opened=_parse_windows_opened(dst),
-                        schema_version=int(dst.get("schema_version", SCHEMA_VERSION)),
-                    )
-                ),
-            )
-    except (filelock.Timeout, OSError):
-        logger.warning(
-            "runtime_state: legacy per-cwd fold skipped (lock/IO); "
-            "both files left as-is",
-            exc_info=True,
+                    windows_opened.setdefault(wid, {})[label] = opened
+        now = time.time()
+        health, _dropped = _drop_stale(health, now)
+        _write_state_atomic(
+            target,
+            _serialize_state(
+                ProviderRuntimeState(
+                    provider_health=health,
+                    combo_cursors=cursors,
+                    usage=usage,
+                    windows_opened=windows_opened,
+                    schema_version=int(dst.get("schema_version", SCHEMA_VERSION)),
+                )
+            ),
         )
 
 
@@ -1400,9 +1427,10 @@ def headroom(
     failure path on every 429, while the window sits behind a TTL with no
     refresher on the dispatch path. So:
 
-    - EXHAUSTED: an active provider-level ``rate_limited_until`` only.
-    - LOW: a fresh window at >= ``threshold_pct`` (the window may only REFINE
-      an ok verdict to low; it never produces exhausted on its own).
+    - EXHAUSTED: an active provider-level ``rate_limited_until``, or a FRESH
+      binding window at >=100% (a probe that just measured a fully consumed
+      window produced a positive marker; a stale or absent one never does).
+    - LOW: a fresh window at >= ``threshold_pct``.
     - UNKNOWN: no fresh usable window and no lock.
     - OK: a fresh snapshot whose binding windows are all below threshold (a
       window already reset never binds, so a stale 100% that has since reset
@@ -1432,6 +1460,48 @@ def headroom(
         snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
     return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct, window=window)
+
+
+def headrooms(
+    provider_ids: list[str] | tuple[str, ...],
+    *,
+    now: float | None = None,
+    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
+    threshold_pct: float = 90.0,
+    repo_root: Path | None = None,
+) -> dict[str, Headroom]:
+    """Headroom verdicts for many accounts from ONE state-file read.
+
+    :func:`headroom` per id would re-read and re-parse the whole file per
+    account; the capacity seam asks about every account a harness can speak
+    for, so the shared payload is read once and each verdict derives from it
+    via the same pure :func:`_headroom_from`. Fail-open like the single read.
+    """
+    if now is None:
+        now = time.time()
+    try:
+        raw = _read_disk_payload(_resolve_state_path(repo_root))
+    except Exception:  # noqa: BLE001 - a corrupt state read never breaks dispatch
+        raw = None
+    health = _parse_state_payload(raw) if raw else {}
+    usage = _parse_usage_payload(raw) if raw else {}
+    out: dict[str, Headroom] = {}
+    for pid in provider_ids:
+        h = health.get(pid)
+        rlu = None
+        if h is not None and h.rate_limited_until is not None:
+            rlu = h.rate_limited_until if h.rate_limited_until > now else None
+        snap = usage.get(pid)
+        window = "fresh"
+        if snap is None:
+            window = "absent"
+        elif snap.probed_at < now - ttl_seconds:
+            window = "stale"
+            snap = None
+        out[pid] = _headroom_from(
+            snap, rlu, now=now, threshold_pct=threshold_pct, window=window
+        )
+    return out
 
 
 def _headroom_from(
@@ -1495,6 +1565,11 @@ def _headroom_from(
         # headroom.
         return Headroom(HeadroomState.OK, None, source="window")
     worst = max(binding, key=lambda w: w.used_pct)
+    if worst.used_pct >= 100.0:
+        # A FRESH fully-consumed window is a positive exhaustion marker a
+        # probe actually measured (rotation failover and the review demotion
+        # both key on it). Only stale or absent windows contribute nothing.
+        return Headroom(HeadroomState.EXHAUSTED, worst.resets_at, source="window")
     if worst.used_pct >= threshold_pct:
         return Headroom(HeadroomState.LOW, worst.resets_at, source="window")
     return Headroom(HeadroomState.OK, None, source="window")

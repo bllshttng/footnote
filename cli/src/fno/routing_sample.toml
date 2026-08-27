@@ -7,6 +7,12 @@
 # block routes nothing from the grid and records `grid=no-inventory-declared`.
 # Every field a row leaves unset stays unset; the same name may appear twice and
 # the later row overrides per field.
+#
+# COST BELONGS TO THE ACCESS PATH, NOT THE MODEL. The same model reached two
+# ways is TWO rows with two cost profiles, never one averaged number: measured
+# 2026-08-27, one vendor prices a pair 3x cheaper on subscription credits and
+# 18x cheaper on API dollars. And cheap is not a proxy for weak: the cheaper
+# row below also carries more context, more throughput, and less latency.
 
 [routing]
 # One of: cheapest-that-clears (default) | best-available | prefer-harness.
@@ -36,13 +42,27 @@ context = 1000000
 # registered account bound to the harness.
 
 [[routing.models]]
-name = "glm-5.3-flash"
+# The SAME model as the row above, reached through a different access path:
+# subscription credits on the z.ai lane (route names the vendor).
+name = "flash-subscription"
 harness = "claude"
 model = "glm-5.3-flash"
-band = "low"
-effort = "medium"
+route = "zai/glm-5.3-flash"
+band = "medium"
+effort = "high"
 cost_per_mtok_in = 2.3
-context = 1000000
+context = 1310720
+
+[[routing.models]]
+# The same model again through per-token API dollars. Its own row, its own
+# cost: the two paths differ 6x on the same inference and are never averaged.
+name = "flash-api"
+harness = "opencode"
+model = "glm-5.3-flash"
+band = "medium"
+effort = "high"
+cost_per_mtok_in = 0.075
+context = 1310720
 
 [[routing.models]]
 name = "gpt-5.6-sol"

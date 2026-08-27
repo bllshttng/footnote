@@ -123,7 +123,7 @@ def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "hi"],
@@ -144,7 +144,7 @@ def test_stage_profile_model_occupies_model_axis(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
     err = io.StringIO()
     result = _inject(
@@ -171,7 +171,7 @@ def test_profile_provider_pins_harness_grid_fills_model_and_effort(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
@@ -193,7 +193,7 @@ def test_pinned_substrate_filters_candidates_instead_of_cancelling(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
     # pane: universal -> grid fires exactly as without the flag
     result = _inject(
@@ -231,7 +231,7 @@ def test_grid_effort_yields_to_explicit_effort_flag(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"codex": "ok"},
+        lambda **kw: {"codex": "ok"},
     )
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "--effort", "low", "hi"],
@@ -255,7 +255,7 @@ def test_inert_grid_says_why_in_the_receipt(monkeypatch):
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
     err = io.StringIO()
     _inject(["spawn", "--name", "w", "--node", "x-grid1", "hi"], err=err)
@@ -291,7 +291,7 @@ def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
     _declare_inventory(monkeypatch, rows)
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
     node = {"difficulty": "low", "priority": "p2"}
     planned = {"difficulty": "low", "priority": "p2", "plan_path": "/tmp/plan.md"}

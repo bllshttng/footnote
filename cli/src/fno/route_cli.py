@@ -20,6 +20,7 @@ file lock; accepted).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sys
 
@@ -253,33 +254,52 @@ def routing_init_cmd(
 
     The sample documents the ``[routing]`` block shape; nothing is enabled until
     you uncomment and edit rows. Idempotent: a config already carrying the
-    sample marker is left untouched.
+    sample marker is left untouched. The sample lives INSIDE the package
+    (``fno/routing_sample.toml``) so an installed wheel finds it exactly like a
+    checkout does - the events-schema precedent.
     """
+    import fcntl
     from pathlib import Path
 
     from fno.config.writer import _target_path
 
-    sample = Path(__file__).resolve().parents[3] / "examples" / "routing.toml"
+    sample = Path(__file__).resolve().parent / "routing_sample.toml"
     if not sample.is_file():
         typer.echo(f"error: sample not found at {sample}", err=True)
         raise typer.Exit(1)
     target = _target_path("project" if local else "global", None)
+    if target.is_symlink():
+        target = Path(os.path.realpath(target))
     marker = "# SAMPLE routing inventory"
-    try:
-        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
-    except OSError as exc:
-        typer.echo(f"error: cannot read {target}: {exc}", err=True)
-        raise typer.Exit(1) from exc
-    if marker in existing:
-        typer.echo(f"routing sample already present in {target}; nothing to do.")
-        raise typer.Exit(0)
     commented = "\n".join(
         ("# " + line.rstrip()) if line.strip() else "#" for line in
         sample.read_text(encoding="utf-8").splitlines()
     )
+    # The SAME exclusive lock discipline config.writer._locked_update uses
+    # (sidecar <config>.lock + flock), held across the read and the append, so
+    # a concurrent `fno config set` rename cannot drop the appended block and
+    # this append cannot land on a replaced inode.
     target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "a", encoding="utf-8") as fh:
-        fh.write("\n\n" + commented + "\n")
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    try:
+        with open(lock_path, "w") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                existing = (
+                    target.read_text(encoding="utf-8") if target.is_file() else ""
+                )
+                if marker in existing:
+                    typer.echo(
+                        f"routing sample already present in {target}; nothing to do."
+                    )
+                    raise typer.Exit(0)
+                with open(target, "a", encoding="utf-8") as fh:
+                    fh.write("\n\n" + commented + "\n")
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        typer.echo(f"error: cannot update {target}: {exc}", err=True)
+        raise typer.Exit(1) from exc
     typer.echo(f"routing sample appended (commented out) to {target}")
 
 

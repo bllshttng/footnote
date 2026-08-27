@@ -360,7 +360,7 @@ def _raise_difficulty_on_outcome(node_id: str) -> None:
         from datetime import datetime, timezone
 
         from fno.graph import mutate_graph
-        from fno.graph._constants import DIFFICULTY_BANDS, append_difficulty_history
+        from fno.graph._constants import DIFFICULTY_BANDS, write_canonical_difficulty
         from fno.paths import graph_json
 
         ladder = DIFFICULTY_BANDS  # ("low", "medium", "high"), ascending
@@ -373,12 +373,15 @@ def _raise_difficulty_on_outcome(node_id: str) -> None:
                 if current not in ladder:
                     return entries
                 raised = ladder[min(ladder.index(current) + 1, len(ladder) - 1)]
-                entry["difficulty"] = raised
-                append_difficulty_history(
+                # The one canonical-write shape (drains a legacy model_tier
+                # key too); history_on="change" so a carve-out on an
+                # already-ceilinged node appends nothing redundant.
+                write_canonical_difficulty(
                     entry,
                     raised,
                     "outcome:carveout",
                     datetime.now(timezone.utc).isoformat(),
+                    history_on="change",
                 )
                 return entries
             return entries

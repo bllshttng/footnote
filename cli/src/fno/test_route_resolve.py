@@ -270,16 +270,22 @@ def test_protected_role_forces_best_available_and_the_floor():
 
 
 def _fake_headroom(monkeypatch, states):
-    """Patch runtime_state.headroom with a per-account verdict map."""
+    """Patch the batch headroom read with a per-account verdict map."""
     import fno.adapters.providers.runtime_state as rs
     from fno.adapters.providers.runtime_state import Headroom, HeadroomState
 
-    def _h(provider_id, **_kw):
-        state = states.get(provider_id, "unknown")
-        return Headroom(getattr(HeadroomState, state.upper()), None, source="lock")
+    def _many(provider_ids, **_kw):
+        return {
+            pid: Headroom(
+                getattr(HeadroomState, states.get(pid, "unknown").upper()),
+                None,
+                source="lock",
+            )
+            for pid in provider_ids
+        }
 
-    monkeypatch.setattr(rs, "headroom", _h)
-    return _h
+    monkeypatch.setattr(rs, "headrooms", _many)
+    return _many
 
 
 def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
@@ -316,13 +322,41 @@ def test_harness_accounts_expands_rows_then_registered_records(monkeypatch):
         {"name": "opus-x", "harness": "claude", "model": "o", "route": "zai/glm-5.3"},
         {"name": "flash-x", "harness": "claude", "model": "f", "account": "paid-lane"},
     ])
-    # declared rows name their accounts (route vendor, explicit account) and the
-    # union adds every registered claude-bound record
+    # a row's explicit account names its record; a route names a VENDOR, never
+    # an account id, so it contributes nothing (a vendor key could never match
+    # the account-keyed state and would dilute a live lock with its UNKNOWN)
     assert rr.harness_accounts("claude", settings=_Settings, inventory=inv) == [
-        "zai", "paid-lane", "rec-a",
+        "paid-lane", "rec-a",
     ]
     # no declared row for codex -> every registered record bound to codex
     assert rr.harness_accounts("codex", settings=_Settings, inventory=inv) == ["rec-b"]
+
+
+def test_same_model_two_access_paths_two_cost_profiles():
+    """Cost belongs to the ACCESS PATH: the same model reached two ways is two
+    rows with two cost profiles, and the cheaper path wins within the band -
+    never an averaged number."""
+    rows = [
+        {"name": "flash-subscription", "harness": "claude",
+         "model": "glm-5.3-flash", "band": "medium",
+         "route": "zai/glm-5.3-flash", "cost_per_mtok_in": 2.3},
+        {"name": "flash-api", "harness": "opencode",
+         "model": "glm-5.3-flash", "band": "medium",
+         "cost_per_mtok_in": 0.075},
+    ]
+    inv = _inv(rows)
+    assert len(inv.rows) == 2  # both rows kept, nothing averaged or merged
+    candidate, chain = rr.resolve_grid(
+        "medium", "p2", {"claude": "ok", "opencode": "ok"}, inventory=inv
+    )
+    assert candidate["model"] == "glm-5.3-flash"
+    assert candidate["harness"] == "opencode"  # the cheaper ACCESS PATH
+    assert any("flash-api" in step for step in chain)
+    # the expensive path still stands when the cheap one is exhausted
+    candidate, _ = rr.resolve_grid(
+        "medium", "p2", {"claude": "ok", "opencode": "exhausted"}, inventory=inv
+    )
+    assert candidate["harness"] == "claude"
 
 
 def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):

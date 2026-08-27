@@ -713,13 +713,19 @@ def runtime_state_json() -> Path:
     rate-limited from one repo is rate-limited everywhere: the state file must
     be one per machine, not one per process cwd (the relative-path defect M5
     measured as two disjoint files). Follows an absolute ``config.state_dir``
-    exactly like :func:`benchmarks_json`. Tests pin an explicit file via the
+    exactly like :func:`benchmarks_json`, EXCEPT that a config that fails to
+    load falls back to ``~/.fno`` instead of raising: this path sits on the
+    429-lock WRITE path, and a bad config must never turn a rate-limit into a
+    crash that loses the lock. Tests pin an explicit file via the
     ``FNO_RUNTIME_STATE_PATH`` env override instead of a config key.
     """
-    settings = _settings()
-    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
-    if os.path.isabs(raw):
-        return state_dir() / "provider-runtime-state.json"
+    try:
+        settings = _settings()
+        raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
+        if os.path.isabs(raw):
+            return state_dir() / "provider-runtime-state.json"
+    except Exception:  # noqa: BLE001 - see docstring: never raise on config
+        pass
     return _resolve("~/.fno/") / "provider-runtime-state.json"
 
 

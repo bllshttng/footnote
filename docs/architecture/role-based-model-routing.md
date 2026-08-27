@@ -154,7 +154,9 @@ The two layers compose by design. The stage table picks the coordinate per verb;
 
 `config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`. Nothing built-in is authoritative. Adding a model, provider or harness is a config edit. A stranger's install declares its own fleet. A virgin install records `grid=no-inventory-declared` and injects nothing.
 
-`examples/routing.toml` ships as a labelled sample no code path reads. `fno config routing init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+`cli/src/fno/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config routing init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+
+Cost belongs to the ACCESS PATH, not the model. The same model reached two ways is two rows with two cost profiles. One vendor prices a pair 3x cheaper on subscription credits and 18x cheaper on API dollars. The rows are never averaged. Cheap is never read as a proxy for weak: the cheaper row can also carry more context, more throughput, and less latency.
 
 The optional OpenRouter snapshot can supply a percentile for a row whose `band` is unset. It can never make the grid inert.
 
@@ -181,7 +183,7 @@ Six verbs over the same machinery (`model_routing.py` stays the single source of
 | `fno config route unset <role>` | Revert a lane to its built-in default (or unrouted); idempotent no-op if unconfigured. |
 | `fno config route env <role \| provider/model>` | Print an eval-able export block for an interactive session: `eval "$(fno config route env build)" && claude`. Fails closed on a missing key (no partial block). |
 | `fno config route inventory [-J]` (also `fno doctor route`) | Every declared `[[routing.models]]` row with its resolved band and reachability verdict; an uninstalled harness refuses by name on stderr. |
-| `fno config routing init` | Append the shipped `examples/routing.toml` sample, commented out, to your config. |
+| `fno config routing init` | Append the shipped routing sample (`fno/routing_sample.toml`), commented out, to your config. |
 
 `route env` is the sanctioned interactive switch - never editing `~/.claude/settings.json` (global, restart-bound, races parallel sessions). The `ccz`-style alias becomes a one-liner over it.
 

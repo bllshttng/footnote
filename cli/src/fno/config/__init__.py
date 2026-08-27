@@ -1780,8 +1780,12 @@ class RoutingModelBlock(BaseModel):
     runs in, and what effort surface it takes. ``name`` is the join key; the
     same name may appear more than once and later rows override per field
     (unset fields keep the earlier row's value), so a base row plus a one-field
-    override is a legal declaration. No value validation here: config stays a
-    leaf module (x-7fdd); the spawn seam and the resolver validate.
+    override is a legal declaration. Cost belongs to the ACCESS PATH, never
+    to the model: the same model reached two ways (subscription credits vs API
+    dollars) is TWO rows with two cost profiles, never one averaged number -
+    the measured ratio between the two paths for one pair is 6x on identical
+    inference. No value validation here: config stays a leaf module (x-7fdd);
+    the spawn seam and the resolver validate.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1807,9 +1811,10 @@ class RoutingBlock(BaseModel):
     authoritative, so a stranger's install declares its own models (local,
     ollama, gemini-only) and never inherits this machine's fleet. A virgin
     install declares nothing; the grid records ``no-inventory-declared`` and
-    injects nothing. ``examples/routing.toml`` ships as a labelled sample that
-    no code path reads. The objective is itself a config key because users
-    differ (cheapest vs strongest vs stay-in-a-harness).
+    injects nothing. ``fno/routing_sample.toml`` ships as a labelled sample
+    (inside the package, so a wheel finds it) that no code path reads. The
+    objective is itself a config key because users differ (cheapest vs
+    strongest vs stay-in-a-harness).
     """
 
     model_config = ConfigDict(extra="ignore")

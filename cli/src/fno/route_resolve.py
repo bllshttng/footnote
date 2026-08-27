@@ -85,13 +85,16 @@ class InventoryRow:
         return _BAND_RANK.get(self.band, -1)
 
     def accounts(self) -> list[str]:
-        """The account record id(s) whose quota this row spends."""
-        if self.account:
-            return [self.account]
-        if self.route:
-            vendor = self.route.split("/", 1)[0].strip()
-            return [vendor] if vendor else []
-        return []
+        """The account record id whose quota this row spends, if named.
+
+        ``route`` deliberately contributes nothing: it names a VENDOR lane
+        (``zai/glm-5.3``), and ``provider_health``/``usage`` are keyed by
+        ``config.accounts.records`` id. A vendor string can never match a key,
+        so folding it into the account set would add a pseudo-account whose
+        permanent UNKNOWN dilutes a real account's live lock in the MAX
+        aggregate - the one shape this change exists to kill.
+        """
+        return [self.account] if self.account else []
 
 
 @dataclasses.dataclass(frozen=True)
@@ -261,8 +264,10 @@ def _candidate_supported(
     routing decision. Mirrors the spawn parser's own gates: thread needs the
     harness's journey-proven lane (claude today), a mapped permission mode is
     claude's on every substrate and a non-claude harness's only on the pane
-    lane. An unknown harness degrades open (kept) so the spawn's own gate,
-    which names the value, stays the authority on refusal.
+    lane. An unset substrate reads as the spawn parser's own default (pane),
+    so a lone permission pin does not filter out non-claude rows the gate
+    would accept. An unknown harness degrades open (kept) so the spawn's own
+    gate, which names the value, stays the authority on refusal.
     """
     sub = (substrate or "").strip()
     if sub == "bg":
@@ -277,7 +282,9 @@ def _candidate_supported(
             pass
     mode = (permission_mode or "").strip()
     if mode:
-        if harness != "claude" and sub != "pane":
+        # "" (unset) is pane here for the same reason _permission_mappable
+        # takes the parser's pane default: only a NON-pane substrate narrows.
+        if harness != "claude" and sub not in ("", "pane"):
             return False
     return True
 
@@ -400,14 +407,12 @@ def resolve_grid(
         chain.append("grid=no-band-candidate")
         return None, chain
 
-    saw_unknown = False
     for row in _order_candidates(clearing, inv):
         state, window = _capacity_state((capacity or {}).get(row.harness, "unknown"))
         if state in ("exhausted", "blocked"):
             chain.append(f"grid skip {row.harness}/{row.name} capacity={state}")
             continue
         if state not in ("ok", "low", "available"):
-            saw_unknown = True
             state = "unknown-permitted"
         chain.append(
             f"grid candidate {row.harness}/{row.name} capacity={state}"
@@ -427,10 +432,9 @@ def resolve_grid(
             out["effort"] = effort
             chain.append(f"grid effort({effort})")
         return out, chain
-    if saw_unknown:
-        chain.append("grid=unknown-capacity")
-    else:
-        chain.append("grid=no-available-candidate")
+    # Reaching here means every candidate was skipped on a positive
+    # exhausted/blocked marker (unknown permits and returns in-loop).
+    chain.append("grid=no-available-candidate")
     return None, chain
 
 
@@ -486,22 +490,26 @@ def runtime_capacity(
 
     A harness is ``ok`` if ANY account reachable through it is ok, ``exhausted``
     only if EVERY account is exhausted, ``unknown`` when no account answers.
-    The value is a detail mapping ``{state, window, accounts}``; bare state
-    strings (the old shape) still resolve via :func:`_capacity_state`. Never
-    probes, never touches the network.
+    Every harness NAMED by a declared row is covered alongside ``providers``,
+    so an agy or custom-harness row is never silently unprobed. The value is a
+    detail mapping ``{state, window, accounts}``; bare state strings (the old
+    shape) still resolve via :func:`_capacity_state`. Never probes, never
+    touches the network, and reads the state file ONCE for all accounts.
     """
     try:
-        from fno.adapters.providers.runtime_state import headroom
+        from fno.adapters.providers.runtime_state import headrooms
 
         inv = inventory if inventory is not None else resolve_inventory(settings=settings)
+        harnesses = list(dict.fromkeys(
+            [*providers, *(r.harness for r in inv.rows.values() if r.harness)]
+        ))
         out: dict[str, object] = {}
-        for harness in providers:
+        for harness in harnesses:
             accounts = harness_accounts(harness, settings=settings, inventory=inv)
             detail: dict[str, str] = {}
             best: Optional[str] = None
             window = "absent"
-            for account in accounts:
-                verdict = headroom(account)
+            for account, verdict in headrooms(accounts).items():
                 state = verdict.state.value
                 detail[account] = state
                 if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
