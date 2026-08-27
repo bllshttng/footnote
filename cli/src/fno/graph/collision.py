@@ -602,7 +602,7 @@ def find_collisions(
                 break
 
     repo_root = _find_repo_root()
-    comparators: list[tuple[dict, set[str]]] = []
+    comparators: list[tuple[dict, str, set[str]]] = []
     for entry in graph:
         if not _is_pending_for_collision(entry):
             continue
@@ -615,7 +615,7 @@ def find_collisions(
         other_files = parse_files_to_modify(other_path)
         if not other_files:
             continue
-        comparators.append((entry, other_files))
+        comparators.append((entry, other_plan, other_files))
 
     # One partition decides who is compared: the candidate's group-mates are
     # exactly the plans sharing a file. Severity still comes from the pair's
@@ -623,14 +623,14 @@ def find_collisions(
     candidate_key = "<candidate>"
     groups, _unevaluated = partition(
         [(candidate_key, candidate_files)]
-        + [(f"other:{i}", files) for i, (_, files) in enumerate(comparators)]
+        + [(f"other:{i}", files) for i, (_, _, files) in enumerate(comparators)]
     )
     by_key = {f"other:{i}": pair for i, pair in enumerate(comparators)}
     for group in groups:
         if candidate_key not in group:
             continue
         for key in group - {candidate_key}:
-            entry, other_files = by_key[key]
+            entry, other_plan, other_files = by_key[key]
             severity, shared_sorted = _classify(candidate_files, other_files, thresholds)
             if not shared_sorted:
                 # The partition normalizes paths this comparison does not; a

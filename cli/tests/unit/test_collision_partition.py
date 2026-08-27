@@ -1,12 +1,23 @@
 """collision.partition: one file-overlap grouping at node and task grain.
 
 ``partition`` is the union-find under ``find_collisions`` (node grain) and
-the orchestrator's ``partition_edges`` (task grain). Locked Decision 1 of
-x-c06a: one function, three consumers.
+the orchestrator's ``partition_edges`` (task grain): one function, three
+consumers.
 """
 from __future__ import annotations
 
-from fno.graph.collision import partition
+from pathlib import Path
+
+from fno.graph.collision import find_collisions, partition
+
+
+def _plan(tmp_path: Path, name: str, *files: str) -> Path:
+    plan = tmp_path / name
+    rows = "\n".join(f"| `{f}` | Modify |" for f in files)
+    plan.write_text(
+        f"# {name}\n\n## Files to Modify\n\n| File | Action |\n|---|---|\n{rows}\n"
+    )
+    return plan
 
 
 class TestPartition:
@@ -58,3 +69,19 @@ class TestPartition:
 
     def test_empty_input_returns_empty_partition(self):
         assert partition([]) == ([], set())
+
+
+class TestFindCollisionsThroughPartition:
+    def test_each_collision_reports_its_own_plan_path(self, tmp_path):
+        # Two comparators, one group: the restructure through partition must
+        # not leave with_plan_path pointing at the last-comparator's plan.
+        candidate = _plan(tmp_path, "cand.md", "a.py", "b.py")
+        one = _plan(tmp_path, "one.md", "a.py")
+        two = _plan(tmp_path, "two.md", "b.py")
+        graph = [
+            {"id": "n-one", "plan_path": str(one), "status": "ready"},
+            {"id": "n-two", "plan_path": str(two), "status": "ready"},
+        ]
+        by_id = {c.with_node_id: c for c in find_collisions(candidate, graph)}
+        assert by_id["n-one"].with_plan_path == str(one)
+        assert by_id["n-two"].with_plan_path == str(two)
