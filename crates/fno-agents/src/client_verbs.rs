@@ -2833,26 +2833,45 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                 }
             }
             if source != AdoptSource::Registry {
-                match row.get("last_message_at").and_then(Value::as_str) {
-                    Some(stamp) => {
-                        let age = chrono::DateTime::parse_from_rfc3339(stamp)
-                            .ok()
-                            .and_then(|at| {
-                                let seconds =
-                                    (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
-                                        .num_seconds();
-                                (seconds >= 0).then_some(seconds as u64)
-                            });
-                        if let Some(age) = age {
-                            eprintln!(
-                                "adopted {name} (short_id={short})\n  last_activity_age_s={age} (from transcript mtime, read before the row write)"
-                            );
-                        }
-                    }
-                    None => eprintln!(
-                        "adopted {name} (short_id={short})\n  transcript unreadable; last_message_at=null"
-                    ),
-                }
+                // The receipt names the handle that ADDRESSES the row. For a
+                // non-claude harness `short_id` is empty by construction
+                // (`adopt_store_hit` fills it for claude alone, because it is
+                // claude's `attach <jobId>` transport key and nothing else's),
+                // so printing `short_id=` told a codex operator their recovery
+                // produced nothing to type. The row name is the address for
+                // every harness, and it is already on stdout.
+                let handle = if short.is_empty() {
+                    format!("address it as {name}")
+                } else {
+                    format!("short_id={short}")
+                };
+                let activity = match row.get("last_message_at").and_then(Value::as_str) {
+                    Some(stamp) => chrono::DateTime::parse_from_rfc3339(stamp)
+                        .ok()
+                        .and_then(|at| {
+                            let seconds = (chrono::Utc::now() - at.with_timezone(&chrono::Utc))
+                                .num_seconds();
+                            (seconds >= 0).then_some(seconds as u64)
+                        })
+                        .map_or_else(
+                            // A stamp that will not parse, or one in the
+                            // future, is a broken instrument. Saying so beats
+                            // the previous silence, which printed no adopted
+                            // line at all and left the operator with a bare
+                            // name on stdout and no receipt.
+                            || format!("last_message_at={stamp} (unparseable or ahead of now)"),
+                            |age| {
+                                format!(
+                                    "last_activity_age_s={age} (from transcript mtime, read before the row write)"
+                                )
+                            },
+                        ),
+                    // Never "unreadable": nothing here read a transcript. The
+                    // adopting write resolves the stamp, so a null means the
+                    // store held no transcript for this session, and only that.
+                    None => "no transcript found in the harness store; last_message_at=null".into(),
+                };
+                eprintln!("adopted {name} ({handle})\n  {activity}");
             }
             0
         }

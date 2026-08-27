@@ -6,6 +6,7 @@ or claiming a dead session is live.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 
@@ -213,6 +214,8 @@ def test_direct_and_single_token_adoption_share_register_kwargs(
         "status": "orphaned",
         "origin": "adopted",
         "log_path": "",
+        # None here only because this test's store holds no transcript file.
+        "last_message_at": None,
         "registry_path": registry,
     }
 
@@ -1061,3 +1064,39 @@ def test_codex_tail_probe_parses_every_rollout_before_identity_filter(
     monkeypatch.setattr(discover, "_codex_meta", meta)
     assert [hit.session_id for hit in store_fallback.probe_stores("55556666")] == [sid]
     assert set(seen) == {wanted.name, noise.name}
+
+
+def test_adopt_records_last_message_at_for_a_codex_rollout(tmp_path, monkeypatch):
+    """An adopted row carries the transcript's last-write stamp, every harness.
+
+    `fno agents adopt` left ``last_message_at`` null for a codex session and the
+    receipt then reported "transcript unreadable" -- an absence read as an
+    answer. Nothing had attempted a read. The rollout was 221 lines and plainly
+    readable.
+    """
+    from fno.agents import store_fallback
+
+    sid = "01a04292-22f0-7501-9967-b96c053b01f2"
+    day = tmp_path / "sessions" / "2026" / "08" / "27"
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-08-27T02-34-28-{sid}.jsonl"
+    rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": "/repo/one"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "sessions"))
+
+    hit = store_fallback.StoreHit(harness="codex", session_id=sid, cwd="/repo/one")
+    entry = store_fallback.adopt_store_hit(hit, registry_path=tmp_path / "registry.json")
+
+    # Positive marker: the stamp the transcript actually carries, not "not null".
+    expected = (
+        datetime.datetime.fromtimestamp(
+            rollout.stat().st_mtime, tz=datetime.timezone.utc
+        )
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+    assert entry.last_message_at == expected

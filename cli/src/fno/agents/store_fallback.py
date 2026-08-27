@@ -34,6 +34,7 @@ Three rules keep it from guessing:
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -425,6 +426,35 @@ def confine_store_hits(
     )
 
 
+def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
+    """The adopted session's last transcript write, as a UTC stamp, or None.
+
+    None means the store held no transcript for this session, and ONLY that. It
+    is the reason the row's ``last_message_at`` was null for every non-claude
+    adoption: nothing here used to look, and the receipt then reported the
+    transcript unreadable, which is an absence read as an answer.
+
+    ``resolve_transcript`` is the shared per-harness resolver (it handles codex
+    and opencode as well as claude), so adopting a codex rollout does not need a
+    second copy of codex's date-partitioned path shape.
+    """
+    from fno.provenance.resolver import resolve_transcript
+
+    try:
+        resolved = resolve_transcript(hit.harness, hit.session_id, hit.cwd)
+        if not resolved.resolved or not resolved.transcript_path:
+            return None
+        mtime = Path(resolved.transcript_path).stat().st_mtime
+    except Exception:  # noqa: BLE001 - a stamp is a nicety; adoption still lands
+        return None
+    return (
+        datetime.datetime.fromtimestamp(mtime, tz=datetime.timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
 def adopt_store_hit(
     hit: StoreHit,
     registry_path: Optional[Path] = None,
@@ -453,6 +483,7 @@ def adopt_store_hit(
     # claude's transport key is the 8-hex jobId (`claude attach <jobId>`), NOT
     # the full UUID that HARNESS_SESSION_ID_FIELDS would otherwise write there.
     short_id = hit.short_id if hit.harness == "claude" else ""
+    last_message_at = _transcript_last_write(hit)
     try:
         return register_existing_session(
             provider=hit.harness,
@@ -471,6 +502,7 @@ def adopt_store_hit(
             # with the absence of an operator marker.
             origin="adopted",
             log_path=log_path,
+            last_message_at=last_message_at,
             registry_path=registry_path,
         )
     except AgentResolutionError:

@@ -708,11 +708,15 @@ def _lookup_mux_pane(
 
 
 def _lookup_registry_row_exact(handle: str):
-    """Return the registry row whose stored name exactly matches ``handle``.
+    """Return the registry row whose stored name or session id matches ``handle``.
 
     This diagnostic runs only after transcript and mux resolution both miss.
-    It deliberately does not resolve aliases: the message must name the exact
-    requested row, and an unreadable registry contributes no diagnosis.
+    It deliberately does not resolve aliases or prefixes: the message must name
+    the exact requested row, and an unreadable registry contributes no
+    diagnosis. The session id is matched alongside the name because that is the
+    string ``fno agents adopt`` and ``fno agents peek``'s own miss text hand the
+    caller, and a row addressable by one spelling and not the other is the same
+    dead end by a shorter route.
     """
     from fno.agents.registry import load_registry
 
@@ -721,8 +725,52 @@ def _lookup_registry_row_exact(handle: str):
     except Exception:  # noqa: BLE001 - the existing not-found path owns read failures
         return None
     return next(
-        (entry for entry in entries if getattr(entry, "name", None) == handle),
+        (
+            entry
+            for entry in entries
+            if getattr(entry, "name", None) == handle
+            or getattr(entry, "harness_session_id", None) == handle
+        ),
         None,
+    )
+
+
+class _RegistrySession:
+    """A registry row in the shape the record reader wants (attrs, by getattr).
+
+    Deliberately not a DiscoveredSession: that type answers "a live session was
+    found by scanning", and asserting it here would be the confident wrong
+    answer this whole path exists to stop making. This says only what the row
+    says.
+    """
+
+    __slots__ = ("agent", "session_id", "short_id", "cwd")
+
+    def __init__(self, agent: str, session_id: str, short_id: str, cwd: str):
+        self.agent = agent
+        self.session_id = session_id
+        self.short_id = short_id
+        self.cwd = cwd
+
+
+def _row_as_session(row) -> Optional[_RegistrySession]:
+    """Adapt a registry row to the reader's session shape, or None.
+
+    None when the row cannot name a conversation to read: no row, or no
+    ``harness_session_id``. The harness defaults to claude only when the row
+    records none, matching the reader's own default; a recorded harness is
+    always used, so a codex orphan is never read with claude's resolver.
+    """
+    if row is None:
+        return None
+    session_id = getattr(row, "harness_session_id", None)
+    if not session_id:
+        return None
+    return _RegistrySession(
+        agent=getattr(row, "harness", None) or "claude",
+        session_id=session_id,
+        short_id=getattr(row, "short_id", None) or "",
+        cwd=getattr(row, "cwd", None) or "",
     )
 
 
@@ -927,6 +975,17 @@ def peek(
                 "harness_session_id is missing; worker identity is incomplete\n"
             )
             return EXIT_UNSUPPORTED
+        # A registered row the live resolver skipped because the session is not
+        # ALIVE. `resolve_or_suggest` answers "which LIVE session is this", and
+        # an adopted orphan is by definition not one, so a row minted by `fno
+        # agents adopt` fell straight through to the miss text below. That text
+        # says "the registry row is gone" and points back at adopt: a closed
+        # loop, and a false statement about a row this function has just read.
+        # The row carries the harness and the session id, which is all the
+        # reader needs, so read the conversation rather than deny it exists.
+        session = _row_as_session(row)
+
+    if session is None:
         # Name the instrument. Both reads above (the live-session resolver and
         # the mux-pane fallback) are registry-shaped, and the registry is not
         # the transcript: a reaped row leaves 4.9M of conversation on disk

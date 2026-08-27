@@ -1405,6 +1405,7 @@ def register_existing_session(
     delivery_policy: Optional[str] = None,
     model: Optional[str] = None,
     effort: Optional[str] = None,
+    last_message_at: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> AgentEntry:
     """Register an operator-started session so peers can address it by name.
@@ -1571,6 +1572,11 @@ def register_existing_session(
                     entry.model = model
                 if effort is not None:
                     entry.effort = effort
+                # Only ever FILLS. A refresh reads a transcript mtime, and a
+                # store that has since been pruned would otherwise erase a real
+                # stamp with None.
+                if last_message_at is not None:
+                    entry.last_message_at = last_message_at
                 return entries
         generated = canonical_handle(session_id)
         if _address_is_taken(generated, same_session_only=True):
@@ -1621,6 +1627,7 @@ def register_existing_session(
             log_path=log_path,
             status=_REGISTERED_STATUS,
             origin=origin,
+            last_message_at=last_message_at,
             spawned_by_session=_sb_session,
             spawned_by_harness=_sb_harness,
             spawned_by_cwd=_sb_cwd,

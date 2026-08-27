@@ -1039,3 +1039,78 @@ def test_peek_opencode_db_ties_render_deterministically(tmp_path):
     }
     assert len(seen) == 1, f"tie ordering not deterministic: {seen}"
     assert seen == {("a", "b", "c")}
+
+
+def test_peek_reads_adopted_orphan_row_instead_of_lying(tmp_path, monkeypatch):
+    """An adopted orphan is addressable: peek reads its transcript, never "not found".
+
+    ``fno agents adopt`` mints a codex row with status="orphaned" and (by
+    design, for a non-claude harness) an empty short_id. The live-session
+    resolver skips it because it is not alive, so peek answered "peer not found
+    in the registry" for a row it had already read, and pointed the caller back
+    at adopt: a closed loop that left a 2,830-line conversation unreachable
+    through the documented observe verb.
+    """
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    day = tmp_path / "sessions" / "2026" / "08" / "27"
+    day.mkdir(parents=True)
+    (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}}
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "user",
+                            "content": [{"type": "input_text", "text": "orphaned ping"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    registry_path = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="01a04292",
+                harness="codex",
+                harness_session_id=session_id,
+                status="orphaned",
+                origin="adopted",
+                cwd="/tmp/proj",
+                log_path="",
+                short_id="",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+    # Addressable by the row name AND by the full session id adopt echoes back.
+    for handle in ("01a04292", session_id):
+        out, err = io.StringIO(), io.StringIO()
+        rc = peek(
+            handle,
+            stdout=out,
+            stderr=err,
+            resolve=lambda h: (None, ["someone-else"]),
+            projects_root=tmp_path,
+            codex_sessions_dir=tmp_path / "sessions",
+            mux_lookup=lambda h: None,
+        )
+        # Positive marker: the conversation itself, never merely a zero exit.
+        assert rc == 0, err.getvalue()
+        assert "orphaned ping" in out.getvalue()
+        assert "peer not found" not in err.getvalue()
+        assert "fno agents adopt" not in err.getvalue()
