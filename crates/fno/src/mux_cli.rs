@@ -2329,6 +2329,40 @@ pub const EXIT_NOT_PANE_HOSTED: i32 = 17; // where: in registry but hosts no liv
 pub const EXIT_REGISTRY_UNAVAILABLE: i32 = 18; // where: the registry could not be read (x-d865)
 pub const EXIT_NO_CLIENT: i32 = 19; // pane focus: no attached viewer to move (x-3e17)
 pub const EXIT_CONTROL_UNANSWERED: i32 = 20; // verb sent, no reply; outcome unknown
+pub const EXIT_NO_SERVER: i32 = 24; // thread: no live mux server to drive (x-07c2)
+
+/// (x-07c2) The shared exit-17 line for a paneless row: the peek route every
+/// paneless row has, plus the drive route when the row's tier is Drive (an
+/// attach id on a live row - `fno agents attach` opens the dedicated thread
+/// pane). One builder so `where`, `view`, and `focus` cannot drift into
+/// saying different things about the same row. The absence of a pane is not
+/// evidence of headlessness and not evidence of death; the line that reports
+/// it is the right place to say what does reach the row.
+fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> String {
+    let name = &row.name;
+    // Ask the same function the server ships in AgentRow.reach, so the CLI
+    // hint and the TUI's actual reach behavior can never drift apart.
+    let tier = crate::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
+    match tier {
+        // `!exited`: thread_reach's contract assumes an already-live row
+        // (reach_thread_pane filters exited rows before ever calling it),
+        // and an exited row's attach_id is not an attachability signal on
+        // its own (agents_view.rs's own doc comment on attach_id) - an
+        // exited Drive-tier row falls through to the plain follow hint.
+        crate::proto::Reach::Drive if !row.exited => format!(
+            "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
+        ),
+        // Locate never has a transcript reader (that's the whole reason it's
+        // Locate, not Follow) - a peek --follow hint here is a route
+        // guaranteed to fail. Point at the one route that actually works.
+        crate::proto::Reach::Locate => format!(
+            "{verb}: {name} hosts no live pane; open it with: fno agents attach {name}"
+        ),
+        _ => format!(
+            "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow"
+        ),
+    }
+}
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
 pub const EXIT_TARGET_IDENTITY_MISMATCH: i32 = 23; // send: pane occupant differs from addressee
@@ -2822,6 +2856,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     at,
                     fallback,
                     max_panes,
+                    thread_pane: false,
                 },
             },
         });
@@ -3875,10 +3910,7 @@ fn focus_by_selector(verb: &str, selector: &str, session_flag: Option<&str>, jso
         Err(code) => return code,
     };
     let Some((host_session, pane)) = row.mux.clone() else {
-        eprintln!(
-            "{verb}: {} hosts no live pane; follow it with: fno agents peek {} --follow",
-            row.name, row.name
-        );
+        eprintln!("{}", paneless_route_hint(verb, &row));
         return EXIT_NOT_PANE_HOSTED;
     };
     let session = resolve_session(session_flag, Some(&host_session));
@@ -4391,10 +4423,7 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
         Err(code) => return code,
     };
     let Some((host_session, pane)) = row.mux.clone() else {
-        eprintln!(
-            "{verb}: {} hosts no live pane; follow it with: fno agents peek {} --follow",
-            row.name, row.name
-        );
+        eprintln!("{}", paneless_route_hint(verb, &row));
         return EXIT_NOT_PANE_HOSTED;
     };
     if url {
@@ -4402,6 +4431,84 @@ pub fn view(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
     let session = resolve_session(session_flag.as_deref(), Some(&host_session));
     focus_pane(verb, &session, pane, true, json)
+}
+
+/// `fno mux thread <name>` (x-07c2, hidden): the outside-the-TUI reach behind
+/// `fno agents attach <name>`. Sends the ThreadPane control verb, which runs
+/// the exact command a TUI reach runs, and prints where it landed. A missing
+/// server is its own exit code so the CLI caller can fall through to the
+/// inline attach instead of reading a generic failure as one.
+pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let (session_flag, _json, rest) = match take_common_flags(args) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("fno mux thread: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let Some(name) = rest
+        .first()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    else {
+        eprintln!("fno mux thread: needs an agent name or attach id");
+        return EXIT_USAGE;
+    };
+    if rest.len() > 1 {
+        eprintln!("fno mux thread: takes exactly one name");
+        return EXIT_USAGE;
+    }
+    // A paneless row owns no session routing: the operator's ambient session
+    // (FNO_SESSION / the default) is the server whose thread pane this drives.
+    let session = resolve_session(
+        session_flag
+            .as_deref()
+            .or(env_session)
+            .filter(|s| !s.is_empty()),
+        None,
+    );
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux thread: {e}");
+            return EXIT_USAGE;
+        }
+    };
+    let stream = match proto::connect_unix_timeout(&sock, PROBE_TIMEOUT) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("fno mux thread: no live mux server ({e})");
+            return EXIT_NO_SERVER;
+        }
+    };
+    match send_control(
+        stream,
+        ControlVerb::ThreadPane { name },
+        CONTROL_TIMEOUT,
+        CONTROL_REPLY_DEADLINE,
+        &session,
+    ) {
+        Ok(ServerMsg::Notice { text }) => {
+            println!("{text}");
+            EXIT_OK
+        }
+        Ok(ServerMsg::Err { msg, .. }) => {
+            eprintln!("fno mux thread: {msg}");
+            EXIT_ERROR
+        }
+        Ok(other) => {
+            eprintln!("fno mux thread: unexpected reply: {other:?}");
+            EXIT_ERROR
+        }
+        Err(ControlError::Unanswered(e)) => {
+            eprintln!("fno mux thread: {e}");
+            EXIT_CONTROL_UNANSWERED
+        }
+        Err(e) => {
+            eprintln!("fno mux thread: {e}");
+            EXIT_ERROR
+        }
+    }
 }
 
 /// `fno mux where <fno_id>` (x-d865): resolve an fno session id to its live
@@ -4476,7 +4583,7 @@ pub fn where_(args: &[OsString], env_session: Option<&str>) -> i32 {
         .unwrap_or_else(|| fno_id.clone());
     // The hosting mux session name.
     let Some(host_session) = row.mux.as_ref().map(|(s, _)| s.clone()) else {
-        eprintln!("fno mux where: {} hosts no live pane", row.name);
+        eprintln!("{}", paneless_route_hint("fno mux where", &row));
         return EXIT_NOT_PANE_HOSTED;
     };
     // Prefer the explicit --session only if the caller gave one; else the host.
@@ -6287,6 +6394,75 @@ pub fn block(args: &[OsString], env_session: Option<&str>) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paneless_row(name: &str, attach: Option<&str>) -> crate::agents_view::RegistryAgent {
+        paneless_row_with_harness(name, attach, None)
+    }
+
+    fn paneless_row_with_harness(
+        name: &str,
+        attach: Option<&str>,
+        harness: Option<&str>,
+    ) -> crate::agents_view::RegistryAgent {
+        crate::agents_view::RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: None,
+            name: name.into(),
+            cwd: "/tmp/seen".into(),
+            exited: false,
+            liveness: crate::agents_view::Liveness::Alive,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: attach.map(str::to_owned),
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            harness: harness.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn paneless_route_hint_names_both_routes_for_a_drive_tier_row() {
+        // AC9-HP: the exit-17 line a paneless row prints names the peek route
+        // every row has AND the drive route a live attach-carrying row has -
+        // never the bare "hosts no live pane" the incident hit. `where`,
+        // `view`, and `focus` share this one builder, so one assertion covers
+        // all three doors.
+        let drive = paneless_route_hint("fno mux where", &paneless_row("t-live", Some("deadbee1")));
+        assert!(drive.contains("fno agents peek t-live --follow"), "{drive}");
+        assert!(drive.contains("fno agents attach t-live"), "{drive}");
+        assert!(drive.contains("hosts no live pane"), "{drive}");
+
+        // Follow tier (a peek-capable harness, no attach id): the peek route
+        // only, still not the bare line.
+        let follow = paneless_route_hint(
+            "fno mux where",
+            &paneless_row_with_harness("t-codex", None, Some("codex")),
+        );
+        assert!(
+            follow.contains("fno agents peek t-codex --follow"),
+            "{follow}"
+        );
+        assert!(!follow.contains("fno agents attach"), "{follow}");
+        assert!(follow.contains("hosts no live pane"), "{follow}");
+
+        // Locate tier (no attach id, no peek reader - e.g. gemini): peek
+        // --follow is a route guaranteed to fail there, so the hint must
+        // name attach instead, never peek.
+        let locate = paneless_route_hint(
+            "fno mux where",
+            &paneless_row_with_harness("t-gemini", None, Some("gemini")),
+        );
+        assert!(locate.contains("fno agents attach t-gemini"), "{locate}");
+        assert!(!locate.contains("--follow"), "{locate}");
+        assert!(locate.contains("hosts no live pane"), "{locate}");
+    }
 
     #[test]
     fn workspace_prune_classifies_pristine_running_and_named_tabs() {

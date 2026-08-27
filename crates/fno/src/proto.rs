@@ -285,7 +285,13 @@ fn default_true() -> bool {
 /// same reason `BackendNotLive` bumped 53 -> 54. `AgentRow.pane_activity`
 /// rides the same bump (additive-tolerant on its own, but it is the shape
 /// change the variant belongs to).
-pub const PROTO_VERSION: u32 = 57;
+///
+/// v58 (x-07c2, dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
+/// enum variant, so a v57 peer cannot decode it and closes the connection
+/// instead of running the reach; the handshake is what stops the skew.
+/// `AgentRow.reach` rides the same bump (additive-tolerant on its own via
+/// `#[serde(default)]`, but it is the shape change the verb belongs to).
+pub const PROTO_VERSION: u32 = 58;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -590,6 +596,15 @@ pub struct PanePlacement {
     /// split refuses. Absent on legacy and non-agent placement requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_panes: Option<usize>,
+    /// (x-07c2) Route this reach into the ONE dedicated thread pane instead
+    /// of an ordinary placement: no slot yet opens one (never persisted as a
+    /// squad member), a slot on another row repoints it in place, a slot on
+    /// this row focuses it. Mutually exclusive with `here`, `at`, `split`
+    /// and a non-default `target` (the dedicated pane owns its geometry);
+    /// the server refuses a conflicting combination. `#[serde(default)]`
+    /// keeps every existing placement wire-identical.
+    #[serde(default)]
+    pub thread_pane: bool,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -757,6 +772,13 @@ pub enum ControlVerb {
     /// "your pane is gone" and "nobody is watching" are different problems, and a
     /// third ("your mux is not running") is the CLI's own connect failure.
     PaneFocus { pane: u64 },
+    /// (x-07c2) Reach a row through the ONE dedicated thread pane: the
+    /// outside-the-TUI door behind `fno agents attach <name>`. `name` is the
+    /// registry name or the 8-hex attach id. The reply is the landing
+    /// (`Notice` carrying where it opened/repointed/focused) or an `Err`
+    /// naming the refusal. Runs the exact command path a TUI reach runs, so
+    /// the two doors cannot drift.
+    ThreadPane { name: String },
     /// Join a whole source tab into the anchor pane's tab as a split, removing
     /// the now-empty source tab -> [`ServerMsg::Ok`]. Refuses join-into-self up
     /// front ([`err_code::BAD_REQUEST`]).
@@ -978,6 +1000,26 @@ pub enum AgentNoPaneReason {
     LivenessUnmeasured,
 }
 
+/// (x-07c2) What the dedicated thread pane can do for a row: `Drive` (an
+/// interactive attach form exists; the pane runs it), `Follow` (no attach
+/// form, but a transcript reader answers; the pane tails it), `Locate`
+/// (neither; the pane renders the row's facts and the routes that do reach
+/// it). Computed from harness CAPABILITY, never from a harness name (law
+/// d-dbf83820: thread is an fno-layer construct over each harness's own
+/// resume primitive). The tier's authority is the server (the row set lives
+/// there); the client field is render-and-gesture only, and a stale client
+/// degrades to `Locate` harmlessly - its reach command is tier-blind and the
+/// server re-derives. Like [`AgentNoPaneReason`], this enum is NOT
+/// additive-tolerant: a new variant later bumps `PROTO_VERSION`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    Drive,
+    Follow,
+    #[default]
+    Locate,
+}
+
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
 /// server's off-loop registry reader joins registry rows to panes via the
 /// `mux` ref and derives the 3-tier fact-badge lattice: `exited` (pane-exit
@@ -1179,6 +1221,13 @@ pub struct AgentRow {
     /// no-reading, never as idle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_activity: Option<ShellActivity>,
+    /// (x-07c2) The dedicated thread-pane tier for a paneless live row (see
+    /// [`Reach`]); meaningless on a pane-hosted row (its reach focuses the
+    /// pane). `#[serde(default)]` keeps a pre-x-07c2 reader wire-tolerant and
+    /// a stale reader's rows degrade to `Locate`, which still routes the
+    /// reach command - the server re-derives the real tier.
+    #[serde(default)]
+    pub reach: Reach,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -3937,7 +3986,8 @@ mod tests {
         // reason bumps it 52 -> 53; backend-not-live classification bumps it
         // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
         // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
-        // bumps it 56 -> 57.
+        // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
+        // 57 -> 58.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3946,7 +3996,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 57);
+        assert_eq!(PROTO_VERSION, 58);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4226,6 +4276,7 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
                         squad: Some(1),
@@ -4272,6 +4323,7 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
+                        reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
                         squad: None,
@@ -4432,6 +4484,7 @@ mod tests {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         };
         for msg in [
             ClientMsg::Control {

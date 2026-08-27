@@ -4649,11 +4649,16 @@ def render_reconcile_human(result, *, out) -> None:
 def cmd_attach(
     name: str = typer.Argument(..., help="Agent name (from `fno agents list`)."),
 ) -> None:
-    """Attach to a running claude agent session interactively.
+    """Attach to a running agent session interactively.
 
-    Claude path: shells out to ``claude attach <short_id>`` with inherited
-    stdin/stdout/stderr - the claude TUI takes over until you detach.
-    fno's exit code mirrors claude's on detach.
+    With a live mux server: drives the one dedicated thread pane, which
+    routes every harness by capability (claude drives, codex follows,
+    gemini locates) instead of the codex/gemini refusal below.
+
+    With no mux server, claude path: shells out to ``claude attach
+    <short_id>`` with inherited stdin/stdout/stderr - the claude TUI
+    takes over until you detach. fno's exit code mirrors claude's on
+    detach.
 
     Codex / gemini: refused with exit 13 and a hint pointing at Phase 6
     (the fno-owned supervisor) as the planned landing for cross-provider

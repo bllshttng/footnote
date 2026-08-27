@@ -14,7 +14,7 @@ use std::time::Duration;
 use common::{
     connect_with_retry, spawn_server, FakeClient, Scratch, ServerProc, ServerTermination,
 };
-use fno::proto::Command;
+use fno::proto::{Command, PanePlacement};
 
 /// Same module-local serialization gate as `persistence.rs`: these tests own
 /// real PTYs + Unix sockets, and parallel runs contend for the runner's CPU.
@@ -356,4 +356,154 @@ fn symptom_stale_live_row_does_not_respawn_a_dead_worker() {
         "restore spawned `claude attach deadbeef` for a row whose pid ({dead_pid}) is dead: the stale-live registry lie respawning a dead worker"
     );
     c.detach();
+}
+
+/// The dedicated thread pane is never a persisted member, so restart must not
+/// rebuild it. A pane binds a session to geometry, a thread binds a session
+/// to a row, and a rebuilt thread pane would re-bind a thread to a rectangle
+/// across a restart - the one property the substrate exists to avoid.
+#[test]
+fn symptom_restore_rebuilds_no_thread_pane() {
+    let _g = PTY_GATE.lock().unwrap_or_else(|e| e.into_inner());
+    let scratch = Scratch::new("thread-restore");
+    // A `claude` stub on PATH that marks every spawn (`boot`) and every
+    // `claude attach` spawn (`attach`). The pre-restart reach MUST produce
+    // exactly one of each (the thread pane is an attach pane); restore must
+    // produce NEITHER. The post-restart probe is the positive control: an
+    // absent `boot` after restart means "not spawned", never "instrument
+    // broken".
+    let bin = scratch.0.join("stubbin");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        bin.join("claude"),
+        "#!/bin/sh\necho boot >> \"$STUB_MARKER\"\nif [ \"$1\" = attach ]; then echo attach >> \"$STUB_MARKER\"; fi\nsleep 60\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let marker = scratch.0.join("marker");
+    let _ = std::fs::remove_file(&marker);
+    let path_with_stub = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+
+    // A LIVE paneless claude row: our own pid with no recorded start time, so
+    // the liveness probe falls back to pid existence and the row reads as a
+    // live daemon-hosted thread carrying an attach id.
+    let agents_home = scratch.0.join("iso-agents");
+    std::fs::create_dir_all(&agents_home).unwrap();
+    std::fs::write(
+        agents_home.join("registry.json"),
+        format!(
+            r#"{{"agents":[{{"name":"threader","cwd":"{}","status":"working","harness":"claude","short_id":"deadbee2","pid":{}}}]}}"#,
+            scratch.home_cwd(),
+            std::process::id()
+        ),
+    )
+    .unwrap();
+
+    let server = spawn_server(
+        &scratch.main_sock(),
+        &[
+            ("PATH", path_with_stub.as_str()),
+            ("STUB_MARKER", marker.to_str().unwrap()),
+        ],
+    );
+    let mut c = attach_client(&scratch);
+    c.wait_layout(10, "the row surfaces", |l| {
+        l.agents
+            .iter()
+            .any(|a| a.attach_id.as_deref() == Some("deadbee2"))
+    });
+    let live_panes = |c: &FakeClient| {
+        c.layout
+            .as_ref()
+            .map(|l| l.squads.iter().map(|s| s.panes).sum::<usize>())
+            .unwrap_or(0)
+    };
+    let before = live_panes(&c);
+
+    // The reach: the exact command a TUI reach sends. One pane appears, and
+    // it runs the stub's attach argv exactly once.
+    c.cmd(Command::AttachAgent {
+        id: "deadbee2".into(),
+        placement: PanePlacement {
+            thread_pane: true,
+            ..Default::default()
+        },
+    });
+    c.pump(Duration::from_secs(2));
+    assert_eq!(
+        live_panes(&c),
+        before + 1,
+        "the reach opened exactly one pane (notices so far: {:?})",
+        c.notices
+    );
+    let text = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        text.matches("boot").count(),
+        1,
+        "the reach spawned the attach argv once: {text:?}"
+    );
+    assert_eq!(
+        text.matches("attach").count(),
+        1,
+        "the thread pane runs `claude attach`: {text:?}"
+    );
+    c.detach();
+
+    // Restart: what "ending fno" does. The thread pane must not come back.
+    // Pane-count equality is the wrong instrument here (restore's home-slot
+    // rebuild for ANY captured topology is x-caef behavior, not thread
+    // behavior); the thread contract is that NOTHING respawns for the thread:
+    // no attach argv (the marker), and no slot for it in the captured trees
+    // (asserted directly in the server unit tests). The replacement server
+    // keeps the stub envs so the control probe below resolves the stub.
+    let _old = server.terminate_and_wait();
+    let _server2 = spawn_server(
+        &scratch.main_sock(),
+        &[
+            ("PATH", path_with_stub.as_str()),
+            ("STUB_MARKER", marker.to_str().unwrap()),
+        ],
+    );
+    let mut r_client = attach_client(&scratch);
+    r_client.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
+    r_client.pump(Duration::from_secs(3));
+    let text = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        text.matches("boot").count(),
+        1,
+        "restore respawned the thread pane's argv: {text:?}"
+    );
+    assert_eq!(
+        text.matches("attach").count(),
+        1,
+        "restore rebuilt the thread pane as an attach: {text:?}"
+    );
+
+    // Positive control, AFTER the absence assertions: the stub is reachable
+    // through the server's own spawn path.
+    let mut probe = scratch.command();
+    probe
+        .env("PATH", &path_with_stub)
+        .env("STUB_MARKER", marker.to_str().unwrap())
+        .args(["mux", "pane", "run", "--", "claude", "probe"]);
+    let out = probe.output().unwrap();
+    assert!(
+        out.status.success(),
+        "pane-run probe failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    r_client.pump(Duration::from_secs(2));
+    let text = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert_eq!(
+        text.matches("boot").count(),
+        2,
+        "control failed: the stub never ran through the live spawn path: {text:?} (probe stdout: {}, probe stderr: {})",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    r_client.detach();
 }

@@ -8733,17 +8733,6 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
-    /// (x-9c5f) Open the placement picker for a not-yet-spawned watch-only row:
-    /// the operator picks the split direction (h/j/k/l or arrows) or a new tab
-    /// before it attaches, instead of a hardcoded split/tab. `squad` is the
-    /// row's owning squad (the picker's preferred target); `apply_hit` resolves
-    /// the live workspace list and default target. Every deliberate attach
-    /// gesture (sideline click, selector Enter, navigator goto, peek Enter)
-    /// routes through here, so placement is chosen the same way everywhere.
-    OpenAttachPlace {
-        id: String,
-        squad: Option<u64>,
-    },
 }
 
 fn no_pane_notice(a: &AgentRow) -> String {
@@ -8774,40 +8763,46 @@ fn no_pane_notice(a: &AgentRow) -> String {
     }
 }
 
-/// The [`ChromeHit`] for an agent row: focus its pane, else attach a paneless
-/// claude bg row, else resume a resumable row through its harness, else say it
-/// has no pane here. Shared by a sideline click ([`View::row_action`]) and the
-/// navigator's goto ([`View::nav_rows`]) so the two inputs resolve the same
-/// entity identically (x-653d). Pure - the agent's own fields decide, so no
-/// `&self` needed.
+/// The [`ChromeHit`] for an agent row: focus its pane, else reach a paneless
+/// live row through the ONE dedicated thread pane, else resume a resumable row
+/// through its harness, else say it has no pane here. Shared by a sideline
+/// click ([`View::row_action`]) and the navigator's goto ([`View::nav_rows`])
+/// so the two inputs resolve the same entity identically (x-653d). Pure - the
+/// agent's own fields decide, so no `&self` needed.
 fn agent_hit(a: &AgentRow, _active_squad: u64) -> ChromeHit {
     match a.pane_id {
         Some(pid) => ChromeHit::Cmds(vec![Command::FocusPane(pid)]),
-        None => match &a.attach_id {
-            // A not-yet-spawned watch-only attachable row opens the placement
-            // picker (x-9c5f) so the operator chooses the split direction
-            // (h/j/k/l or arrows) or a new tab, rather than a hardcoded
-            // same-workspace Right split / cross-workspace new tab.
-            //
-            // The attach catalog gate is `attach_id && !exited`, and BOTH halves
-            // belong here: a tombstone row keeps its attach_id so the client can
-            // dismiss it, so testing attach_id alone offered the picker for a
-            // dead agent and only refused two keystrokes later, at the send-time
-            // recheck. This is the shared resolver for the click, the selector's
-            // Enter, the navigator goto, and peek, so the guard covers all four.
-            Some(id) if !a.exited => ChromeHit::OpenAttachPlace {
-                id: id.clone(),
-                squad: a.squad,
-            },
+        None if !a.exited => {
+            // (x-07c2) Every paneless live row reaches the dedicated thread
+            // pane: Drive attaches, Follow tails the transcript, Locate
+            // renders the explanation screen. One command, no placement
+            // dialog - the server owns the tier (the row set lives there).
+            // The command's id is the attach id for a claude row and the row
+            // NAME for every other harness (Follow/Locate rows carry no
+            // attach id); the x-e10f refusal invariant holds by construction
+            // because the client never chooses between attach and focus.
+            let id = a.attach_id.clone().unwrap_or_else(|| a.name.clone());
+            ChromeHit::Cmds(vec![Command::AttachAgent {
+                id,
+                placement: PanePlacement {
+                    thread_pane: true,
+                    ..PanePlacement::default()
+                },
+            }])
+        }
+        None => {
             // (x-5f7f) A paneless row whose harness owns a resume form resumes
             // through that form: the server spawns `claude --resume <sid>` /
             // `codex resume <sid>` as a pane in the recorded cwd. The
             // operator's explicit gesture - restore never sends this.
-            _ if a.resumable => ChromeHit::Cmds(vec![Command::ResumeAgent {
-                name: a.name.clone(),
-            }]),
-            _ => ChromeHit::Notice(no_pane_notice(a)),
-        },
+            if a.resumable {
+                ChromeHit::Cmds(vec![Command::ResumeAgent {
+                    name: a.name.clone(),
+                }])
+            } else {
+                ChromeHit::Notice(no_pane_notice(a))
+            }
+        }
     }
 }
 
@@ -12741,25 +12736,6 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // (x-9c5f) A not-yet-spawned watch-only row: open the placement picker so
-        // the operator picks the split direction. Resolve the live workspace list
-        // and default target (the row's own squad if still present, else the
-        // active one, else the first) here, where `&mut View` + the layout are in
-        // hand. `open_attach_place` closes peek/the selector; the picker owns the
-        // rest of the attach.
-        ChromeHit::OpenAttachPlace { id, squad } => {
-            // A synthetic mission squad is a render-time grouping header, not
-            // a real session squad `place_spawned_pane` can route into -
-            // exclude it here so a mission-grouped row's placement falls back
-            // to a real target (the row's cwd match, else active, else first)
-            // instead of leaking the virtual id into the picker.
-            let squads: Vec<u64> = view.attach_dst_squads();
-            if squads.is_empty() {
-                view.set_notice("no workspace to attach into".into());
-            } else {
-                view.open_attach_place(id, squad, squads);
-            }
-        }
     }
     Ok(())
 }
@@ -13408,6 +13384,7 @@ async fn execute_row_menu_action(
                         at: None,
                         fallback: PlacementFallback::NewTab,
                         max_panes: None,
+                        thread_pane: false,
                     },
                 }),
             )
@@ -14360,10 +14337,9 @@ async fn peek_keys(
             b'l' | b'\r' | b'\n' => {
                 // Attach from peek (US4) through the shared agent_hit -> apply_hit
                 // path a click / selector Enter uses: a pane-hosted row focuses;
-                // a not-yet-spawned watch-only row resolves to OpenAttachPlace, so
-                // apply_hit opens the placement picker (choose split direction /
-                // tab, x-9c5f) - open_attach_place closes both overlays. A Notice
-                // refusal (a paneless row with no attach target) keeps BOTH
+                // a paneless live row reaches the ONE dedicated thread pane with
+                // no placement dialog (x-07c2; the explicit picker is `p`). A
+                // Notice refusal (a dead or unresolvable row) keeps BOTH
                 // overlays open (x-260a locked 3). Right-arrow folds to `l`.
                 let hit = match view.display_rows().get(cursor) {
                     Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
@@ -14715,12 +14691,13 @@ async fn selector_keys(
                     }
                     _ => None,
                 };
-                // Enter resolves the same row to the same picker via
-                // `agent_hit`/`apply_hit`, so the synthetic mission squad has to
-                // be excluded on BOTH paths or the virtual id leaks in through
-                // this one and `place_spawned_pane` cannot route it. Same reason
-                // the two no-op cases stay distinct: "no workspace" and "not
-                // attachable" are different problems to report.
+                // (x-07c2) Enter reaches the thread pane, so `p` is the
+                // picker's only door. The synthetic mission squad must still be
+                // excluded here (attach_dst_squads does it) or the virtual id
+                // leaks into the picker and `place_spawned_pane` cannot route
+                // it. Same reason the two no-op cases stay distinct: "no
+                // workspace" and "not attachable" are different problems to
+                // report.
                 let squads: Vec<u64> = view.attach_dst_squads();
                 match picked {
                     Some((id, owner)) if !squads.is_empty() => {
@@ -15221,6 +15198,7 @@ async fn attach_place_keys(
                     at: None,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             }),
         )
@@ -16219,7 +16197,7 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, TabMeta};
+    use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
     use crate::vt::frame_text;
 
     #[test]
@@ -16544,6 +16522,7 @@ mod tests {
         // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
         // agent to the SAME ChromeHit. pane > attach > notice.
         let hosted = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16577,8 +16556,9 @@ mod tests {
         assert!(
             matches!(agent_hit(&hosted, 2), ChromeHit::Cmds(c) if c == vec![Command::FocusPane(7)])
         );
-        // A watch-only attachable row (any workspace) now resolves to the
-        // placement picker (x-9c5f), carrying its owning squad as the target.
+        // (x-07c2) A watch-only attachable row (any workspace) reaches the ONE
+        // dedicated thread pane: one AttachAgent with the thread_pane flag,
+        // no placement dialog. The server owns the tier.
         let bg = AgentRow {
             pane_id: None,
             attach_id: Some("job1".into()),
@@ -16586,12 +16566,14 @@ mod tests {
         };
         assert!(matches!(
             agent_hit(&bg, 2),
-            ChromeHit::OpenAttachPlace { id, squad } if id == "job1" && squad == bg.squad
+            ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
+                id: "job1".into(),
+                placement: PanePlacement { thread_pane: true, ..Default::default() },
+            }]
         ));
         // A TOMBSTONE row keeps its attach_id (the client needs it to dismiss),
-        // so attach_id alone would offer the picker for a dead agent and only
-        // refuse at the send-time recheck. The catalog gate is attach_id AND
-        // !exited, and the `p` key already enforced both.
+        // so the reach arm gates on !exited: a dead agent never reaches, it
+        // notices.
         let dead = AgentRow {
             pane_id: None,
             attach_id: Some("job1".into()),
@@ -16601,43 +16583,28 @@ mod tests {
             ..hosted.clone()
         };
         assert!(matches!(agent_hit(&dead, 2), ChromeHit::Notice(_)));
+        // A live paneless row with NO attach id reaches BY NAME - the Follow
+        // and Locate tiers (the dedicated pane tails or explains).
         let orphan = AgentRow {
+            name: "t-live-paneless".into(),
             pane_id: None,
             attach_id: None,
-            ..hosted
-        };
-        assert!(matches!(agent_hit(&orphan, 2), ChromeHit::Notice(_)));
-
-        let live_paneless = AgentRow {
-            name: "t-live-paneless".into(),
-            exited: false,
             no_pane_reason: Some(AgentNoPaneReason::LivePaneless),
-            pane_activity: None,
-            ..orphan.clone()
+            ..hosted.clone()
         };
-        for _ in 0..2 {
-            match agent_hit(&live_paneless, 2) {
-                ChromeHit::Notice(text) => {
-                    assert!(text.contains("live"), "live-paneless notice: {text}");
-                    assert!(
-                        text.contains("fno agents peek t-live-paneless --follow"),
-                        "live-paneless notice: {text}"
-                    );
-                }
-                other => panic!(
-                    "live paneless must remain a notice: {}",
-                    chrome_hit_label(&Some(other))
-                ),
-            }
-        }
+        assert!(matches!(
+            agent_hit(&orphan, 2),
+            ChromeHit::Cmds(c) if c == vec![Command::AttachAgent {
+                id: "t-live-paneless".into(),
+                placement: PanePlacement { thread_pane: true, ..Default::default() },
+            }]
+        ));
+        // The LivePaneless notice itself still exists (render paths and the
+        // server refusal echo it); its actionable peek command must survive
+        // narrow clipping. Driven directly, not through agent_hit: the click
+        // path now EXECUTES that advice in the dedicated pane instead.
         let mut narrow = two_pane_view();
-        narrow.set_notice(match agent_hit(&live_paneless, 2) {
-            ChromeHit::Notice(text) => text,
-            other => panic!(
-                "live paneless must produce a notice for clipping: {}",
-                chrome_hit_label(&Some(other))
-            ),
-        });
+        narrow.set_notice(no_pane_notice(&orphan));
         let (_, clipped) = narrow.notice_overlay(80).expect("notice is set");
         assert!(
             clipped.contains("fno agents peek t-live-paneless --follow"),
@@ -16681,6 +16648,7 @@ mod tests {
         // still wins while a claude bg row is live and carries a jobId;
         // resumable takes the dead-and-nameless cases the notice used to eat.
         let row = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16715,8 +16683,10 @@ mod tests {
             ChromeHit::Cmds(c)
                 if c == vec![Command::ResumeAgent { name: "t-codex-one".into() }]
         ));
-        // A live attachable row keeps the picker even if a stale server also
-        // flagged it resumable: the daemon-owned attach is the cheaper truth.
+        // A live attachable row reaches the dedicated thread pane even if a
+        // stale server also flagged it resumable: while the daemon owns the
+        // session, attaching is the cheaper truth, and resuming a live row
+        // would mint a second writer (the LivePaneless warning).
         let attachable = AgentRow {
             attach_id: Some("c19cd2c3".into()),
             exited: false,
@@ -16727,16 +16697,22 @@ mod tests {
         };
         assert!(matches!(
             agent_hit(&attachable, 2),
-            ChromeHit::OpenAttachPlace { .. }
+            ChromeHit::Cmds(c) if matches!(
+                c.as_slice(),
+                [Command::AttachAgent { placement, .. }] if placement.thread_pane
+            )
         ));
     }
 
     #[test]
-    fn agent_hit_watch_only_opens_placement_picker() {
-        // x-9c5f: a watch-only attachable row (any workspace) resolves to the
-        // placement picker carrying its owning squad, instead of a hardcoded
-        // split/tab - the operator picks the direction in the picker.
+    fn agent_hit_watch_only_reaches_the_thread_pane() {
+        // (x-07c2) A watch-only attachable row (any workspace) resolves to the
+        // dedicated thread pane: one AttachAgent carrying the thread_pane
+        // flag and the row's attach id, no placement dialog. The explicit
+        // placement gestures (picker `p`, menu splits, open-here, drag) still
+        // pin a persisted pane when the operator wants one.
         let row = AgentRow {
+            reach: Reach::Drive,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16767,12 +16743,15 @@ mod tests {
             pane_activity: None,
         };
         match agent_hit(&row, 1) {
-            ChromeHit::OpenAttachPlace { id, squad } => {
-                assert_eq!(id, "job1");
-                assert_eq!(squad, Some(1));
-            }
+            ChromeHit::Cmds(c) => assert!(
+                matches!(
+                    c.as_slice(),
+                    [Command::AttachAgent { id, placement }] if id == "job1" && placement.thread_pane
+                ),
+                "expected a thread-pane reach, got {c:?}"
+            ),
             other => panic!(
-                "expected OpenAttachPlace, got {}",
+                "expected a thread-pane reach, got {}",
                 chrome_hit_label(&Some(other))
             ),
         }
@@ -16782,7 +16761,9 @@ mod tests {
     // `place_spawned_pane` can route a pane into - a mission-grouped row's
     // placement must fall back to a real target, and the picker must never
     // offer the virtual id as a choice (codex review of x-1a47 change 2/3,
-    // P1-b).
+    // P1-b). Driven through the `p`-key door (attach_dst_squads +
+    // open_attach_place), the only door left since x-07c2 moved every
+    // deliberate attach gesture to the dedicated thread pane.
     #[tokio::test]
     async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
         let mut view = two_pane_view();
@@ -16790,12 +16771,8 @@ mod tests {
         let mid = mission_meta(9, "mux-squad  1/1").id;
         layout.squads.push(mission_meta(9, "mux-squad  1/1"));
         view.set_layout(layout);
-        let hit = ChromeHit::OpenAttachPlace {
-            id: "job1".into(),
-            squad: Some(mid),
-        };
-        let mut buf: Vec<u8> = Vec::new();
-        apply_hit(&mut view, hit, &mut buf).await.unwrap();
+        let squads = view.attach_dst_squads();
+        view.open_attach_place("job1".into(), Some(mid), squads);
         let picker = view.attach_place.expect("picker opened");
         assert_ne!(
             picker.target(),
@@ -16999,6 +16976,7 @@ mod tests {
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
     fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -17526,6 +17504,7 @@ mod tests {
     // An agent row hosting a given pane, under squad 1.
     fn focus_agent(pane: u64) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -19291,7 +19270,6 @@ mod tests {
             Some(ChromeHit::SortColumn(_)) => "SortColumn",
             Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
-            Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
             Some(ChromeHit::CycleDensity) => "CycleDensity",
         }
     }
@@ -19486,6 +19464,7 @@ mod tests {
     // (squad, exited) matter; badge/seen round out a plausible row.
     fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(squad),
@@ -20164,6 +20143,7 @@ mod tests {
     // tri-state filtering tests below.
     fn view_with_dead_interleaved() -> View {
         let row = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -20354,6 +20334,7 @@ mod tests {
     #[test]
     fn section_header_is_clickable_but_never_selector_selectable() {
         let view = view_with_agents(vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
@@ -20670,6 +20651,7 @@ mod tests {
     #[test]
     fn elsewhere_section_live_only_hides_exited_orphans() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99), // no such squad -> orphan
@@ -20727,6 +20709,7 @@ mod tests {
     #[test]
     fn section_header_caret_tracks_all_three_states() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99),
@@ -20842,6 +20825,7 @@ mod tests {
     #[test]
     fn chrome_hit_agent_rows_focus_or_hint() {
         let hosted = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -20871,9 +20855,11 @@ mod tests {
             no_pane_reason: None,
             pane_activity: None,
         };
-        // A watch-only bg row with a claude jobId: a click opens the placement
-        // picker (x-9c5f) so the operator chooses the split direction.
+        // A watch-only bg row with a claude jobId: a click reaches the
+        // dedicated thread pane (x-07c2); a row with no attach id reaches
+        // BY NAME (Follow/Locate tiers).
         let bg_attach = AgentRow {
+            reach: Reach::Drive,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -20903,8 +20889,10 @@ mod tests {
             no_pane_reason: None,
             pane_activity: None,
         };
-        // A watch-only row with no attach target: a click can only hint.
+        // A watch-only row with no attach target: its reach opens the
+        // dedicated pane by name (Follow tails it, Locate explains it).
         let bg_plain = AgentRow {
+            reach: Reach::Follow,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -20942,11 +20930,25 @@ mod tests {
                                      // (4), "+ new workspace" footer (5), Blank (6), "~ elsewhere" header (7),
                                      // orphan "bg-claude" (8), orphan "bg-other" (9).
         assert_eq!(cmds(view.chrome_hit(1, 4)), vec![Command::FocusPane(10)]);
-        assert!(matches!(
-            view.chrome_hit(8, 4),
-            Some(ChromeHit::OpenAttachPlace { id, squad }) if id == "c19cd2c3" && squad.is_none()
-        ));
-        assert!(matches!(view.chrome_hit(9, 4), Some(ChromeHit::Notice(_))));
+        // (x-07c2) Both watch-only rows now REACH the dedicated thread pane:
+        // the attachable one by attach id, the other by name.
+        for (row, want_id) in [(8usize, "c19cd2c3"), (9, "bg-other")] {
+            let row = row.try_into().unwrap();
+            match view.chrome_hit(row, 4) {
+                Some(ChromeHit::Cmds(c)) => assert!(
+                    matches!(
+                        c.as_slice(),
+                        [Command::AttachAgent { id, placement }]
+                            if id == want_id && placement.thread_pane
+                    ),
+                    "row {row} must reach the thread pane, got {c:?}"
+                ),
+                other => panic!(
+                    "row {row}: expected a thread reach, got {}",
+                    chrome_hit_label(&other)
+                ),
+            }
+        }
         // (x-975a) The "~ elsewhere" header cycles its own section view. It
         // stays `row_is_inert` (the selector cursor still skips it) - clickable
         // is not selectable.
@@ -20967,6 +20969,7 @@ mod tests {
         // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -21516,6 +21519,7 @@ mod tests {
         // row gets focus and NO splits (already placed); an exited row gets
         // remove and no stop.
         let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -22741,6 +22745,7 @@ mod tests {
         // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
         // never the other same-named row.
         let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -24359,6 +24364,7 @@ mod tests {
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -25161,6 +25167,7 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: Some(1),
@@ -25191,6 +25198,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: Some(1),
@@ -25221,6 +25229,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25307,6 +25316,7 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(squad),
@@ -25720,6 +25730,7 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25750,6 +25761,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25780,6 +25792,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25813,6 +25826,7 @@ mod tests {
                 // load-bearing "attention is never dimmed" branch. The accent
                 // must win over the external DIM modifier.
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -26321,6 +26335,7 @@ mod tests {
     /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad,
@@ -27051,6 +27066,7 @@ mod tests {
     #[test]
     fn peek_overlay_renders_loading_transcript_and_answerable() {
         let row = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -27367,10 +27383,10 @@ mod tests {
     }
 
     // x-c376 AC4-HP: Enter on a pane-hosted peeked row focuses its pane and
-    // closes BOTH overlays; right-arrow (folds to l) on a NOT-yet-spawned
-    // watch-only row opens the placement picker (x-9c5f), which then sends the
-    // AttachAgent with the chosen split; AC2-EDGE: a row with no pane and no
-    // attach target refuses with a notice and keeps both overlays open.
+    // closes BOTH overlays; (x-07c2) Enter on a NOT-yet-spawned watch-only row
+    // reaches the dedicated thread pane (one AttachAgent, thread_pane flag,
+    // no picker); a dead paneless row still refuses with a notice and keeps
+    // both overlays open.
     #[tokio::test]
     async fn peek_attaches_and_refuses_a_paneless_row() {
         // Pane-hosted "worker" (pane_id 10): Enter -> FocusPane, both close.
@@ -27387,38 +27403,38 @@ mod tests {
             ClientMsg::Command(Command::FocusPane(p)) => assert_eq!(p, 10),
             other => panic!("expected FocusPane, got {other:?}"),
         }
-        // Watch-only "bg-claude" (attach_id, not yet spawned): right-arrow folds
-        // to l -> opens the placement picker (no command yet); a direction key
-        // then sends AttachAgent with the chosen split (x-9c5f).
+        // Watch-only "bg-claude" (attach_id, not yet spawned): Enter reaches
+        // the dedicated thread pane directly - no picker on the plain reach
+        // (the picker stays on its own explicit doors: selector `p`, menu).
         let mut v = unified_rows_view();
         let mut buf2: Vec<u8> = Vec::new();
         let bg = agent_row_at(&v, |a| a.name == "bg-claude");
         v.selector = Some(bg);
         v.open_peek(bg, "bg-claude".into());
-        peek_keys(&mut v, b"\x1b[C", &mut buf2).await.unwrap();
+        peek_keys(&mut v, b"\r", &mut buf2).await.unwrap();
         assert!(
             v.peek.is_none() && v.selector.is_none(),
-            "the picker replaces peek"
+            "the reach closes both"
         );
-        assert!(
-            v.attach_place.is_some(),
-            "a not-yet-spawned watch-only peek attach opens the placement picker"
-        );
-        assert!(buf2.is_empty(), "nothing sent until a direction is chosen");
-        // Choose a right split -> AttachAgent with split Right. Uppercase: the
-        // lowercase twins are cursor motion now.
-        let mut buf2b: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"L", &mut buf2b).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf2b);
+        assert!(v.attach_place.is_none(), "no placement dialog on a reach");
+        let mut cur = std::io::Cursor::new(buf2);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
-                assert_eq!(placement.split, Some(Dir::Right));
+                assert!(placement.thread_pane, "the reach drives the thread pane");
+                assert!(placement.split.is_none() && !placement.here);
             }
             other => panic!("expected AttachAgent, got {other:?}"),
         }
-        // Orphan "bg-other" (no pane, no attach_id): Enter refuses, overlays stay.
+        // Orphan "bg-other" (no pane, no attach_id, DEAD): Enter refuses,
+        // overlays stay.
         let mut v = unified_rows_view();
+        v.layout
+            .agents
+            .iter_mut()
+            .find(|a| a.name == "bg-other")
+            .unwrap()
+            .exited = true;
         let mut buf3: Vec<u8> = Vec::new();
         let orphan = agent_row_at(&v, |a| a.name == "bg-other");
         v.selector = Some(orphan);
@@ -27490,6 +27506,7 @@ mod tests {
         // AC4-EDGE (client half): x on a tombstone member row sends
         // DismissMember for its squad + attach_id (not a squad remove).
         let tomb = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -27541,6 +27558,7 @@ mod tests {
     /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
     fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -27865,27 +27883,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn selector_enter_opens_placement_for_bg_agent() {
-        // x-9c5f: Enter on a not-yet-spawned claude bg row opens the placement
-        // picker (choose the split direction) instead of a default-placement
-        // attach; a direction key then sends AttachAgent with that split.
+    async fn selector_enter_reaches_bg_agent_thread_pane() {
+        // (x-07c2) Enter on a not-yet-spawned claude bg row reaches the ONE
+        // dedicated thread pane: one AttachAgent with the thread_pane flag,
+        // no placement dialog, selector closed. The explicit placement
+        // gestures (selector `p`, menu splits, open-here, drag) still pin a
+        // persisted pane for an operator who wants one.
         let mut v = unified_rows_view();
         v.selector = Some(8); // bg-claude
         let mut buf: Vec<u8> = Vec::new();
         selector_keys(&mut v, b"\r", &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "nothing sent until a direction is chosen");
-        assert!(v.attach_place.is_some(), "Enter opens the placement picker");
-        assert_eq!(v.selector, None, "the picker replaces the selector");
-        // Choosing a direction sends the AttachAgent with that split. Uppercase:
-        // lowercase now moves the cursor (arrows fold to the same bytes, so a
-        // scan of the list must never commit).
-        let mut buf2: Vec<u8> = Vec::new();
-        attach_place_keys(&mut v, b"J", &mut buf2).await.unwrap();
-        let mut cur = std::io::Cursor::new(buf2);
+        assert_eq!(v.selector, None, "the reach closes the selector");
+        assert!(v.attach_place.is_none(), "no placement dialog on a reach");
+        let mut cur = std::io::Cursor::new(&buf);
         match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
             ClientMsg::Command(Command::AttachAgent { id, placement }) => {
                 assert_eq!(id, "c19cd2c3");
-                assert_eq!(placement.split, Some(Dir::Down));
+                assert!(placement.thread_pane, "drives the dedicated thread pane");
+                assert!(placement.split.is_none() && !placement.here && placement.at.is_none());
             }
             other => panic!("expected AttachAgent, got {other:?}"),
         }
@@ -27948,6 +27963,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             })
         );
@@ -27975,19 +27991,11 @@ mod tests {
             .expect("an attachable agent row")
     }
 
-    /// Open the attach picker through the CLICK door (`apply_hit`), which does
-    /// not depend on a sideline row index.
+    /// Open the attach picker the way the `p` key does (no sideline row
+    /// index needed), which since x-07c2 is the picker's only door.
     async fn open_attach_by_click(v: &mut View) {
-        apply_hit(
-            v,
-            ChromeHit::OpenAttachPlace {
-                id: "c19cd2c3".into(),
-                squad: None,
-            },
-            &mut Vec::new(),
-        )
-        .await
-        .unwrap();
+        let squads = v.attach_dst_squads();
+        v.open_attach_place("c19cd2c3".into(), None, squads);
     }
 
     #[tokio::test]
@@ -28317,6 +28325,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             })
         );
@@ -28367,6 +28376,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             }),
             "Enter must attach to the marked workspace, not here"
@@ -28412,11 +28422,19 @@ mod tests {
 
     #[tokio::test]
     async fn selector_enter_refusal_keeps_selector_open() {
-        // AC1-ERR + AC2-ERR (locked 3): a refusal row (paneless agent, blocked
-        // card, in-flight card) shows a notice, sends nothing, and the
-        // selector stays open.
+        // AC1-ERR + AC2-ERR (locked 3): a refusal row (a DEAD paneless agent,
+        // blocked card, in-flight card) shows a notice, sends nothing, and the
+        // selector stays open. A live paneless row is no longer a refusal -
+        // it reaches the dedicated thread pane (x-07c2) - so the dead-row
+        // case carries this invariant now.
         let mut v = unified_rows_view();
-        // bg-other (9), blocked card (13), in-flight card (14).
+        v.layout
+            .agents
+            .iter_mut()
+            .find(|a| a.name == "bg-other")
+            .unwrap()
+            .exited = true; // the dead paneless row
+                            // bg-other (9), blocked card (13), in-flight card (14).
         for row in [9usize, 13, 14] {
             v.selector = Some(row);
             v.notice = None;
@@ -28570,6 +28588,7 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -28600,6 +28619,7 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -28669,6 +28689,7 @@ mod tests {
         // that path is covered by pane_activity_folds_*, this one pins the
         // rollup with a measured idle pane.)
         let row = |name: &str, pane, badge| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -28742,6 +28763,7 @@ mod tests {
         // so a [blocked] chip leaves only the blocked agent.
         let mut v = two_pane_view();
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(2),
@@ -28866,6 +28888,7 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(2),
@@ -28896,6 +28919,7 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(2),
@@ -29119,6 +29143,7 @@ mod tests {
         // SelectSquad then FocusPane in order, and closes the navigator.
         let mut v = two_pane_view(); // active squad = 1 (footnote)
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(2),
@@ -29580,6 +29605,7 @@ mod tests {
             },
         ];
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -29748,6 +29774,7 @@ mod tests {
 
     fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),

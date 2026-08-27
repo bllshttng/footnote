@@ -2168,7 +2168,7 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
-    from fno.agents import dispatch
+    from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
     calls: list[str] = []
@@ -2178,6 +2178,14 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
         return 0
 
     monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    # No live mux server here (x-07c2): stub _run_mux instead of letting the
+    # mux-aware branch exec the real fno binary - this test is about the
+    # inline claude-attach fallback, not a live mux round-trip.
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(24, stderr="fno mux thread: no live mux server"),
+    )
 
     result = dispatch.attach_agent("worker-claude")
     assert result.provider == "claude"
@@ -2195,6 +2203,17 @@ def test_attach_codex_refused_with_exit_13(
             name="worker-codex",
             provider="codex",
             codex_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        ),
+    )
+    # No live mux server (exit 24): the mux-aware branch falls through to the
+    # inline refusal under test, exactly as on a machine with no mux running.
+    from fno.agents import mux_spawn
+
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: subprocess.CompletedProcess(
+            args=[], returncode=24, stdout="", stderr="no live mux server"
         ),
     )
 
@@ -2239,11 +2258,18 @@ def test_attach_claude_propagates_nonzero_exit(
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
-    from fno.agents import dispatch
+    from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod, "claude_attach", lambda short_id: 4
+    )
+    # No live mux server here (x-07c2): stub _run_mux instead of letting the
+    # mux-aware branch exec the real fno binary.
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(24, stderr="fno mux thread: no live mux server"),
     )
 
     result = dispatch.attach_agent("worker-claude")
@@ -2756,3 +2782,138 @@ def test_reconcile_entries_share_key_schema(
         assert required.issubset(keys), (
             f"entry {entry!r} missing one of {required}; has {keys}"
         )
+
+
+# ---------------------------------------------------------------------------
+# attach_agent, mux-aware branch - AC8-*
+# ---------------------------------------------------------------------------
+
+
+def _mux_reply(returncode: int, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(
+        args=["fno", "mux", "thread", "worker-claude"],
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+
+def test_attach_with_live_mux_lands_in_the_thread_pane(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """AC8-HP: a live mux server answers, the verb prints the landing and
+    never runs the inline attach."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.harnesses import claude as claude_mod
+
+    def fake_attach(short_id: str) -> int:
+        raise AssertionError("inline attach must not run when the mux answers")
+
+    monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(0, stdout="thread pane -> worker-claude\n"),
+    )
+
+    result = dispatch.attach_agent("worker-claude")
+    assert result.exit_code == 0
+    assert "thread pane -> worker-claude" in capsys.readouterr().out
+
+
+def test_attach_with_no_mux_server_falls_through_inline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC8-EDGE: exit 24 is 'no live mux server', not a refusal - the inline
+    attach path runs exactly as before the branch existed."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.harnesses import claude as claude_mod
+
+    calls: list[str] = []
+
+    def fake_attach(short_id: str) -> int:
+        calls.append(short_id)
+        return 0
+
+    monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(24, stderr="fno mux thread: no live mux server"),
+    )
+
+    result = dispatch.attach_agent("worker-claude")
+    assert result.exit_code == 0
+    assert calls == ["7c5dcf5d"], "exit 24 must fall through to the inline attach"
+
+
+def test_attach_with_usage_exit_falls_through_inline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A usage exit (2) never reached a server: malformed args, or a deployed
+    binary older than `mux thread` (version skew). Either way there is no
+    refusal to honor, so the inline attach runs exactly as before the branch."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.harnesses import claude as claude_mod
+
+    calls: list[str] = []
+
+    def fake_attach(short_id: str) -> int:
+        calls.append(short_id)
+        return 0
+
+    monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(2, stderr="fno mux: unknown verb"),
+    )
+
+    result = dispatch.attach_agent("worker-claude")
+    assert result.exit_code == 0
+    assert calls == ["7c5dcf5d"], "exit 2 must fall through to the inline attach"
+
+
+def test_attach_surfaces_a_mux_refusal_instead_of_double_attaching(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC8-ERR: any other non-zero exit is the server refusing; the verb
+    surfaces it verbatim and never falls through to an attach it refused."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.harnesses import claude as claude_mod
+
+    def fake_attach(short_id: str) -> int:
+        raise AssertionError("a refused attach must not fall through inline")
+
+    monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(1, stderr="fno mux thread: no such agent: ghost"),
+    )
+
+    with pytest.raises(dispatch.DispatchAskError) as exc_info:
+        dispatch.attach_agent("worker-claude")
+    assert "no such agent" in str(exc_info.value)

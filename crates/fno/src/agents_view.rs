@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crate::proto::{AgentBadge, AnswerablePrompt};
+use crate::proto::{AgentBadge, AnswerablePrompt, Reach};
 
 /// One registry row as the sideline consumes it: badge already TTL-derived
 /// (the reader knows "now"); the pane-exit fact is joined later, on the core
@@ -114,6 +114,33 @@ pub enum Liveness {
     Alive,
     Dead,
     Unmeasured,
+}
+
+/// (x-07c2) The harnesses whose transcripts `fno agents peek` can tail: the
+/// reader arms registered in `recent_records` (cli/src/fno/agents/peek.py).
+/// A static mirror of a Python seam; `thread_reach_mirrors_the_peek_reader_seam`
+/// pins it against that file so the two cannot drift (Rust checked against
+/// Rust proves nothing). Mirrors `_follow_target`, which owns `--follow`'s
+/// tailable-file question, not `recent_records` (opencode answers there -
+/// it has readable history - but writes a directory tree with no tailable
+/// file, so `_follow_target` returns `None` for it and `--follow` would
+/// exit immediately; that gap is why this list omits opencode).
+const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
+
+/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
+/// `Drive` when the row carries an attach id (an interactive attach form
+/// resolved it), `Follow` when the harness's transcript has a peek reader,
+/// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
+/// d-dbf83820): the two sets below are capability mirrors, and a harness that
+/// gains a capability moves tier with no edit here.
+pub fn thread_reach(harness: Option<&str>, attach_id: Option<&str>) -> Reach {
+    if attach_id.is_some() {
+        return Reach::Drive;
+    }
+    match harness {
+        Some(h) if PEEK_READER_HARNESSES.contains(&h) => Reach::Follow,
+        _ => Reach::Locate,
+    }
 }
 
 /// A recorded pid is CONFIRMED gone (`kill(pid, 0)` -> ESRCH). Fails toward
@@ -4038,5 +4065,114 @@ config_dir = "~/.claude-alt"
         let (order, depths) = layout(&rows);
         assert_eq!(ordered_names(&rows, &order), vec!["b", "a"]);
         assert_eq!(depths, vec![0, 0]);
+    }
+
+    // ---- (x-07c2) thread_reach tier derivation --------------------------------
+
+    /// AC1-HP: a live claude thread row derives Drive and its attach_id is
+    /// unchanged. AC2-EDGE: a paneless codex row is Follow, a gemini row is
+    /// Locate, and neither carries an attach_id.
+    #[test]
+    fn thread_reach_tiers_by_capability_not_name() {
+        use super::thread_reach;
+        use crate::proto::Reach;
+        assert_eq!(thread_reach(Some("claude"), Some("ba96bf35")), Reach::Drive);
+        // A claude row with no attach id (attach refused / none recorded):
+        // its transcript still reads, so Follow, never Locate.
+        assert_eq!(thread_reach(Some("claude"), None), Reach::Follow);
+        assert_eq!(thread_reach(Some("codex"), None), Reach::Follow);
+        // opencode's history reads fine (recent_records supports it), but it
+        // writes a directory tree with no tailable file, so --follow has
+        // nothing to run - Locate, not Follow (PEEK_READER_HARNESSES doc).
+        assert_eq!(thread_reach(Some("opencode"), None), Reach::Locate);
+        assert_eq!(thread_reach(Some("gemini"), None), Reach::Locate);
+        assert_eq!(thread_reach(Some("agy"), None), Reach::Locate);
+        // A harness the contract has never heard of, and a row with no
+        // harness recorded: the honest answer is "no viewport known".
+        assert_eq!(thread_reach(Some("future-harness"), None), Reach::Locate);
+        assert_eq!(thread_reach(None, None), Reach::Locate);
+    }
+
+    /// The Follow set mirrors the reader arms in peek.py's `recent_records`.
+    /// Rust checked against Rust proves nothing: parse the Python seam the
+    /// verb actually dispatches on, so adding a reader arm there without
+    /// moving the tier here fails this test.
+    #[test]
+    fn thread_reach_mirrors_the_peek_reader_seam() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/src/fno/agents/peek.py");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        // Isolate _follow_target's body, not recent_records': recent_records
+        // answers "can this harness's history be read at all" (opencode
+        // yes), while _follow_target answers "does --follow have a tailable
+        // file" (opencode no - it writes a directory tree). Follow tier
+        // rides the second question, so that is the arm set to mirror.
+        let body = raw
+            .split("def _follow_target(")
+            .nth(1)
+            .and_then(|s| s.split("\ndef ").next())
+            .expect("_follow_target body");
+        let arms: std::collections::BTreeSet<&str> = body
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                // `if` or `elif`: a future arm written as `elif` must be
+                // collected too, or the mirror would stay green while the
+                // Follow set silently drifted - the exact drift this guards.
+                l.strip_prefix("if agent == ")
+                    .or_else(|| l.strip_prefix("elif agent == "))
+            })
+            .map(|rest| rest.trim_end_matches(':'))
+            .map(|rest| {
+                let r = rest.trim();
+                let un = r.trim_start_matches('"').trim_end_matches('"');
+                un.trim_start_matches('\'').trim_end_matches('\'')
+            })
+            .collect();
+        let mirror: std::collections::BTreeSet<&str> =
+            super::PEEK_READER_HARNESSES.into_iter().collect();
+        assert_eq!(
+            arms, mirror,
+            "peek.py reader arms and PEEK_READER_HARNESSES drifted apart"
+        );
+    }
+
+    /// The Drive tier rides attach_id presence, and attach_id derives only
+    /// for the harness whose interactive_attach form is supported. Pin BOTH
+    /// halves against the capability contract so a new attach-capable
+    /// harness cannot silently stay Drive-blind.
+    #[test]
+    fn drive_tier_rides_the_only_interactive_attach_harness() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../cli/src/fno/agents/harness_capabilities.toml");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
+        let harness = caps.get("harness").expect("harness table");
+        let attach_capable: Vec<&str> = harness
+            .as_table()
+            .expect("harness table")
+            .keys()
+            .filter(|h| {
+                // Walk the path node by node: a slash-joined `get` is one
+                // key, not a path (same walk as the resume mirror test).
+                let mut node = harness
+                    .get(h.as_str())
+                    .and_then(|n| n.get("resume_strategy"));
+                for key in ["forms", "interactive_attach", "kind"] {
+                    node = node.and_then(|n| n.get(key));
+                }
+                node.and_then(|k| k.as_str())
+                    .is_some_and(|k| k != "unsupported")
+            })
+            .map(|h| h.as_str())
+            .collect();
+        assert_eq!(
+            attach_capable,
+            vec!["claude"],
+            "a harness beyond claude gained interactive_attach: the attach_id \
+             gate in derive_rows and the Drive tier must learn it together"
+        );
     }
 }

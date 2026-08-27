@@ -1643,6 +1643,14 @@ def _run_mux(
             "substrate is hosted by the fno mux (set FNO_BIN or install fno)",
             exit_code=127,
         ) from exc
+    except OSError as exc:
+        # A binary that exists but can't run (bad permissions, wrong arch,
+        # partial install) is the same "can't reach the mux" case as a
+        # missing binary, not a reason to lose the inline path.
+        raise DispatchAskError(
+            f"could not run '{_fno_bin()}': {exc}",
+            exit_code=127,
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         # The EFFECTIVE timeout, not the module default: the binding-loop probes
         # pass a 2s bound, so naming 30s here would be a diagnostics lie.

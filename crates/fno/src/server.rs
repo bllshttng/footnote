@@ -40,7 +40,7 @@ use crate::proto::{
     AgentNoPaneReason, AgentRow, AnchoredLayoutSpec, BacklogCard, BindOutcome, BlockDir, BlockSel,
     CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
-    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement,
+    PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
     ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
     TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
@@ -572,6 +572,14 @@ enum CoreMsg {
         pane: u64,
         reply: ControlReply,
     },
+    /// (x-07c2) `fno agents attach` with a live mux: reach `name` through the
+    /// dedicated thread pane (the TUI reach's twin; see
+    /// [`ControlVerb::ThreadPane`]).
+    ThreadPane {
+        name: String,
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
     TabJoin {
         src_tab: TabSel,
         anchor_pane: u64,
@@ -871,6 +879,12 @@ thread_local! {
     /// tests at a benign binary so the attach spawn+swap path runs without claude.
     static ATTACH_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+    /// (x-07c2) Test override for the Follow viewer program (see
+    /// [`peek_argv`]): the real argv boots the deployed `fno` CLI, which under
+    /// a loaded full-suite run can outlive any sane test budget. Same benign-
+    /// binary pattern as `ATTACH_PROGRAM`.
+    static PEEK_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The base argv attaching bg session `id`: `claude attach <id>`. `id` is always
@@ -915,6 +929,71 @@ fn attach_argv(
 #[cfg(test)]
 fn set_attach_program(argv: &[&str]) {
     ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+/// (x-07c2) The Follow tier's viewer argv: `fno agents peek <name> --follow`,
+/// tailing the row's transcript in the dedicated pane. Read-only by
+/// construction (peek never writes the observed). Tests override the program
+/// via `set_peek_program` so the spawn path runs without the deployed CLI.
+fn peek_argv(name: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(mut argv) = PEEK_PROGRAM.with(|p| p.borrow().clone()) {
+        argv.push(name.to_string());
+        return argv;
+    }
+    vec![
+        "fno".to_string(),
+        "agents".to_string(),
+        "peek".to_string(),
+        name.to_string(),
+        "--follow".to_string(),
+    ]
+}
+
+#[cfg(test)]
+fn set_peek_program(argv: &[&str]) {
+    PEEK_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+/// (x-07c2) The Locate tier's one-screen explanation: the row's facts, the
+/// single sentence saying why no viewport exists for it, and the route that
+/// DOES reach it. Rendered through `sh -c 'printf ...; exec cat'` with every
+/// line as an ARGV (`"$@"`), never interpolated into the script, so a row
+/// field can never parse as shell. `exec cat` holds the PTY open until the
+/// pane is closed - the screen is not an empty pane and not a dead one; it
+/// stays up, self-teaching, exactly until the operator closes it.
+fn locate_argv(row: &RegistryAgent) -> Vec<String> {
+    let harness = row.harness.as_deref().unwrap_or("(none recorded)");
+    let cwd = if row.cwd.is_empty() {
+        "(none recorded)"
+    } else {
+        row.cwd.as_str()
+    };
+    let lines = [
+        "thread view - no live viewport exists for this row".to_string(),
+        String::new(),
+        format!("name:      {}", row.name),
+        format!("harness:   {harness}"),
+        // The registry records no substrate field; a paneless live row is by
+        // construction daemon-hosted, and that is the true thing to say.
+        "substrate: daemon-hosted (no pane; the daemon owns the session)".to_string(),
+        format!("cwd:       {cwd}"),
+        String::new(),
+        format!(
+            "why: the {harness} harness owns no interactive attach form and no \
+             transcript reader, so no live viewport can be opened for it here."
+        ),
+        String::new(),
+        format!("what reaches it: fno agents mail send {}", row.name),
+    ];
+    let mut argv = vec![
+        "sh".to_string(),
+        "-c".to_string(),
+        "printf '%s\\n' \"$@\"; exec cat".to_string(),
+        "fno-locate".to_string(),
+    ];
+    argv.extend(lines);
+    argv
 }
 
 #[cfg(test)]
@@ -1836,6 +1915,23 @@ struct Core {
     /// glance, and one operator wanting two at once is the case to hear about
     /// before building per-view state for it.
     diff_pane: Option<(String, u64)>,
+    /// (x-07c2) The ONE pane dedicated to thread-substrate rows:
+    /// `(row key, pane id)`, where the row key is the attach id (claude) or
+    /// the registry name (every other harness - the command's `id` field).
+    /// Same singleton contract as `diff_pane` above, with one deliberate
+    /// difference: re-reaching the SAME row is a no-op focus ("show me"),
+    /// never a close - closing is the ordinary close-pane gesture. A repoint
+    /// to a different row reuses the open-here mechanic (spawn-first,
+    /// `tree::replace_leaf`, reap-last) so the geometry never moves. NEVER
+    /// persisted and NEVER rebuilt by restore: a pane binds a session to
+    /// geometry, a thread binds a session to a row, and persisting the slot
+    /// would re-bind a thread to a rectangle across a restart.
+    thread_pane: Option<(String, u64)>,
+    /// (x-07c2) One-shot latch for the discoverability notice: the first
+    /// thread row to appear with no thread pane open tells the operator the
+    /// reach gesture exists. A notice is not state - the latch only mutes
+    /// repetition, it never gates behavior.
+    thread_pane_noticed: bool,
     /// (x-8f11) Durable membership of each PERSISTED named squad: squad id ->
     /// its recruited members (attach-ids + tombstone bits). Populated only by
     /// `NewSquad`, `RecruitAgents`, and restore; presence here is what marks a
@@ -2048,6 +2144,32 @@ impl<'a> SlotCapture<'a> {
     /// The slot name capture gave `pane` (for the persisted focus marker).
     fn slot_of(&self, pane: u64) -> Option<String> {
         self.by_pane.get(&pane).cloned()
+    }
+}
+
+/// The live tree minus one pane (x-07c2): the dedicated thread pane's leaf is
+/// pruned from a topology before capture, and a split it hollowed out
+/// collapses, because the thread pane is NEVER persisted - a pane binds a
+/// session to geometry, a thread binds a session to a row, and a persisted
+/// slot would re-bind a thread to a rectangle across a restart. `None` means
+/// nothing durable remains in this subtree.
+fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
+    match node {
+        Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
+        Node::Branch { axis, children } => {
+            let kept: Vec<(f32, Node)> = children
+                .iter()
+                .filter_map(|(w, n)| node_without_leaf(n, skip).map(|n| (*w, n)))
+                .collect();
+            match kept.len() {
+                0 => None,
+                1 => kept.into_iter().next().map(|(_, n)| n),
+                _ => Some(Node::Branch {
+                    axis: *axis,
+                    children: kept,
+                }),
+            }
+        }
     }
 }
 
@@ -5846,9 +5968,37 @@ impl Core {
             .map(|(pane, name)| (*pane, name.as_str()))
             .collect();
         let mut trees = Vec::with_capacity(sq.tabs.len());
-        for t in &sq.tabs {
+        let mut active_tab = 0;
+        // If pruning hollows out the active tab itself, `active_tab` has no
+        // surviving position to copy - remember where the NEXT tab lands so
+        // restore falls onto the nearest surviving tab instead of silently
+        // defaulting to index 0 (an unrelated tab picked as "active").
+        let mut active_pruned_at: Option<usize> = None;
+        for (i, t) in sq.tabs.iter().enumerate() {
+            // (x-07c2) Prune the thread pane's leaf before capture: it is
+            // never persisted, so restore rebuilds no pane (and no split) for
+            // a thread. A tab the prune hollowed out entirely is not captured,
+            // and a skipped tab - the active one included - never leaves a
+            // dangling `active_tab` index behind (position IS the tab's
+            // durable identity in `tab_trees`).
+            let pruned = match self.thread_pane.as_ref().map(|(_, pid)| *pid) {
+                None => None,
+                Some(pid) => match node_without_leaf(&t.root, pid) {
+                    Some(root) => Some(root),
+                    None => {
+                        if i == sq.active_tab {
+                            active_pruned_at = Some(trees.len());
+                        }
+                        continue;
+                    }
+                },
+            };
+            if i == sq.active_tab {
+                active_tab = trees.len();
+            }
+            let root = pruned.as_ref().unwrap_or(&t.root);
             let mut capture = SlotCapture::new(&pane_owner);
-            let tree = capture.node_to_spec(&t.root);
+            let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
                 tab_name: t.name.clone(),
@@ -5857,7 +6007,10 @@ impl Core {
                 focus,
             });
         }
-        Some((trees, sq.active_tab))
+        if let Some(pos) = active_pruned_at {
+            active_tab = pos.min(trees.len().saturating_sub(1));
+        }
+        Some((trees, active_tab))
     }
 
     /// Write the topology lane for `sid` beside its membership row. A write
@@ -7428,6 +7581,12 @@ impl Core {
                 }
             }
         };
+        // `id` is a primary key everywhere a client is looked up
+        // (`clients.iter().find(|c| c.id == id)`); a stale entry still
+        // queued for teardown (e.g. `CoreMsg::Gone` not yet drained) must
+        // not survive a fresh attach under the same id, or lookups can
+        // resolve to the dying client instead of this one.
+        self.clients.retain(|c| c.id != id);
         self.clients.push(Client {
             id,
             reliable_tx,
@@ -8136,6 +8295,13 @@ impl Core {
                                 // one field away: keep it so the client can
                                 // show activity when the badge goes quiet.
                                 pane_activity: pane_entry.map(|e| e.vt.shell_activity()),
+                                // (x-07c2) Decorative on a pane-hosted row (its
+                                // reach focuses the pane); carried so the field
+                                // never lies about the row's capability.
+                                reach: agents_view::thread_reach(
+                                    a.harness.as_deref(),
+                                    a.attach_id.as_deref(),
+                                ),
                             }
                         }
                         None => {
@@ -8187,6 +8353,7 @@ impl Core {
                                 basis: None,
                                 resumable: false,
                                 no_pane_reason: None,
+                                reach: Reach::Locate,
                             }
                         }
                     };
@@ -8259,6 +8426,7 @@ impl Core {
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Dangling dead: the pane is gone, so no vt reading.
                         pane_activity: None,
+                        reach: Reach::Locate,
                     })
                 }
                 None => {
@@ -8315,6 +8483,16 @@ impl Core {
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
                         pane_activity: None,
+                        // (x-07c2) The load-bearing site: a paneless live row's
+                        // reach decides what its gesture opens. The attach_id
+                        // half of the input re-reads the registry row (not the
+                        // wire row's exited-gated copy) because the tier
+                        // describes the SESSION's capability, while the wire's
+                        // attach_id is cleared on exit for gate reasons.
+                        reach: agents_view::thread_reach(
+                            a.harness.as_deref(),
+                            a.attach_id.as_deref(),
+                        ),
                     })
                 }
             }
@@ -8368,6 +8546,7 @@ impl Core {
                     no_pane_reason: None,
                     // A synthesized dead member owns no PTY.
                     pane_activity: None,
+                    reach: Reach::Locate,
                 })
             }
         }
@@ -8450,6 +8629,9 @@ impl Core {
                 no_pane_reason: None,
                 // An external-daemon row owns no PTY of this server.
                 pane_activity: None,
+                // An external-lifecycle tombstone has no capability data here;
+                // a live external row renders through the watch-only arm above.
+                reach: Reach::Locate,
             })
         }
         out
@@ -9463,6 +9645,372 @@ impl Core {
         Flow::Continue
     }
 
+    /// (x-07c2) Reach `key` (an attach id for a claude row, a registry name
+    /// for every other harness) through the ONE dedicated thread pane. The
+    /// tier is capability-computed (`agents_view::thread_reach`): Drive runs
+    /// the account-wrapped attach argv, Follow tails the transcript with
+    /// `fno agents peek --follow`, Locate renders the self-teaching screen.
+    /// Resolution order: no slot opens one through the ordinary placement
+    /// path; a slot on another row repoints it in place (the open-here
+    /// mechanic: spawn-first, `tree::replace_leaf`, reap-last - the geometry
+    /// never moves); a slot on this row focuses it; a recorded pane the tree
+    /// no longer knows reads as absent. NEVER persists a squad member and is
+    /// never rebuilt by restore: a pane binds a session to geometry, a thread
+    /// binds a session to a row.
+    fn reach_thread_pane(
+        &mut self,
+        client_id: u64,
+        view: (u64, TabId),
+        vp: Rect,
+        key: &str,
+    ) -> Flow {
+        // Resolve exactly one live paneless row for the key. Names are not
+        // unique; a name that matches two rows must refuse, never pick.
+        let mut hits = self.agents.iter().filter(|a| {
+            a.mux.is_none() && !a.exited && (a.attach_id.as_deref() == Some(key) || a.name == key)
+        });
+        let row = match (hits.next(), hits.next()) {
+            (Some(a), None) => a.clone(),
+            (Some(_), Some(_)) => {
+                self.notice(
+                    client_id,
+                    "more than one row goes by that name - reach it by its pane",
+                );
+                return Flow::Continue;
+            }
+            _ => {
+                self.notice(client_id, "no such agent");
+                return Flow::Continue;
+            }
+        };
+        let tier = agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
+        let spawn_cwd = if row.cwd.is_empty() {
+            self.session
+                .squad(view.0)
+                .map(|s| s.canonical_cwd().to_string())
+                .unwrap_or_default()
+        } else {
+            row.cwd.clone()
+        };
+        // The tier's argv is built server-side, where the row set lives: the
+        // client's reach command is tier-blind by design.
+        let argv = match tier {
+            Reach::Drive => {
+                let id = row.attach_id.clone().expect("Drive implies attach_id");
+                let (acct, cd) = self.attach_account_ctx(&id);
+                attach_argv(&id, acct.as_deref(), cd.as_deref())
+            }
+            Reach::Follow => peek_argv(&row.name),
+            Reach::Locate => locate_argv(&row),
+        };
+        let (rows, cols) = self
+            .clients
+            .iter()
+            .find(|c| c.id == client_id)
+            .map(|c| c.dims)
+            // A passive observer's (0,0) sentinel must never size a pane -
+            // fall back to the view rect (the control-path reach rides an
+            // observer client).
+            .filter(|(r, c)| *r > 0 && *c > 0)
+            .unwrap_or((vp.rows, vp.cols));
+        // Slot: take it, then verify against the live tree (the diff-pane
+        // stale-id guard - a recorded pane closed by any other path reads as
+        // closed and never wedges the slot).
+        let slot = self.thread_pane.take();
+        if let Some((slot_row, pid)) = slot {
+            if self.panes.contains_key(&pid) {
+                if let Some((sid, ti)) = self.session.find_pane(pid) {
+                    let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
+                    // Same ROW, not same key: the TUI door keys the slot by the
+                    // attach id while `fno agents attach` keys it by the registry
+                    // name, and both doors advertise the same pane. Attach ids
+                    // are unique per bg session, so a slot keyed by this row's
+                    // attach id is this row whatever door the reach came from -
+                    // and the reverse (slot keyed by name, reached again by
+                    // attach id) is the same row too, so the name comparison
+                    // has to run both directions.
+                    let same_row = slot_row == key
+                        || row.attach_id.as_deref() == Some(slot_row.as_str())
+                        || slot_row == row.name;
+                    if same_row {
+                        // Same row: "show me", never a toggle-close. Closing
+                        // the pane is the ordinary close gesture. The slot
+                        // was taken above; put it back - a focus is not a
+                        // close.
+                        self.thread_pane = Some((slot_row, pid));
+                        self.set_view(client_id, sid, tid);
+                        if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                            tab.focus = pid;
+                        }
+                        self.mark_seen_if_done(pid);
+                        self.notice(
+                            client_id,
+                            format!("thread pane: already showing {}", row.name),
+                        );
+                        self.push_layout(true);
+                        return Flow::Continue;
+                    }
+                    // Repoint to the new row. Spawn-first, so a failure
+                    // leaves the slot pane, the layout, and the recorded slot
+                    // exactly as they were. The displacement guard the
+                    // open-here path needs does not apply here: the slot pane
+                    // is the dedicated pane, displaceable by construction.
+                    let permit = match crate::process_admission::admit_pane(0, None) {
+                        Ok(p) => p,
+                        Err(error) => {
+                            self.thread_pane = Some((slot_row, pid));
+                            self.notice(client_id, format!("thread pane failed: {error}"));
+                            return Flow::Continue;
+                        }
+                    };
+                    let new_pid = match self
+                        .spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit)
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            self.thread_pane = Some((slot_row, pid));
+                            self.notice(client_id, format!("thread pane failed: {e}"));
+                            return Flow::Continue;
+                        }
+                    };
+                    self.name_thread_viewer_pane(new_pid, &row, &tier);
+                    let Some(tab) = self.viewed_tab_mut((sid, tid)) else {
+                        self.reap_pane(new_pid);
+                        self.thread_pane = Some((slot_row, pid));
+                        self.notice(client_id, "thread pane: the tab closed under the repoint");
+                        return Flow::Continue;
+                    };
+                    if !tree::replace_leaf(tab, pid, new_pid) {
+                        self.reap_pane(new_pid);
+                        self.thread_pane = Some((slot_row, pid));
+                        self.notice(client_id, "thread pane: its pane left the tree");
+                        return Flow::Continue;
+                    }
+                    // Insert the new mapping BEFORE the reap: reap_pane drops
+                    // every mapping onto the old pane, so the old row
+                    // resurfaces watch-only while the new mapping survives.
+                    if let Some(id) = row.attach_id.clone() {
+                        self.attached.insert(id, new_pid);
+                    }
+                    // Reap-last: the displaced viewer dies, the session it
+                    // showed keeps running daemon-hosted.
+                    self.reap_pane(pid);
+                    self.thread_pane = Some((key.to_string(), new_pid));
+                    self.set_view(client_id, sid, tid);
+                    if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                        tab.focus = new_pid;
+                    }
+                    self.notice(client_id, format!("thread pane -> {}", row.name));
+                    self.push_layout(true);
+                    return Flow::Continue;
+                } else {
+                    // Half-created pane (close_pane's same case): tracked in
+                    // self.panes but absent from the tab tree. Reap it here
+                    // too, so it can never leak a child process.
+                    self.reap_pane(pid);
+                }
+            }
+            // Stale slot (pane closed by any other path): open fresh below.
+        }
+        // Open fresh through the ordinary placement path: owner routing (the
+        // squad whose owns_path matches the row cwd, else the viewed squad),
+        // then the shared placement helper. The slot is recorded only after
+        // placement succeeds, and NO squad member is persisted - the one
+        // deliberate difference from the ordinary attach tail.
+        let owner = self
+            .session
+            .squads
+            .iter()
+            .find(|s| !spawn_cwd.is_empty() && s.owns_path(&spawn_cwd))
+            .map(|s| s.id)
+            .unwrap_or(view.0);
+        let dest = match self.resolve_placement_target(&PaneTarget::CurrentRoute, Some(owner)) {
+            Ok(d) => d,
+            Err(e) => {
+                self.notice(client_id, e);
+                return Flow::Continue;
+            }
+        };
+        let effective = PanePlacement::default();
+        let permit = match crate::process_admission::admit_pane(
+            self.placement_pane_count(dest, &effective),
+            effective.max_panes,
+        ) {
+            Ok(p) => p,
+            Err(error) => {
+                self.notice(client_id, format!("thread pane failed: {error}"));
+                return Flow::Continue;
+            }
+        };
+        let pid = match self.spawn_pane_cmd_with_permit(&argv, rows, cols, &spawn_cwd, permit) {
+            Ok(p) => p,
+            Err(e) => {
+                self.notice(client_id, format!("thread pane failed: {e}"));
+                return Flow::Continue;
+            }
+        };
+        self.name_thread_viewer_pane(pid, &row, &tier);
+        let (sid, tid, fell_back) = match self.place_with(dest, &spawn_cwd, pid, &effective) {
+            Ok(landing) => landing,
+            Err((_code, e)) => {
+                self.notice(client_id, e);
+                return Flow::Continue;
+            }
+        };
+        if let Some(id) = row.attach_id.clone() {
+            self.attached.insert(id, pid);
+        }
+        self.thread_pane = Some((key.to_string(), pid));
+        self.set_view(client_id, sid, tid);
+        if fell_back {
+            self.notice(client_id, "tab full - opened as tab");
+        }
+        self.notice(client_id, format!("thread pane -> {}", row.name));
+        self.push_layout(true);
+        Flow::Continue
+    }
+
+    /// (x-07c2) Title a freshly-opened thread-viewer pane. A Drive pane is
+    /// named by [`Self::name_attached_pane`] semantics (the registry name);
+    /// a Follow/Locate pane carries the row's name so the tab reads as the
+    /// worker it views, not as `sh` or `fno`.
+    fn name_thread_viewer_pane(&mut self, pid: u64, row: &RegistryAgent, tier: &Reach) {
+        if matches!(tier, Reach::Drive) {
+            // The attach argv carries no FNO_AGENT_SELF; name_attached_pane
+            // resolves the name from the live catalog the same way.
+            if let Some(id) = row.attach_id.as_deref() {
+                let (_, cd) = self.attach_account_ctx(id);
+                self.name_attached_pane(pid, id, cd.as_deref());
+            }
+            return;
+        }
+        if let Some(entry) = self.panes.get_mut(&pid) {
+            entry.name = Some(row.name.clone());
+        }
+    }
+
+    /// (x-07c2) The outside-the-TUI reach (`fno agents attach` with a live
+    /// mux), run as the exact command a TUI reach runs: a synthetic OBSERVER
+    /// client (0,0 - read-only, no squad or PTY of its own) whose reliable
+    /// channel collects the notices, then the real AttachAgent thread-pane
+    /// command. One implementation, two doors, no drift; the observer is
+    /// removed through the same Gone path a Detach takes, and the reply is
+    /// the landing notice on success or the refusal's Err.
+    fn thread_pane_ctl(
+        &mut self,
+        name: &str,
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    ) {
+        if let Some(rows) = agents {
+            // Same source and cadence as the off-loop reader's tick; assigning
+            // only guarantees the command resolves against the snapshot the
+            // CLI just saw.
+            self.agents = rows;
+        }
+        // Names are not unique; a name that matches two rows must refuse,
+        // never pick, same as reach_thread_pane's own guard.
+        let mut named_hits = self
+            .agents
+            .iter()
+            .filter(|a| a.name == name || a.attach_id.as_deref() == Some(name));
+        if let (Some(_), Some(_)) = (named_hits.next(), named_hits.next()) {
+            let _ = reply.send(ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: "more than one row goes by that name - reach it by its pane".to_string(),
+            });
+            return;
+        }
+        // A row already pane-hosted has its viewport: answer with the location
+        // instead of opening a second one. Another session's row is that
+        // server's to view - saying so beats the reach's "no such agent",
+        // which would lie about a row the registry knows (the inline attach
+        // this verb replaced attached it regardless of hosting session).
+        let hosted = self
+            .agents
+            .iter()
+            .find(|a| (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some());
+        if let Some(a) = hosted {
+            let (sess, pane) = a.mux.as_ref().expect("checked");
+            let where_at = if sess == &self.session_name {
+                "this session; focus it in the mux".to_string()
+            } else {
+                format!("session {sess}; focus it in that session's mux")
+            };
+            let _ = reply.send(ServerMsg::Notice {
+                text: format!("{} hosts pane {pane} in {where_at}", a.name),
+            });
+            return;
+        }
+        let cwd = self
+            .agents
+            .iter()
+            .find(|a| a.name == name || a.attach_id.as_deref() == Some(name))
+            .map(|a| a.cwd.clone())
+            .unwrap_or_default();
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(256);
+        const CONTROL_CLIENT: u64 = u64::MAX;
+        self.attach(
+            CONTROL_CLIENT,
+            0,
+            0,
+            cwd,
+            name.to_string(),
+            tx,
+            DirtyMap::default(),
+            Arc::new(Notify::new()),
+        );
+        // Drop the observer's cold-attach snapshot (layout + frames): only
+        // the reach's notice is the payload, and an empty buffer guarantees it
+        // is never the message a full channel drops.
+        while rx.try_recv().is_ok() {}
+        self.command(
+            CONTROL_CLIENT,
+            Command::AttachAgent {
+                id: name.to_string(),
+                placement: PanePlacement {
+                    thread_pane: true,
+                    ..Default::default()
+                },
+            },
+        );
+        // Harvest the notice the reach emitted (every path ends in exactly
+        // one) and tear the observer out through Gone.
+        let landing = loop {
+            match rx.try_recv() {
+                Ok(ServerMsg::Notice { text }) => break Some(text),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
+        let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
+        // Row-aware, not key-aware: a focus on a slot keyed by the attach id
+        // (the TUI door) reached through the registry name (this door) leaves
+        // the slot keyed by the attach id - that is a landing, not a refusal.
+        let landed = self.thread_pane.as_ref().is_some_and(|(k, _)| {
+            k == name
+                || self.agents.iter().any(|a| {
+                    (a.attach_id.as_deref() == Some(k) && a.name == name)
+                        || (a.name == k.as_str() && a.attach_id.as_deref() == Some(name))
+                })
+        });
+        let msg = match (landed, landing) {
+            (true, Some(text)) => ServerMsg::Notice { text },
+            (true, None) => ServerMsg::Notice {
+                text: format!("thread pane -> {name}"),
+            },
+            (false, Some(text)) => ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: text,
+            },
+            (false, None) => ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!("no such agent: {name}"),
+            },
+        };
+        let _ = reply.send(msg);
+    }
+
     fn command(&mut self, client_id: u64, cmd: Command) -> Flow {
         // Commands act on the SENDER's view (Locked 3/4). A command from a
         // just-deregistered client has nothing to act on: drop fail-closed.
@@ -9846,6 +10394,25 @@ impl Core {
                 Flow::Continue
             }
             Command::AttachAgent { id, placement } => {
+                // (x-07c2) The dedicated thread-pane reach routes BEFORE the
+                // attach-shaped gates: `id` is an 8-hex attach id for a
+                // claude row but a registry NAME for every other harness
+                // (Follow/Locate rows carry no attach id), so the hex gate
+                // and the attach catalog gate do not apply. The reach
+                // resolves its own row, fail-closed. The dedicated pane owns
+                // its geometry, so any explicit placement contradicts it.
+                if placement.thread_pane {
+                    if placement.here
+                        || placement.split.is_some()
+                        || placement.at.is_some()
+                        || placement.tab.is_some()
+                        || !matches!(placement.target, PaneTarget::CurrentRoute)
+                    {
+                        self.notice(client_id, "thread pane takes no split, target, or anchor");
+                        return Flow::Continue;
+                    }
+                    return self.reach_thread_pane(client_id, view, vp, &id);
+                }
                 // Validate the jobId shape (8 hex digits) BEFORE it reaches the
                 // argv - defense in depth even though spawn_pane_cmd never
                 // builds a shell string (the id can only ever be `claude
@@ -10003,6 +10570,14 @@ impl Core {
                     // Reap-last (Locked 4): F's viewer dies but the displaced session keeps running detached
                     // and resurfaces watch-only (x-7561 external-lifecycle - viewport moved, nothing killed).
                     self.reap_pane(focus);
+                    // (x-07c2) An explicit open-here onto the thread pane
+                    // repurposed its geometry for an ordinary attach: the
+                    // dedicated slot no longer describes what that pane
+                    // shows. Clear it so a later reach opens fresh instead
+                    // of trusting a slot that names the wrong row.
+                    if self.thread_pane.as_ref().is_some_and(|&(_, p)| p == focus) {
+                        self.thread_pane = None;
+                    }
                     // Persist B as a member of the viewed squad so it survives a
                     // restart pane-hosted (US2); the take-over already succeeded.
                     self.persist_attached_member(view.0, &id);
@@ -11621,6 +12196,14 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::ThreadPane {
+                name,
+                agents,
+                reply,
+            } => {
+                self.thread_pane_ctl(&name, agents, reply);
+                Flow::Continue
+            }
             CoreMsg::TabJoin {
                 src_tab,
                 anchor_pane,
@@ -11687,6 +12270,20 @@ impl Core {
                 tails,
             } => {
                 let identity_published = self.worker_identity_published(&rows);
+                // (x-07c2) Discoverability, once per server lifetime: the
+                // first paneless live row to appear with no thread pane open
+                // names the gesture. "Explicit and lazy" must not mean
+                // "undiscoverable". A notice is not state - the latch only
+                // mutes repetition, it never gates behavior.
+                if !self.thread_pane_noticed
+                    && self.thread_pane.is_none()
+                    && rows.iter().any(|a| a.mux.is_none() && !a.exited)
+                {
+                    self.thread_pane_noticed = true;
+                    self.notice_all(
+                        "thread row present: reach a row (Enter or click) to open the dedicated thread pane",
+                    );
+                }
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
@@ -12013,6 +12610,8 @@ async fn serve(
         worker_session_pane: HashMap::new(),
         held_workers: HashMap::new(),
         diff_pane: None,
+        thread_pane: None,
+        thread_pane_noticed: false,
         squad_members: HashMap::new(),
         template_specs: HashMap::new(),
         pending_template_restores: Vec::new(),
@@ -13063,6 +13662,16 @@ async fn handle_control(
             core_tx
                 .send(CoreMsg::PaneFocus {
                     pane,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::ThreadPane { name } => {
+            let agents = read_guard_agents().await;
+            core_tx
+                .send(CoreMsg::ThreadPane {
+                    name,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -15838,6 +16447,7 @@ mod tests {
                     at: Some(2),
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )
@@ -15871,6 +16481,7 @@ mod tests {
                     at: Some(999),
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )
@@ -15907,6 +16518,7 @@ mod tests {
                     at: Some(1),
                     fallback: PlacementFallback::Refuse,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )
@@ -17345,6 +17957,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 Some("probe-x5f7f".into()),
             )
@@ -17397,6 +18010,7 @@ mod tests {
                 here: false,
                 fallback: PlacementFallback::NewTab,
                 max_panes: None,
+                thread_pane: false,
             },
             None,
         )
@@ -17438,6 +18052,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 Some("a;rm -rf".into()),
             )
@@ -18971,6 +19586,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             },
         );
@@ -19102,6 +19718,573 @@ mod tests {
             assert!(drain_notices(&mut rx)
                 .iter()
                 .any(|t| t.contains("open-here takes no split or target")));
+        }
+    }
+
+    // ---- (x-07c2) the dedicated thread pane ----------------------------------
+
+    /// The reach command with the thread_pane flag set.
+    fn thread_reach_cmd(id: &str) -> Command {
+        Command::AttachAgent {
+            id: id.into(),
+            placement: PanePlacement {
+                thread_pane: true,
+                ..Default::default()
+            },
+        }
+    }
+
+    /// One squad, ONE minted-id tab, one shell pane: the thread-pane fixture.
+    /// `seen_test_core`'s manually-pushed second tab shares an id with the
+    /// next minted one (a push does not bump `next_tab_id`), which is fine
+    /// for its own tests but breaks a `find_pane`->`viewed_tab_mut` round
+    /// trip that must land on the tab the thread pane actually opened.
+    fn thread_core() -> (Core, u64, u64, mpsc::Receiver<ServerMsg>) {
+        let scratch = std::env::temp_dir().join(format!(
+            "fno-thread-store-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&scratch);
+        crate::squad_store::set_test_path(&scratch);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let p1 = core.spawn_pane(24, 40, "/tmp/seen").expect("pane 1");
+        core.session.add_squad(
+            1,
+            vec!["/tmp/seen".into()],
+            None,
+            Tab {
+                name: None,
+                id: 1,
+                root: Node::Leaf(p1),
+                focus: p1,
+            },
+        );
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(32);
+        core.attach(
+            9,
+            24,
+            80,
+            "/tmp/seen".into(),
+            "/tmp/seen".into(),
+            tx,
+            DirtyMap::default(),
+            Arc::new(Notify::new()),
+        );
+        while rx.try_recv().is_ok() {}
+        (core, 9, p1, rx)
+    }
+
+    #[test]
+    fn thread_pane_opens_one_pane_and_persists_no_member() {
+        // AC3-HP: no slot, a reach on thread row A opens exactly one pane
+        // running A's tier argv, records the slot, and persists no squad
+        // member - the deliberate difference from the ordinary attach tail.
+        set_attach_program(&["/bin/cat"]); // stand in for `claude attach`
+        let (mut core, client_id, _p1, mut rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        let panes_before = core.panes.len();
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+
+        assert_eq!(
+            core.panes.len(),
+            panes_before + 1,
+            "exactly one pane opened"
+        );
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee1".to_string(), new_pid)),
+            "the slot records row A"
+        );
+        assert!(core.squad_members.is_empty(), "no squad member persisted");
+        assert_eq!(
+            core.attached.get("deadbee1"),
+            Some(&new_pid),
+            "a Drive row maps its viewer"
+        );
+        // `cmd` records the program base: the attach stand-in, proof the
+        // pane runs the tier argv and not a shell.
+        assert_eq!(
+            core.panes[&new_pid].cmd.as_deref(),
+            Some("cat"),
+            "the pane runs the attach argv"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("thread pane ->")));
+        core.reap_pane(new_pid); // don't leak the stand-in child
+    }
+
+    #[test]
+    fn thread_pane_repoints_the_same_slot_with_no_pane_count_change() {
+        // AC4-EDGE: a slot showing A, a reach on B: the same tree slot now
+        // runs B, the pane count is unchanged, and no other pane moved.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![
+            bg_row("target-a", "/tmp/seen", Some("deadbee1")),
+            bg_row("target-b", "/tmp/seen", Some("deadbee2")),
+        ];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, slot_a) = core.thread_pane.clone().unwrap();
+        let (slot_sid, slot_ti) = core.session.find_pane(slot_a).unwrap();
+        let slot_tab_id = core.session.squad(slot_sid).unwrap().tabs[slot_ti].id;
+        let panes_after_open = core.panes.len();
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, thread_reach_cmd("deadbee2"));
+
+        assert_eq!(core.panes.len(), panes_after_open, "pane count unchanged");
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee2".to_string(), new_pid)),
+            "the slot now names B"
+        );
+        assert!(!core.panes.contains_key(&slot_a), "A's viewer reaped");
+        assert!(core.attached.contains_key("deadbee2"), "B mapped");
+        assert!(
+            !core.attached.contains_key("deadbee1"),
+            "A resurfaces watch-only"
+        );
+        // The same tree slot: the geometry never moved, only its leaf id.
+        let (sid, ti) = core.session.find_pane(new_pid).unwrap();
+        let tab = &core.session.squad(sid).unwrap().tabs[ti];
+        assert_eq!(
+            (sid, tab.id),
+            (slot_sid, slot_tab_id),
+            "same tab, same slot"
+        );
+        assert!(
+            matches!(tab.root, Node::Leaf(leaf) if leaf == new_pid),
+            "the slot leaf is B's pane: {:?}",
+            tab.root
+        );
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn thread_pane_stale_slot_never_reaches_an_argv() {
+        // AC5-ERR: a recorded pane id the tree no longer knows reads as
+        // absent - a fresh pane opens and the stale id never touches a spawn.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-b", "/tmp/seen", Some("deadbee2"))];
+        core.thread_pane = Some(("deadbee1".to_string(), 99_999)); // closed elsewhere
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, thread_reach_cmd("deadbee2"));
+
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee2".to_string(), new_pid)),
+            "fresh pane recorded"
+        );
+        assert!(core.panes.contains_key(&new_pid));
+        assert!(
+            !core.panes.contains_key(&99_999),
+            "the stale id stayed dead"
+        );
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn thread_pane_same_row_refocuses_without_respawn() {
+        // The "show me" rule: reaching the row the slot already shows is a
+        // no-op focus, never a respawn and never a toggle-close.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, mut rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, pid) = core.thread_pane.clone().unwrap();
+        let panes_after_open = core.panes.len();
+
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+
+        assert_eq!(core.panes.len(), panes_after_open, "no respawn");
+        assert_eq!(core.thread_pane, Some(("deadbee1".to_string(), pid)));
+        let view = core.client_view(client_id).unwrap();
+        assert_eq!(
+            core.viewed_tab(view).unwrap().focus,
+            pid,
+            "the reach focused the showing pane"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already showing")));
+        core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_same_row_through_the_other_door_is_a_focus() {
+        // The TUI door keys the slot by the attach id; `fno agents attach`
+        // keys it by the registry name. Same row, so "show me": no respawn,
+        // no repoint - reaching the row either way must never kill the viewer
+        // the operator may be typing into.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, mut rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, pid) = core.thread_pane.clone().unwrap();
+        let panes_after_open = core.panes.len();
+
+        core.command(client_id, thread_reach_cmd("target-a"));
+
+        assert_eq!(core.panes.len(), panes_after_open, "no respawn, no repoint");
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee1".to_string(), pid)),
+            "the slot keeps its original key and pane"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already showing")));
+        core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_by_name_on_an_attach_id_slot_replies_a_landing() {
+        // The control door reaches by name while the slot is keyed by the
+        // attach id: the focus path emits no Err. A key-only `landed` check
+        // would turn that success into "no such agent".
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(9, thread_reach_cmd("deadbee1"));
+        let (_, pid) = core.thread_pane.clone().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+        core.thread_pane_ctl("target-a", None, tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("already showing"),
+                "the by-name reach on an attach-id slot is a focus: {text}"
+            ),
+            other => panic!("expected a Notice landing, got {other:?}"),
+        }
+        assert_eq!(core.thread_pane, Some(("deadbee1".to_string(), pid)));
+        core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_names_the_session_of_a_foreign_hosted_row() {
+        // A row pane-hosted in ANOTHER session is that server's to view: the
+        // reply names where it lives. "no such agent" would lie about a row
+        // the registry knows (and the inline attach this verb replaced
+        // attached it regardless of hosting session).
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let mut hosted = bg_row("far-row", "/tmp/seen", None);
+        hosted.mux = Some(("other-session".to_string(), 42));
+        let agents = vec![hosted];
+
+        core.thread_pane_ctl("far-row", Some(agents), tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("other-session") && text.contains("pane 42"),
+                "names the foreign session and pane: {text}"
+            ),
+            other => panic!("expected a Notice, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none(), "no thread pane minted");
+    }
+
+    #[test]
+    fn thread_pane_follow_and_locate_rows_spawn_their_tier_argv() {
+        // A paneless codex row (Follow) tails its transcript; a gemini row
+        // (Locate) renders the self-teaching screen. Both reach by NAME -
+        // neither carries an attach id - and neither maps into `attached`.
+        // The peek program is overridden to a stand-in so the spawn path runs
+        // without booting the deployed CLI (whose load-time boot can outlive
+        // any sane test budget under the full suite); the real argv shape is
+        // asserted in `peek_argv_is_the_peek_verb_with_follow`.
+        set_peek_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        let mut codex = bg_row("codex-row", "/tmp/seen", None);
+        codex.harness = Some("codex".into());
+        let mut gem = bg_row("gem-row", "/tmp/seen", None);
+        gem.harness = Some("gemini".into());
+        core.agents = vec![codex, gem];
+
+        core.command(client_id, thread_reach_cmd("codex-row"));
+        let (_, follow_pid) = core.thread_pane.clone().unwrap();
+        assert_eq!(
+            core.panes[&follow_pid].cmd.as_deref(),
+            Some("cat"),
+            "Follow tails through the peek stand-in"
+        );
+        assert!(
+            core.attached.is_empty(),
+            "no attach mapping for a Follow row"
+        );
+
+        core.command(client_id, thread_reach_cmd("gem-row"));
+        let (_, locate_pid) = core.thread_pane.clone().unwrap();
+        assert_eq!(
+            core.panes[&locate_pid].cmd.as_deref(),
+            Some("sh"),
+            "Locate renders its screen through sh"
+        );
+        assert!(
+            core.attached.is_empty(),
+            "no attach mapping for a Locate row"
+        );
+        core.reap_pane(locate_pid);
+        core.reap_pane(follow_pid);
+    }
+
+    #[test]
+    fn peek_argv_is_the_peek_verb_with_follow() {
+        // The real (un-overridden) Follow argv, asserted directly so the
+        // program override in the spawn tests never hides the shipped
+        // command.
+        PEEK_PROGRAM.with(|p| *p.borrow_mut() = None);
+        assert_eq!(
+            peek_argv("codex-row"),
+            vec![
+                "fno".to_string(),
+                "agents".into(),
+                "peek".into(),
+                "codex-row".into(),
+                "--follow".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn thread_pane_locate_screen_names_the_row_and_its_routes() {
+        // The Locate pane is self-teaching runtime text, not an empty pane:
+        // the pure builder alone is asserted here (no spawn needed) - name,
+        // harness, cwd, the why sentence, and the mail route that does reach
+        // the row. Injection safety: every fact rides as an ARGV element.
+        let mut gem = bg_row("gem-row'$(reboot)'", "/tmp/gem cwd", None);
+        gem.harness = Some("gemini".into());
+        let argv = locate_argv(&gem);
+        assert_eq!(argv[0], "sh");
+        assert_eq!(argv[1], "-c");
+        assert_eq!(
+            argv[2], "printf '%s\\n' \"$@\"; exec cat",
+            "facts ride as argv, never as script"
+        );
+        assert_eq!(argv[3], "fno-locate");
+        let screen = argv[4..].join("\n");
+        assert!(
+            screen.contains("gem-row'$(reboot)'"),
+            "names the row verbatim"
+        );
+        assert!(screen.contains("harness:   gemini"), "names the harness");
+        assert!(screen.contains("cwd:       /tmp/gem cwd"), "names the cwd");
+        assert!(screen.contains("no live viewport"), "says why");
+        assert!(
+            screen.contains("fno agents mail send gem-row'$(reboot)'"),
+            "names the route that reaches it"
+        );
+    }
+
+    #[test]
+    fn thread_pane_refuses_an_unresolvable_or_ambiguous_key() {
+        // A key no paneless live row answers, and a name two rows share:
+        // both refuse fail-closed with a named reason, nothing spawns.
+        let (mut core, client_id, _p1, mut rx) = thread_core();
+        core.agents = vec![
+            bg_row("dupe", "/tmp/seen", Some("deadbee1")),
+            bg_row("dupe", "/tmp/seen", Some("deadbee2")),
+        ];
+        let panes_before = core.panes.len();
+        core.command(client_id, thread_reach_cmd("nosuchrow"));
+        core.command(client_id, thread_reach_cmd("dupe"));
+        assert_eq!(core.panes.len(), panes_before, "nothing spawned");
+        let notices = drain_notices(&mut rx);
+        assert!(notices.iter().any(|t| t.contains("no such agent")));
+        assert!(notices.iter().any(|t| t.contains("more than one row")));
+        assert!(core.thread_pane.is_none(), "no slot recorded on a refusal");
+    }
+
+    #[test]
+    fn thread_pane_ctl_lands_the_reach_and_replies_where() {
+        // AC8-HP (server half): the control verb drives the SAME reach a TUI
+        // gesture drives, records the slot, persists nothing, and replies
+        // with the landing.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        let new_pid = core.next_pane_id;
+
+        core.thread_pane_ctl("deadbee1", Some(agents), tx);
+
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee1".to_string(), new_pid)),
+            "the control reach records the slot"
+        );
+        assert!(core.squad_members.is_empty(), "no squad member persisted");
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("thread pane -> target-a"),
+                "the reply names the landing: {text}"
+            ),
+            other => panic!("expected a Notice landing, got {other:?}"),
+        }
+        // The observer's removal rides the core queue (CoreMsg::Gone), so it
+        // happens on the loop's next drain, not synchronously here.
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_refuses_an_unknown_name() {
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+        core.thread_pane_ctl("nosuchrow", None, tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Err { msg, .. } => {
+                assert!(msg.contains("no such agent"), "names the refusal: {msg}")
+            }
+            other => panic!("expected an Err refusal, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none());
+        assert!(core.panes.len() == 1, "nothing spawned");
+    }
+
+    #[test]
+    fn thread_pane_ctl_answers_a_pane_hosted_row_with_its_location() {
+        // A row already pane-hosted in this session has its viewport: the
+        // verb answers with the pane instead of opening a second one.
+        let (mut core, _client_id, p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let mut hosted = bg_row("hosted-row", "/tmp/seen", None);
+        hosted.mux = Some(("test".to_string(), p1));
+        let name = core.session_name.clone();
+        core.session_name = "test".to_string();
+        let agents = vec![hosted];
+
+        core.thread_pane_ctl("hosted-row", Some(agents), tx);
+
+        core.session_name = name;
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("hosts pane") && text.contains("hosted-row"),
+                "names the existing pane: {text}"
+            ),
+            other => panic!("expected a Notice, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none(), "no thread pane minted");
+    }
+
+    #[test]
+    fn stored_tab_trees_prunes_the_thread_pane_and_remaps_active_tab() {
+        // (x-07c2) The dedicated thread pane is never persisted: capture
+        // prunes its leaf, a tab it hollowed out is not captured at all, and
+        // a skipped tab - the active one included - never leaves a dangling
+        // `active_tab` (position IS the durable tab identity in tab_trees).
+        // The thread pane carries an `attached` binding, so an un-pruned
+        // capture WOULD name its slot Fno(deadbee1): the absent binding is
+        // the red/green pair, not a vacuous one.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, thread_pid) = core.thread_pane.clone().unwrap();
+        let (sid, _ti) = core
+            .session
+            .find_pane(thread_pid)
+            .expect("the thread pane is in the live tree");
+
+        let (trees, active) = core.stored_tab_trees(sid).unwrap();
+        assert!(
+            trees
+                .iter()
+                .flat_map(|t| &t.slots)
+                .all(|s| !matches!(&s.binding, LayoutBinding::Fno(id) if id == "deadbee1")),
+            "no captured slot names the thread pane's attach id"
+        );
+        assert!(
+            active < trees.len(),
+            "active_tab remapped into the captured range (active={active}, {} trees)",
+            trees.len()
+        );
+        assert!(
+            trees.iter().all(|t| !t.slots.is_empty()),
+            "no hollowed tab was captured"
+        );
+        // Positive control: the prune touched the CAPTURE, not the live
+        // session - the pane is still there and still the dedicated slot.
+        assert!(core.session.find_pane(thread_pid).is_some());
+        assert_eq!(core.thread_pane.as_ref().map(|&(_, p)| p), Some(thread_pid));
+    }
+
+    #[test]
+    fn stored_tab_trees_remaps_active_tab_when_the_active_tab_is_pruned_away() {
+        // (x-07c2) When the ACTIVE tab is the one entirely hollowed out by
+        // the thread-pane prune, the remap in the loop above never fires
+        // (its guard never sees a tab that `continue`d past it) - active_tab
+        // must not silently default to 0, which would land restore on a
+        // tab unrelated to the one that vanished.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, thread_pid) = core.thread_pane.clone().unwrap();
+        let (sid, thread_tab_idx) = core
+            .session
+            .find_pane(thread_pid)
+            .expect("the thread pane is in the live tree");
+
+        // Sandwich the thread tab between two ordinary sibling tabs, and
+        // make the thread tab (pure thread pane, no other content) active.
+        let squad = core.session.squad_mut(sid).unwrap();
+        let thread_tab = squad.tabs.remove(thread_tab_idx);
+        squad.tabs = vec![leaf_tab(9001, 9101), thread_tab, leaf_tab(9002, 9102)];
+        squad.active_tab = 1;
+
+        let (trees, active) = core.stored_tab_trees(sid).unwrap();
+        assert_eq!(
+            trees.len(),
+            2,
+            "only the two sibling tabs survive the prune"
+        );
+        assert_eq!(
+            active, 1,
+            "active_tab lands on the surviving tab that followed the pruned one, not index 0"
+        );
+    }
+
+    #[test]
+    fn thread_pane_takes_no_explicit_placement() {
+        // The dedicated pane owns its geometry: a split, anchor, or target
+        // alongside the flag is a contradiction, refused pre-spawn.
+        for placement in [
+            PanePlacement {
+                thread_pane: true,
+                split: Some(Dir::Right),
+                ..Default::default()
+            },
+            PanePlacement {
+                thread_pane: true,
+                at: Some(1),
+                ..Default::default()
+            },
+        ] {
+            let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+            core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+            let panes_before = core.panes.len();
+            core.command(
+                client_id,
+                Command::AttachAgent {
+                    id: "deadbee1".into(),
+                    placement,
+                },
+            );
+            assert_eq!(core.panes.len(), panes_before, "no pane spawned");
+            assert!(drain_notices(&mut rx)
+                .iter()
+                .any(|t| t.contains("thread pane takes no split")));
         }
     }
 
@@ -19916,6 +21099,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             },
         );
@@ -22383,6 +23567,8 @@ mod tests {
             worker_session_pane: HashMap::new(),
             held_workers: HashMap::new(),
             diff_pane: None,
+            thread_pane: None,
+            thread_pane_noticed: false,
             squad_members: HashMap::new(),
             template_specs: HashMap::new(),
             pending_template_restores: Vec::new(),
@@ -22568,6 +23754,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )
@@ -22624,6 +23811,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )
@@ -22683,6 +23871,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
                 None,
             )

@@ -519,6 +519,7 @@ fn concurrent_strict_spawn_only_one_commits() {
                 here: false,
                 fallback: PlacementFallback::Refuse,
                 max_panes: None,
+                thread_pane: false,
             },
             worker: None,
         },
