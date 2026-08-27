@@ -37,7 +37,7 @@ def test_selftest_passes():
         ["bash", str(VALIDATOR), "--selftest"], capture_output=True, text=True
     )
     assert out.returncode == 0, out.stdout + out.stderr
-    assert "6 passed, 0 failed" in out.stdout
+    assert "7 passed, 0 failed" in out.stdout
 
 
 def test_a_pass_with_no_probe_is_refused_and_named(tmp_path):
