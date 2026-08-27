@@ -168,6 +168,54 @@ def test_ac1_sent_unclaimed_past_ttl(env, capsys):
     assert "carol" in out
 
 
+def test_sent_unclaimed_nag_names_wake_before_withdraw(env, capsys):
+    # x-d19e: the nag's only actionable verb used to be withdraw, and a king
+    # reading it withdrew four messages without once considering a wake. The
+    # wake rung must come first; withdraw stays, framed as the stale exit.
+    _send(MY_HANDLE, "carol", "please read", ts=_ts_ago(3600))
+    out = _run(capsys)
+    assert "fno agents resume <recipient>" in out
+    assert "fno agents mail withdraw <id>" in out
+    assert out.index("fno agents resume <recipient>") < out.index(
+        "fno agents mail withdraw <id>"
+    )
+
+
+def test_sent_unclaimed_listing_footer_names_wake_before_withdraw(env, monkeypatch):
+    # x-d19e: the `sent --unclaimed` footer taught one verb, the destructive
+    # one. It now carries the peek/resume rungs ahead of withdraw. The text
+    # renderer only fires on a TTY, so stand one up.
+    from fno.mail.cli import cmd_sent
+
+    class _Tty:
+        def __init__(self):
+            self.parts = []
+
+        def write(self, s):
+            self.parts.append(s)
+            return len(s)
+
+        def flush(self):
+            pass
+
+        def isatty(self):
+            return True
+
+    _send(MY_HANDLE, "carol", "please read", ts=_ts_ago(3600))
+    fake = _Tty()
+    monkeypatch.setattr("fno.mail.cli.sys.stdout", fake)
+    # All params explicit: a direct call bypasses typer's binding, and a
+    # defaulted one arrives as an OptionInfo object.
+    cmd_sent(unclaimed_only=True, from_name=None, json_out=False)
+    out = "".join(fake.parts)
+    assert "fno agents peek <recipient>" in out
+    assert "fno agents resume <recipient>" in out
+    assert "fno agents mail withdraw <id>" in out
+    assert out.index("fno agents resume <recipient>") < out.index(
+        "fno agents mail withdraw <id>"
+    )
+
+
 def test_ac1_sent_lists_all_distinct_recipients(env, capsys):
     _send(MY_HANDLE, "carol", "a", ts=_ts_ago(3600))
     _send(MY_HANDLE, "dave", "b", ts=_ts_ago(3600))
