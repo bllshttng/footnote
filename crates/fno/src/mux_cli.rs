@@ -2340,7 +2340,10 @@ pub const EXIT_NO_SERVER: i32 = 24; // thread: no live mux server to drive (x-07
 /// it is the right place to say what does reach the row.
 fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> String {
     let name = &row.name;
-    if !row.exited && row.attach_id.is_some() {
+    // Ask the same function the server ships in AgentRow.reach, so the CLI
+    // hint and the TUI's actual reach behavior can never drift apart.
+    let tier = crate::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
+    if matches!(tier, crate::proto::Reach::Drive) {
         format!(
             "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
         )

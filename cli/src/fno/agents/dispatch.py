@@ -4987,11 +4987,17 @@ def reconcile_agents(
 
 
 def attach_agent(name: str) -> AttachResult:
-    """Interactive attach to a running agent session (claude only).
+    """Interactive attach to a running agent session.
 
-    claude: shells out to ``claude attach <short_id>`` with inherited
-    stdio. The claude TUI takes over the terminal until the operator
-    detaches. fno's exit code mirrors claude's.
+    With a live mux server, this drives the one dedicated thread pane
+    (x-07c2): the server picks Drive/Follow/Locate per row from harness
+    capability, so codex and gemini rows land on a peek-follow or a
+    locate screen there instead of the exit-13 refusal below.
+
+    With no mux server, the inline path below runs unchanged. claude:
+    shells out to ``claude attach <short_id>`` with inherited stdio.
+    The claude TUI takes over the terminal until the operator detaches.
+    fno's exit code mirrors claude's.
 
     codex / gemini: exit 13 with a message pointing at Phase 6 (the
     future fno-owned supervisor) as the planned landing for cross-

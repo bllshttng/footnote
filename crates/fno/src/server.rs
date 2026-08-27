@@ -9706,9 +9706,13 @@ impl Core {
                     // attach id while `fno agents attach` keys it by the registry
                     // name, and both doors advertise the same pane. Attach ids
                     // are unique per bg session, so a slot keyed by this row's
-                    // attach id is this row whatever door the reach came from.
-                    let same_row =
-                        slot_row == key || row.attach_id.as_deref() == Some(slot_row.as_str());
+                    // attach id is this row whatever door the reach came from -
+                    // and the reverse (slot keyed by name, reached again by
+                    // attach id) is the same row too, so the name comparison
+                    // has to run both directions.
+                    let same_row = slot_row == key
+                        || row.attach_id.as_deref() == Some(slot_row.as_str())
+                        || slot_row == row.name;
                     if same_row {
                         // Same row: "show me", never a toggle-close. Closing
                         // the pane is the ordinary close gesture. The slot
@@ -9780,6 +9784,11 @@ impl Core {
                     self.notice(client_id, format!("thread pane -> {}", row.name));
                     self.push_layout(true);
                     return Flow::Continue;
+                } else {
+                    // Half-created pane (close_pane's same case): tracked in
+                    // self.panes but absent from the tab tree. Reap it here
+                    // too, so it can never leak a child process.
+                    self.reap_pane(pid);
                 }
             }
             // Stale slot (pane closed by any other path): open fresh below.
@@ -9880,6 +9889,19 @@ impl Core {
             // CLI just saw.
             self.agents = rows;
         }
+        // Names are not unique; a name that matches two rows must refuse,
+        // never pick, same as reach_thread_pane's own guard.
+        let mut named_hits = self
+            .agents
+            .iter()
+            .filter(|a| a.name == name || a.attach_id.as_deref() == Some(name));
+        if let (Some(_), Some(_)) = (named_hits.next(), named_hits.next()) {
+            let _ = reply.send(ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: "more than one row goes by that name - reach it by its pane".to_string(),
+            });
+            return;
+        }
         // A row already pane-hosted has its viewport: answer with the location
         // instead of opening a second one. Another session's row is that
         // server's to view - saying so beats the reach's "no such agent",
@@ -9948,10 +9970,10 @@ impl Core {
         // the slot keyed by the attach id - that is a landing, not a refusal.
         let landed = self.thread_pane.as_ref().is_some_and(|(k, _)| {
             k == name
-                || self
-                    .agents
-                    .iter()
-                    .any(|a| a.attach_id.as_deref() == Some(k) && a.name == name)
+                || self.agents.iter().any(|a| {
+                    (a.attach_id.as_deref() == Some(k) && a.name == name)
+                        || (a.name == k.as_str() && a.attach_id.as_deref() == Some(name))
+                })
         });
         let msg = match (landed, landing) {
             (true, Some(text)) => ServerMsg::Notice { text },
