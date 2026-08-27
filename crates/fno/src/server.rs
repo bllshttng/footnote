@@ -871,6 +871,12 @@ thread_local! {
     /// tests at a benign binary so the attach spawn+swap path runs without claude.
     static ATTACH_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+    /// (x-07c2) Test override for the Follow viewer program (see
+    /// [`peek_argv`]): the real argv boots the deployed `fno` CLI, which under
+    /// a loaded full-suite run can outlive any sane test budget. Same benign-
+    /// binary pattern as `ATTACH_PROGRAM`.
+    static PEEK_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// The base argv attaching bg session `id`: `claude attach <id>`. `id` is always
@@ -915,6 +921,30 @@ fn attach_argv(
 #[cfg(test)]
 fn set_attach_program(argv: &[&str]) {
     ATTACH_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
+}
+
+/// (x-07c2) The Follow tier's viewer argv: `fno agents peek <name> --follow`,
+/// tailing the row's transcript in the dedicated pane. Read-only by
+/// construction (peek never writes the observed). Tests override the program
+/// via `set_peek_program` so the spawn path runs without the deployed CLI.
+fn peek_argv(name: &str) -> Vec<String> {
+    #[cfg(test)]
+    if let Some(mut argv) = PEEK_PROGRAM.with(|p| p.borrow().clone()) {
+        argv.push(name.to_string());
+        return argv;
+    }
+    vec![
+        "fno".to_string(),
+        "agents".to_string(),
+        "peek".to_string(),
+        name.to_string(),
+        "--follow".to_string(),
+    ]
+}
+
+#[cfg(test)]
+fn set_peek_program(argv: &[&str]) {
+    PEEK_PROGRAM.with(|p| *p.borrow_mut() = Some(argv.iter().map(|s| s.to_string()).collect()));
 }
 
 /// (x-07c2) The Locate tier's one-screen explanation: the row's facts, the
@@ -9599,13 +9629,7 @@ impl Core {
                 let (acct, cd) = self.attach_account_ctx(&id);
                 attach_argv(&id, acct.as_deref(), cd.as_deref())
             }
-            Reach::Follow => vec![
-                "fno".to_string(),
-                "agents".to_string(),
-                "peek".to_string(),
-                row.name.clone(),
-                "--follow".to_string(),
-            ],
+            Reach::Follow => peek_argv(&row.name),
             Reach::Locate => locate_argv(&row),
         };
         let (rows, cols) = self
@@ -19667,6 +19691,11 @@ mod tests {
         // A paneless codex row (Follow) tails its transcript; a gemini row
         // (Locate) renders the self-teaching screen. Both reach by NAME -
         // neither carries an attach id - and neither maps into `attached`.
+        // The peek program is overridden to a stand-in so the spawn path runs
+        // without booting the deployed CLI (whose load-time boot can outlive
+        // any sane test budget under the full suite); the real argv shape is
+        // asserted in `peek_argv_is_the_peek_verb_with_follow`.
+        set_peek_program(&["/bin/cat"]);
         let (mut core, client_id, _p1, _rx) = thread_core();
         let mut codex = bg_row("codex-row", "/tmp/seen", None);
         codex.harness = Some("codex".into());
@@ -19676,13 +19705,10 @@ mod tests {
 
         core.command(client_id, thread_reach_cmd("codex-row"));
         let (_, follow_pid) = core.thread_pane.clone().unwrap();
-        // `cmd` is the program base; the full peek argv is exercised in the
-        // manual incident-path verification. The tier split shows here as
-        // `fno` (peek) vs `sh` (the locate screen).
         assert_eq!(
             core.panes[&follow_pid].cmd.as_deref(),
-            Some("fno"),
-            "Follow tails through peek"
+            Some("cat"),
+            "Follow tails through the peek stand-in"
         );
         assert!(
             core.attached.is_empty(),
@@ -19702,6 +19728,24 @@ mod tests {
         );
         core.reap_pane(locate_pid);
         core.reap_pane(follow_pid);
+    }
+
+    #[test]
+    fn peek_argv_is_the_peek_verb_with_follow() {
+        // The real (un-overridden) Follow argv, asserted directly so the
+        // program override in the spawn tests never hides the shipped
+        // command.
+        PEEK_PROGRAM.with(|p| *p.borrow_mut() = None);
+        assert_eq!(
+            peek_argv("codex-row"),
+            vec![
+                "fno".to_string(),
+                "agents".into(),
+                "peek".into(),
+                "codex-row".into(),
+                "--follow".into()
+            ]
+        );
     }
 
     #[test]
