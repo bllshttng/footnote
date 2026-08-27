@@ -239,6 +239,9 @@ frontmatter = {
     "status": "ready",
     "difficulty": "medium",
     "created": now.date().isoformat(),
+    # difficulty gates on created-after-2026-08-26 plans; the fixture stamps
+    # created at run time, so past that boundary the plan needs the field.
+    "difficulty": "low",
     "completion": "delivery",
     "company_work": {
         "work_order": {"node_id": "x-delivery-e2e", "attempt_id": "attempt-e2e"},

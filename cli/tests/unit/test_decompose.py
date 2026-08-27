@@ -886,6 +886,30 @@ def test_scaffold_empty_why_falls_back_to_stub_marker():
     assert "<!-- Why (from epic):" in text
 
 
+def test_scaffold_is_born_passing_the_difficulty_gate():
+    # x-e3d1 sibling: the scaffold stamps created=<today> (or a caller-injected
+    # date), so a child minted after the 2026-08-26 boundary needs a difficulty
+    # band or it is born failing its own validator. The pair: the scaffold
+    # carries a band AND passes the gate; with the band stripped the gate
+    # refuses the same frontmatter.
+    import yaml
+
+    from fno.plan.schema import difficulty_gate_error
+
+    text = scaffold_separate_plan(
+        _grp(), "ab-epic0001", "big.md", why_digest="the why", created="2026-08-27"
+    )
+    assert text.startswith("---\n")
+    fm = yaml.safe_load(text[4 : text.find("\n---")])
+    assert fm.get("difficulty") in {"low", "medium", "high"}, (
+        f"scaffold carries no difficulty band: {fm.get('difficulty')!r}"
+    )
+    assert difficulty_gate_error(fm) is None
+
+    stripped = {k: v for k, v in fm.items() if k != "difficulty"}
+    assert difficulty_gate_error(stripped) is not None
+
+
 def test_scaffold_seeds_adopted_coverage_checklist():
     # AC8 (x-d9a4 task 1.7): a group that folds three existing nodes seeds them
     # as a coverage checklist - node-level coverage is mechanical, but nothing

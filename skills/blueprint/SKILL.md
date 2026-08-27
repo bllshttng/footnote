@@ -456,6 +456,8 @@ Exit codes:
 - `kill_criteria` (frontmatter)
 - `execution_mode`, `waves` (frontmatter)
 - `acceptance_contract` (frontmatter; stamped `compiled-v1` at finalize)
+- `consolidation` (frontmatter; the step 2d outcome)
+- `difficulty` (frontmatter; the floor band the mint stamps so a post-2026-08-26 doc is born passing its own gate)
 
 Any attempt to write outside this allowlist exits 2. Author-owned sections (Overview, Architecture, User Stories, Failure Modes, Acceptance Criteria, Locked Decisions, etc.) are never touched.
 

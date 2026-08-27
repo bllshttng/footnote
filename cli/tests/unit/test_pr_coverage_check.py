@@ -1350,3 +1350,211 @@ def test_file_findings_at_cap_is_idempotent_on_the_finding_key(monkeypatch, tmp_
     )
     assert ids == ["x-77aa"]
     assert not any(c[:3] == ["fno", "backlog", "idea"] for c in seen)
+
+
+# ---- x-aecc: declining must satisfy coverage ----
+#
+# The pass condition is ANSWERED at this head, never clean at this head. The
+# branch's ONLY attestation is a fail whose findings are all terminally
+# dispositioned, and the row the Rust producer emits for that chain now reads
+# covered/reviewed (its answered-fail local verdict). A pass-chain covering
+# proves nothing here - the tests above already pin that arm - so every
+# fixture's only attestation is a fail.
+
+
+def _xaecc_fail_round(findings_keys, dispositioned_keys):
+    """One fail round at FIXTURE_HEAD; `dispositioned_keys` get declines."""
+    return {
+        "ts": "2026-08-26T19:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": FIXTURE_HEAD,
+            "verdict": "fail",
+            "session_id": "s-xaecc",
+            "attester_session_id": "sess-peer",
+            "branch": "feature/x-8439",
+            "reviewed_base_sha": "17a3b85b1a70a22014f1fc4e04b7aa35a632757f",
+            "reviewed_head_sha": FIXTURE_HEAD,
+            "reviewed_file_count": 3,
+            "reviewed_line_count": 40,
+            "findings_blocking": len(findings_keys),
+            "findings": [
+                {
+                    "category": "correctness",
+                    "verdict": None,
+                    "blocking": True,
+                    "has_required_fields": True,
+                    "finding_key": k,
+                }
+                for k in findings_keys
+            ],
+            "dispositions": [
+                {
+                    "finding_key": k,
+                    "disposition": "declined",
+                    "reason": "not worth the churn",
+                }
+                for k in dispositioned_keys
+            ],
+        },
+    }
+
+
+def _xaecc_row(covered: bool):
+    """The row the Rust producer emits: covered once the fail is answered,
+    uncovered while a finding keeps it non-terminal."""
+    verdicts = (
+        [
+            {
+                "producer": "local_attestation",
+                "name": "code-review",
+                "verdict": "reviewed",
+                "attestation_origin": "other_session",
+                "reviewed_sha": FIXTURE_HEAD,
+                "freshness": "fresh",
+            }
+        ]
+        if covered
+        else []
+    )
+    return {
+        "ts": "2026-08-26T19:01:00Z",
+        "type": "review_coverage",
+        "source": "hook",
+        "data": {
+            "pr": 42,
+            "coverage": "covered" if covered else "uncovered",
+            "review_state": "reviewed" if covered else "unreviewed",
+            "reviewed_count": 1 if covered else 0,
+            "head_sha": FIXTURE_HEAD,
+            "verdicts": verdicts,
+        },
+    }
+
+
+def _xaecc_seed(tmp_path, attestations, row):
+    if not isinstance(attestations, list):
+        attestations = [attestations]
+    (tmp_path / ".fno").mkdir(exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        "\n".join(json.dumps(e) for e in (*attestations, row)) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_xaecc_marker1_fail_only_chain_fully_dispositioned_covers(monkeypatch, tmp_path):
+    """MARKER 1: the only attestation is a fail, every finding declined with a
+    reason on a corroborated row - literal COVERED, refusal empty."""
+    _specimen_gates(monkeypatch)
+    _xaecc_seed(
+        tmp_path,
+        _xaecc_fail_round(
+            ["a.py:1:correctness", "b.py:2:correctness"],
+            ["a.py:1:correctness", "b.py:2:correctness"],
+        ),
+        _xaecc_row(covered=True),
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, refusal
+    assert refusal == ""
+    # MARKER 3: the covered answer pins the SAME head the declining round
+    # attested - no commit and no further review between declining and merge.
+    assert covered_head == FIXTURE_HEAD
+
+
+def test_xaecc_marker2_one_nonterminal_finding_refuses_and_names_it(monkeypatch, tmp_path):
+    """MARKER 2: the same branch with ONE finding left non-terminal refuses,
+    and the refusal NAMES that finding - never the generic '0 reviewed'
+    sentence that taught the loop to re-review."""
+    _specimen_gates(monkeypatch)
+    _xaecc_seed(
+        tmp_path,
+        _xaecc_fail_round(
+            ["a.py:1:correctness", "b.py:2:correctness"],
+            ["a.py:1:correctness"],
+        ),
+        _xaecc_row(covered=False),
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "b.py:2:correctness" in refusal, "the refusal names the open finding"
+    assert "not terminal" in refusal
+    assert "0 reviewed" not in refusal, "the generic text hid the finding"
+    assert "1/2 review rounds used" in note
+
+
+def test_xaecc_cap_files_the_remainder_and_covers_at_the_same_head(monkeypatch, tmp_path):
+    """Filed at the cap is terminal: three fail rounds, one soft open finding,
+    the row the producer emits reads covered - the gate files the finding and
+    answers COVERED pinning the head the last fail attested."""
+    _specimen_gates(monkeypatch)
+    stamps = ["2026-08-26T18:00:00Z", "2026-08-26T18:30:00Z", "2026-08-26T19:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    rounds = []
+    for ts, head in zip(stamps, heads):
+        r = _xaecc_fail_round(["a.py:1:correctness"], [])
+        r["ts"] = ts
+        r["data"]["head_sha"] = head
+        r["data"]["reviewed_head_sha"] = head
+        rounds.append(r)
+    _xaecc_seed(tmp_path, rounds, _xaecc_row(covered=True))
+    calls = []
+
+    def fake_file(keys, pr_number, repo):
+        calls.append(tuple(keys))
+        return ["x-ae01" for _ in keys]
+
+    monkeypatch.setattr(_coverage_gate, "file_findings_at_cap", fake_file)
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, refusal
+    assert calls == [("a.py:1:correctness",)]
+    assert "filed at the round cap (3/2)" in note
+
+
+def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatch, tmp_path):
+    """Review finding 3: when the cap arm files the findings but the row is
+    uncovered on the no_local_pass conjunct, the gate keeps the sized
+    attestation refusal (never an emptied sentence) and the filed node rides
+    the note instead of vanishing."""
+    _specimen_gates(monkeypatch)
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
+    stamps = ["2026-08-26T18:00:00Z", "2026-08-26T18:30:00Z", "2026-08-26T19:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    rounds = []
+    for ts, head in zip(stamps, heads):
+        r = _xaecc_fail_round(["a.py:1:correctness"], [])
+        r["ts"] = ts
+        r["data"]["head_sha"] = head
+        r["data"]["reviewed_head_sha"] = head
+        # The reviewer label is a peer, not code-review: the row carries no
+        # code-review local pass, which is the conjunct that must keep its
+        # own remedy.
+        r["data"]["reviewer"] = "peer"
+        rounds.append(r)
+    _xaecc_seed(tmp_path, rounds, _xaecc_row(covered=False))
+    monkeypatch.setattr(
+        _coverage_gate, "file_findings_at_cap", lambda keys, pr_number, repo: ["x-ae02"]
+    )
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert refusal, "never an empty refusal sentence"
+    assert "required code-review has no head-pinned local pass" in refusal
+    assert "filed at the round cap (3/2)" in note, "the filed node rides the note"

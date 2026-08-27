@@ -299,6 +299,7 @@ def coverage_verdict(
     # non-terminal AND the rounds are spent; either alone keeps its ordinary
     # verdict.
     filed_note = ""
+    cap_filed = False
     if disposition_named and rounds > max_rounds:
         if disposition_hard:
             return (
@@ -327,9 +328,12 @@ def coverage_verdict(
             + ", ".join(f"{k} -> {n}" for k, n in zip(disposition_named, filed))
         )
         disposition_text = ""
+        cap_filed = True
 
     if covered and corroboration:
-        return REFUSED, corroboration, "", recompute_note
+        return REFUSED, corroboration, "", "; ".join(
+            x for x in (recompute_note, filed_note) if x
+        )
     if covered:
         if disposition_text:
             # Rounds remain (the exhausted case returned above), so the
@@ -340,6 +344,25 @@ def coverage_verdict(
             return REFUSED, disposition_text, "", note
         notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
+    # x-aecc: a fail attestation answers this head, so an uncovered row in
+    # that shape is uncovered BECAUSE of the non-terminal findings. Name them
+    # (the disposition sentence carries each finding key) instead of falling
+    # through to the generic "0 reviewed" text - that text taught the loop to
+    # re-review, which is the loop this branch exists to end. Two limits
+    # (review finding 3): it never fires after the cap arm FILED the findings
+    # (that path must keep its own refusal and note, not return an emptied
+    # sentence), and it leaves the specialized conjuncts - no_local_pass,
+    # reviewer_refused, stale_head - to their own sized remedies below.
+    if (
+        failed == "uncovered"
+        and not cap_filed
+        and disposition_named
+        and any(e.get("verdict") != "pass" for e in chain)
+    ):
+        remaining = _rounds_remaining_note(rounds, max_rounds)
+        note = "; ".join(x for x in (recompute_note, remaining) if x)
+        return REFUSED, disposition_text, "", note
+
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
         # fails the count conjunct, but the truer refusal names the policy and
@@ -348,7 +371,11 @@ def coverage_verdict(
         # (stale head, missing local pass, reviewer refusal) keep their own
         # refusals: those name a remedy that can actually work, and the
         # corroboration question may dissolve once the head is re-attested.
-        return REFUSED, corroboration, "", recompute_note
+        # recompute_note plus the filed node ids when the cap arm fired on the
+        # way here (same receipt contract as the returns above and below).
+        return REFUSED, corroboration, "", "; ".join(
+            x for x in (recompute_note, filed_note) if x
+        )
 
     # Same branch order run_merge has always used: the attestation refusal is
     # checked first, so a config requiring code-review with no row names the
@@ -386,7 +413,10 @@ def coverage_verdict(
             _merge._coverage_sources(repo) if cov is None else None,
             self_review_hint=hint,
         )
-    return REFUSED, refusal, "", recompute_note
+    # The cap arm may already have FILED findings on the way here (the row
+    # stayed uncovered on another conjunct): that side effect must ride the
+    # receipt, never vanish behind the refusal it did not soften.
+    return REFUSED, refusal, "", "; ".join(x for x in (recompute_note, filed_note) if x)
 
 
 def refusal_line(refusal: str, note: str) -> str:
