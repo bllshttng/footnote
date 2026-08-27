@@ -2411,11 +2411,22 @@ fn format_success(
             }
         }
         "stop" => {
-            if let Some(short_id) = result.get("short_id").and_then(|v| v.as_str()) {
-                Some(format!("stopped: {name} ({short_id})"))
-            } else {
-                Some(format!("stopped: {name}"))
+            let mut line = match result.get("short_id").and_then(|v| v.as_str()) {
+                Some(short_id) => format!("stopped: {name} ({short_id})"),
+                None => format!("stopped: {name}"),
+            };
+            // A codex thread stop names what happened to the in-flight turn:
+            // a bare "stopped" over an interrupt the daemon never confirmed is
+            // the exact report-it-did-not-perform shape this field exists to
+            // prevent. `no-turn` (nothing was driving) stays silent.
+            if let Some(outcome) = result
+                .get("interrupt")
+                .and_then(|v| v.as_str())
+                .filter(|outcome| *outcome != "no-turn")
+            {
+                line.push_str(&format!(" (turn {outcome})"));
             }
+            Some(line)
         }
         "rm" => {
             let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
@@ -3435,6 +3446,18 @@ mod tests {
 
     /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
     #[test]
+    /// A codex thread stop names the interrupt outcome; `no-turn` stays silent.
+    #[test]
+    fn format_success_stop_names_the_interrupt_outcome() {
+        let result =
+            json!({"stopped": true, "backend": "codex-thread", "interrupt": "interrupted"});
+        let out = format_success("stop", "t", &result, false, true, false).expect("stop line");
+        assert_eq!(out, "stopped: t (turn interrupted)");
+        let no_turn = json!({"stopped": true, "backend": "codex-thread", "interrupt": "no-turn"});
+        let out = format_success("stop", "t", &no_turn, false, true, false).expect("stop line");
+        assert_eq!(out, "stopped: t");
+    }
+
     fn format_success_stop_with_short_id() {
         let result = json!({"stopped": true, "short_id": "fo-1a2b"});
         let out = format_success("stop", "foo", &result, false, true, false);
