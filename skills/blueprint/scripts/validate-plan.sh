@@ -1391,6 +1391,90 @@ else
 fi
 
 # -------------------------------------------------------------------
+# Check 6d: Declared per-task blocked_by edges (unknown id, cycle)
+# -------------------------------------------------------------------
+echo ""
+echo "--- Task Edge Check ---"
+
+validate_task_edges_check() {
+    local source_root="" python_bin="" _src="" source_pythonpath=""
+    _src="$(_fno_source_python)"
+    if [[ -n "$_src" ]]; then
+        python_bin="${_src%%|*}"
+        source_root="${_src##*|}"
+    else
+        # A source tree may still exist even where no interpreter resolved;
+        # the uv arm below can run it.
+        source_root=$(_fno_source_root)
+    fi
+    if [[ -z "$python_bin" && -z "$source_root" ]]; then
+        ok "task edge check skipped (fno not importable)"
+        return 0
+    fi
+    source_pythonpath="$source_root/cli/src${PYTHONPATH:+:$PYTHONPATH}"
+    local code
+    code=$(cat <<'PYEOF'
+import re
+import sys
+from pathlib import Path
+
+plan = Path(sys.argv[1])
+section = []
+in_section = False
+for line in plan.read_text().splitlines():
+    if not in_section:
+        in_section = bool(re.match(r"^##+\s+Execution Strategy", line))
+        continue
+    if re.match(r"^##+", line):
+        break
+    section.append(line)
+
+if not section:
+    sys.exit(0)  # No strategy to check; presence itself is Check 2's finding.
+
+try:
+    from fno.plan.brief import (
+        BriefParseError,
+        parse_execution_strategy,
+        validate_task_edges,
+    )
+except ImportError:
+    sys.exit(0)
+
+try:
+    parsed = parse_execution_strategy("\n".join(section))
+except BriefParseError:
+    sys.exit(0)  # Malformed YAML is Check 2's finding, reported there.
+
+errors = validate_task_edges(parsed)
+for err in errors:
+    print(err)
+sys.exit(1 if errors else 0)
+PYEOF
+)
+    local edge_out edge_rc=0
+    if [[ -n "$python_bin" ]] && PYTHONPATH="$source_pythonpath" \
+        "$python_bin" -c 'import pydantic, yaml' 2>/dev/null; then
+        edge_out=$(PYTHONPATH="$source_pythonpath" "$python_bin" -c "$code" "$PLAN_DIR") || edge_rc=$?
+    elif command -v uv >/dev/null 2>&1 && [[ -n "$source_root" ]]; then
+        edge_out=$(uv run --project "$source_root/cli" python -c "$code" "$PLAN_DIR") || edge_rc=$?
+    else
+        ok "task edge check skipped (fno not importable)"
+        return 0
+    fi
+    if [[ $edge_rc -ne 0 ]]; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && error "$line"
+        done <<< "$edge_out"
+        [[ -z "$edge_out" ]] && error "task edge check failed with no report (rc=$edge_rc)"
+    else
+        ok "declared task blocked_by edges are acyclic and resolve"
+    fi
+}
+
+validate_task_edges_check
+
+# -------------------------------------------------------------------
 # Check 7: impeccable_stages pin validator (Phase 02.2)
 # -------------------------------------------------------------------
 echo ""

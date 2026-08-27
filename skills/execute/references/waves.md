@@ -193,10 +193,26 @@ skipped. Load
 [session-project-invariant.md](session-project-invariant.md)
 for the full decision table, exact commands, and receipt formats.
 
-For each wave in order:
+For each DISPATCH ROUND, drive off the ready set, not wave order:
+
+```bash
+# One JSON object on stdout: {"ready": [...], "completed": [...], "claimed": [...]}.
+# Pass --node "$NODE_ID" when graph_node_id is bound (the same field step 3e
+# reads): cross-session done/in_progress task rows then join this session's
+# STATE.md [x] as completions and claims. A failed node read degrades to
+# STATE.md only - proceed, never stall on the richer read.
+READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" \
+    --ready --state .fno/STATE.md ${NODE_ID:+--node "$NODE_ID"})
+```
+
+A task appears under `ready` when its effective blockers are all complete
+and no peer holds it: its declared `blocked_by` wins outright, otherwise it
+derives every task in the previous wave, so a plan without per-task edges
+schedules exactly as the whole-wave barrier did. Dispatch every entry under
+`ready` before running the query again:
 
 **If mode: sequential**
-- Execute each task in order using fno:archer
+- Execute each ready task in order using fno:archer
 - Wait for completion before next task
 - Update STATE.md after each task
 
@@ -204,9 +220,13 @@ For each wave in order:
 - Resolve provider capabilities and hidden shared-output conflicts first
 - Spawn N targets simultaneously only when the capability contract and file-ownership checks allow it
 - Use Task tool with multiple concurrent calls
-- Wait for ALL to complete
+- Wait for the round to complete
 - Collect and merge results
 - Update STATE.md with all completed tasks
+
+Stop dispatching when `ready` comes back empty. A held (`[~]`) task
+reappears on its own once the peer's row leaves `in_progress`; a `done`
+row never does.
 
 **Gemini note:** Gemini always runs main-thread sequential; a parallel wave downgrades and records the reason. There is no project-agent upgrade path (the experimental mode was removed when Google deprecated the Gemini CLI).
 
@@ -357,7 +377,7 @@ Branch on `TASK_CLAIM_RC`. Every nonzero code means you did NOT take the claim, 
 - **Exit 1**: the plan bound to the node is unreadable, or the row vanished between the read and the write. A stop, not a skip: the rows derive from the plan, so no task of this node can be claimed until it is readable.
 - **Exit 2**: the task id is not in the plan, or `--status` was misspelled. A stop: the wave and the plan disagree about what a task is.
 - **Exit 6**: this node has no task grain. Either no plan is bound to it, or the project runs a non-graph tracker backend that has no task rows at all. Dispatch unguarded, exactly as the no-bound-node case below. It is its own code because it is common rather than exceptional: about one live node in five carries no `plan_path`, and a tracker-backend project carries none anywhere, so reading it as a stop would halt waves that ran fine before task rows existed.
-- **Exit 3**: a peer session holds the task, or the task is already `done`. The message says which. For a peer holder, log `task <id> held by <holder>, skipping this round`, write `- [~] <id>: held by <holder>` to STATE.md, and move to the next task in the wave, the same shape as lane-fill leaving a peer-lane node ready. `get_completed_tasks_from_state` matches only `[x]`, so a `[~]` task is re-offered on a later pass once the peer releases it. For a `done` row there is no holder and no later pass that changes the answer: write `- [x] <id>` and never re-offer it, or the wave spins on shipped work forever.
+- **Exit 3**: a peer session holds the task, or the task is already `done`. The message says which. For a peer holder, log `task <id> held by <holder>, skipping this round`, write `- [~] <id>: held by <holder>` to STATE.md, and move to the next task in the wave, the same shape as lane-fill leaving a peer-lane node ready. A `[~]` task needs no re-offer bookkeeping of its own: the next `--ready` read omits every row still `in_progress`, so once the peer releases it (the row leaves `in_progress`) the task simply returns under `ready`. For a `done` row there is no holder and no later pass that changes the answer: write `- [x] <id>` and never re-offer it, or the wave spins on shipped work forever.
 - **Exit 4**: no provable session id or session pid for the claim. A stop, not a skip: emit `<help reason="task claim needs a session id" evidence="task <id> of node <node>">`.
 - **Exit 5**: the graph itself is unreadable. A stop for the whole wave, never a skip. This code is distinct from 3 on purpose: reading a corrupt graph as "a peer holds it" would make every task in the wave skip silently and log a holder that does not exist.
 - **No bound node** (plan-only sessions with no `graph_node_id`): skip the call and dispatch as today. There is no task row to guard.
