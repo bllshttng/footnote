@@ -93,27 +93,85 @@ OVERRIDE_NOTE_PREFIX = "override: "
 NO_LANE_NOTE = "no review lane configured"
 
 
-def _override_note(pr_number: int, repo: str) -> str:
-    """The override note when the PR carries the label, else ``""``.
+def _pr_author_login(pr_number: int, repo: str) -> Optional[str]:
+    """The PR author's login, or None on any read failure. Only read when an
+    override label is held (the one consumer), so a healthy PR never pays
+    for it."""
+    try:
+        from fno.pr._proc import run
+        from fno.pr._rest import fetch_pr_info_rest
 
-    ``_reviews`` owns the label reader (one reader, name-matched, never a grep
-    over the raw label JSON). Every failure inside it degrades to "no label":
-    an unreadable label state must not open the valve, because the recovery
-    from a wrong refusal is one command and the recovery from a wrong merge is
-    a revert.
+        # Bounded like _pr_reviews, and for the same reason: this runs inside
+        # `fno do pr merge`, and bare `run` passes timeout=None and does not
+        # catch TimeoutExpired, so a stalled gh would hang the merge verb
+        # rather than fail closed.
+        def _bounded(cmd, **kwargs):
+            kwargs.setdefault("timeout", 30.0)
+            return run(cmd, **kwargs)
+
+        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=_bounded)
+        return str((info or {}).get("author") or "") or None
+    except Exception:  # noqa: BLE001 - an unreadable author fails closed below
+        return None
+
+
+def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
+    """``(valid, note, refusal)`` for the PR's override label.
+
+    The one deliberate bypass, with the same author check the approval path
+    beside it has always had: a label applied by the PR AUTHOR does not open
+    the valve, because an agent that cannot merge can label its own PR, and
+    that is reject-and-attest wearing a label. The actor is unreadable, or
+    the author is, and the valve refuses fail-closed - an unreadable actor is
+    exactly the state a forger produces, and the approval path already fails
+    closed on the same ambiguity. Who applied the label is named in every
+    arm (the receipt survives both verdicts): the recovery from a wrong
+    refusal is one command; the recovery from a wrong merge is a revert.
     """
     try:
+        # Inside the try: an unreadable label state must not open the valve,
+        # and an ImportError here is one more way to be unreadable. Hoisting
+        # it out would propagate out of coverage_verdict instead.
         from fno.pr import _reviews
 
         held, actor = _reviews._override_label_actor(pr_number, repo, _reviews.run)
-        if not held:
-            return ""
-        return (
-            f"{OVERRIDE_NOTE_PREFIX}{_reviews.COVERAGE_OVERRIDE_LABEL} "
-            f"label applied by {actor or 'unknown actor'}"
-        )
     except Exception:  # noqa: BLE001 - an unreadable label is not an override
-        return ""
+        return False, "", ""
+    if not held:
+        return False, "", ""
+    if not actor:
+        return (
+            False,
+            "",
+            "coverage-override label present but the labelling actor is "
+            "unreadable; refused (an unreadable actor is not an operator "
+            "waiver)",
+        )
+    author = _pr_author_login(pr_number, repo)
+    if not author:
+        return (
+            False,
+            "",
+            f"coverage-override label applied by {actor} but the PR author is "
+            "unreadable; refused (cannot prove the labeller is not the author)",
+        )
+    # Case-insensitive, matching the Rust side's login_equals and _merge.py's
+    # node-slug compare: a GitHub login is itself case-insensitive, and an
+    # exact-case compare here opens the valve for the author the moment the
+    # events feed and /pulls/{n} disagree on casing.
+    if actor.lower() == author.lower():
+        return (
+            False,
+            "",
+            f"coverage-override label applied by {actor}, the PR author; "
+            "refused (an author cannot override its own review gate)",
+        )
+    return (
+        True,
+        f"{OVERRIDE_NOTE_PREFIX}{_reviews.COVERAGE_OVERRIDE_LABEL} "
+        f"label applied by {actor}",
+        "",
+    )
 
 
 def covered_conjuncts(
@@ -248,9 +306,11 @@ def coverage_verdict(
     # recompute entirely, and before the attestation branch so the refusal it
     # would have built never runs. It returns the live head as the pin, so
     # `--match-head-commit` still refuses a push that races the merge: an
-    # override waives the review, never the TOCTOU.
-    override = _override_note(pr_number, repo)
-    if override:
+    # override waives the review, never the TOCTOU. A label held but REFUSED
+    # (author-applied, or an unreadable actor) keeps its refusal for the
+    # uncovered answer below, so the operator sees why the valve stayed shut.
+    override_valid, override, override_refusal = _override_valve(pr_number, repo)
+    if override_valid:
         return COVERED, "", head, override
 
     code_review_required = _merge._code_review_attestation_required(repo, pr_number)
@@ -290,7 +350,18 @@ def coverage_verdict(
         disposition_refusal(chain, cov, repo)
     )
     max_rounds = resolved_max_rounds(repo)
-    rounds = rounds_since_last_pass(chain)
+    # The budget counts BOTH evidence axes: a GitHub-App reviewer's rounds
+    # leave no attestation row, so the chain alone reads zero on exactly the
+    # lane that spins. The reviews read is paid only where it can change the
+    # answer (uncovered, or findings to file/decline); a healthy covered PR
+    # with no open findings keeps the events-only count and skips the
+    # paginated read. A read failure keeps the events-only answer.
+    reviews_payload = (
+        _pr_reviews(pr_number, repo)
+        if (disposition_named or disposition_text or not covered)
+        else None
+    )
+    rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -300,7 +371,7 @@ def coverage_verdict(
     # verdict.
     filed_note = ""
     cap_filed = False
-    if disposition_named and rounds > max_rounds:
+    if disposition_named and rounds >= max_rounds:
         if disposition_hard:
             return (
                 IMPOSSIBLE,
@@ -363,6 +434,73 @@ def coverage_verdict(
         note = "; ".join(x for x in (recompute_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
+    # The spent budget DISCHARGES the review obligation. It does not fail it.
+    #
+    # This arm used to refuse, and that was the inversion at the heart of the
+    # runaway-review problem. `config.review.max_rounds = 2` has to mean "this
+    # PR gets two rounds, and then review is DONE" - a budget you spend. It
+    # read as "after two rounds you are permanently unmergeable" instead,
+    # which is a guard nothing can pass: every remedy that could clear it
+    # names a review verb, and running one spends a round that is already
+    # spent. Measured across 25 recent merged PRs, seven blew past the cap and
+    # four reached double digits (12, 11, 10, 8 rounds) precisely because the
+    # cap never ended a review phase - it only refused afterward.
+    #
+    # The operator's ruling is already written twenty lines above: "the PR
+    # merges with its remaining findings FILED as nodes, never dropped". That
+    # ruling was only ever reachable through the `covered` branch, so it fired
+    # for a PR that had findings and never for a PR that had none. Having
+    # findings made a PR MORE mergeable than having none. This is where the
+    # ruling actually lands.
+    #
+    # What still blocks: a CONFIRMED correctness or security finding returns
+    # IMPOSSIBLE above and never reaches here, and a filing failure refuses
+    # there too. Those are the real safety, not this arm. Requiring an
+    # attestation past the cap buys no trust the budget does not: in this
+    # fleet the attestation is emitted by the same worker that wrote the code,
+    # so both axes are self-certified. External review and human approval are
+    # the trust boundary, and neither is weakened here.
+    #
+    # The waiver is NAMED in the note, never silent, so a merge that happened
+    # on a spent budget is legible afterward.
+    # `>=`, not `>`. max_rounds is a MAXIMUM: 2 means two rounds, and the
+    # second one is the last. The old `>` let a third round run before the
+    # budget tripped, so `max_rounds = 2` silently meant three reviews -
+    # a reading nobody would arrive at from the key's own name.
+    if rounds >= max_rounds:
+        # The waiver names what it waived. Past the cap this arm preempts the
+        # sized coverage refusals below - the required-reviewer attestation
+        # conjunct included - and that is deliberate: a conjunct that still
+        # refuses past the cap is unsatisfiable by construction, because the
+        # only way to satisfy it is a round the budget will not fund. Losing
+        # the FACT would be wrong though, so it rides the receipt as a note
+        # instead of a block.
+        # `failed` is covered_conjuncts' own name for the conjunct that
+        # broke: uncovered / no_local_pass / stale_head / reviewer_refused.
+        # A configured code-review requirement is named ALONGSIDE it, never
+        # instead: an uncovered row hides that fact behind the generic name,
+        # and "we merged without the reviewer config demands" is exactly the
+        # fact a later reader needs.
+        unsatisfied = "; ".join(
+            x
+            for x in (
+                failed,
+                "code-review attestation required by config" if code_review_required else "",
+            )
+            if x
+        )
+        waiver = (
+            f"review budget discharged ({rounds}/{max_rounds} rounds): the "
+            "review phase is complete and the remainder is filed; the "
+            "operator lever is config.review.max_rounds"
+            + (f" (waived at the cap: {unsatisfied})" if unsatisfied else "")
+        )
+        return (
+            COVERED,
+            "",
+            head or "",
+            "; ".join(n for n in (recompute_note, filed_note, waiver) if n),
+        )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
         # fails the count conjunct, but the truer refusal names the policy and
@@ -413,6 +551,10 @@ def coverage_verdict(
             _merge._coverage_sources(repo) if cov is None else None,
             self_review_hint=hint,
         )
+    if override_refusal:
+        # The label is present but stayed shut; naming that first beats a
+        # generic uncovered refusal the operator cannot act on.
+        refusal = f"{override_refusal}; {refusal}"
     # The cap arm may already have FILED findings on the way here (the row
     # stayed uncovered on another conjunct): that side effect must ride the
     # receipt, never vanish behind the refusal it did not soften.
@@ -714,27 +856,150 @@ IMPOSSIBLE_REMEDIES = (
 )
 
 
-def rounds_since_last_pass(chain: list[dict]) -> int:
-    """Review rounds since the last pass on the chain, oldest-first.
+def _ts_after(a: str, b: str) -> bool:
+    """True iff ``a`` is strictly after ``b``, both RFC3339. Unparseable
+    input answers False, matching the Rust-side ``ts_after``: a round is
+    never counted on a timestamp that cannot be read. TypeError is caught
+    too: comparing an offset-naive timestamp against an offset-aware one
+    raises instead of answering, and the crash would take the whole
+    coverage verdict down with it."""
+    try:
+        from datetime import datetime
 
-    A round is a review VERDICT since the last pass; a pass resets the
-    counter. The declared ``review_round`` wins when present (the running max
-    since the reset); every event from before the field existed falls back to
-    counting verdicts. The Rust-side mirror is
+        return datetime.fromisoformat(a) > datetime.fromisoformat(b)
+    except (ValueError, TypeError):
+        return False
+
+
+def rounds_since_last_pass(
+    chain: list[dict],
+    reviews: Optional[list[dict]] = None,
+) -> int:
+    """Review rounds since the last pass, oldest-first.
+
+    A round is a review COMPLETION since the last pass, whatever its
+    verdict, on two evidence axes; a pass resets both. The chain axis
+    counts attestation verdicts (the declared ``review_round`` wins when
+    present, the running max since the reset; events from before the field
+    existed fall back to counting verdicts). The reviews axis, when a
+    payload is supplied, counts DISTINCT reviewed commits submitted
+    strictly after the newest pass - a GitHub-App reviewer's rounds leave
+    no attestation row anywhere, so they exist only as review objects, and
+    every fix moves the head, making one reviewed commit one round. No
+    author filter: the codex cloud connector posts its review objects
+    under the PR author's own login (measured live - 116 of 117 objects on
+    the spinning specimen), so an author exclusion deletes the round trace
+    on exactly that lane. Known bound, accepted: reply volume at ONE
+    commit is neutral, but replies landed on distinct never-reviewed heads
+    each count as a round. No discriminator exists in the review-object
+    data, and over-counting fires the cap on a worker already
+    push-replying without re-review, where the old under-count spun
+    forever. The answer is the MAX of the two axes, never the sum: a
+    healthy lane leaves both traces per round. The Rust-side mirror is
     ``loopcheck::rounds_since_last_pass``; the two are held equal by the
     shared corpus.
     """
     rounds = 0
+    last_pass_ts = ""
+    pass_ts_unreadable = False
     for event in chain:
         if event.get("verdict") == "pass":
             rounds = 0
+            last_pass_ts = str(event.get("ts") or "")
+            # A pass with no readable ts leaves nothing to filter the reviews
+            # axis by. Counting the whole review history there would fire the
+            # cap on a budget this very pass just defused, so the axis is
+            # dropped instead - the same bias as the read-failure arm below.
+            pass_ts_unreadable = not last_pass_ts
             continue
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
             rounds = max(rounds, declared)
         else:
             rounds += 1
-    return rounds
+    events_rounds = rounds
+    if reviews is None or pass_ts_unreadable:
+        return events_rounds
+    counted: set[str] = set()
+    for review in reviews:
+        state = review.get("state")
+        if not isinstance(state, str) or not state:
+            continue
+        commit = review.get("commit")
+        oid = commit.get("oid") if isinstance(commit, dict) else None
+        if not isinstance(oid, str) or not oid:
+            continue
+        submitted = review.get("submittedAt")
+        if not isinstance(submitted, str):
+            submitted = ""
+        if last_pass_ts and not _ts_after(submitted, last_pass_ts):
+            continue
+        counted.add(oid)
+    return max(events_rounds, len(counted))
+
+
+def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
+    """The PR's review objects for the round budget, or None on any read
+    failure.
+
+    The paginated REST read rides ``_internal_gh._rest_pages`` (the same
+    reader every other gate REST read uses, with its rate-limit-aware
+    failure classification) and the field mapping is the subset of
+    ``_internal_gh._coverage_reviews`` the counter reads. Each page call is
+    bounded at 30s like the Rust gate's stopgate timeout, so a STALLED gh
+    costs one timeout and then answers None rather than hanging the merge
+    verb. That is a per-call bound, not a whole-read one: ``_rest_pages``
+    walks up to 100 pages, so a read that keeps succeeding slowly is bounded
+    by the page cap, not by 30s. A read failure answers None: the round budget
+    then keeps its events-only answer rather than guessing - a cap that
+    fires on a broken read would decline review remainder the budget may
+    not have spent.
+    """
+    from fno.pr._internal_gh import _rest_pages
+    from fno.pr._proc import run
+    from fno.pr._rest import _repo_slug
+
+    def _bounded(cmd, **kwargs):
+        kwargs.setdefault("timeout", 30.0)
+        return run(cmd, **kwargs)
+
+    try:
+        slug = _repo_slug(repo, _bounded)
+        if not slug:
+            return None
+        # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
+        # _quota.delegate_environment(), which strips the quota proxy from
+        # PATH so the proxy's own delegate call does not recurse. That is
+        # right inside _internal_gh and wrong from here: this gate is a proxy
+        # CLIENT, and every sibling read in this module (_repo_slug just
+        # above, _pr_head_oid, _pr_author_login) is brokered. Stamping it
+        # here would spend the shared quota unmetered.
+        rows, _reason = _rest_pages(
+            f"repos/{slug}/pulls/{pr_number}/reviews",
+            "pull reviews",
+            cwd=repo,
+            runner=_bounded,
+        )
+        if rows is None:
+            return None
+        return [
+            {
+                "state": row.get("state") if isinstance(row.get("state"), str) else "",
+                "submittedAt": (
+                    row.get("submitted_at")
+                    if isinstance(row.get("submitted_at"), str)
+                    else ""
+                ),
+                "commit": {
+                    "oid": row.get("commit_id")
+                    if isinstance(row.get("commit_id"), str)
+                    else ""
+                },
+            }
+            for row in rows
+        ]
+    except Exception:  # noqa: BLE001 - an instrument failure never fires the cap
+        return None
 
 
 def resolved_max_rounds(repo: str) -> int:
@@ -828,11 +1093,13 @@ def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
     before the next round reports impossible. Zero remaining is still worth
     saying - the next round is the one that trips, and a worker who cannot
     see the budget cannot choose to stop."""
-    remaining = max_rounds - rounds
+    # One less than the raw difference: at rounds = max_rounds - 1 the NEXT
+    # round is the last the budget funds, so zero remain after it.
+    remaining = max_rounds - rounds - 1
     if remaining <= 0:
         return (
             f"{rounds}/{max_rounds} review rounds used; the next round "
-            "reports impossible"
+            "is the last the budget funds"
         )
     plural = "" if remaining == 1 else "s"
     return (

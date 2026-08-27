@@ -309,6 +309,7 @@ def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
     monkeypatch.setattr(
         _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
     )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "op")
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
@@ -319,6 +320,104 @@ def test_the_override_label_opens_the_gate_on_an_uncovered_pr(
     assert covered_head == HEAD
     assert note.startswith(_coverage_gate.OVERRIDE_NOTE_PREFIX)
     assert "jane" in note
+
+
+def test_an_override_applied_by_the_pr_author_is_refused(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The author check the approval path always had, on the one bypass
+    beside it. An agent that cannot merge can label its own PR; that is
+    reject-and-attest wearing a label. The refusal NAMES the author, so an
+    operator whose label was refused sees exactly why the valve stayed
+    shut."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "worker-login")
+    )
+    monkeypatch.setattr(
+        _coverage_gate, "_pr_author_login", lambda pr, repo: "worker-login"
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "worker-login" in refusal, "the refusal must name the author: " + refusal
+    assert "the PR author" in refusal
+    assert "cannot override its own review gate" in refusal
+
+
+def test_an_override_by_the_author_in_different_casing_is_refused(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """A GitHub login is case-insensitive. An exact-case compare would open
+    the valve for the author the moment the events feed and /pulls/{n}
+    disagree on casing, which is the one shape this check exists to stop."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "BllsHttng")
+    )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "bllshttng")
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "cannot override its own review gate" in refusal, refusal
+
+
+def test_an_override_with_an_unreadable_actor_fails_closed(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Label held, actor unreadable: the valve stays shut. An unreadable
+    actor is exactly the state a forger produces, and the approval path
+    already fails closed on the same ambiguity."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, None)
+    )
+    # The author read must never even matter: the actor alone is unreadable.
+    monkeypatch.setattr(
+        _coverage_gate,
+        "_pr_author_login",
+        lambda pr, repo: pytest.fail("no author read on an unreadable actor"),
+    )
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "labelling actor is unreadable" in refusal
+
+
+def test_an_override_with_an_unreadable_author_fails_closed(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Actor readable, author unreadable: the labeller cannot be proven to
+    differ from the author, so the valve refuses rather than guess."""
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(
+        _merge, "_code_review_attestation_required", lambda repo, pr_number=0: False
+    )
+    monkeypatch.setattr(
+        _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
+    )
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: None)
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "PR author is unreadable" in refusal
 
 
 def test_the_override_reaches_the_merge_verb_and_says_so(
@@ -339,6 +438,8 @@ def test_the_override_reaches_the_merge_verb_and_says_so(
     monkeypatch.setattr(
         _reviews, "_override_label_actor", lambda pr, repo, r: (True, "jane")
     )
+    # The valve now needs a labeller distinct from the author; name one.
+    monkeypatch.setattr(_coverage_gate, "_pr_author_login", lambda pr, repo: "op")
     fake = FakeRun(toplevel=str(tmp_path))
     monkeypatch.setattr(_merge, "run", fake)
     rc = _merge.run_merge(["42"], cwd=str(tmp_path))
@@ -1032,18 +1133,60 @@ def test_ac7_marker_exhausted_decline_exits_impossible(monkeypatch, tmp_path, ca
     assert "hooks/git-protection.py:302:security" in line
 
 
-def test_ac7_hp_two_rounds_refuse_three_say_how_many_remain(
+@pytest.mark.parametrize("max_rounds", [1, 2, 3, 5])
+def test_max_rounds_n_means_exactly_n_rounds(monkeypatch, tmp_path, max_rounds):
+    """The boundary tracks the CONFIGURED number, at four of them.
+
+    Set it to 3 and the third round is the last one; set it to 5 and the fifth
+    is. Pinning only max_rounds = 2 would leave the cap free to be hardcoded
+    to 2 somewhere and still pass, which is the exact shape a single-value
+    test cannot see.
+    """
+    monkeypatch.setattr(_coverage_gate, "resolved_max_rounds", lambda repo: max_rounds)
+    seen = {}
+    for n in (max_rounds - 1, max_rounds, max_rounds + 1):
+        if n < 1:
+            continue
+        _specimen_gates(monkeypatch)
+        _seed_soft_cap(tmp_path, rounds=n)
+        monkeypatch.setattr(
+            _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-cap01"]
+        )
+        state, _refusal, _head, note = _coverage_gate.coverage_verdict(
+            42, str(tmp_path), recompute=False
+        )
+        seen[n] = (state, note)
+
+    if max_rounds - 1 >= 1:
+        assert seen[max_rounds - 1][0] == _coverage_gate.REFUSED, (
+            f"one short of {max_rounds} must still be under the cap: "
+            f"{seen[max_rounds - 1]}"
+        )
+    assert seen[max_rounds][0] == _coverage_gate.COVERED, (
+        f"round {max_rounds} of {max_rounds} is the last the budget funds: "
+        f"{seen[max_rounds]}"
+    )
+    assert f"({max_rounds}/{max_rounds}" in seen[max_rounds][1], seen[max_rounds][1]
+    assert seen[max_rounds + 1][0] == _coverage_gate.COVERED, seen[max_rounds + 1]
+
+
+def test_ac7_hp_under_the_cap_refuses_and_says_how_many_remain(
     monkeypatch, tmp_path, capsys
 ):
-    """The same chain at two rounds: exit 3 with the budget named, not 5."""
+    """The same chain UNDER the cap: exit 3 with the budget named, not 5.
+
+    One round of a two-round maximum. This used to seed two rounds and still
+    expect a refusal, which only held because `max_rounds` was compared with
+    `>` and so meant three. Two means two, so the last fundable round here is
+    the next one."""
     _specimen_gates(monkeypatch)
-    _ac7_seed(tmp_path, rounds=2)
+    _ac7_seed(tmp_path, rounds=1)
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     cap = capsys.readouterr()
     line = (cap.err.strip().splitlines() or [""])[0]
     assert rc == _coverage_gate.REFUSED == 3
-    assert "2/2 review rounds used" in line
-    assert "the next round reports impossible" in line
+    assert "1/2 review rounds used" in line
+    assert "the next round is the last the budget funds" in line
 
 
 def test_ac7_impossible_refuses_the_merge_with_its_own_name(
@@ -1217,12 +1360,12 @@ def _soft_round(ts: str, head: str, dispositions=None):
 
 
 def _seed_soft_cap(tmp_path, rounds=3):
-    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
-    heads = [
-        "1111111111111111111111111111111111111111",
-        "2222222222222222222222222222222222222222",
-        FIXTURE_HEAD,
-    ]
+    # Generated, not a fixed list: the boundary test walks max_rounds up to 5,
+    # and a three-element table silently IndexErrors past three rather than
+    # saying the fixture ran out. The LAST round always lands on FIXTURE_HEAD,
+    # because the gate reads the newest round at the PR head.
+    stamps = [f"2026-08-25T{21 + (i // 2):02d}:{(i % 2) * 30:02d}:00Z" for i in range(rounds)]
+    heads = [f"{i + 1}" * 40 for i in range(rounds - 1)] + [FIXTURE_HEAD]
     (tmp_path / ".fno").mkdir(exist_ok=True)
     with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
         for i in range(rounds):
@@ -1316,10 +1459,13 @@ def test_cap_refuses_when_filing_fails(monkeypatch, tmp_path):
 
 
 def test_under_the_cap_a_soft_finding_still_blocks(monkeypatch, tmp_path):
-    """One review is the floor and the budget still bites: at two rounds the
-    same soft finding REFUSES rather than being filed."""
+    """One review is the floor and the budget still bites: UNDER the cap the
+    same soft finding REFUSES rather than being filed.
+
+    One round of a two-round maximum. Seeded at two this passed only under the
+    old `>` comparison, where a cap of 2 permitted a third round."""
     _specimen_gates(monkeypatch)
-    _seed_soft_cap(tmp_path, rounds=2)
+    _seed_soft_cap(tmp_path, rounds=1)
     monkeypatch.setattr(
         _coverage_gate,
         "file_findings_at_cap",
@@ -1523,11 +1669,20 @@ def test_xaecc_cap_files_the_remainder_and_covers_at_the_same_head(monkeypatch, 
     assert "filed at the round cap (3/2)" in note
 
 
-def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatch, tmp_path):
-    """Review finding 3: when the cap arm files the findings but the row is
-    uncovered on the no_local_pass conjunct, the gate keeps the sized
-    attestation refusal (never an emptied sentence) and the filed node rides
-    the note instead of vanishing."""
+def test_xaecc_r3_cap_filed_but_no_local_pass_is_waived_and_named(monkeypatch, tmp_path):
+    """The cap arm files the findings and the row is uncovered on the
+    no_local_pass conjunct: config REQUIRES a code-review attestation and only
+    a peer ever attested.
+
+    This case used to keep a sized refusal. It cannot: past the cap that
+    conjunct is unsatisfiable by construction, because the only way to satisfy
+    it is a code-review round the spent budget will not fund. That is the
+    unpassable-guard shape the round cap exists to end, and the operator's
+    ruling is two rounds maximum whatever the shape.
+
+    So the budget discharges - and the FACT is not lost. The waived conjunct
+    is named in the receipt beside the filed node, so a merge that happened
+    without the required reviewer's attestation stays legible afterward."""
     _specimen_gates(monkeypatch)
     monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
     stamps = ["2026-08-26T18:00:00Z", "2026-08-26T18:30:00Z", "2026-08-26T19:00:00Z"]
@@ -1554,7 +1709,279 @@ def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatc
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
-    assert state == _coverage_gate.REFUSED
-    assert refusal, "never an empty refusal sentence"
-    assert "required code-review has no head-pinned local pass" in refusal
+    assert state == _coverage_gate.COVERED, f"spent budget must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert covered_head, "a covered verdict must name the head it covers"
+    # The filed node still rides the note - unchanged from the refusal this
+    # replaces, and the reason the discharge is safe.
     assert "filed at the round cap (3/2)" in note, "the filed node rides the note"
+    # And the waiver is explicit about WHAT it waived, so the missing
+    # required-reviewer attestation is a recorded fact rather than a silence.
+    assert "review budget discharged (3/2 rounds)" in note, note
+    assert "waived at the cap: uncovered" in note, note
+    # The specific fact their sized refusal carried: config demanded a
+    # code-review attestation and none exists. Waived, but on the record.
+    assert "code-review attestation required by config" in note, note
+# --- rounds the attestation chain never saw: the GitHub review axis ---
+# The Python half of the shared corpus. The Rust half lives in
+# crates/fno-agents/tests/coverage_tiling.rs under the same case names, and
+# the two must answer identically: the counter gates the merge on this side
+# and the stop hook on that one.
+
+_CONNECTOR = "chatgpt-codex-connector[bot]"
+_PR_AUTHOR = "bllshttng"
+
+
+def _review_object(login, state, commit, submitted_at):
+    """One review object in the shape both gates read (gh pr view / REST,
+    normalized): author.login, state, commit.oid, submittedAt."""
+    return {
+        "author": {"login": login},
+        "state": state,
+        "commit": {"oid": commit},
+        "submittedAt": submitted_at,
+    }
+
+
+def test_round_budget_counts_rounds_that_only_github_review_objects_saw():
+    """The connector lane: three review rounds, every one ended with
+    findings, NO attestation exists anywhere. Each fix moved the head and
+    the connector reviewed the new head, so the rounds exist only as three
+    distinct reviewed commits. The chain alone answers 0 and the cap cannot
+    fire; with the payload it must answer 3."""
+    chain: list[dict] = []
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T15:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
+
+
+def test_round_budget_pass_resets_the_github_axis_too():
+    """A clean pass at 12:00 resets both axes: the connector review at 11:00
+    is a spent round, the two reviews after the pass are fresh rounds. The
+    answer is 2, never 3."""
+    chain = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass", "ts": "2026-08-26T12:00:00Z"},
+    ]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T15:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
+
+
+def test_round_budget_drops_the_github_axis_when_the_pass_has_no_ts():
+    """A pass with no readable ts leaves nothing to filter the reviews axis
+    by. Counting the whole review history there would fire the cap on a
+    budget this very pass just defused: the three pre-pass reviews below
+    would read as 3 spent rounds when the pass reset them to 0. The answer
+    is the events-only 0, and the positive marker is that exact number - an
+    unfiltered read would answer 3."""
+    chain = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass"},
+    ]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T09:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T09:30:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T09:45:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
+    # The same chain with a readable pass ts still counts the axis, so the
+    # guard above is narrow: it drops the axis, never the whole counter.
+    dated = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "pass", "ts": "2026-08-26T08:00:00Z"},
+    ]
+    assert _coverage_gate.rounds_since_last_pass(dated, reviews=reviews) == 3
+
+
+def test_round_budget_counts_review_objects_posted_under_the_pr_author_login():
+    """The measured specimen: the codex cloud connector posts its review
+    objects under the PR AUTHOR's own login - 116 of 117 objects on the
+    branch that spun, one burst per reviewed commit. An author filter
+    deletes the round trace on exactly that lane, so there is none: three
+    bursts at three distinct commits under the author login are three
+    rounds, and reply volume inside one burst is one round."""
+    reviews = [
+        _review_object(_PR_AUTHOR, "COMMENTED", "c1", "2026-08-26T11:00:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c1", "2026-08-26T11:05:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c2", "2026-08-26T12:00:00Z"),
+        _review_object(_PR_AUTHOR, "COMMENTED", "c3", "2026-08-26T13:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass([], reviews=reviews) == 3
+
+
+def test_round_budget_takes_the_max_not_the_sum_of_both_axes():
+    """A healthy lane leaves BOTH traces per round: a fail attestation and a
+    connector review of the same head. Two rounds, not four."""
+    chain = [{"verdict": "fail", "ts": "2026-08-26T10:00:00Z"}, {"verdict": "fail"}]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T11:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T12:00:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
+
+
+def test_round_budget_no_reviews_evidence_keeps_the_events_only_answer():
+    """No payload (the read failed, or the caller had none): behavior is
+    exactly the events-only answer."""
+    chain = [{"verdict": "fail"}, {"verdict": "fail"}]
+    assert _coverage_gate.rounds_since_last_pass(chain) == 2
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=None) == 2
+
+
+def test_round_budget_naive_pass_timestamp_never_crashes_the_gate():
+    """A pass row whose ts carries no offset, compared against a Z-suffixed
+    review submittedAt, used to raise TypeError out of rounds_since_last_pass
+    and crash the whole coverage verdict. The comparison must answer False
+    (not after), matching the Rust mirror's unparseable-ts answer."""
+    chain = [{"verdict": "pass", "ts": "2026-08-26T12:00:00"}]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T13:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T15:00:00Z"),
+    ]
+    # The pass's ts cannot be ordered against either review, so neither is
+    # "after" it: the axis answers 0 rather than raising.
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
+
+
+def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
+    """The helper rides the shared _rest_pages reader (page-per-call arrays)
+    and maps the three fields the counter reads; a failed read answers with
+    no payload so the budget keeps its events-only answer."""
+    from fno.pr._proc import Result
+
+    # Page one must be a FULL page (100 rows) or _rest_pages stops early.
+    first = [
+        {
+            "user": {"login": "bllshttng"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T11:00:00Z",
+            "commit_id": "c1",
+        },
+        {
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T12:00:00Z",
+            "commit_id": "c2",
+        },
+    ] + [
+        {
+            "user": {"login": "bllshttng"},
+            "state": "COMMENTED",
+            "submitted_at": "2026-08-26T12:30:00Z",
+            "commit_id": f"filler-{i}",
+        }
+        for i in range(98)
+    ]
+    pages = [
+        first,
+        [
+            {
+                "user": {"login": "chatgpt-codex-connector[bot]"},
+                "state": "APPROVED",
+                "submitted_at": "2026-08-26T13:00:00Z",
+                "commit_id": "c3",
+            }
+        ],
+    ]
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "pulls/42" in joined:
+            page = pages.pop(0)
+            return Result(0, json.dumps(page), "")
+        raise AssertionError(f"unexpected shell call: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", fake_run)
+    monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
+    reviews = _coverage_gate._pr_reviews(42, "/repo")
+    oids = [r["commit"]["oid"] for r in reviews]
+    assert oids[:2] == ["c1", "c2"] and oids[-1] == "c3" and len(oids) == 101
+    assert reviews[-1]["submittedAt"] == "2026-08-26T13:00:00Z"
+    assert "author" not in reviews[0], "no reader consumes author; do not map it"
+
+    # A failed read fails open to the events-only budget, never an exception.
+    def failing_run(cmd, **kwargs):
+        return Result(1, "", "boom")
+
+    monkeypatch.setattr("fno.pr._proc.run", failing_run)
+    assert _coverage_gate._pr_reviews(42, "/repo") is None
+
+
+def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tmp_path):
+    """The Python mirror of the spent-budget receipt: past the cap the
+    uncovered refusal must not teach the review verb (that instruction is
+    the loop this cap exists to bound) and must name the terminal act. The
+    render itself is asserted first so an unrendered refusal cannot pass
+    the absence checks."""
+    _specimen_gates(monkeypatch)
+    _seed_soft_cap(tmp_path, rounds=3)
+    # Overwrite the coverage row the seed wrote: this PR is UNCOVERED (the
+    # connector lane shape - no verdict ever counted), so after the soft
+    # findings are filed the refusal falls through to the spent-budget arm.
+    rows = []
+    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
+    heads = [
+        "1111111111111111111111111111111111111111",
+        "2222222222222222222222222222222222222222",
+        FIXTURE_HEAD,
+    ]
+    for i in range(3):
+        rows.append(json.dumps(_soft_round(stamps[i], heads[i])))
+    rows.append(
+        json.dumps(
+            {
+                "ts": "2026-08-25T22:01:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 42,
+                    "coverage": "uncovered",
+                    "review_state": "unreviewed",
+                    "reviewed_count": 0,
+                    "self_attested_count": 0,
+                    "head_sha": FIXTURE_HEAD,
+                    "verdicts": [],
+                },
+            }
+        )
+    )
+    (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(rows) + "\n")
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(
+        _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
+    )
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    # A SPENT budget discharges the review obligation; it does not fail it.
+    # `max_rounds = 2` means "this PR gets two rounds, then review is done".
+    # The old REFUSED here was a guard nothing could pass: every remedy that
+    # could clear it names a review verb, and running one spends a round
+    # already spent. That is what produced 12-round PRs against a cap of 2.
+    assert state == _coverage_gate.COVERED, f"spent budget must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert head, "a covered verdict must name the head it covers"
+
+    # The waiver is NAMED, never silent: a merge on a spent budget has to be
+    # legible afterward, and the note is the only place that record lives.
+    assert "review budget discharged (3/2 rounds)" in note, note
+    assert "config.review.max_rounds" in note, note
+
+    # file_findings_at_cap ran and created a real node. The remainder being
+    # FILED is what makes the discharge safe, so the node id must reach the
+    # receipt or the operator files the same finding twice.
+    assert "x-filed1" in note, "the filed node must reach the receipt: " + note
+    assert "filed at the round cap (3/2)" in note, note
+
+    # Unchanged from the refusal this replaces, and still the point: past the
+    # cap the gate must name NO review verb. That instruction is the loop the
+    # cap exists to bound.
+    for needle in ("/code-review", "/review", "/fno:review", "review verb"):
+        assert needle not in note, f"past-cap receipt names {needle}: {note}"
