@@ -137,11 +137,13 @@ def _build_resume_argv(
         # yolo one, and applying the bypass unconditionally would resume every
         # bounded worker with approvals off. That also contradicts the -c grant
         # spliced beside it, which exists only to widen a sandbox the bypass
-        # would remove. `sandbox_flag_resume` already owns this decision and
-        # returns nothing for the bounded case. Clearing the approval and
-        # hook-trust modals needs an operator opt-in this verb does not have
-        # yet, and hook trust additionally needs the installed-version gate
-        # that `mux_spawn` applies.
+        # would remove. The ASK lane makes this call correctly, in
+        # `sandbox_flag_resume`, because it is handed a known posture. Nothing
+        # calls it from here, and that is the gap, not an oversight to route
+        # around: this lane has no posture to hand it. Clearing the approval
+        # and hook-trust modals needs an operator opt-in this verb does not
+        # have yet, and hook trust additionally needs the installed-version
+        # gate that `mux_spawn` applies.
         place = ["--cd", cwd] if cwd else []
         return [argv[0], *grant, *place, *argv[1:]]
     return argv
