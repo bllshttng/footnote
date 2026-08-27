@@ -603,7 +603,7 @@ mod tests {
             "Python and packaged Rust contract copies diverged",
         );
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 9);
+        assert_eq!(contract.map_version, 10);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode"]
@@ -682,11 +682,16 @@ mod tests {
                 .unwrap(),
             ["opencode", "run", "--session", "ses_1"]
         );
-        assert!(contract
-            .render_session_argv("agy", "interactive_resume", Some("x"))
-            .unwrap_err()
-            .to_string()
-            .contains("unsupported"));
+        // agy's resume primitive, measured 2026-08-26 on 1.1.19 and 1.1.21:
+        // `agy --conversation <id>` from a fresh process quotes a token planted
+        // in an earlier turn (num_turns 2). The interactive row renders the
+        // same argv the headless_resume row records.
+        assert_eq!(
+            contract
+                .render_session_argv("agy", "interactive_resume", Some("cv-1"))
+                .unwrap(),
+            ["agy", "--conversation", "cv-1"]
+        );
     }
 
     #[test]
@@ -695,6 +700,16 @@ mod tests {
         let claude = contract.capabilities("claude").unwrap();
         let codex = contract.capabilities("codex").unwrap();
         let opencode = contract.capabilities("opencode").unwrap();
+        // The thread bit asserts fno's OWN driver for the harness (driver +
+        // unattended journey test), never the harness's resume primitive.
+        // agy and opencode both have measured-working primitives yet read
+        // false: agy has no driver, opencode's serve lane is launch-only
+        // (ask refuses, steering unbuilt). claude is the one journey-proven
+        // lane, and it must stay true so the false bits are not vacuous.
+        assert!(claude.thread);
+        assert!(!codex.thread);
+        assert!(!contract.capabilities("agy").unwrap().thread);
+        assert!(!opencode.thread);
         assert_eq!(claude.ready_marker, "live_prompt_box");
         assert_eq!(codex.ready_marker, "idle_prompt");
         assert_eq!(claude.send_keys_enter_delay_ms, 800);

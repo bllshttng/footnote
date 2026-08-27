@@ -1335,7 +1335,9 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // bg is claude + opencode: claude's detached `--bg` thread, opencode's
         // serve-hosted session (the arm above). codex/gemini/agy have no
         // detached-interactive substrate. Hard error pointing to headless;
-        // never a silent substrate swap.
+        // never a silent substrate swap. (The harness-capability `thread` bit
+        // is a separate claim - autonomous dispatch readiness - and opencode's
+        // reads false until steering ships; this interactive arm is unaffected.)
         (other, "bg") => {
             eprintln!(
                 "substrate 'bg' (detached interactive thread) is claude + opencode; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",

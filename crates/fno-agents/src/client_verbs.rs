@@ -1035,7 +1035,7 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
-        "codex" | "gemini" | "opencode" => Some("harness_session_id"),
+        "codex" | "gemini" | "agy" | "opencode" => Some("harness_session_id"),
         _ => None,
     }
 }
@@ -4244,6 +4244,7 @@ mod tests {
         assert_eq!(session_id_field("claude"), Some("short_id"));
         assert_eq!(session_id_field("codex"), Some("harness_session_id"));
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
+        assert_eq!(session_id_field("agy"), Some("harness_session_id"));
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
@@ -4270,7 +4271,15 @@ mod tests {
             build_resume_argv("opencode", "ses_1", None),
             Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
         );
-        assert_eq!(build_resume_argv("agy", "x", None), None);
+        // The measured primitive (fresh process quoting an earlier turn's
+        // token over `--conversation`, 2026-08-26): the argv renders, and a
+        // row carrying a canonical harness_session_id reaches it. No spawn
+        // lane records one yet, so `resume` on today's agy rows still stops
+        // at the missing-session-id refusal.
+        assert_eq!(
+            build_resume_argv("agy", "x", None),
+            Some(vec!["agy".into(), "--conversation".into(), "x".into()])
+        );
     }
 
     #[test]

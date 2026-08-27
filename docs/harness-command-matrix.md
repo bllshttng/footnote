@@ -13,10 +13,10 @@ What each harness fundamentally is, from fno's point of view:
 | | claude | codex | gemini | agy | opencode |
 |---|---|---|---|---|---|
 | Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless |
-| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | yes (a persistent session on a shared `opencode serve`, driven over HTTP) |
+| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) |
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
-| Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
-| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
+| Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) |
+| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
@@ -29,7 +29,7 @@ Known limitation: the agy seed receipt is unverified. Until action confirmation 
 
 ## The opencode thread serve lane
 
-`spawn --harness opencode --substrate thread` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted. `bg` remains a deprecated input alias for one release:
+`spawn --harness opencode --substrate thread` is the unattended opencode worker lane, and it is HTTP-driven rather than PTY-hosted. `bg` remains a deprecated input alias for one release. The lane is launch-only today. The harness-capability `thread` bit reads false. Autonomous dispatch resolves opencode to `headless`. An explicit interactive spawn still reaches this lane. When the steering lane below ships its own unattended journey test, the bit returns to true. That test must cover the bar in `docs/architecture/codex-thread-driver.md`:
 
 - fno-agents manages one shared `opencode serve` per agents home (state file `opencode-serve.json`, health-gated reuse). The serve starts with a generated `OPENCODE_CONFIG`. That config grants `permission."*" = "allow"`, the unattended posture other worker lanes get from their own bypass flag. An unanswered permission `ask` on a headless server is a hang, not a refusal.
 - The spawn mints a session with `POST /session?directory=<cwd>`, so one serve hosts workers across worktrees.
@@ -47,7 +47,7 @@ Run `fno agents dispatch capabilities <h> --json` to read one harness without di
 | claude | `permission_prompt`: `1` once, `2` always, `3` deny | `live_prompt_box` | separate Enter after 800 ms | `claude attach <short_id>` | `claude stop <short_id>` | `claude rm <short_id>` <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> |
 | codex | `approval_prompt`: `1` once, `2` always, `3` deny | `idle_prompt` | **unsupported until a successful pane-submit fixture is pinned** | `codex resume <thread_id>`. Headless: `codex exec resume <thread_id>` | registry no-op | remove the thread from `session_index.jsonl` |
 | gemini | unsupported | unsupported (deprecated lane) | unsupported | `gemini --resume <id>` | registry no-op | registry only |
-| agy | unsupported | trust prompt cleared by submit | separate submit after readiness | unsupported on the interactive CLI | registry no-op | registry only |
+| agy | unsupported | trust prompt cleared by submit | separate submit after readiness | `agy --conversation <id>` | registry no-op | registry only |
 | opencode | Known picker map: `Enter`, `Right Enter`, `Right Right Enter`. Automatic use requires a fingerprinted picker. | unsupported | unsupported | `opencode --session <ses_id>` | registry no-op | registry only |
 
 `ready` means that the configured manifest rule matched. A painted pane with no positive rule stays `live`. Claude and Codex use different readiness rules.
