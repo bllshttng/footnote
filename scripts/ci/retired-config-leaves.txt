@@ -1,0 +1,2 @@
+# Retired dotted config paths. Format: <path>|<disposition>|<replacement/remedy>
+review.github_apps|deleted|use one-shot review evidence
