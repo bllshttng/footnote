@@ -2770,7 +2770,7 @@ def test_reconcile_entries_share_key_schema(
 
 
 # ---------------------------------------------------------------------------
-# attach_agent, mux-aware branch — AC8-*
+# attach_agent, mux-aware branch - AC8-*
 # ---------------------------------------------------------------------------
 
 
@@ -2841,6 +2841,39 @@ def test_attach_with_no_mux_server_falls_through_inline(
     result = dispatch.attach_agent("worker-claude")
     assert result.exit_code == 0
     assert calls == ["7c5dcf5d"], "exit 24 must fall through to the inline attach"
+
+
+def test_attach_with_usage_exit_falls_through_inline(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A usage exit (2) never reached a server: malformed args, or a deployed
+    binary older than `mux thread` (version skew). Either way there is no
+    refusal to honor, so the inline attach runs exactly as before the branch."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="worker-claude", provider="claude", short_id="7c5dcf5d"),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.harnesses import claude as claude_mod
+
+    calls: list[str] = []
+
+    def fake_attach(short_id: str) -> int:
+        calls.append(short_id)
+        return 0
+
+    monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(2, stderr="fno mux: unknown verb"),
+    )
+
+    result = dispatch.attach_agent("worker-claude")
+    assert result.exit_code == 0
+    assert calls == ["7c5dcf5d"], "exit 2 must fall through to the inline attach"
 
 
 def test_attach_surfaces_a_mux_refusal_instead_of_double_attaching(

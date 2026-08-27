@@ -9702,7 +9702,14 @@ impl Core {
             if self.panes.contains_key(&pid) {
                 if let Some((sid, ti)) = self.session.find_pane(pid) {
                     let tid = self.session.squad(sid).expect("find_pane live").tabs[ti].id;
-                    if slot_row == key {
+                    // Same ROW, not same key: the TUI door keys the slot by the
+                    // attach id while `fno agents attach` keys it by the registry
+                    // name, and both doors advertise the same pane. Attach ids
+                    // are unique per bg session, so a slot keyed by this row's
+                    // attach id is this row whatever door the reach came from.
+                    let same_row =
+                        slot_row == key || row.attach_id.as_deref() == Some(slot_row.as_str());
+                    if same_row {
                         // Same row: "show me", never a toggle-close. Closing
                         // the pane is the ordinary close gesture. The slot
                         // was taken above; put it back - a focus is not a
@@ -9873,19 +9880,23 @@ impl Core {
             // CLI just saw.
             self.agents = rows;
         }
-        // A row already pane-hosted HERE has its viewport: answer with the
-        // location instead of opening a second one.
+        // A row already pane-hosted has its viewport: answer with the location
+        // instead of opening a second one. Another session's row is that
+        // server's to view - saying so beats the reach's "no such agent",
+        // which would lie about a row the registry knows (the inline attach
+        // this verb replaced attached it regardless of hosting session).
         let hosted = self.agents.iter().find(|a| {
-            (a.name == name || a.attach_id.as_deref() == Some(name))
-                && a.mux.as_ref().is_some_and(|(s, _)| s == &self.session_name)
+            (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some()
         });
         if let Some(a) = hosted {
-            let pane = a.mux.as_ref().expect("checked").1;
+            let (sess, pane) = a.mux.as_ref().expect("checked");
+            let where_at = if sess == &self.session_name {
+                "this session; focus it in the mux".to_string()
+            } else {
+                format!("session {sess}; focus it in that session's mux")
+            };
             let _ = reply.send(ServerMsg::Notice {
-                text: format!(
-                    "{} hosts pane {pane} in this session; focus it in the mux",
-                    a.name
-                ),
+                text: format!("{} hosts pane {pane} in {where_at}", a.name),
             });
             return;
         }
@@ -9931,7 +9942,16 @@ impl Core {
             }
         };
         let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
-        let landed = self.thread_pane.as_ref().is_some_and(|(k, _)| k == name);
+        // Row-aware, not key-aware: a focus on a slot keyed by the attach id
+        // (the TUI door) reached through the registry name (this door) leaves
+        // the slot keyed by the attach id - that is a landing, not a refusal.
+        let landed = self.thread_pane.as_ref().is_some_and(|(k, _)| {
+            k == name
+                || self
+                    .agents
+                    .iter()
+                    .any(|a| a.attach_id.as_deref() == Some(k) && a.name == name)
+        });
         let msg = match (landed, landing) {
             (true, Some(text)) => ServerMsg::Notice { text },
             (true, None) => ServerMsg::Notice {
@@ -19853,6 +19873,82 @@ mod tests {
             .iter()
             .any(|t| t.contains("already showing")));
         core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_same_row_through_the_other_door_is_a_focus() {
+        // The TUI door keys the slot by the attach id; `fno agents attach`
+        // keys it by the registry name. Same row, so "show me": no respawn,
+        // no repoint - reaching the row either way must never kill the viewer
+        // the operator may be typing into.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, mut rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, pid) = core.thread_pane.clone().unwrap();
+        let panes_after_open = core.panes.len();
+
+        core.command(client_id, thread_reach_cmd("target-a"));
+
+        assert_eq!(core.panes.len(), panes_after_open, "no respawn, no repoint");
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee1".to_string(), pid)),
+            "the slot keeps its original key and pane"
+        );
+        assert!(drain_notices(&mut rx)
+            .iter()
+            .any(|t| t.contains("already showing")));
+        core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_by_name_on_an_attach_id_slot_replies_a_landing() {
+        // The control door reaches by name while the slot is keyed by the
+        // attach id: the focus path emits no Err. A key-only `landed` check
+        // would turn that success into "no such agent".
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(9, thread_reach_cmd("deadbee1"));
+        let (_, pid) = core.thread_pane.clone().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+        core.thread_pane_ctl("target-a", None, tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("already showing"),
+                "the by-name reach on an attach-id slot is a focus: {text}"
+            ),
+            other => panic!("expected a Notice landing, got {other:?}"),
+        }
+        assert_eq!(core.thread_pane, Some(("deadbee1".to_string(), pid)));
+        core.reap_pane(pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_names_the_session_of_a_foreign_hosted_row() {
+        // A row pane-hosted in ANOTHER session is that server's to view: the
+        // reply names where it lives. "no such agent" would lie about a row
+        // the registry knows (and the inline attach this verb replaced
+        // attached it regardless of hosting session).
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let mut hosted = bg_row("far-row", "/tmp/seen", None);
+        hosted.mux = Some(("other-session".to_string(), 42));
+        let agents = vec![hosted];
+
+        core.thread_pane_ctl("far-row", Some(agents), tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("other-session") && text.contains("pane 42"),
+                "names the foreign session and pane: {text}"
+            ),
+            other => panic!("expected a Notice, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none(), "no thread pane minted");
     }
 
     #[test]

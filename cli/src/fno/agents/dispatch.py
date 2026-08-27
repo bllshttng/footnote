@@ -375,6 +375,10 @@ _DEFAULT_FOLLOWUP_TIMEOUT_SEC = 600.0
 # EXIT_NO_SERVER. On this code `attach_agent` falls through to the inline
 # path; every other non-zero exit is a server refusal it surfaces.
 _MUX_THREAD_NO_SERVER = 24
+# The Rust EXIT_USAGE (2): the verb never reached a server - malformed args,
+# or a deployed binary older than `mux thread` (version skew). Neither can be
+# a refusal about the agent, so it falls through to the inline path too.
+_MUX_THREAD_USAGE = 2
 
 # x-c393: how recent an inside_leg report must be for a worker to count as
 # "provably live" when a follow-up fails to route. Mirrors the Rust
@@ -5028,7 +5032,7 @@ def attach_agent(name: str) -> AttachResult:
     # (x-07c2) Mux-aware branch: with a live mux server this verb drives the
     # ONE dedicated thread pane and prints where it landed. The tier decides
     # what the pane runs, server-side (attach / peek --follow / the locate
-    # screen), so the verb serves every harness, not only claude. Exit 21 is
+    # screen), so the verb serves every harness, not only claude. Exit 24 is
     # "no live mux server": fall through to the inline path below unchanged.
     from fno.agents.mux_spawn import _run_mux
 
@@ -5051,7 +5055,10 @@ def attach_agent(name: str) -> AttachResult:
             provider=existing.harness or "claude",
             exit_code=0,
         )
-    if landed is not None and landed.returncode != _MUX_THREAD_NO_SERVER:
+    if landed is not None and landed.returncode not in (
+        _MUX_THREAD_NO_SERVER,
+        _MUX_THREAD_USAGE,
+    ):
         # The server answered with a refusal: surface it verbatim rather than
         # silently falling through to an attach it just refused.
         raise DispatchAskError(

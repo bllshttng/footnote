@@ -14691,12 +14691,13 @@ async fn selector_keys(
                     }
                     _ => None,
                 };
-                // Enter resolves the same row to the same picker via
-                // `agent_hit`/`apply_hit`, so the synthetic mission squad has to
-                // be excluded on BOTH paths or the virtual id leaks in through
-                // this one and `place_spawned_pane` cannot route it. Same reason
-                // the two no-op cases stay distinct: "no workspace" and "not
-                // attachable" are different problems to report.
+                // (x-07c2) Enter reaches the thread pane, so `p` is the
+                // picker's only door. The synthetic mission squad must still be
+                // excluded here (attach_dst_squads does it) or the virtual id
+                // leaks into the picker and `place_spawned_pane` cannot route
+                // it. Same reason the two no-op cases stay distinct: "no
+                // workspace" and "not attachable" are different problems to
+                // report.
                 let squads: Vec<u64> = view.attach_dst_squads();
                 match picked {
                     Some((id, owner)) if !squads.is_empty() => {

@@ -4104,7 +4104,14 @@ config_dir = "~/.claude-alt"
             .expect("recent_records body");
         let arms: std::collections::BTreeSet<&str> = body
             .lines()
-            .filter_map(|l| l.trim().strip_prefix("if agent == "))
+            .filter_map(|l| {
+                let l = l.trim();
+                // `if` or `elif`: a future arm written as `elif` must be
+                // collected too, or the mirror would stay green while the
+                // Follow set silently drifted - the exact drift this guards.
+                l.strip_prefix("if agent == ")
+                    .or_else(|| l.strip_prefix("elif agent == "))
+            })
             .map(|rest| rest.trim_end_matches(':'))
             .map(|rest| {
                 let r = rest.trim();
