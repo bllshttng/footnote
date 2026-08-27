@@ -1729,16 +1729,17 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
         // Declared per harness in the capability contract; this lane never
         // applied it. Hook trust is a separate axis with no contract key, and
         // footnote's own Stop hooks are what trip it.
-        if let Some(bypass) = crate::harness_capabilities::HarnessContract::packaged()
-            .ok()
-            .and_then(|c| {
-                c.capabilities(provider)
-                    .ok()
-                    .map(|caps| caps.permission_bypass.clone())
-            })
-        {
-            argv.extend(bypass);
-        }
+        //
+        // Fails CLOSED, with `?` rather than a swallowed `.ok()`: an omitted
+        // bypass reintroduces the exact approval modal this lane exists to
+        // clear, and unattended that is a hang. `None` here surfaces as the
+        // caller's named "resume contract is invalid" refusal, matching the
+        // identity render above and the Python twin, which raises rather than
+        // degrading. Silently shipping a shorter argv is the one outcome that
+        // must not happen.
+        let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
+        let caps = contract.capabilities(provider).ok()?;
+        argv.extend(caps.permission_bypass.clone());
         argv.push("--dangerously-bypass-hook-trust".into());
     }
     Some(argv)
