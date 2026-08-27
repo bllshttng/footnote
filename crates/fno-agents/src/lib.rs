@@ -89,6 +89,7 @@ pub mod paths;
 pub mod protocol;
 pub mod provider;
 pub mod readiness;
+pub mod reentry;
 pub mod roster_progress;
 pub mod run_outcome;
 pub mod run_state;

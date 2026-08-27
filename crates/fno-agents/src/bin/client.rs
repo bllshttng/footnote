@@ -114,6 +114,16 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
     }
 
+    // `reentry-plan` is the INTERNAL machine resolver behind every
+    // Claude re-entry door (x-d285): the Rust/Python attach+resume arms and
+    // the mux gestures consume its verdict instead of each rebuilding a
+    // provider argv. Matched with `matches!` (like `claim`/`detect`) so it
+    // stays out of the routable-verb parity sets - it is not an `fno agents`
+    // verb, and adding one needs the Python surface to grow with it.
+    if matches!(verb, "reentry-plan") {
+        return fno_agents::reentry::run_reentry_plan(&args[1..], &AgentsHome::from_env());
+    }
+
     if matches!(verb, "manifest-for-session") {
         return fno_agents::manifest_lookup::run_manifest_for_session(&args[1..]);
     }
