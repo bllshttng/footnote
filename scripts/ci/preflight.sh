@@ -743,9 +743,18 @@ acquire_lock() {
     if [[ -z "$holder_line" ]] && ! queue_has_waiters; then
         # No parsable holder: nothing proves this lock is live, but we still
         # refuse rather than steal (a holder killed between mkdir and its stamp
-        # looks identical to this). Name the path so the recovery is obvious.
+        # looks identical to this). Check before acting: removing the lockdir
+        # while a preflight IS running destroys its mutual exclusion and two
+        # preflights interleave. The loss is stated first because an agent
+        # executes remedy text literally.
         echo "preflight: lock held by an unidentified holder (no readable $LOCKDIR/holder)." >&2
-        echo "preflight: if no preflight is running, remove it: rm -rf '$LOCKDIR'" >&2
+        echo "preflight: check whether one is running first: a wait queue in" >&2
+        echo "  ${LOCKDIR}.queue.d means one is; for a process check, 'pgrep -fl preflight.sh'" >&2
+        echo "  and read what matched - a bash run of the script counts, an editor or grep" >&2
+        echo "  holding the path does not ('-f' substring-matches any argv naming it)." >&2
+        echo "preflight: only if none is running: removing '$LOCKDIR' LOSES the mutual" >&2
+        echo "  exclusion any running preflight still depends on (the dir holds only lock" >&2
+        echo "  state): rm -rf '$LOCKDIR'" >&2
         exit 3
     fi
     if [[ "$WAIT_TIMEOUT" -eq 0 ]]; then

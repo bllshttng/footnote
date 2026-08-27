@@ -1022,8 +1022,15 @@ def _couple_pr_watch(enabled: bool) -> None:
             # signal that the watcher did not actually stop.
             typer.echo(
                 "pr-watch: WARNING disable set but launchctl unload failed; the "
-                "agent may still be running. Run `fno do pr watch uninstall` or "
-                "`launchctl unload ~/Library/LaunchAgents/sh.fno.pr-watcher.plist`.",
+                "agent may still be running. Check whether it is "
+                "(`launchctl list | grep sh.fno.pr-watcher`), then retry the "
+                "unload: `launchctl unload "
+                "~/Library/LaunchAgents/sh.fno.pr-watcher.plist` "
+                "(or re-run this config set, which re-fires the unload). "
+                "`fno do pr watch uninstall` removes the watcher "
+                "entirely - nothing measured is lost (the watermark store "
+                "survives; `fno do pr watch install` restores it) - but run it "
+                "only when removal is the intent, not to silence this warning.",
                 file=sys.stderr,
             )
         else:

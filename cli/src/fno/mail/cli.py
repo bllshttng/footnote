@@ -4655,7 +4655,12 @@ def cmd_sent(
         lane = m.to_kind or "?"
         delivery = m.delivery or "durable"
         print(f"{m.id}  -> {m.to}  [{lane}/{delivery}]  {m.ts}  {state}")
-    print("\nto retract one: fno agents mail withdraw <id>")
+    print(
+        "\nunclaimed means the recipient never read it. Wake it first - "
+        "fno agents peek <recipient> to check, fno agents resume <recipient> "
+        "to wake (the wake lane delivers); withdraw one only when stale: "
+        "fno agents mail withdraw <id>"
+    )
 
 
 @mail_app.command("withdraw")
@@ -5543,7 +5548,8 @@ def cmd_notify_self() -> None:
             f"{len(unclaimed)} sent fno agents mail unclaimed (to {who}, >{ttl // 60}m): "
             "recipient has not picked it up; "
             "`fno agents mail sent --unclaimed` to see them, "
-            "`fno agents mail withdraw <id>` to retract one"
+            "`fno agents resume <recipient>` to wake one (the wake lane delivers), "
+            "`fno agents mail withdraw <id>` to retract one only when stale"
         )
 
     if not lines:

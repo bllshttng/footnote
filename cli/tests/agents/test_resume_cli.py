@@ -161,11 +161,11 @@ def test_agent_resumed_event_emitted_before_execvp() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AC2-ERR — missing cwd → exit 13 with cleanup hint
+# AC2-ERR — missing cwd → exit 13 with the handle-cost remedy
 # ---------------------------------------------------------------------------
 
 
-def test_missing_cwd_exits_13_with_rm_hint() -> None:
+def test_missing_cwd_exits_13_with_handle_remedy() -> None:
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -183,14 +183,15 @@ def test_missing_cwd_exits_13_with_rm_hint() -> None:
     )
     assert res.exit_code == 13
     assert "no recorded cwd" in res.stderr
-    assert "fno agents rm alpha" in res.stderr
+    assert "the row is the resume handle" in res.stderr
+    assert "fno agents adopt <id>" in res.stderr
 
 
 def test_claude_resume_refuses_a_stale_cwd_without_waking() -> None:
     """code-review finding: the claude branch skipped the cwd-reachability
     check every other harness gets, so a deleted worktree burned a full
     ~19s wake attempt before surfacing a confusing exit-16 instead of the
-    immediate, actionable exit-13 rm hint."""
+    immediate, actionable exit-13 handle-cost remedy."""
     from fno.agents.resume_cli import resume_logic
 
     entry = _FakeAgentEntry(
@@ -210,7 +211,8 @@ def test_claude_resume_refuses_a_stale_cwd_without_waking() -> None:
     )
     assert res.exit_code == 13
     assert "no longer reachable" in res.stderr
-    assert "fno agents rm alpha" in res.stderr
+    assert "the row is the resume handle" in res.stderr
+    assert "fno agents adopt <id>" in res.stderr
 
 
 def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
@@ -1055,7 +1057,7 @@ def test_print_command_uses_shlex_quote_for_special_chars() -> None:
     assert "'/tmp/~tilde-suffix'" in res.output
 
 
-def test_stale_cwd_exits_13_with_rm_hint() -> None:
+def test_stale_cwd_exits_13_with_handle_remedy() -> None:
     """sigma-review H2: missing cwd at chdir-time must NOT emit success.
 
     The real (default) cwd_checker -- os.path.isdir -- catches this stale
@@ -1085,7 +1087,8 @@ def test_stale_cwd_exits_13_with_rm_hint() -> None:
         execvp=None,
     )
     assert res.exit_code == 13
-    assert "fno agents rm alpha" in res.stderr
+    assert "the row is the resume handle" in res.stderr
+    assert "fno agents adopt <id>" in res.stderr
     # Critically: no agent_resumed event was emitted on the failure path.
     assert events_seen == []
 
@@ -1117,7 +1120,8 @@ def test_stale_cwd_that_passes_isdir_but_fails_chdir_still_exits_13() -> None:
         execvp=None,
     )
     assert res.exit_code == 13
-    assert "fno agents rm alpha" in res.stderr
+    assert "the row is the resume handle" in res.stderr
+    assert "fno agents adopt <id>" in res.stderr
     assert events_seen == []
 
 

@@ -774,11 +774,27 @@ def resume_logic(
     session_id = _session_id_for(entry)
 
     if not cwd:
+        if session_id:
+            return ResumeResult(
+                exit_code=13,
+                stderr=(
+                    f"fno agents resume: agent {name!r} has no recorded cwd. "
+                    "the row is the resume handle and still carries the session "
+                    "id: the harness itself can reach the session directly "
+                    "(e.g. claude --resume <id>). To re-drive it under fno, rm "
+                    "this row and `fno agents adopt <id>` rebinds a fresh one "
+                    "with a live cwd - that pair spends the recorded route "
+                    "bindings. rm alone just deletes the handle.\n"
+                ),
+            )
+        # Neither cwd nor session id: nothing to resume and nothing to
+        # rebind. Do not claim an id the row does not carry.
         return ResumeResult(
             exit_code=13,
             stderr=(
-                f"fno agents resume: agent {name!r} has no recorded cwd. "
-                f"Run `fno agents rm {name}` to clean up.\n"
+                f"fno agents resume: agent {name!r} has no recorded cwd and "
+                "no session id. The row holds nothing resumable; rm it and "
+                "re-spawn is the honest cleanup, and nothing is lost.\n"
             ),
         )
 
@@ -873,7 +889,12 @@ def resume_logic(
             exit_code=13,
             stderr=(
                 f"fno agents resume: cwd {cwd!r} for agent {name!r} is no "
-                f"longer reachable. Run `fno agents rm {name}` to clean up.\n"
+                "longer reachable. Check whether the path "
+                "is recoverable first (renamed worktree base, unmounted volume): "
+                "the row is the resume handle. To re-drive the session under fno from a "
+                f"live cwd, rm this row and `fno agents adopt <id>` rebinds a "
+                "fresh one; rm alone deletes the handle and the session "
+                "binding with it. rm is for a path that is gone for good.\n"
             ),
         )
 
@@ -927,8 +948,12 @@ def resume_logic(
                 exit_code=13,
                 stderr=(
                     f"fno agents resume: cwd {cwd!r} for agent {name!r} "
-                    f"is no longer reachable: {exc}. Run "
-                    f"`fno agents rm {name}` to clean up.\n"
+                    f"is no longer reachable: {exc}. "
+                    "the row is the resume handle; rm deletes it and the "
+                    "session binding with it. "
+                    "rm is for a path that is gone for good - recover the "
+                    "path (or rm, then `fno agents adopt <id>` to rebind "
+                    "from a live cwd) instead of clearing this refusal.\n"
                 ),
             )
 

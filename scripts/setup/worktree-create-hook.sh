@@ -98,10 +98,19 @@ echo "=== Creating worktree at $WORKTREE_PATH ===" >&2
 echo "    Branch: $BRANCH_NAME" >&2
 
 # Refuse if the destination already exists; recreating would corrupt the
-# existing worktree's git state. Operator can `git worktree remove` first.
+# existing worktree's git state. Reuse or archive it; removal is last and
+# states its loss first (an agent executes remedy text literally).
 if [ -e "$WORKTREE_PATH" ]; then
     echo "Worktree path already exists: $WORKTREE_PATH" >&2
-    echo "Remove it first: git worktree remove --force $WORKTREE_PATH" >&2
+    echo "Reuse it instead: if 'git worktree list' names it, it is enterable as-is." >&2
+    echo "(If that listing does NOT name it, the path is leftover non-worktree"
+    echo "content - inspect it by hand before touching it.)" >&2
+    echo "Or archive it with the guarded remover, which checks dirty/unpushed/"
+    echo "live-session first (fno repos ship it; run from the repo root):"
+    echo "  scripts/setup/archive-worktree.sh $WORKTREE_PATH" >&2
+    echo "Only if removal is certain: uncommitted changes and unpushed commits in that" >&2
+    echo "worktree are LOST - then run plain 'git worktree remove $WORKTREE_PATH'" >&2
+    echo "(no --force: git itself refuses a dirty tree, and that refusal is a save)." >&2
     exit 1
 fi
 
@@ -119,9 +128,10 @@ fi
 # Recreate-after-remove flow: `git worktree remove` does NOT delete the
 # branch. Without this check, re-running `claude --worktree X` after
 # removing X fails with "a branch named worktree-X already exists". Attach
-# to the existing branch; user can `git branch -D` to start fresh.
+# to the existing branch; user can rename the old one aside to start fresh.
 if git show-ref --verify --quiet "refs/heads/$BRANCH_NAME"; then
-    echo "    Branch $BRANCH_NAME already exists; attaching (git branch -D $BRANCH_NAME to start fresh)" >&2
+    echo "    Branch $BRANCH_NAME already exists; attaching (to start fresh instead, rename" >&2
+    echo "    the old branch out of the way: git branch -m $BRANCH_NAME $BRANCH_NAME-old)" >&2
     git worktree add "$WORKTREE_PATH" "$BRANCH_NAME" >&2
 else
     git worktree add -b "$BRANCH_NAME" "$WORKTREE_PATH" "$BASE" >&2

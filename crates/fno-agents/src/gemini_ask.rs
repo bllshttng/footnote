@@ -981,7 +981,8 @@ pub fn dispatch_gemini_once(
         // AC2-FR: loud warning, row stays visible, exit 0 still.
         // Python: f"... teardown failed for {name!r} ..." -> py_repr.
         format!(
-            "fno agents spawn: warning: teardown failed for {} (gemini/{}): {}. Peer leaked -- clean up via 'fno agents rm {}'\n",
+            "fno agents spawn: warning: teardown failed for {} (gemini/{}): {}. Peer leaked -- \
+             the exchange finished, so nothing is lost; clean up the dead row via 'fno agents rm {}'\n",
             py_repr(name),
             session_or_short_id,
             e,
@@ -1201,7 +1202,9 @@ fn dispatch_resume(
             return AskOutcome::err(
                 format!(
                     "registry entry {:?} has no gemini_session_id; cannot follow up. \
-                     Remove with 'fno agents rm {}' and recreate.",
+                     Recover the id from the harness if it can still name the session; \
+                     'fno agents rm {}' drops the row and its route bindings, so run it to \
+                     recreate, not to clear this refusal.",
                     name, name
                 ),
                 11,
