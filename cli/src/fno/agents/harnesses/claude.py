@@ -945,6 +945,7 @@ def _build_envelope(
     from_name: str = "fno",
     *,
     token: Optional[str] = None,
+    allow_envelope_body: bool = False,
 ) -> bytes:
     """Render the BG8 cross-session envelope as UTF-8 bytes + trailing newline.
 
@@ -964,14 +965,16 @@ def _build_envelope(
     input before we get here, but a defensive escape keeps the envelope safe in
     every code path.
 
-    A body that IS one complete fno_mail envelope rides verbatim: the drain
-    delivers already-wrapped bus mail, and wrapping it again would nest
-    envelopes. The passthrough demands exactly one open and one close tag with
-    the open tag first, so a forged tag prepended, nested, or appended still
-    falls through to the wrapper, whose ``refuse_if_forged`` raises. Text after
-    the close tag (the record trailer the drain stamps beneath the envelope)
-    stays outside the envelope's authority and rides as ordinary trailing
-    prose.
+    A body that IS one complete fno_mail envelope rides verbatim, and only
+    when the caller set ``allow_envelope_body``: the drain delivers
+    already-wrapped bus mail (trusted by construction - ``wrap_fno_mail``
+    refused any inner tag at write time), and wrapping it again would nest
+    envelopes. Every other caller always wraps, so a hand-typed envelope from
+    the ask lane hits the wrapper's ``refuse_if_forged`` no matter how well
+    formed it looks. The shape check still demands exactly one open and one
+    close tag with the open tag first; text after the close tag (the record
+    trailer the drain stamps beneath the envelope) stays outside the
+    envelope's authority and rides as ordinary trailing prose.
     """
 
     def _rides_verbatim(body: str) -> bool:
@@ -981,7 +984,7 @@ def _build_envelope(
             and body.count("</fno_mail>") == 1
         )
 
-    if _rides_verbatim(message):
+    if allow_envelope_body and _rides_verbatim(message):
         content = message
     else:
         content = build_cross_session_container(message, from_name)
@@ -1014,6 +1017,7 @@ def send_to_session(
     from_name: str = "fno",
     *,
     token: Optional[str] = None,
+    allow_envelope_body: bool = False,
 ) -> str:
     """Single-shot send of the BG8 envelope over the messaging socket.
 
@@ -1035,8 +1039,14 @@ def send_to_session(
     token only when the caller runs inside that recipient (a drain hook). A
     foreign sender silently passing its own token would authenticate as
     nobody; each caller decides which side of that line it is on (x-c995).
+
+    ``allow_envelope_body`` is the verbatim lane for the drain (bodies fno
+    itself wrapped): without it, any body carrying an fno_mail tag raises
+    through the wrapper's forged-envelope guard.
     """
-    payload = _build_envelope(content, from_name, token=token)
+    payload = _build_envelope(
+        content, from_name, token=token, allow_envelope_body=allow_envelope_body
+    )
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(_SEND_SOCKET_TIMEOUT_SEC)
     primary_exc: Optional[BaseException] = None

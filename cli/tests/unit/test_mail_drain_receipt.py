@@ -508,8 +508,16 @@ def test_drain_delivers_to_socket_when_socket_env_present(monkeypatch):
 
     sent: list[dict] = []
 
-    def _stub_send(sock_path, content, from_name=None, token=None):
-        sent.append({"sock": sock_path, "content": content, "from": from_name, "token": token})
+    def _stub_send(sock_path, content, from_name=None, token=None, allow_envelope_body=False):
+        sent.append(
+            {
+                "sock": sock_path,
+                "content": content,
+                "from": from_name,
+                "token": token,
+                "verbatim": allow_envelope_body,
+            }
+        )
         return "written"
 
     monkeypatch.setattr(claude_mod, "send_to_session", _stub_send)
@@ -523,4 +531,5 @@ def test_drain_delivers_to_socket_when_socket_env_present(monkeypatch):
     assert sent[0]["sock"] == "/tmp/fake.sock"
     assert "hello socket" in sent[0]["content"]
     assert sent[0]["token"] == "fake-token"
+    assert sent[0]["verbatim"] is True
     assert not out.written

@@ -5263,9 +5263,21 @@ def cmd_drain_self(
             from fno.agents.harnesses.claude import send_to_session
 
             for m in to_print:
-                send_to_session(sock_path, _render_body(m), from_name=m.from_, token=token)
+                send_to_session(
+                    sock_path,
+                    _render_body(m),
+                    from_name=m.from_,
+                    token=token,
+                    allow_envelope_body=True,
+                )
             for m in job_to_print:
-                send_to_session(sock_path, _render_body(m), from_name=m.from_, token=token)
+                send_to_session(
+                    sock_path,
+                    _render_body(m),
+                    from_name=m.from_,
+                    token=token,
+                    allow_envelope_body=True,
+                )
             delivered_to_socket = True
         except Exception:
             delivered_to_socket = False
