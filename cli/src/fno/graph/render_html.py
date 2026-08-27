@@ -365,14 +365,14 @@ def _dashboard_status_class(status: object) -> str:
 _DASHBOARD_CSS = """\
 :root {
   --bg:#f6f5f9; --surface:#ffffff; --surface-2:#efedf4; --line:#dedae8;
-  --ink:#1a1922; --ink-2:#4a4757; --muted:#75718a;
-  --accent:#a85c1c; --accent-soft:#f2e4d4;
-  --ready:#b8720c; --ready-bg:#fdf0dc;
+  --ink:#1a1922; --ink-2:#4a4757; --muted:#6b677e;
+  --accent:#9a5418; --accent-soft:#f2e4d4;
+  --ready:#9a5f08; --ready-bg:#fdf0dc;
   --done:#1f7358; --done-bg:#dff0e8;
   --idea:#5c5975; --idea-bg:#e9e7f0;
   --sup:#7c5c8c; --sup-bg:#efe6f3;
   --prog:#3b5bbf; --prog-bg:#e2e7f8;
-  --defer:#6c6a78; --defer-bg:#e6e4ec;
+  --defer:#62606e; --defer-bg:#e6e4ec;
   --blocked:#a8331f; --blocked-bg:#f8e2de;
   --bug:#a8331f; --bug-bg:#f8e2de;
   --epic:#7c5c8c; --epic-bg:#efe6f3;
@@ -487,6 +487,9 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
 /* A public board emits an empty .rid, so the fixed id column would be a
    permanent empty gutter on every row. Collapse it where there are no ids. */
 body[data-local="false"] .rmain { grid-template-columns:0 1fr auto auto }
+/* 104px = 15px padding + the 78px id column + its 11px gap. Collapse the
+   column and the indent it was aligned to has to go with it. */
+body[data-local="false"] .detail { padding-left:15px }
 .rid { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:12.5px; color:var(--muted) }
 .rt { line-height:1.4; min-width:0; overflow-wrap:anywhere }
 .row[data-s=superseded] .rt { color:var(--muted); text-decoration:line-through;
@@ -711,7 +714,11 @@ _DASHBOARD_JS = """\
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + '</span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
-      + nodeLink(n.pa) + (n.pt_ ? ' ' + esc(n.pt_) : ' <span class=\"st stale\">not found</span>') + '</div></div>';
+      // No not-found marker here: pt_ is empty BOTH when the parent is absent
+      // from the graph and when it simply has no title, so a marker keyed on it
+      // calls a live parent missing. nodeLink already declines to link an id
+      // with no row, which is the honest signal available at this point.
+      + nodeLink(n.pa) + (n.pt_ ? ' ' + esc(n.pt_) : '') + '</div></div>';
     h += relatedBlock('kin', 'Children', n.ki);
     h += relatedBlock('', 'Dependencies', n.bb);
     h += relatedBlock('kin', 'Unblocks', n.su);
@@ -740,7 +747,7 @@ _DASHBOARD_JS = """\
       sec.appendChild(head);
       var built = rows.map(function (n) { var row = document.createElement('div'); row.className = 'row';
         if (n.id) row.id = n.id;
-        row.dataset.project = n.project; row.dataset.status = n.s; row.dataset.s = n.s;
+        row.dataset.project = n.project; row.dataset.s = n.s;
         if (n.ty) row.dataset.type = n.ty;
         var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button'; main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
@@ -753,11 +760,15 @@ _DASHBOARD_JS = """\
       sections.push({ el:sec, bar:bar, count:count, rows:built });
     });
   }
-  // A revealed row survives re-render. Clearing is-hidden directly does not:
-  // render() reassigns className wholesale, so the next keystroke in the search
-  // box hid the very row an anchor had just jumped to.
+  // An anchored row is exempt from the filter for exactly one render: its own.
+  // Clearing is-hidden directly did not survive, because render() reassigns
+  // className wholesale. Keeping the exemption FOREVER is the opposite defect:
+  // the row then counts toward every later group header and total, which is the
+  // same lie the visible-count invariant below exists to prevent. So the next
+  // render the reader causes drops it, and the row obeys the filter again.
   var revealed = null;
-  function render() {
+  function render(keepReveal) {
+    if (!keepReveal) revealed = null;
     var shown = 0;
     sections.forEach(function (sec) {
       var vis = [];
@@ -786,9 +797,12 @@ _DASHBOARD_JS = """\
     var id = (location.hash || '').slice(1);
     if (!id) return;
     var row = document.getElementById(id);
-    if (!row) return;
+    // Only a ROW is a reveal target. `#board` and the control ids also resolve,
+    // and expanding whatever .rmain they happen to contain is not what the
+    // reader asked for.
+    if (!row || !row.classList.contains('row')) return;
     revealed = id;
-    render();
+    render(true);
     var sec = row.closest('.group');
     if (sec) { sec.classList.remove('is-hidden'); sec.dataset.open = 'true'; }
     var main = row.querySelector('.rmain');
@@ -1035,7 +1049,11 @@ def _dashboard_static_html(
             project = html.escape(str(row.get("project") or ""), quote=True)
             node_id = html.escape(str(row.get("id") or ""), quote=True) if local else ""
             parts.append(
-                f'<div class="row" data-project="{project}" data-status="{html.escape(str(row.get("s") or ""), quote=True)}">'
+                f'<div class="row" data-project="{project}" '
+                # `data-s` is what the de-emphasis rules read; the scripted
+                # builder sets it and the static half did not, so closed work
+                # rendered at full weight until the script replaced the board.
+                f'data-s="{html.escape(str(row.get("s") or ""), quote=True)}">'
                 f'<div class="rmain"><span class="rid">{node_id}</span>'
                 f'<span class="rt">{html.escape(str(row.get("t") or ""))}</span>'
                 f'<span class="meta"><span class="pill {_dashboard_status_class(row.get("s"))}">'
@@ -1090,10 +1108,15 @@ def _dashboard_html(
     if local:
         scope_note = "live \u00b7 re-rendered on every graph mutation"
         opens_note = "Opens on the live board. "
+        # Description, blockers and the plan link are added under `if local:`
+        # in _dashboard_rows. Promising them on a public board sends a reader
+        # to a detail pane holding only the status their pill already showed.
+        detail_note = "Click any row for its description, blockers and plan link."
     else:
         scope_note = "snapshot \u00b7 rendered when published"
         # roadmap opens with `done` pressed, so it does not open on live work.
         opens_note = "" if projection == "roadmap" else "Opens on open work. "
+        detail_note = "Click any row for its status and dates."
     # Built outside the f-string: an escape inside an f-string EXPRESSION
     # is Python 3.12+, and this package targets 3.11.
     status_legend = " \u00b7 ".join(_DASHBOARD_STATUS_ORDER)
@@ -1133,8 +1156,7 @@ def _dashboard_html(
         '<p class="lede">Every open node, plus recently closed work for context. '
         f'<b id="totalCount">{len(rows)}</b> nodes. {opens_note}'
         '<b>Plan, unfinished</b> is the real queue: every node with a plan that has '
-        'not shipped. Set <b>from</b> to a date to narrow the window. Click any row '
-        'for its description, blockers and plan link.</p></header>'
+        f'not shipped. Set <b>from</b> to a date to narrow the window. {detail_note}</p></header>'
         '<div class="stats" id="stats"></div><div class="controls">'
         '<input type="search" id="q" placeholder="Search title, id, or description\u2026" aria-label="Search nodes">'
         '<div class="chips" id="statusChips" role="group" aria-label="Filter by status"></div>'

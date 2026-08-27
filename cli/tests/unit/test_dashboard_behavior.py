@@ -237,12 +237,30 @@ def test_an_anchor_only_links_an_id_that_has_a_row(tmp_path: Path):
     assert "ab-11000002" in detail, "it must still be NAMED, just not linked"
 
 
-def test_a_revealed_row_survives_the_next_render(tmp_path: Path):
-    """The reveal bug only appears on the SECOND render.
+def test_an_anchor_reveals_a_row_the_active_filter_hides(tmp_path: Path):
+    """A link can name a row the current filter hides. An anchor to a hidden
+    element scrolls nowhere, so the jump has to reveal its target."""
+    entries = [
+        _entry("ab-12000001", project="web", title="alpha target"),
+        _entry("ab-12000002", project="fno", title="zulu other"),
+    ]
+    out = _run(
+        tmp_path,
+        entries,
+        BOARD_QUERY="?project=fno",
+        BOARD_HASH="#ab-12000001",
+    )
+    assert out["revealedVisible"] is True, (
+        "the anchored row stayed hidden, so the jump lands on nothing"
+    )
 
-    revealHash cleared is-hidden directly, and render() reassigns className
-    wholesale, so the next keystroke in the search box hid the very row the
-    anchor had just jumped to.
+
+def test_the_reveal_exemption_is_dropped_on_the_next_reader_action(tmp_path: Path):
+    """The exemption lasts exactly one render: its own.
+
+    Holding it forever is the opposite defect. The row then counts toward every
+    later group header and total, which is the same lie the visible-count
+    invariant exists to prevent, and no action short of a reload clears it.
     """
     entries = [
         _entry("ab-12000001", title="alpha target"),
@@ -254,9 +272,12 @@ def test_a_revealed_row_survives_the_next_render(tmp_path: Path):
         BOARD_HASH="#ab-12000001",
         BOARD_ACTION="search:zulu",
     )
-    assert out["after"]["revealedVisible"] is True, (
-        "the anchored row disappeared once a filter re-rendered the board"
+    assert out["after"]["visibleRows"] == 1, (
+        f"a pinned row inflated the count: {out['after']['visibleRows']} visible "
+        "when only one row matches the query"
     )
+    assert out["after"]["revealedVisible"] is False
+    assert out["after"]["shown"].startswith("1 "), out["after"]["shown"]
 
 
 def test_the_stat_tiles_carry_their_status(tmp_path: Path):

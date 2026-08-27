@@ -720,3 +720,54 @@ def test_the_live_claim_is_keyed_on_local_not_on_projection(tmp_path: Path):
     assert "snapshot" not in local.split("</header>")[0]
     assert "snapshot" in public.split("</header>")[0]
     assert "re-rendered on every graph mutation" not in public
+
+
+def test_the_light_palette_meets_wcag_aa_on_small_text():
+    """Every pill, chip and badge on this board is 10.5px to 12.5px, so 4.5:1
+    is the bar for all of them.
+
+    The port shipped four pairs below it: ready 3.43, accent 3.99, muted 4.03
+    and deferred 4.20. Every status chip is pressed on first paint, so the
+    failing state was the board's default rather than an edge case.
+    """
+    import re
+
+    from fno.graph.render_html import _DASHBOARD_CSS
+
+    def _lum(value: str) -> float:
+        h = value.lstrip("#")
+        parts = []
+        for i in (0, 2, 4):
+            c = int(h[i : i + 2], 16) / 255
+            parts.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+    def _ratio(fg: str, bg: str) -> float:
+        a, b = _lum(fg), _lum(bg)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+    light = _DASHBOARD_CSS.split(":root {", 1)[1].split("}", 1)[0]
+    tok = dict(re.findall(r"(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6})", light))
+
+    pairs = [
+        ("--ready", "--ready-bg"),
+        ("--done", "--done-bg"),
+        ("--idea", "--idea-bg"),
+        ("--sup", "--sup-bg"),
+        ("--prog", "--prog-bg"),
+        ("--defer", "--defer-bg"),
+        ("--blocked", "--blocked-bg"),
+        ("--bug", "--bug-bg"),
+        ("--epic", "--epic-bg"),
+        ("--accent", "--accent-soft"),
+        ("--muted", "--surface-2"),
+        ("--ink-2", "--surface-2"),
+        ("--muted", "--surface"),
+    ]
+    failures = []
+    for fg, bg in pairs:
+        assert fg in tok and bg in tok, f"{fg} or {bg} vanished from the palette"
+        got = _ratio(tok[fg], tok[bg])
+        if got < 4.5:
+            failures.append(f"{fg} on {bg} = {got:.2f}")
+    assert not failures, "below 4.5:1 on small text: " + ", ".join(failures)

@@ -150,6 +150,11 @@ const api = {
     pressed: b.getAttribute("aria-pressed"),
   })),
   statClasses: byId.get("stats").children.map((d) => d.className),
+  // Whether the row named by location.hash is on screen right now.
+  revealedVisible: process.env.BOARD_HASH
+    ? !(byId.get(process.env.BOARD_HASH.replace(/^#/, "")) || { classList: { contains: () => true } })
+        .classList.contains("is-hidden")
+    : null,
   rowHtml: rows.map((r) => ({
     id: r.id,
     type: r.dataset.type,
