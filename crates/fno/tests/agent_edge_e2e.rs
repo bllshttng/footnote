@@ -498,3 +498,89 @@ fn agent_edge_inject_vs_typing_interlock() {
     client.detach();
     kill_server(&scratch);
 }
+
+/// x-2f03 end-to-end: N live claude sessions in the daemon roster (the real
+/// bare-list shape `claude agents --json` emits) render as N sideline rows at
+/// an attached client; terminal-catalog sessions (state done/stopped/failed)
+/// do not render - roster presence means attachable. The harness isolates
+/// `FNO_CLAUDE_DAEMON_DIR` to `<scratch>/iso-daemon`, so planting the fixture
+/// there IS the live roster the server's reader polls; the hermetic registry
+/// stays empty, so every live roster session must surface as a watch-only
+/// foreign row (attach_id set, pane_id None) - no registry row to own or
+/// suppress it.
+#[test]
+fn agent_edge_bare_list_roster_renders_every_live_session() {
+    let raw = include_str!("testdata/roster-bare-list.json");
+    let items: serde_json::Value = serde_json::from_str(raw).unwrap();
+    let items = items.as_array().unwrap();
+    let terminal = |v: &serde_json::Value| {
+        v["state"]
+            .as_str()
+            .is_some_and(fno::agents_view::is_terminal_state)
+    };
+    let live: Vec<&serde_json::Value> = items.iter().filter(|v| !terminal(v)).collect();
+    let n = live.len();
+    assert!(
+        n < items.len(),
+        "capture must carry terminal items to prove they skip"
+    );
+    let expected: Vec<(String, String)> = live
+        .iter()
+        .map(|v| {
+            let sid = v["sessionId"].as_str().unwrap();
+            (
+                v["name"].as_str().unwrap().to_string(),
+                sid.split('-').next().unwrap().to_string(),
+            )
+        })
+        .collect();
+
+    let scratch = Scratch::new("agent_edge_bare_list_roster");
+    let dir = scratch.home_cwd();
+
+    // Plant the roster BEFORE the server boots: the reader's first tick then
+    // parses the bare list from the start.
+    let daemon_dir = scratch.0.join("iso-daemon");
+    std::fs::create_dir_all(&daemon_dir).unwrap();
+    std::fs::write(daemon_dir.join("roster.json"), raw).unwrap();
+
+    // Boot the hermetic server (and a keeper pane so the session outlives
+    // the attach).
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", &dir, "--", "/bin/sh", "-c", "sleep 300"],
+    );
+    assert!(
+        run.status.success(),
+        "run stderr: {:?}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+
+    let mut client = FakeClient::attach(&scratch.main_sock(), 30, 100, &dir);
+
+    // The marker: N sessions in the roster -> exactly N watch-only sideline
+    // rows, each attachable under its own short id. Scoped to DEFAULT-account
+    // rows (account: None): the planted iso-daemon roster is the default
+    // daemon dir, while isolated-account rosters are a separate union source
+    // (the host's real config can name one - x-c914 - and the harness does
+    // not sandbox the PWD config candidate).
+    let is_default_roster = |r: &AgentRow| r.attach_id.is_some() && r.account.is_none();
+    let rows = wait_agents(&mut client, 15, "N roster session rows", |a| {
+        a.iter().filter(|r| is_default_roster(r)).count() == n
+    });
+    let roster_rows: Vec<&AgentRow> = rows.iter().filter(|r| is_default_roster(r)).collect();
+    assert_eq!(roster_rows.len(), n, "one row per roster session");
+    for r in &roster_rows {
+        assert_eq!(r.pane_id, None, "roster sessions are watch-only rows");
+        assert!(!r.exited, "a roster-listed session is live/attachable");
+    }
+    let got: std::collections::BTreeSet<(String, String)> = roster_rows
+        .iter()
+        .map(|r| (r.name.clone(), r.attach_id.clone().unwrap_or_default()))
+        .collect();
+    let want: std::collections::BTreeSet<(String, String)> = expected.into_iter().collect();
+    assert_eq!(got, want, "names and attach ids key off the capture");
+
+    client.detach();
+    kill_server(&scratch);
+}

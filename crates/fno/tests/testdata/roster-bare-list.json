@@ -1,0 +1,157 @@
+[
+  {
+    "id": "8d0263b5",
+    "cwd": "/tmp/roster/00",
+    "kind": "background",
+    "startedAt": 1786904698534,
+    "sessionId": "8d0263b5-aaaa-bbbb-cccc-000000000000",
+    "name": "roster-session-00",
+    "state": "blocked"
+  },
+  {
+    "id": "36867b83",
+    "cwd": "/tmp/roster/01",
+    "kind": "background",
+    "startedAt": 1787164431622,
+    "sessionId": "36867b83-aaaa-bbbb-cccc-000000000001",
+    "name": "roster-session-01",
+    "state": "blocked"
+  },
+  {
+    "id": "12718be7",
+    "cwd": "/tmp/roster/02",
+    "kind": "background",
+    "startedAt": 1787769733348,
+    "sessionId": "12718be7-aaaa-bbbb-cccc-000000000002",
+    "name": "roster-session-02",
+    "state": "blocked"
+  },
+  {
+    "id": "e93330e9",
+    "cwd": "/tmp/roster/03",
+    "kind": "background",
+    "startedAt": 1787773272348,
+    "sessionId": "e93330e9-aaaa-bbbb-cccc-000000000003",
+    "name": "roster-session-03",
+    "state": "blocked"
+  },
+  {
+    "id": "20fcd111",
+    "cwd": "/tmp/roster/04",
+    "kind": "background",
+    "startedAt": 1787773584340,
+    "sessionId": "20fcd111-aaaa-bbbb-cccc-000000000004",
+    "name": "roster-session-04",
+    "state": "blocked"
+  },
+  {
+    "pid": 44528,
+    "id": "4fd7e07b",
+    "cwd": "/tmp/roster/05",
+    "kind": "background",
+    "startedAt": 1787803747963,
+    "sessionId": "4fd7e07b-aaaa-bbbb-cccc-000000000005",
+    "name": "roster-session-05",
+    "status": "idle",
+    "state": "blocked"
+  },
+  {
+    "pid": 62055,
+    "id": "119e3c52",
+    "cwd": "/tmp/roster/06",
+    "kind": "background",
+    "startedAt": 1787803771411,
+    "sessionId": "119e3c52-aaaa-bbbb-cccc-000000000006",
+    "name": "roster-session-06",
+    "status": "idle",
+    "state": "done"
+  },
+  {
+    "pid": 99111,
+    "id": "71d30b9c",
+    "cwd": "/tmp/roster/07",
+    "kind": "background",
+    "startedAt": 1787803807817,
+    "sessionId": "71d30b9c-aaaa-bbbb-cccc-000000000007",
+    "name": "roster-session-07",
+    "status": "busy",
+    "state": "working"
+  },
+  {
+    "pid": 864,
+    "id": "07aadf9f",
+    "cwd": "/tmp/roster/08",
+    "kind": "background",
+    "startedAt": 1787803825895,
+    "sessionId": "07aadf9f-aaaa-bbbb-cccc-000000000008",
+    "name": "roster-session-08",
+    "status": "idle",
+    "state": "done"
+  },
+  {
+    "pid": 61123,
+    "id": "7420e8f7",
+    "cwd": "/tmp/roster/09",
+    "kind": "background",
+    "startedAt": 1787804431678,
+    "sessionId": "7420e8f7-aaaa-bbbb-cccc-000000000009",
+    "name": "roster-session-09",
+    "status": "idle",
+    "state": "done"
+  },
+  {
+    "pid": 62195,
+    "id": "9df7bb4d",
+    "cwd": "/tmp/roster/10",
+    "kind": "background",
+    "startedAt": 1787804577109,
+    "sessionId": "9df7bb4d-aaaa-bbbb-cccc-000000000010",
+    "name": "roster-session-10",
+    "status": "busy",
+    "state": "working"
+  },
+  {
+    "pid": 82222,
+    "id": "a09dd5bb",
+    "cwd": "/tmp/roster/11",
+    "kind": "background",
+    "startedAt": 1787804606197,
+    "sessionId": "a09dd5bb-aaaa-bbbb-cccc-000000000011",
+    "name": "roster-session-11",
+    "status": "idle",
+    "state": "working"
+  },
+  {
+    "pid": 90977,
+    "id": "2597380c",
+    "cwd": "/tmp/roster/12",
+    "kind": "background",
+    "startedAt": 1787804776660,
+    "sessionId": "2597380c-aaaa-bbbb-cccc-000000000012",
+    "name": "roster-session-12",
+    "status": "busy",
+    "state": "working"
+  },
+  {
+    "pid": 22390,
+    "id": "0d76bd99",
+    "cwd": "/tmp/roster/13",
+    "kind": "background",
+    "startedAt": 1787804799546,
+    "sessionId": "0d76bd99-aaaa-bbbb-cccc-000000000013",
+    "name": "roster-session-13",
+    "status": "idle",
+    "state": "working"
+  },
+  {
+    "pid": 30179,
+    "id": "57ad6094",
+    "cwd": "/tmp/roster/14",
+    "kind": "background",
+    "startedAt": 1787804889340,
+    "sessionId": "57ad6094-aaaa-bbbb-cccc-000000000014",
+    "name": "roster-session-14",
+    "status": "busy",
+    "state": "working"
+  }
+]
