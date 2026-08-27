@@ -4099,6 +4099,10 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             }
         });
     }
+    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
+    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
+    // event without both, which is how a thread worker could lose its only
+    // resume fallback before the row is reaped.
     let _ = ctx.emitter.emit(
         "agent_spawned",
         &json!({
@@ -4122,6 +4126,14 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             "lane": "thread",
         }),
     )
+}
+
+/// A Codex thread row startup recovery may auto-resume: it needs a full
+/// durable identity AND a status that was non-terminal when the daemon died.
+/// `handle_stop` marks a stopped thread `Exited`; resurrecting that row on the
+/// next daemon start would silently undo `fno agents stop`.
+fn codex_thread_recovery_candidate(entry: &RegistryEntry) -> bool {
+    codex_thread_resume_identity(entry).ok().flatten().is_some() && is_non_terminal(entry.status)
 }
 
 async fn ensure_codex_thread_handle(
@@ -4168,11 +4180,7 @@ fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
             }
         };
         for entry in registry.entries {
-            if codex_thread_resume_identity(&entry)
-                .ok()
-                .flatten()
-                .is_none()
-            {
+            if !codex_thread_recovery_candidate(&entry) {
                 continue;
             }
             match ensure_codex_thread_handle(&ctx, &entry).await {
@@ -12008,6 +12016,29 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         row.cwd.clear();
         let error = codex_thread_resume_identity(&row).unwrap_err();
         assert!(error.contains("cwd"), "error: {error}");
+    }
+
+    #[test]
+    fn recovery_skips_stopped_codex_thread_rows() {
+        let mut row = rentry("codex-thread-stopped", AgentStatus::Exited, None);
+        row.harness = Some("codex".into());
+        row.legacy_provider.clear();
+        row.short_id.clear();
+        row.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        row.harness_session_id = Some("019f0000-0000-7000-8000-000000000009".into());
+        row.codex_session_id = row.harness_session_id.clone();
+        row.cwd = "/tmp/codex-thread-worktree".into();
+
+        // The identity is complete, so resume WOULD be possible; the Exited
+        // status from `fno agents stop` is what must veto the resurrection.
+        assert!(codex_thread_resume_identity(&row).ok().flatten().is_some());
+        assert!(!codex_thread_recovery_candidate(&row));
+
+        row.status = AgentStatus::Live;
+        assert!(codex_thread_recovery_candidate(&row));
+
+        row.status = AgentStatus::PermanentDead;
+        assert!(!codex_thread_recovery_candidate(&row));
     }
 
     #[test]
