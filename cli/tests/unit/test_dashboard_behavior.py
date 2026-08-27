@@ -304,3 +304,27 @@ def test_a_status_outside_the_vocabulary_still_renders_a_chip(tmp_path: Path):
     assert "background:" in block, (
         "the neutral chip base is gone; every unmodified pill renders as bare text"
     )
+
+
+def test_a_graph_value_named_after_an_object_member_is_inert(tmp_path: Path):
+    """TYPE_CLASSES and TERMINAL are keyed on values the GRAPH supplies.
+
+    On a plain object, a type named `constructor` inherits Object.prototype's
+    member and puts a function in a class attribute; a child status named
+    `toString` counts as terminal and silently shifts a parent's rollup.
+    """
+    entries = [
+        _entry("ab-15000001", title="Hostile type", type="constructor"),
+        _entry("ab-15000002", title="Parent", type="epic"),
+        _entry("ab-15000003", title="Odd child", status="toString",
+               parent="ab-15000002"),
+    ]
+    out = _run(tmp_path, entries, BOARD_ACTION="expand:ab-15000002")
+    html = "".join(r["html"] for r in out["rowHtml"])
+
+    assert "function" not in html.lower(), (
+        "an Object.prototype member reached a class attribute"
+    )
+    assert "native code" not in html.lower()
+    # The child is not terminal, so the parent reads 1 of 1 still open.
+    assert "1/1" in out["detail"] or "1/1" in html, out["detail"][:400]

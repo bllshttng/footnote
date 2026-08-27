@@ -617,7 +617,10 @@ _DASHBOARD_JS = """\
   var projectNames = []; NODES.forEach(function (n) { if (projectNames.indexOf(n.project) < 0) projectNames.push(n.project); });
   var UNSCOPED = DATA.unscoped_label;
   var COLORS = DATA.status_colors || {};
-  var TYPE_CLASSES = DATA.type_classes || {};
+  // Null-prototype: these are keyed on GRAPH values, so a type or status
+  // named `constructor` or `toString` would otherwise inherit an Object
+  // member and put a function in a class attribute.
+  var TYPE_CLASSES = Object.assign(Object.create(null), DATA.type_classes || {});
   var TYPE_FALLBACK = DATA.type_fallback;
   var UNBADGED = DATA.unbadged_type;
   // feature is the overwhelming majority, so it gets no badge; badging it
@@ -674,7 +677,7 @@ _DASHBOARD_JS = """\
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
     return true;
   }
-  var TERMINAL = { done:1, superseded:1 };
+  var TERMINAL = Object.assign(Object.create(null), { done:1, superseded:1 });
   // A parent's rollup, in the same stacked-bar language the group headers use.
   // Reusing .tw rather than authoring a second progress idiom.
   function kidBar(n) {
