@@ -45,7 +45,12 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     monkeypatch.setattr(advance, "_canonical_root", lambda: canonical)
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
 
-    calls: dict = {"worktrees": [], "worktree_roots": [], "spawns": []}
+    calls: dict = {
+        "worktrees": [],
+        "worktree_roots": [],
+        "spawns": [],
+        "spawn_options": [],
+    }
 
     def fake_ensure(node_id, *, canonical_root, harness="claude"):
         wt = tmp_path / "wt" / node_id
@@ -56,6 +61,11 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
 
     def fake_spawn(node_id, cwd, slug, model=None, provider=None, **kwargs):
         calls["spawns"].append((node_id, cwd, slug))
+        calls["spawn_options"].append({
+            "model": model,
+            "provider": provider,
+            **kwargs,
+        })
         if spawn is not None:
             return spawn(node_id)
         return f"short-{node_id}"
@@ -257,6 +267,79 @@ def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
 
     assert result.exit_code == exit_code
     assert "n-a" in result.output if receipts else result.output.strip() == "[]"
+
+
+def test_dispatch_lanes_forwards_vendor_and_model_on_claude_harness(
+    tmp_path, monkeypatch
+):
+    ready = _nodes(("n-a", "code"))
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    advance.dispatch_lanes(
+        1,
+        project_root=tmp_path,
+        claims_root=tmp_path / "claims",
+        model="glm-5.3-flash[1m]",
+        harness="claude",
+        vendor="zai",
+    )
+
+    options = calls["spawn_options"][0]
+    assert options["provider"] == "claude"
+    assert options["harness"] == "claude"
+    assert options["vendor"] == "zai"
+    assert options["model"] == "glm-5.3-flash[1m]"
+
+
+def test_spawn_worker_forwards_vendor_in_spawn_argv(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"short_id":"abcd1234"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(advance.subprocess, "run", fake_run)
+
+    advance._spawn_worker(
+        "n-a",
+        str(tmp_path),
+        "n-a",
+        model="glm-5.3-flash[1m]",
+        provider="claude",
+        harness="claude",
+        vendor="zai",
+    )
+
+    assert captured["cmd"][captured["cmd"].index("--provider") + 1] == "zai"
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "glm-5.3-flash[1m]"
+
+
+def test_dispatch_lanes_refuses_harness_name_on_vendor_axis(monkeypatch):
+    called = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
+
+    result = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--provider", "codex", "--max", "1"]
+    )
+
+    assert result.exit_code == 2
+    assert (
+        "--provider names the model VENDOR axis; 'codex' is a HARNESS. "
+        "Use -H/--harness codex."
+    ) in result.output
+    assert called is False
 
 
 def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monkeypatch):

@@ -1204,6 +1204,7 @@ def _spawn_worker(
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    vendor: Optional[str] = None,
     harness: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
@@ -1328,6 +1329,8 @@ def _spawn_worker(
         *_subprocess_util.fno_py_cmd(),
         "agents", "spawn", "--harness", prov, "--substrate", substrate,
     ]
+    if vendor:
+        cmd += ["--provider", vendor]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -1719,12 +1722,13 @@ def dispatch_lanes(
     events_path: Optional[Path] = None,
     claims_root: Optional[Path] = None,
     model: Optional[str] = None,
-    provider: Optional[str] = None,
+    harness: Optional[str] = None,
+    vendor: Optional[str] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
 
-    A dispatch-time ``model``/``provider`` applies to every lane spawned this run
-    and outranks each node's own annotation (Locked Decision 1).
+    Dispatch-time ``model``/``harness``/``vendor`` values apply to every lane
+    spawned this run and outrank each node's own annotation (Locked Decision 1).
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -1817,9 +1821,9 @@ def dispatch_lanes(
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
         try:
-            eff_provider = provider if provider is not None else node.get("provider")
+            eff_harness = harness if harness is not None else node.get("provider")
             resolved_model = _route_resolve.node_model(
-                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+                node, explicit=model, provider=eff_harness, resolve_difficulty=False
             )
             # The grid must decide BEFORE the worktree is placed: placement is
             # harness-keyed (claude-native vs external base), so it has to agree
@@ -1829,9 +1833,9 @@ def dispatch_lanes(
             # spawn seam, and a capacity change in between could land the worker
             # on a harness the worktree was not keyed for.
             lane_grid_harness, lane_grid_model = _grid_lane_for(
-                node, model=resolved_model, provider=eff_provider
+                node, model=resolved_model, provider=eff_harness
             )
-            lane_placement_harness = _lane_harness(lane_grid_harness or eff_provider)
+            lane_placement_harness = _lane_harness(lane_grid_harness or eff_harness)
             worktree = _ensure_lane_worktree(
                 node_id,
                 canonical_root=root,
@@ -1849,7 +1853,8 @@ def dispatch_lanes(
                 str(worktree),
                 slug,
                 model=lane_grid_model or resolved_model,
-                provider=lane_grid_harness or eff_provider,
+                provider=lane_grid_harness or eff_harness,
+                vendor=vendor,
                 # The placement value unconditionally: a grid pick is always a
                 # fixed point of _lane_harness today, and if that ever stops
                 # holding, the raw pick would reopen the split this pins shut.
