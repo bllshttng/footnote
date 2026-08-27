@@ -6385,8 +6385,9 @@ async fn handle_rm_with(
         let roster_known = claude_agents.as_ref().is_some_and(|snap| snap.is_known());
         let detail = if entry.harness_name() != "claude" {
             format!(
-                "agent {name} is still live. Stop it with `fno agents stop {name}`, or pass \
-                 --force."
+                "agent {name} is still live. Stop it with `fno agents stop {name}`; rm \
+                 proceeds on its own once the row is gone. Forcing it through orphans a \
+                 live process and spends the row's resume handle."
             )
         } else if harness_row_id.is_none() {
             // claude_row_provably_absent short-circuits to `false` (not
@@ -6398,7 +6399,8 @@ async fn handle_rm_with(
             format!(
                 "agent {name} is still live, but it has no resolvable harness row id, so \
                  its presence in `claude agents --json --all` cannot be checked. Stop it \
-                 with `fno agents stop {name}`, or pass --force."
+                 with `fno agents stop {name}`; rm proceeds on its own once the row is \
+                 gone. Forcing it through spends the resume handle the row still holds."
             )
         } else if roster_known {
             format!(
@@ -6412,7 +6414,9 @@ async fn handle_rm_with(
             format!(
                 "agent {name} is still live, and its harness row {row}'s presence in \
                  `claude agents --json --all` could not be confirmed (the roster read \
-                 failed). Retry once the roster is readable, or pass --force."
+                 failed). Retry once the roster is readable: rm re-reads it and proceeds \
+                 on its own when the row is provably gone. Forcing it through spends the \
+                 resume handle on unverified evidence."
             )
         };
         return Response::err(req.id, ErrorCode::Busy, detail);
@@ -8975,6 +8979,18 @@ mod tests {
         .await;
 
         assert!(response.error().is_some());
+        {
+            // Positive markers (x-d19e): the unprovable case names the retry,
+            // states what forcing costs, and offers no override flag.
+            let message = &response.error().unwrap().message;
+            assert!(
+                message.contains("Retry once the roster is readable"),
+                "{}",
+                message
+            );
+            assert!(message.contains("resume handle"), "{}", message);
+            assert!(!message.contains("--force"), "{}", message);
+        }
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
@@ -9021,6 +9037,19 @@ mod tests {
         let message = &response.error().unwrap().message;
         assert!(message.contains("claude agents --json --all"));
         assert!(message.contains("fno agents stop"));
+        // Specimen guard (x-d19e): this branch is the landed bar - safe verb,
+        // self-proceeding command, and the hand-teardown cost named. A rewrite
+        // that drops any of the three must fail here, not in a king's reign.
+        assert!(
+            message.contains("rm proceeds on its own"),
+            "{}",
+            message
+        );
+        assert!(
+            message.contains("spends the resume handle"),
+            "{}",
+            message
+        );
         // This refusal used to offer `claude stop <row>` then `claude rm <row>`
         // as a by-hand alternative, and this test required it. Ruling
         // d-1900e419 retired that pair: the harness row IS the resume handle,
@@ -9032,6 +9061,62 @@ mod tests {
         assert!(!message.contains("claude rm bbbb8888"));
         assert!(!message.contains("--force"));
         assert!(!message.contains("-F"));
+        assert_eq!(
+            state::load_registry(&home.registry_json())
+                .unwrap()
+                .entries
+                .len(),
+            1
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test]
+    async fn rm_refusal_on_a_claude_row_without_a_row_id_names_stop_not_force() {
+        // x-d19e: the no-row-id arm cannot check the roster, but the refusal
+        // still owes the reader the safe verb and the cost of forcing through,
+        // never the override flag itself.
+        let home = short_home("rmnorowid");
+        // short_id empty AND session id empty (a pid carries the handle
+        // invariant instead): claude_row_id answers None, which is the arm
+        // where the roster can never be consulted.
+        let mut row = ask_row("idless-live", Some("2020-01-01T00:00:00Z"));
+        row.harness = Some("claude".into());
+        row.harness_session_id = None;
+        row.pid = Some(4242);
+        row.pid_start_time = Some(123456);
+        row.status = AgentStatus::Live;
+        state::update_registry(&home.registry_json(), |registry| registry.entries.push(row))
+            .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let request = Request::new(1, "agent.rm", json!({"name": "idless-live"}));
+
+        let response = handle_rm_with(
+            &ctx,
+            &request,
+            &|| {
+                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
+            },
+            &|_| panic!("an unresolvable row must not reach claude rm"),
+            &|_, _| panic!("an unresolvable row must not reach mux kill"),
+            &|_, _| PaneProbe::Unknown,
+        )
+        .await;
+
+        let message = &response.error().expect("still live must refuse").message;
+        assert!(message.contains("no resolvable harness row id"), "{}", message);
+        assert!(
+            message.contains("fno agents stop idless-live"),
+            "{}",
+            message
+        );
+        assert!(
+            message.contains("rm proceeds on its own"),
+            "{}",
+            message
+        );
+        assert!(message.contains("resume handle"), "{}", message);
+        assert!(!message.contains("--force"), "{}", message);
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
@@ -9193,6 +9278,19 @@ mod tests {
 
         let error = response.error().expect("a stored-live row must be refused");
         assert!(error.message.contains("still live"), "{}", error.message);
+        // Positive markers (x-d19e): the refusal names the safe verb and the
+        // cost of forcing past it; the override lives in --help, never here.
+        assert!(
+            error.message.contains("fno agents stop maybe-pane-worker"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("resume handle"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
@@ -9231,6 +9329,18 @@ mod tests {
 
         let error = response.error().expect("a stored-live row must be refused");
         assert!(error.message.contains("still live"), "{}", error.message);
+        // Positive markers (x-d19e): same contract as the probe-unknown arm.
+        assert!(
+            error.message.contains("fno agents stop live-pane-worker"),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("resume handle"),
+            "{}",
+            error.message
+        );
+        assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
                 .unwrap()
