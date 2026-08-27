@@ -1570,7 +1570,6 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "cwd": node_cwd,
         "priority": spec["priority"],
         "blocks_everything": blocks_everything,
-        "difficulty": difficulty,
         "difficulty_history": [],
         "domain": "code",
         "blocked_by": spec["deps"],
@@ -1604,7 +1603,11 @@ def _build_intake_node(spec: dict, entries: list[dict]) -> dict:
         "mission_slug": mission_slug,
         "mission_from_msg_id": mission_from_msg_id,
     }
+    # A bandless plan leaves the key ABSENT, the shape write_canonical_difficulty
+    # and the birth paths agree on. A present None reads as a clearable mirror
+    # to the plan projector, which then deletes a band the doc authored later.
     if difficulty is not None:
+        node["difficulty"] = difficulty
         # The one append shape every difficulty writer uses (x-baef): a
         # hand-rolled birth entry here would drift from the helper the
         # claim, update, and migration lanes all share.

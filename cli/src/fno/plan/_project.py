@@ -51,12 +51,19 @@ LIST_MIRROR_KEYS: frozenset[str] = frozenset({"blocked_by", "tags"})
 # stale doc mirror", not "skip" - otherwise the doc keeps the old parent/size
 # after the graph dropped it. parent_slug is tied to parent: the converger sets
 # it to None whenever parent is null/dangling so it clears in lockstep.
-CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "difficulty", "parent", "parent_slug"})
+CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
+
+# difficulty is NOT clearable by a None: a bandless row is born with the key
+# absent or (pre-fix rows, still on disk) present-and-None, and neither is an
+# operator's decision. The doc authors the band at blueprint time, so a None
+# here must never delete it. The one explicit clear, `update --difficulty
+# null`, names the key through ``clear_keys`` instead.
 
 
 def project_node_to_plan(
     node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False,
     force_status_off_terminal: bool = False,
+    clear_keys: frozenset[str] = frozenset(),
 ) -> bool:
     """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
 
@@ -94,6 +101,14 @@ def project_node_to_plan(
 
     changed = False
     for key in (*MIRROR_KEYS, "type") if mirror_type else MIRROR_KEYS:
+        if key in clear_keys:
+            # Explicit clear: the graph row may not carry the key at all (a
+            # null clear on a bandless row leaves it absent), so this runs
+            # before the presence check.
+            if key in fields:
+                del fields[key]
+                changed = True
+            continue
         if key not in node:
             continue
         value = node[key]
@@ -219,6 +234,7 @@ def project_graph_nodes(
     *,
     mirror_type_for: str | None = None,
     force_status_off_terminal_for: str | None = None,
+    clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> int:
     """Project each named node's mirror fields onto its linked plan.
 
@@ -292,6 +308,11 @@ def project_graph_nodes(
                 augmented, p,
                 mirror_type=(nid == mirror_type_for),
                 force_status_off_terminal=(nid == force_status_off_terminal_for),
+                clear_keys=(
+                    clear_keys_for[1]
+                    if clear_keys_for and nid == clear_keys_for[0]
+                    else frozenset()
+                ),
             ):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort

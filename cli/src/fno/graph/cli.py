@@ -3998,6 +3998,7 @@ def cmd_update(
         or priority is not None
         or project is not None
         or type_ is not None
+        or difficulty is not None
         or has_blocker_edit
         or plan_path is not None
         or size is not None
@@ -4017,6 +4018,13 @@ def cmd_update(
             # `type == "epic"` view drops a node the graph is rolling up. Scoped
             # to this id - the repaint fan-out must not carry it to siblings.
             mirror_type_for=(projected_node[0]["id"] if type_ is not None else None),
+            # An explicit `--difficulty null` is the ONE clear the projector
+            # honors for that key; a graph None on its own never deletes it.
+            clear_keys_for=(
+                (projected_node[0]["id"], frozenset({"difficulty"}))
+                if difficulty is not None and difficulty.lower() == "null"
+                else None
+            ),
         )
 
 
@@ -8316,6 +8324,7 @@ def _project_plans_from_graph(
     *,
     mirror_type_for: str | None = None,
     force_status_off_terminal_for: str | None = None,
+    clear_keys_for: tuple[str, frozenset[str]] | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
@@ -8349,6 +8358,7 @@ def _project_plans_from_graph(
         ids,
         mirror_type_for=mirror_type_for,
         force_status_off_terminal_for=force_status_off_terminal_for,
+        clear_keys_for=clear_keys_for,
     )
 
 

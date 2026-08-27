@@ -79,9 +79,20 @@ def test_empty_blocked_by_clears_stale_mirror(tmp_path):
     assert fields["blocked_by"] == []
 
 
-def test_none_difficulty_clears_stale_mirror(tmp_path):
+def test_none_difficulty_never_deletes_the_doc_band(tmp_path):
+    """A graph None is a bandless birth (absent, or a pre-fix stored null), not
+    a decision; the doc's authored band survives every mirrored edit."""
     plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ndifficulty: high"))
-    assert project_node_to_plan({"difficulty": None}, plan) is True
+    assert project_node_to_plan({"difficulty": None}, plan) is False
+    _, fields, _ = read_plan_file(plan)
+    assert fields["difficulty"] == "high"
+
+
+def test_explicit_clear_keys_removes_the_doc_band(tmp_path):
+    """`--difficulty null` names the key; the clear lands even when the graph
+    row never carried the key at all."""
+    plan = _write_plan(tmp_path, _PLAN.replace("size: M", "size: M\ndifficulty: high"))
+    assert project_node_to_plan({}, plan, clear_keys=frozenset({"difficulty"})) is True
     _, fields, _ = read_plan_file(plan)
     assert "difficulty" not in fields
 
