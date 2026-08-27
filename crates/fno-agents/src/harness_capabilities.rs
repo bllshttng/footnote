@@ -704,10 +704,11 @@ mod tests {
         // unattended journey test), never the harness's resume primitive.
         // agy and opencode both have measured-working primitives yet read
         // false: agy has no driver, opencode's serve lane is launch-only
-        // (ask refuses, steering unbuilt). claude is the one journey-proven
-        // lane, and it must stay true so the false bits are not vacuous.
+        // (ask refuses, steering unbuilt). claude and codex are the
+        // journey-proven lanes, and they must stay true so the false bits are
+        // not vacuous.
         assert!(claude.thread);
-        assert!(!codex.thread);
+        assert!(codex.thread);
         assert!(!contract.capabilities("agy").unwrap().thread);
         assert!(!opencode.thread);
         assert_eq!(claude.ready_marker, "live_prompt_box");
