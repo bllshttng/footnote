@@ -1601,6 +1601,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn codex_create_and_resume_argv_grant_the_resolved_plan_directory() {
+        // PATH mutation is process-global: take the lib-wide test mutex so a
+        // concurrent PATH-dependent test does not inherit this stub.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = crate::claims::test_env_lock()

@@ -4543,6 +4543,11 @@ mod tests {
 
     #[test]
     fn token_helper_runs_in_explicit_scope_cwd() {
+        // PATH mutation is process-global: take the lib-wide test mutex so a
+        // concurrent PATH-dependent test does not inherit this stub.
+        let _path_guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use std::os::unix::fs::PermissionsExt;
 
         let _guard = crate::claims::test_env_lock()

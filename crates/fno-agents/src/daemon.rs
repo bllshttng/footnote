@@ -12839,7 +12839,9 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({"id": msg.get("id"), "result": {"thread": {"id": "thread-p", "path": "/tmp/p.jsonl"}}}) + "\n")
     sys.stdout.flush()
 "#;
-        let _guard = CODEX_LANE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join("codex");
         std::fs::write(&fake, json).unwrap();
@@ -15922,9 +15924,11 @@ done
     // each FAILS against the old Arc<Mutex<CodexThread>> shape (verified by
     // running them on the pre-rewrite daemon) and passes against the actor.
 
-    /// Serializes PATH (and the ask-wait env below) across these tests: the
-    /// fakes install `codex` on PATH and one test retunes FNO_CODEX_ASK_WAIT_MS.
-    static CODEX_LANE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // PATH + ask-wait env serialization across these tests AND every other
+    // PATH-mutating test in the lib (provider.rs, client_verbs.rs): one shared
+    // mutex, never nested. The fakes install `codex` on PATH and one test
+    // retunes FNO_CODEX_ASK_WAIT_MS; a concurrent `set_var` from an unrelated
+    // test would make the child inherit a broken PATH (exit 127).
 
     /// Queue-reader fake whose turns complete 1.2s in; a steer arriving
     /// mid-turn acks into the SAME turn. (Why a reader thread: a sequential
@@ -16022,7 +16026,7 @@ while True:
 
     /// Install a fake `codex` on PATH for the duration of `body`.
     async fn with_fake_codex_daemon(script: &str, body: impl std::future::Future<Output = ()>) {
-        let _guard = CODEX_LANE_LOCK
+        let _guard = crate::PATH_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bin_dir = tempfile::tempdir().unwrap();
