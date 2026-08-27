@@ -490,3 +490,37 @@ def test_drained_msg_ids_skips_non_dict_json(tmp_path, monkeypatch):
 
     ids = _drained_msg_ids()
     assert "m-real" in ids, "a non-dict line suppressed a real marker"
+
+
+def test_drain_delivers_to_socket_when_socket_env_present(monkeypatch):
+    """When CLAUDE_CODE_MESSAGING_SOCKET is in env, cmd_drain_self sends to socket instead of stdout."""
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.mail import cli as mail_cli
+
+    msg = _Msg(
+        id="m-sock", from_="alice", to="cl-abcd1234", kind="note",
+        ts="2026-08-11T00:00:00Z", body="hello socket",
+    )
+    cursor_mod = _drain_setup(monkeypatch, msg)
+    monkeypatch.setattr(cursor_mod, "advance_cursor", lambda h, mid: True)
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_SOCKET", "/tmp/fake.sock")
+    monkeypatch.setenv("CLAUDE_CODE_MESSAGING_TOKEN", "fake-token")
+
+    sent: list[dict] = []
+
+    def _stub_send(sock_path, content, from_name=None, token=None):
+        sent.append({"sock": sock_path, "content": content, "from": from_name, "token": token})
+        return "written"
+
+    monkeypatch.setattr(claude_mod, "send_to_session", _stub_send)
+    out = _StubStdout()
+
+    with monkeypatch.context() as patch:
+        patch.setattr("sys.stdout", out)
+        mail_cli.cmd_drain_self(json_out=False)
+
+    assert len(sent) == 1
+    assert sent[0]["sock"] == "/tmp/fake.sock"
+    assert "hello socket" in sent[0]["content"]
+    assert sent[0]["token"] == "fake-token"
+    assert not out.written

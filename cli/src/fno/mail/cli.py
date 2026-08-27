@@ -2429,6 +2429,13 @@ def _name_lane_send(
         lanes.append("self-send")
     elif resolved is not None:
         if provider == "claude":
+            # x-c995: the sender NEVER posts to the recipient's messaging
+            # socket directly. A socket write that the peer accepts at the
+            # transport layer can still be silently held (a recipient without
+            # `crossSessionInbound: "accept"` holds peer mail for approval and
+            # lets it expire), so a "sent" here would read silence as delivery.
+            # The socket lane is the recipient's own drain hook posting to its
+            # own socket (cmd_drain_self); the sender keeps the inject lane.
             _resolved_reason: list = []
             injected = _mail_inject_claude(
                 resolved.session_id, wrapped, reason_out=_resolved_reason
@@ -5248,6 +5255,21 @@ def cmd_drain_self(
             m.body, getattr(m, "origin", None)
         )
 
+    sock_path = os.environ.get("CLAUDE_CODE_MESSAGING_SOCKET")
+    token = os.environ.get("CLAUDE_CODE_MESSAGING_TOKEN")
+    delivered_to_socket = False
+    if not json_out and sock_path and (to_print or job_to_print):
+        try:
+            from fno.agents.harnesses.claude import send_to_session
+
+            for m in to_print:
+                send_to_session(sock_path, _render_body(m), from_name=m.from_, token=token)
+            for m in job_to_print:
+                send_to_session(sock_path, _render_body(m), from_name=m.from_, token=token)
+            delivered_to_socket = True
+        except Exception:
+            delivered_to_socket = False
+
     if json_out:
         out = [
             {
@@ -5265,7 +5287,7 @@ def cmd_drain_self(
                 }
             )
         print(json.dumps(out, ensure_ascii=False))
-    else:
+    elif not delivered_to_socket:
         if to_print:
             print(f"[fno agents mail] {len(to_print)} message(s) for {handle}:")
             for m in to_print:
