@@ -1104,10 +1104,11 @@ pub fn parse_thread_read_cwd(raw: &str) -> Option<String> {
 /// Classify a `turn/start` response frame into delivered / not-delivered.
 ///
 /// - `.result.turn.id` is a string -> `Ok(())` (turn accepted; DELIVERED).
-/// - `.error` whose message mentions "not found"/"thread" -> `Reason("thread-not-loaded")`
+/// - `.error` whose message says "not found" -> `Reason("thread-not-loaded")`
 ///   (the session is embedded / not attached to the daemon -> durable fallback).
 /// - any other `.error` -> `Server(message)`: the daemon said WHY, and the
-///   reason must survive to the receipt.
+///   reason must survive to the receipt. A bare "thread" substring is NOT the
+///   not-loaded marker: an unrelated error mentioning threads takes this path.
 /// - an error object with no message, or a result frame with no turn id ->
 ///   `Reason("unexpected-response")`; unparseable frames -> `Reason("invalid-response")`.
 ///
@@ -1131,7 +1132,7 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
             .and_then(|m| m.as_str())
             .unwrap_or("")
             .to_lowercase();
-        if msg.contains("not found") || msg.contains("thread") {
+        if msg.contains("not found") {
             return Err(ReviewStartError::Reason("thread-not-loaded"));
         }
         return match err
@@ -1864,6 +1865,19 @@ mod tests {
         assert_eq!(
             classify_turn_start_response(raw),
             Err(ReviewStartError::Reason("thread-not-loaded"))
+        );
+    }
+
+    #[test]
+    fn classify_thread_mention_without_not_found_is_a_server_error() {
+        // "thread" alone is not the not-loaded marker: an unrelated error that
+        // merely mentions threads must surface its message, not demote silently.
+        let raw = r#"{"id":1,"error":{"code":-32000,"message":"worker thread pool exhausted"}}"#;
+        assert_eq!(
+            classify_turn_start_response(raw),
+            Err(ReviewStartError::Server(
+                "worker thread pool exhausted".into()
+            ))
         );
     }
 
