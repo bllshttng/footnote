@@ -322,6 +322,13 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError("failover_swapped short_id must be a non-empty string")
         if type(data.get("redispatched")) is not bool:
             raise ValidationError("failover_swapped redispatched must be boolean")
+        # The reason is what makes an abandonment diagnosable, so an
+        # abandonment without one is refused at the writer rather than
+        # discovered later as an untraceable false (x-763a).
+        if not data["redispatched"] and not str(data.get("reason") or "").strip():
+            raise ValidationError(
+                "failover_swapped with redispatched=false must name a reason"
+            )
 
     if type_name == "context_snapshot":
         if source not in {"hook", "test"}:

@@ -511,12 +511,23 @@ def _probe_claude(
     network error aborts (fail-open None).
 
     Reports ``unattributed`` rather than ``probe-failed`` when every candidate
-    bearer was REJECTED, because no usage request was ever issued: the fault is
-    a stale or unprovable account binding, not the endpoint. Calling that a
-    probe failure sends an operator to debug a network path that was never
-    used - a confident wrong reason, which is worse than a bare unknown.
+    bearer was REJECTED before the request, because no usage request was ever
+    issued: the fault is a stale or unprovable account binding, not the
+    endpoint. Calling that a probe failure sends an operator to debug a network
+    path that was never used - a confident wrong reason, which is worse than a
+    bare unknown.
+
+    Reports ``credential-rejected`` when the request WAS issued and the
+    endpoint answered 401/403 on every candidate. That is a third thing again,
+    and it used to read ``probe-failed`` - the same slug a DNS failure and a
+    timeout produce, which sends an operator to debug a network path that
+    answered correctly. Measured on this machine: an account whose credential
+    dir resolved, whose single 108-character bearer proved out, and whose usage
+    request returned a clean 401. The repair is a re-login for that config dir,
+    and no amount of network debugging finds it.
     """
     unattributable = False
+    rejected = False
     for bearer in _claude_bearer_candidates(record):
         # Prove BEFORE the usage request, so another account's usage is never
         # fetched at all - not fetched and then discarded.
@@ -537,6 +548,7 @@ def _probe_claude(
                 body = resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
+                rejected = True
                 continue  # stale/invalid token - try the next candidate
             return None, "probe-failed"
         except (urllib.error.URLError, OSError, TimeoutError):
@@ -562,6 +574,10 @@ def _probe_claude(
         # which correctly leaves this one unknown.
         _reconcile_slot_once(record, now)
         return None, "unattributed"
+    if rejected:
+        # The endpoint was reached and it said no. Naming that separately is
+        # the difference between "log in again" and "check the network".
+        return None, "credential-rejected"
     return None, "probe-failed"
 
 
@@ -931,6 +947,10 @@ def probe_usage_detail(
     - ``unattributed``       - no credential provably belongs to this record.
       Covers both the pre-probe refusal AND a probe that rejected every
       candidate bearer, since in neither case was a usage request issued.
+    - ``credential-rejected``- the request WAS issued and the endpoint answered
+      401/403 on every candidate bearer. The repair is a re-login, never a
+      network investigation, and this used to be indistinguishable from a
+      timeout
     - ``probe-failed``       - the probe issued a request and could not read usage
     - ``probe-error``        - the probe raised (contained here, AC1-FR)
 

@@ -273,3 +273,69 @@ class TestConfidenceTravelsInBand:
         from fno.adapters.providers.usage import _zai_confidence
 
         assert _zai_confidence(zai_live) == "percent_only"
+
+
+class TestUnknownNamesWhichUnknown:
+    """AC17-ERR: a rejected credential is not a failed network."""
+
+    def test_a_401_on_every_bearer_reads_credential_rejected(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Measured on this machine: an account whose credential dir resolved,
+        whose single bearer proved out, and whose usage request returned a
+        clean 401, reported the same slug as a DNS failure."""
+        import urllib.error
+
+        from fno.adapters.providers import usage as usage_mod
+
+        monkeypatch.setattr(
+            usage_mod, "_claude_bearer_candidates", lambda _r: ["a-real-token"]
+        )
+        monkeypatch.setattr(
+            usage_mod, "_bearer_verdict", lambda _r, _b, _n: "match"
+        )
+
+        def _401(_request, timeout):  # noqa: ANN001
+            raise urllib.error.HTTPError(
+                usage_mod._CLAUDE_USAGE_URL, 401, "Unauthorized", None, None
+            )
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _401)
+        snap, reason = usage_mod._probe_claude(_claude_record(), now=1000.0)
+        assert snap is None
+        assert reason == "credential-rejected"
+
+    def test_a_transport_failure_still_reads_probe_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The distinction only pays if the other side keeps its own name."""
+        import urllib.error
+
+        from fno.adapters.providers import usage as usage_mod
+
+        monkeypatch.setattr(
+            usage_mod, "_claude_bearer_candidates", lambda _r: ["a-real-token"]
+        )
+        monkeypatch.setattr(
+            usage_mod, "_bearer_verdict", lambda _r, _b, _n: "match"
+        )
+
+        def _down(_request, timeout):  # noqa: ANN001
+            raise urllib.error.URLError("name resolution failed")
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _down)
+        snap, reason = usage_mod._probe_claude(_claude_record(), now=1000.0)
+        assert snap is None
+        assert reason == "probe-failed"
+
+
+def _claude_record():
+    from fno.adapters.providers.model import ProviderRecord
+
+    return ProviderRecord(
+        id="readyrule",
+        name="readyrule",
+        harness="claude",
+        auth="managed",
+        priority=100,
+    )
