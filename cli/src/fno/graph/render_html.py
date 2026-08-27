@@ -890,7 +890,16 @@ def _dashboard_rows(
                     "ki": [
                         {
                             "id": str(child.get("id") or "?"),
-                            "s": str(child.get("status") or "unknown"),
+                            # Same completed_at-is-authoritative rule the row's
+                            # own status uses above. A legacy child can carry a
+                            # completed_at beside a stale open status, and
+                            # without this the parent rollup counts it open
+                            # while the child's own row reads done.
+                            "s": (
+                                "done"
+                                if child.get("completed_at")
+                                else str(child.get("status") or "unknown")
+                            ),
                             "t": str(child.get("title") or "")[:90],
                             "ty": str(child.get("type") or ""),
                         }
