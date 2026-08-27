@@ -43,6 +43,12 @@
 # and ships green while the rest stay broken. The engines below catch the
 # textual shapes; the enumeration is still the author's job.
 #
+# Sharpen that, because it cost four review rounds on one branch: engine A
+# compares LITERALS that already appear in two files. A path that was never
+# fixed carries no literal, so it is not drift and not a stale twin. It is
+# invisible. This gate can tell you two copies disagree. It cannot tell you a
+# third copy exists, and a fix applied to two of three reads as done.
+#
 # Run:  bash scripts/ci/check-reachable-paths.sh [--self-test|--dump-baseline]
 # Exit: 0 clean, 1 findings or a control that did not fire, 2 misuse.
 #
