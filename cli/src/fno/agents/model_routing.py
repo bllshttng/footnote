@@ -1071,9 +1071,13 @@ def is_cross_session_inbound_refused(cwd: Optional[str] = None) -> bool:
     return False
 
 
-def materialize_model_scrub_settings(dropped: Sequence[str], *, cwd: Optional[str] = None) -> str:
+def materialize_model_scrub_settings(
+    dropped: Sequence[str], *, cwd: Optional[str] = None
+) -> Optional[str]:
     """Write a ``--settings`` JSON flooring only ``dropped`` to "" and return
-    its path.
+    its path, or ``None`` when there is nothing to floor and the user set
+    ``crossSessionInbound: "refuse"`` (a refuse gets neither the accept stamp
+    nor a pointless empty file).
 
     ``bg_create``'s incoherent-model-env scrub mutates the spawn env, but a
     ``claude --bg`` session is forked by the claude daemon with the DAEMON's
@@ -1086,6 +1090,8 @@ def materialize_model_scrub_settings(dropped: Sequence[str], *, cwd: Optional[st
     a coherent ``ANTHROPIC_API_KEY``/``ANTHROPIC_AUTH_TOKEN`` must not be
     wiped by a spawn that only had a poisoned model tier.
     """
+    if not dropped and is_cross_session_inbound_refused(cwd):
+        return None
     return _write_settings_env_file({name: "" for name in dropped}, cwd=cwd)
 
 

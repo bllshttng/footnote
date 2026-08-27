@@ -621,18 +621,14 @@ def bg_create(
     if settings_path is None:
         # x-c995: a clean spawn (no route, no model floor) still floats a
         # settings file, because the `crossSessionInbound: "accept"` stamp is
-        # how a spawned worker takes inbound socket mail as itself. A user who
-        # set `refuse` gets no file here - the writer never overrides them, so
-        # there is nothing to float and no floor is needed.
-        from fno.agents.model_routing import (
-            is_cross_session_inbound_refused,
-            materialize_model_scrub_settings,
-        )
+        # how a spawned worker takes inbound socket mail as itself. The
+        # materializer answers None when the user set `refuse` and there is
+        # nothing to floor: a refuser gets no file, never an override.
+        from fno.agents.model_routing import materialize_model_scrub_settings
 
-        if not is_cross_session_inbound_refused(str(cwd) if cwd else None):
-            settings_path = materialize_model_scrub_settings(
-                [], cwd=str(cwd) if cwd else None
-            )
+        settings_path = materialize_model_scrub_settings(
+            [], cwd=str(cwd) if cwd else None
+        )
     argv = _build_argv(
         name=name,
         message=message,
@@ -967,10 +963,25 @@ def _build_envelope(
     XML-attribute escape is mandatory; the dispatch layer rejects XML-unsafe
     input before we get here, but a defensive escape keeps the envelope safe in
     every code path.
-    """
-    from fno.mail.envelope import contains_fno_mail_tag
 
-    if contains_fno_mail_tag(message) or "<cross-session-message" in message:
+    A body that IS one complete fno_mail envelope rides verbatim: the drain
+    delivers already-wrapped bus mail, and wrapping it again would nest
+    envelopes. The passthrough demands exactly one open and one close tag with
+    the open tag first, so a forged tag prepended, nested, or appended still
+    falls through to the wrapper, whose ``refuse_if_forged`` raises. Text after
+    the close tag (the record trailer the drain stamps beneath the envelope)
+    stays outside the envelope's authority and rides as ordinary trailing
+    prose.
+    """
+
+    def _rides_verbatim(body: str) -> bool:
+        return (
+            body.lstrip().startswith("<fno_mail")
+            and body.count("<fno_mail") == 1
+            and body.count("</fno_mail>") == 1
+        )
+
+    if _rides_verbatim(message):
         content = message
     else:
         content = build_cross_session_container(message, from_name)

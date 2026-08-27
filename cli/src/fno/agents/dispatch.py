@@ -1600,7 +1600,9 @@ def _claude_create_path(
     from fno.agents.model_routing import route_settings_path_for
 
     route_settings_path = (
-        route_settings_path_for(route_env, account_env) if route_env else None
+        route_settings_path_for(route_env, account_env, cwd=str(cwd) if cwd else None)
+        if route_env
+        else None
     )
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.

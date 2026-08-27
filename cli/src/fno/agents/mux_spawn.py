@@ -4194,7 +4194,9 @@ def dispatch_spawn_pane(
             # route-only stamp would make a later restore silently drop the
             # account's pinned env.
             if provider == "claude" and route_env:
-                route_settings_path = route_settings_path_for(route_env, account_env)
+                route_settings_path = route_settings_path_for(
+                    route_env, account_env, cwd=str(cwd) if cwd else None
+                )
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
             if crown_declined and _declined_scope:
