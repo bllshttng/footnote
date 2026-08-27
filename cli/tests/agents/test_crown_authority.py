@@ -64,6 +64,20 @@ def test_attended_human_still_authorized(monkeypatch):
     assert grant_error("any-scope", None) is None
 
 
+def test_agent_marker_without_session_identity_refuses_grant(monkeypatch):
+    """A stranded mesh marker is an unverified agent, never an attended human."""
+    monkeypatch.setenv("FNO_AGENT_SELF", "stranded-worker")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
+    )
+
+    caller = calling_agent_row()
+
+    assert caller is REGISTRY_UNREADABLE
+    assert grant_error("some-scope", caller) is not None
+
+
 def test_known_agent_passes_through_to_crown_check(monkeypatch):
     """A readable registry with a matching row is NOT misread as unreadable:
     the sentinel is reserved for failures, not for found rows."""
