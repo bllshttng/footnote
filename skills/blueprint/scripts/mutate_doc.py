@@ -447,7 +447,7 @@ def _parse_user_stories(us_body: str) -> list[tuple[str, str]]:
     return result
 
 
-def _build_execution_strategy(sections: OrderedDict[str, str]) -> str:
+def _build_execution_strategy(sections: OrderedDict[str, str], difficulty: str = "") -> str:
     """Build ## Execution Strategy content from User Stories."""
     us_body = sections.get("User Stories", "")
     tasks = []
@@ -501,16 +501,20 @@ def _build_execution_strategy(sections: OrderedDict[str, str]) -> str:
             }
             tasks.append(task)
 
+    wave_block: dict[str, Any] = {
+        "wave": wave_num,
+        "mode": "sequential",
+        "name": "Implementation",
+        "tasks": [t["id"] for t in tasks],
+    }
+    if difficulty:
+        # Blueprint is the PM: seed each wave with the plan's band; the
+        # main-thread pass revises it per wave. The band is the routing axis -
+        # models and routes stay in config (_grid_lane_for), never in the plan.
+        wave_block["difficulty"] = difficulty
     waves_yaml: dict[str, Any] = {
         "execution_mode": "mixed",
-        "waves": [
-            {
-                "wave": wave_num,
-                "mode": "sequential",
-                "name": "Implementation",
-                "tasks": [t["id"] for t in tasks],
-            }
-        ],
+        "waves": [wave_block],
         "tasks": tasks,
     }
 
@@ -931,7 +935,9 @@ def mutate(
     except OwnershipViolation as exc:
         return 2, str(exc)
     try:
-        new_sections["Execution Strategy"] = _build_execution_strategy(plan.sections)
+        new_sections["Execution Strategy"] = _build_execution_strategy(
+            plan.sections, difficulty=str(plan.frontmatter.get("difficulty") or "").strip()
+        )
     except UserStoryParseError as exc:
         return 2, str(exc)
 

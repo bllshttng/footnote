@@ -14,6 +14,7 @@ from fno.plan.brief import (
     validate_task_edges,
 )
 from fno.plan.criteria import CriteriaParseError, compile_criteria
+from fno.plan.schema import created_after_gate
 
 
 @dataclass(frozen=True)
@@ -30,6 +31,7 @@ class ExecutionValidationResult:
 _QUICK_REQUIRED_SECTIONS = ("Context", "Changes", "Files to Modify", "Verification")
 _EXECUTION_MODES = {"sequential", "parallel", "mixed"}
 _WAVE_MODES = {"sequential", "parallel"}
+_WAVE_DIFFICULTIES = {"low", "medium", "high"}
 _TASK_ID_RE = re.compile(r"^\d+(?:\.\d+)*[A-Za-z]*$")
 _QUICK_PLACEHOLDERS = (
     "[change name]",
@@ -423,6 +425,32 @@ def validate_execution(
                 _violation(
                     f"waves.{label}.mode",
                     f"expected one of {sorted(_WAVE_MODES)}, got {wave_mode!r}",
+                )
+            )
+
+        # Blueprint is the PM: the wave's band is decided in the Execution
+        # Strategy, and it is the ONLY routing axis a plan may carry (models
+        # and routes stay in config). Post-gate plans must stamp every wave;
+        # the frontmatter difficulty_gate_error covers the plan-level band.
+        wave_band = wave.get("difficulty")
+        if wave_band is None or (isinstance(wave_band, str) and not wave_band.strip()):
+            if created_after_gate(doc.frontmatter) is True:
+                violations.append(
+                    _violation(
+                        f"waves.{label}.difficulty",
+                        "wave difficulty is required for plans created after the "
+                        "difficulty gate; set it to one of low, medium, high",
+                    )
+                )
+        elif (
+            not isinstance(wave_band, str)
+            or wave_band.strip().lower() not in _WAVE_DIFFICULTIES
+        ):
+            violations.append(
+                _violation(
+                    f"waves.{label}.difficulty",
+                    "must be one of low, medium, high, got "
+                    f"{wave_band!r}",
                 )
             )
 

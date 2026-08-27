@@ -906,3 +906,75 @@ def test_validate_execution_acceptance_contract_override(tmp_path: Path) -> None
     result = validate_execution(load_plan(plan), acceptance_contract="compiled-v1")
 
     assert any("AC9" in v.message for v in result.violations)
+
+
+_BAND_FRONTMATTER = "status: ready\ncreated: 2026-08-27\ndifficulty: medium\n"
+
+
+def test_post_gate_plan_requires_a_band_per_wave(tmp_path: Path) -> None:
+    plan = _write_plan(tmp_path, _full_plan(VALID_STRATEGY), frontmatter=_BAND_FRONTMATTER)
+
+    violations = validate_execution(load_plan(plan)).violations
+
+    assert any(
+        v.field == "waves.1.difficulty" and "one of low, medium, high" in v.message
+        for v in violations
+    )
+
+
+def test_out_of_enum_wave_band_is_refused(tmp_path: Path) -> None:
+    # AC4-ERR: `difficulty: hard` names the wave and the three legal values.
+    strategy = VALID_STRATEGY.replace(
+        "    mode: sequential", "    mode: sequential\n    difficulty: hard", 1
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy), frontmatter=_BAND_FRONTMATTER)
+
+    violations = validate_execution(load_plan(plan)).violations
+
+    assert any(
+        v.field == "waves.1.difficulty" and "must be one of low, medium, high" in v.message
+        for v in violations
+    )
+
+
+def test_out_of_enum_wave_band_fails_validate_plan_sh(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace(
+        "    mode: sequential", "    mode: sequential\n    difficulty: hard", 1
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy), frontmatter=_BAND_FRONTMATTER)
+
+    result = subprocess.run(
+        ["bash", str(VALIDATOR), str(plan)],
+        capture_output=True,
+        text=True,
+        cwd=REPO_ROOT,
+    )
+
+    assert result.returncode != 0, result.stdout
+    assert "waves.1.difficulty" in result.stdout
+    assert "low, medium, high" in result.stdout
+
+
+def test_stamped_wave_bands_pass_post_gate(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace(
+        "    mode: sequential", "    mode: sequential\n    difficulty: high", 1
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy), frontmatter=_BAND_FRONTMATTER)
+
+    result = validate_execution(load_plan(plan))
+
+    assert result.violations == []
+
+
+def test_undatable_frontmatter_skips_the_wave_band_requirement(tmp_path: Path) -> None:
+    # The lenient authoring scope: validate-plan.sh dates undated plans itself,
+    # so an unreadable created cannot make the wave band required here.
+    plan = _write_plan(
+        tmp_path,
+        _full_plan(VALID_STRATEGY),
+        frontmatter="status: ready\ncreated: not-a-date\ndifficulty: medium\n",
+    )
+
+    result = validate_execution(load_plan(plan))
+
+    assert [v for v in result.violations if v.field.endswith(".difficulty")] == []

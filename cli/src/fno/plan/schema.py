@@ -60,6 +60,52 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
 DIFFICULTY_REQUIRED_AFTER = date(2026, 8, 26)
 
 
+def _parse_created(value: object) -> date | None:
+    """Read a frontmatter ``created`` value as a date, or None if undatable.
+
+    The one date parser behind the difficulty gate. Exact extended-calendar
+    forms only (the shapes pydantic accepts for this union): round 11 removed
+    the [:10] truncation, but a bare fromisoformat still accepted the basic
+    form ('20260827') and ISO week dates, which pydantic coerces differently
+    (unix timestamp, refusal) - dating the plan in one scope and breaking it
+    in the other. Where the strict side refuses, no bandless mint can follow.
+    """
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value  # a YAML-parsed date object is already the answer
+    if isinstance(value, str):
+        s = value.strip()
+        if _ISO_CREATED.match(s):
+            try:
+                return date.fromisoformat(s[:10])
+            except ValueError:
+                return None
+        return None
+    # int/list/None-ish scalars: an unquoted YAML int (20260827) would
+    # otherwise fall through the isinstance(date) test and bypass the
+    # gate everywhere (pydantic even coerces it to an epoch date in the
+    # model scope, reading post-gate as pre-gate).
+    return None
+
+
+def created_after_gate(frontmatter: dict) -> bool | None:
+    """Whether ``created`` dates the plan past DIFFICULTY_REQUIRED_AFTER.
+
+    One parse with :func:`difficulty_gate_error`, so the per-wave band
+    requirement in execution validation reads the same date the frontmatter
+    gate does. None: the frontmatter is empty or undatable, which the lenient
+    scopes treat as "no band requirement" (validate-plan.sh dates those plans
+    itself).
+    """
+    if not frontmatter:
+        return None
+    created = _parse_created(frontmatter.get("created"))
+    if created is None:
+        return None
+    return created > DIFFICULTY_REQUIRED_AFTER
+
+
 def difficulty_gate_error(
     frontmatter: dict, *, undatable_refuses: bool = True
 ) -> str | None:
@@ -81,32 +127,7 @@ def difficulty_gate_error(
     contract; refusing here would preempt the validator's own dating. The
     band refusal, once the plan IS dated post-gate, is identical everywhere.
     """
-    created = frontmatter.get("created")
-    if isinstance(created, datetime):
-        created = created.date()
-    elif isinstance(created, date):
-        pass  # a YAML-parsed date object is already the answer
-    elif isinstance(created, str):
-        # Exact extended-calendar forms only (the shapes pydantic accepts
-        # for this union): round 11 removed the [:10] truncation, but a bare
-        # fromisoformat still accepted the basic form ('20260827') and ISO
-        # week dates, which pydantic coerces differently (unix timestamp,
-        # refusal) - dating the plan in one scope and breaking it in the
-        # other. Where the strict side refuses, no bandless mint can follow.
-        s = created.strip()
-        if _ISO_CREATED.match(s):
-            try:
-                created = date.fromisoformat(s[:10])
-            except ValueError:
-                created = None
-        else:
-            created = None
-    else:
-        # int/list/None-ish scalars: an unquoted YAML int (20260827) would
-        # otherwise fall through the isinstance(date) test and bypass the
-        # gate everywhere (pydantic even coerces it to an epoch date in the
-        # model scope, reading post-gate as pre-gate).
-        created = None
+    created = _parse_created(frontmatter.get("created"))
     if "created" not in frontmatter and frontmatter:
         # HAS frontmatter but no created: undatable. Returning None here
         # would silently mint a bandless node on the direct-intake lanes

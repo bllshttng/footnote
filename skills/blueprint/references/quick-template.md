@@ -161,6 +161,8 @@ _Optional — omit this section entirely if no relevant patterns exist._
 
 **Per-task dependencies:** A task row in `## Execution Strategy` can declare `blocked_by: ['1.1']`. The list must use known task ids and contain no cycles. An explicit empty list leaves the task unblocked. A task without this key inherits every task from the previous wave, preserving whole-wave scheduling.
 
+**Per-wave difficulty:** Each wave in `## Execution Strategy` carries `difficulty: low|medium|high` (post-gate plans must stamp every wave; the validator refuses an out-of-enum value). The band routes the wave's work: a pulling worker takes only tasks at or below its own band, and the band-to-harness-and-model mapping stays in config, never in the plan. Seed from the plan's frontmatter band, then revise per wave when the waves differ in depth.
+
 **Verification:** Every step must be concrete and runnable. Not "check that it works" but "run this command, expect this output."
 
 **Self-contained:** A fresh-context agent should be able to implement this plan without reading the conversation that produced it.

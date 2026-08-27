@@ -110,6 +110,7 @@ waves:
   - wave: 1
     mode: sequential
     name: Implementation
+    difficulty: medium
     tasks:
       - '1.1'
 tasks:
