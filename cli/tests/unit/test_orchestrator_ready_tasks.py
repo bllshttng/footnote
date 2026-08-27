@@ -14,6 +14,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[3]
 
 
@@ -231,6 +233,25 @@ class TestReadyCli:
         out = json.loads(proc.stdout)
         assert out["ready"] == ["1.2", "2.1"]
         assert out["claimed"] == []
+
+    @pytest.mark.parametrize("payload", ["[]", "null", '{"tasks": null}'])
+    def test_non_object_node_read_degrades_to_state(self, tmp_path, payload):
+        plan, state = _write_fixture(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_fno = bin_dir / "fno"
+        fake_fno.write_text(f"#!/bin/sh\nprintf '%s\\n' {payload!r}\n")
+        fake_fno.chmod(fake_fno.stat().st_mode | stat.S_IEXEC)
+        proc = _run_cli(
+            [str(plan), "--ready", "--state", str(state), "--node", "x-demo"],
+            env_path=str(bin_dir),
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.2", "2.1"]
+        assert out["claimed"] == []
+        assert "unreadable task rows" in proc.stderr
 
     def test_invalid_edges_refuse_the_run(self, tmp_path):
         bad_plan = PLAN_MD.replace("blocked_by: ['1.1']", "blocked_by: ['9.9']")

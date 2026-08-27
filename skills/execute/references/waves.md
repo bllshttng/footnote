@@ -230,9 +230,12 @@ again:
 - Collect and merge results
 - Update STATE.md with all completed tasks
 
-Stop dispatching when `ready` comes back empty. A held (`[~]`) task
-reappears on its own once the peer's row leaves `in_progress`; a `done`
-row never does.
+An empty `ready` list does not prove execution is complete. If `claimed` is
+non-empty, wait for peer claims to leave `in_progress` and rerun `--ready`. If
+`blocked` is non-empty, stop with a refusal naming those task ids until their
+statuses are repaired. Proceed to verification only when every plan task is
+in `completed` and both `claimed` and `blocked` are empty. A held (`[~]`) task
+reappears after its peer's row leaves `in_progress`. A `done` row never does.
 
 **Gemini note:** Gemini always runs main-thread sequential; a parallel wave downgrades and records the reason. There is no project-agent upgrade path (the experimental mode was removed when Google deprecated the Gemini CLI).
 

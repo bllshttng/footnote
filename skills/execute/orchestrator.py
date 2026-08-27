@@ -1752,8 +1752,10 @@ if __name__ == "__main__":
             if result is not None:
                 try:
                     loaded = json.loads(result.stdout.decode("utf-8", "replace"))
-                    rows = [r for r in loaded.get("tasks", []) if isinstance(r, dict)]
-                except ValueError:
+                    if not isinstance(loaded, dict) or not isinstance(loaded.get("tasks"), list):
+                        raise ValueError("task list payload must contain a tasks list")
+                    rows = [r for r in loaded["tasks"] if isinstance(r, dict)]
+                except (TypeError, ValueError):
                     print(
                         f"orchestrator: note: unreadable task rows for node {node_id}; "
                         "proceeding with STATE.md only",
