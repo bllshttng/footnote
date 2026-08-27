@@ -64,6 +64,23 @@ def test_valid_strategy_has_no_representation_warnings(tmp_path: Path) -> None:
     assert result.violations == []
 
 
+def test_task_edge_validation_is_part_of_semantic_validation(tmp_path: Path) -> None:
+    strategy = VALID_STRATEGY.replace(
+        'tasks: ["1.1"]', 'tasks: ["1.1"]'
+    ).replace(
+        'acceptance: [AC1-HP]', 'acceptance: [AC1-HP]\n    blocked_by: ["9.9"]'
+    )
+    plan = _write_plan(tmp_path, _full_plan(strategy))
+
+    violations = validate_execution(load_plan(plan)).violations
+
+    assert any(
+        v.field == "tasks.blocked_by"
+        and "unknown task 9.9" in v.message
+        for v in violations
+    )
+
+
 def test_quick_plan_uses_sections_not_task_headings(tmp_path: Path) -> None:
     plan = _write_plan(
         tmp_path,

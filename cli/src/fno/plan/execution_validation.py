@@ -8,7 +8,11 @@ import re
 import shlex
 
 from fno.plan._doc import PlanDoc
-from fno.plan.brief import BriefParseError, parse_execution_strategy
+from fno.plan.brief import (
+    BriefParseError,
+    parse_execution_strategy,
+    validate_task_edges,
+)
 from fno.plan.criteria import CriteriaParseError, compile_criteria
 
 
@@ -363,6 +367,9 @@ def validate_execution(
                     "task acceptance must contain at least one criterion",
                 )
             )
+
+    for edge_error in validate_task_edges(strategy):
+        violations.append(_violation("tasks.blocked_by", edge_error))
 
     # compiled-v1: every task acceptance reference must resolve to exactly one
     # compiled criterion (AC5-ERR). Unstamped plans skip this (AC3-COMPAT).

@@ -58,15 +58,11 @@ For each wave marked sequential in execution strategy:
 
 ## Edge Cases
 
-### Partial overlap in a multi-task wave
-If wave has tasks A, B, C where A and B are disjoint but C overlaps with A,
-the entire wave remains sequential. Partial parallelization within a single
-wave is not supported.
+### Per-task readiness does not partition file overlap
+Per-task readiness controls dependency availability. It does not partition tasks by file overlap. If A, B, and C share files, the conflict gate keeps the wave sequential. Partial parallelization within one wave remains unsupported.
 
 ### Malformed or missing map
-If the file ownership map section exists but the table cannot be parsed
-(malformed markdown, missing columns), log a warning and fall back to the
-declared execution strategy.
+If the ownership map is present but malformed, log a warning and use the declared strategy.
 
 ## Extended Decision Tree
 

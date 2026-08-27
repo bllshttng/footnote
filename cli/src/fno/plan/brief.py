@@ -163,6 +163,17 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
                     f"Execution Strategy task '{task_id}' acceptance item "
                     f"{item_index} must be a non-empty string"
                 )
+        blocked_by = t.get("blocked_by", [])
+        if not isinstance(blocked_by, list):
+            raise BriefParseError(
+                f"Execution Strategy task '{task_id}' blocked_by must be a list of task ids"
+            )
+        for item_index, item in enumerate(blocked_by, start=1):
+            if not isinstance(item, str) or not item.strip():
+                raise BriefParseError(
+                    f"Execution Strategy task '{task_id}' blocked_by item "
+                    f"{item_index} must be a non-empty task id"
+                )
         normalized_tasks.append({
             "id": task_id,
             "title": str(t.get("title", "")),
@@ -170,6 +181,8 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
             "verify": str(t.get("verify", "")),
             "acceptance": [str(a) for a in acceptance],
             "notes": str(t.get("notes", "")).strip(),
+            "blocked_by": [str(b) for b in blocked_by],
+            "blocked_by_declared": "blocked_by" in t,
         })
 
     waves = parsed.get("waves", [])
@@ -194,6 +207,79 @@ def find_task(parsed: dict[str, Any], task_id: str) -> dict[str, Any] | None:
 def list_task_ids(parsed: dict[str, Any]) -> list[str]:
     """Return all task ids from the parsed execution strategy."""
     return [t["id"] for t in parsed.get("tasks", [])]
+
+
+def validate_task_edges(parsed: dict[str, Any]) -> list[str]:
+    """Validate declared per-task ``blocked_by`` edges.
+
+    Returns one error string per problem, empty when clean. Unknown ids are
+    checked on declared edges. Cycles are checked on effective edges, including
+    inherited previous-wave blockers and self-edges.
+    """
+    errors: list[str] = []
+    tasks = parsed.get("tasks", [])
+    task_ids = list_task_ids(parsed)
+    known = set(task_ids)
+    declared: dict[str, list[str]] = {}
+    for task in tasks:
+        task_id = task["id"]
+        if task.get("blocked_by_declared", "blocked_by" in task):
+            declared[task_id] = [str(d) for d in task.get("blocked_by", [])]
+
+    for task_id, deps in declared.items():
+        for dep in deps:
+            if dep not in known:
+                errors.append(f"task {task_id} blocked_by unknown task {dep}")
+
+    wave_tasks: list[list[str]] = []
+    task_wave: dict[str, int] = {}
+    waves = parsed.get("waves", [])
+    if isinstance(waves, list):
+        for wave in waves:
+            if not isinstance(wave, dict):
+                continue
+            raw_tasks = wave.get("tasks", [])
+            if not isinstance(raw_tasks, list):
+                raw_tasks = [raw_tasks]
+            current = [str(task_id) for task_id in raw_tasks]
+            wave_tasks.append(current)
+            for task_id in current:
+                task_wave.setdefault(task_id, len(wave_tasks) - 1)
+
+    effective: dict[str, list[str]] = {}
+    for task_id in task_ids:
+        if task_id in declared:
+            effective[task_id] = declared[task_id]
+            continue
+        position = task_wave.get(task_id)
+        effective[task_id] = wave_tasks[position - 1] if position and position > 0 else []
+
+    # Iterative DFS with a colour map (white/grey/black); a grey hit is a
+    # back-edge and the grey stack spells the cycle out. Plans are small, so
+    # the exact path is cheaper to carry than Kahn's leftover set would be.
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = dict.fromkeys(effective, WHITE)
+    for root in effective:
+        if colour[root] != WHITE:
+            continue
+        colour[root] = GREY
+        path = [root]
+        iterators = [iter(effective[root])]
+        while iterators:
+            dependency = next(iterators[-1], None)
+            if dependency is None:
+                iterators.pop()
+                colour[path.pop()] = BLACK
+                continue
+            state = colour.get(dependency)
+            if state == GREY:
+                start = path.index(dependency)
+                errors.append("cycle: " + " -> ".join([*path[start:], dependency]))
+            elif state == WHITE:
+                colour[dependency] = GREY
+                path.append(dependency)
+                iterators.append(iter(effective[dependency]))
+    return errors
 
 
 # ---------------------------------------------------------------------------
