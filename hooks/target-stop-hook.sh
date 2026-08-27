@@ -242,7 +242,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     KING_RESOLVE_BROKEN=0
     if [[ -n "$HOOK_HARNESS_ID" ]] && compgen -G "${KINGS_DIR}/*.md" >/dev/null 2>&1; then
         if command -v fno >/dev/null 2>&1; then
-            MANIFEST_ARGS=(king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")
+            MANIFEST_ARGS=(agents king manifest-path --harness-session-id "$HOOK_HARNESS_ID" --state-root "$REPO_ROOT/.fno")
             [[ -n "$HOOK_HARNESS" ]] && MANIFEST_ARGS+=(--harness "$HOOK_HARNESS")
             KING_RC=0
             KING_STATE_FILE=$(fno "${MANIFEST_ARGS[@]}" 2>/dev/null) || KING_RC=$?

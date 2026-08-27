@@ -71,7 +71,7 @@ setup_king() {
     cat > "${TMP_DIR}/bin/fno" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > .fno/fno.args
-if [[ "$1 $2" != "king manifest-path" ]]; then
+if [[ "$1 $2 $3" != "agents king manifest-path" ]]; then
     exit 1
 fi
 session=""

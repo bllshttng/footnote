@@ -277,7 +277,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
     # reproduced on the one path that never got the fix.
     KING_STATE_FILE=""
     if [[ -n "$CONVERSATION_ID" ]] && command -v fno >/dev/null 2>&1; then
-        KING_STATE_FILE=$(cd "$ROOT" && fno king manifest-path \
+        KING_STATE_FILE=$(cd "$ROOT" && fno agents king manifest-path \
             --harness-session-id "$CONVERSATION_ID" --harness agy \
             --state-root "$ROOT/.fno" 2>/dev/null || true)
     fi

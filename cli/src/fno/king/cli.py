@@ -416,6 +416,9 @@ agents_king_app = typer.Typer(
 agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
+# The stop hooks resolve the crown manifest through this spelling; a verb
+# missing here silently turns the king gate off after three retries.
+agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 
 
 def main() -> None:  # pragma: no cover - console-script shim
