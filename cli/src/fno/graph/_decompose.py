@@ -305,7 +305,10 @@ def scaffold_separate_plan(
     # A scaffold with no `created:` is invisible to the consolidation gate,
     # which reads that key to tell a new plan from a pre-gate one - so every
     # child of a decompose would be grandfathered forever. Caller-injectable
-    # for deterministic tests.
+    # for deterministic tests. The same stamp makes the child post-gate for
+    # the difficulty gate (created after 2026-08-26 needs a band, x-e3d1), so
+    # the scaffold carries the floor band; the builder filling the stub
+    # revises it like every other placeholder.
     created_date = created or _date.today().isoformat()
     why_block = why_digest.strip() or _WHY_STUB
     if adopted:
@@ -325,6 +328,7 @@ def scaffold_separate_plan(
         f'status: idea\n'
         f'kind: quick-plan\n'
         f'created: {created_date}\n'
+        f'difficulty: low\n'
         f'consolidation:\n'
         f'  # <!-- Consolidation: run the step 2d gate against this child and\n'
         f'  #      record one outcome with a reason per id considered. -->\n'

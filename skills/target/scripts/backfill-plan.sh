@@ -82,7 +82,12 @@ cmd_skeleton() {
     printf 'title: "%s"\n' "$title_esc"
     printf 'status: design\n'
     printf 'source: claude-plan-mode\n'
-    printf 'created_at: %s\n' "$created"
+    # Canonical `created` (not the legacy created_at synonym no canonical
+    # reader dates) plus the difficulty floor band: this skeleton is a mint,
+    # and a post-2026-08-26 mint with no band is born failing its own
+    # validator. /blueprint revises the band during the run.
+    printf 'created: %s\n' "$created"
+    printf 'difficulty: low\n'
     printf 'slug: %s\n' "$slug"
     printf 'messaged_peers: []\n'
     printf 'executor: tdd\n'
