@@ -115,6 +115,12 @@ _DEFAULT_KILL_CRITERIA = [
     },
 ]
 
+# The floor band stamped when the difficulty gate would refuse the frontmatter
+# this script is about to write. The mint predates any judgment of the work, so
+# the value is the conservative floor; blueprint's model-routing gate revises
+# it to a judged band during the run and transcribes that to the node.
+_DEFAULT_DIFFICULTY = "low"
+
 
 def _first_fill_block() -> str:
     """The locked frontmatter block for a doc that carries none.
@@ -760,6 +766,53 @@ def _validate_proposed_frontmatter(new_fm: dict[str, Any]) -> str | None:
     return None  # rc 0 = valid; any other rc (e.g. import failure) = degrade to skip
 
 
+# Prints STAMP when adding the floor band is exactly what clears the gate's
+# refusal for this frontmatter, SKIP otherwise. Differential, so the gate
+# stays the single oracle: no second date parser, no refusal-message
+# matching. Runs out-of-process because the ambient python3 running /blueprint
+# has no pydantic (see _pydantic_python).
+_DIFFICULTY_PROBE_SNIPPET = r"""
+import json, sys
+from fno.plan.schema import difficulty_gate_error
+fm = json.load(sys.stdin)
+before = difficulty_gate_error(fm)
+after = difficulty_gate_error({**fm, "difficulty": "low"})
+print("STAMP" if (before is not None and after is None) else "SKIP")
+"""
+
+
+def _ensure_difficulty(new_fm: dict[str, Any]) -> None:
+    """Stamp the floor difficulty band when, and only when, the gate refuses.
+
+    A doc minted here carries ``created: <today>``, so the wall clock crossing
+    DIFFICULTY_REQUIRED_AFTER (2026-08-26, strictly-after) makes every mint
+    born failing its own validator with no code change at all (x-e3d1). The
+    probe above keeps the pre-gate contract intact: a plan created on or
+    before the boundary passes bandless by design, and stamping a band onto
+    it would fabricate an estimate nobody made. An author-set band is never
+    touched (the probe only fires when the gate refuses the current shape).
+    Best-effort like _validate_proposed_frontmatter: no pydantic-capable
+    interpreter means no oracle, so skip rather than block the save.
+    """
+    py = _pydantic_python()
+    if py is None:
+        return
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(_CLI_SRC), env.get("PYTHONPATH", "")]))
+    try:
+        proc = subprocess.run(
+            [py, "-c", _DIFFICULTY_PROBE_SNIPPET],
+            input=json.dumps(new_fm, default=str),
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except OSError:
+        return  # interpreter vanished mid-run - degrade, don't block
+    if proc.returncode == 0 and proc.stdout.strip() == "STAMP":
+        new_fm["difficulty"] = _DEFAULT_DIFFICULTY
+
+
 def mutate(
     doc_path: Path,
     mode: str = "auto",
@@ -917,6 +970,15 @@ def mutate(
     if not new_fm.get("waves"):
         new_fm["waves"] = [1]
 
+    # Same preserve-if-set tier as the three above, but value-gated by the
+    # difficulty gate itself: the band is stamped only when the gate would
+    # refuse this frontmatter (post-2026-08-26 created, no band yet).
+    try:
+        assert_blueprint_can_write("difficulty")
+    except OwnershipViolation as exc:
+        return 2, str(exc)
+    _ensure_difficulty(new_fm)
+
     # Validate and apply status transition
     if current_status == "design" and not draft:
         try:
@@ -1037,6 +1099,13 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
     frontmatter = dict(plan.frontmatter)
     frontmatter["status"] = "ready"
     frontmatter["acceptance_contract"] = "compiled-v1"
+    # finalize is the second frontmatter write path: a doc promoted to ready
+    # here must not be born failing the difficulty gate either (x-e3d1).
+    try:
+        assert_blueprint_can_write("difficulty")
+    except OwnershipViolation as exc:
+        return 2, str(exc)
+    _ensure_difficulty(frontmatter)
     schema_err = _validate_proposed_frontmatter(frontmatter)
     if schema_err is not None:
         return 3, schema_err

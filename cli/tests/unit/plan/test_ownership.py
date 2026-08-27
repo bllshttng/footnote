@@ -52,6 +52,7 @@ class TestBlueprintWriteAllowlist:
                 "waves",
                 "acceptance_contract",
                 "consolidation",
+                "difficulty",
             }
         )
 
