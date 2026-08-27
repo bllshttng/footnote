@@ -8,7 +8,6 @@ from pathlib import Path
 from fno.graph.render_html import (
     UNSCOPED_LABEL,
     _obsidian_url,
-    _project_color,
     render_graph_html,
 )
 
@@ -183,11 +182,6 @@ def test_obsidian_url_builds_and_normalizes_internal_paths():
     assert _obsidian_url("myvault", "src/not-a-plan.py") is None
 
 
-def test_project_color_is_deterministic():
-    assert _project_color("gamma") == _project_color("gamma")
-    assert _project_color(None) == "hsl(0, 0%, 70%)"
-
-
 def test_public_rows_keep_safe_plan_and_pr_flags_without_private_values():
     from fno.graph.roadmap_public import render_public_backlog_html
 
@@ -275,3 +269,79 @@ def test_dashboard_derives_done_from_completion_fact(tmp_path: Path):
     text = out.read_text()
     assert '"s":"done"' in text
     assert '"s":"ready"' not in text
+
+
+def _payload(document: str) -> str:
+    """The data-bearing half of a rendered board: markup plus the JSON payload.
+
+    The inline stylesheet and the behavior script are authored constants that
+    carry no node data, and a CSS hex colour such as ``#707782`` matches the
+    gate's pr-reference pattern. Dropping them keeps the probe pointed at the
+    only two places an entry field can reach: the static markup and the JSON.
+    """
+    for opening, closing in (("<style>", "</style>"), ("<script>", "</script>")):
+        while opening in document and closing in document:
+            head, rest = document.split(opening, 1)
+            document = head + rest.split(closing, 1)[1]
+    return document
+
+
+def test_public_document_carries_no_leak_class_the_gate_names(tmp_path: Path):
+    """The gate's own regexes, run over the WHOLE public document.
+
+    The gate scans titles only. This scans every byte the public surface
+    emits with the same LEAK_PATTERNS list, so a private field reaching the
+    markup through any other route still fails here. The local render is the
+    paired positive control: the same probe MUST fire on it, which is what
+    proves the probe can fire at all.
+    """
+    from fno.graph.render_html import LEAK_PATTERNS
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entry = _entry(
+        "ab-4f470abc",
+        project="fno",
+        title="a clean public title",
+        details="private description",
+        plan_path="/Users/me/internal/fno/plans/private-plan.md",
+        pr_number=1208,
+        pr_url="https://github.com/o/r/pull/1208",
+    )
+    public = render_public_backlog_html([entry], "fno")
+    fired = sorted(name for name, pattern in LEAK_PATTERNS if pattern.search(_payload(public)))
+    assert fired == [], f"public document leaks {fired}"
+
+    local_path = tmp_path / "local.html"
+    render_graph_html([entry], local_path)
+    local_fired = sorted(
+        name
+        for name, pattern in LEAK_PATTERNS
+        if pattern.search(_payload(local_path.read_text()))
+    )
+    assert "node-id" in local_fired and "home-path" in local_fired, (
+        f"probe never fires, so the public zero proves nothing: {local_fired}"
+    )
+
+
+def test_default_local_path_renders_the_canonical_dashboard(tmp_path: Path, monkeypatch):
+    """The surface the operator names: ~/.fno/graph.html, path resolved by default.
+
+    Every other test passes an explicit path, so none of them covers the
+    lazily-resolved GRAPH_HTML default that the auto-render hook actually
+    writes. Assert the canonical skeleton, and assert the replaced card
+    projection is absent.
+    """
+    from fno.graph import _constants
+    from fno.graph import render_html as module
+
+    default = tmp_path / "graph.html"
+    monkeypatch.setattr(_constants, "GRAPH_HTML", default)
+
+    module.render_graph_html([_entry("ab-defa0117", project="fno", title="Default path")])
+    text = default.read_text()
+    for marker in ('id="stats"', 'id="statusChips"', 'id="projectChips"', 'id="fromDate"',
+                   'id="planOnly"', 'id="prOnly"', 'class="group"'):
+        assert marker in text, f"canonical dashboard marker missing: {marker}"
+    assert "Default path" in text and "ab-defa0117" in text
+    for card_marker in ('class="card"', 'class="lane"', 'id="show-done"'):
+        assert card_marker not in text, f"replaced card projection resurfaced: {card_marker}"

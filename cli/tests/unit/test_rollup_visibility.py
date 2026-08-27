@@ -171,11 +171,10 @@ def test_per_project_board_does_not_invent_orphans():
 
     A feature whose parent epic lives in another project has no reachable
     ancestor inside a project-scoped slice; computing orphans from that subset
-    invented orphans AND disagreed with the card flag, which is built from the
-    full index.
+    invents orphans. Every scoped consumer must be handed the whole-graph set.
+    The dashboard renderer carries the same rule through its context_entries
+    argument, covered by test_render_html's cross-project relationship test.
     """
-    from fno.graph.render_html import _bucket
-
     entries = [
         node("x-epic", type="epic", title="mission", project="other"),
         node("x-child", parent="x-epic", project="fno"),
@@ -186,8 +185,6 @@ def test_per_project_board_does_not_invent_orphans():
     proj_entries = [e for e in entries if e["project"] == "fno"]
     # Without the whole-graph set the subset would call x-child an orphan.
     assert orphan_ids(proj_entries) == {"x-child"}
-    # _bucket must use the set it is handed, not recompute from the slice.
-    _bucket(proj_entries, all_orphans)
 
 
 def test_done_cards_are_not_flagged_as_orphans():
