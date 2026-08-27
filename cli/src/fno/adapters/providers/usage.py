@@ -743,10 +743,6 @@ def _zai_integer(value: Any) -> int | None:
     return value
 
 
-def _zai_window_label(window_minutes: int) -> str:
-    return _label_for_minutes(window_minutes)
-
-
 # A reset is published as a window's own reset only when the distance to it is
 # consistent with the window's span. Measured: the TIME_LIMIT row's
 # nextResetTime is the PLAN-PERIOD reset, not that window's, so a one-minute
@@ -863,7 +859,7 @@ def _parse_zai_windows(
                 resets_at = candidate
         windows.append(
             UsageWindow(
-                label=_zai_window_label(window_minutes),
+                label=_label_for_minutes(window_minutes),
                 used_pct=used_pct,
                 resets_at=resets_at,
             )
