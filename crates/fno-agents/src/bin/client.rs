@@ -1081,6 +1081,10 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
                 py_repr(provider)
             );
         };
+        if provider == "codex" && substrate == "bg" && add_dir.is_some() {
+            unsupported("--add-dir");
+            return Some(2);
+        }
         // --add-dir: claude/codex/agy map it; gemini has no verified equivalent.
         if add_dir.is_some() && !matches!(provider, "claude" | "codex" | "agy") {
             unsupported("--add-dir");

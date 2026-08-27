@@ -618,17 +618,15 @@ def test_explicit_tab_wins_over_profile_pane_group(monkeypatch):
 
 
 def test_ac4_err_incompatible_config_substrate_degrades_open():
-    # bg on a codex-resolved spawn: no --substrate injected, warning names it.
+    # bg on a codex-resolved spawn is now the earned persistent thread lane.
     err = io.StringIO()
     out = _inject(
         ["spawn", "-H", "codex", "--name", "w", "/think x"], err=err,
         profiles={"think": {"substrate": "bg"}},
     )
-    assert "--substrate" not in out
+    assert out[out.index("--substrate") + 1] == "bg"
     msg = err.getvalue()
-    assert "substrate skipped" in msg
-    assert "bg" in msg and "codex" in msg
-    assert "agents.profiles.think.substrate" in msg
+    assert "substrate skipped" not in msg
 
 
 def test_ac5_err_unknown_profile_provider_fails_closed():
@@ -773,8 +771,7 @@ def test_only_harness_flags_feed_the_provider_aware_default_scan():
     ambient claude-only default (bg) skip itself on a routed claude spawn."""
     for flag in ("--harness", "-H"):
         out = _inject(["spawn", "hi", flag, "codex"], substrate="bg")
-        # bg is claude-only, so a codex spawn degrades open (warn, skip).
-        assert "--substrate" not in out, f"{flag}: bg must not be injected for codex"
+        assert out[out.index("--substrate") + 1] == "bg", flag
 
     # --provider zai leaves the harness unresolved (claude by default), so the
     # claude-only bg default still applies.

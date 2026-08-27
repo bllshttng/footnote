@@ -100,13 +100,26 @@ pub fn thread_resume_request_json(thread_id: &str, cwd: &str, approval_policy: &
 
 /// Build a `turn/start` request for the held driver.
 pub fn turn_start_request_json_with_id(id: u64, thread_id: &str, text: &str) -> String {
+    turn_start_request_json_with_effort(id, thread_id, text, None)
+}
+
+pub fn turn_start_request_json_with_effort(
+    id: u64,
+    thread_id: &str,
+    text: &str,
+    effort: Option<&str>,
+) -> String {
+    let mut params = json!({
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": text}],
+    });
+    if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
+        params["effort"] = json!(effort);
+    }
     json!({
         "id": id,
         "method": "turn/start",
-        "params": {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": text}],
-        }
+        "params": params,
     })
     .to_string()
 }
@@ -231,6 +244,7 @@ pub struct CodexThread {
     thread_id: String,
     rollout_path: PathBuf,
     cwd: PathBuf,
+    effort: Option<String>,
     current_turn_id: Option<String>,
 }
 
@@ -239,6 +253,7 @@ impl CodexThread {
         cwd: impl Into<PathBuf>,
         model: Option<&str>,
         yolo: bool,
+        effort: Option<&str>,
     ) -> Result<Self, ThreadDriverError> {
         let cwd = cwd.into();
         let mut driver = Self::launch(cwd.clone()).await?;
@@ -249,6 +264,9 @@ impl CodexThread {
             .map_err(|error| ThreadDriverError::Protocol(error.to_string()))?;
         driver.thread_id = thread_id;
         driver.rollout_path = PathBuf::from(rollout_path);
+        driver.effort = effort
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_string);
         Ok(driver)
     }
 
@@ -257,6 +275,7 @@ impl CodexThread {
         thread_id: &str,
         model: Option<&str>,
         yolo: bool,
+        effort: Option<&str>,
     ) -> Result<Self, ThreadDriverError> {
         if thread_id.trim().is_empty() {
             return Err(ThreadDriverError::Protocol(
@@ -277,6 +296,9 @@ impl CodexThread {
         }
         driver.thread_id = confirmed_id;
         driver.rollout_path = PathBuf::from(rollout_path);
+        driver.effort = effort
+            .filter(|effort| !effort.is_empty())
+            .map(str::to_string);
         Ok(driver)
     }
 
@@ -307,6 +329,7 @@ impl CodexThread {
             thread_id: String::new(),
             rollout_path: PathBuf::new(),
             cwd,
+            effort: None,
             current_turn_id: None,
         })
     }
@@ -405,7 +428,12 @@ impl CodexThread {
     pub async fn drive_turn(&mut self, text: &str) -> Result<TurnResult, ThreadDriverError> {
         let request_id = self.next_id;
         self.next_id += 1;
-        let request = turn_start_request_json_with_id(request_id, &self.thread_id, text);
+        let request = turn_start_request_json_with_effort(
+            request_id,
+            &self.thread_id,
+            text,
+            self.effort.as_deref(),
+        );
         let response = tokio::time::timeout(TURN_TIMEOUT, self.request(request_id, request))
             .await
             .map_err(|_| ThreadDriverError::Timeout)??;
@@ -562,6 +590,18 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["params"]["expectedTurnId"], "turn-1");
+    }
+
+    #[test]
+    fn turn_start_carries_reasoning_effort_when_requested() {
+        let value: Value = serde_json::from_str(&turn_start_request_json_with_effort(
+            7,
+            "thread-1",
+            "continue",
+            Some("high"),
+        ))
+        .unwrap();
+        assert_eq!(value["params"]["effort"], "high");
     }
 
     #[test]

@@ -3939,6 +3939,7 @@ fn build_codex_thread_entry(
     cwd: &Path,
     driver: &crate::codex_thread::CodexThread,
     model: Option<&str>,
+    effort: Option<&str>,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
@@ -3950,7 +3951,7 @@ fn build_codex_thread_entry(
         provider: Some("openai".into()),
         model: model.map(str::to_string),
         model_basis: None,
-        effort: None,
+        effort: effort.map(str::to_string),
         harness: Some("codex".into()),
         harness_session_id: Some(session_id.clone()),
         predecessor_session_ids: Vec::new(),
@@ -4001,13 +4002,20 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
         .get("yolo")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let effort = req.params.get("effort").and_then(Value::as_str);
     let seed = req
         .params
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let driver = match crate::codex_thread::CodexThread::start(cwd.to_path_buf(), model, yolo).await
+    let driver = match crate::codex_thread::CodexThread::start(
+        cwd.to_path_buf(),
+        model,
+        yolo,
+        effort,
+    )
+    .await
     {
         Ok(driver) => driver,
         Err(error) => {
@@ -4018,7 +4026,7 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry
@@ -4130,10 +4138,15 @@ async fn ensure_codex_thread_handle(
     if let Some(handle) = threads.get(&entry.name).cloned() {
         return Ok(handle);
     }
-    let driver =
-        crate::codex_thread::CodexThread::resume(cwd, &session_id, entry.model.as_deref(), false)
-            .await
-            .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
+    let driver = crate::codex_thread::CodexThread::resume(
+        cwd,
+        &session_id,
+        entry.model.as_deref(),
+        false,
+        entry.effort.as_deref(),
+    )
+    .await
+    .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
     let handle = Arc::new(tokio::sync::Mutex::new(driver));
     threads.insert(entry.name.clone(), Arc::clone(&handle));
     Ok(handle)

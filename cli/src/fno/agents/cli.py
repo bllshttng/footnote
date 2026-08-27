@@ -1312,7 +1312,7 @@ def cmd_spawn(
             "Model for the worker, forwarded as --model <m> to the provider's "
             "own CLI (exact passthrough, no fuzzy resolution). On the default "
             "pane substrate every provider honors it (claude/codex/gemini/agy/"
-            "opencode); on --substrate thread/headless it reaches claude and agy. "
+            "opencode); on --substrate thread/headless it reaches claude, codex, and agy. "
             "Unset = provider default; opencode defaults to zai-coding-plan/glm-5.3."
         ),
     ),

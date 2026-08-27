@@ -68,6 +68,38 @@ def test_route_bearing_spawn_detected() -> None:
     assert not _is_route_bearing_spawn("ask", ["ask", "w", "--route", "zai,glm-5.2"])
 
 
+def test_codex_thread_spawn_returns_full_session_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fno.agents import dispatch
+    from fno import rust_binary
+
+    captured: dict[str, Any] = {}
+    session_id = "019f0000-0000-7000-8000-000000000001"
+
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"harness": "codex", "short_id": "", "harness_session_id": session_id})
+        stderr = ""
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/fno-agents"))
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Completed:
+        captured["argv"] = argv
+        return Completed()
+
+    monkeypatch.setattr(dispatch.subprocess, "run", fake_run)
+    assert dispatch._codex_thread_spawn(
+        name="codex-thread",
+        message="seed",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+    ) == session_id
+    argv = captured["argv"]
+    assert argv[argv.index("--substrate") + 1] == "thread"
+    assert argv[-1] == "seed"
+
+
 # ---------------------------------------------------------------------------
 # cmd_spawn: fail CLOSED before the gate (AC3-ERR)
 # ---------------------------------------------------------------------------

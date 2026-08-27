@@ -67,7 +67,7 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>mi
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
-thread = false
+thread = true
 autonomous_pane = true
 route_on_pane = false
 stop_hook = "native"
