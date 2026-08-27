@@ -1397,14 +1397,20 @@ echo ""
 echo "--- Task Edge Check ---"
 
 validate_task_edges_check() {
-    local source_root="" python_bin="" _src="" source_pythonpath=""
+    local source_root="" python_bin="" _src="" source_pythonpath="" plan_file="$PLAN_DIR"
+    if [[ -d "$plan_file" ]]; then
+        if [[ -f "$plan_file/00-INDEX.md" ]]; then
+            plan_file="$plan_file/00-INDEX.md"
+        else
+            ok "task edge check skipped (directory plan has no 00-INDEX.md)"
+            return 0
+        fi
+    fi
     _src="$(_fno_source_python)"
     if [[ -n "$_src" ]]; then
         python_bin="${_src%%|*}"
         source_root="${_src##*|}"
     else
-        # A source tree may still exist even where no interpreter resolved;
-        # the uv arm below can run it.
         source_root=$(_fno_source_root)
     fi
     if [[ -z "$python_bin" && -z "$source_root" ]]; then
@@ -1425,26 +1431,22 @@ for line in plan.read_text().splitlines():
     if not in_section:
         in_section = bool(re.match(r"^##+\s+Execution Strategy", line))
         continue
-    if re.match(r"^##+", line):
+    if re.match(r"^##+\s", line):
         break
     section.append(line)
 
 if not section:
-    sys.exit(0)  # No strategy to check; presence itself is Check 2's finding.
+    sys.exit(0)
 
 try:
-    from fno.plan.brief import (
-        BriefParseError,
-        parse_execution_strategy,
-        validate_task_edges,
-    )
+    from fno.plan.brief import BriefParseError, parse_execution_strategy, validate_task_edges
 except ImportError:
     sys.exit(0)
 
 try:
     parsed = parse_execution_strategy("\n".join(section))
 except BriefParseError:
-    sys.exit(0)  # Malformed YAML is Check 2's finding, reported there.
+    sys.exit(0)
 
 errors = validate_task_edges(parsed)
 for err in errors:
@@ -1455,9 +1457,9 @@ PYEOF
     local edge_out edge_rc=0
     if [[ -n "$python_bin" ]] && PYTHONPATH="$source_pythonpath" \
         "$python_bin" -c 'import pydantic, yaml' 2>/dev/null; then
-        edge_out=$(PYTHONPATH="$source_pythonpath" "$python_bin" -c "$code" "$PLAN_DIR") || edge_rc=$?
+        edge_out=$(PYTHONPATH="$source_pythonpath" "$python_bin" -c "$code" "$plan_file") || edge_rc=$?
     elif command -v uv >/dev/null 2>&1 && [[ -n "$source_root" ]]; then
-        edge_out=$(uv run --project "$source_root/cli" python -c "$code" "$PLAN_DIR") || edge_rc=$?
+        edge_out=$(uv run --project "$source_root/cli" python -c "$code" "$plan_file") || edge_rc=$?
     else
         ok "task edge check skipped (fno not importable)"
         return 0

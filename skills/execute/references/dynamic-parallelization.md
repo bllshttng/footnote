@@ -58,8 +58,8 @@ For each wave marked sequential in execution strategy:
 
 ## Edge Cases
 
-### Overlap no longer strands disjoint siblings
-When a task's effective blockers are done and no peer claims it, the task runs. Declared `blocked_by` takes precedence. Otherwise, blockers are every task in the previous wave. Once the waves skill uses the orchestrator's `--ready` read, C's overlap with A holds C back while A and B dispatch independently.
+### Per-task readiness does not partition file overlap
+Per-task readiness controls dependency availability. It does not partition tasks by file overlap. If A, B, and C share files, the conflict gate keeps the wave sequential. Partial parallelization within one wave remains unsupported.
 
 ### Malformed or missing map
 If the ownership map is present but malformed, log a warning and use the declared strategy.

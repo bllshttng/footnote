@@ -196,7 +196,7 @@ for the full decision table, exact commands, and receipt formats.
 For each DISPATCH ROUND, drive off the ready set, not wave order:
 
 ```bash
-# One JSON object on stdout: {"ready": [...], "completed": [...], "claimed": [...]}.
+# One JSON object on stdout: {"ready": [...], "completed": [...], "claimed": [...], "blocked": [...]}.
 # Pass --node "$NODE_ID" when graph_node_id is bound (the same field step 3e
 # reads): cross-session done/in_progress task rows then join this session's
 # STATE.md [x] as completions and claims. A failed node read degrades to
@@ -205,11 +205,14 @@ READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" \
     --ready --state .fno/STATE.md ${NODE_ID:+--node "$NODE_ID"})
 ```
 
-A task appears under `ready` when its effective blockers are all complete
-and no peer holds it: its declared `blocked_by` wins outright, otherwise it
-derives every task in the previous wave, so a plan without per-task edges
-schedules exactly as the whole-wave barrier did. Dispatch every entry under
-`ready` before running the query again:
+A task appears under `ready` when its effective blockers are all complete and
+no peer holds it. A declared `blocked_by` list wins, including an explicit
+empty list. A task without that key derives every task in the previous wave,
+so a plan without per-task edges schedules exactly as the whole-wave barrier
+did. Live foreign task claims appear under `claimed`. Stale or self-owned
+claims are re-offered. Unknown task-row statuses appear under `blocked` and
+never dispatch. Dispatch every entry under `ready` before running the query
+again:
 
 **If mode: sequential**
 - Execute each ready task in order using fno:archer
