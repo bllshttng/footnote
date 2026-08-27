@@ -127,20 +127,30 @@ def unreachable_tier_ids(
 def empty_bands_for_harness(
     harnesses: tuple[str, ...] = ("claude", "codex"),
     tiers: Optional[Mapping[str, list]] = None,
+    reach: Optional[Mapping[str, tuple[str, str]]] = None,
 ) -> dict[str, list[str]]:
     """Bands whose static tier resolves to NOTHING for a harness, per harness.
 
     The doctor-line shape: a band an entire provider cannot serve is a
     routing hole an operator must see, not discover at dispatch.
+
+    Reads the STATIC reachability map, not :func:`reachable`, and takes
+    ``reach`` for the same reason ``unreachable_tier_ids`` does. Both answer
+    one question - does the curated tier table line up with the curated
+    reachability map - and that question is about the static tables alone. Its
+    sibling already read the map directly; this one called ``reachable``, which
+    became inventory-backed and made every band read as a hole wherever no
+    inventory is declared.
     """
     table = tiers if tiers is not None else STATIC_TIERS
+    rows = reach if reach is not None else REACHABILITY
     out: dict[str, list[str]] = {}
     for harness in harnesses:
         empty = [
             band
             for band, names in table.items()
             if not any(
-                (row := reachable(n)) is not None and row[0] == harness
+                (row := rows.get(n)) is not None and row[0] == harness
                 for n in names
             )
         ]

@@ -559,12 +559,29 @@ def resolve_tier(
     if band not in _BAND_FLOOR:
         chain.append("unknown-tier -> provider default")
         return None, chain
-    inv = inventory if inventory is not None else resolve_inventory(
+    declared = inventory is not None
+    inv = inventory if declared else resolve_inventory(
         settings=settings, snapshot=snapshot
     )
     if not inv.rows:
-        chain.append("no declared inventory -> provider default")
-        return None, chain
+        if declared:
+            # The caller handed us the inventory and it is empty. That is an
+            # answer, not a gap: honor it rather than reaching past the caller
+            # for a fleet it did not name.
+            chain.append("no declared inventory -> provider default")
+            return None, chain
+        # Nothing declared in config. The GRID stays config-first and injects
+        # nothing here (resolve_grid records no-inventory-declared), but a tier
+        # request must still name a model: review level resolves a model for
+        # every level, and answering None would drop `/code-review` to the
+        # provider default on every install that has declared no inventory,
+        # which is every fresh one. So fall back to the curated static table.
+        # The declared inventory still wins whenever one exists - the rule the
+        # inventory exists to enforce is that a stranger's install never
+        # INHERITS this machine's fleet, and declaring one overrides this.
+        model, static_chain = _resolve_tier_static(band, provider)
+        chain.extend(static_chain)
+        return model, chain
 
     rows = _scoped_rows(inv, provider)
     floor_rank = _BAND_RANK[band]
@@ -581,6 +598,30 @@ def resolve_tier(
         return best.model, chain
     chain.append("inventory has no reachable model -> provider default")
     return None, chain
+
+
+
+def _resolve_tier_static(band: str, provider: Optional[str]) -> tuple[Optional[str], list[str]]:
+    """Resolve a band from the curated static table, scoped to one harness.
+
+    The pre-inventory resolver, kept for the no-inventory-declared case only.
+    Walks ``_STATIC_FALLTHROUGH`` so a band the harness cannot serve degrades
+    within that harness instead of returning nothing, and never crosses to a
+    foreign harness. The chain names ``static`` so a reader can tell which
+    source answered, and so ``review_level._degraded_max`` can still see that a
+    max request was served by a lower band.
+    """
+    from fno.adapters.providers import benchmarks as _bm
+
+    for cand_band in _STATIC_FALLTHROUGH.get(band, [band]):
+        for name in _bm.STATIC_TIERS.get(cand_band, []):
+            row = _bm.REACHABILITY.get(name)
+            if row is None:
+                continue
+            if provider is not None and row[0] != provider:
+                continue
+            return row[1], [f"static {cand_band} -> {name}"]
+    return None, ["static table has no reachable model -> provider default"]
 
 
 def resolve_dispatch_model(

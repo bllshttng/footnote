@@ -145,9 +145,12 @@ def _prefer_provider_family(
     from fno.adapters.providers import benchmarks as bm
     from fno.route_resolve import _STATIC_FALLTHROUGH
 
+    # Reads the STATIC map, not bm.reachable: this walk is over STATIC_TIERS,
+    # and reachable() answers from the declared inventory. Asking the two
+    # sources one question misses on every install that declares no inventory.
     for cand_band in _STATIC_FALLTHROUGH.get(band, [band]):
         for name in bm.STATIC_TIERS.get(cand_band, []):
-            reach = bm.reachable(name)
+            reach = bm.REACHABILITY.get(name)
             if reach and reach[0] == harness and name.startswith(families):
                 chain.append(f"provider family({route_provider}) static {cand_band} -> {name}")
                 return name
