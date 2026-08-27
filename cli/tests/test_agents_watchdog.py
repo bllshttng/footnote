@@ -3422,3 +3422,516 @@ def test_origin_is_on_the_shared_list_row_contract():
          / "schemas" / "agents-list-row.json").read_text()
     )
     assert "origin" in contract["required"]
+
+
+# ---------------------------------------------------------------------------
+# The unfinished-work report: the operator surface, distinct from the verdict
+# classifier above. The classifier stays the internal recovery engine; the
+# report answers the outcome question (was work started and never finished?)
+# over four dimensions, each row naming the one verb that clears it.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+from fno.agents import unfinished_work as uw  # noqa: E402
+
+
+def _probe(
+    handle: str = "sess-0001",
+    *,
+    pid_alive=None,
+    transcript_age_s=None,
+    claim_state=None,
+    stored_exited=False,
+):
+    return uw.OwnerProbe(
+        handle=handle,
+        pid_alive=pid_alive,
+        transcript_age_s=transcript_age_s,
+        claim_state=claim_state,
+        stored_exited=stored_exited,
+    )
+
+
+def _node_obs(
+    node_id: str,
+    *,
+    status: str = "in_progress",
+    claim_state: str = "free",
+    touched_epoch=None,
+    worktree=None,
+    ahead=None,
+    probes=(),
+    cwd=None,
+):
+    return uw.NodeObs(
+        node_id=node_id,
+        status=status,
+        touched_at_epoch=touched_epoch,
+        cwd=cwd,
+        worktree_path=worktree,
+        ahead_count=ahead,
+        claim={"state": claim_state} if claim_state is not None else None,
+        owner_probes=tuple(probes),
+    )
+
+
+def _wt_obs(
+    path: str,
+    *,
+    dirty=0,
+    ahead=None,
+    node_id=None,
+    probes=(),
+    repo="/repo",
+):
+    return uw.WorktreeObs(
+        path=path,
+        repo_root=repo,
+        branch=None,
+        dirty_count=dirty,
+        ahead_count=ahead,
+        node_id=node_id,
+        owner_probes=tuple(probes),
+    )
+
+
+def _pr_obs(
+    number: int,
+    *,
+    state="OPEN",
+    opened_epoch=None,
+    node="x-prnode",
+    probes=(),
+    url=None,
+):
+    return uw.PrObs(
+        pr_number=number,
+        pr_url=url or f"https://github.com/o/r/pull/{number}",
+        node_id=node,
+        state=state,
+        opened_at_epoch=opened_epoch,
+        owner_probes=tuple(probes),
+    )
+
+
+def _uw_obs(
+    nodes=(),
+    worktrees=(),
+    prs=(),
+    *,
+    graph_ok=True,
+    claims_ok=True,
+    registry_ok=True,
+    github_ok=True,
+    unscanned_roots=(),
+    warnings=(),
+    now_s=NOW_1840,
+):
+    return uw.Observations(
+        now_epoch=now_s,
+        graph_ok=graph_ok,
+        claims_ok=claims_ok,
+        registry_ok=registry_ok,
+        github_ok=github_ok,
+        nodes=tuple(nodes),
+        worktrees=tuple(worktrees),
+        prs=tuple(prs),
+        unscanned_roots=tuple(unscanned_roots),
+        warnings=tuple(warnings),
+    )
+
+
+# --- AC1: the report answers the outcome question ------------------------
+
+
+def test_ac1_clean_scan_renders_four_measured_zero_dimensions():
+    snap = uw.classify(_uw_obs())
+    payload = uw.snapshot_payload(snap)
+    text = uw.snapshot_digest(snap)
+
+    assert snap.complete is True
+    assert payload["findings"] == []
+    assert payload["counts"] == {dim: 0 for dim in uw.DIMENSIONS}
+    assert text.splitlines()[0] == "unfinished work: 0 finding(s)"
+    for dim in uw.DIMENSIONS:
+        assert f"{dim}=0 measured" in text
+
+
+def test_ac1_session_bookkeeping_never_enters_the_operator_surfaces():
+    """100 registry-absent rollouts and six past-ceiling stale rows produced
+    zero actionable outcomes in the measured sweep; the report must say that
+    with positive measured markers, never by repeating the session rows."""
+    snap = uw.classify(_uw_obs())
+    blob = json.dumps(uw.snapshot_payload(snap)) + uw.snapshot_digest(snap) \
+        + uw.snapshot_signature(snap)
+    assert "recoverable" not in blob
+    assert "stale" not in blob
+    assert "orphaned" not in blob
+
+
+# --- AC2: liveness is read from pid/transcript, never a stored word -------
+
+
+def test_ac2_live_pid_defeats_any_stored_terminal_word():
+    probe = _probe(pid_alive=True, transcript_age_s=99999.0)
+    assert uw.owner_verdict(probe) == "live"
+
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/fix-scoreboard-clock", dirty=82, probes=[probe])])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+def test_ac2_fresh_transcript_defeats_stored_state_too():
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0)) == "live"
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0, claim_state="stale")) == "live"
+
+
+def test_ac2_unreadable_liveness_is_unknown_not_ownerless():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x", dirty=5, probes=[_probe()])])
+    )
+    assert snap.findings == ()
+    dim = snap.dimensions[uw.KIND_DIRTY]
+    assert dim.state == uw.UNKNOWN_DIM
+    assert snap.complete is False
+
+
+def test_ac2_positive_control_genuinely_orphaned_still_ownerless():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x", dirty=5, probes=[_probe(pid_alive=False)])])
+    )
+    assert [f.subject for f in snap.findings] == ["/w/x"]
+
+
+def test_ac2_no_candidates_is_gone_only_when_the_store_read():
+    """A worktree nobody registered on reads ownerless only when the registry
+    read succeeded; a failed read must not manufacture an ownerless verdict."""
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=5)]))
+    assert [f.kind for f in snap.findings] == [uw.KIND_DIRTY]
+
+    snap2 = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=5)], registry_ok=False))
+    assert snap2.findings == ()
+    assert snap2.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+
+
+# --- AC3: started nodes with free claims ---------------------------------
+
+
+def test_ac3_started_free_claim_nodes_carry_target_verbs_and_idle_order():
+    older = _node_obs(
+        "x-7d02", touched_epoch=NOW_1840 - 116 * 3600, worktree="/w/x-7d02", ahead=8
+    )
+    newer = _node_obs(
+        "x-3b05", touched_epoch=NOW_1840 - 10 * 3600, worktree="/w/x-3b05", ahead=6
+    )
+    snap = uw.classify(_uw_obs(nodes=[newer, older]))
+
+    assert [f.subject for f in snap.findings] == ["x-7d02", "x-3b05"]
+    assert all(f.kind == uw.KIND_STARTED for f in snap.findings)
+    assert all(f.clear_command == f"/fno:target {f.subject}" for f in snap.findings)
+    assert snap.findings[0].age_s == pytest.approx(116 * 3600)
+    assert snap.findings[0].ahead_count == 8
+    assert "origin/main" in snap.findings[0].basis
+    assert snap.findings[1].basis.count("origin/main") == 1
+
+
+def test_ac3_non_free_claim_or_live_owner_excludes_the_node():
+    held = _node_obs("x-held", claim_state="live")
+    suspect = _node_obs("x-susp", claim_state="suspect")
+    stale_lease = _node_obs("x-lease", claim_state="stale")
+    corrupted = _node_obs("x-corr", claim_state="corrupted")
+    owned = _node_obs("x-owned", probes=[_probe(pid_alive=True)])
+
+    snap = uw.classify(
+        _uw_obs(nodes=[held, suspect, stale_lease, corrupted, owned])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_STARTED].state == uw.MEASURED
+
+
+# --- AC4: done nodes whose branch never reached main ----------------------
+
+
+def test_ac4_done_ahead_of_main_names_count_and_squash_reading():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[
+                _node_obs("x-aaae", status="done", worktree="/w/x-aaae"),
+            ],
+            worktrees=[_wt_obs("/w/x-aaae", dirty=0, ahead=66, node_id="x-aaae")],
+        )
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DONE_AHEAD
+    assert finding.subject == "x-aaae"
+    assert finding.ahead_count == 66
+    assert "66" in finding.basis
+    assert "squash" in finding.basis
+    assert "stranded" in finding.clear_command
+    assert "/w/x-aaae" in finding.basis
+
+
+def test_ac4_unreadable_ahead_count_marks_dimension_unknown():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[_node_obs("x-aaae", status="done", worktree="/w/x-aaae")],
+            worktrees=[_wt_obs("/w/x-aaae", dirty=0, ahead=None, node_id="x-aaae")],
+        )
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DONE_AHEAD].state == uw.UNKNOWN_DIM
+
+
+def test_ac4_metric_reads_fresh_origin_main_not_the_tracking_ref(tmp_path):
+    """The measured defect: a stale remote-tracking ref inflated the ahead
+    count to 936 against a true 8. The fixture builds a real bare origin,
+    rebases a feature branch onto an origin advance, then rewinds the local
+    remote-tracking ref to the pre-advance commit: the tracking-ref count
+    reads 11, the true origin/main..HEAD count is 8, and only a fresh fetch
+    separates them."""
+    import subprocess as _sp
+
+    def _git(cwd, *argv, check=True):
+        return _sp.run(
+            ["git", "-C", str(cwd), *argv],
+            capture_output=True, text=True, check=check,
+        )
+
+    origin = tmp_path / "origin.git"
+    _sp.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    clone = tmp_path / "clone"
+    _sp.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    _git(clone, "config", "user.email", "t@t.t")
+    _git(clone, "config", "user.name", "t")
+    _git(clone, "checkout", "-q", "-b", "main")
+    (clone / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(clone, "add", "a.txt")
+    _git(clone, "commit", "-q", "-m", "base")
+    _git(clone, "push", "-q", "-u", "origin", "main")
+    base_sha = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    _git(clone, "checkout", "-q", "-b", "feature")
+    for i in range(8):
+        (clone / "a.txt").write_text(f"base\n{i}\n", encoding="utf-8")
+        _git(clone, "add", "a.txt")
+        _git(clone, "commit", "-q", "-m", f"f{i}")
+    _git(clone, "branch", "--set-upstream-to=origin/main", "feature")
+
+    # Advance origin/main from a second clone, rebase onto it, then rewind
+    # the local remote-tracking ref: exactly the stale-ref condition.
+    other = tmp_path / "other"
+    _sp.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git(other, "config", "user.email", "t@t.t")
+    _git(other, "config", "user.name", "t")
+    for i in range(3):
+        (other / "b.txt").write_text(f"{i}\n", encoding="utf-8")
+        _git(other, "add", "b.txt")
+        _git(other, "commit", "-q", "-m", f"m{i}")
+    _git(other, "push", "-q", "origin", "main")
+
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "rebase", "-q", "origin/main")
+    _git(clone, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    # The control: against the stale tracking ref the two-dot count lies
+    # (3 main commits + 8 feature commits). This is the 936-equivalent
+    # inflation the metric exists to refuse.
+    inflated = _git(
+        clone, "rev-list", "--count", "feature@{upstream}..feature"
+    ).stdout.strip()
+    assert int(inflated) == 11
+
+    assert uw.fetch_origin_main(clone) is True
+    assert uw.ahead_of_main(clone) == 8
+
+
+def test_ac4_fetch_failure_and_garbage_count_are_unknown_never_a_count():
+    class _FailRun:
+        def __call__(self, argv, **kw):
+            class _P:
+                returncode = 1
+                stdout = ""
+                stderr = "no remote"
+
+            return _P()
+
+    class _GarbageRun:
+        def __call__(self, argv, **kw):
+            class _P:
+                returncode = 0
+                stdout = "not a count\n"
+                stderr = ""
+
+            return _P()
+
+    assert uw.fetch_origin_main(Path("/nope"), runner=_FailRun()) is False
+    assert uw.ahead_of_main(Path("/nope"), runner=_FailRun()) is None
+    assert uw.ahead_of_main(Path("/nope"), runner=_GarbageRun()) is None
+
+
+# --- AC5: dirty worktrees with no owner -----------------------------------
+
+
+def test_ac5_dirty_ownerless_worktree_is_keyed_by_absolute_path():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/fix-scoreboard-clock", dirty=82)])
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DIRTY
+    assert finding.subject == "/w/fix-scoreboard-clock"
+    assert finding.dirty_count == 82
+    assert "/w/fix-scoreboard-clock" in finding.clear_command
+
+
+def test_ac5_dirty_worktree_with_a_node_names_the_target_verb():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-46f9", dirty=3, node_id="x-46f9")])
+    )
+    [finding] = snap.findings
+    assert finding.clear_command == "/fno:target x-46f9"
+
+
+def test_ac5_failed_git_status_marks_dimension_unknown():
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=None)]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+
+
+def test_ac5_clean_worktrees_do_not_emit():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/clean", dirty=0, ahead=0, node_id="x-ok")])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+# --- AC6: ownerless open PRs older than 24h -------------------------------
+
+
+def test_ac6_pr_age_boundary_and_verb():
+    old = _pr_obs(101, opened_epoch=NOW_1840 - 24 * 3600 - 1)
+    exact = _pr_obs(102, opened_epoch=NOW_1840 - 24 * 3600)
+    young = _pr_obs(103, opened_epoch=NOW_1840 - 3600)
+    snap = uw.classify(_uw_obs(prs=[old, exact, young]))
+
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_PR
+    assert finding.pr_number == 101
+    assert finding.clear_command == "/fno:pr check 101"
+    assert "pull/101" in finding.basis
+    assert finding.age_s == pytest.approx(24 * 3600 + 1)
+
+
+def test_ac6_merged_live_owned_and_unreadable_prs_do_not_emit():
+    merged = _pr_obs(104, state="MERGED", opened_epoch=NOW_1840 - 48 * 3600)
+    live_owned = _pr_obs(
+        105, opened_epoch=NOW_1840 - 48 * 3600, probes=[_probe(pid_alive=True)]
+    )
+    snap = uw.classify(_uw_obs(prs=[merged, live_owned]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_PR].state == uw.MEASURED
+
+    unreadable = _uw_obs(prs=[_pr_obs(106, state=None, opened_epoch=NOW_1840 - 48 * 3600)])
+    snap2 = uw.classify(unreadable)
+    assert snap2.findings == ()
+    assert snap2.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+    snap3 = uw.classify(
+        _uw_obs(
+            prs=[_pr_obs(107, opened_epoch=NOW_1840 - 48 * 3600, probes=[_probe()])],
+        )
+    )
+    assert snap3.findings == ()
+    assert snap3.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+    snap4 = uw.classify(_uw_obs(prs=[_pr_obs(108, opened_epoch=NOW_1840 - 48 * 3600)], github_ok=False))
+    assert snap4.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+# --- AC7: every finding names its clearing verb ---------------------------
+
+
+def test_ac7_every_emitted_finding_carries_subject_basis_and_verb():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)],
+            worktrees=[_wt_obs("/w/d", dirty=4)],
+            prs=[_pr_obs(9, opened_epoch=NOW_1840 - 30 * 3600)],
+        )
+    )
+    assert len(snap.findings) == 3
+    for finding in snap.findings:
+        assert finding.subject
+        assert finding.basis
+        assert finding.clear_command
+        assert ":" in uw.finding_identity(finding)
+
+
+def test_ac7_a_finding_without_a_verb_is_not_emitted(monkeypatch):
+    monkeypatch.setattr(uw, "_dirty_clear_command", lambda w: "")
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=7)]))
+    assert snap.findings == ()
+    assert any("clearing verb" in w for w in snap.warnings)
+
+
+# --- AC8: a clean dimension is positive evidence --------------------------
+
+
+def test_ac8_any_failed_read_blocks_complete():
+    for kwargs in (
+        {"graph_ok": False},
+        {"claims_ok": False},
+        {"registry_ok": False},
+        {"github_ok": False},
+        {"unscanned_roots": ("/repo/other",)},
+    ):
+        snap = uw.classify(_uw_obs(**kwargs))
+        assert snap.complete is False, kwargs
+        assert any(
+            d.state == uw.UNKNOWN_DIM for d in snap.dimensions.values()
+        ), kwargs
+
+
+def test_ac8_unknown_dimensions_carry_their_warning():
+    snap = uw.classify(_uw_obs(graph_ok=False))
+    dim = snap.dimensions[uw.KIND_STARTED]
+    assert dim.state == uw.UNKNOWN_DIM
+    assert dim.warning
+
+
+def test_ac8_ordering_is_deterministic_severity_then_age_then_subject():
+    a = _node_obs("x-b", touched_epoch=NOW_1840 - 5 * 3600)
+    b = _node_obs("x-a", touched_epoch=NOW_1840 - 5 * 3600)
+    c = _node_obs("x-c", touched_epoch=NOW_1840 - 50 * 3600)
+    snap = uw.classify(_uw_obs(nodes=[a, b, c], worktrees=[_wt_obs("/w/z", dirty=1)]))
+    assert [f.subject for f in snap.findings] == ["x-c", "x-a", "x-b", "/w/z"]
+
+
+# --- the digest and the signature -----------------------------------------
+
+
+def test_digest_is_house_style_blocks_and_names_verbs():
+    snap = uw.classify(
+        _uw_obs(nodes=[_node_obs("x-7d02", touched_epoch=NOW_1840 - 116 * 3600)])
+    )
+    text = uw.snapshot_digest(snap)
+    lines = text.splitlines()
+    assert lines[0] == "unfinished work: 1 finding(s)"
+    assert any(ln.startswith("- ") for ln in lines)
+    assert "/fno:target x-7d02" in text
+    # One physical line per paragraph: exactly one blank separator before
+    # the dimension block, every content line whole.
+    assert lines.count("") == 1
+    assert all(ln.strip() for ln in lines if ln != "")
+
+
+def test_signature_keys_on_outcome_identity_not_rows():
+    s1 = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 99 * 3600)]))
+    s2 = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 1 * 3600)]))
+    assert uw.snapshot_signature(s1) == uw.snapshot_signature(s2)
+
+    s3 = uw.classify(_uw_obs(nodes=[_node_obs("x-2", touched_epoch=NOW_1840 - 99 * 3600)]))
+    assert uw.snapshot_signature(s1) != uw.snapshot_signature(s3)
