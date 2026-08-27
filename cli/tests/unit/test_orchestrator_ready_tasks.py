@@ -421,3 +421,55 @@ class TestPartitionEdgesReady:
         assert out["bands"] == {
             "1.1": "medium", "1.2": "medium", "1.3": "medium", "1.4": "medium",
         }
+
+    def test_bands_normalize_case(self, tmp_path):
+        # The validator accepts any casing; the band axis is lowercase, so a
+        # plan stamped "Medium" must report "medium", not pass "Medium" on to
+        # band-resolving consumers.
+        plan_md = PARALLEL_PLAN_MD.replace("difficulty: medium", "difficulty: Medium")
+        plan, state = _write_parallel_fixture(tmp_path, plan_md)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["bands"]["1.1"] == "medium"
+
+    def test_canonical_surface_lists_drive_the_partition(self, tmp_path):
+        # A plan that declares ownership only through Execution Strategy
+        # `surface:` lists has no `### Task` prose; the partition must read
+        # its file targets from the parsed task blocks, not find them all
+        # unevaluated and add no edges.
+        canonical = """---
+title: canonical surfaces
+status: ready
+---
+
+# Canonical surfaces
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: parallel
+    tasks: ['1.1', '1.2', '1.3']
+tasks:
+  - id: '1.1'
+    title: Alpha
+    surface: [src/a.py]
+  - id: '1.2'
+    title: Beta
+    surface: [src/b.py]
+  - id: '1.3'
+    title: Alpha again
+    surface: [src/a.py]
+```
+"""
+        plan, state = _write_parallel_fixture(tmp_path, canonical)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.2"]
+        assert out["blocked_on"] == {"1.3": ["1.1"]}

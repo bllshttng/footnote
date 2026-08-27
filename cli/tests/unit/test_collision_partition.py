@@ -79,6 +79,13 @@ class TestPartition:
         assert groups == [{"A", "B"}]
         assert unevaluated == set()
 
+    def test_all_degenerate_paths_are_unevaluated(self):
+        # A non-empty set whose every entry normalizes away has no usable
+        # file list: unevaluated, never a silent concurrent pass.
+        groups, unevaluated = partition([("D", {"."}), ("E", {"a.py"})])
+        assert groups == [{"D"}, {"E"}]
+        assert unevaluated == {"D"}
+
 
 class TestFindCollisionsThroughPartition:
     def test_each_collision_reports_its_own_plan_path(self, tmp_path):

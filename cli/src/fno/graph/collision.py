@@ -63,7 +63,17 @@ def _default_thresholds() -> CollisionThresholds:
     return CollisionThresholdsBlock().model_dump()  # type: ignore[return-value]
 
 
-DEFAULT_THRESHOLDS: CollisionThresholds = _default_thresholds()
+# Lazy on purpose: partition() must import under a dep-less python (the
+# orchestrator's --ready path runs there), so the fno.config import rides the
+# first thresholds read, never the module import.
+DEFAULT_THRESHOLDS: CollisionThresholds | None = None
+
+
+def _default_thresholds_loaded() -> CollisionThresholds:
+    global DEFAULT_THRESHOLDS
+    if DEFAULT_THRESHOLDS is None:
+        DEFAULT_THRESHOLDS = _default_thresholds()
+    return DEFAULT_THRESHOLDS
 
 
 @dataclass(frozen=True)
@@ -211,17 +221,22 @@ def has_file_surface(plan_path: Path) -> bool:
     return bool(parse_files_to_modify(plan_path))
 
 
-def _match_shared_root(path: str, roots: Collection[str]) -> str | None:
-    """The shared-output root ``path`` falls under, or None.
+def match_shared_root(path: str, roots: Collection[str]) -> str | None:
+    """The shared-output root a normalized path falls under, or None.
 
     A path equal to a root or written beneath it shares that generated-output
-    directory. Task-grain callers pass their hidden-root list (orchestrator's
-    ``HIDDEN_SHARED_OUTPUT_ROOTS``); node-grain callers pass nothing, so the
-    rule applies only where the output-root hazard exists.
+    directory. Task-grain callers pass their hidden-root list (the
+    orchestrator's hidden shared output roots); node-grain callers pass
+    nothing, so the rule applies only where the output-root hazard exists.
+    Input is normalized here so both callers (partition's grouping and the
+    orchestrator's legacy conflict keys) apply the identical rule.
     """
+    normalized = posixpath.normpath(str(path).strip().strip("`"))
+    if not normalized or normalized == ".":
+        return None
     for root in roots:
         base = root.rstrip("/")
-        if path == base or path.startswith(base + "/"):
+        if normalized == base or normalized.startswith(base + "/"):
             return base
     return None
 
@@ -235,8 +250,9 @@ def partition(
     Union-find over ``(id, paths)`` items keyed by normalized path: two items
     sharing a path land in one group, and so do two items writing under one of
     ``shared_roots`` (the generated-output rule; empty by default). Returns
-    ``(groups, unevaluated)`` - disjoint sets of item ids, and the ids whose
-    path set was empty. An unevaluated item is a singleton group as well:
+    ``(groups, unevaluated)`` - disjoint sets of item ids, and the ids with
+    no usable path (empty set, or every entry normalizing away). An
+    unevaluated item is a singleton group as well:
     "no parseable file list" is its own verdict, never a silent pass (the same
     rule ``_classify_lane_candidate`` applies at node grain).
     """
@@ -259,21 +275,25 @@ def partition(
 
     path_owner: dict[str, str] = {}
     root_owner: dict[str, str] = {}
+    evaluated: set[str] = set()
     for item_id, paths in items:
         for raw in paths:
             normalized = posixpath.normpath(str(raw).strip().strip("`"))
             if not normalized or normalized == ".":
                 continue
+            evaluated.add(item_id)
             union(path_owner.setdefault(normalized, item_id), item_id)
-            root = _match_shared_root(normalized, shared_roots)
+            root = match_shared_root(normalized, shared_roots)
             if root:
                 union(root_owner.setdefault(root, item_id), item_id)
 
     groups: dict[str, set[str]] = {}
     unevaluated: set[str] = set()
-    for item_id, paths in items:
+    for item_id, _paths in items:
         groups.setdefault(find(item_id), set()).add(item_id)
-        if not paths:
+        # No usable path (raw-empty set, or every entry normalizing away):
+        # unevaluated - never a silent concurrent pass.
+        if item_id not in evaluated:
             unevaluated.add(item_id)
     ordered = sorted(groups.values(), key=lambda group: sorted(group))
     return ordered, unevaluated
@@ -347,7 +367,7 @@ def _load_thresholds(
             "using defaults",
             file=sys.stderr,
         )
-        return cast("dict[str, float]", dict(DEFAULT_THRESHOLDS))
+        return cast("dict[str, float]", dict(_default_thresholds_loaded()))
 
 
 # ---------------------------------------------------------------------------

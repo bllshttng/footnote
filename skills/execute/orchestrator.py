@@ -390,6 +390,10 @@ class ExecutionStrategy:
     # Declared per-task edges (task id -> blocked_by list). A task with no
     # declared entry derives its blockers from the previous wave instead.
     blocked_by: Dict[str, List[str]] = field(default_factory=dict)
+    # Canonical task surfaces parsed from the Execution Strategy task blocks.
+    # The prose `### Task` / `**Files:**` scan misses plans that declare
+    # ownership only here, which would read every task as unevaluated.
+    task_surfaces: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _extract_task_section(phase_file: Path, task_id: str) -> List[str]:
@@ -436,23 +440,34 @@ def get_task_file_targets(plan_path: str, task_id: str) -> List[str]:
     return targets
 
 
-def _shared_output_root(path: str) -> Optional[str]:
-    normalized = path.strip()
-    normalized = normalized.strip("`")
-    for root in HIDDEN_SHARED_OUTPUT_ROOTS:
-        if normalized == root[:-1] or normalized.startswith(root):
-            return root.rstrip("/")
-    return None
+def _task_targets(
+    plan_path: str, task_id: str, surfaces: Optional[Dict[str, List[str]]]
+) -> List[str]:
+    """The task's file targets: canonical surfaces first, prose scan as fallback.
+
+    A plan that declares ownership only through Execution Strategy `surface:`
+    lists has no `### Task` prose to scan, so the prose scan alone would read
+    it as unevaluated and partition away a real overlap.
+    """
+    if surfaces is not None:
+        canonical = [str(s) for s in surfaces.get(task_id, [])]
+        if canonical:
+            return canonical
+    return get_task_file_targets(plan_path, task_id)
 
 
-def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[str, List[str]]:
+def detect_hidden_output_conflicts(
+    plan_path: str,
+    task_ids: List[str],
+    surfaces: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[str]]:
     """Partition a wave's tasks by file overlap and shared-output roots.
 
     Returns the collision partition (``groups`` of overlapping task ids,
     ``unevaluated`` ids with no parseable file list) plus the two legacy
     conflict keys the ``--wave-decision`` printer still reports.
     """
-    from fno.graph.collision import partition
+    from fno.graph.collision import match_shared_root, partition
 
     by_file: Dict[str, List[str]] = {}
     by_root: Dict[str, List[str]] = {}
@@ -461,7 +476,7 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
     items: List[tuple[str, set[str]]] = []
 
     for task_id in task_ids:
-        targets = set(get_task_file_targets(plan_path, task_id))
+        targets = set(_task_targets(plan_path, task_id, surfaces))
         items.append((task_id, targets))
         for target in sorted(targets):
             owners = by_file.setdefault(target, [])
@@ -469,7 +484,7 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
             if len(owners) == 2:
                 file_conflicts.append(target)
 
-            shared_root = _shared_output_root(target)
+            shared_root = match_shared_root(target, HIDDEN_SHARED_OUTPUT_ROOTS)
             if shared_root:
                 root_owners = by_root.setdefault(shared_root, [])
                 if task_id not in root_owners:
@@ -486,7 +501,11 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
     }
 
 
-def partition_edges(plan_path: str, wave: Wave) -> Dict[str, List[str]]:
+def partition_edges(
+    plan_path: str,
+    wave: Wave,
+    surfaces: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[str]]:
     """Derived within-wave edges from the collision partition.
 
     Inside a multi-member group, task N blocks on task N-1 in wave order;
@@ -496,7 +515,10 @@ def partition_edges(plan_path: str, wave: Wave) -> Dict[str, List[str]]:
     """
     from fno.graph.collision import partition
 
-    items = [(task_id, set(get_task_file_targets(plan_path, task_id))) for task_id in wave.tasks]
+    items = [
+        (task_id, set(_task_targets(plan_path, task_id, surfaces)))
+        for task_id in wave.tasks
+    ]
     groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
 
     edges: Dict[str, List[str]] = {}
@@ -521,7 +543,7 @@ def apply_partition_edges(strategy: ExecutionStrategy, plan_path: str) -> None:
     for wave in strategy.waves:
         if wave.mode != "parallel":
             continue
-        for task_id, blockers in partition_edges(plan_path, wave).items():
+        for task_id, blockers in partition_edges(plan_path, wave, strategy.task_surfaces).items():
             if task_id in strategy.blocked_by:
                 base = set(strategy.blocked_by[task_id])
             else:
@@ -546,6 +568,7 @@ def resolve_wave_execution_mode(
     wave: Wave,
     plan_path: str,
     provider: Optional[str] = None,
+    surfaces: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, object]:
     """Resolve effective wave mode from requested mode and hidden file/shared-output conflicts."""
     resolved_provider, harness_source = resolve_invoking_harness(provider)
@@ -567,7 +590,7 @@ def resolve_wave_execution_mode(
     if wave.mode != "parallel":
         return decision
 
-    conflicts = detect_hidden_output_conflicts(plan_path, wave.tasks)
+    conflicts = detect_hidden_output_conflicts(plan_path, wave.tasks, surfaces)
     decision["conflicts"] = conflicts
 
     if resolved_provider in SEQUENTIAL_FALLBACK_PROVIDERS:
@@ -1626,7 +1649,7 @@ def load_plan_strategy(
                 mode=str(wave_data.get("mode", "sequential")),
                 tasks=tasks,
                 reason=str(wave_data.get("reason", "")),
-                difficulty=str(wave_data.get("difficulty") or plan_band or "").strip(),
+                difficulty=str(wave_data.get("difficulty") or plan_band or "").strip().lower(),
             )
         )
 
@@ -1646,6 +1669,11 @@ def load_plan_strategy(
             str(t["id"]): [str(d) for d in t.get("blocked_by", [])]
             for t in raw.get("tasks", [])
             if isinstance(t, dict) and t.get("id") and t.get("blocked_by_declared", False)
+        },
+        task_surfaces={
+            str(t["id"]): [str(s) for s in t.get("surface", [])]
+            for t in raw.get("tasks", [])
+            if isinstance(t, dict) and t.get("id")
         },
     )
 
@@ -1802,7 +1830,7 @@ if __name__ == "__main__":
         if not wave:
             print(f"Error: wave {wave_number} not found", file=sys.stderr)
             sys.exit(1)
-        decision = resolve_wave_execution_mode(wave, index_path, provider)
+        decision = resolve_wave_execution_mode(wave, index_path, provider, strategy.task_surfaces)
         print(json.dumps(decision, indent=2))
     elif "--ready" in sys.argv:
         # The work-stealing read the waves skill runs before each dispatch

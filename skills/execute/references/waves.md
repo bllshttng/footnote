@@ -219,7 +219,8 @@ A task appears under `ready` when its effective blockers are all complete and no
 **If mode: parallel**
 - Resolve provider capabilities first (a sequential-fallback provider still downgrades the wave)
 - Spawn the whole `ready` set concurrently - Task tool, multiple concurrent calls
-- Update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round
+- With `--node` bound: update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round - the peers' live task rows hold their in-flight claims back
+- Node-less: wait for the whole round to complete, update STATE.md, then re-query - with no node rows an in-flight sibling still reads `ready`, and re-dispatching it double-spawns the work
 - Tasks under `blocked_on` need no action; their derived edges hold them until a later round
 
 `bands` maps each task to its wave's `difficulty` band, with the plan frontmatter band as the fallback. A pulling worker takes only tasks at or below its own band. The band-to-harness-and-model mapping lives in config, never in the plan.
