@@ -8,6 +8,7 @@ Pure-Python primitive consumed by:
 Public API:
     Collision (dataclass)            - one collision record between two plans
     parse_files_to_modify(plan_path) - normalize files from a plan's table
+    partition(items)                 - group items by shared path (node AND task grain)
     find_collisions(...)             - compare a candidate against all pending
     find_acknowledged_collisions(...) - reconcile acknowledged + shipped pairs
     _load_thresholds()               - resolve severity thresholds from settings
@@ -26,11 +27,12 @@ Action inference (deterministic):
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Literal, TypedDict, cast
+from typing import Collection, Iterable, Literal, TypedDict, cast
 
 # Distinguishes "node carries no plan_path" from "node is not on the graph";
 # both are self, but for different reasons and a bare None conflates them.
@@ -207,6 +209,70 @@ def has_file_surface(plan_path: Path) -> bool:
     overlap" from "had nothing to compare" must ask here first.
     """
     return bool(parse_files_to_modify(plan_path))
+
+
+def _match_shared_root(path: str, roots: Collection[str]) -> str | None:
+    """The shared-output root ``path`` falls under, or None.
+
+    A path equal to a root or written beneath it shares that generated-output
+    directory. Task-grain callers pass their hidden-root list (orchestrator's
+    ``HIDDEN_SHARED_OUTPUT_ROOTS``); node-grain callers pass nothing, so the
+    rule applies only where the output-root hazard exists.
+    """
+    for root in roots:
+        base = root.rstrip("/")
+        if path == base or path.startswith(base + "/"):
+            return base
+    return None
+
+
+def partition(
+    items: list[tuple[str, set[str]]],
+    shared_roots: Collection[str] = (),
+) -> tuple[list[set[str]], set[str]]:
+    """Group items by shared path, so overlapping work can serialize as a unit.
+
+    Union-find over ``(id, paths)`` items keyed by normalized path: two items
+    sharing a path land in one group, and so do two items writing under one of
+    ``shared_roots`` (the generated-output rule; empty by default). Returns
+    ``(groups, unevaluated)`` - disjoint sets of item ids, and the ids whose
+    path set was empty. An unevaluated item is a singleton group as well:
+    "no parseable file list" is its own verdict, never a silent pass (the same
+    rule ``_classify_lane_candidate`` applies at node grain).
+    """
+    parent: dict[str, str] = {item_id: item_id for item_id, _ in items}
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]  # path halving
+            node = parent[node]
+        return node
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    path_owner: dict[str, str] = {}
+    root_owner: dict[str, str] = {}
+    for item_id, paths in items:
+        for raw in paths:
+            normalized = posixpath.normpath(str(raw).strip().strip("`"))
+            if not normalized or normalized == ".":
+                continue
+            union(path_owner.setdefault(normalized, item_id), item_id)
+            root = _match_shared_root(normalized, shared_roots)
+            if root:
+                union(root_owner.setdefault(root, item_id), item_id)
+
+    groups: dict[str, set[str]] = {}
+    unevaluated: set[str] = set()
+    for item_id, paths in items:
+        groups.setdefault(find(item_id), set()).add(item_id)
+        if not paths:
+            unevaluated.add(item_id)
+    ordered = sorted(groups.values(), key=lambda group: sorted(group))
+    return ordered, unevaluated
 
 
 def resolve_plan_path(plan_path: str) -> Path:
@@ -536,6 +602,7 @@ def find_collisions(
                 break
 
     repo_root = _find_repo_root()
+    comparators: list[tuple[dict, set[str]]] = []
     for entry in graph:
         if not _is_pending_for_collision(entry):
             continue
@@ -548,39 +615,56 @@ def find_collisions(
         other_files = parse_files_to_modify(other_path)
         if not other_files:
             continue
-        shared = candidate_files & other_files
-        if not shared:
+        comparators.append((entry, other_files))
+
+    # One partition decides who is compared: the candidate's group-mates are
+    # exactly the plans sharing a file. Severity still comes from the pair's
+    # shared count and thresholds, so the verdict per pair is unchanged.
+    candidate_key = "<candidate>"
+    groups, _unevaluated = partition(
+        [(candidate_key, candidate_files)]
+        + [(f"other:{i}", files) for i, (_, files) in enumerate(comparators)]
+    )
+    by_key = {f"other:{i}": pair for i, pair in enumerate(comparators)}
+    for group in groups:
+        if candidate_key not in group:
             continue
-        severity, shared_sorted = _classify(candidate_files, other_files, thresholds)
-        action = _infer_action(
-            candidate_files,
-            other_files,
-            entry.get("created_at") or "",
-            candidate_created,
-            severity,
-        )
-        rationale = _build_rationale(
-            candidate_files,
-            other_files,
-            shared_sorted,
-            entry.get("id", "<unknown>"),
-            severity,
-            action,
-        )
-        out.append(
-            Collision(
-                with_node_id=entry.get("id", "<unknown>"),
-                with_node_title=entry.get("title", ""),
-                with_plan_path=str(other_plan),
-                shared_files=shared_sorted,
-                candidate_only_files=sorted(candidate_files - other_files),
-                other_only_files=sorted(other_files - candidate_files),
-                severity=severity,
-                recommended_action=action,
-                rationale=rationale,
-                _other_created_at=entry.get("created_at") or "",
+        for key in group - {candidate_key}:
+            entry, other_files = by_key[key]
+            severity, shared_sorted = _classify(candidate_files, other_files, thresholds)
+            if not shared_sorted:
+                # The partition normalizes paths this comparison does not; a
+                # group mate with no literal shared path is no collision.
+                continue
+            action = _infer_action(
+                candidate_files,
+                other_files,
+                entry.get("created_at") or "",
+                candidate_created,
+                severity,
             )
-        )
+            rationale = _build_rationale(
+                candidate_files,
+                other_files,
+                shared_sorted,
+                entry.get("id", "<unknown>"),
+                severity,
+                action,
+            )
+            out.append(
+                Collision(
+                    with_node_id=entry.get("id", "<unknown>"),
+                    with_node_title=entry.get("title", ""),
+                    with_plan_path=str(other_plan),
+                    shared_files=shared_sorted,
+                    candidate_only_files=sorted(candidate_files - other_files),
+                    other_only_files=sorted(other_files - candidate_files),
+                    severity=severity,
+                    recommended_action=action,
+                    rationale=rationale,
+                    _other_created_at=entry.get("created_at") or "",
+                )
+            )
 
     out.sort(key=lambda c: (_SEVERITY_ORDER[c.severity], c.with_node_id))
     return out
