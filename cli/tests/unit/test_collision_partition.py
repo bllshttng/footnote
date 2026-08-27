@@ -70,6 +70,15 @@ class TestPartition:
     def test_empty_input_returns_empty_partition(self):
         assert partition([]) == ([], set())
 
+    def test_repeated_item_id_keeps_its_unions(self):
+        # Two path batches for one id: the second must extend the first's
+        # group, not reset the item back to a singleton.
+        groups, unevaluated = partition(
+            [("A", {"x.py"}), ("B", {"y.py"}), ("A", {"y.py"})]
+        )
+        assert groups == [{"A", "B"}]
+        assert unevaluated == set()
+
 
 class TestFindCollisionsThroughPartition:
     def test_each_collision_reports_its_own_plan_path(self, tmp_path):

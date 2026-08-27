@@ -240,7 +240,11 @@ def partition(
     "no parseable file list" is its own verdict, never a silent pass (the same
     rule ``_classify_lane_candidate`` applies at node grain).
     """
-    parent: dict[str, str] = {item_id: item_id for item_id, _ in items}
+    parent: dict[str, str] = {}
+    for item_id, _ in items:
+        # setdefault, not assignment: a caller that repeats an id (two path
+        # batches for one item) must not reset the unions already made.
+        parent.setdefault(item_id, item_id)
 
     def find(node: str) -> str:
         while parent[node] != node:
