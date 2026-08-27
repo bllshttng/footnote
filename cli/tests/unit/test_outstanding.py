@@ -1925,6 +1925,72 @@ def test_operator_authority_refusal_names_the_chat_door(
     assert [q["id"] for q in after["questions"]] == [qid]
 
 
+def test_origin_floor_refusal_names_the_flag_that_actually_fixes_it(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """This refusal IS fixed by changing a flag, so it must not say otherwise.
+
+    An attended terminal claiming `--origin peer --authority operator` trips the
+    origin floor, not the agent guard. Handing it the agent remedy would tell a
+    human they are an agent and that no flag helps, when dropping one does.
+    """
+    from types import SimpleNamespace
+
+    qid = (
+        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    # No session identity, and a terminal: the operator's own state.
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
+    )
+    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
+
+    refused = runner.invoke(
+        outstanding_app,
+        [
+            "clear", qid, "--answer", "the codex lane",
+            "--authority", "operator", "--origin", "peer",
+        ],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    assert "--origin" in refused.output
+    # Never the agent remedy: this caller is not an agent and a flag DOES fix it.
+    assert "cannot record ANY answer here" not in refused.output
+    assert "/fno:law" not in refused.output
+
+
+def test_unattributed_caller_is_not_sent_to_chat(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """No identity and no terminal: cron or CI. Not an agent, and has no chat."""
+    from types import SimpleNamespace
+
+    qid = (
+        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
+    )
+    monkeypatch.setattr("fno.decide._attended_terminal", lambda: False)
+
+    refused = runner.invoke(
+        outstanding_app,
+        ["clear", qid, "--answer", "the codex lane", "--authority", "operator"],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    assert "no terminal" in refused.output
+    # Telling a cron job to compose in chat is advice it cannot take.
+    assert "/fno:law" not in refused.output
+
+
 def test_bad_origin_is_not_told_to_go_write_law(root: Path):
     """A typo'd --origin gets its own remedy, not the authority two-step.
 

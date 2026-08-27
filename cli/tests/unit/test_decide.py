@@ -3477,25 +3477,28 @@ def test_review_list_names_out_of_enum_authority_values(monkeypatch):
     )
 
 
-def test_review_list_breakdown_survives_a_key_sorting_serializer():
+def test_review_list_breakdown_survives_a_key_sorting_serializer(monkeypatch):
     """`--output report.json` writes through json.dumps(sort_keys=True).
 
-    A dict would carry the ranking in insertion order and lose it there, filing
-    a one-row `banana` above a forty-row `crown-l1`.
+    Drives the real producer, because a hand-written literal round-tripped
+    through the stdlib asserts nothing about `review_list`: regressing it back
+    to a dict would leave such a test green. `banana` sorts BEFORE `crown-l1`
+    alphabetically and AFTER it by rank, so the two orders disagree and the
+    assertion can tell them apart.
     """
     import json as _json
 
-    report = {
-        "data_quality": {
-            "invalid_authority": 41,
-            "invalid_authority_values": [
-                {"value": "crown-l1", "count": 40},
-                {"value": "banana", "count": 1},
-            ],
-        }
-    }
+    from fno import decide as decide_mod
 
-    round_tripped = _json.loads(_json.dumps(report, sort_keys=True))
+    rows = [{"decision_id": "d-0", "subject": "x-a", "authority_source": "banana"}]
+    rows += [
+        {"decision_id": f"d-{i}", "subject": "x-a", "authority_source": "crown-l1"}
+        for i in range(1, 41)
+    ]
+    monkeypatch.setattr(decide_mod, "list_decisions", lambda *a, **k: (None, rows, 0))
+
+    produced = decide_mod.review_list()
+    round_tripped = _json.loads(_json.dumps(produced, sort_keys=True))
 
     assert round_tripped["data_quality"]["invalid_authority_values"] == [
         {"value": "crown-l1", "count": 40},

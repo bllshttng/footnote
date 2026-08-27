@@ -140,7 +140,11 @@ fi
 # turns any trailing prose into a hit: `"... came from fno test earlier"` would
 # match where only `"... fno test"` did before. That is a flood, and unlike the
 # daemon.rs specimen it is unbounded prose rather than one declarable site.
-SUBVERB='([[:space:]]+[a-z][a-z-]*)?'
+# Up to TWO words, not one: retired roots have grandchildren. `fno workspace`
+# is a retired root and `fno workspace worktree ensure <name>` is the runnable
+# string under it, so a one-word bound passed it vacuously. Two is the depth
+# the real registry needs; raise it only against a specimen.
+SUBVERB='([[:space:]]+[a-z][a-z-]*){0,2}'
 ARG="(${SUBVERB}"'([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8})|[[:space:]]*"[[:space:]]*$)'
 PATTERN=""
 for cmd in "${CMDS[@]}"; do
@@ -157,7 +161,8 @@ printf '%s\n' "$CANARY" | grep -qE "$PATTERN" ||
 # and the bare canary above would still pass. All three argument shapes are
 # asserted, because an earlier draft covered only the angle-bracket one and
 # let every f-string instruction under a retired root through.
-for shape in "set <subject> <decision>" "set {subject}" "set 7c5dcf5d"; do
+for shape in "set <subject> <decision>" "set {subject}" "set 7c5dcf5d" \
+             "worktree ensure <name>"; do
     printf '%s\n' "use \`${CMDS[0]} ${shape}\` instead" | grep -qE "$PATTERN" ||
         fail "pattern misses sub-verb shape '${shape}'; a leaf under a retired root would pass"
 done
