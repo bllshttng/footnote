@@ -128,6 +128,57 @@ def _write_fixture(tmp_path: Path, plan_md: str = PLAN_MD):
     return plan, state
 
 
+# A parallel wave at task grain: 1.1 and 1.2 are disjoint, 1.3 shares 1.1's
+# file, and 1.4 states no file list at all (unevaluated).
+PARALLEL_PLAN_MD = """---
+title: parallel fixture
+status: ready
+difficulty: medium
+---
+
+# Parallel fixture
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: parallel
+    tasks: ['1.1', '1.2', '1.3', '1.4']
+tasks:
+  - id: '1.1'
+    title: Touch a
+  - id: '1.2'
+    title: Touch b
+  - id: '1.3'
+    title: Also touches a
+  - id: '1.4'
+    title: No file list
+```
+
+### Task 1.1: Touch a
+**Files:**
+- Modify: `src/a.py`
+
+### Task 1.2: Touch b
+**Files:**
+- Modify: `src/b.py`
+
+### Task 1.3: Also touches a
+**Files:**
+- Modify: `src/a.py`
+"""
+
+
+def _write_parallel_fixture(tmp_path: Path, plan_md: str = PARALLEL_PLAN_MD):
+    plan = tmp_path / "plan.md"
+    plan.write_text(plan_md)
+    state = tmp_path / "STATE.md"
+    state.write_text("# Progress\n")
+    return plan, state
+
+
 class TestReadyCli:
     def test_state_only_read(self, tmp_path):
         # AC3-HP: 2.1 blocks only on 1.1 and STATE.md marks 1.1 [x]; the
@@ -261,3 +312,112 @@ class TestReadyCli:
         assert proc.returncode != 0
         assert "blocked_reason=plan_task_edges_invalid" in proc.stderr
         assert "task 2.1 blocked_by unknown task 9.9" in proc.stderr
+
+
+class TestPartitionEdgesReady:
+    def test_overlapping_task_waits_for_its_group_mate(self, tmp_path):
+        # AC2-HP: 1.1 and 1.2 are disjoint and dispatch now; 1.3 shares
+        # 1.1's file and is held with 1.1 as its blocker.
+        plan, state = _write_parallel_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.2"]
+        assert out["blocked_on"] == {"1.3": ["1.1"], "1.4": ["1.1", "1.2", "1.3"]}
+
+    def test_unevaluated_task_waits_for_every_evaluated_sibling(self, tmp_path):
+        # AC2-ERR: 1.4 states no file list, so it runs only after every
+        # evaluated task in the wave is complete.
+        plan, state = _write_parallel_fixture(tmp_path)
+        state.write_text("# Progress\n\n- [x] 1.1: a\n- [x] 1.2: b\n- [x] 1.3: a again\n")
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.4"]
+        assert out["blocked_on"] == {}
+
+    def test_wave_decision_records_unevaluated(self, tmp_path):
+        plan, state = _write_parallel_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--wave-decision", "1"],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        decision = json.loads(proc.stdout)
+        assert decision["effective_mode"] == "parallel"
+        assert decision["conflicts"]["unevaluated"] == ["1.4"]
+        assert ["1.1", "1.3"] in decision["conflicts"]["groups"]
+
+    def test_declared_edges_union_with_derived_never_replace(self, tmp_path):
+        # 1.3 declares blocked_by [1.2] AND shares 1.1's file: both edges hold.
+        plan_md = PARALLEL_PLAN_MD.replace(
+            "  - id: '1.3'\n    title: Also touches a",
+            "  - id: '1.3'\n    title: Also touches a\n    blocked_by: ['1.2']",
+        )
+        plan, state = _write_parallel_fixture(tmp_path, plan_md)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.2"]
+        assert out["blocked_on"]["1.3"] == ["1.1", "1.2"]
+
+    def test_derived_edge_cannot_float_task_past_earlier_wave(self, tmp_path):
+        # Wave 2 tasks 2.1/2.2 share a file, so 2.2 derives an edge on 2.1.
+        # That derived edge must UNION with the previous-wave inheritance:
+        # both still wait for all of wave 1. If the union replaced the
+        # inheritance, 2.1 would float ready with no blockers at all.
+        wave2_plan = PARALLEL_PLAN_MD.replace(
+            "    tasks: ['1.1', '1.2', '1.3', '1.4']\ntasks:",
+            "    tasks: ['1.1', '1.2', '1.3', '1.4']\n"
+            "  - wave: 2\n    mode: parallel\n    tasks: ['2.1', '2.2']\ntasks:",
+        ).replace(
+            "  - id: '1.4'\n    title: No file list",
+            "  - id: '1.4'\n    title: No file list\n"
+            "  - id: '2.1'\n    title: Wave two, first\n"
+            "  - id: '2.2'\n    title: Wave two, second",
+        ).replace(
+            "### Task 1.3: Also touches a\n**Files:**\n- Modify: `src/a.py`",
+            "### Task 1.3: Also touches a\n**Files:**\n- Modify: `src/a.py`\n\n"
+            "### Task 2.1: Wave two, first\n**Files:**\n- Modify: `src/two.py`\n\n"
+            "### Task 2.2: Wave two, second\n**Files:**\n- Modify: `src/two.py`",
+        )
+        plan, state = _write_parallel_fixture(tmp_path, wave2_plan)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.2"]
+        assert out["blocked_on"] == {
+            "1.3": ["1.1"],
+            "1.4": ["1.1", "1.2", "1.3"],
+            "2.1": ["1.1", "1.2", "1.3", "1.4"],
+            "2.2": ["1.1", "1.2", "1.3", "1.4", "2.1"],
+        }
+
+    def test_ready_reports_bands(self, tmp_path):
+        # The plan's frontmatter band seeds every wave; an explicit per-wave
+        # band wins (AC4-HP's --ready half).
+        plan_md = PARALLEL_PLAN_MD.replace(
+            "  - wave: 1\n    mode: parallel\n    tasks: ['1.1', '1.2', '1.3', '1.4']",
+            "  - wave: 1\n    mode: parallel\n    difficulty: high\n"
+            "    tasks: ['1.1', '1.2', '1.3', '1.4']",
+        )
+        plan, state = _write_parallel_fixture(tmp_path, plan_md)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["bands"] == {
+            "1.1": "high", "1.2": "high", "1.3": "high", "1.4": "high",
+        }
+
+    def test_bands_fall_back_to_frontmatter_band(self, tmp_path):
+        plan, state = _write_parallel_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["bands"] == {
+            "1.1": "medium", "1.2": "medium", "1.3": "medium", "1.4": "medium",
+        }
