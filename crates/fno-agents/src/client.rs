@@ -26,8 +26,8 @@ pub enum ClientError {
          {0:?} - it is alive and saturated, not absent"
     )]
     DaemonBusy(Duration),
-    #[error("daemon exited during startup with status {0}")]
-    DaemonExitedEarly(std::process::ExitStatus),
+    #[error("daemon exited during startup with status {0} - {1}")]
+    DaemonExitedEarly(std::process::ExitStatus, String),
     #[error(
         "daemon binary not found: {0} - the fno-agents triad (client/daemon/worker) \
          is split here. Run `fno doctor update` to redeploy the pair, or set \
@@ -286,14 +286,45 @@ pub async fn ensure_daemon(
     // touching the socket -- one short-lived extra process, not a supervisor
     // that keeps running on an inode nobody can reach.
     eprintln!("(lazy-starting daemon)");
+    // Helper closure-free twin used by both early-exit returns below: the
+    // daemon's refusal cause is in daemon.stderr.log, not the exit status.
+    fn daemon_exited_early(status: std::process::ExitStatus, log: &std::path::Path) -> ClientError {
+        const TAIL: usize = 2000;
+        let detail = std::fs::read(log)
+            .ok()
+            .map(|raw| {
+                let start = raw.len().saturating_sub(TAIL);
+                String::from_utf8_lossy(&raw[start..]).trim().to_string()
+            })
+            .filter(|text| !text.is_empty());
+        ClientError::DaemonExitedEarly(
+            status,
+            detail.map_or_else(
+                || "no stderr captured".into(),
+                |text| format!("daemon stderr: {text}"),
+            ),
+        )
+    }
     // Detached, own process group: the daemon must outlive this client.
     let mut cmd = tokio::process::Command::new(daemon_bin);
     cmd.process_group(0);
     // The daemon outlives this client. Inheriting a caller's captured stdout or
     // stderr keeps `Command::output()` open after the client exits, so a
-    // captured spawn/restart waits forever on a pipe the daemon owns.
+    // captured spawn/restart waits forever on a pipe the daemon owns. stderr
+    // still must not be discarded: the x-4c87 startup refusal prints its cause
+    // (registry path + divergence counts) to stderr and exits before binding,
+    // and the try_wait branch below reports exactly that. A file keeps both
+    // properties: no inherited pipe to hold open, and the diagnostic survives
+    // to be read back when the child exits early.
     cmd.stdout(std::process::Stdio::null());
-    cmd.stderr(std::process::Stdio::null());
+    let stderr_log = home.root().join("daemon.stderr.log");
+    let stderr_sink = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&stderr_log)
+        .map(|file| std::process::Stdio::from(file))
+        .unwrap_or(std::process::Stdio::null());
+    cmd.stderr(stderr_sink);
     cmd.env("FNO_AGENTS_HOME", home.root());
     // Name the home in argv too, not just the env (x-cd31): a bare
     // `fno-agents-daemon` row in ps cannot be attributed to the home it
@@ -328,7 +359,7 @@ pub async fn ensure_daemon(
         // appear (code-review on PR 924).
         if let Ok(Some(status)) = child.try_wait() {
             if !status.success() {
-                return Err(ClientError::DaemonExitedEarly(status));
+                return Err(daemon_exited_early(status, &stderr_log));
             }
             // Exit ZERO without a socket is the race loser's designed ending:
             // it found the lock held, deferred to the winner, and stopped. The
@@ -341,7 +372,7 @@ pub async fn ensure_daemon(
             // immediate idle-exit, a mismatched binary). Report it now rather
             // than spend the whole budget on a socket that will never appear.
             if daemon_lock_is_free(home) {
-                return Err(ClientError::DaemonExitedEarly(status));
+                return Err(daemon_exited_early(status, &stderr_log));
             }
             return wait_for_socket(&sock, start, budget).await;
         }
