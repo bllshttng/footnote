@@ -3078,6 +3078,416 @@ fn no_external_on_active_gate_serializes_unknown_coverage_not_uncovered() {
     );
 }
 
+// ── x-2219: the round budget on the no-external lane ─────────────────────────
+// A stock install (required_bots empty, no optional lane) never reached the
+// external arm's reviews refresh, so rounds that exist only as GitHub review
+// objects read 0/2 forever and the cap could not fire on exactly the lane
+// that spun (PR #1225: five real rounds, counter 0/2, six invocations).
+
+const X2219_HEAD: &str = "deadbeefdeadbeefdeadbeefdeadbeef00000021";
+
+/// A green OPEN PR whose `--json reviews` payload carries distinct reviewed
+/// commits by the connector - the lane whose rounds leave no local
+/// attestation. `record`, when given, collects every `--json reviews` read so
+/// a test can assert the paginated read was paid (or not) with a positive
+/// control beside it. Both scripts land in `dir`, which the caller owns.
+fn x2219_reviews_gh(
+    dir: &Path,
+    record: Option<&Path>,
+    review_oids: &[String],
+) -> (PathBuf, PathBuf) {
+    let reviews: Vec<String> = review_oids
+        .iter()
+        .enumerate()
+        .map(|(i, oid)| {
+            format!(
+                r#"{{"author":{{"login":"chatgpt-codex-connector"}},"state":"COMMENTED","submittedAt":"2026-08-26T1{i}:00:00Z","commit":{{"oid":"{oid}"}}}}"#
+            )
+        })
+        .collect();
+    let reviews_json = format!(r#"{{"reviews":[{}]}}"#, reviews.join(","));
+    let record_s = record.map(|p| p.display().to_string()).unwrap_or_default();
+    let record_line = if record.is_some() {
+        format!(r#"echo "$*" >> "{record_s}";"#)
+    } else {
+        String::new()
+    };
+    let gh = make_script(
+        dir,
+        "gh",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{{"state":"OPEN","number":21,"headRefName":"feat","headRefOid":"{X2219_HEAD}","mergeable":"MERGEABLE","baseRefName":"main"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  {record_line}
+  echo '{reviews_json}'
+  exit 0
+fi
+exit 1
+"#
+        ),
+    );
+    let git = make_script(
+        dir,
+        "git",
+        r#"case "$*" in
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000021" ;;
+esac"#,
+    );
+    (gh, git)
+}
+
+/// Distinct 40-char oids, one per review object.
+fn x2219_oids(n: usize) -> Vec<String> {
+    (1..=n).map(|i| format!("{}{i}", "a".repeat(39))).collect()
+}
+
+fn x2219_fixture(cwd: &Path, settings: &str, manifest: &str) -> (String, String) {
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, settings).unwrap();
+    let manifest_path = cwd.join("target-state.md");
+    fs::write(&manifest_path, manifest).unwrap();
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+    (
+        manifest_path.display().to_string(),
+        transcript_path.display().to_string(),
+    )
+}
+
+#[test]
+fn x2219_no_external_lane_counts_github_review_rounds_past_the_cap() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let (manifest, transcript) = x2219_fixture(
+        cwd,
+        "[review]\nrequired_bots = []\nmax_rounds = 2\n",
+        &new_manifest("sess-x2219-a", "2026-06-05T00:00:00Z", true),
+    );
+    let bins = TempDir::new().unwrap();
+    let (gh, git) = x2219_reviews_gh(bins.path(), None, &x2219_oids(3));
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        &manifest,
+        "--transcript",
+        &transcript,
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        cwd.join(".fno/config.toml").to_str().unwrap(),
+        "--author-harness",
+        "claude",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    // The counter read 3 distinct reviewed commits on the no-external arm
+    // and the cap fired at 3/2, discharging coverage (x-0fb9's spent-budget
+    // discharge): the session terminates green instead of demanding a round
+    // the budget will not fund. The emitted review_coverage row carries the
+    // exact numbers.
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"rounds_used\":3"),
+        "three GitHub-only rounds must count as 3 on the no-external arm: {events}"
+    );
+    assert!(
+        events.contains("\"rounds_exhausted\":true"),
+        "3 rounds against max_rounds 2 must exhaust the budget: {events}"
+    );
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "the spent budget releases the PR, it never funds another round: {}",
+        d.message
+    );
+}
+
+#[test]
+fn x2219_max_rounds_three_fires_at_four_rounds_and_five_does_not() {
+    // AC9 at the arm boundary: the same four GitHub-only rounds exhaust a
+    // max of 3 (the row proves the counter read 4) and do not exhaust a max
+    // of 5 - the under-cap receipt still asks for review. Pinning only the
+    // shipped default cannot tell a live key from a comparison that
+    // ignores it.
+    let oids = x2219_oids(4);
+    for (max_rounds, spent) in [("3", true), ("5", false)] {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let (manifest, transcript) = x2219_fixture(
+            cwd,
+            &format!("[review]\nrequired_bots = []\nmax_rounds = {max_rounds}\n"),
+            &new_manifest("sess-x2219-b", "2026-06-05T00:00:00Z", true),
+        );
+        let bins = TempDir::new().unwrap();
+        let (gh, git) = x2219_reviews_gh(bins.path(), None, &oids);
+        let (_code, d) = fire(&[
+            "loop-check",
+            "--state",
+            &manifest,
+            "--transcript",
+            &transcript,
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--now",
+            "2026-06-05T00:30:00Z",
+            "--settings",
+            cwd.join(".fno/config.toml").to_str().unwrap(),
+            "--author-harness",
+            "claude",
+            &format!("--gh-bin={}", gh.display()),
+            &format!("--git-bin={}", git.display()),
+        ]);
+        let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+        assert!(
+            events.contains("\"rounds_used\":4"),
+            "max_rounds={max_rounds}: the counter read all four rounds: {events}"
+        );
+        assert_eq!(
+            d.termination_reason.as_deref() == Some("DonePRGreen"),
+            spent,
+            "max_rounds={max_rounds} against 4 rounds: spent={spent}, got: {}",
+            d.message
+        );
+        if spent {
+            assert!(
+                d.message.contains("green and reviewed"),
+                "the spent budget releases the PR: {}",
+                d.message
+            );
+        } else {
+            assert!(
+                d.message.contains("code-review"),
+                "the unspent budget keeps asking for the review: {}",
+                d.message
+            );
+            assert!(
+                !d.message.contains("spent"),
+                "4 rounds of 5 are under the cap: {}",
+                d.message
+            );
+        }
+    }
+}
+
+#[test]
+fn x2219_broken_reviews_read_keeps_the_events_only_answer() {
+    // AC5-EDGE: a failed reviews read answers events-only rather than
+    // guessing. The events axis here is zero, so the cap must NOT fire on a
+    // budget the broken read may have hidden - the receipt keeps asking for
+    // review (the positive marker) and never declares the budget spent.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let (manifest, transcript) = x2219_fixture(
+        cwd,
+        "[review]\nrequired_bots = []\nmax_rounds = 2\n",
+        &new_manifest("sess-x2219-c", "2026-06-05T00:00:00Z", true),
+    );
+    let dir = TempDir::new().unwrap();
+    let gh = make_script(
+        dir.path(),
+        "gh",
+        r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":21,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000021"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let git = make_script(
+        dir.path(),
+        "git",
+        r#"case "$*" in
+  *--raw*) exit 1 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000021" ;;
+esac"#,
+    );
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        &manifest,
+        "--transcript",
+        &transcript,
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        cwd.join(".fno/config.toml").to_str().unwrap(),
+        "--author-harness",
+        "claude",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    assert!(
+        !d.message.contains("spent"),
+        "a broken read must never fire the cap: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("code-review"),
+        "the unspent budget keeps asking for the review: {}",
+        d.message
+    );
+}
+
+#[test]
+fn x2219_covered_pr_skips_the_reviews_read_uncovered_pays_for_it() {
+    // The cost gate, with a positive control on the instrument itself: a
+    // covered PR (fresh local pass) must NOT pay the paginated reviews read;
+    // the same mock on an uncovered PR MUST. Asserting only the covered
+    // absence would also pass on a mock that never answers reviews.
+    let settings = "[review]\nrequired_bots = []\nmax_rounds = 2\n";
+    let record_hits =
+        |cwd: &Path| fs::read_to_string(cwd.join("reviews-reads.log")).unwrap_or_default();
+    // Covered case: one head-pinned pass attestation covers the row.
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    let (manifest, transcript) = x2219_fixture(
+        cwd,
+        settings,
+        &new_manifest("sess-x2219-d", "2026-06-05T00:00:00Z", true),
+    );
+    let attestation = serde_json::json!({
+        "type": "review_attestation",
+        "ts": "2026-06-05T00:10:00Z",
+        "data": {"reviewer": "code-review", "head_sha": X2219_HEAD, "verdict": "pass"}
+    });
+    fs::write(
+        cwd.join(".fno/events.jsonl"),
+        attestation.to_string() + "\n",
+    )
+    .unwrap();
+    let record = cwd.join("reviews-reads.log");
+    let bins = TempDir::new().unwrap();
+    let (gh, git) = x2219_reviews_gh(bins.path(), Some(&record), &x2219_oids(1));
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        &manifest,
+        "--transcript",
+        &transcript,
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        cwd.join(".fno/config.toml").to_str().unwrap(),
+        "--author-harness",
+        "claude",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+    let _ = d;
+    assert!(
+        !record_hits(cwd).contains("--json reviews"),
+        "a healthy covered PR must not pay the reviews read: {}",
+        record_hits(cwd)
+    );
+    // The instrument works: the same mock on an uncovered PR logs the read.
+    // (One pass attestation against a two-round budget is one spent round
+    // of two - under the cap, and its verdict satisfies the floored
+    // reviewer, so this fire terminates green rather than blocking.)
+    let tmp2 = TempDir::new().unwrap();
+    let cwd2 = tmp2.path();
+    let (manifest2, transcript2) = x2219_fixture(
+        cwd2,
+        settings,
+        &new_manifest("sess-x2219-e", "2026-06-05T00:00:00Z", true),
+    );
+    let record2 = cwd2.join("reviews-reads.log");
+    let bins2 = TempDir::new().unwrap();
+    let (gh2, git2) = x2219_reviews_gh(bins2.path(), Some(&record2), &x2219_oids(1));
+    let (_code2, _d2) = fire(&[
+        "loop-check",
+        "--state",
+        &manifest2,
+        "--transcript",
+        &transcript2,
+        "--cwd",
+        cwd2.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        cwd2.join(".fno/config.toml").to_str().unwrap(),
+        "--author-harness",
+        "claude",
+        &format!("--gh-bin={}", gh2.display()),
+        &format!("--git-bin={}", git2.display()),
+    ]);
+    assert!(
+        record_hits(cwd2).contains("--json reviews"),
+        "positive control: an uncovered PR must pay the reviews read: {}",
+        record_hits(cwd2)
+    );
+}
+
+#[test]
+fn x2219_no_external_session_never_pays_the_reviews_read() {
+    // A per-session no_external refuses the gh review reads wholesale, so
+    // the round-budget read must stay behind that refusal too. Positive
+    // control: the same repo WITHOUT no_external pays it.
+    let oids = x2219_oids(1);
+    let paid_the_read = |cwd: &Path| {
+        fs::read_to_string(cwd.join("reviews-reads.log"))
+            .unwrap_or_default()
+            .contains("--json reviews")
+    };
+    for (no_external, expect_read) in [("true", false), ("false", true)] {
+        let tmp = TempDir::new().unwrap();
+        let cwd = tmp.path();
+        let manifest = format!(
+            "---\nsession_id: sess-x2219-f{no_external}\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\nno_external: {no_external}\n---\n"
+        );
+        let (manifest, transcript) = x2219_fixture(
+            cwd,
+            "[review]\nrequired_bots = [\"chatgpt-codex-connector\"]\nmax_rounds = 2\n",
+            &manifest,
+        );
+        let record = cwd.join("reviews-reads.log");
+        let bins = TempDir::new().unwrap();
+        let (gh, git) = x2219_reviews_gh(bins.path(), Some(&record), &oids);
+        let (_code, _d) = fire(&[
+            "loop-check",
+            "--state",
+            &manifest,
+            "--transcript",
+            &transcript,
+            "--cwd",
+            cwd.to_str().unwrap(),
+            "--now",
+            "2026-06-05T00:30:00Z",
+            "--settings",
+            cwd.join(".fno/config.toml").to_str().unwrap(),
+            &format!("--gh-bin={}", gh.display()),
+            &format!("--git-bin={}", git.display()),
+        ]);
+        assert_eq!(
+            paid_the_read(cwd),
+            expect_read,
+            "no_external={no_external}: round-budget reviews read paid or not"
+        );
+    }
+}
+
 /// The other skip cause: no_external on a repo with an INACTIVE login gate.
 /// Nothing was configured to read, so the axis is a known zero and the event
 /// serializes uncovered. The retry remedy belongs to suppressed reads of an
