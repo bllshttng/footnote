@@ -745,8 +745,18 @@ def test_ac5_marker_specimen_is_covered(monkeypatch, tmp_path):
 
 
 def test_ac5b_marker_specimen_plus_one_open_finding_refuses(monkeypatch, tmp_path):
-    """AC5b: the same fixture plus one open correctness finding REFUSES, by key."""
+    """AC5b: the same fixture plus one open correctness finding REFUSES, by key.
+
+    The budget is raised here: the specimen's chain carries three attested
+    rounds (fail, pass, this finding's fail) and the x-2219 per-PR-total
+    counter counts all three, so the shipped max_rounds of 2 would fire the
+    cap-file arm and the refusal would name the cap, not the finding. This
+    test pins the by-key refusal, which needs budget room; the cap arm has
+    its own tests."""
     _specimen_gates(monkeypatch)
+    monkeypatch.setattr(
+        _coverage_gate, "resolved_max_rounds", lambda repo: 5
+    )
     _seed_specimen(tmp_path, extra_lines=[_ac5b_finding()])
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         1179, str(tmp_path), recompute=False
