@@ -58,10 +58,12 @@ For each wave marked sequential in execution strategy:
 
 ## Edge Cases
 
-### Partial overlap in a multi-task wave
-If wave has tasks A, B, C where A and B are disjoint but C overlaps with A,
-the entire wave remains sequential. Partial parallelization within a single
-wave is not supported.
+### Overlap no longer strands disjoint siblings
+A task runs when its effective blockers are done and no peer claims it:
+its declared `blocked_by`, else every task in the previous wave. The
+whole-wave sequential fallback is gone once the waves skill drives dispatch
+from the orchestrator's `--ready` read - C's overlap with A holds back C
+alone while A and B dispatch on their own merits.
 
 ### Malformed or missing map
 If the file ownership map section exists but the table cannot be parsed
