@@ -285,7 +285,13 @@ fn default_true() -> bool {
 /// same reason `BackendNotLive` bumped 53 -> 54. `AgentRow.pane_activity`
 /// rides the same bump (additive-tolerant on its own, but it is the shape
 /// change the variant belongs to).
-pub const PROTO_VERSION: u32 = 57;
+///
+/// v58 (x-07c2, dedicated thread pane): `ControlVerb::ThreadPane` - a NEW
+/// enum variant, so a v57 peer cannot decode it and closes the connection
+/// instead of running the reach; the handshake is what stops the skew.
+/// `AgentRow.reach` rides the same bump (additive-tolerant on its own via
+/// `#[serde(default)]`, but it is the shape change the verb belongs to).
+pub const PROTO_VERSION: u32 = 58;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -3980,7 +3986,8 @@ mod tests {
         // reason bumps it 52 -> 53; backend-not-live classification bumps it
         // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
         // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
-        // bumps it 56 -> 57.
+        // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
+        // 57 -> 58.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -3989,7 +3996,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 57);
+        assert_eq!(PROTO_VERSION, 58);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,

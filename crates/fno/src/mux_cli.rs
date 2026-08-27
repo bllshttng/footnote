@@ -2341,20 +2341,26 @@ pub const EXIT_NO_SERVER: i32 = 24; // thread: no live mux server to drive (x-07
 fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> String {
     let name = &row.name;
     // Ask the same function the server ships in AgentRow.reach, so the CLI
-    // hint and the TUI's actual reach behavior can never drift apart. Gate on
-    // `!exited` same as the caller must: thread_reach's contract assumes an
-    // already-live row (reach_thread_pane filters exited rows before ever
-    // calling it), and an exited row's attach_id is not an attachability
-    // signal on its own (agents_view.rs's own doc comment on attach_id).
+    // hint and the TUI's actual reach behavior can never drift apart.
     let tier = crate::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
-    if !row.exited && matches!(tier, crate::proto::Reach::Drive) {
-        format!(
+    match tier {
+        // `!exited`: thread_reach's contract assumes an already-live row
+        // (reach_thread_pane filters exited rows before ever calling it),
+        // and an exited row's attach_id is not an attachability signal on
+        // its own (agents_view.rs's own doc comment on attach_id) - an
+        // exited Drive-tier row falls through to the plain follow hint.
+        crate::proto::Reach::Drive if !row.exited => format!(
             "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
-        )
-    } else {
-        format!(
+        ),
+        // Locate never has a transcript reader (that's the whole reason it's
+        // Locate, not Follow) - a peek --follow hint here is a route
+        // guaranteed to fail. Point at the one route that actually works.
+        crate::proto::Reach::Locate => format!(
+            "{verb}: {name} hosts no live pane; open it with: fno agents attach {name}"
+        ),
+        _ => format!(
             "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow"
-        )
+        ),
     }
 }
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
@@ -6390,6 +6396,14 @@ mod tests {
     use super::*;
 
     fn paneless_row(name: &str, attach: Option<&str>) -> crate::agents_view::RegistryAgent {
+        paneless_row_with_harness(name, attach, None)
+    }
+
+    fn paneless_row_with_harness(
+        name: &str,
+        attach: Option<&str>,
+        harness: Option<&str>,
+    ) -> crate::agents_view::RegistryAgent {
         crate::agents_view::RegistryAgent {
             spawned_by_session: None,
             session_id: None,
@@ -6409,7 +6423,7 @@ mod tests {
             updated_at: None,
             crown_level: None,
             crown_scope: None,
-            harness: None,
+            harness: harness.map(str::to_owned),
         }
     }
 
@@ -6425,16 +6439,29 @@ mod tests {
         assert!(drive.contains("fno agents attach t-live"), "{drive}");
         assert!(drive.contains("hosts no live pane"), "{drive}");
 
-        // A paneless row with no attach id (Follow/Locate tiers, or a dead
-        // row) has no drive route to name: only the peek hint, still not the
-        // bare line.
-        let follow = paneless_route_hint("fno mux where", &paneless_row("t-codex", None));
+        // Follow tier (a peek-capable harness, no attach id): the peek route
+        // only, still not the bare line.
+        let follow = paneless_route_hint(
+            "fno mux where",
+            &paneless_row_with_harness("t-codex", None, Some("codex")),
+        );
         assert!(
             follow.contains("fno agents peek t-codex --follow"),
             "{follow}"
         );
         assert!(!follow.contains("fno agents attach"), "{follow}");
         assert!(follow.contains("hosts no live pane"), "{follow}");
+
+        // Locate tier (no attach id, no peek reader - e.g. gemini): peek
+        // --follow is a route guaranteed to fail there, so the hint must
+        // name attach instead, never peek.
+        let locate = paneless_route_hint(
+            "fno mux where",
+            &paneless_row_with_harness("t-gemini", None, Some("gemini")),
+        );
+        assert!(locate.contains("fno agents attach t-gemini"), "{locate}");
+        assert!(!locate.contains("--follow"), "{locate}");
+        assert!(locate.contains("hosts no live pane"), "{locate}");
     }
 
     #[test]

@@ -120,8 +120,12 @@ pub enum Liveness {
 /// reader arms registered in `recent_records` (cli/src/fno/agents/peek.py).
 /// A static mirror of a Python seam; `thread_reach_mirrors_the_peek_reader_seam`
 /// pins it against that file so the two cannot drift (Rust checked against
-/// Rust proves nothing).
-const PEEK_READER_HARNESSES: [&str; 3] = ["claude", "codex", "opencode"];
+/// Rust proves nothing). Mirrors `_follow_target`, which owns `--follow`'s
+/// tailable-file question, not `recent_records` (opencode answers there -
+/// it has readable history - but writes a directory tree with no tailable
+/// file, so `_follow_target` returns `None` for it and `--follow` would
+/// exit immediately; that gap is why this list omits opencode).
+const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
 /// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
 /// `Drive` when the row carries an attach id (an interactive attach form
@@ -4096,12 +4100,16 @@ config_dir = "~/.claude-alt"
             .join("../../cli/src/fno/agents/peek.py");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        // Isolate the recent_records body, then collect its dispatch arms.
+        // Isolate _follow_target's body, not recent_records': recent_records
+        // answers "can this harness's history be read at all" (opencode
+        // yes), while _follow_target answers "does --follow have a tailable
+        // file" (opencode no - it writes a directory tree). Follow tier
+        // rides the second question, so that is the arm set to mirror.
         let body = raw
-            .split("def recent_records(")
+            .split("def _follow_target(")
             .nth(1)
             .and_then(|s| s.split("\ndef ").next())
-            .expect("recent_records body");
+            .expect("_follow_target body");
         let arms: std::collections::BTreeSet<&str> = body
             .lines()
             .filter_map(|l| {
