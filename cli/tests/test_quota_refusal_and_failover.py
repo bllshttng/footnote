@@ -109,6 +109,29 @@ class TestTheWindowNameIsTheTrustworthyHalf:
         assert err.resets_at is None
         assert err.reset_is_derived is False
 
+    @pytest.mark.parametrize(
+        ("status", "body"),
+        [
+            (503, "Service Unavailable. The upstream has been degraded for 2 days."),
+            (500, "Internal error. This endpoint has been unstable for 1 week."),
+            (401, "Token invalid. Sessions are valid for 30 minutes."),
+        ],
+    )
+    def test_only_a_quota_refusal_derives_a_deadline(self, status, body) -> None:
+        """`resets_at` is written straight through as the provider lock, and
+        `for <n> <unit>` is ordinary English that appears in bodies naming no
+        rate-limit window.
+
+        Unscoped, the 401 body here derived a 30-minute epoch and
+        `update_provider_health` wrote it as a real provider lock in place of
+        the rule's own backoff step. Only a quota refusal is making a claim
+        about a window.
+        """
+        err = normalize(status, None, body, now=1_787_000_000.0)
+        assert err.error_class is not ErrorClass.PROVIDER_4XX_QUOTA
+        assert err.reset_is_derived is False
+        assert err.resets_at is None
+
     def test_a_resolved_stamp_still_wins_over_the_derived_bound(self) -> None:
         """AC13-EDGE in miniature: an unambiguous epoch is not a bound, so it
         is never replaced by one."""

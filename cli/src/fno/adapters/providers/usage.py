@@ -58,8 +58,10 @@ _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orc
 # dropped, letting Opus work dispatch until the reactive 429 (x-6bcf review).
 _CLAUDE_KNOWN_LABELS = {"five_hour": "5h", "seven_day": "weekly"}
 
+# Unit codes to minutes. There is no sibling suffix table: a label is derived
+# from the resulting SPAN through `_label_for_minutes`, one vocabulary shared
+# with every other lane, never from the unit code the row happens to carry.
 _ZAI_UNIT_MINUTES = {1: 1440, 3: 60, 5: 1, 6: 10080}
-_ZAI_UNIT_SUFFIX = {1: "d", 3: "h", 5: "m", 6: "w"}
 _ZAI_LIMIT_TYPES = frozenset({"TOKENS_LIMIT", "TIME_LIMIT", "CREDIT_LIMIT"})
 _ZAI_HOSTS = frozenset({"api.z.ai", "open.bigmodel.cn"})
 
@@ -741,7 +743,7 @@ def _zai_integer(value: Any) -> int | None:
     return value
 
 
-def _zai_window_label(unit: int, number: int, window_minutes: int) -> str:
+def _zai_window_label(window_minutes: int) -> str:
     return _label_for_minutes(window_minutes)
 
 
@@ -861,7 +863,7 @@ def _parse_zai_windows(
                 resets_at = candidate
         windows.append(
             UsageWindow(
-                label=_zai_window_label(unit, number, window_minutes),
+                label=_zai_window_label(window_minutes),
                 used_pct=used_pct,
                 resets_at=resets_at,
             )

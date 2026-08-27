@@ -483,12 +483,21 @@ def normalize(
     )
     resets_at, unparsed = _parse_reset_stamp(body, reset_timezone)
     derived = False
-    if resets_at is None:
+    if resets_at is None and error_class is ErrorClass.PROVIDER_4XX_QUOTA:
         # No stamp resolved, so fall back to the window the message NAMES.
         # This is the only half of a vendor rate-limit string that can be read
         # without knowing its timezone, and a bound is worth more than the
         # null that 27 recorded refusals carried. An unnamed window still
         # yields None: an invented deadline is worse than an absent one.
+        #
+        # Scoped to the QUOTA class deliberately. `resets_at` is written
+        # straight through as the provider lock (failover.py, via
+        # update_provider_health), replacing the rule's own backoff step, and
+        # `for <n> <unit>` is ordinary English that appears in bodies which
+        # name no rate-limit window at all. Unscoped, an auth body reading
+        # "Sessions are valid for 30 minutes" locked the provider for thirty
+        # minutes, and a 5xx saying "degraded for 2 days" carried a two-day
+        # epoch. Only a quota refusal is making a claim about a window.
         span = reset_window_seconds_from(body)
         if span is not None:
             import time as _time
