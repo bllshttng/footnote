@@ -798,6 +798,7 @@ pub fn codex_resume(
     output_path: &Path,
     timeout: Option<Duration>,
     reasoning_effort: Option<&str>,
+    agent_self: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = normalize_codex_command(prompt);
     let full_prompt = inject_from_name(&effective_prompt, from_name);
@@ -825,7 +826,7 @@ pub fn codex_resume(
         timeout,
         false,
         Some(cwd),
-        None,
+        agent_self,
         Some(session_id),
     )
 }
@@ -1424,6 +1425,7 @@ fn dispatch_resume(
         &log_path,
         Some(timeout_sec),
         entry.effort.as_deref(),
+        Some(name),
     ) {
         Ok(r) => r,
         Err(e) => {

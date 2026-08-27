@@ -1189,6 +1189,10 @@ const FNO_HARNESS_NAME: &str = "FNO_HARNESS_NAME";
 const FNO_HARNESS_SESSION_ID: &str = "FNO_HARNESS_SESSION_ID";
 
 pub(crate) const AMBIENT_IDENTITY_NAMES: &[&str] = &[
+    "FNO_AGENT_SELF",
+    "FNO_AGENT_HARNESS",
+    "FNO_AGENT_PROVIDER",
+    "FNO_AGENT_SESSION",
     FNO_HARNESS_NAME,
     FNO_HARNESS_SESSION_ID,
     "CODEX_THREAD_ID",
@@ -2780,6 +2784,7 @@ mod tests {
     fn command_stamp_scrubs_all_identity_and_sets_only_bound_session() {
         let mut command = std::process::Command::new("sh");
         command.env("CODEX_THREAD_ID", "parent");
+        command.env("FNO_AGENT_SELF", "parent");
         command.env(FNO_HARNESS_NAME, "parent");
         stamp_command_env(
             &mut command,
@@ -2816,6 +2821,22 @@ mod tests {
             Some("11111111-1111-4111-8111-111111111111")
         );
         assert!(!values.contains_key("CODEX_THREAD_ID"));
+
+        let mut unowned = std::process::Command::new("sh");
+        unowned.env("FNO_AGENT_SELF", "parent");
+        stamp_command_env(&mut unowned, None, "codex", None);
+        let values: std::collections::HashMap<_, _> = unowned
+            .get_envs()
+            .filter_map(|(key, value)| {
+                value.map(|value| {
+                    (
+                        key.to_string_lossy().into_owned(),
+                        value.to_string_lossy().into_owned(),
+                    )
+                })
+            })
+            .collect();
+        assert!(!values.contains_key("FNO_AGENT_SELF"));
     }
 
     #[test]

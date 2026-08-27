@@ -27,12 +27,24 @@ def stamp_child_harness_identity(
     environ: Optional[dict[str, str]],
     harness: str,
     session_id: Optional[str] = None,
+    *,
+    agent_self: Optional[str] = None,
 ) -> dict[str, str]:
     """Scrub inherited fno stamps, then apply the launcher's owned values."""
     if environ is None:
         environ = dict(os.environ)
+    for key in (
+        "FNO_AGENT_SELF",
+        "FNO_AGENT_HARNESS",
+        "FNO_AGENT_PROVIDER",
+        "FNO_AGENT_SESSION",
+    ):
+        environ.pop(key, None)
     environ.pop(FNO_HARNESS_NAME, None)
     environ.pop(FNO_HARNESS_SESSION_ID, None)
+    if agent_self:
+        environ["FNO_AGENT_SELF"] = agent_self
+    environ["FNO_AGENT_HARNESS"] = harness
     environ[FNO_HARNESS_NAME] = harness
     if session_id and session_id.strip():
         environ[FNO_HARNESS_SESSION_ID] = session_id.strip()

@@ -332,6 +332,7 @@ fn rust_codex_resume(
         output_path,
         Some(std::time::Duration::from_secs(timeout_sec)),
         None,
+        None,
     );
 
     match old_path {

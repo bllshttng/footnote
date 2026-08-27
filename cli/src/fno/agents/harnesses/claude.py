@@ -479,8 +479,9 @@ def headless_create(
         spawn_env = proxy_env
     from fno.harness_identity import stamp_child_harness_identity
 
-    spawn_env = stamp_child_harness_identity(spawn_env, "claude")
-    spawn_env["FNO_AGENT_HARNESS"] = "claude"
+    spawn_env = stamp_child_harness_identity(
+        spawn_env, "claude", agent_self=name
+    )
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -686,7 +687,7 @@ def bg_create(
     from fno.harness_identity import stamp_child_harness_identity
 
     spawn_env = stamp_child_harness_identity(
-        spawn_env, "claude", resume_session_id
+        spawn_env, "claude", resume_session_id, agent_self=name
     )
 
     # Seed provenance, set AFTER the env floor. The seed argument stays

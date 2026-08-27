@@ -702,6 +702,7 @@ pub fn gemini_resume(
     yolo: bool,
     output_path: &Path,
     timeout: Option<Duration>,
+    agent_self: Option<&str>,
 ) -> Result<GeminiResult, GeminiAskError> {
     let full_prompt = inject_from_name(prompt, from_name);
     // ab-994222ee: a resumed autonomous worker is the same headless risk class.
@@ -719,7 +720,7 @@ pub fn gemini_resume(
         timeout,
         false,
         Some(cwd),
-        None,
+        agent_self,
         Some(session_id),
     )
 }
@@ -1257,6 +1258,7 @@ fn dispatch_resume(
         yolo,
         &log_path,
         Some(timeout_sec),
+        Some(name),
     ) {
         Ok(r) => r,
         Err(e) => {
