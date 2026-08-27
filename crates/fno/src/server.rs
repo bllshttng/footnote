@@ -2073,6 +2073,32 @@ fn restore_member_cwd(
     }
 }
 
+/// The directory `--cd` should name on a codex restore, or `""` for none.
+///
+/// `restore_member_cwd` has THREE outcomes and only one of them earns a
+/// `--cd`. Stored directory present and still there: `spawn_cwd` IS the row's
+/// own tree, so name it and the prompt goes away. Stored directory gone
+/// (`gone` is set), or never recorded at all (`stored` is `None`): `spawn_cwd`
+/// is a fallback, the squad canonical cwd or `$HOME`.
+///
+/// Pinning a fallback is WORSE than the prompt it removes. Left alone, codex
+/// offers the recorded session directory, which is the original checkout and
+/// usually still exists, and a human can take it. Pinned, the agent silently
+/// comes back rooted at `$HOME` with only a notice line to hint at it. `$HOME`
+/// is also not a trusted codex project, so pinning it can raise the
+/// folder-trust screen instead: an unattended hang of exactly the kind `--cd`
+/// exists to remove.
+///
+/// Note `gone.is_none()` alone is not the test. The no-stored-directory case
+/// also reports no `gone`, and it is a fallback too.
+fn resume_cd_arg<'a>(stored: Option<&str>, spawn_cwd: &'a str, gone: Option<&str>) -> &'a str {
+    if stored.is_some() && gone.is_none() {
+        spawn_cwd
+    } else {
+        ""
+    }
+}
+
 fn restore_worker_refusal_reason(
     member: &crate::squad_store::StoredMember,
     row: Option<&RegistryAgent>,
@@ -5595,13 +5621,14 @@ impl Core {
         let (spawn_cwd, gone) = restore_member_cwd(stored_cwd, &fallback_cwd, |path| {
             std::path::Path::new(path).is_dir()
         });
+        let cd_cwd = resume_cd_arg(stored_cwd, &spawn_cwd, gone.as_deref()).to_string();
         let fallback_notice = gone.map(|missing| {
             format!(
                 "resume: {}'s directory {missing} is gone; resuming at {fallback_cwd}",
                 facts.name
             )
         });
-        let argv = resume_argv_for(bin, token, &facts.harness_session_id, &spawn_cwd);
+        let argv = resume_argv_for(bin, token, &facts.harness_session_id, &cd_cwd);
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(facts.name.clone());
@@ -20645,6 +20672,26 @@ mod tests {
             harness: None,
             harness_session_id: None,
         }
+    }
+
+    #[test]
+    fn resume_cd_arg_names_only_the_rows_own_directory() {
+        // Stored and still there: spawn_cwd IS the row's tree, so name it.
+        assert_eq!(
+            resume_cd_arg(Some("/worktrees/x-04b0"), "/worktrees/x-04b0", None),
+            "/worktrees/x-04b0"
+        );
+        // Stored but pruned: spawn_cwd is the squad fallback. Pinning it roots
+        // the agent away from any repo and hides it behind one notice line.
+        // Codex's own prompt still offers the recorded session directory.
+        assert_eq!(
+            resume_cd_arg(Some("/worktrees/gone"), "/repo", Some("/worktrees/gone")),
+            ""
+        );
+        // Never recorded: also a fallback, and it reports no `gone`, which is
+        // why `gone.is_none()` alone is the wrong test.
+        assert_eq!(resume_cd_arg(None, "/repo", None), "");
+        assert_eq!(resume_cd_arg(None, "/Users/someone", None), "");
     }
 
     #[test]
