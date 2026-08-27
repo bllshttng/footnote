@@ -1441,7 +1441,20 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
 
 ### CLI
 
-- `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %, resets-in). `--refresh` forces a probe past the TTL cache and renders that probe's own result, with no second cache read. Two reads of one observation can disagree, and that disagreement is what once printed `unknown` while the probe returned real windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON and `unknown (<slug>)` in human output. The slug names the boundary that failed: `harness-unsupported` (no probe for this CLI), `auth-unsupported` (an api_key record, and the probes read OAuth bearers), `unattributed` (no credential provably this record's), `credential-rejected` (the request WAS issued and the endpoint answered 401/403 on every bearer, so the repair is a re-login and not a network investigation), `probe-failed`, `probe-error`, `record-missing`, `config-unreadable`, `no-windows`, or `not-probed` (no `--refresh` and no fresh snapshot). Capability is classified before attribution. So an unsupported harness or an api_key record is never reported as an account-binding fault it does not have. A known provider additionally carries `"persisted": false` when the reading is good but its cache write lost the update-lock race. The reading is still displayed, because persistence and displayability are separate outcomes.
+- `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %, resets-in). `--refresh` forces a probe past the TTL cache and renders that probe's own result, with no second cache read. Two reads of one observation can disagree, and that disagreement is what once printed `unknown` while the probe returned real windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON and `unknown (<slug>)` in human output. The slug names the boundary that failed. Capability is classified before attribution. So an unsupported harness or an api_key record is never reported as an account-binding fault it does not have. When the reading is good but its cache write lost the update-lock race, a known provider additionally carries `"persisted": false`. The reading is still displayed, because persistence and displayability are separate outcomes.
+
+  | Slug | The boundary it names |
+  |---|---|
+  | `harness-unsupported` | No probe is registered for this CLI. |
+  | `auth-unsupported` | An api_key record. The probes read OAuth bearers. |
+  | `unattributed` | No credential is provably this record's. |
+  | `credential-rejected` | The request WAS issued and the endpoint answered 401/403 on every bearer. The repair is a re-login, not a network investigation. |
+  | `probe-failed` | The probe issued a request and could not read usage. |
+  | `probe-error` | The probe raised. |
+  | `record-missing` | No such account record. |
+  | `config-unreadable` | The config could not be read. |
+  | `no-windows` | The source answered and reported no windows. |
+  | `not-probed` | No `--refresh`, and no fresh snapshot. |
 - `fno config accounts list` gains a compact `headroom=` column, plus a `usage=<age>` column.
 - `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
 
@@ -1455,7 +1468,7 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
 
 Three shapes a snapshot can carry, each added because its absence had already produced a wrong answer.
 
-**A window with no reset is retained, not dropped.** `UsageWindow.resets_at` is optional. When the endpoint reports a limit and its utilization but no reset, the window is kept with `resets_at = None` and binds headroom on its percentage alone. Such a window can never be "already reset", so the check that exempts a stale window cannot exempt it: it always binds. Dropping it is what let a live z.ai response lose its binding five-hour cap and answer with a surviving one-minute tool limit at 0.6 percent, which reads as headroom. The sensor reported a healthy provider sitting inside its five-hour wall.
+**A window with no reset is retained, not dropped.** `UsageWindow.resets_at` is optional. When the endpoint reports a limit and its utilization but no reset, the window is kept with `resets_at = None` and binds headroom on its percentage alone. Such a window can never be "already reset", so the check that exempts a stale window cannot exempt it: it always binds. Dropping it is what let a live z.ai response lose its binding five-hour cap. A surviving one-minute tool limit at 0.6 percent answered in its place, and that reads as headroom. The sensor reported a healthy provider sitting inside its five-hour wall.
 
 **A response that was not read whole is marked `partial`.** The per-window guards are each correct about the row they reject. None of them can see that a sibling row has answered in a rejected row's place. So the marker sits beside them, per RESPONSE rather than per window. A partial snapshot floors headroom at `LOW` and never returns `OK`. That converts "we never saw the window that matters" from an absence into a positive marker.
 
