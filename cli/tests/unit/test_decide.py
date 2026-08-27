@@ -2188,7 +2188,7 @@ def test_resolved_agent_identity_refuses_decision_write(
         decide_app, ["--subject", "pr-923", "--decision", "merged"]
     )
     assert refused.exit_code == 3, refused.output
-    assert "fno law set <subject> <decision>" in refused.output
+    assert "fno inbox law set <subject> <decision>" in refused.output
     assert "fno backlog note" in refused.output
 
 
@@ -2295,7 +2295,7 @@ def test_an_agent_cannot_type_a_name_or_authority_into_a_decision(
     assert named.exit_code == 3, named.output
     assert granted.exit_code == 3, granted.output
     assert "fno backlog note" in named.output
-    assert "fno law" in granted.output
+    assert "fno inbox law" in granted.output
 
 
 def test_record_decision_refuses_agent_operator_authority_before_either_write(
@@ -2375,7 +2375,7 @@ def test_backlog_decide_refuses_every_non_operator_authority_before_any_write(
     refused = runner.invoke(decide_app, args)
 
     assert refused.exit_code == 3, refused.output
-    assert "fno law" in refused.output
+    assert "fno inbox law" in refused.output
     assert "fno backlog note" in refused.output
 
     # Positive control: a terminal-attested operator can still reach both
@@ -2437,7 +2437,7 @@ def test_cli_refuses_agent_operator_authority_with_actionable_guidance(
     )
     assert refused.exit_code == 3, refused.output
     assert handle in refused.output
-    assert "fno law" in refused.output
+    assert "fno inbox law" in refused.output
     assert "fno backlog note" in refused.output
 
     # The successful-control write proves both stores were inspected after the
@@ -3369,7 +3369,7 @@ def test_decide_refusal_names_the_chat_door(
 ):
     """The refusal must name a surface the refused caller can actually reach.
 
-    An agent session has no terminal, so `fno law set` alone points it at a
+    An agent session has no terminal, so `fno inbox law set` alone points it at a
     door it cannot open. `/fno:law` is the one it can.
     """
     from types import SimpleNamespace
@@ -3392,8 +3392,26 @@ def test_decide_refusal_names_the_chat_door(
 
     assert refused.exit_code == 3, refused.output
     assert "/fno:law" in refused.stderr
-    # The attended-terminal verb is not replaced, only joined.
-    assert "fno law set" in refused.stderr
+    # The attended-terminal verb is not replaced, only joined, and it is named
+    # in its canonical spelling: `fno law` is a retired root (d-add90c60).
+    assert "fno inbox law set" in refused.stderr
+    assert "`fno law set" not in refused.stderr
+
+
+def test_invalid_authority_detail_caps_the_spellings_it_prints():
+    """`crown-l2-<node>` is one spelling per node over a machine-wide index."""
+    from fno.decide.cli import _INVALID_AUTHORITY_SHOWN, _invalid_authority_detail
+
+    assert _invalid_authority_detail({}) == ""
+
+    many = {f"crown-l2-x-{i:04d}": 40 - i for i in range(40)}
+    rendered = _invalid_authority_detail({"invalid_authority_values": many})
+
+    assert rendered.count(" x") == _INVALID_AUTHORITY_SHOWN
+    assert f"+{40 - _INVALID_AUTHORITY_SHOWN} more (see --json)" in rendered
+    # Sorted by count descending upstream, so the cap keeps the worst.
+    assert "crown-l2-x-0000 x40" in rendered
+    assert "crown-l2-x-0039" not in rendered
 
 
 def test_agent_session_is_still_refused_operator_authority(monkeypatch):

@@ -236,7 +236,7 @@ def _record(
             "cannot record decisions. Decisions are operator-authored. From "
             "chat, draft it with `/fno:law <the ruling>` and the operator's "
             "approval records it in the law lane, no terminal needed. At a "
-            "terminal, `fno law set <subject> <decision>` does it in one call. "
+            "terminal, `fno inbox law set <subject> <decision>` does it in one call. "
             "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
@@ -247,7 +247,7 @@ def _record(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run "
-            "`fno law set <subject> <decision>` from an attended operator "
+            "`fno inbox law set <subject> <decision>` from an attended operator "
             "terminal, or draft it from chat with `/fno:law <the ruling>` for "
             "the operator to approve. Append agent findings with "
             "`fno backlog note <node> <text>`.",
@@ -583,6 +583,9 @@ def _resolve_output_format(path: str, requested: Optional[str]) -> str:
     raise ValueError("--output needs a .json, .md, or .markdown suffix, or --format")
 
 
+_INVALID_AUTHORITY_SHOWN = 5
+
+
 def _invalid_authority_detail(quality: dict) -> str:
     """Spell out the offending authority values, or say nothing.
 
@@ -593,7 +596,15 @@ def _invalid_authority_detail(quality: dict) -> str:
     values = quality.get("invalid_authority_values") or {}
     if not values:
         return ""
-    listed = ", ".join(f"{name} x{count}" for name, count in values.items())
+    # Capped because the motivating value is `crown-l2-<node>`, one distinct
+    # spelling per node, over a machine-wide index. Uncapped, a large journal
+    # turns this summary into a single line of tens of kilobytes. The dict is
+    # sorted by count descending, so the cap keeps the worst offenders.
+    shown = list(values.items())[:_INVALID_AUTHORITY_SHOWN]
+    listed = ", ".join(f"{name} x{count}" for name, count in shown)
+    remaining = len(values) - len(shown)
+    if remaining > 0:
+        listed += f", +{remaining} more (see --json)"
     return f" ({listed})"
 
 

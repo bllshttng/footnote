@@ -355,9 +355,12 @@ def clear(
                         "The operator does not need a second terminal. Compose "
                         "the ruling in chat with `/fno:law <the ruling>`; their "
                         "approval records it in the law lane. Then re-run this "
-                        "close citing that `d-...` id in --answer. At a "
-                        "terminal, `fno law set <subject> <decision>` is the "
-                        "same destination in one call.",
+                        "close WITHOUT --authority operator, citing that "
+                        "`d-...` id in --answer: the law is already recorded, "
+                        "so this close only needs to retire the question. "
+                        "Re-running with --authority operator still refuses. "
+                        "At a terminal, `fno inbox law set <subject> "
+                        "<decision>` is the same destination in one call.",
                         err=True,
                     )
                     raise typer.Exit(3)

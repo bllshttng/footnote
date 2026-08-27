@@ -1908,6 +1908,13 @@ def test_operator_authority_refusal_names_the_chat_door(
     assert "Nothing was closed" in refused.output
     # And the door is now named.
     assert "/fno:law" in refused.output
+    # The advised retry must not be the identical command. _resolve_decider
+    # keys on ambient identity plus this one flag, so a literal re-run takes
+    # exit 3 forever.
+    assert "WITHOUT --authority operator" in refused.output
+    # Canonical spelling only: `fno law` is a retired root (d-add90c60).
+    assert "fno inbox law set" in refused.output
+    assert "`fno law set" not in refused.output
 
     # The question really is still open: a refused answer must never retire it.
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)

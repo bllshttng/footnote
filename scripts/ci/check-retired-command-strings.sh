@@ -116,7 +116,21 @@ fi
 #      hides one: `f"Orphan supervisor: claude rm "` on one line and
 #      `f"{short_id} to clean later."` on the next shipped a live
 #      instruction straight past a line-scoped scan
-ARG='([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8}|[[:space:]]*"[[:space:]]*$)'
+#
+#   4. a leaf under a retired ROOT - `fno law set <subject>`. The registry
+#      retires two-token roots, so the placeholder sits one word further along
+#      than shapes 1-3 look, and `fno law set <subject> <decision>` shipped
+#      straight through a gate that was passing vacuously on it.
+#
+# Shape 4 pairs the optional word with `<...>` ONLY, never `{` or `$`. That is
+# the discriminator that keeps it from becoming noise: a documentation
+# placeholder a reader copies is angle-bracketed, while `{code}` and `$var` are
+# interpolation in a failure message that merely NAMES the shellout. Without
+# the narrowing, `format!("claude rm exited {code}")` matches and the gate
+# starts reporting the exact strings its own `retired-ok:` rule exists to
+# excuse. Widen further only with a specimen that a marker cannot cover.
+SUBVERB='([[:space:]]+[a-z][a-z-]*)?[[:space:]]+<'
+ARG="(${SUBVERB}"'|[[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8}|[[:space:]]*"[[:space:]]*$)'
 PATTERN=""
 for cmd in "${CMDS[@]}"; do
     PATTERN="${PATTERN}${PATTERN:+|}${cmd}${ARG}"
@@ -127,6 +141,25 @@ PATTERN="(${PATTERN})"
 CANARY="run ${CMDS[0]} <short_id> to clean up"
 printf '%s\n' "$CANARY" | grep -qE "$PATTERN" ||
     fail "pattern does not match the canary; every future sweep would pass vacuously"
+
+# The sub-verb form needs its own canary, or SUBVERB could rot to a no-op and
+# the bare canary above would still pass. This is the shape that shipped.
+SUBVERB_CANARY="use \`${CMDS[0]} set <subject> <decision>\` instead"
+printf '%s\n' "$SUBVERB_CANARY" | grep -qE "$PATTERN" ||
+    fail "pattern misses the sub-verb form; a leaf under a retired root would pass"
+
+# Two negative controls. Shape 4 is the one that can rot into noise, so both
+# strings it must NOT match are asserted here rather than left to a reviewer.
+NEGATIVE_CANARY="${CMDS[0]} is now ${INSTEAD[0]}"
+printf '%s\n' "$NEGATIVE_CANARY" | grep -qE "$PATTERN" &&
+    fail "pattern matches a descriptive mention; it would flood the report"
+
+# An interpolated failure message NAMES the shellout that failed. It is the
+# first kind of string `retired-ok:` exists to excuse, so the pattern must not
+# manufacture the hit that then needs excusing.
+INTERPOLATION_CANARY="format!(\"${CMDS[0]} exited {code}\")"
+printf '%s\n' "$INTERPOLATION_CANARY" | grep -qE "$PATTERN" &&
+    fail "sub-verb shape matches an interpolated failure message; narrow it"
 
 # --- 3. Scan the caller-facing surfaces ------------------------------------
 # A surface is a directory plus an extension, never a `**` pathspec (see the
