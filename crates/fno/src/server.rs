@@ -989,13 +989,38 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// arrives from a registry row the catalog gate matched, so it can only name
 /// a session. Tests override the program via `set_resume_program`, mirroring
 /// `set_attach_program`.
-fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
+///
+/// `cwd` is the RESOLVED spawn directory, not the row's stored one:
+/// `restore_member_cwd` falls back to the squad canonical cwd or `$HOME` when
+/// the stored directory is gone, and --cd has to follow that fallback or it
+/// names a directory codex cannot enter.
+///
+/// This is the THIRD codex resume argv builder in the tree, beside the Python
+/// `_build_resume_argv` and its Rust twin in fno-agents. A fix applied to two
+/// of three reads as done and leaves this lane broken, which is how the
+/// directory prompt survived here. The other two also splice a
+/// `-c sandbox_workspace_write.writable_roots=` grant, which this lane still
+/// lacks: fno does not depend on fno-agents, so the grant builder is not
+/// reachable from here without a new crate dependency. A bounded codex
+/// restored into a linked worktree therefore still cannot write its `.git`
+/// metadata.
+fn resume_argv_for(bin: &str, token: &str, session_id: &str, cwd: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(mut argv) = RESUME_PROGRAM.with(|p| p.borrow().clone()) {
         argv.push(session_id.to_string());
         return argv;
     }
-    vec![bin.to_string(), token.to_string(), session_id.to_string()]
+    let mut argv = vec![bin.to_string()];
+    // `bin` is the literal from `resume_form`, never a path, so this compares
+    // against the same spelling that function returns. --cd is global, so it
+    // goes before the subcommand, matching the other two builders.
+    if bin == "codex" && !cwd.is_empty() {
+        argv.push("--cd".to_string());
+        argv.push(cwd.to_string());
+    }
+    argv.push(token.to_string());
+    argv.push(session_id.to_string());
+    argv
 }
 
 #[cfg(test)]
@@ -5576,7 +5601,7 @@ impl Core {
                 facts.name
             )
         });
-        let argv = resume_argv_for(bin, token, &facts.harness_session_id);
+        let argv = resume_argv_for(bin, token, &facts.harness_session_id, &spawn_cwd);
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(facts.name.clone());
@@ -18180,11 +18205,25 @@ mod tests {
         );
         // The built argv substitutes the placeholder with the session id.
         assert_eq!(
-            resume_argv_for("codex", "resume", "01a027ad"),
+            resume_argv_for("codex", "resume", "01a027ad", "/tmp/wt/x-04b0"),
+            vec![
+                "codex".to_string(),
+                "--cd".to_string(),
+                "/tmp/wt/x-04b0".to_string(),
+                "resume".to_string(),
+                "01a027ad".into()
+            ],
+            "the mux restore lane must place the resume in the row's own tree"
+        );
+        // No cwd means no --cd: a bare flag fails parsing, and inventing a
+        // directory is the wrong-tree failure this exists to prevent.
+        assert_eq!(
+            resume_argv_for("codex", "resume", "01a027ad", ""),
             vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()]
         );
+        // --cd is codex-only; claude's resume form does not take it.
         assert_eq!(
-            resume_argv_for("claude", "--resume", "119e3c52-uuid"),
+            resume_argv_for("claude", "--resume", "119e3c52-uuid", "/tmp/wt/x-04b0"),
             vec![
                 "claude".to_string(),
                 "--resume".to_string(),

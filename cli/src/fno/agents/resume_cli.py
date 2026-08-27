@@ -128,7 +128,7 @@ def _build_resume_argv(
         # is the wrong tree, which looks like success.
         #
         # Placed BEFORE the subcommand, where every other codex lane puts a
-        # global (the -c grant here, `-C <cwd>` in the spawn lane). Both
+        # global (the -c grant here, `--cd <cwd>` in the spawn lane). Both
         # positions parse on codex 0.149.1, so this is consistency rather than
         # a fix, and consistency is what a reader checks against.
         #
