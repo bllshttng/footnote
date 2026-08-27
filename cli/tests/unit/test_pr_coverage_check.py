@@ -1133,17 +1133,20 @@ def test_ac7_marker_exhausted_decline_exits_impossible(monkeypatch, tmp_path, ca
     assert "hooks/git-protection.py:302:security" in line
 
 
-def test_max_rounds_two_means_exactly_two_rounds(monkeypatch, tmp_path):
-    """The boundary, pinned per round, because the key is named max_rounds.
+@pytest.mark.parametrize("max_rounds", [1, 2, 3, 5])
+def test_max_rounds_n_means_exactly_n_rounds(monkeypatch, tmp_path, max_rounds):
+    """The boundary tracks the CONFIGURED number, at four of them.
 
-    Nobody reads `max_rounds = 2` and expects three reviews. It used to mean
-    three: the comparison was `>`, so the budget tripped only once a THIRD
-    round had already run. Round 2 is now the last one, and this walks the
-    boundary rather than asserting a single side of it - an off-by-one is
-    invisible from one sample.
+    Set it to 3 and the third round is the last one; set it to 5 and the fifth
+    is. Pinning only max_rounds = 2 would leave the cap free to be hardcoded
+    to 2 somewhere and still pass, which is the exact shape a single-value
+    test cannot see.
     """
+    monkeypatch.setattr(_coverage_gate, "resolved_max_rounds", lambda repo: max_rounds)
     seen = {}
-    for n in (1, 2, 3):
+    for n in (max_rounds - 1, max_rounds, max_rounds + 1):
+        if n < 1:
+            continue
         _specimen_gates(monkeypatch)
         _seed_soft_cap(tmp_path, rounds=n)
         monkeypatch.setattr(
@@ -1154,19 +1157,17 @@ def test_max_rounds_two_means_exactly_two_rounds(monkeypatch, tmp_path):
         )
         seen[n] = (state, note)
 
-    # Round 1 of 2: under the cap, so the finding still blocks.
-    assert seen[1][0] == _coverage_gate.REFUSED, seen[1]
-
-    # Round 2 of 2: the LAST round the budget funds. Discharged here, not on
-    # round 3 - that is the whole point of the rename-shaped fix.
-    assert seen[2][0] == _coverage_gate.COVERED, seen[2]
-    # Either receipt is correct here and which one depends on the row: a
-    # covered row takes the filed-at-cap note, an uncovered one takes the
-    # discharge waiver. Both must NAME the cap, which is the auditable part.
-    assert "(2/2" in seen[2][1], seen[2][1]
-
-    # Round 3 stays discharged: past the cap is not a different rule.
-    assert seen[3][0] == _coverage_gate.COVERED, seen[3]
+    if max_rounds - 1 >= 1:
+        assert seen[max_rounds - 1][0] == _coverage_gate.REFUSED, (
+            f"one short of {max_rounds} must still be under the cap: "
+            f"{seen[max_rounds - 1]}"
+        )
+    assert seen[max_rounds][0] == _coverage_gate.COVERED, (
+        f"round {max_rounds} of {max_rounds} is the last the budget funds: "
+        f"{seen[max_rounds]}"
+    )
+    assert f"({max_rounds}/{max_rounds}" in seen[max_rounds][1], seen[max_rounds][1]
+    assert seen[max_rounds + 1][0] == _coverage_gate.COVERED, seen[max_rounds + 1]
 
 
 def test_ac7_hp_under_the_cap_refuses_and_says_how_many_remain(
@@ -1359,12 +1360,12 @@ def _soft_round(ts: str, head: str, dispositions=None):
 
 
 def _seed_soft_cap(tmp_path, rounds=3):
-    stamps = ["2026-08-25T21:00:00Z", "2026-08-25T21:30:00Z", "2026-08-25T22:00:00Z"]
-    heads = [
-        "1111111111111111111111111111111111111111",
-        "2222222222222222222222222222222222222222",
-        FIXTURE_HEAD,
-    ]
+    # Generated, not a fixed list: the boundary test walks max_rounds up to 5,
+    # and a three-element table silently IndexErrors past three rather than
+    # saying the fixture ran out. The LAST round always lands on FIXTURE_HEAD,
+    # because the gate reads the newest round at the PR head.
+    stamps = [f"2026-08-25T{21 + (i // 2):02d}:{(i % 2) * 30:02d}:00Z" for i in range(rounds)]
+    heads = [f"{i + 1}" * 40 for i in range(rounds - 1)] + [FIXTURE_HEAD]
     (tmp_path / ".fno").mkdir(exist_ok=True)
     with open(tmp_path / ".fno" / "events.jsonl", "w", encoding="utf-8") as fh:
         for i in range(rounds):
