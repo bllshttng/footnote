@@ -400,7 +400,9 @@ def headless_create(
     # the floor below.
     from fno.agents.model_routing import route_settings_path_for
 
-    settings_path = route_settings_path_for(route_env, account_env)
+    settings_path = route_settings_path_for(
+        route_env, account_env, cwd=str(cwd) if cwd else None
+    )
     if settings_path:
         argv += ["--settings", settings_path]
     if permission_mode:
@@ -592,7 +594,9 @@ def bg_create(
     # Computed once here because the settings-file float below needs the
     # answer before _build_argv; the spawn_env scrub rescans on its own.
     _incoherent = incoherent_model_env()
-    settings_path = route_settings_path_for(route_env, account_env)
+    settings_path = route_settings_path_for(
+        route_env, account_env, cwd=str(cwd) if cwd else None
+    )
     # Without a route/account there is no settings file, so an env-only scrub
     # of the model vars below is decorative for `claude --bg`: the serving
     # session is forked by the claude daemon with the DAEMON's own env
@@ -611,7 +615,24 @@ def bg_create(
     if settings_path is None and _floor_keys:
         from fno.agents.model_routing import materialize_model_scrub_settings
 
-        settings_path = materialize_model_scrub_settings(_floor_keys)
+        settings_path = materialize_model_scrub_settings(
+            _floor_keys, cwd=str(cwd) if cwd else None
+        )
+    if settings_path is None:
+        # x-c995: a clean spawn (no route, no model floor) still floats a
+        # settings file, because the `crossSessionInbound: "accept"` stamp is
+        # how a spawned worker takes inbound socket mail as itself. A user who
+        # set `refuse` gets no file here - the writer never overrides them, so
+        # there is nothing to float and no floor is needed.
+        from fno.agents.model_routing import (
+            is_cross_session_inbound_refused,
+            materialize_model_scrub_settings,
+        )
+
+        if not is_cross_session_inbound_refused(str(cwd) if cwd else None):
+            settings_path = materialize_model_scrub_settings(
+                [], cwd=str(cwd) if cwd else None
+            )
     argv = _build_argv(
         name=name,
         message=message,
@@ -923,7 +944,12 @@ def build_cross_session_container(message: str, from_name: str) -> str:
     return f'<cross-session-message from-name="{safe_from}">\n{message}\n</cross-session-message>'
 
 
-def _build_envelope(message: str, from_name: str) -> bytes:
+def _build_envelope(
+    message: str,
+    from_name: str = "fno",
+    *,
+    token: Optional[str] = None,
+) -> bytes:
     """Render the BG8 cross-session envelope as UTF-8 bytes + trailing newline.
 
     Shape ``{"type":"user","message":{"role":"user","content":<wrapped>},
@@ -935,27 +961,30 @@ def _build_envelope(message: str, from_name: str) -> bytes:
     security feature: a synthetic user turn is indistinguishable from operator
     typing, and in a bypass session it would drive tools with no approval).
 
-    The listener does carry a ``fromMode`` attestation field (a peer origin
-    whose mode matches the recipient's class is auto-delivered), but reading it
-    is gated behind the internal GrowthBook flag ``tengu_harbor_kite_mode_emit``
-    (default off), so it is not a contract a sender can rely on or enable. The
-    only documented escape is the receiver setting ``crossSessionInbound:
-    "accept"``, which accepts every un-attested peer. Net: a socket inject
-    cannot be delivered into a bypass session. ``recovery.py`` documents the
-    consequence for the watchdog; a fresh ``claude --bg --resume`` (whose seed
-    is a CLI arg, not a socket inject) is the deliverable channel.
+    When ``token`` is present, an auth frame ``{"type":"auth","token":token}``
+    is prepended.
 
     XML-attribute escape is mandatory; the dispatch layer rejects XML-unsafe
     input before we get here, but a defensive escape keeps the envelope safe in
     every code path.
     """
-    wrapped = build_cross_session_container(message, from_name)
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    if contains_fno_mail_tag(message) or "<cross-session-message" in message:
+        content = message
+    else:
+        content = build_cross_session_container(message, from_name)
     envelope = {
         "type": "user",
-        "message": {"role": "user", "content": wrapped},
+        "message": {"role": "user", "content": content},
         "priority": "next",
     }
-    return (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
+    out = b""
+    if token:
+        auth_frame = {"type": "auth", "token": token}
+        out += (json.dumps(auth_frame, separators=(",", ":")) + "\n").encode("utf-8")
+    out += (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
+    return out
 
 
 # Transport-level send outcome. The only success state of a single-shot AF_UNIX
@@ -968,7 +997,13 @@ def _build_envelope(message: str, from_name: str) -> bytes:
 SEND_WRITTEN = "written"
 
 
-def send_to_session(sock_path: str, content: str, from_name: str) -> str:
+def send_to_session(
+    sock_path: str,
+    content: str,
+    from_name: str = "fno",
+    *,
+    token: Optional[str] = None,
+) -> str:
     """Single-shot send of the BG8 envelope over the messaging socket.
 
     Opens an AF_UNIX SOCK_STREAM, writes the rendered envelope plus a
@@ -983,8 +1018,14 @@ def send_to_session(sock_path: str, content: str, from_name: str) -> str:
     (EIO, ECONNRESET) are the only reliable "your bytes never made it across"
     signal, so a close OSError is propagated as a send failure rather than
     swallowed; a clean close still only proves the write, not the delivery.
+
+    ``token`` is read ONLY from the explicit argument, never the ambient env:
+    the env var carries THIS process's session token, which is the recipient's
+    token only when the caller runs inside that recipient (a drain hook). A
+    foreign sender silently passing its own token would authenticate as
+    nobody; each caller decides which side of that line it is on (x-c995).
     """
-    payload = _build_envelope(content, from_name)
+    payload = _build_envelope(content, from_name, token=token)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(_SEND_SOCKET_TIMEOUT_SEC)
     primary_exc: Optional[BaseException] = None

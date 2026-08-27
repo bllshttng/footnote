@@ -888,3 +888,89 @@ def test_ask_followup_not_found_without_transcript_is_inconclusive(
         )
     assert exc_info.value.reason == "truth-live-inject-failed"
     assert calls["n"] == 0
+
+
+def test_send_to_session_includes_auth_frame_when_token_provided() -> None:
+    from fno.agents.harnesses.claude import send_to_session
+
+    sock_path = _short_sock_path()
+    server = _UnixSocketServer(sock_path)
+    server.start()
+
+    try:
+        send_to_session(sock_path, "test msg", "fno", token="secret-auth-token-999")
+    finally:
+        server.close()
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+    lines = [line for line in server.received.decode("utf-8").split("\n") if line]
+    assert len(lines) == 2
+    auth_obj = json.loads(lines[0])
+    assert auth_obj == {"type": "auth", "token": "secret-auth-token-999"}
+    msg_obj = json.loads(lines[1])
+    assert msg_obj["type"] == "user"
+    assert "test msg" in msg_obj["message"]["content"]
+
+
+def test_send_to_session_preserves_fno_mail_payload() -> None:
+    from fno.agents.harnesses.claude import send_to_session
+
+    sock_path = _short_sock_path()
+    server = _UnixSocketServer(sock_path)
+    server.start()
+
+    mail_payload = '<fno_mail from="cl-1234" to="cl-5678" id="m-abc">hello peer</fno_mail>'
+    try:
+        send_to_session(sock_path, mail_payload, "fno")
+    finally:
+        server.close()
+        try:
+            os.unlink(sock_path)
+        except FileNotFoundError:
+            pass
+
+    lines = [line for line in server.received.decode("utf-8").split("\n") if line]
+    assert len(lines) == 1
+    msg_obj = json.loads(lines[0])
+    assert msg_obj["type"] == "user"
+    assert msg_obj["message"]["content"] == mail_payload
+
+
+def test_settings_inbound_accept_and_refuse(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.model_routing import (
+        is_cross_session_inbound_refused,
+        materialize_model_scrub_settings,
+    )
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # Default without refuse setting
+    assert not is_cross_session_inbound_refused(str(tmp_path))
+    settings_path = materialize_model_scrub_settings([], cwd=str(tmp_path))
+    data = json.loads(Path(settings_path).read_text(encoding="utf-8"))
+    assert data.get("crossSessionInbound") == "accept"
+
+    # With refuse setting in project
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    (claude_dir / "settings.json").write_text(
+        json.dumps({"crossSessionInbound": "refuse"})
+    )
+    assert is_cross_session_inbound_refused(str(tmp_path))
+    refused_settings = materialize_model_scrub_settings([], cwd=str(tmp_path))
+    refused_data = json.loads(Path(refused_settings).read_text(encoding="utf-8"))
+    assert "crossSessionInbound" not in refused_data
+
+
+def test_route_settings_carry_inbound_accept(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents.model_routing import materialize_route_settings
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = materialize_route_settings(
+        {"ANTHROPIC_BASE_URL": "https://example.test"}, cwd=str(tmp_path)
+    )
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert data["crossSessionInbound"] == "accept"
+    assert data["env"]["ANTHROPIC_BASE_URL"] == "https://example.test"
