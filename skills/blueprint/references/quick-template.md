@@ -159,7 +159,7 @@ _Optional — omit this section entirely if no relevant patterns exist._
 
 **Changes:** Number them. Each change should target 1-3 files. If a single change touches 5+ files, break it into smaller changes. Each change gets 1-2 BDD acceptance criteria (happy path + primary error case) in the `**Acceptance:**` field.
 
-**Per-task dependencies:** a task row in `## Execution Strategy` may declare `blocked_by: ['1.1']` (list of task ids; validate-plan.sh refuses unknown ids and cycles). A task that declares none derives its blockers as every task in the previous wave, so omitting the key schedules exactly as the whole-wave barrier did.
+**Per-task dependencies:** A task row in `## Execution Strategy` can declare `blocked_by: ['1.1']`. The list must use known task ids and contain no cycles. A task without this key inherits every task from the previous wave, preserving whole-wave scheduling.
 
 **Verification:** Every step must be concrete and runnable. Not "check that it works" but "run this command, expect this output."
 

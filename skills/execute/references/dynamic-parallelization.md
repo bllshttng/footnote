@@ -59,16 +59,10 @@ For each wave marked sequential in execution strategy:
 ## Edge Cases
 
 ### Overlap no longer strands disjoint siblings
-A task runs when its effective blockers are done and no peer claims it:
-its declared `blocked_by`, else every task in the previous wave. The
-whole-wave sequential fallback is gone once the waves skill drives dispatch
-from the orchestrator's `--ready` read - C's overlap with A holds back C
-alone while A and B dispatch on their own merits.
+When a task's effective blockers are done and no peer claims it, the task runs. Declared `blocked_by` takes precedence. Otherwise, blockers are every task in the previous wave. Once the waves skill uses the orchestrator's `--ready` read, C's overlap with A holds C back while A and B dispatch independently.
 
 ### Malformed or missing map
-If the file ownership map section exists but the table cannot be parsed
-(malformed markdown, missing columns), log a warning and fall back to the
-declared execution strategy.
+If the ownership map is present but malformed, log a warning and use the declared strategy.
 
 ## Extended Decision Tree
 
