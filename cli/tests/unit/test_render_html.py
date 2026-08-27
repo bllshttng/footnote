@@ -816,3 +816,50 @@ def test_a_child_completed_at_beats_its_stale_open_status_in_the_parent_rollup()
     assert rows["ab-00000010"]["ki"] == [
         {"id": "ab-00000011", "s": "done", "t": "legacy child", "ty": "feature"}
     ], "the parent rollup must agree with the child's own row"
+
+
+def test_completed_at_beats_a_stale_status_in_every_relation_projection():
+    """The rule the row's own status uses must hold in all four projections.
+    Fixing `ki` alone left `su`, `bb` and `sb` reading status raw, so a finished
+    dependency still rendered open inside the red Dependencies box and the node
+    read as blocked by work that was done."""
+    entries = [
+        _entry(
+            "ab-00000020",
+            project="fno",
+            title="finished blocker",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "ab-00000021",
+            project="fno",
+            title="dependent",
+            blocked_by=["ab-00000020"],
+            superseded_by="ab-00000020",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000020"]["s"] == "done", "control: the blocker's own row"
+    assert rows["ab-00000021"]["bb"] == [
+        {"id": "ab-00000020", "s": "done", "t": "finished blocker"}
+    ], "Dependencies must not show a finished blocker as open"
+    assert rows["ab-00000021"]["sb"] == {
+        "id": "ab-00000020",
+        "s": "done",
+        "t": "finished blocker",
+    }, "Superseded by must agree with the row"
+    assert rows["ab-00000020"]["su"] == [
+        {"id": "ab-00000021", "s": "ready", "t": "dependent"}
+    ], "an unfinished successor still reads its own stored status"
+
+
+def test_an_unresolvable_relation_id_still_reports_not_found():
+    """The shared helper must keep the missing-row fallback the projections had:
+    an id absent from the index is 'not found', never 'unknown'."""
+    entries = [_entry("ab-00000030", project="fno", blocked_by=["ab-missing1"])]
+
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000030"]["bb"] == [{"id": "ab-missing1", "s": "not found", "t": ""}]

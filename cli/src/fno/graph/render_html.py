@@ -824,6 +824,22 @@ _DASHBOARD_JS = """\
 """
 
 
+def _row_status(entry: object, missing: str = "unknown") -> str:
+    """The status a row and every projection of it must agree on.
+
+    `completed_at` is authoritative. A legacy or archived row can carry it
+    beside a stale open status, and a projection that reads `status` raw then
+    contradicts the row rendered beside it: a finished dependency shows open
+    inside the red Dependencies box, and the parent rollup counts it open.
+    One rule, so a fifth reader cannot drift from the other four.
+    """
+    if not isinstance(entry, dict) or not entry:
+        return missing
+    if entry.get("completed_at"):
+        return "done"
+    return str(entry.get("status") or missing)
+
+
 def _dashboard_rows(
     entries: list[dict],
     *,
@@ -857,7 +873,7 @@ def _dashboard_rows(
                 successors.setdefault(blocker, []).append(successor)
     rows: list[dict] = []
     for entry in entries:
-        status = "done" if entry.get("completed_at") else str(entry.get("status") or "unknown")
+        status = _row_status(entry)
         row: dict[str, object] = {
             "s": status,
             "t": str(entry.get("title") or "(untitled)").replace("\n", " ").strip(),
@@ -895,11 +911,7 @@ def _dashboard_rows(
                             # completed_at beside a stale open status, and
                             # without this the parent rollup counts it open
                             # while the child's own row reads done.
-                            "s": (
-                                "done"
-                                if child.get("completed_at")
-                                else str(child.get("status") or "unknown")
-                            ),
+                            "s": _row_status(child),
                             "t": str(child.get("title") or "")[:90],
                             "ty": str(child.get("type") or ""),
                         }
@@ -928,7 +940,7 @@ def _dashboard_rows(
                     "su": [
                         {
                             "id": str(successor.get("id") or "?"),
-                            "s": str(successor.get("status") or "unknown"),
+                            "s": _row_status(successor),
                             "t": str(successor.get("title") or "")[:90],
                         }
                         for successor in successors.get(str(entry.get("id") or ""), ())
@@ -936,9 +948,8 @@ def _dashboard_rows(
                     "sb": (
                         {
                             "id": str(entry.get("superseded_by")),
-                            "s": str(
-                                index.get(entry.get("superseded_by"), {}).get("status")
-                                or "not found"
+                            "s": _row_status(
+                                index.get(entry.get("superseded_by")), "not found"
                             ),
                             "t": str(
                                 index.get(entry.get("superseded_by"), {}).get("title")
@@ -952,7 +963,7 @@ def _dashboard_rows(
                     "bb": [
                         {
                             "id": bid,
-                            "s": str(index.get(bid, {}).get("status") or "not found"),
+                            "s": _row_status(index.get(bid), "not found"),
                             "t": str(index.get(bid, {}).get("title") or "")[:90],
                         }
                         for bid in entry.get("blocked_by") or []
