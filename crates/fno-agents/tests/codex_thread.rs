@@ -202,6 +202,17 @@ fn fake_interrupt() -> String {
     )
 }
 
+/// The foreign-completion wedge: mid-turn, a `turn/completed` for a turn id
+/// nobody drives arrives (the review lane's own turn, a stale completion
+/// racing a retry), then the REAL completion lands normally.
+fn fake_foreign_completion() -> String {
+    queue_fake(
+        r#"        time.sleep(0.6)
+        send({"method": "turn/completed", "params": {"turn": {"id": "turn-stray", "status": "completed", "items": [{"type": "agentMessage", "text": "STRAY"}]}}})
+        time.sleep(0.6)"#,
+    )
+}
+
 /// The stacked-bounds wedge: interrupt acks SLOWLY (1s) and the turn never
 /// completes. Against stacked full bounds the settle wait then runs its own
 /// 65s after the ack; against the shared budget it gets only the remainder.
@@ -389,6 +400,33 @@ async fn interrupt_settle_shares_one_deadline_with_the_ack_wait() {
             "the settle wait consumed the remaining budget: {outcome:?}"
         );
         std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
+        actor.shutdown().await.unwrap();
+    })
+    .await;
+}
+
+/// A completion for a turn nobody drives (the review lane's own turn id, or a
+/// stale completion racing the steer-precondition retry) must stay parked
+/// telemetry: the driving turn's waiters resolve from the REAL completion and
+/// its shared id clears only there. The old take()-then-filter dropped both
+/// on the first foreign completion.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn foreign_completion_leaves_the_driving_turn_untouched() {
+    with_fake_codex(&fake_foreign_completion(), async {
+        let (actor, _keep) = start_actor().await;
+        let reply = actor.submit("drive me".into()).await.unwrap();
+        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
+            .await
+            .expect("the driving turn's waiter survives the foreign completion")
+            .unwrap()
+            .expect("turn 1 receipt");
+        assert_eq!(turn.turn_id, "turn-1");
+        assert_eq!(turn.text, "REPLY-1");
+        assert_eq!(
+            actor.current_turn_id(),
+            None,
+            "cleared by the real completion, not the stray"
+        );
         actor.shutdown().await.unwrap();
     })
     .await;

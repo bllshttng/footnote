@@ -1030,18 +1030,20 @@ impl ActorCtx {
         let turn_id = result.turn_id.clone();
         let receipt: TurnReceipt = result.into();
         self.park_completed(turn_id.clone(), receipt.clone());
-        let matched = self
-            .driving
-            .take()
-            .filter(|driving| driving.turn_id == turn_id);
-        if let Some(driving) = matched {
-            self.driver.note_turn_completed(&turn_id);
-            self.shared.set_turn_id(None);
-            for waiter in driving.waiters {
-                let _ = waiter.send(Ok(receipt.clone()));
-            }
-            (self.on_turn_done)(receipt);
+        // take(), not take()-then-filter: a completion for a turn nobody
+        // drives (the review lane's own turn id, or a stale completion racing
+        // the steer-precondition retry) must stay parked telemetry above -
+        // stripping the driving value here dropped its waiters unresolved
+        // and left the shared turn id stale.
+        let Some(driving) = self.driving.take_if(|driving| driving.turn_id == turn_id) else {
+            return;
+        };
+        self.driver.note_turn_completed(&turn_id);
+        self.shared.set_turn_id(None);
+        for waiter in driving.waiters {
+            let _ = waiter.send(Ok(receipt.clone()));
         }
+        (self.on_turn_done)(receipt);
     }
 
     fn park_completed(&mut self, turn_id: String, receipt: TurnReceipt) {
