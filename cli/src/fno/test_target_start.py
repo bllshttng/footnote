@@ -1316,7 +1316,7 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.6-sol", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.4", "task-pin"),
     )
     # gpt-5.4 is declared on the codex harness.
     result = runner.invoke(

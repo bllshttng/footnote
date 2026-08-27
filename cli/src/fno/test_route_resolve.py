@@ -219,13 +219,18 @@ def test_constrain_harness_picks_within_the_pinned_harness():
 
 
 def test_substrate_filter_empties_the_set_with_a_named_reason():
-    """AC9-EDGE: a thread substrate no codex row supports records
-    constrained-empty rather than cancelling silently."""
+    """AC9-EDGE: a thread substrate no declared row supports records
+    constrained-empty rather than cancelling silently.
+
+    Reads opencode, whose thread bit is False. This test named codex until
+    codex gained a verified thread lane; the edge case is about a harness
+    without one, so it follows the capability rather than the harness name.
+    """
     inv = _inv([
-        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+        {"name": "oc-x", "harness": "opencode", "model": "oc-big", "band": "high"},
     ])
     candidate, chain = rr.resolve_grid(
-        "high", "p1", {"codex": "ok"}, substrate="thread", inventory=inv
+        "high", "p1", {"opencode": "ok"}, substrate="thread", inventory=inv
     )
     assert candidate is None
     assert chain[-1] == "grid=constrained-empty"
