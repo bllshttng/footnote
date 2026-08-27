@@ -629,3 +629,28 @@ def test_update_difficulty_reaches_the_plan_doc(tmp_graph, tmp_path):
     res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "high"])
     assert res.exit_code == 0, res.output
     assert "difficulty: high" in plan.read_text()
+
+
+@pytest.mark.real_plan_projection
+def test_update_difficulty_null_clears_the_plan_doc(tmp_graph, tmp_path):
+    """The explicit clear reaches the doc even on a row that never held the key."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: high\n---\n\n# a plan\n")
+    _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
+
+    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "null"])
+    assert res.exit_code == 0, res.output
+    assert "difficulty" not in plan.read_text()
+
+
+@pytest.mark.real_plan_projection
+def test_update_priority_keeps_a_persisted_null_band_off_the_doc(tmp_graph, tmp_path):
+    """Rows minted before the intake fix still store difficulty: null; a
+    mirrored edit on them must not delete the band the doc authored since."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\ndifficulty: medium\n---\n\n# a plan\n")
+    _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, difficulty=None, plan_path=str(plan)))
+
+    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--priority", "p1"])
+    assert res.exit_code == 0, res.output
+    assert "difficulty: medium" in plan.read_text()
