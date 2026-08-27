@@ -153,7 +153,8 @@ def test_json_output_keys_unchanged():
         "models",
     }
     assert set(payload["tokens"]) == {"input", "output", "cache_read", "cache_create", "total"}
-    assert set(payload["messages"]) == {"user", "assistant", "subagent"}
+    # "mail" is the fno_mail bucket: agent peer mail, never the operator.
+    assert set(payload["messages"]) == {"user", "mail", "assistant", "subagent"}
 
 
 def test_json_surfaces_pricing_fallback_models():
