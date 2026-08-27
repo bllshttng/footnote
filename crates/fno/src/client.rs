@@ -8733,17 +8733,6 @@ enum ChromeHit {
         row: u16,
         col: u16,
     },
-    /// (x-9c5f) Open the placement picker for a not-yet-spawned watch-only row:
-    /// the operator picks the split direction (h/j/k/l or arrows) or a new tab
-    /// before it attaches, instead of a hardcoded split/tab. `squad` is the
-    /// row's owning squad (the picker's preferred target); `apply_hit` resolves
-    /// the live workspace list and default target. Every deliberate attach
-    /// gesture (sideline click, selector Enter, navigator goto, peek Enter)
-    /// routes through here, so placement is chosen the same way everywhere.
-    OpenAttachPlace {
-        id: String,
-        squad: Option<u64>,
-    },
 }
 
 fn no_pane_notice(a: &AgentRow) -> String {
@@ -12747,25 +12736,6 @@ async fn apply_hit(
         ChromeHit::OpenSidelineMenu { row, col } => {
             view.open_sideline_menu(Anchor::At { row, col })
         }
-        // (x-9c5f) A not-yet-spawned watch-only row: open the placement picker so
-        // the operator picks the split direction. Resolve the live workspace list
-        // and default target (the row's own squad if still present, else the
-        // active one, else the first) here, where `&mut View` + the layout are in
-        // hand. `open_attach_place` closes peek/the selector; the picker owns the
-        // rest of the attach.
-        ChromeHit::OpenAttachPlace { id, squad } => {
-            // A synthetic mission squad is a render-time grouping header, not
-            // a real session squad `place_spawned_pane` can route into -
-            // exclude it here so a mission-grouped row's placement falls back
-            // to a real target (the row's cwd match, else active, else first)
-            // instead of leaking the virtual id into the picker.
-            let squads: Vec<u64> = view.attach_dst_squads();
-            if squads.is_empty() {
-                view.set_notice("no workspace to attach into".into());
-            } else {
-                view.open_attach_place(id, squad, squads);
-            }
-        }
     }
     Ok(())
 }
@@ -14367,10 +14337,9 @@ async fn peek_keys(
             b'l' | b'\r' | b'\n' => {
                 // Attach from peek (US4) through the shared agent_hit -> apply_hit
                 // path a click / selector Enter uses: a pane-hosted row focuses;
-                // a not-yet-spawned watch-only row resolves to OpenAttachPlace, so
-                // apply_hit opens the placement picker (choose split direction /
-                // tab, x-9c5f) - open_attach_place closes both overlays. A Notice
-                // refusal (a paneless row with no attach target) keeps BOTH
+                // a paneless live row reaches the ONE dedicated thread pane with
+                // no placement dialog (x-07c2; the explicit picker is `p`). A
+                // Notice refusal (a dead or unresolvable row) keeps BOTH
                 // overlays open (x-260a locked 3). Right-arrow folds to `l`.
                 let hit = match view.display_rows().get(cursor) {
                     Some(DisplayRow::Agent(a)) => Some(agent_hit(a, view.layout.active_squad)),
@@ -16791,7 +16760,9 @@ mod tests {
     // `place_spawned_pane` can route a pane into - a mission-grouped row's
     // placement must fall back to a real target, and the picker must never
     // offer the virtual id as a choice (codex review of x-1a47 change 2/3,
-    // P1-b).
+    // P1-b). Driven through the `p`-key door (attach_dst_squads +
+    // open_attach_place), the only door left since x-07c2 moved every
+    // deliberate attach gesture to the dedicated thread pane.
     #[tokio::test]
     async fn open_attach_place_excludes_mission_squad_from_placement_targets() {
         let mut view = two_pane_view();
@@ -16799,12 +16770,8 @@ mod tests {
         let mid = mission_meta(9, "mux-squad  1/1").id;
         layout.squads.push(mission_meta(9, "mux-squad  1/1"));
         view.set_layout(layout);
-        let hit = ChromeHit::OpenAttachPlace {
-            id: "job1".into(),
-            squad: Some(mid),
-        };
-        let mut buf: Vec<u8> = Vec::new();
-        apply_hit(&mut view, hit, &mut buf).await.unwrap();
+        let squads = view.attach_dst_squads();
+        view.open_attach_place("job1".into(), Some(mid), squads);
         let picker = view.attach_place.expect("picker opened");
         assert_ne!(
             picker.target(),
@@ -19302,7 +19269,6 @@ mod tests {
             Some(ChromeHit::SortColumn(_)) => "SortColumn",
             Some(ChromeHit::ToggleIdle(_)) => "ToggleIdle",
             Some(ChromeHit::OpenSidelineMenu { .. }) => "OpenSidelineMenu",
-            Some(ChromeHit::OpenAttachPlace { .. }) => "OpenAttachPlace",
             Some(ChromeHit::CycleDensity) => "CycleDensity",
         }
     }
@@ -28024,19 +27990,11 @@ mod tests {
             .expect("an attachable agent row")
     }
 
-    /// Open the attach picker through the CLICK door (`apply_hit`), which does
-    /// not depend on a sideline row index.
+    /// Open the attach picker the way the `p` key does (no sideline row
+    /// index needed), which since x-07c2 is the picker's only door.
     async fn open_attach_by_click(v: &mut View) {
-        apply_hit(
-            v,
-            ChromeHit::OpenAttachPlace {
-                id: "c19cd2c3".into(),
-                squad: None,
-            },
-            &mut Vec::new(),
-        )
-        .await
-        .unwrap();
+        let squads = v.attach_dst_squads();
+        v.open_attach_place("c19cd2c3".into(), None, squads);
     }
 
     #[tokio::test]
