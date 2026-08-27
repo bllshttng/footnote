@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fno.graph.render_html import (
     UNSCOPED_LABEL,
+    _dashboard_rows,
     _obsidian_url,
     render_graph_html,
 )
@@ -409,3 +410,68 @@ def test_roadmap_opens_with_shipped_visible_and_backlog_does_not(tmp_path: Path)
     local_path = tmp_path / "local.html"
     render_graph_html([entry], local_path)
     assert '"initial_done":false' in local_path.read_text()
+
+
+def test_successor_lookup_is_indexed_not_a_per_entry_rescan():
+    """The auto-render hook runs on EVERY graph mutation, so this is the
+    latency the operator feels on every `fno backlog` command.
+
+    Scanning the source list per entry to find what each one unblocks is
+    quadratic. Measured on the real graph shape at 4694 entries: 3.26s that
+    way, 0.13s indexed, for the same 424 rows that carry a successor.
+
+    Asserted as a RATIO against the same call with successors disabled, not
+    as a wall-clock bound, so it does not go flaky on a loaded machine. A
+    per-entry rescan is ~47x; an index is ~2x.
+    """
+    import time
+
+    entries = [
+        {
+            "id": f"ab-{i:08x}",
+            "title": f"node {i}",
+            "status": "ready",
+            "project": "fno",
+            "created_at": "2026-01-01T00:00:00Z",
+            "blocked_by": [f"ab-{i - 1:08x}"] if i else [],
+        }
+        for i in range(3000)
+    ]
+
+    start = time.perf_counter()
+    local_rows = _dashboard_rows(entries, local=True, context_entries=entries)
+    local_elapsed = time.perf_counter() - start
+
+    # The public projection emits no successors at all, so it is the honest
+    # floor for everything else this function does over the same entries.
+    start = time.perf_counter()
+    _dashboard_rows(entries, local=False, context_entries=entries)
+    baseline = time.perf_counter() - start
+
+    assert sum(1 for r in local_rows if r["su"]) == 2999, "successors still populated"
+    assert local_elapsed < baseline * 10, (
+        f"successor lookup looks quadratic: {local_elapsed:.3f}s local vs "
+        f"{baseline:.3f}s baseline over {len(entries)} entries"
+    )
+
+
+def test_successor_rows_match_the_entries_that_name_the_blocker():
+    """The index must agree with the scan it replaced, including the case a
+    scan handled implicitly: a blocker id that no entry carries."""
+    entries = [
+        _entry("ab-00000001", project="fno", title="blocker"),
+        _entry("ab-00000002", project="fno", title="first", blocked_by=["ab-00000001"]),
+        _entry("ab-00000003", project="fno", title="second", blocked_by=["ab-00000001"]),
+        _entry("ab-00000004", project="fno", title="unrelated", blocked_by=["ab-missing"]),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert sorted(s["id"] for s in rows["ab-00000001"]["su"]) == [
+        "ab-00000002",
+        "ab-00000003",
+    ]
+    assert rows["ab-00000002"]["su"] == []
+    assert rows["ab-00000004"]["su"] == []
+    assert rows["ab-00000004"]["bb"] == [
+        {"id": "ab-missing", "s": "not found", "t": ""}
+    ], "an unresolvable blocker still reports itself"

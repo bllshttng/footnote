@@ -549,6 +549,17 @@ def _dashboard_rows(
     """Project graph entries into the canonical dashboard's data contract."""
     source = context_entries if context_entries is not None else entries
     index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
+    # Successors, indexed once. Scanning `source` per entry to find what each
+    # one unblocks is quadratic, and this runs inside the auto-render hook on
+    # EVERY graph mutation: 4694 entries cost 3.26s that way against 0.07s
+    # here, to populate 424 rows. Board freshness is the point of this file.
+    successors: dict[str, list[dict]] = {}
+    for successor in source:
+        if not isinstance(successor.get("id"), str):
+            continue
+        for blocker in successor.get("blocked_by") or []:
+            if isinstance(blocker, str):
+                successors.setdefault(blocker, []).append(successor)
     rows: list[dict] = []
     for entry in entries:
         status = "done" if entry.get("completed_at") else str(entry.get("status") or "unknown")
@@ -594,10 +605,7 @@ def _dashboard_rows(
                             "s": str(successor.get("status") or "unknown"),
                             "t": str(successor.get("title") or "")[:90],
                         }
-                        for successor in source
-                        if isinstance(successor.get("id"), str)
-                        and isinstance(entry.get("id"), str)
-                        and entry.get("id") in (successor.get("blocked_by") or [])
+                        for successor in successors.get(str(entry.get("id") or ""), ())
                     ],
                     "sb": (
                         {
