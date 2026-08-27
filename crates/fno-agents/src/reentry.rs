@@ -499,6 +499,7 @@ mod tests {
             forked_from_session_id: None,
             launch_account: None,
             related_session_id: None,
+            sandbox_posture: None,
         }
     }
 

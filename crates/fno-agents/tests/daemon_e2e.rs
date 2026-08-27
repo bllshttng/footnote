@@ -2197,6 +2197,8 @@ async fn cold_start_settles_a_failed_codex_thread_resume_to_orphaned() {
             fno_id: None,
             delivery_policy: None,
             sandbox_posture: Some("workspace-write".into()),
+            launch_account: None,
+            related_session_id: None,
         });
     })
     .unwrap();

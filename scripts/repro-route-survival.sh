@@ -75,7 +75,7 @@ EOF
 
 # The routed worker row exactly as the spawn seams write it.
 cat > "$scratch/.fno/agents/registry.json" <<EOF
-{"schema_version": 19, "agents": [{
+{"schema_version": 20, "agents": [{
   "name": "repro-router",
   "harness": "claude",
   "provider": "zai",
