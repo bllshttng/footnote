@@ -58,7 +58,12 @@ validate() {
     echo "validate-prove-it: $verdict recorded (no pass claimed)"
     return 0
   fi
-  if ! grep -q '🔍' "$report"; then
+  # Scope the marker search to the Steps section alone: a 🔍 anywhere else in
+  # the report (a Findings note, an explanatory sentence) must not satisfy a
+  # check whose whole point is that a STEP was actually run off the happy path.
+  local steps_section
+  steps_section="$(awk '/^### Steps/{f=1; next} /^### /{f=0} f' "$report")"
+  if ! grep -q '🔍' <<<"$steps_section"; then
     echo "validate-prove-it: REFUSED - PASS with no marked probe (🔍) in the Steps list; a happy-path replay is not a verification. Add at least one probe off the claim's path and re-run." >&2
     return 1
   fi
@@ -95,6 +100,18 @@ EOF
 EOF
   printf 'fno-prove-it: {"verdict":"PASS","claim":"resolve-level answers every provider"}\n' >> "$TMP/no-probe.md"
 
+  cat > "$TMP/marker-outside-steps.md" <<'EOF'
+## Verification: the route returns the header
+**Verdict:** PASS
+**Claim:** resolve-level answers every provider
+**Method:** cold start
+### Steps
+1. ✅ ran resolve-level high -> model gpt-5.6-sol
+### Findings
+- 🔍 a note that happens to carry the marker glyph, not a run step
+EOF
+  printf 'fno-prove-it: {"verdict":"PASS","claim":"resolve-level answers every provider"}\n' >> "$TMP/marker-outside-steps.md"
+
   cat > "$TMP/fail.md" <<'EOF'
 ## Verification: the route returns the header
 **Verdict:** FAIL
@@ -126,6 +143,7 @@ EOF
   validate "$TMP/no-probe.md" >/dev/null 2>&1 && sfail "PASS with NO probe accepted (the refusal is the behavior under test)" || spass "PASS with NO probe refused, naming the missing probe"
   refusal_msg="$(validate "$TMP/no-probe.md" 2>&1 || true)"
   grep -q 'no marked probe' <<<"$refusal_msg" && spass "refusal reason names the missing probe" || sfail "refusal reason does not name the missing probe"
+  validate "$TMP/marker-outside-steps.md" >/dev/null 2>&1 && sfail "PASS accepted on a marker outside Steps (AC-scope: Findings note satisfied the check)" || spass "PASS with the marker only outside Steps is still refused"
   validate "$TMP/fail.md" >/dev/null 2>&1 && spass "FAIL passes through untouched" || sfail "FAIL rejected"
   validate "$TMP/blocked.md" >/dev/null 2>&1 && spass "BLOCKED passes through (no verdict claimed)" || sfail "BLOCKED rejected"
   validate "$TMP/skip.md" >/dev/null 2>&1 && spass "SKIP passes through (no verdict claimed)" || sfail "SKIP rejected"

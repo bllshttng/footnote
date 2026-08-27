@@ -11234,17 +11234,19 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
 
     // The pipefail preamble closes the `| tail -5` trap at the runner: a
     // pipeline whose real command fails can no longer read as pass through
-    // the truncating tail's exit 0. The shell is bash-first for the same
-    // reason: on Linux /bin/sh is dash, and dash treats an illegal option on
-    // the special builtin `set` as an abort with status 2, so the preamble
-    // killed every probe before its command ran. A no-bash host falls back
-    // to plain sh and loses only the pipeline-trap closure, not the probe.
-    let wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
+    // the truncating tail's exit 0. Bash-only: on Linux /bin/sh is commonly
+    // dash, and dash treats an illegal option on the special builtin `set`
+    // as an ABORT with status 2 regardless of the `2>/dev/null` redirect (a
+    // special builtin's own errors are not an ordinary command failure a
+    // redirect can swallow), so the preamble would kill every probe before
+    // its command ran. A no-bash host falls back to plain sh with NO
+    // preamble, losing only the pipeline-trap closure, not the probe.
+    let bash_wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
     let spawned = {
-        let build = |shell: &str| {
+        let build = |shell: &str, script: &str| {
             Command::new(shell)
                 .arg("-c")
-                .arg(&wrapped)
+                .arg(script)
                 .current_dir(cwd)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -11252,9 +11254,9 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
                 .process_group(0)
                 .spawn()
         };
-        match build("bash") {
+        match build("bash", &bash_wrapped) {
             Ok(child) => Ok(child),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh", cmd),
             Err(e) => Err(e),
         }
     };
