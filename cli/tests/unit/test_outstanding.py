@@ -1868,3 +1868,47 @@ def test_ask_and_clear_state_when_the_cap_truncated_the_text(root: Path):
 
     assert "recorded truncated" in cleared.output
     assert str(QUESTION_CAP) in cleared.output
+
+
+def test_operator_authority_refusal_names_the_chat_door(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """An agent refused here must be told the path that needs no terminal.
+
+    Specimen d-796ed205: the operator's real instruction existed, the worker
+    could not carry it, and the refusal named no remedy, so nothing moved until
+    a second terminal was opened. The refusal is CORRECT and stays; only its
+    silence about `/fno:law` was the defect.
+    """
+    from types import SimpleNamespace
+
+    qid = (
+        runner.invoke(outstanding_app, ["ask", "close PR 1157?"])
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="7420e8f7-aaaa-bbbb-cccc-dddddddddddd",
+            harness="claude",
+            disposition="proven",
+        ),
+    )
+
+    refused = runner.invoke(
+        outstanding_app,
+        ["clear", qid, "--answer", "reopen it", "--authority", "operator"],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    # The refusal itself survives: this is the unforgeable half.
+    assert "cannot record under operator authority" in refused.output
+    # The all-or-nothing statement survives too.
+    assert "Nothing was closed" in refused.output
+    # And the door is now named.
+    assert "/fno:law" in refused.output
+
+    # The question really is still open: a refused answer must never retire it.
+    after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert [q["id"] for q in after["questions"]] == [qid]

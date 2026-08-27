@@ -343,9 +343,21 @@ def clear(
                     # across this loop, so the refusal fires on the first id or
                     # never. Naming one id would be the partial statement this
                     # verb's whole family of messages exists to stop.
+                    #
+                    # Name the door, not just the wall. An agent refused here
+                    # used to be told only that it could not answer, so the
+                    # operator's real instruction stalled until they opened a
+                    # second terminal (specimen d-796ed205). The two-step path
+                    # below needs no terminal and already ships.
                     typer.echo(
                         f"outstanding: refused: {exc}. Nothing was closed; "
-                        f"all {len(targets)} question(s) stay open.",
+                        f"all {len(targets)} question(s) stay open.\n"
+                        "The operator does not need a second terminal. Compose "
+                        "the ruling in chat with `/fno:law <the ruling>`; their "
+                        "approval records it in the law lane. Then re-run this "
+                        "close citing that `d-...` id in --answer. At a "
+                        "terminal, `fno law set <subject> <decision>` is the "
+                        "same destination in one call.",
                         err=True,
                     )
                     raise typer.Exit(3)

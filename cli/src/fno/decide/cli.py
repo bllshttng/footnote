@@ -233,9 +233,11 @@ def _record(
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record decisions. Decisions are operator-authored through "
-            "`fno law set <subject> <decision>`. Append agent findings without "
-            "replacing node details with "
+            "cannot record decisions. Decisions are operator-authored. From "
+            "chat, draft it with `/fno:law <the ruling>` and the operator's "
+            "approval records it in the law lane, no terminal needed. At a "
+            "terminal, `fno law set <subject> <decision>` does it in one call. "
+            "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
@@ -245,8 +247,9 @@ def _record(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run "
-            "`fno law set <subject> <decision>` from an attended operator terminal. "
-            "Append agent findings with "
+            "`fno law set <subject> <decision>` from an attended operator "
+            "terminal, or draft it from chat with `/fno:law <the ruling>` for "
+            "the operator to approve. Append agent findings with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )
@@ -580,6 +583,20 @@ def _resolve_output_format(path: str, requested: Optional[str]) -> str:
     raise ValueError("--output needs a .json, .md, or .markdown suffix, or --format")
 
 
+def _invalid_authority_detail(quality: dict) -> str:
+    """Spell out the offending authority values, or say nothing.
+
+    The count alone never named `crown-l1`, `crown-l2-<node>` or `banana`, so
+    the tally that was supposed to catch a minted spelling could not report
+    one. Returns a leading-space suffix so callers append it unconditionally.
+    """
+    values = quality.get("invalid_authority_values") or {}
+    if not values:
+        return ""
+    listed = ", ".join(f"{name} x{count}" for name, count in values.items())
+    return f" ({listed})"
+
+
 def _render_markdown(report: dict) -> str:
     lines = ["# Decision report", ""]
     if "groups" in report:
@@ -594,7 +611,8 @@ def _render_markdown(report: dict) -> str:
         quality = report.get("data_quality", {})
         lines.append(
             f"Data quality: {quality.get('subjectless', 0)} subjectless, "
-            f"{quality.get('invalid_authority', 0)} invalid authority value(s)."
+            f"{quality.get('invalid_authority', 0)} invalid authority value(s)"
+            f"{_invalid_authority_detail(quality)}."
         )
     else:
         lines.append(
@@ -665,7 +683,8 @@ def _list_decisions(
             typer.echo(
                 f"review list: {len(report['groups'])} group(s), "
                 f"{quality['subjectless']} subjectless, "
-                f"{quality['invalid_authority']} invalid authority value(s)",
+                f"{quality['invalid_authority']} invalid authority value(s)"
+                f"{_invalid_authority_detail(quality)}",
                 err=True,
             )
         return

@@ -940,6 +940,8 @@ def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
     assert payload["data_quality"] == {
         "subjectless": 1,
         "invalid_authority": 1,
+        # The count says how many; only this says which.
+        "invalid_authority_values": {"banana": 1},
     }
 
 
@@ -3360,3 +3362,95 @@ def test_standing_query_refuses_a_damaged_local_index(
     assert result.exit_code == 1
     assert "decision index has 1 damaged row" in result.stderr
     assert '"current_law"' not in result.stdout
+
+
+def test_decide_refusal_names_the_chat_door(
+    root: Path, tmp_graph: Path, index: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The refusal must name a surface the refused caller can actually reach.
+
+    An agent session has no terminal, so `fno law set` alone points it at a
+    door it cannot open. `/fno:law` is the one it can.
+    """
+    from types import SimpleNamespace
+
+    from fno.graph.cli import cli as backlog_app
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+            harness="codex",
+            disposition="single",
+        ),
+    )
+
+    refused = runner.invoke(
+        backlog_app,
+        ["decide", "pr-923", "close it", "--authority", "operator"],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    assert "/fno:law" in refused.stderr
+    # The attended-terminal verb is not replaced, only joined.
+    assert "fno law set" in refused.stderr
+
+
+def test_agent_session_is_still_refused_operator_authority(monkeypatch):
+    """Characterization lock. Expected to pass today; do NOT delete as redundant.
+
+    This is the property x-4155 must not break while making law reachable. The
+    mechanism that makes law unforgeable is the same one that made it feel
+    unreachable, so a later attempt to open up the operator lane will land in
+    `_resolve_decider`. If this test goes green after such a change, the change
+    forged law. Inverting the guard locally must make this fail.
+    """
+    from types import SimpleNamespace
+
+    from fno import harness_identity
+    from fno.decide import RefusedAuthorityError, _resolve_decider
+
+    session_id = "7420e8f7-aaaa-bbbb-cccc-dddddddddddd"
+    handle = harness_identity.canonical_handle(session_id)
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=session_id, harness="claude", disposition="proven"
+        ),
+    )
+
+    with pytest.raises(RefusedAuthorityError, match=handle) as excinfo:
+        _resolve_decider(None, "operator")
+    assert excinfo.value.agent_handle == handle
+
+
+def test_review_list_names_out_of_enum_authority_values(monkeypatch):
+    """A count cannot surface a spelling; the breakdown is the whole point."""
+    from fno import decide as decide_mod
+
+    rows = [
+        {"decision_id": "d-1", "subject": "x-aaaa", "authority_source": "banana"},
+        {"decision_id": "d-2", "subject": "x-aaaa", "authority_source": "crown-l1"},
+        {"decision_id": "d-3", "subject": "x-bbbb", "authority_source": "crown-l1"},
+        {"decision_id": "d-4", "subject": "x-bbbb", "authority_source": "agent"},
+        # A repository-projected row is catalogued law, never a bad spelling.
+        {
+            "decision_id": "d-5",
+            "subject": "x-cccc",
+            "authority_source": "design",
+            "_source": "repository",
+        },
+    ]
+    monkeypatch.setattr(decide_mod, "list_decisions", lambda *a, **k: (None, rows, 0))
+
+    quality = decide_mod.review_list()["data_quality"]
+
+    assert quality["invalid_authority"] == 3
+    # Ordered by count desc, then name, so the worst offender reads first.
+    assert list(quality["invalid_authority_values"].items()) == [
+        ("crown-l1", 2),
+        ("banana", 1),
+    ]
+    assert sum(quality["invalid_authority_values"].values()) == (
+        quality["invalid_authority"]
+    )
