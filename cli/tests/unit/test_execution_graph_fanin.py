@@ -175,8 +175,32 @@ def test_tally_counts_runtime_failed_and_blocks():
     assert t.complete is False
 
 
+def test_tally_names_could_not_tell_kinds():
+    # unknown_terminal / no_output surface as their own counters, not a
+    # shapeless malformed count (the absence-vs-outcome ambiguity).
+    t = tally_fan_in(["a"], [("a", "completed"), (None, "unknown_terminal"), (None, "no_output")])
+    assert t.unknown_terminal == 1 and t.no_output == 1 and t.malformed == 0
+    assert t.to_dict()["unknown_terminal"] == 1 and t.to_dict()["no_output"] == 1
+    assert t.complete is False
+
+
+def test_runtime_terminal_from_exit_code_maps_shell_convention():
+    orch = _load_orch()
+    f = orch.runtime_terminal_from_exit_code
+    assert f(0) == "completed"
+    assert f(1) == "error"
+    assert f(143) == "signal"  # SIGTERM
+    assert f(137) == "signal"  # SIGKILL
+    assert f(-9) == "signal"  # subprocess spelling of a signal death
+    # The producer mapping feeds the classifier end-to-end: a signal death
+    # downgrades a claimed SUCCESS observed through the exit code alone.
+    assert orch.classify_worker_return(
+        '```json\n{"result":"SUCCESS","task":"a"}\n```', runtime_terminal=f(143)
+    ) == ("a", "failed")
+
+
 def test_tally_runtime_failed_field_defaults_zero():
-    # Backward-compatible construction without the new field.
+    # Backward-compatible construction without the new fields.
     t = tally_fan_in(["a"], [("a", "completed")])
     assert t.runtime_failed == 0 and t.complete is True
     assert t.to_dict()["runtime_failed"] == 0
@@ -196,7 +220,7 @@ def test_end_to_end_mixed_bag_blocks_synthesis():
     assert t.completed == 1
     assert t.failed == 1
     assert t.duplicate == 1
-    assert t.malformed == 1
+    assert t.unknown_terminal == 1 and t.malformed == 0
     assert t.missing == 1
     assert t.complete is False
 
@@ -212,7 +236,7 @@ def test_end_to_end_runtime_death_names_the_cause():
     ]
     t = tally_fan_in(["a", "b"], observed)
     assert t.runtime_failed == 1
-    assert t.malformed == 1
+    assert t.unknown_terminal == 1 and t.malformed == 0
     assert t.missing == 1
     assert t.complete is False
 

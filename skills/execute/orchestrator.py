@@ -18,7 +18,7 @@ import subprocess
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict
+from typing import List, Literal, Optional, Dict
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
@@ -924,21 +924,53 @@ def parse_task_result(output: str) -> Optional[TaskResult]:
 #                             pipeline lost it)
 _COMPLETED_STATUSES = frozenset({"SUCCESS", "DONE_WITH_CONCERNS"})
 
+# The classifier's return kind, mirroring fno.events' FanInKind without the
+# fno.* import this module must avoid (it runs under the ambient python). A
+# local Literal (not a bare str) so a typo'd kind fails type-check instead of
+# silently counting as malformed at the tally.
+ClassifiedKind = Literal[
+    "completed",
+    "failed",
+    "runtime_failed",
+    "unknown_terminal",
+    "no_output",
+]
+
 # Runtime-observed worker terminal vocabulary (x-1862): the process-level half
 # of a worker return, independent of anything the worker wrote about itself.
-# The dispatcher already encodes these (a signal death arrives as 128+N); this
-# is where that observation stops being discarded. None means "no observation
-# available" and never fabricates a verdict; an unrecognized non-None value is
-# failure-class (an unknown terminal reason is a failure, never partial output
-# as success - deepseek-harness stopReasonError precedent).
+# The dispatcher encodes process death as an exit code (a signal death arrives
+# as 128+N); ``runtime_terminal_from_exit_code`` is the producer-side mapping
+# of that encoding onto this vocabulary, so a barrier consumer hands the pair
+# ``classify_worker_return(output, runtime_terminal_from_exit_code(rc))`` to
+# the classifier. None means "no observation available" and never fabricates a
+# verdict; an unrecognized non-None value is failure-class (an unknown
+# terminal reason is a failure, never partial output as success -
+# deepseek-harness stopReasonError precedent).
 _RUNTIME_TERMINALS = frozenset({"completed", "error", "signal", "context_limit", "refusal"})
 _RUNTIME_FAILURE_TERMINALS = frozenset({"error", "signal", "context_limit", "refusal"})
+
+
+def runtime_terminal_from_exit_code(exit_code: int) -> str:
+    """Map a dispatch exit status onto the runtime-terminal vocabulary.
+
+    The shell convention the dispatcher already writes into ``node_failed``
+    events: 0 is a clean exit, 128+N is death by signal N, anything else is a
+    plain error. A negative code is Python's ``subprocess`` spelling of a
+    signal death, so it maps to ``"signal"`` too. Harness-level terminals
+    (``context_limit``, ``refusal``) have no exit-code spelling; a consumer
+    that can observe them passes them directly instead of this function.
+    """
+    if exit_code == 0:
+        return "completed"
+    if exit_code > 128 or exit_code < 0:
+        return "signal"
+    return "error"
 
 
 def classify_worker_return(
     output: str,
     runtime_terminal: Optional[str] = None,
-) -> tuple[Optional[str], Optional[str]]:
+) -> tuple[Optional[str], Optional[ClassifiedKind]]:
     """Validate a worker return against the canonical contract and classify it.
 
     Two independent inputs, kept separate on purpose (x-1862): ``output`` is
@@ -968,7 +1000,7 @@ def classify_worker_return(
         return None, "unknown_terminal"
     if observed_failure and result.status in _COMPLETED_STATUSES:
         return result.task_id, "failed"
-    kind = "completed" if result.status in _COMPLETED_STATUSES else "failed"
+    kind: ClassifiedKind = "completed" if result.status in _COMPLETED_STATUSES else "failed"
     return result.task_id, kind
 
 
