@@ -12,10 +12,12 @@
 //! # The daemon prerequisite (why this can be a no-op)
 //!
 //! A default `codex` TUI runs its app-server IN-PROCESS with no socket on disk.
-//! The socket exists ONLY when a codex app-server daemon is running
+//! The socket appears when a codex app-server daemon is running
 //! (`codex app-server daemon start`, standalone install + ChatGPT login); TUIs
-//! launched afterward auto-attach to it. Absent that daemon, `deliver_via_codex_daemon`
-//! returns `"no-daemon"` and the caller writes the durable floor. e2e verification
+//! launched afterward auto-attach to it. The socket FILE also outlives its
+//! daemon, so liveness is the connect attempt itself: a refusal (or a missing
+//! file) makes `deliver_via_codex_daemon` return `"no-daemon"` and the caller
+//! writes the durable floor. e2e verification
 //! needs the user's daemon; the pure builders + `classify_turn_start_response`
 //! below are the correct-by-construction unit-tested core.
 //!
@@ -452,19 +454,28 @@ pub fn parse_review_start_response(raw: &str) -> Result<(String, String), Review
     Err(ReviewStartError::Reason("unexpected-response"))
 }
 
+/// A unix connect refusal is the dead-daemon marker: the socket file survives
+/// the process that created it, so a missing file and a refused connect both
+/// mean no daemon is listening. Any other io error (permission, wedged) stays
+/// an `io-error`.
+fn connect_refused_reason(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => "no-daemon",
+        _ => "io-error",
+    }
+}
+
 /// Drive a `review/start` over the app-server daemon socket. `Ok((turn_id,
 /// review_thread_id))` on accept; every `Err(reason)` is a clean not-delivered
-/// signal. Socket absent -> `"no-daemon"`; a pre-send wedge -> `"io-error"`;
-/// a lost response after the request was sent -> `"not-confirmed"`.
+/// signal. No daemon answering (the connect refuses or the file is gone) ->
+/// `"no-daemon"`; a pre-send wedge -> `"io-error"`; a lost response after the
+/// request was sent -> `"not-confirmed"`.
 pub async fn deliver_via_codex_review_start(
     thread_id: &str,
     target: &ReviewTarget,
     delivery: ReviewDelivery,
 ) -> Result<(String, String), ReviewStartError> {
     let sock = codex_app_server_socket_path();
-    if !sock.exists() {
-        return Err(ReviewStartError::Reason("no-daemon"));
-    }
     let mut request_in_flight = false;
     match tokio::time::timeout(
         HANDSHAKE_TIMEOUT,
@@ -489,7 +500,7 @@ async fn review_start_round_trip(
 ) -> Result<(String, String), ReviewStartError> {
     let conn = UnixStream::connect(sock)
         .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
+        .map_err(|e| ReviewStartError::Reason(connect_refused_reason(&e)))?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
         Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
@@ -1125,15 +1136,12 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), &'static str> {
 }
 
 /// Deliver `text` into codex `thread_id` over the app-server daemon socket.
-/// `Ok(())` == turn accepted (delivered); every `Err(reason)` is a clean
-/// not-delivered signal whose value is the `mail-inject` JSON `reason` token.
-/// Socket absent -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
+/// `Ok(())` == turn accepted (delivered); every `Err` is a clean not-delivered
+/// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
+/// daemon answering -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), &'static str> {
     let sock = codex_app_server_socket_path();
-    if !sock.exists() {
-        return Err("no-daemon");
-    }
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
         Ok(r) => r,
         Err(_) => Err("io-error"),
@@ -1142,9 +1150,6 @@ pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(),
 
 pub async fn discover_loaded_threads() -> Result<Vec<LoadedThread>, &'static str> {
     let sock = codex_app_server_socket_path();
-    if !sock.exists() {
-        return Err("no-daemon");
-    }
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, discover(&sock)).await {
         Ok(result) => result,
         Err(_) => Err("io-error"),
@@ -1163,7 +1168,9 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), &'static str> {
-    let conn = UnixStream::connect(sock).await.map_err(|_| "io-error")?;
+    let conn = UnixStream::connect(sock)
+        .await
+        .map_err(|e| connect_refused_reason(&e))?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
         Err(_) => return Err("handshake-failed"),
@@ -1189,7 +1196,9 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), &'static
 }
 
 async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
-    let conn = UnixStream::connect(sock).await.map_err(|_| "io-error")?;
+    let conn = UnixStream::connect(sock)
+        .await
+        .map_err(|e| connect_refused_reason(&e))?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
         Err(_) => return Err("handshake-failed"),
@@ -1777,6 +1786,62 @@ mod tests {
     fn classify_delivered_on_result_turn_id() {
         let raw = r#"{"id":1,"result":{"turn":{"id":"turn-abc","status":"inProgress"}}}"#;
         assert_eq!(classify_turn_start_response(raw), Ok(()));
+    }
+
+    #[test]
+    fn connect_refusal_maps_to_no_daemon_and_other_errors_do_not() {
+        use std::io::{Error, ErrorKind};
+        assert_eq!(
+            connect_refused_reason(&Error::from(ErrorKind::ConnectionRefused)),
+            "no-daemon"
+        );
+        assert_eq!(
+            connect_refused_reason(&Error::from(ErrorKind::NotFound)),
+            "no-daemon"
+        );
+        assert_eq!(
+            connect_refused_reason(&Error::from(ErrorKind::PermissionDenied)),
+            "io-error"
+        );
+    }
+
+    #[tokio::test]
+    async fn dead_socket_connect_reads_no_daemon_not_io_error() {
+        // The measured specimen: a socket inode whose daemon is gone. The file
+        // exists, nothing listens; the refusal must read no-daemon (the Python
+        // demote and the start-the-daemon remedy key on that token), never
+        // io-error. A missing file answers the same token.
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("codex.sock");
+        UnixListener::bind(&socket).unwrap(); // dropped: inode survives, no listener
+        assert!(socket.exists());
+        let mut in_flight = false;
+        assert_eq!(
+            review_start_round_trip(
+                &socket,
+                "t",
+                &ReviewTarget::UncommittedChanges,
+                ReviewDelivery::Inline,
+                &mut in_flight,
+            )
+            .await,
+            Err(ReviewStartError::Reason("no-daemon"))
+        );
+        assert_eq!(inject(&socket, "t", "hi").await, Err("no-daemon"));
+        assert_eq!(discover(&socket).await, Err("no-daemon"));
+        let absent = temp.path().join("absent.sock");
+        let mut in_flight = false;
+        assert_eq!(
+            review_start_round_trip(
+                &absent,
+                "t",
+                &ReviewTarget::UncommittedChanges,
+                ReviewDelivery::Inline,
+                &mut in_flight,
+            )
+            .await,
+            Err(ReviewStartError::Reason("no-daemon"))
+        );
     }
 
     #[test]
