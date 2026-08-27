@@ -1742,10 +1742,13 @@ def test_render_html_renders_non_http_pr_url_as_plain_text(tmp_path):
     entry = {
         "id": "ab-abcdabcd", "title": "Multi", "priority": "p2",
         "type": "feature", "domain": "code", "parent": None,
-        "plan_path": "x.md", "completed_at": "2026-01-01T00:00:00Z",
+        "plan_path": "x.md",
         "pr_number": 542, "pr_url": "github.com/x/y/pull/542",
         "created_at": "2026-01-01T00:00:00Z",
-        "status": "done",
+        # Open, not done: the static half renders only what the chips show on
+        # first paint, so a closed node would exercise the payload alone and
+        # leave the no-JS anchor guard untested.
+        "status": "in_review",
     }
     out = tmp_path / "graph.html"
     render_graph_html([entry], out)

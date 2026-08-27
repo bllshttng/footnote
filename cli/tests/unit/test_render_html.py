@@ -513,3 +513,103 @@ def test_successor_rows_match_the_entries_that_name_the_blocker():
     assert rows["ab-00000004"]["bb"] == [
         {"id": "ab-missing", "s": "not found", "t": ""}
     ], "an unresolvable blocker still reports itself"
+
+
+def test_static_half_shows_what_the_chips_show_not_the_whole_graph(tmp_path: Path):
+    """Every node was serialised twice, and build() discards the static copy.
+
+    Measured on the real graph before this: 10.1 MB of an 18.7 MB document,
+    nearly all closed work the script hides on first paint anyway. The two
+    halves agree now, which is both the size win and the correctness one - a
+    no-JS reader saw archived nodes a JS reader could not.
+    """
+    entries = [
+        _entry("ab-0pen0001", project="fno", title="OpenWork", status="ready"),
+        _entry("ab-d0ne0001", project="fno", title="ClosedWork", status="done"),
+        _entry("ab-5up30001", project="fno", title="GoneWork", status="superseded"),
+    ]
+    out = tmp_path / "graph.html"
+    render_graph_html(entries, out)
+    text = out.read_text()
+    static = text.split('<main id="board">', 1)[1].split("</main>", 1)[0]
+
+    assert "OpenWork" in static
+    assert "ClosedWork" not in static, "closed work must not render in the static half"
+    assert "GoneWork" not in static
+    # Positive control: the closed rows are still in the PAYLOAD, so pressing
+    # the Done chip reveals them. Hiding by omission from the data would be the
+    # data loss this whole node exists to prevent.
+    assert '"t":"ClosedWork"' in text
+    assert '"t":"GoneWork"' in text
+
+
+def test_roadmap_static_half_keeps_shipped_work(tmp_path: Path):
+    """A roadmap presses the done chip on first paint, so its static half must
+    agree. The two surfaces derive the rule from one tuple."""
+    from fno.graph.roadmap_public import (
+        render_public_backlog_html,
+        render_public_roadmap_html,
+    )
+
+    entry = _entry("ab-5h1p0001", project="fno", title="ShippedThing", status="done")
+    roadmap = render_public_roadmap_html([entry], "fno")
+    backlog = render_public_backlog_html([entry], "fno")
+
+    def _static(doc: str) -> str:
+        return doc.split('<main id="board">', 1)[1].split("</main>", 1)[0]
+
+    assert "ShippedThing" in _static(roadmap), "a roadmap must show shipped work"
+    assert '"t":"ShippedThing"' in roadmap, "and carry it in the payload"
+    # The public BACKLOG projection drops closed work upstream, at
+    # PUBLIC_BACKLOG_STATUSES, so done never reaches either half. That is a
+    # different mechanism from the static-half rule and predates this work.
+    assert "ShippedThing" not in backlog
+
+
+def test_status_bar_colors_are_keyed_by_name_not_by_position(tmp_path: Path):
+    """render() emits no segment for a zero-count status, so positional
+    nth-child rules slid every surviving segment into the wrong colour, and the
+    colours shifted live as the user filtered. A status past the ninth got no
+    rule at all."""
+    from fno.graph.render_html import (
+        _DASHBOARD_STATUS_COLORS,
+        _DASHBOARD_UNKNOWN_COLOR,
+    )
+
+    out = tmp_path / "graph.html"
+    render_graph_html([_entry("ab-c010r001", project="fno", status="blocked")], out)
+    text = out.read_text()
+
+    assert ".tw i:nth-child" not in text, "positional colour rules must be gone"
+    assert "COLORS[s] || UNKNOWN_COLOR" in text
+    assert "background:' + color" in text
+    assert f'"unknown_color":"{_DASHBOARD_UNKNOWN_COLOR}"' in text
+    for status, color in _DASHBOARD_STATUS_COLORS.items():
+        assert f'"{status}":"{color}"' in text, f"{status} lost its colour"
+
+
+def test_every_ranked_status_has_a_color():
+    """The order list and the colour table are two lists that must not drift."""
+    from fno.graph.render_html import (
+        _DASHBOARD_STATUS_COLORS,
+        _DASHBOARD_STATUS_ORDER,
+    )
+
+    missing = [s for s in _DASHBOARD_STATUS_ORDER if s not in _DASHBOARD_STATUS_COLORS]
+    assert not missing, f"ranked statuses with no colour: {missing}"
+
+
+def test_a_persisted_selection_naming_absent_projects_does_not_blank_the_board():
+    """localStorage is origin-wide, so one key is shared by every board.
+
+    A selection saved on the global board names projects a scoped board has
+    never heard of. Restored as-is, those match nothing, every row hides, and
+    no chip renders pressed to explain why.
+    """
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "var present = new Set(projectNames);" in _DASHBOARD_JS
+    assert "return present.has(p);" in _DASHBOARD_JS
+    assert (
+        "state.projectFilterActive = loadedProjects.active && state.projects.size > 0;"
+    ) in _DASHBOARD_JS

@@ -319,6 +319,29 @@ _DASHBOARD_STATUS_ORDER = (
     "superseded",
 )
 
+# Closed work. The scripted board leaves these chips unpressed on first paint
+# (a roadmap presses done, since shipped work is its point), and the static
+# half honors the same rule so the two agree before any script runs.
+_DASHBOARD_TERMINAL_STATUSES = ("done", "superseded")
+
+# Status colours live here, keyed by NAME. They used to be positional
+# .tw i:nth-child(N) rules, but render() emits no segment for a zero-count
+# status, so every surviving segment slid into the wrong colour slot and the
+# colours shifted live as the user filtered. A status past the ninth got no
+# rule at all.
+_DASHBOARD_STATUS_COLORS = {
+    "in_progress": "var(--prog)",
+    "in_review": "var(--prog)",
+    "ready": "var(--accent)",
+    "blocked": "var(--blocked)",
+    "design": "var(--idea)",
+    "idea": "var(--idea)",
+    "deferred": "#8c929a",
+    "done": "var(--done)",
+    "superseded": "#a5a9af",
+}
+_DASHBOARD_UNKNOWN_COLOR = "#b9bec4"
+
 _DASHBOARD_CSS = """\
 :root { color-scheme: light dark; --bg:#f7f8fa; --surface:#fff; --ink:#20242b;
         --muted:#707782; --line:#d9dde3; --accent:#3568a8; --done:#3f8b61;
@@ -355,13 +378,6 @@ input[type=search] { flex:1 1 230px }
 .caret { width:13px; color:var(--muted) }
 .tw { display:flex; flex:1; height:7px; overflow:hidden; border-radius:5px; background:var(--line) }
 .tw i { display:block; height:100% }
-.tw i:nth-child(1), .tw i:nth-child(2) { background:var(--prog) }
-.tw i:nth-child(3) { background:var(--done) }
-.tw i:nth-child(4) { background:var(--blocked) }
-.tw i:nth-child(5), .tw i:nth-child(6) { background:var(--idea) }
-.tw i:nth-child(7) { background:#8c929a }
-.tw i:nth-child(8) { background:var(--done) }
-.tw i:nth-child(9) { background:#a5a9af }
 .gc { color:var(--muted); font-size:12px }
 .rows { border-top:1px solid var(--line) }
 .row { border-bottom:1px solid var(--line) }
@@ -439,13 +455,22 @@ _DASHBOARD_JS = """\
       b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); render(); }); statusChips.appendChild(b); });
   var projectNames = []; NODES.forEach(function (n) { if (projectNames.indexOf(n.project) < 0) projectNames.push(n.project); });
   var UNSCOPED = DATA.unscoped_label;
+  var COLORS = DATA.status_colors || {};
+  var UNKNOWN_COLOR = DATA.unknown_color;
   projectNames.sort(function (a, b) { return a === UNSCOPED ? 1 : b === UNSCOPED ? -1 : a.localeCompare(b); });
   var projectChips = document.getElementById('projectChips');
   projectNames.forEach(function (p) { var b = document.createElement('button'); b.className = 'chip project-chip'; b.type = 'button';
     b.dataset.project = p; b.textContent = p; b.setAttribute('aria-pressed', 'false'); b.addEventListener('click', function () {
       if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p);
       state.projectFilterActive = state.projects.size > 0; saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
-  var loadedProjects = loadProjects(); state.projects = loadedProjects.selected; state.projectFilterActive = loadedProjects.active;
+  var loadedProjects = loadProjects();
+  // Intersect against the projects actually on THIS board. The key is shared
+  // by every board on the origin, so a selection saved on the global board
+  // names projects a scoped board has never heard of; without this those
+  // match nothing, every row hides, and no chip renders pressed to explain it.
+  var present = new Set(projectNames);
+  state.projects = new Set(Array.from(loadedProjects.selected).filter(function (p) { return present.has(p); }));
+  state.projectFilterActive = loadedProjects.active && state.projects.size > 0;
   var queryProject = new URLSearchParams(window.location.search).get('project');
   if (queryProject && projectNames.indexOf(queryProject) >= 0) { state.projects = new Set([queryProject]); state.projectFilterActive = true; }
   function syncProjects() { projectChips.querySelectorAll('[data-project]').forEach(function (b) {
@@ -529,7 +554,10 @@ _DASHBOARD_JS = """\
       var c = counts(vis);
       sec.count.textContent = vis.length;
       sec.bar.innerHTML = vis.length ? ORDER.map(function (s) {
-        return c[s] ? '<i style=\"width:' + (100 * c[s] / vis.length) + '%\"></i>' : ''; }).join('') : '';
+        if (!c[s]) return '';
+        var color = COLORS[s] || UNKNOWN_COLOR;
+        return '<i style=\"width:' + (100 * c[s] / vis.length) + '%;background:' + color + '\"></i>';
+      }).join('') : '';
       sec.el.className = 'group' + (vis.length ? '' : ' is-hidden');
     });
     document.getElementById('shown').textContent = shown + ' of ' + NODES.length + ' nodes shown';
@@ -693,10 +721,30 @@ def _dashboard_static_detail(row: dict[str, object], *, local: bool) -> str:
     return "".join(parts)
 
 
-def _dashboard_static_html(rows: list[dict], *, local: bool) -> str:
+def _dashboard_static_html(
+    rows: list[dict], *, local: bool, initial_done: bool = False
+) -> str:
+    """The no-JS board, showing the SAME rows the scripted board shows on
+    first paint rather than every row in the graph.
+
+    Every node was being serialised twice, once here and once as JSON, and
+    build() discards this half the moment a script runs. Measured on the real
+    graph: 10.1 MB of an 18.7 MB document, nearly all of it closed work the
+    script hides anyway. A reader with JS sees an identical board either way;
+    a reader without it now sees what the chips would have shown.
+    """
+    hidden = tuple(
+        status
+        for status in _DASHBOARD_TERMINAL_STATUSES
+        if not (initial_done and status == "done")
+    )
     groups: dict[str, list[dict]] = {}
     for row in rows:
+        if str(row.get("s") or "") in hidden:
+            continue
         groups.setdefault(str(row.get("g") or "uncategorized"), []).append(row)
+    if not groups:
+        return '<p class="empty">No open nodes.</p>'
     parts: list[str] = []
     for group in sorted(groups):
         group_rows = groups[group]
@@ -738,6 +786,8 @@ def _dashboard_html(
             "nodes": rows,
             "status_order": list(_DASHBOARD_STATUS_ORDER),
             "unscoped_label": UNSCOPED_LABEL,
+            "status_colors": _DASHBOARD_STATUS_COLORS,
+            "unknown_color": _DASHBOARD_UNKNOWN_COLOR,
             # A roadmap's whole point is the shipped column, so it opens with
             # done pressed. Every other surface opens on open work.
             "initial_done": projection == "roadmap",
@@ -745,7 +795,9 @@ def _dashboard_html(
         separators=(",", ":"),
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     generated = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    static_board = _dashboard_static_html(rows, local=local)
+    static_board = _dashboard_static_html(
+        rows, local=local, initial_done=projection == "roadmap"
+    )
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
