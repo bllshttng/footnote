@@ -2346,6 +2346,22 @@ fn format_success(
             } else {
                 // Follow-up path: print the reply verbatim (no added newline; println!
                 // in the caller adds the newline, matching Python's behaviour).
+                // A `reply: null` with `status: "in_flight"` is the codex
+                // thread actor's bounded-ask receipt: the turn is still
+                // driving, so say THAT instead of printing an empty line that
+                // reads as an empty answer.
+                if result.get("reply").is_none_or(Value::is_null)
+                    && result.get("status").and_then(|v| v.as_str()) == Some("in_flight")
+                {
+                    let turn_id = result
+                        .get("turn_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    return Some(format!(
+                        "in flight: turn {turn_id} is still driving; the reply surfaces via \
+                         agent_ask_done"
+                    ));
+                }
                 let reply = result.get("reply").and_then(|v| v.as_str()).unwrap_or("");
                 Some(reply.to_string())
             }
@@ -3802,6 +3818,22 @@ mod tests {
         let result = json!({"reply": "", "backend": "pty"});
         let out = format_success("ask", "myagent", &result, false, true, false);
         assert_eq!(out, Some(String::new()));
+    }
+
+    /// The codex-thread bounded-ask receipt: `reply: null` + in_flight prints
+    /// the in-flight line, never an empty line that reads as an empty answer.
+    #[test]
+    fn format_success_ask_in_flight_prints_the_turn_not_nothing() {
+        let result = json!({
+            "reply": null,
+            "backend": "codex-thread",
+            "turn_id": "turn-9",
+            "status": "in_flight",
+        });
+        let out = format_success("ask", "myagent", &result, false, true, false)
+            .expect("in_flight formats a line");
+        assert!(out.contains("turn-9"), "names the turn: {out}");
+        assert!(out.contains("in flight"), "names the state: {out}");
     }
 
     /// AC3-HP: build_request accepts --from-name, --yolo, --timeout without error.

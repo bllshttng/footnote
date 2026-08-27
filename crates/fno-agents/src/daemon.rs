@@ -3065,7 +3065,56 @@ struct Ctx {
 /// panes registering at once while staying a hard ceiling.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-type CodexThreadHandle = Arc<tokio::sync::Mutex<crate::codex_thread::CodexThread>>;
+/// One actor task per thread owns the app-server child exclusively (x-de10).
+/// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
+/// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
+/// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
+/// active turn, the steer RPC was unreachable, the detached seed task held the
+/// same lock, and `stop` removed a handle whose turn task still owned a clone
+/// while stamping `Exited`. Consumers now send [`ThreadCommand`]s and never
+/// touch the driver; see `crates/fno-agents/src/codex_thread.rs`.
+type CodexThreadHandle = Arc<crate::codex_thread::CodexThreadActor>;
+
+use crate::codex_thread::{InterruptOutcome, TurnReceipt};
+
+/// The per-completion hook every codex-thread actor gets at construction:
+/// bump the row (`Live` + `last_message_at`) and emit `agent_ask_done`, for
+/// every submitter class (ask, seed, mail steer) in ONE place - previously
+/// the ask path and the seed task each kept their own copy of this.
+fn codex_thread_on_done(
+    emitter: &EventEmitter,
+    registry_path: std::path::PathBuf,
+    name: &str,
+) -> Arc<dyn Fn(TurnReceipt) + Send + Sync> {
+    let emitter = emitter.clone();
+    let name = name.to_string();
+    Arc::new(move |receipt: TurnReceipt| {
+        let emitter = emitter.clone();
+        let name = name.clone();
+        let turn_id = receipt.turn_id.clone();
+        let status = receipt.status.clone();
+        let registry_path = registry_path.clone();
+        tokio::spawn(async move {
+            let bump_name = name.clone();
+            let _ = update_registry_offloaded(registry_path, move |registry| {
+                if let Some(entry) = registry.find_mut(&bump_name) {
+                    entry.status = AgentStatus::Live;
+                    entry.last_message_at = Some(now_rfc3339_like());
+                }
+            })
+            .await;
+            let _ = emitter.emit(
+                "agent_ask_done",
+                &json!({
+                    "name": name,
+                    "backend": "codex-thread",
+                    "turn_id": turn_id,
+                    "turn_status": status,
+                }),
+            );
+        });
+    })
+}
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
@@ -4064,40 +4113,30 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             )
         }
     }
-    let handle = Arc::new(tokio::sync::Mutex::new(driver));
+    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
+        &ctx.emitter,
+        ctx.home.registry_json(),
+        name,
+    )));
     ctx.codex_threads
         .lock()
         .await
         .insert(name.to_string(), Arc::clone(&handle));
 
+    // The seed turn is just the first Submit in the actor's queue: no
+    // dedicated task, no lock to steal. Its reply receiver is dropped on
+    // purpose (nobody waits); the on-done hook still emits the event, and a
+    // first follow-up ask STEERS into the seed turn instead of blocking
+    // behind it (the daemon.rs:4077 mutex shape this replaces).
     if !seed.trim().is_empty() {
-        let emitter = ctx.emitter.clone();
-        let registry_path = ctx.home.registry_json();
         let seed_name = name.to_string();
-        tokio::spawn(async move {
-            let mut driver = handle.lock().await;
-            match driver.drive_turn(&seed).await {
-                Ok(turn) => {
-                    let name_for_write = seed_name.clone();
-                    let _ = update_registry_offloaded(registry_path, move |registry| {
-                        if let Some(entry) = registry.find_mut(&name_for_write) {
-                            entry.last_message_at = Some(now_rfc3339_like());
-                        }
-                    })
-                    .await;
-                    let _ = emitter.emit(
-                        "agent_ask_done",
-                        &json!({"name": seed_name, "backend": "codex-thread", "turn_id": turn.turn_id}),
-                    );
-                }
-                Err(error) => {
-                    let _ = emitter.emit(
-                        "daemon_recovery_error",
-                        &json!({"op": "codex_thread_seed", "name": seed_name, "error": error.to_string()}),
-                    );
-                }
-            }
-        });
+        let submitted = handle.submit(seed).await;
+        if submitted.is_err() {
+            let _ = ctx.emitter.emit(
+                "daemon_recovery_error",
+                &json!({"op": "codex_thread_seed", "name": seed_name, "error": "actor gone at seed submit"}),
+            );
+        }
     }
     // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
     // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
@@ -4160,12 +4199,17 @@ async fn ensure_codex_thread_handle(
         cwd,
         &session_id,
         entry.model.as_deref(),
+        // Posture resume is x-1.5's change; safe default until then.
         false,
         entry.effort.as_deref(),
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
-    let handle = Arc::new(tokio::sync::Mutex::new(driver));
+    let handle = Arc::new(driver.into_actor(codex_thread_on_done(
+        &ctx.emitter,
+        ctx.home.registry_json(),
+        &entry.name,
+    )));
     threads.insert(entry.name.clone(), Arc::clone(&handle));
     Ok(handle)
 }
@@ -4191,7 +4235,7 @@ fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
             }
             match ensure_codex_thread_handle(&ctx, &entry).await {
                 Ok(handle) => {
-                    let pid = handle.lock().await.pid();
+                    let pid = handle.pid();
                     let name = entry.name.clone();
                     let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
                         if let Some(entry) = registry.find_mut(&name) {
@@ -4370,9 +4414,23 @@ async fn handle_review_start(ctx: &Ctx, req: &Request) -> Response {
             )
         }
     };
-    if entry.harness_name() != "codex"
-        || entry.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE
-    {
+    if !is_codex_thread_entry(&entry) {
+        // The tight predicate, not the loose harness+host_mode one: a codex
+        // PANE row passes the loose gate and then dies inside
+        // ensure_codex_thread_handle with "is not a Codex thread" instead of
+        // naming its real lane (AC16).
+        if let Some(mux) = entry.mux.as_ref() {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidStatus,
+                format!(
+                    "agent {} is a pane worker; review reaches no pane. Review a hosted \
+                     thread (`--substrate thread`), or kill the pane: \
+                     `fno mux pane kill {}:{}`.",
+                    entry.name, mux.session, mux.pane_id
+                ),
+            );
+        }
         return Response::err(
             req.id,
             ErrorCode::InvalidStatus,
@@ -4383,9 +4441,9 @@ async fn handle_review_start(ctx: &Ctx, req: &Request) -> Response {
         Ok(handle) => handle,
         Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
     };
-    let review = match handle.lock().await.review(&target, delivery).await {
+    let review = match handle.review(target, delivery).await {
         Ok(review) => review,
-        Err(error) => return Response::err(req.id, ErrorCode::Internal, error.to_string()),
+        Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
     };
     Response::ok(
         req.id,
@@ -4521,38 +4579,79 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
     if entry.harness_name() == "codex"
         && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
     {
-        let handle = match ensure_codex_thread_handle(ctx, &entry).await {
-            Ok(handle) => handle,
-            Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
-        };
-        let turn = match handle.lock().await.drive_turn(&message).await {
-            Ok(turn) => turn,
-            Err(error) => {
-                return Response::err(req.id, ErrorCode::Internal, error.to_string());
+        // The loose predicate above routes a codex PANE row here too; only a
+        // thread row (no short_id, no mux ref) belongs to the hosted lane.
+        // A pane row would otherwise die inside ensure_codex_thread_handle
+        // with the confusing "is not a Codex thread" refusal instead of
+        // naming its real lane (AC16).
+        if !is_codex_thread_entry(&entry) {
+            if let Some(mux) = entry.mux.as_ref() {
+                return Response::err(
+                    req.id,
+                    ErrorCode::InvalidStatus,
+                    format!(
+                        "agent {name} is a pane worker; ask reaches no pane. Send to the pane: \
+                         `fno mux pane send {}:{} \"...\" --submit`, or ask a hosted thread.",
+                        mux.session, mux.pane_id
+                    ),
+                );
             }
-        };
-        let ask_name = name.clone();
-        let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
-            if let Some(entry) = registry.find_mut(&ask_name) {
-                entry.status = AgentStatus::Live;
-                entry.last_message_at = Some(now_rfc3339_like());
-            }
-        })
-        .await;
-        let _ = ctx.emitter.emit(
-            "agent_ask_done",
-            &json!({"name": name, "backend": "codex-thread", "turn_id": turn.turn_id}),
-        );
-        return Response::ok(
-            req.id,
-            json!({
-                "reply": turn.text,
-                "backend": "codex-thread",
-                "turn_id": turn.turn_id,
-                "status": turn.status,
-                "harness_session_id": entry.harness_session_id,
-            }),
-        );
+        } else {
+            let handle = match ensure_codex_thread_handle(ctx, &entry).await {
+                Ok(handle) => handle,
+                Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
+            };
+            // Submit + bounded wait: while a turn is driving this STEERS into
+            // it instead of queueing behind a whole 600s turn, and a turn
+            // longer than the bound answers `in_flight` (reply: null) with the
+            // turn id - the old shape held a lock past the client's 120s
+            // RESPONSE_DEADLINE and the ask failed silently while the daemon
+            // kept driving. The reply is never lost: it persists in the
+            // rollout and surfaces via `agent_ask_done` when the turn ends.
+            let submitted = match handle.submit(message).await {
+                Ok(reply_rx) => reply_rx,
+                Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
+            };
+            let turn = match tokio::time::timeout(crate::codex_thread::ask_wait(), submitted).await
+            {
+                Ok(Ok(Ok(receipt))) => receipt,
+                Ok(Ok(Err(error))) => {
+                    return Response::err(req.id, ErrorCode::Internal, error);
+                }
+                Ok(Err(_)) => {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::Internal,
+                        "codex thread actor is gone",
+                    );
+                }
+                Err(_) => {
+                    return Response::ok(
+                        req.id,
+                        json!({
+                            "reply": null,
+                            "backend": "codex-thread",
+                            "turn_id": handle.current_turn_id(),
+                            "status": "in_flight",
+                            "harness_session_id": entry.harness_session_id,
+                        }),
+                    );
+                }
+            };
+            // The registry bump + agent_ask_done event fire from the actor's
+            // on-done hook now, not here: an in_flight ask returns before the
+            // turn ends, so this path only formats the answer.
+            return Response::ok(
+                req.id,
+                json!({
+                    "reply": turn.text,
+                    "backend": "codex-thread",
+                    "turn_id": turn.turn_id,
+                    "status": turn.status,
+                    "harness_session_id": entry.harness_session_id,
+                }),
+            );
+        }
     }
 
     let sock = ctx.home.worker_sock(&entry.short_id);
@@ -6202,9 +6301,33 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     if entry.harness_name() == "claude" {
         return stop_claude(ctx, req, &name, &entry).await;
     }
-    if entry.harness_name() == "codex"
-        && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
-    {
+    if is_codex_thread_entry(&entry) {
+        // Stop means INTERRUPT the in-flight turn, then DROP the actor (its
+        // driver's kill_on_drop kills the app-server child), and only then
+        // stamp Exited. The old shape removed the handle and stamped Exited
+        // without interrupting: a driving turn still held an Arc clone, the
+        // child stayed alive until the turn ended, and the verb reported a
+        // stop it did not perform.
+        let handle = ctx.codex_threads.lock().await.get(&name).cloned();
+        let mut interrupt_report = "no-turn".to_string();
+        if let Some(handle) = handle.as_ref() {
+            let outcome = match tokio::time::timeout(
+                crate::codex_thread::stop_settle_bound(),
+                handle.interrupt(),
+            )
+            .await
+            {
+                Ok(Ok(InterruptOutcome::NoTurnInFlight)) => "no-turn".to_string(),
+                Ok(Ok(InterruptOutcome::Interrupted(receipt))) => receipt.status,
+                Ok(Ok(InterruptOutcome::Timeout)) => "timeout-child-killed".to_string(),
+                Ok(Err(error)) => format!("interrupt-failed-child-killed: {error}"),
+                Err(_) => "interrupt-failed-child-killed: stop exchange timed out".to_string(),
+            };
+            interrupt_report = outcome;
+            // Shutdown acks only after the driver dropped, so kill_on_drop
+            // has already signaled the child before the row reads Exited.
+            let _ = handle.shutdown().await;
+        }
         ctx.codex_threads.lock().await.remove(&name);
         let stop_name = name.clone();
         if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
@@ -6223,9 +6346,18 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         }
         let _ = ctx.emitter.emit(
             "agent_stopped",
-            &json!({"name": name, "backend": "codex-thread"}),
+            &json!({"name": name, "backend": "codex-thread", "interrupt": interrupt_report}),
         );
-        return Response::ok(req.id, json!({"stopped": true, "backend": "codex-thread"}));
+        // A bare `stopped: true` over a turn the interrupt never confirmed is
+        // the zombie shape: name the interrupt outcome in the response.
+        return Response::ok(
+            req.id,
+            json!({
+                "stopped": true,
+                "backend": "codex-thread",
+                "interrupt": interrupt_report,
+            }),
+        );
     }
     // A non-PTY row (empty short_id == Python-authored; the daemon's create path
     // always derives a non-empty short_id) for codex/gemini has no daemon worker
@@ -15307,6 +15439,301 @@ done
             _ => panic!("expected error response for unknown provider"),
         }
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    // --- codex thread lane: actor-driven ask / stop (the x-de10 probes) ---
+    //
+    // These three are the make-it-fail probes for the concurrency rewrite:
+    // each FAILS against the old Arc<Mutex<CodexThread>> shape (verified by
+    // running them on the pre-rewrite daemon) and passes against the actor.
+
+    /// Serializes PATH (and the ask-wait env below) across these tests: the
+    /// fakes install `codex` on PATH and one test retunes FNO_CODEX_ASK_WAIT_MS.
+    static CODEX_LANE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Queue-reader fake whose turns complete 1.2s in; a steer arriving
+    /// mid-turn acks into the SAME turn. (Why a reader thread: a sequential
+    /// `for line in sys.stdin` fake cannot answer steer/interrupt while its
+    /// turn/start branch sleeps, and the real app-server does.)
+    const CODEX_FAKE_QUICK: &str = r#"#!/usr/bin/env python3
+import json, sys, time, threading, queue
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+q = queue.Queue()
+def _reader():
+    for line in sys.stdin:
+        q.put(line)
+threading.Thread(target=_reader, daemon=True).start()
+
+turn_n = 0
+while True:
+    try:
+        msg = json.loads(q.get())
+    except Exception:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg.get("id"), "result": {}})
+    elif method == "thread/start":
+        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-t", "path": "/tmp/fake-daemon-rollout.jsonl"}}})
+    elif method == "turn/start":
+        turn_n += 1
+        send({"id": msg.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
+        end = time.time() + 1.2
+        steered = False
+        while time.time() < end:
+            try:
+                m2 = json.loads(q.get(timeout=0.1))
+            except queue.Empty:
+                continue
+            if m2.get("method") == "turn/steer" and not steered:
+                send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
+                steered = True
+        send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
+"#;
+
+    /// Same skeleton with a 30s turn and an interrupt handler that completes
+    /// the turn as `interrupted` immediately.
+    const CODEX_FAKE_LONG: &str = r#"#!/usr/bin/env python3
+import json, sys, time, threading, queue
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+q = queue.Queue()
+def _reader():
+    for line in sys.stdin:
+        q.put(line)
+threading.Thread(target=_reader, daemon=True).start()
+
+turn_n = 0
+while True:
+    try:
+        msg = json.loads(q.get())
+    except Exception:
+        break
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg.get("id"), "result": {}})
+    elif method == "thread/start":
+        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-t", "path": "/tmp/fake-daemon-rollout.jsonl"}}})
+    elif method == "turn/start":
+        turn_n += 1
+        send({"id": msg.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
+        end = time.time() + 30
+        stopped = False
+        while time.time() < end and not stopped:
+            try:
+                m2 = json.loads(q.get(timeout=0.1))
+            except queue.Empty:
+                continue
+            if m2.get("method") == "turn/steer":
+                send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
+            elif m2.get("method") == "turn/interrupt":
+                send({"id": m2.get("id"), "result": {}})
+                send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "interrupted", "items": []}}})
+                stopped = True
+        if not stopped:
+            send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
+"#;
+
+    /// Install a fake `codex` on PATH for the duration of `body`.
+    async fn with_fake_codex_daemon(script: &str, body: impl std::future::Future<Output = ()>) {
+        let _guard = CODEX_LANE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake = bin_dir.path().join("codex");
+        std::fs::write(&fake, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved_path = std::env::var_os("PATH");
+        let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
+        prefixed.push(":");
+        if let Some(rest) = saved_path.as_ref() {
+            prefixed.push(rest);
+        }
+        std::env::set_var("PATH", &prefixed);
+        body.await;
+        if let Some(path) = saved_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+    }
+
+    /// Spawn a codex thread worker through the real handle_spawn and return
+    /// its response.
+    async fn spawn_codex_thread_for_test(ctx: &Ctx, home: &AgentsHome, seed: &str) -> Response {
+        let worktree = home.root().join("worktree");
+        std::fs::create_dir_all(&worktree).unwrap();
+        let req = Request::new(
+            1,
+            "agent.spawn",
+            json!({
+                "name": "t",
+                "provider": "codex",
+                "substrate": "thread",
+                "cwd": worktree.to_string_lossy(),
+                "message": seed,
+            }),
+        );
+        handle_spawn(ctx, &req).await
+    }
+
+    /// AC4 make-it-fail probe: an ask arriving while the SEED turn is driving
+    /// STEERS into it. Old mutex shape: the ask queued behind the whole seed
+    /// turn and drove a SECOND turn - this asserted reply would read REPLY-2
+    /// and two agent_ask_done events would land. Actor: one shared turn, one
+    /// event, the ask returns the seed turn's own reply.
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_thread_ask_while_driving_steers_instead_of_queueing() {
+        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+            let home = tmp_home("codex-steer");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+            let ask = handle_ask(
+                &ctx,
+                &Request::new(2, "agent.ask", json!({"name": "t", "message": "follow-up"})),
+            )
+            .await;
+            let res = ask.result().expect("ask errored");
+            assert_eq!(
+                res["reply"], "REPLY-1",
+                "the follow-up must ride the seed turn, not drive a second one: {res:?}"
+            );
+
+            // Exactly ONE completed turn: the seed and the steered ask share
+            // it, so exactly one agent_ask_done event fires.
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            let events = read_events(&home);
+            let done = events
+                .iter()
+                .filter(|e| e["type"] == "agent_ask_done")
+                .count();
+            assert_eq!(done, 1, "one shared turn must emit one event: {events:?}");
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// AC5 + AC6 make-it-fail probe: stop INTERRUPTS the in-flight turn before
+    /// reporting stopped, kills the child, and names the interrupt outcome in
+    /// the response. Old shape: no `interrupt` key (remove-and-stamp while the
+    /// turn task still held an Arc clone and the child lived on), so the
+    /// `interrupt == "interrupted"` assert fails there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_thread_stop_interrupts_then_kills_child_and_stamps_exited() {
+        with_fake_codex_daemon(CODEX_FAKE_LONG, async {
+            let home = tmp_home("codex-stop");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+            let registry = load_registry_offloaded(home.registry_json())
+                .await
+                .expect("registry");
+            let pid = registry
+                .find("t")
+                .and_then(|entry| entry.pid)
+                .expect("row carries the child pid");
+
+            // Let the seed turn reach driving, then stop mid-turn.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let stop =
+                handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
+            let res = stop.result().expect("stop errored");
+            assert_eq!(res["stopped"], true, "stop response: {res:?}");
+            assert_eq!(
+                res["interrupt"], "interrupted",
+                "stopped must name the interrupt outcome: {res:?}"
+            );
+
+            let registry = load_registry_offloaded(home.registry_json())
+                .await
+                .expect("registry");
+            assert_eq!(
+                registry.find("t").map(|e| e.status),
+                Some(AgentStatus::Exited)
+            );
+
+            // The child must be gone by the time the response said stopped.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                let alive = std::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|status| status.success())
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "app-server child {pid} outlived a reported stop"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// AC3 make-it-fail probe: an ask against a turn longer than the bounded
+    /// wait answers `in_flight` with the turn id while the turn keeps running.
+    /// Old shape: the ask blocked on the mutex for the whole 30s turn and
+    /// returned a completed reply - `status == "in_flight"` fails there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
+        with_fake_codex_daemon(CODEX_FAKE_LONG, async {
+            std::env::set_var("FNO_CODEX_ASK_WAIT_MS", "200");
+            let home = tmp_home("codex-inflight");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let started = std::time::Instant::now();
+            let ask = handle_ask(
+                &ctx,
+                &Request::new(2, "agent.ask", json!({"name": "t", "message": "status?"})),
+            )
+            .await;
+            let res = ask.result().expect("ask errored");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "the bounded ask must answer near its 200ms bound, took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(res["status"], "in_flight", "in_flight receipt: {res:?}");
+            assert!(res["reply"].is_null(), "in_flight reply is null: {res:?}");
+            assert_eq!(
+                res["turn_id"], "turn-1",
+                "the receipt carries the surviving interrupt handle: {res:?}"
+            );
+
+            // Stop cleans up: interrupts the still-driving turn and kills it.
+            let stop =
+                handle_stop(&ctx, &Request::new(3, "agent.stop", json!({"name": "t"}))).await;
+            let stop_res = stop.result().expect("stop errored");
+            assert_eq!(stop_res["interrupt"], "interrupted");
+            std::env::remove_var("FNO_CODEX_ASK_WAIT_MS");
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
     }
 
     /// AC4-HP: handle_ask on AgentNotFound with a provider param routes into the

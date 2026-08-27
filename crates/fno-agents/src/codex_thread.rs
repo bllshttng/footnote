@@ -34,7 +34,7 @@ const TURN_TIMEOUT: Duration = Duration::from_secs(600);
 /// (crates/fno-agents/src/bin/client.rs) so a bounded receipt, not a silent
 /// transport failure, is what the caller sees. Env-overridable so tests can
 /// exercise the expiry path without sleeping 90s.
-fn ask_wait() -> Duration {
+pub fn ask_wait() -> Duration {
     std::env::var("FNO_CODEX_ASK_WAIT_MS")
         .ok()
         .and_then(|raw| raw.parse::<u64>().ok())
@@ -44,6 +44,12 @@ fn ask_wait() -> Duration {
 /// steer-precondition failure): the same outer-deadline shape as the daemon's
 /// switchboard drive (request budget + grace) backstopping a wedged child.
 const TURN_SETTLE_TIMEOUT: Duration = Duration::from_secs(65);
+/// Outer bound around the daemon's WHOLE stop exchange (interrupt RPC + turn
+/// settle), kept just under the client's 120s `RESPONSE_DEADLINE` so a wedged
+/// child yields `timeout-child-killed`, not a dead socket.
+pub fn stop_settle_bound() -> Duration {
+    Duration::from_secs(115)
+}
 /// Parked-but-unclaimed turn receipts are telemetry only (the rollout on disk
 /// is the durable record), so the map is capped and overflow drops entries.
 const COMPLETED_PARK_CAP: usize = 8;
