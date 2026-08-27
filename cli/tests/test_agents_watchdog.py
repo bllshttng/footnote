@@ -3459,6 +3459,7 @@ def test_origin_is_on_the_shared_list_row_contract():
 # ---------------------------------------------------------------------------
 
 from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
 
 from fno.agents import unfinished_work as uw  # noqa: E402
 
@@ -3962,3 +3963,109 @@ def test_signature_keys_on_outcome_identity_not_rows():
 
     s3 = uw.classify(_uw_obs(nodes=[_node_obs("x-2", touched_epoch=NOW_1840 - 99 * 3600)]))
     assert uw.snapshot_signature(s1) != uw.snapshot_signature(s3)
+
+
+# --- AC9: one producer, two callers; budget refusal ------------------------
+
+_REPO_ROOT_UW = Path(watchdog.__file__).resolve().parents[4]
+
+
+def _source(rel: str) -> str:
+    return (_REPO_ROOT_UW / rel).read_text(encoding="utf-8")
+
+
+def test_ac9_census_both_callers_route_through_one_producer():
+    """Manual verb and scheduled tick consume the same build_report +
+    publish_report pair; neither rebuilds the four predicates itself."""
+    manual = _source("cli/src/fno/agents/cli.py")
+    tick = _source("cli/src/fno/pr_watch/cli.py")
+    assert "uw.build_report" in manual and "uw.publish_report" in manual
+    assert "_uw.build_report" in tick and "_uw.publish_report" in tick
+
+
+def test_ac9_census_no_session_predicates_on_the_report_path():
+    """The retired session-bookkeeping vocabulary cannot reach the report:
+    the escalation module carries no stale marker and no reap instruction,
+    and the report modules own none of the forbidden metric spellings."""
+    escalate = _source("cli/src/fno/agents/stale_escalate.py")
+    assert "watchdog-stale" not in escalate
+    assert "--only stale" not in escalate
+    assert "reap it or resume it" not in escalate
+
+
+def _function_body(src: str, name: str) -> str:
+    start = src.index(f"def {name}(")
+    nxt = src.find("\ndef ", start + 1)
+    return src[start : nxt if nxt != -1 else len(src)]
+
+
+def test_census_the_report_metric_owns_only_the_fresh_ref_spelling():
+    """Positive marker first: origin/main..HEAD appears in the metric's
+    source. Then the absence: none of the three forbidden spellings (the
+    stale-tracking-ref form, its short form, and the remotes-not form) may
+    appear in the metric module or the report-path functions of the
+    watchdog. The reap lane's own worktree check keeps its internal
+    spelling; it is not on this path."""
+    report_src = _source("cli/src/fno/agents/unfinished_work.py")
+    assert "origin/main..HEAD" in report_src
+    wd_src = _source("cli/src/fno/agents/watchdog.py")
+    report_region = (
+        _function_body(wd_src, "write_sweep_file")
+        + _function_body(wd_src, "unfinished_mail_gate")
+    )
+    for forbidden in ("@{upstream}", "@{u}", "HEAD --not --remotes"):
+        assert forbidden not in report_src
+        assert forbidden not in report_region
+
+
+def test_ac9_budget_spent_before_scanning_reads_unknown_never_clean(tmp_path):
+    """The tick's fatal deadline: roots and PR states that did not fit stay
+    unread, their dimensions say unknown, and the snapshot is incomplete, so
+    nothing partial is stamped or mailed as complete."""
+    import time as _time
+
+    snap = uw.build_report(
+        [tmp_path],
+        now_s=NOW_1840,
+        graph_entries=[],
+        registry_rows=({}, True),
+        claim_status_fn=lambda node: {"state": "free"},
+        truth_resolver=lambda handle: None,
+        pr_candidates=[SimpleNamespace(node_id="x-1", pr_number=9, pr_url=None)],
+        deadline_monotonic=_time.monotonic() - 1.0,
+    )
+    assert snap.complete is False
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+    assert snap.dimensions[uw.KIND_DONE_AHEAD].state == uw.UNKNOWN_DIM
+    assert snap.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+def test_ac9_manual_and_tick_stamps_agree_for_one_snapshot(tmp_path, monkeypatch):
+    """Publishing the same snapshot from either cadence writes the same
+    unfinished counts, completeness, and signature: only the cadence bookkeeping
+    (source, tick epoch) differs."""
+    import fno.paths as paths_mod
+
+    sweep_file = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "s")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(
+        _se, "escalate_unfinished", lambda findings, **kw: ("none", "")
+    )
+
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+    manual = json.loads(sweep_file.read_text())
+    uw.publish_report(snap, source="tick", now_s=NOW_1840 + 60, mail_to="")
+    tick = json.loads(sweep_file.read_text())
+
+    assert manual["unfinished_counts"] == tick["unfinished_counts"]
+    assert manual["unfinished_complete"] == tick["unfinished_complete"] is True
+    assert manual["unfinished_signature"] == tick["unfinished_signature"]
+    assert manual["source"] == "manual" and tick["source"] == "tick"

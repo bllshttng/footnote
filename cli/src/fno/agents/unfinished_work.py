@@ -231,6 +231,7 @@ class Observations:
     worktrees: tuple
     prs: tuple
     unscanned_roots: tuple = ()
+    prs_unscanned: bool = False
     warnings: tuple[str, ...] = ()
 
 
@@ -305,6 +306,10 @@ def classify(
         _mark_unknown(KIND_PR, "registry unreadable")
     if not obs.github_ok:
         _mark_unknown(KIND_PR, "github unreadable")
+    if obs.prs_unscanned:
+        # Budget ran out before every PR state was read: zero reads is not
+        # zero findings.
+        _mark_unknown(KIND_PR, "budget spent before PR states were read")
     for root in obs.unscanned_roots:
         _mark_unknown(KIND_DIRTY, f"budget spent before scanning {root}")
         _mark_unknown(KIND_DONE_AHEAD, f"budget spent before scanning {root}")
@@ -917,6 +922,7 @@ def collect_observations(
     # PR observations through the canonical reader.
     prs: list[PrObs] = []
     github_ok = True
+    prs_unscanned = False
     candidates = pr_candidates
     if candidates is None:
         from fno.pr_watch._discover import discover_open_prs
@@ -927,6 +933,13 @@ def collect_observations(
         candidates = discover_open_prs(entries, max_age_days=3650)
     node_probes: dict[str, tuple] = {n.node_id: n.owner_probes for n in nodes}
     for candidate in candidates:
+        left = _budget_left()
+        if left is not None and left <= 0:
+            # Out of budget mid-scan: the unread candidates stay unread, and
+            # the dimension reads unknown rather than counting only what
+            # fit before the deadline.
+            prs_unscanned = True
+            break
         node_id = getattr(candidate, "node_id", None)
         number = getattr(candidate, "pr_number", None)
         state: Optional[str] = None
@@ -966,6 +979,7 @@ def collect_observations(
         worktrees=tuple(worktrees),
         prs=tuple(prs),
         unscanned_roots=tuple(unscanned),
+        prs_unscanned=prs_unscanned,
         warnings=tuple(warnings),
     )
 
