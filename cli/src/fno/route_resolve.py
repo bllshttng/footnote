@@ -559,29 +559,29 @@ def resolve_tier(
     if band not in _BAND_FLOOR:
         chain.append("unknown-tier -> provider default")
         return None, chain
-    declared = inventory is not None
-    inv = inventory if declared else resolve_inventory(
-        settings=settings, snapshot=snapshot
-    )
-    if not inv.rows:
-        if declared:
-            # The caller handed us the inventory and it is empty. That is an
-            # answer, not a gap: honor it rather than reaching past the caller
-            # for a fleet it did not name.
+    if inventory is not None:
+        # The caller handed us the inventory. An empty one is an answer, not a
+        # gap: honor it rather than reaching past the caller for a fleet it did
+        # not name.
+        if not inventory.rows:
             chain.append("no declared inventory -> provider default")
             return None, chain
-        # Nothing declared in config. The GRID stays config-first and injects
-        # nothing here (resolve_grid records no-inventory-declared), but a tier
-        # request must still name a model: review level resolves a model for
-        # every level, and answering None would drop `/code-review` to the
-        # provider default on every install that has declared no inventory,
-        # which is every fresh one. So fall back to the curated static table.
-        # The declared inventory still wins whenever one exists - the rule the
-        # inventory exists to enforce is that a stranger's install never
-        # INHERITS this machine's fleet, and declaring one overrides this.
-        model, static_chain = _resolve_tier_static(band, provider)
-        chain.extend(static_chain)
-        return model, chain
+        inv = inventory
+    else:
+        inv = resolve_inventory(settings=settings, snapshot=snapshot)
+        if not inv.rows:
+            # Nothing declared in config. The GRID stays config-first and
+            # injects nothing (resolve_grid records no-inventory-declared), but
+            # a tier request must still name a model: review level resolves one
+            # for every level, and answering None would drop `/code-review` to
+            # the provider default on every install that declares no inventory,
+            # which is every fresh one. So fall back to the curated static
+            # table. A declared inventory still wins whenever one exists - the
+            # rule the inventory enforces is that an install never INHERITS
+            # another machine's fleet, and declaring one overrides this.
+            model, static_chain = _resolve_tier_static(band, provider)
+            chain.extend(static_chain)
+            return model, chain
 
     rows = _scoped_rows(inv, provider)
     floor_rank = _BAND_RANK[band]
