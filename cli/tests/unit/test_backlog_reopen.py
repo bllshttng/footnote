@@ -613,3 +613,19 @@ def test_the_event_schema_requires_a_reason():
 
     with pytest.raises(Exception):
         _build("backlog_reopened", "backlog", {"node_id": "ab-11111111"})
+
+
+# -- update projects difficulty --
+
+
+@pytest.mark.real_plan_projection
+def test_update_difficulty_reaches_the_plan_doc(tmp_graph, tmp_path):
+    """`--difficulty` is a mirrored key, so the edit must trigger the projection
+    like `--priority` does; before this it changed the graph and left the doc."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\ncreated: 2026-05-05\n---\n\n# a plan\n")
+    _write(tmp_graph, _node("ab-11111111", status="ready", completed_at=None, plan_path=str(plan)))
+
+    res = runner.invoke(app, ["backlog", "update", "ab-11111111", "--difficulty", "high"])
+    assert res.exit_code == 0, res.output
+    assert "difficulty: high" in plan.read_text()

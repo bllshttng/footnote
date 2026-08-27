@@ -1831,3 +1831,17 @@ def test_entries_with_archive_degrades_when_archive_read_raises(monkeypatch, tmp
     monkeypatch.setattr(store, "read_graph", boom)
     working = [_node("live1", title="some live node", status="idea")]
     assert store.entries_with_archive(working) == working  # degraded, did not raise
+
+
+def test_intake_pre_gate_bandless_plan_leaves_difficulty_absent(fixture_graph, tmp_path, capsys):
+    """A pre-gate plan with no band mints a node with NO difficulty key.
+
+    A present None reads as a clearable mirror to the plan projector, which
+    then deletes a band the doc authors later (a group-4 plan lost its
+    `difficulty: medium` to a `--blocked-by` edit this way)."""
+    plan = _write_quick_plan(tmp_path, title="Bandless pre-gate", created="2026-05-05T04:35")
+    _intake_impl(plan_paths=[str(plan)])
+    capsys.readouterr()
+    minted = [e for e in _read_entries(fixture_graph) if e.get("plan_path") == str(plan)]
+    assert len(minted) == 1
+    assert "difficulty" not in minted[0]

@@ -3998,6 +3998,7 @@ def cmd_update(
         or priority is not None
         or project is not None
         or type_ is not None
+        or difficulty is not None
         or has_blocker_edit
         or plan_path is not None
         or size is not None
