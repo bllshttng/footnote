@@ -393,7 +393,7 @@ def test_think_worker_codex_uses_shared_dispatch_default(monkeypatch):
 
     cmd = captured["cmd"]
     assert cmd[cmd.index("--harness") + 1] == "codex"
-    assert cmd[cmd.index("--substrate") + 1] == "headless"
+    assert cmd[cmd.index("--substrate") + 1] == "thread"
     assert cmd[-1] == "$fno:think x-test\n\nfull context"
 
 

@@ -441,13 +441,12 @@ def test_spawn_claude_once_uses_headless(workdir_claude) -> None:
 
 
 # ---------------------------------------------------------------------------
-# codex plain spawn (no --once): refused exit 13 in Python fallback
+# codex plain spawn (no --once): Rust runtime is required
 # ---------------------------------------------------------------------------
 
 
-def test_spawn_codex_plain_no_once_refused(workdir, monkeypatch) -> None:
-    """codex bg-substrate spawn (no --once) in Python fallback -> exit 13 (the
-    daemon-worker lane; the pane default routes to the mux instead, 4a-G2)."""
+def test_spawn_codex_plain_no_once_requires_runtime(workdir, monkeypatch) -> None:
+    """Codex thread spawn reports the missing Rust runtime distinctly."""
     from fno.agents.cli import agents_app
 
     runner = _make_runner()
@@ -460,7 +459,7 @@ def test_spawn_codex_plain_no_once_refused(workdir, monkeypatch) -> None:
         f"expected exit 13 for plain codex spawn in Python fallback, got {result.exit_code}\n"
         f"output: {result.output}"
     )
-    assert "--once" in result.output or "daemon" in result.output or "Rust" in result.output
+    assert "fno-agents runtime" in result.output
 
 
 def test_spawn_unknown_provider_exits_2(workdir) -> None:

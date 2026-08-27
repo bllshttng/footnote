@@ -153,6 +153,13 @@ printf '{{"type":"turn.completed"}}\n'
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+fn install_fake_codex_app_server_failure(bin_dir: &Path) {
+    let path = bin_dir.join("codex");
+    fs::write(&path, "#!/bin/sh\nexit 17\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
 /// Install a fake gemini binary that emits a one-shot JSON response.
 ///
 /// gemini_ask::parse_response expects `{"session_id":..., "response":..., "stats":{}}`.
@@ -891,7 +898,9 @@ fn client_ask_unknown_name_exits_16() {
 
 #[test]
 fn client_ask_full_codex_session_id_resumes_named_row() {
-    let _guard = PATH_MUTEX.lock().unwrap();
+    let _guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home_dir = tmpdir("cli-ask-full-codex-home");
     let bin_dir = tmpdir("cli-ask-full-codex-bin");
     let cwd = tmpdir("cli-ask-full-codex-cwd");
@@ -949,7 +958,9 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
 /// hit the bg lane instead of the headless passthrough).
 #[test]
 fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
-    let _guard = PATH_MUTEX.lock().unwrap();
+    let _guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home_dir = tmpdir("cli-spawn-once-claude-home");
     let bin_dir = tmpdir("cli-spawn-once-claude-bin");
     let cwd = tmpdir("cli-spawn-once-claude-cwd");
@@ -998,7 +1009,9 @@ fn client_spawn_once_claude_is_headless_p_lane_not_bg() {
 /// indefinite wedge.
 #[test]
 fn client_spawn_headless_claude_honors_timeout() {
-    let _guard = PATH_MUTEX.lock().unwrap();
+    let _guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home_dir = tmpdir("cli-spawn-hl-to-home");
     let bin_dir = tmpdir("cli-spawn-hl-to-bin");
     let cwd = tmpdir("cli-spawn-hl-to-cwd");
@@ -1052,18 +1065,27 @@ fn client_spawn_headless_claude_honors_timeout() {
     );
 }
 
-/// x-2c27: `bg` is claude + opencode. `--substrate bg --harness codex` must
-/// hard-error (exit 2) pointing to headless, never silently fall to another
-/// substrate.
+/// Codex `bg` is the daemon-hosted app-server thread lane. A missing app-server
+/// must surface as a spawn failure, not as the old substrate incompatibility.
 #[test]
-fn client_spawn_substrate_bg_codex_hard_errors() {
+fn client_spawn_substrate_bg_codex_uses_thread_lane() {
     let home_dir = tmpdir("cli-spawn-bg-codex-home");
     let bin = find_client_bin();
     if !bin.exists() {
-        eprintln!("skipping client_spawn_substrate_bg_codex_hard_errors: binary not found");
+        eprintln!("skipping client_spawn_substrate_bg_codex_uses_thread_lane: binary not found");
         return;
     }
 
+    let bin_dir = tmpdir("cli-spawn-bg-codex-bin");
+    install_fake_codex_app_server_failure(&bin_dir);
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _path_guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = std::process::Command::new(&bin)
         .args([
             "spawn",
@@ -1077,18 +1099,20 @@ fn client_spawn_substrate_bg_codex_hard_errors() {
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")
+        .env("PATH", path)
         .output()
         .expect("failed to run fno-agents");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert_eq!(
+    assert_ne!(
         out.status.code(),
         Some(2),
-        "codex --substrate bg must exit 2; stderr: {stderr}"
+        "codex thread must not use the old substrate refusal; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("claude + opencode") && stderr.contains("headless"),
-        "codex --substrate bg error must name the claude + opencode constraint and headless: {stderr}"
+        stderr.contains("lazy-starting daemon") && !stderr.contains("claude + opencode"),
+        "codex bg must reach the thread lane instead of the old substrate guard: {stderr}"
     );
 }
 
@@ -1298,8 +1322,8 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
         "agy --substrate bg must exit 2; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("claude + opencode") && stderr.contains("headless"),
-        "agy --substrate bg error must name the claude + opencode constraint and headless: {stderr}"
+        stderr.contains("claude + codex + opencode") && stderr.contains("headless"),
+        "agy --substrate bg error must name the supported detached-thread providers and headless: {stderr}"
     );
 }
 
@@ -1307,9 +1331,8 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
 /// "provider is required" error - it INFERS the invoking harness, mirroring
 /// Python's resolve_dispatch_provider (and the pane arm). Proven deterministically
 /// here via a single CODEX_SESSION_ID marker: inference resolves codex, which then
-/// hits the bg guard (exit 2, but for the claude + opencode reason, not a
-/// missing-provider one). Other harness markers are removed so the ambient session
-/// running the test suite can't make the env ambiguous.
+/// reaches the Codex thread lane. Other harness markers are removed so the
+/// ambient session running the test suite can't make the env ambiguous.
 #[test]
 fn client_spawn_bg_no_provider_infers_harness() {
     let home_dir = tmpdir("cli-spawn-noprov-home");
@@ -1322,11 +1345,23 @@ fn client_spawn_bg_no_provider_infers_harness() {
         return;
     }
 
+    let bin_dir = tmpdir("cli-spawn-noprov-bin");
+    install_fake_codex_app_server_failure(&bin_dir);
+    let path = format!(
+        "{}:{}",
+        bin_dir.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let _path_guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let out = std::process::Command::new(&bin)
         .args(["spawn", "myagent", "hello", "--substrate", "bg"])
         .env("FNO_SPAWN_GATE", "0")
         .env("FNO_E2E", "1") // test context: the spawn-cap auto-emit must NOT fire (x-91b5 AC1-EDGE)
         .env("FNO_AGENTS_HOME", &home_dir)
+        .env("FNO_AGENTS_NO_STARTUP_RECONCILE", "1")
+        .env("PATH", path)
         .env("CODEX_SESSION_ID", "test-sid") // exactly one marker -> codex inferred
         .env_remove("CLAUDE_CODE_SESSION_ID")
         .env_remove("GEMINI_SESSION_ID")
@@ -1334,11 +1369,11 @@ fn client_spawn_bg_no_provider_infers_harness() {
         .expect("failed to run fno-agents");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
-    // Inference landed on codex -> the bg substrate guard, NOT the old
+    // Inference landed on codex -> the thread lane, NOT the old
     // "provider is required" rejection.
     assert!(
-        stderr.contains("claude + opencode") && !stderr.contains("provider is required"),
-        "missing --provider on bg must infer the harness (codex here), not reject: {stderr}"
+        stderr.contains("lazy-starting daemon") && !stderr.contains("provider is required"),
+        "missing --provider on bg must infer codex and reach its thread lane: {stderr}"
     );
 }
 
@@ -1476,7 +1511,9 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
 
 #[test]
 fn client_spawn_bg_claude_bootstraps_the_first_daemon_worker() {
-    let _path_guard = PATH_MUTEX.lock().unwrap();
+    let _path_guard = PATH_MUTEX
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let home_dir = tmpdir("cli-spawn-claude-bootstrap-home");
     let claude_home = tmpdir("cli-spawn-claude-bootstrap-claude");
     let daemon_dir = claude_home.join("daemon");
