@@ -18,10 +18,7 @@ _MESSAGE_EVENT_SKEW_SECONDS = 2
 #: own QUEUE_TIMEOUT_S: the gate gives up waiting at the same bound.
 SPAWN_TIMEOUT_S = 600.0
 
-#: Supervisor words that are POSITIVE claims of a live, acting process. Only
-#: these can contradict a fired falsifier: "idle"/"done" claim nothing, so
-#: they stand beside an unreachable verdict without disagreement.
-_ACTIVE_SUPERVISOR_WORDS = frozenset({"working", "needs input"})
+
 
 # A start token at or below this reads as clock ticks since boot, not epoch
 # microseconds, so it cannot be compared to created_at. Both languages share
@@ -144,15 +141,20 @@ def project_row(row: Mapping[str, Any], *, now: Any = None) -> dict[str, Any]:
 
 
 def _supervisor_contradicted(row: Mapping[str, Any]) -> Optional[str]:
-    """The falsifier that superseded a supervisor's positive claim, or None.
+    """The falsifier that superseded a supervisor's claim, or None.
 
     ``superseded_live_status`` is an INPUT the caller injects (like ``pid``):
-    the non-idle supervisor word the truth-status fallback replaced after a
-    falsifier fired. The claim it stood against rides ``reachability``/
-    ``basis``. The input is popped; only the basis key survives.
+    the supervisor word the truth-status fallback replaced after a falsifier
+    fired. PRESENCE is the caller's assertion that a supersession happened;
+    the marker does not re-derive which words qualify. It did once, with a
+    second word list narrower than the gate's admission set ({idle, done}),
+    and an unrecognized claude status that the gate had stamped came back with
+    a null basis - a row denying a supersession that happened. Which words
+    claim nothing lives in ONE place now: the gate. ``project_row`` pops the
+    input; only the basis key survives.
     """
     word = row.get("superseded_live_status")
-    if not isinstance(word, str) or word.lower() not in _ACTIVE_SUPERVISOR_WORDS:
+    if not isinstance(word, str) or not word:
         return None
     if row.get("reachability") != "unreachable":
         return None
