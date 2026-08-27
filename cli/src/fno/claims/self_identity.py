@@ -104,9 +104,12 @@ def _manifest_identity_values(project_root: Optional[Path]) -> frozenset:
 
     The caller may run from a subdirectory of the worktree, so a bare
     ``cwd/.fno`` read would silently miss the manifest and wave a shared
-    anchor through. The walk stops at the first ``.fno/target-state.md``,
-    mirroring how a worktree root is discovered without shelling to git
-    (claims stays at the bottom of the stack).
+    anchor through. The walk stops at the first ``.fno/target-state.md``, and
+    never climbs past a repository root (the ``.git`` marker) - a stray
+    manifest ABOVE the project must not anchor lookups inside it. Worktree
+    roots carry ``.git`` as a file, plain repos as a directory, so the marker
+    check accepts both. No git subprocess: claims stays at the bottom of the
+    stack.
     """
     start = Path(project_root) if project_root else Path.cwd()
     for directory in (start, *start.parents):
@@ -114,15 +117,18 @@ def _manifest_identity_values(project_root: Optional[Path]) -> frozenset:
         try:
             text = manifest.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            continue
-        values = []
-        for field in _MANIFEST_IDENTITY_FIELDS:
-            m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
-            if m:
-                val = m.group(1).strip().strip("\"'")
-                if val and val != "null":
-                    values.append(val)
-        return frozenset(values)
+            text = None
+        if text is not None:
+            values = []
+            for field in _MANIFEST_IDENTITY_FIELDS:
+                m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
+                if m:
+                    val = m.group(1).strip().strip("\"'")
+                    if val and val != "null":
+                        values.append(val)
+            return frozenset(values)
+        if (directory / ".git").exists():
+            break
     return frozenset()
 
 

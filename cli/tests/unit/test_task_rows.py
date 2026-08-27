@@ -972,6 +972,23 @@ def test_manifest_anchor_is_found_from_a_subdirectory(
     assert refused.exit_code == 4
     assert "shared" in refused.output
 
+    # A stray manifest ABOVE the project must not anchor lookups inside it:
+    # the walk stops at the ``.git`` marker and reads only the project's own.
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "target-state.md").write_text(
+        "fno_id: stray-above-id\n", encoding="utf-8"
+    )
+    (manifest_dir / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident("stray-above-id", "claude", "single"),
+    )
+    unaffected = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "in_progress"
+    )
+    # The stray id above the repo root must not anchor this lookup.
+    assert unaffected.exit_code == 0, unaffected.output
+
 
 def test_takeover_settles_a_gone_holder_under_the_takers_identity(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
