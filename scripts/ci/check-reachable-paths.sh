@@ -45,6 +45,11 @@
 #
 # Run:  bash scripts/ci/check-reachable-paths.sh [--self-test|--dump-baseline]
 # Exit: 0 clean, 1 findings or a control that did not fire, 2 misuse.
+#
+# --dump-baseline emits DATA LINES ONLY, with no header. Redirecting it over
+# the baseline file therefore deletes the header that explains what a line
+# means and which drift each engine catches, and the gate still passes, so
+# nothing tells you. Copy the lines you need instead.
 
 set -uo pipefail
 

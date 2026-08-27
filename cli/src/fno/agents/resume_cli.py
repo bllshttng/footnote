@@ -120,29 +120,30 @@ def _build_resume_argv(
 
         from fno.agents.harnesses.codex import git_writable_config_args
 
-        from fno.agents.harness_map import capabilities
-
         grant = git_writable_config_args(Path(cwd)) if cwd else []
-        # Three modal-clearing additions. A resume that stops on a prompt is a
-        # hang with no human attached, and the only other way past one is
-        # arrow keystrokes at a TUI - the lane that reports `typed`, not
-        # delivered. Every flag below parses after the session id (verified
-        # against codex 0.149.1; a clap rejection prints usage instead).
+        # Without --cd, codex asks session-directory vs current-directory and
+        # defaults to the SESSION directory, which is the canonical checkout
+        # recorded at spawn rather than the worktree the row works in.
+        # Attended that is a wrong default a human must catch. Unattended it
+        # is the wrong tree, which looks like success.
         #
-        # --cd: without it codex asks session-directory vs current-directory
-        # and defaults to the SESSION directory, which is the canonical
-        # checkout recorded at spawn rather than the worktree the row works
-        # in. Attended that is a wrong default a human must catch; unattended
-        # it is the wrong tree, which looks like success.
+        # Placed BEFORE the subcommand, where every other codex lane puts a
+        # global (the -c grant here, `-C <cwd>` in the spawn lane). Both
+        # positions parse on codex 0.149.1, so this is consistency rather than
+        # a fix, and consistency is what a reader checks against.
+        #
+        # NO permission bypass rides here, deliberately. A registry row records
+        # no sandbox posture, so this lane cannot tell a bounded worker from a
+        # yolo one, and applying the bypass unconditionally would resume every
+        # bounded worker with approvals off. That also contradicts the -c grant
+        # spliced beside it, which exists only to widen a sandbox the bypass
+        # would remove. `sandbox_flag_resume` already owns this decision and
+        # returns nothing for the bounded case. Clearing the approval and
+        # hook-trust modals needs an operator opt-in this verb does not have
+        # yet, and hook trust additionally needs the installed-version gate
+        # that `mux_spawn` applies.
         place = ["--cd", cwd] if cwd else []
-        # permission_bypass is already declared per harness in the capability
-        # contract; this lane simply never applied it.
-        bypass = list(capabilities("codex")["permission_bypass"])
-        # Hook trust is a separate axis from permissions, so it has no
-        # contract key. footnote's own Stop hooks are what trip it, and the
-        # gate re-arms per codex install, not per pane.
-        return [argv[0], *grant, *argv[1:], *place, *bypass,
-                "--dangerously-bypass-hook-trust"]
+        return [argv[0], *grant, *place, *argv[1:]]
     return argv
 
 

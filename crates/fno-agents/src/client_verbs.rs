@@ -1718,32 +1718,30 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
     if provider == "codex" {
         if let Some(cwd) = cwd {
             let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
+            let grant_len = grant.len();
             if !grant.is_empty() {
                 argv.splice(1..1, grant);
             }
             // Without --cd, codex asks session-directory vs current-directory
             // and defaults to the SESSION directory: the canonical checkout
             // recorded at spawn, not the worktree the row works in. Unattended
-            // that prompt is a hang; attended it is a wrong default a human
+            // that prompt is a hang. Attended it is a wrong default a human
             // must catch.
-            argv.push("--cd".into());
-            argv.push(cwd.into());
+            //
+            // Spliced BEFORE the subcommand, beside the grant, where every
+            // other codex lane puts a global. Both positions parse on codex
+            // 0.149.1, so this is consistency rather than a fix.
+            //
+            // NO permission bypass rides here, deliberately. A registry row
+            // records no sandbox posture, so this lane cannot tell a bounded
+            // worker from a yolo one, and an unconditional bypass would resume
+            // every bounded worker with approvals off. See the Python twin.
+            // Right after the grant, so the token order matches the Python
+            // twin exactly. `test_rust_verb_parity` compares the two argvs
+            // element for element, so "both are globals" is not enough here.
+            let at = (1 + grant_len).min(argv.len());
+            argv.splice(at..at, ["--cd".to_string(), cwd.to_string()]);
         }
-        // Declared per harness in the capability contract; this lane never
-        // applied it. Hook trust is a separate axis with no contract key, and
-        // footnote's own Stop hooks are what trip it.
-        //
-        // Fails CLOSED, with `?` rather than a swallowed `.ok()`: an omitted
-        // bypass reintroduces the exact approval modal this lane exists to
-        // clear, and unattended that is a hang. `None` here surfaces as the
-        // caller's named "resume contract is invalid" refusal, matching the
-        // identity render above and the Python twin, which raises rather than
-        // degrading. Silently shipping a shorter argv is the one outcome that
-        // must not happen.
-        let contract = crate::harness_capabilities::HarnessContract::packaged().ok()?;
-        let caps = contract.capabilities(provider).ok()?;
-        argv.extend(caps.permission_bypass.clone());
-        argv.push("--dangerously-bypass-hook-trust".into());
     }
     Some(argv)
 }
@@ -4273,10 +4271,11 @@ mod tests {
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
-        // The trailing flags clear codex's two modals. Both were answered by
-        // hand during the 2026-08-25 fleet recovery, and each is a hang with no
-        // human attached. Kept byte-identical to Python `_build_resume_argv`;
-        // `test_rust_verb_parity.py` fails if the twins drift.
+        // --cd lands the resume in the row's own tree instead of the session
+        // directory codex defaults to. It sits with the -c grant BEFORE the
+        // subcommand, where codex's globals go. Kept byte-identical to Python
+        // `_build_resume_argv`; `test_rust_verb_parity.py` fails on drift, so
+        // token ORDER is load-bearing here, not just membership.
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(vec![
@@ -4284,26 +4283,17 @@ mod tests {
                 "-c".into(),
                 "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
                     .into(),
-                "resume".into(),
-                "uuid-1".into(),
                 "--cd".into(),
                 "/path/that/does/not/exist".into(),
-                "--dangerously-bypass-approvals-and-sandbox".into(),
-                "--dangerously-bypass-hook-trust".into(),
+                "resume".into(),
+                "uuid-1".into(),
             ])
         );
-        // No cwd means no --cd (a bare flag fails parsing, and inventing a
-        // directory is the wrong-tree failure this exists to prevent), but the
-        // modal-clearing flags do not depend on cwd.
+        // No cwd means no --cd: a bare flag fails parsing, and inventing a
+        // directory is the wrong-tree failure this exists to prevent.
         assert_eq!(
             build_resume_argv("codex", "uuid-2", None),
-            Some(vec![
-                "codex".into(),
-                "resume".into(),
-                "uuid-2".into(),
-                "--dangerously-bypass-approvals-and-sandbox".into(),
-                "--dangerously-bypass-hook-trust".into(),
-            ])
+            Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
         );
         assert_eq!(
             build_resume_argv("claude", "abc123", None),
