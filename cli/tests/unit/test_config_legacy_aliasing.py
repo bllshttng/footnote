@@ -114,14 +114,14 @@ def test_health_load_config_fail_open_on_bad_unrelated_setting(tmp_path):
 
 
 def test_collision_thresholds_fail_open_on_bad_unrelated_setting(tmp_path):
-    from fno.graph.collision import DEFAULT_THRESHOLDS, _load_thresholds
+    from fno.graph.collision import _default_thresholds_loaded, _load_thresholds
 
     bad = _write(
         tmp_path / "s.yaml",
         "config:\n  backlog:\n    id_prefix: tgt\n  collision:\n    severity_thresholds:\n      high_count: 9\n",
     )
     out = _load_thresholds(project_settings=bad, user_settings=tmp_path / "missing.yaml")
-    assert out == DEFAULT_THRESHOLDS
+    assert out == _default_thresholds_loaded()
 
 
 def test_max_iterations_degrades_instead_of_raising(tmp_path):

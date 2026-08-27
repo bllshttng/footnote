@@ -202,7 +202,7 @@ def test_collision_load_thresholds_failsopen_on_invalid_settings(
     which triggers full Pydantic model validation. If settings.yaml is invalid,
     it raises ValidationError. _load_thresholds must catch that and return defaults.
     """
-    from fno.graph.collision import _load_thresholds, DEFAULT_THRESHOLDS
+    from fno.graph.collision import _load_thresholds, _default_thresholds_loaded
     from fno import config as config_mod
     import fno.paths as paths_mod
 
@@ -226,7 +226,7 @@ def test_collision_load_thresholds_failsopen_on_invalid_settings(
         user_settings=None,  # triggers _paths.config_file() call
     )
     assert isinstance(result, dict), "_load_thresholds must return a dict even on bad settings"
-    assert result["high_count"] == DEFAULT_THRESHOLDS["high_count"], (
+    assert result["high_count"] == _default_thresholds_loaded()["high_count"], (
         "result must contain default high_count when settings are invalid"
     )
 

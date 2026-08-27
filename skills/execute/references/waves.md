@@ -196,7 +196,8 @@ for the full decision table, exact commands, and receipt formats.
 For each DISPATCH ROUND, drive off the ready set, not wave order:
 
 ```bash
-# One JSON object on stdout: {"ready": [...], "completed": [...], "claimed": [...], "blocked": [...]}.
+# One JSON object on stdout: {"ready": [...], "completed": [...], "claimed": [...],
+# "blocked": [...], "blocked_on": {task: [blockers]}, "bands": {task: band}}.
 # Pass --node "$NODE_ID" when graph_node_id is bound (the same field step 3e
 # reads): cross-session done/in_progress task rows then join this session's
 # STATE.md [x] as completions and claims. A failed node read degrades to
@@ -208,14 +209,7 @@ fi
 READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" "${READY_ARGS[@]}")
 ```
 
-A task appears under `ready` when its effective blockers are all complete and
-no peer holds it. A declared `blocked_by` list wins, including an explicit
-empty list. A task without that key derives every task in the previous wave,
-so a plan without per-task edges schedules exactly as the whole-wave barrier
-did. Live foreign task claims appear under `claimed`. Stale or self-owned
-claims are re-offered. Unknown task-row statuses appear under `blocked` and
-never dispatch. Dispatch every entry under `ready` before running the query
-again:
+A task appears under `ready` when its effective blockers are all complete and no peer holds it. A declared `blocked_by` list wins, including an explicit empty list. A task without that key derives every task in the previous wave. Inside a parallel wave, `collision.partition` adds derived edges: tasks sharing a file (or a hidden shared output root) serialize in wave order, and a task with no parseable file list waits for every evaluated sibling. Live foreign task claims appear under `claimed`. Stale or self-owned claims are re-offered. Tasks held back by unfinished blockers appear under `blocked_on` with those blockers and re-enter `ready` on a later round, so they need no action now. Unknown task-row statuses appear under `blocked` and never dispatch. Dispatch every entry under `ready` before running the query again:
 
 **If mode: sequential**
 - Execute each ready task in order using fno:archer
@@ -223,12 +217,13 @@ again:
 - Update STATE.md after each task
 
 **If mode: parallel**
-- Resolve provider capabilities and hidden shared-output conflicts first
-- Spawn N targets simultaneously only when the capability contract and file-ownership checks allow it
-- Use Task tool with multiple concurrent calls
-- Wait for the round to complete
-- Collect and merge results
-- Update STATE.md with all completed tasks
+- Resolve provider capabilities first (a sequential-fallback provider still downgrades the wave)
+- Spawn the whole `ready` set concurrently - Task tool, multiple concurrent calls
+- With `--node` bound: update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round - the peers' live task rows hold their in-flight claims back
+- Node-less: wait for the whole round to complete, update STATE.md, then re-query - with no node rows an in-flight sibling still reads `ready`, and re-dispatching it double-spawns the work
+- Tasks under `blocked_on` need no action; their derived edges hold them until a later round
+
+`bands` maps each task to its wave's `difficulty` band, with the plan frontmatter band as the fallback. A pulling worker takes only tasks at or below its own band. The band-to-harness-and-model mapping lives in config, never in the plan.
 
 An empty `ready` list does not prove execution is complete. If `claimed` is
 non-empty, wait for peer claims to leave `in_progress` and rerun `--ready`. If

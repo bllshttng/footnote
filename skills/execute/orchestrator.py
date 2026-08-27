@@ -368,6 +368,9 @@ class Wave:
     mode: str  # 'sequential' | 'parallel'
     tasks: List[str]
     reason: str
+    # Blueprint's per-wave band ('low' | 'medium' | 'high'); '' when the plan
+    # predates the band. A pulling worker filters on it; models stay in config.
+    difficulty: str = ""
 
 
 @dataclass
@@ -387,6 +390,10 @@ class ExecutionStrategy:
     # Declared per-task edges (task id -> blocked_by list). A task with no
     # declared entry derives its blockers from the previous wave instead.
     blocked_by: Dict[str, List[str]] = field(default_factory=dict)
+    # Canonical task surfaces parsed from the Execution Strategy task blocks.
+    # The prose `### Task` / `**Files:**` scan misses plans that declare
+    # ownership only here, which would read every task as unevaluated.
+    task_surfaces: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _extract_task_section(phase_file: Path, task_id: str) -> List[str]:
@@ -433,30 +440,51 @@ def get_task_file_targets(plan_path: str, task_id: str) -> List[str]:
     return targets
 
 
-def _shared_output_root(path: str) -> Optional[str]:
-    normalized = path.strip()
-    normalized = normalized.strip("`")
-    for root in HIDDEN_SHARED_OUTPUT_ROOTS:
-        if normalized == root[:-1] or normalized.startswith(root):
-            return root.rstrip("/")
-    return None
+def _task_targets(
+    plan_path: str, task_id: str, surfaces: Optional[Dict[str, List[str]]]
+) -> List[str]:
+    """The task's file targets: canonical surfaces first, prose scan as fallback.
+
+    A plan that declares ownership only through Execution Strategy `surface:`
+    lists has no `### Task` prose to scan, so the prose scan alone would read
+    it as unevaluated and partition away a real overlap.
+    """
+    if surfaces is not None:
+        canonical = [str(s) for s in surfaces.get(task_id, [])]
+        if canonical:
+            return canonical
+    return get_task_file_targets(plan_path, task_id)
 
 
-def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[str, List[str]]:
-    """Detect explicit file conflicts and shared-output-root collisions for parallel tasks."""
+def detect_hidden_output_conflicts(
+    plan_path: str,
+    task_ids: List[str],
+    surfaces: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[str]]:
+    """Partition a wave's tasks by file overlap and shared-output roots.
+
+    Returns the collision partition (``groups`` of overlapping task ids,
+    ``unevaluated`` ids with no parseable file list) plus the two legacy
+    conflict keys the ``--wave-decision`` printer still reports.
+    """
+    from fno.graph.collision import match_shared_root, partition
+
     by_file: Dict[str, List[str]] = {}
     by_root: Dict[str, List[str]] = {}
     file_conflicts: List[str] = []
     root_conflicts: List[str] = []
+    items: List[tuple[str, set[str]]] = []
 
     for task_id in task_ids:
-        for target in get_task_file_targets(plan_path, task_id):
+        targets = set(_task_targets(plan_path, task_id, surfaces))
+        items.append((task_id, targets))
+        for target in sorted(targets):
             owners = by_file.setdefault(target, [])
             owners.append(task_id)
             if len(owners) == 2:
                 file_conflicts.append(target)
 
-            shared_root = _shared_output_root(target)
+            shared_root = match_shared_root(target, HIDDEN_SHARED_OUTPUT_ROOTS)
             if shared_root:
                 root_owners = by_root.setdefault(shared_root, [])
                 if task_id not in root_owners:
@@ -464,10 +492,68 @@ def detect_hidden_output_conflicts(plan_path: str, task_ids: List[str]) -> Dict[
                 if len(root_owners) == 2:
                     root_conflicts.append(shared_root)
 
+    groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
     return {
+        "groups": [sorted(group) for group in groups],
+        "unevaluated": sorted(unevaluated),
         "file_conflicts": sorted(set(file_conflicts)),
         "shared_output_conflicts": sorted(set(root_conflicts)),
     }
+
+
+def partition_edges(
+    plan_path: str,
+    wave: Wave,
+    surfaces: Optional[Dict[str, List[str]]] = None,
+) -> Dict[str, List[str]]:
+    """Derived within-wave edges from the collision partition.
+
+    Inside a multi-member group, task N blocks on task N-1 in wave order;
+    every unevaluated task blocks on every evaluated task in the wave. The
+    ``--ready`` query unions these with the declared ``blocked_by`` edges,
+    so the overlapping tasks serialize without flipping the wave's mode.
+    """
+    from fno.graph.collision import partition
+
+    items = [
+        (task_id, set(_task_targets(plan_path, task_id, surfaces)))
+        for task_id in wave.tasks
+    ]
+    groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
+
+    edges: Dict[str, List[str]] = {}
+    for group in groups:
+        ordered = [task_id for task_id in wave.tasks if task_id in group]
+        for prev, cur in zip(ordered, ordered[1:]):
+            edges.setdefault(cur, []).append(prev)
+    evaluated = [task_id for task_id in wave.tasks if task_id not in unevaluated]
+    for task_id in wave.tasks:
+        if task_id in unevaluated and evaluated:
+            edges[task_id] = list(evaluated)
+    return edges
+
+
+def apply_partition_edges(strategy: ExecutionStrategy, plan_path: str) -> None:
+    """Union partition-derived edges into ``strategy.blocked_by`` in place.
+
+    A declared list is kept and extended, never replaced. A task with no
+    declared entry keeps its previous-wave inheritance as the base, so a
+    derived edge can never float a task ahead of an incomplete earlier wave.
+    """
+    for wave in strategy.waves:
+        if wave.mode != "parallel":
+            continue
+        for task_id, blockers in partition_edges(plan_path, wave, strategy.task_surfaces).items():
+            if task_id in strategy.blocked_by:
+                base = set(strategy.blocked_by[task_id])
+            else:
+                base = set()
+                for pos, holder in enumerate(strategy.waves):
+                    if task_id in holder.tasks:
+                        if pos:
+                            base |= set(strategy.waves[pos - 1].tasks)
+                        break
+            strategy.blocked_by[task_id] = sorted(base | set(blockers))
 
 
 # Providers whose stable baseline cannot spawn concurrent Task-tool subagents,
@@ -482,6 +568,7 @@ def resolve_wave_execution_mode(
     wave: Wave,
     plan_path: str,
     provider: Optional[str] = None,
+    surfaces: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, object]:
     """Resolve effective wave mode from requested mode and hidden file/shared-output conflicts."""
     resolved_provider, harness_source = resolve_invoking_harness(provider)
@@ -492,20 +579,19 @@ def resolve_wave_execution_mode(
         "effective_mode": wave.mode,
         "dispatch": "main-thread",
         "reason": "Wave is sequential by plan",
-        "conflicts": {"file_conflicts": [], "shared_output_conflicts": []},
+        "conflicts": {
+            "groups": [],
+            "unevaluated": [],
+            "file_conflicts": [],
+            "shared_output_conflicts": [],
+        },
     }
 
     if wave.mode != "parallel":
         return decision
 
-    conflicts = detect_hidden_output_conflicts(plan_path, wave.tasks)
+    conflicts = detect_hidden_output_conflicts(plan_path, wave.tasks, surfaces)
     decision["conflicts"] = conflicts
-    if conflicts["file_conflicts"] or conflicts["shared_output_conflicts"]:
-        decision["effective_mode"] = "sequential"
-        decision["reason"] = (
-            "Parallel wave downgraded because tasks share explicit files or hidden shared outputs"
-        )
-        return decision
 
     if resolved_provider in SEQUENTIAL_FALLBACK_PROVIDERS:
         decision["effective_mode"] = "sequential"
@@ -516,7 +602,17 @@ def resolve_wave_execution_mode(
         return decision
 
     decision["dispatch"] = "native-subagents"
-    decision["reason"] = "Parallel wave has no file or shared-output conflicts"
+    overlapping = any(len(group) > 1 for group in conflicts["groups"]) or bool(
+        conflicts["unevaluated"]
+    )
+    if overlapping:
+        # The wave stays parallel: partition edges hold the overlapping tasks
+        # back while the ready set dispatches concurrently.
+        decision["reason"] = (
+            "Parallel wave dispatches the ready set; partition edges serialize overlapping tasks"
+        )
+    else:
+        decision["reason"] = "Parallel wave has no file or shared-output conflicts"
     return decision
 
 
@@ -1533,6 +1629,10 @@ def load_plan_strategy(
     execution_mode = raw.get("execution_mode", "sequential")
     scope = raw.get("scope", "single-project")
     project_tasks: Dict[str, List[str]] = raw.get("projects", {}) or {}
+    # Blueprint stamps difficulty per wave; the plan's frontmatter band is the
+    # fallback so a partially-stamped strategy still reports a band. No model
+    # or route lives here: the band is the axis, config maps it to a lane.
+    plan_band = str(doc.frontmatter.get("difficulty") or "").strip()
     waves: List[Wave] = []
 
     for wave_data in raw.get("waves", []):
@@ -1549,6 +1649,7 @@ def load_plan_strategy(
                 mode=str(wave_data.get("mode", "sequential")),
                 tasks=tasks,
                 reason=str(wave_data.get("reason", "")),
+                difficulty=str(wave_data.get("difficulty") or plan_band or "").strip().lower(),
             )
         )
 
@@ -1568,6 +1669,11 @@ def load_plan_strategy(
             str(t["id"]): [str(d) for d in t.get("blocked_by", [])]
             for t in raw.get("tasks", [])
             if isinstance(t, dict) and t.get("id") and t.get("blocked_by_declared", False)
+        },
+        task_surfaces={
+            str(t["id"]): [str(s) for s in t.get("surface", [])]
+            for t in raw.get("tasks", [])
+            if isinstance(t, dict) and t.get("id")
         },
     )
 
@@ -1724,13 +1830,19 @@ if __name__ == "__main__":
         if not wave:
             print(f"Error: wave {wave_number} not found", file=sys.stderr)
             sys.exit(1)
-        decision = resolve_wave_execution_mode(wave, index_path, provider)
+        decision = resolve_wave_execution_mode(wave, index_path, provider, strategy.task_surfaces)
         print(json.dumps(decision, indent=2))
     elif "--ready" in sys.argv:
         # The work-stealing read the waves skill runs before each dispatch
         # round. `done` rows are cross-session completions beside this
         # session's STATE.md [x]; a failed task-row read degrades to
         # STATE.md only (the same non-fatal posture as the boundary settle).
+        #
+        # Partition-derived edges join the declared ones first: inside a
+        # parallel wave, tasks sharing a file (or a hidden shared output
+        # root) serialize in wave order and an unevaluated task waits for
+        # every evaluated sibling. Declared lists are unioned, never replaced.
+        apply_partition_edges(strategy, index_path)
         node_id = ""
         if "--node" in sys.argv:
             node_idx = sys.argv.index("--node")
@@ -1796,11 +1908,30 @@ if __name__ == "__main__":
             completed = list(dict.fromkeys(completed))
             claimed = list(dict.fromkeys(claimed))
             blocked = list(dict.fromkeys(blocked))
+        busy = [*claimed, *blocked]
+        ready = ready_tasks(strategy, completed, busy)
+        # Tasks held back by unfinished blockers, declared or derived. Not the
+        # same list as `blocked` (corrupt statuses, which the skill refuses
+        # on): a held task just waits for its blocker and re-enters `ready`.
+        blocked_on: Dict[str, List[str]] = {}
+        for wave in strategy.waves:
+            for task_id in wave.tasks:
+                if task_id in completed or task_id in busy or task_id in ready:
+                    continue
+                outstanding = sorted(effective_blockers(strategy, task_id) - set(completed))
+                if outstanding:
+                    blocked_on[task_id] = outstanding
         print(json.dumps({
-            "ready": ready_tasks(strategy, completed, [*claimed, *blocked]),
+            "ready": ready,
             "completed": completed,
             "claimed": claimed,
             "blocked": blocked,
+            "blocked_on": blocked_on,
+            "bands": {
+                task_id: wave.difficulty
+                for wave in strategy.waves
+                for task_id in wave.tasks
+            },
         }))
     elif "--next" in sys.argv:
         next_wave = get_next_wave(strategy, completed_tasks)

@@ -8,6 +8,7 @@ Pure-Python primitive consumed by:
 Public API:
     Collision (dataclass)            - one collision record between two plans
     parse_files_to_modify(plan_path) - normalize files from a plan's table
+    partition(items)                 - group items by shared path (node AND task grain)
     find_collisions(...)             - compare a candidate against all pending
     find_acknowledged_collisions(...) - reconcile acknowledged + shipped pairs
     _load_thresholds()               - resolve severity thresholds from settings
@@ -26,11 +27,12 @@ Action inference (deterministic):
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, Literal, TypedDict, cast
+from typing import Collection, Iterable, Literal, TypedDict, cast
 
 # Distinguishes "node carries no plan_path" from "node is not on the graph";
 # both are self, but for different reasons and a bare None conflates them.
@@ -61,7 +63,25 @@ def _default_thresholds() -> CollisionThresholds:
     return CollisionThresholdsBlock().model_dump()  # type: ignore[return-value]
 
 
-DEFAULT_THRESHOLDS: CollisionThresholds = _default_thresholds()
+# Lazy on purpose: partition() must import under a dep-less python (the
+# orchestrator's --ready path runs there), so the fno.config import rides the
+# first thresholds read, never the module import. The public
+# DEFAULT_THRESHOLDS attribute resolves through module __getattr__ below, so
+# `from fno.graph.collision import DEFAULT_THRESHOLDS` still yields the dict.
+_DEFAULT_THRESHOLDS: CollisionThresholds | None = None
+
+
+def _default_thresholds_loaded() -> CollisionThresholds:
+    global _DEFAULT_THRESHOLDS
+    if _DEFAULT_THRESHOLDS is None:
+        _DEFAULT_THRESHOLDS = _default_thresholds()
+    return _DEFAULT_THRESHOLDS
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_THRESHOLDS":
+        return _default_thresholds_loaded()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True)
@@ -209,6 +229,84 @@ def has_file_surface(plan_path: Path) -> bool:
     return bool(parse_files_to_modify(plan_path))
 
 
+def match_shared_root(path: str, roots: Collection[str]) -> str | None:
+    """The shared-output root a normalized path falls under, or None.
+
+    A path equal to a root or written beneath it shares that generated-output
+    directory. Task-grain callers pass their hidden-root list (the
+    orchestrator's hidden shared output roots); node-grain callers pass
+    nothing, so the rule applies only where the output-root hazard exists.
+    Input is normalized here so both callers (partition's grouping and the
+    orchestrator's legacy conflict keys) apply the identical rule.
+    """
+    normalized = posixpath.normpath(str(path).strip().strip("`"))
+    if not normalized or normalized == ".":
+        return None
+    for root in roots:
+        base = root.rstrip("/")
+        if normalized == base or normalized.startswith(base + "/"):
+            return base
+    return None
+
+
+def partition(
+    items: list[tuple[str, set[str]]],
+    shared_roots: Collection[str] = (),
+) -> tuple[list[set[str]], set[str]]:
+    """Group items by shared path, so overlapping work can serialize as a unit.
+
+    Union-find over ``(id, paths)`` items keyed by normalized path: two items
+    sharing a path land in one group, and so do two items writing under one of
+    ``shared_roots`` (the generated-output rule; empty by default). Returns
+    ``(groups, unevaluated)`` - disjoint sets of item ids, and the ids with
+    no usable path (empty set, or every entry normalizing away). An
+    unevaluated item is a singleton group as well:
+    "no parseable file list" is its own verdict, never a silent pass (the same
+    rule ``_classify_lane_candidate`` applies at node grain).
+    """
+    parent: dict[str, str] = {}
+    for item_id, _ in items:
+        # setdefault, not assignment: a caller that repeats an id (two path
+        # batches for one item) must not reset the unions already made.
+        parent.setdefault(item_id, item_id)
+
+    def find(node: str) -> str:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]  # path halving
+            node = parent[node]
+        return node
+
+    def union(left: str, right: str) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    path_owner: dict[str, str] = {}
+    root_owner: dict[str, str] = {}
+    evaluated: set[str] = set()
+    for item_id, paths in items:
+        for raw in paths:
+            normalized = posixpath.normpath(str(raw).strip().strip("`"))
+            if not normalized or normalized == ".":
+                continue
+            evaluated.add(item_id)
+            union(path_owner.setdefault(normalized, item_id), item_id)
+            root = match_shared_root(normalized, shared_roots)
+            if root:
+                union(root_owner.setdefault(root, item_id), item_id)
+
+    groups: dict[str, set[str]] = {}
+    unevaluated: set[str] = set()
+    for item_id, _paths in items:
+        groups.setdefault(find(item_id), set()).add(item_id)
+        # No usable path (raw-empty set, or every entry normalizing away):
+        # unevaluated - never a silent concurrent pass.
+        if item_id not in evaluated:
+            unevaluated.add(item_id)
+    ordered = sorted(groups.values(), key=lambda group: sorted(group))
+    return ordered, unevaluated
+
+
 def resolve_plan_path(plan_path: str) -> Path:
     """Resolve a graph-stored ``plan_path`` (absolute, ``~``, or repo-relative)."""
     return _resolve_plan_path(plan_path, _find_repo_root())
@@ -277,7 +375,7 @@ def _load_thresholds(
             "using defaults",
             file=sys.stderr,
         )
-        return cast("dict[str, float]", dict(DEFAULT_THRESHOLDS))
+        return cast("dict[str, float]", dict(_default_thresholds_loaded()))
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +634,7 @@ def find_collisions(
                 break
 
     repo_root = _find_repo_root()
+    comparators: list[tuple[dict, str, set[str]]] = []
     for entry in graph:
         if not _is_pending_for_collision(entry):
             continue
@@ -548,39 +647,56 @@ def find_collisions(
         other_files = parse_files_to_modify(other_path)
         if not other_files:
             continue
-        shared = candidate_files & other_files
-        if not shared:
+        comparators.append((entry, other_plan, other_files))
+
+    # One partition decides who is compared: the candidate's group-mates are
+    # exactly the plans sharing a file. Severity still comes from the pair's
+    # shared count and thresholds, so the verdict per pair is unchanged.
+    candidate_key = "<candidate>"
+    groups, _unevaluated = partition(
+        [(candidate_key, candidate_files)]
+        + [(f"other:{i}", files) for i, (_, _, files) in enumerate(comparators)]
+    )
+    by_key = {f"other:{i}": pair for i, pair in enumerate(comparators)}
+    for group in groups:
+        if candidate_key not in group:
             continue
-        severity, shared_sorted = _classify(candidate_files, other_files, thresholds)
-        action = _infer_action(
-            candidate_files,
-            other_files,
-            entry.get("created_at") or "",
-            candidate_created,
-            severity,
-        )
-        rationale = _build_rationale(
-            candidate_files,
-            other_files,
-            shared_sorted,
-            entry.get("id", "<unknown>"),
-            severity,
-            action,
-        )
-        out.append(
-            Collision(
-                with_node_id=entry.get("id", "<unknown>"),
-                with_node_title=entry.get("title", ""),
-                with_plan_path=str(other_plan),
-                shared_files=shared_sorted,
-                candidate_only_files=sorted(candidate_files - other_files),
-                other_only_files=sorted(other_files - candidate_files),
-                severity=severity,
-                recommended_action=action,
-                rationale=rationale,
-                _other_created_at=entry.get("created_at") or "",
+        for key in group - {candidate_key}:
+            entry, other_plan, other_files = by_key[key]
+            severity, shared_sorted = _classify(candidate_files, other_files, thresholds)
+            if not shared_sorted:
+                # The partition normalizes paths this comparison does not; a
+                # group mate with no literal shared path is no collision.
+                continue
+            action = _infer_action(
+                candidate_files,
+                other_files,
+                entry.get("created_at") or "",
+                candidate_created,
+                severity,
             )
-        )
+            rationale = _build_rationale(
+                candidate_files,
+                other_files,
+                shared_sorted,
+                entry.get("id", "<unknown>"),
+                severity,
+                action,
+            )
+            out.append(
+                Collision(
+                    with_node_id=entry.get("id", "<unknown>"),
+                    with_node_title=entry.get("title", ""),
+                    with_plan_path=str(other_plan),
+                    shared_files=shared_sorted,
+                    candidate_only_files=sorted(candidate_files - other_files),
+                    other_only_files=sorted(other_files - candidate_files),
+                    severity=severity,
+                    recommended_action=action,
+                    rationale=rationale,
+                    _other_created_at=entry.get("created_at") or "",
+                )
+            )
 
     out.sort(key=lambda c: (_SEVERITY_ORDER[c.severity], c.with_node_id))
     return out

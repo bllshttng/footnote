@@ -285,14 +285,14 @@ def test_done_nodes_excluded(tmp_path):
 
 
 def test_load_thresholds_defaults(tmp_path):
-    from fno.graph.collision import _load_thresholds, DEFAULT_THRESHOLDS
+    from fno.graph.collision import _load_thresholds, _default_thresholds_loaded
 
     # Point both layers at non-existent paths.
     out = _load_thresholds(
         project_settings=tmp_path / "missing-project.yaml",
         user_settings=tmp_path / "missing-user.yaml",
     )
-    assert out == DEFAULT_THRESHOLDS
+    assert out == _default_thresholds_loaded()
 
 
 def test_load_thresholds_project_beats_user(tmp_path):
@@ -329,7 +329,7 @@ def test_load_thresholds_project_beats_user(tmp_path):
 def test_load_thresholds_malformed_warns_and_falls_back(tmp_path, caplog):
     import logging
 
-    from fno.graph.collision import _load_thresholds, DEFAULT_THRESHOLDS
+    from fno.graph.collision import _load_thresholds, _default_thresholds_loaded
 
     proj = tmp_path / "project.yaml"
     proj.write_text(
@@ -347,8 +347,9 @@ def test_load_thresholds_malformed_warns_and_falls_back(tmp_path, caplog):
     assert any(
         "not numeric" in r.message or "negative" in r.message for r in caplog.records
     )
-    assert out["high_count"] == DEFAULT_THRESHOLDS["high_count"]
-    assert out["high_ratio"] == DEFAULT_THRESHOLDS["high_ratio"]
+    expected = _default_thresholds_loaded()
+    assert out["high_count"] == expected["high_count"]
+    assert out["high_ratio"] == expected["high_ratio"]
 
 
 # ---------------------------------------------------------------------------

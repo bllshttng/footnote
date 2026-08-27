@@ -1,8 +1,6 @@
 # Dynamic Parallelization
 
-Automatic optimization that upgrades sequential waves to parallel when task
-file sets are provably disjoint. Activated when the plan contains a
-`## File Ownership Map` section.
+Automatic optimization that upgrades sequential waves to parallel, with `collision.partition` serializing any tasks whose file sets overlap. The rule activates on a `## File Ownership Map` section.
 
 ## Activation
 
@@ -24,44 +22,34 @@ Build mapping: task_id -> set of file paths
 - Single: `1.1`
 - Comma-separated: `1.1, 2.2` (split and assign each)
 
-## Set Intersection Algorithm
+## The Partition Rule
 
-```
-For each wave marked sequential in execution strategy:
-  tasks = wave.tasks
-  For each task, look up file set from ownership map
-  If any task has NO entry in map:
-    VERDICT: keep sequential (unknown scope, conservative)
-    Log: "Task X.Y has no file ownership entry, keeping wave N sequential"
-    break
+`collision.partition` (cli/src/fno/graph/collision.py) groups a wave's tasks by shared normalized path. Two tasks writing under one hidden shared output root (`.fno/`, `docs/`, ...) land in one group too. A task with no parseable file list is `unevaluated`: its own verdict, never a silent pass.
 
-  all_disjoint = true
-  For each pair (A, B) in tasks:
-    overlap = files_A intersection files_B
-    if overlap is not empty:
-      all_disjoint = false
-      Log: "Tasks A and B share files: {overlap}, keeping wave N sequential"
-      break
+A wave's tasks run as soon as their blockers are complete, whether those blockers are declared in `blocked_by` or derived from file overlap:
 
-  If all_disjoint:
-    Upgrade wave to parallel
-    Log: "Wave N upgraded to parallel: all task file sets disjoint"
-```
+- Tasks in disjoint groups dispatch concurrently. The wave stays parallel.
+- A group of overlapping tasks runs in id order: each task's derived edge names the group mate before it.
+- An unevaluated task runs last: it waits for every evaluated task in the wave.
+
+The overlap never downgrades the wave. The `--ready` query unions the derived edges with the declared ones. `/execute waves` dispatches the ready set concurrently while the edges hold the overlapping tasks back.
 
 ## Rules
 
 1. **Only upgrade** sequential to parallel, never downgrade parallel to sequential
-2. **Tasks missing from map** force the wave to stay sequential (conservative)
+2. **Tasks missing from map** are `unevaluated`: they run after every evaluated task in the wave
 3. **Log every decision** for debuggability
 4. **File ownership map is the ONLY input** - never infer from task descriptions
 5. **Already-parallel waves** are left as-is (no action needed)
 
 ## Edge Cases
 
-### Per-task readiness does not partition file overlap
-Per-task readiness controls dependency availability. It does not partition tasks by file overlap. If A, B, and C share files, the conflict gate keeps the wave sequential. Partial parallelization within one wave remains unsupported.
+### Per-task readiness partitions file overlap
+
+Per-task readiness controls dependency availability, and derived edges carry file overlap into that same query. If A, B, and C share files, A and B can still dispatch while C waits on its group mate. Partial parallelization within one wave is the supported path.
 
 ### Malformed or missing map
+
 If the ownership map is present but malformed, log a warning and use the declared strategy.
 
 ## Extended Decision Tree
@@ -71,9 +59,8 @@ Is wave declared sequential?
 +-- NO (parallel) -> Leave as-is
 +-- YES -> Does the plan have a File Ownership Map?
          +-- NO -> Keep sequential (declared strategy)
-         +-- YES -> Are all tasks present in the map?
-                  +-- NO -> Keep sequential (unknown scope)
-                  +-- YES -> Are all task file sets disjoint?
-                           +-- NO -> Keep sequential
-                           +-- YES -> Upgrade to parallel
+         +-- YES -> Do any two tasks share a file or a hidden output root?
+                  +-- NO -> Upgrade to parallel
+                  +-- YES -> Upgrade to parallel; partition edges
+                             serialize the overlapping tasks
 ```
