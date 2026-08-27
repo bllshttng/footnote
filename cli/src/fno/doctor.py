@@ -2259,8 +2259,9 @@ def _emit_human(
     cas = result.get("codex_app_server") or {}
     if not cas.get("present"):
         out(
-            "fno doctor: codex app-server daemon not running (no control socket); "
-            "live mail to codex sessions demotes to durable. Start it BEFORE the "
+            "fno doctor: codex app-server daemon not running (no daemon answering "
+            "its control socket); live mail to codex sessions demotes to durable. "
+            "Start it BEFORE the "
             "codex TUI: `codex app-server daemon start` (or "
             "`codex app-server daemon bootstrap` for durable SSH-driven use). A "
             "session launched before the daemon cannot receive live mail without a restart."
@@ -3186,8 +3187,8 @@ def _harness_surface_report() -> dict[str, Any]:
     # uninstalled codex must not nag a user who no longer runs it.
     if shutil.which("codex") is not None:
         try:
-            # Reuse the socket probe already stored above: a second stat can
-            # disagree with it when the daemon starts between the two calls.
+            # Reuse the socket probe already stored above: a second connect
+            # can disagree with it when the daemon starts between the two calls.
             report["codex_context_window"] = _codex_context_window_report(
                 app_server_present=(report.get("codex_app_server") or {}).get("present")
             )
