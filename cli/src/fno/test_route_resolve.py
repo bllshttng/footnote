@@ -6,6 +6,8 @@ static-table fallback when no snapshot exists, and the non-fatal node_model seam
 """
 from __future__ import annotations
 
+import pytest
+
 from fno import route_resolve as rr
 
 
@@ -101,9 +103,9 @@ def test_tier_none_provider_is_unscoped():
 # --- node_model provider scoping ------------------------------------------- #
 
 
-def test_node_model_tier_scoped_to_claude():
-    """AC1-HP at the seam: a medium-tier node on the claude lane -> claude model."""
-    node = {"model_tier": "medium"}
+def test_node_model_difficulty_scoped_to_claude():
+    """AC1-HP at the seam: a medium-band node on the claude lane -> claude model."""
+    node = {"difficulty": "medium"}
     assert rr.node_model(node, snapshot={}, provider="claude") == "claude-sonnet-5"
 
 
@@ -119,7 +121,7 @@ def test_node_model_none_provider_defaults_to_claude(monkeypatch):
     ambient must not resolve a codex model for a claude spawn."""
     # Force a codex ambient; node_model must still scope to claude, not codex.
     monkeypatch.setenv("CODEX_SANDBOX", "1")
-    node = {"model_tier": "medium"}
+    node = {"difficulty": "medium"}
     assert rr.node_model(node, snapshot={}) == "claude-sonnet-5"
 
 
@@ -137,31 +139,45 @@ def test_node_model_degrades_on_resolver_error(monkeypatch):
 
 
 def test_explicit_outranks_everything():
-    """AC2-EDGE: a dispatch-time --model wins over a task tier (and role routing)."""
+    """AC2-EDGE: a dispatch-time --model wins over a task band (and role routing)."""
     model, source, chain = rr.resolve_dispatch_model(
-        explicit="pinned-x", task_tier="high", snapshot=_snap([])
+        explicit="pinned-x", task_difficulty="high", snapshot=_snap([])
     )
     assert (model, source) == ("pinned-x", "explicit")
 
 
-def test_task_pin_outranks_task_tier():
+def test_task_pin_outranks_task_difficulty():
     model, source, _ = rr.resolve_dispatch_model(
-        task_model="task-x", task_tier="high", snapshot=_snap([])
+        task_model="task-x", task_difficulty="high", snapshot=_snap([])
     )
     assert (model, source) == ("task-x", "task-pin")
 
 
-def test_task_tier_resolves_and_labels_source():
+def test_task_difficulty_resolves_and_labels_source():
     snap = _snap([{"name": "glm-4.7", "coding_percentile": 55}])
-    model, source, _ = rr.resolve_dispatch_model(task_tier="low", snapshot=snap)
+    model, source, _ = rr.resolve_dispatch_model(task_difficulty="low", snapshot=snap)
     assert model == "glm-4.7"
-    assert source == "task-tier(low)"
+    assert source == "task-difficulty(low)"
 
 
-def test_plan_tier_is_lowest_priority_before_default():
+def test_plan_difficulty_is_lowest_priority_before_default():
     snap = _snap([{"name": "glm-4.7", "coding_percentile": 55}])
-    model, source, _ = rr.resolve_dispatch_model(plan_tier="low", snapshot=snap)
-    assert model == "glm-4.7" and source == "plan-tier(low)"
+    model, source, _ = rr.resolve_dispatch_model(plan_difficulty="low", snapshot=snap)
+    assert model == "glm-4.7" and source == "plan-difficulty(low)"
+
+
+def test_retired_tier_params_are_gone():
+    """AC4-HP (x-baef): the compat read side died with the field. A caller
+    still spelling task_tier/plan_tier gets a TypeError, not a silent
+    fallback, and a node dict carrying only model_tier resolves nothing."""
+    import inspect
+
+    params = inspect.signature(rr.resolve_dispatch_model).parameters
+    assert "task_tier" not in params and "plan_tier" not in params
+    with pytest.raises(TypeError):
+        rr.resolve_dispatch_model(task_tier="low")
+    # the negative half of the compat-kill: model_tier-only reads as unset
+    assert rr.node_model({"model_tier": "low"}, snapshot={}, provider="claude") is None
 
 
 def test_nothing_set_is_provider_default():
@@ -172,11 +188,11 @@ def test_nothing_set_is_provider_default():
 # --- node_model (spawn seam) ----------------------------------------------- #
 
 
-def test_node_model_reads_pin_and_tier():
+def test_node_model_reads_pin_and_band():
     assert rr.node_model({"model": "glm-5.2"}) == "glm-5.2"
-    # tier with an (empty) injected snapshot -> deterministic static table; scope
+    # band with an (empty) injected snapshot -> deterministic static table; scope
     # to claude so the pick is env-independent (the low band is all-claude anyway).
-    assert rr.node_model({"model_tier": "low"}, snapshot={}, provider="claude") == "glm-4.7"
+    assert rr.node_model({"difficulty": "low"}, snapshot={}, provider="claude") == "glm-4.7"
     assert rr.node_model({}) is None
 
 
@@ -211,4 +227,4 @@ def test_grid_is_inert_when_capacity_is_unknown():
 
 
 def test_node_model_explicit_override_wins():
-    assert rr.node_model({"model_tier": "low"}, explicit="cli-x", snapshot={}) == "cli-x"
+    assert rr.node_model({"difficulty": "low"}, explicit="cli-x", snapshot={}) == "cli-x"

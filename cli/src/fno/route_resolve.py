@@ -1,16 +1,16 @@
 """Dispatch-time model resolution: the pareto router's read side.
 
-A task or node may pin an exact model (``model``) or a minimum quality tier
-(``model_tier: high|medium|low``). At dispatch this resolves a tier to the
-cheapest reachable mapped model that clears the tier's floor, per the cached
+A task or node may pin an exact model (``model``) or a work-difficulty band
+(``difficulty: high|medium|low``). At dispatch this resolves a band to the
+cheapest reachable mapped model that clears the band's floor, per the cached
 benchmark snapshot -- and degrades, never blocks: an empty band falls through to
 a lower band and finally to the provider default, recording the fallback chain so
 the choice is auditable. It NEVER touches the network; a missing snapshot uses the
 static table in :mod:`fno.adapters.providers.benchmarks`.
 
 Full precedence (Locked Decision 1):
-    dispatch --model > task ``model:`` > task ``model_tier:`` > plan ``model:`` >
-    plan ``model_tier:`` > provider default (``--role`` routing / provider-rotation
+    dispatch --model > task ``model:`` > task ``difficulty:`` > plan ``model:`` >
+    plan ``difficulty:`` > provider default (``--role`` routing / provider-rotation
     combos live downstream and only fire when nothing above resolves a model).
 """
 from __future__ import annotations
@@ -190,10 +190,8 @@ def resolve_dispatch_model(
     *,
     explicit: Optional[str] = None,
     task_model: Optional[str] = None,
-    task_tier: Optional[str] = None,
     task_difficulty: Optional[str] = None,
     plan_model: Optional[str] = None,
-    plan_tier: Optional[str] = None,
     plan_difficulty: Optional[str] = None,
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
@@ -202,8 +200,8 @@ def resolve_dispatch_model(
 
     ``model`` is None only when everything falls through to the provider default.
     ``decision_source`` is the receipt vocabulary
-    (``explicit`` / ``task-pin`` / ``task-tier(<band>)`` / ``plan-default`` /
-    ``plan-tier(<band>)`` / ``provider-default``). ``provider`` scopes tier
+    (``explicit`` / ``task-pin`` / ``task-difficulty(<band>)`` / ``plan-default`` /
+    ``plan-difficulty(<band>)`` / ``provider-default``). ``provider`` scopes band
     resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
     bypass the filter -- operator authority outranks routing (Locked Decision 4).
     """
@@ -211,18 +209,14 @@ def resolve_dispatch_model(
         return explicit, "explicit", ["explicit"]
     if task_model:
         return task_model, "task-pin", ["task-pin"]
-    effective_task_tier = task_difficulty or task_tier
-    if effective_task_tier:
-        model, chain = resolve_tier(effective_task_tier, snapshot=snapshot, provider=provider)
-        label = "difficulty" if task_difficulty else "tier"
-        return model, f"task-{label}({effective_task_tier.strip().lower()})", chain
+    if task_difficulty:
+        model, chain = resolve_tier(task_difficulty, snapshot=snapshot, provider=provider)
+        return model, f"task-difficulty({task_difficulty.strip().lower()})", chain
     if plan_model:
         return plan_model, "plan-default", ["plan-default"]
-    effective_plan_tier = plan_difficulty or plan_tier
-    if effective_plan_tier:
-        model, chain = resolve_tier(effective_plan_tier, snapshot=snapshot, provider=provider)
-        label = "difficulty" if plan_difficulty else "tier"
-        return model, f"plan-{label}({effective_plan_tier.strip().lower()})", chain
+    if plan_difficulty:
+        model, chain = resolve_tier(plan_difficulty, snapshot=snapshot, provider=provider)
+        return model, f"plan-difficulty({plan_difficulty.strip().lower()})", chain
     return None, "provider-default", ["provider-default"]
 
 
@@ -236,10 +230,11 @@ def node_model(
 ) -> Optional[str]:
     """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
 
-    Reads the node's own ``model`` pin and ``model_tier`` annotation and applies
+    Reads the node's own ``model`` pin and ``difficulty`` band and applies
     the precedence with an optional dispatch-time ``explicit`` override.
-    ``provider`` scopes tier resolution to the spawn harness so a tier never yields
-    a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
+    ``provider`` scopes band resolution to the spawn harness so a band never
+    yields a cross-harness ``<provider> --model <foreign>`` pick. When
+    ``provider`` is
     None it defaults to ``claude`` -- the bg substrate's own spawn default (see
     ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``), NOT the
     ambient/invoking harness. A bg worker is always claude regardless of which
@@ -253,7 +248,6 @@ def node_model(
         model, _source, _chain = resolve_dispatch_model(
             explicit=explicit,
             task_model=node.get("model"),
-            task_tier=node.get("model_tier"),
             task_difficulty=node.get("difficulty") if resolve_difficulty else None,
             snapshot=snapshot,
             provider=provider or "claude",

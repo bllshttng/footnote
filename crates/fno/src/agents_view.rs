@@ -1728,8 +1728,8 @@ pub fn lineage_layout<T>(
     // Defensive tail: nothing should reach here unemitted (every row is a root
     // or a descendant of one), but a forest the walk could not classify still
     // renders rather than vanishing.
-    for i in 0..n {
-        if !emitted[i] {
+    for (i, was_emitted) in emitted.iter().enumerate().take(n) {
+        if !was_emitted {
             order.push(i);
         }
     }
@@ -2491,6 +2491,22 @@ mod tests {
             rows.iter().find(|r| r.name == "live-one").unwrap().liveness,
             Liveness::Alive
         );
+    }
+
+    #[test]
+    fn full_harness_session_ids_remain_distinct_for_same_prefix() {
+        let raw = reg(
+            r#"{"name":"one","cwd":"/w","status":"working","harness":"codex",
+                "harness_session_id":"01abcdef-one"},
+               {"name":"two","cwd":"/w","status":"working","harness":"codex",
+                "harness_session_id":"01abcdef-two"}"#,
+        );
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let one = rows.iter().find(|row| row.name == "one").unwrap();
+        let two = rows.iter().find(|row| row.name == "two").unwrap();
+        assert_eq!(one.effective_identity(), Some("01abcdef-one"));
+        assert_eq!(two.effective_identity(), Some("01abcdef-two"));
+        assert_ne!(one.effective_identity(), two.effective_identity());
     }
 
     #[test]

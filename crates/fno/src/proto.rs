@@ -1576,6 +1576,9 @@ pub enum Command {
     /// (observer) client; external rows are never touched (the reap verb only
     /// knows the fno registry). The uppercase-`X` sibling of per-row `x`.
     ReapAgents,
+    /// Sweep positively dead stored squad members and the empty sideline rows
+    /// from the operator menu. The server re-folds the current identities.
+    SweepDead,
     /// (v30, x-7561) Stop a LIVE external claude-daemon row by its stable
     /// `attach_id` (8-hex). The server re-validates the exact live external
     /// catalog row (`external` + matching `attach_id`), durably records
@@ -1903,6 +1906,10 @@ pub enum ServerMsg {
         /// it (a blank lane would be worse) but says it is stale.
         #[serde(default)]
         backlog_stale: bool,
+        /// Positive dead-member candidates from the server's shared sweep
+        /// classifier, used by the sideline menu label.
+        #[serde(default)]
+        sweep_dead_count: usize,
     },
     /// Escape bytes syncing the client terminal to the newly focused pane's
     /// negotiated modes (bracketed paste, mouse reporting, DECCKM, ...).
@@ -2179,10 +2186,18 @@ pub struct TabLayout {
 pub struct PaneInfo {
     pub pane_id: u64,
     pub squad_id: u64,
+    /// The live workspace name, when this pane belongs to a named workspace.
+    /// Additive so workspace maintenance can apply `--include-named` to tabs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_name: Option<String>,
     pub tab_id: u64,
     pub cwd: String,
     pub child_pid: Option<u32>,
     pub title: Option<String>,
+    /// Positive shell-integrated evidence that this pane is pristine and idle.
+    /// Missing/false is never treated as empty by a cleanup caller.
+    #[serde(default)]
+    pub pristine_idle_shell: bool,
     /// (v51, x-1499) The pane's tab name and 1-based ordinal, so the human
     /// listing prints `tab=<name-or-·N> tab_id=<id>`. `None` for a pane
     /// mid-teardown (not in any tab) or on a pre-v51 reply.
@@ -2940,7 +2955,7 @@ pub(crate) fn legacy_global_yaml_state_dir_hint() -> Option<std::path::PathBuf> 
     // verb forever over no divergence.
     let mut under_config = false;
     let value = body.lines().find_map(|l| {
-        let indented = l.starts_with(|c| c == ' ' || c == '\t');
+        let indented = l.starts_with([' ', '\t']);
         let (key, val) = l.split_once(':')?;
         let key = key.trim();
         if !indented {
@@ -3031,6 +3046,7 @@ pub fn legacy_fallback_allowed() -> bool {
 /// (client.rs, x-0296's NEVER-stderr rule).
 static CONFIG_WARNING: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
 
+#[allow(dead_code)]
 fn record_config_warning(msg: String, remedy: String) {
     let _ = CONFIG_WARNING.set((msg, remedy));
 }
@@ -4318,6 +4334,7 @@ mod tests {
                 ],
                 backlog_lanes: vec![("in-progress".into(), 1), ("ready".into(), 56)],
                 backlog_stale: false,
+                sweep_dead_count: 0,
             },
             ServerMsg::ModeSync {
                 bytes: b"\x1b[?2004h\x1b[?1000l".to_vec(),
@@ -4449,10 +4466,12 @@ mod tests {
                 panes: vec![PaneInfo {
                     pane_id: 4,
                     squad_id: 1,
+                    squad_name: None,
                     tab_id: 7,
                     cwd: "/code/footnote".into(),
                     child_pid: Some(4242),
                     title: None,
+                    pristine_idle_shell: false,
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,

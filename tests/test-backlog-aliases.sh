@@ -122,6 +122,7 @@ plan_a="$TMP/plan-a.md"
 cat > "$plan_a" <<EOF
 ---
 title: Intake Test Plan
+created: 2026-05-05
 ---
 # Body
 

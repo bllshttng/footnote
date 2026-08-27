@@ -1492,7 +1492,7 @@ def _grid_lane_for(
 
         capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
         candidate, _chain = route_resolve.resolve_grid(
-            node.get("difficulty") or node.get("model_tier"),
+            node.get("difficulty"),
             node.get("priority"),
             capacity,
         )
@@ -2343,8 +2343,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             # x-571f: carry the model pin so _dispatch_one_dependent threads it.
             # difficulty rides alongside so the grid resolver sees the work axis.
             "model": e.get("model"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
-            "model_tier": e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             "cross_project": (e.get("project") or None) != (closed_project or None),
         })
     return out

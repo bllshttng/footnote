@@ -756,6 +756,10 @@ struct PaneEntry {
     /// disposition to see that its session is already running here.
     /// `None` for a shell pane or any non-resume run.
     resume_target: Option<String>,
+    /// A restore placeholder created because a worker could not be resumed.
+    /// This positive refusal marker is sweepable; it is not inferred from an
+    /// absent registry row.
+    refused_worker: Option<String>,
     /// (x-d401) When this pane last produced PTY output, stamped on the drain
     /// path itself so a pane with no `pane wait` watcher still records activity
     /// (`note_pane_output` returns early with zero subscribers, which is why
@@ -1516,8 +1520,8 @@ struct HeldWorker {
     cwd: String,
 }
 
-fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
-    let mut receipts: HashMap<String, HeldWorker> = HashMap::new();
+fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
+    let mut receipts: HashMap<(String, String), HeldWorker> = HashMap::new();
     for line in raw.lines() {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -1533,16 +1537,28 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             }
             Some("agent_removed") | Some("agent_row_reaped") => {
                 let session_id = data.get("harness_session_id").and_then(|v| v.as_str());
-                let name = data.get("name").and_then(|v| v.as_str());
-                receipts.retain(|id, facts| {
-                    session_id != Some(id.as_str()) && name != Some(facts.name.as_str())
+                let harness = data
+                    .get("harness")
+                    .or_else(|| data.get("provider"))
+                    .and_then(|v| v.as_str());
+                receipts.retain(|(receipt_harness, receipt_session), _| {
+                    if let (Some(harness), Some(session_id)) = (harness, session_id) {
+                        receipt_harness != harness || receipt_session != session_id
+                    } else {
+                        // An incomplete event cannot identify one receipt.
+                        // Reused names are not lifecycle identity.
+                        true
+                    }
                 });
                 continue;
             }
             Some("agent_spawned") => {}
             _ => continue,
         }
-        if data.get("substrate").and_then(|v| v.as_str()) != Some("pane") {
+        if !matches!(
+            data.get("substrate").and_then(|v| v.as_str()),
+            Some("pane") | Some("thread") | Some("bg")
+        ) {
             continue;
         }
         let Some(session_id) = data
@@ -1567,7 +1583,7 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
             continue;
         };
         receipts.insert(
-            session_id.to_string(),
+            (harness.to_string(), session_id.to_string()),
             HeldWorker {
                 name: name.to_string(),
                 harness: harness.to_string(),
@@ -1583,12 +1599,25 @@ fn parse_spawn_receipts(raw: &str) -> HashMap<String, HeldWorker> {
     receipts
 }
 
-fn load_spawn_receipts() -> HashMap<String, HeldWorker> {
+fn load_spawn_receipts() -> Result<HashMap<(String, String), HeldWorker>, String> {
     let path = agents_view::registry_path().with_file_name("events.jsonl");
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|raw| parse_spawn_receipts(&raw))
-        .unwrap_or_default()
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => Ok(parse_spawn_receipts(&raw)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+        Err(error) => Err(format!(
+            "spawn receipt store unreadable at {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn receipt_for_member<'a>(
+    receipts: &'a HashMap<(String, String), HeldWorker>,
+    member: &crate::squad_store::StoredMember,
+) -> Option<&'a HeldWorker> {
+    let harness = member.harness.as_deref()?;
+    let session_id = member.harness_session_id.as_deref()?;
+    receipts.get(&(harness.to_string(), session_id.to_string()))
 }
 
 struct Core {
@@ -1732,10 +1761,10 @@ struct Core {
     /// session on the same rollout, and `agent_rows()` presents the row
     /// pane-hosted while it lives. Lifetime = pane lifetime, swept on reap,
     /// never persisted.
-    worker_pane: HashMap<String, u64>,
-    /// Full harness session id -> resumed pane. This is the durable join when
-    /// registry cleanup rewrites the display name after process death.
-    worker_session_pane: HashMap<String, u64>,
+    worker_pane: HashMap<String, Vec<u64>>,
+    /// Full `(harness, harness session id)` -> resumed pane. This is the durable
+    /// join when registry cleanup rewrites the display name after process death.
+    worker_session_pane: HashMap<(String, String), u64>,
     /// Restart placeholders keyed by pane. Focusing one consumes the marker
     /// and resumes the persisted harness session into the same tree leaf.
     held_workers: HashMap<u64, HeldWorker>,
@@ -2004,6 +2033,68 @@ fn restore_member_cwd(
         Some(path) if is_dir(path) => (path.to_string(), None),
         Some(path) => (cwd0.to_string(), Some(path.to_string())),
         None => (cwd0.to_string(), None),
+    }
+}
+
+fn restore_worker_refusal_reason(
+    member: &crate::squad_store::StoredMember,
+    row: Option<&RegistryAgent>,
+    receipt_store_error: Option<&str>,
+    receipts: &HashMap<(String, String), HeldWorker>,
+) -> String {
+    if let Some(reason) = row
+        .and_then(Core::row_no_pane_reason)
+        .map(Core::no_pane_reason_text)
+    {
+        return reason.to_string();
+    }
+    let Some(harness) = member.harness.as_deref() else {
+        return "harness is unknown".into();
+    };
+    let Some(session_id) = member.harness_session_id.as_deref() else {
+        return "session id is missing".into();
+    };
+    if let Some(error) = receipt_store_error {
+        return error.to_string();
+    }
+    if receipt_for_member(receipts, member).is_none() {
+        return format!("spawn receipt is missing for {harness} session {session_id}");
+    }
+    format!("{harness} session {session_id} is not resumable")
+}
+
+fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
+    agent
+        .harness_session_id
+        .as_deref()
+        .or(agent.claude_session_uuid.as_deref())
+}
+
+fn worker_registry_match(
+    member: &crate::squad_store::StoredMember,
+    agent: &RegistryAgent,
+    worker_name: &str,
+) -> bool {
+    match (
+        member.harness.as_deref(),
+        member.harness_session_id.as_deref(),
+    ) {
+        (Some(harness), Some(session_id)) => {
+            agent.harness.as_deref() == Some(harness)
+                && agent_harness_session_id(agent) == Some(session_id)
+        }
+        _ => agent.name == worker_name,
+    }
+}
+
+fn worker_binding_key(member: &crate::squad_store::StoredMember) -> Option<String> {
+    let worker = member.worker.as_deref()?;
+    match (
+        member.harness.as_deref(),
+        member.harness_session_id.as_deref(),
+    ) {
+        (Some(harness), Some(session_id)) => Some(format!("worker:{harness}:{session_id}")),
+        _ => Some(worker.to_string()),
     }
 }
 
@@ -2822,7 +2913,7 @@ impl Core {
         {
             let id = self.next_pane_id;
             self.next_pane_id = id.saturating_add(1);
-            return Ok(id);
+            Ok(id)
         }
         #[cfg(not(test))]
         {
@@ -2881,6 +2972,7 @@ impl Core {
                 cmd,
                 account,
                 resume_target,
+                refused_worker: None,
                 last_output: Instant::now(),
                 stats: Arc::clone(&stats),
             },
@@ -2910,7 +3002,10 @@ impl Core {
         self.attached.retain(|_, p| *p != pid);
         // (x-5f7f) Same for the worker resume map: the pane died, so the row
         // returns to idle and resumable - never a mapping at a corpse.
-        self.worker_pane.retain(|_, p| *p != pid);
+        self.worker_pane.retain(|_, panes| {
+            panes.retain(|candidate| *candidate != pid);
+            !panes.is_empty()
+        });
         self.worker_session_pane.retain(|_, p| *p != pid);
         self.held_workers.remove(&pid);
         if let Some(tx) = self.pane_watch.remove(&pid) {
@@ -2975,28 +3070,31 @@ impl Core {
             .panes
             .iter()
             .map(|(&pid, entry)| {
-                let (squad_id, tab_id, cwd, tab_name, tab_ordinal) =
+                let (squad_id, squad_name, tab_id, cwd, tab_name, tab_ordinal) =
                     match self.session.find_pane(pid) {
                         Some((sid, ti)) => {
                             let sq = self.session.squad(sid).expect("find_pane live squad");
                             let dict = sq.tab_dict(ti);
                             (
                                 sid,
+                                sq.name.clone(),
                                 sq.tabs[ti].id,
                                 sq.canonical_cwd().to_string(),
                                 dict.as_ref().and_then(|d| d.name.clone()),
                                 dict.map(|d| d.ordinal),
                             )
                         }
-                        None => (0, 0, String::new(), None, None),
+                        None => (0, None, 0, String::new(), None, None),
                     };
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
+                    squad_name,
                     tab_id,
                     cwd,
                     child_pid: entry.pty.child_pid(),
                     title: entry.vt.osc_title().map(str::to_string),
+                    pristine_idle_shell: entry.cmd.is_none() && entry.vt.is_pristine_idle_shell(),
                     name: entry.name.clone(),
                     tab_name,
                     tab_ordinal,
@@ -5426,6 +5524,7 @@ impl Core {
         let pid = self.spawn_pane(rows, cols, cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(format!("{name} ({reason})"));
+            entry.refused_worker = Some(name.to_string());
         }
         self.write_restore_message(pid, &format!("{name} could not be resumed: {reason}"));
         Ok(pid)
@@ -5497,9 +5596,14 @@ impl Core {
             });
             tid
         };
-        self.worker_pane.insert(facts.name.clone(), pid);
-        self.worker_session_pane
-            .insert(facts.harness_session_id.clone(), pid);
+        self.worker_pane
+            .entry(facts.name.clone())
+            .or_default()
+            .push(pid);
+        self.worker_session_pane.insert(
+            (facts.harness.clone(), facts.harness_session_id.clone()),
+            pid,
+        );
         self.record_worker_member(
             sid,
             &facts.name,
@@ -5600,6 +5704,47 @@ impl Core {
                     m.cwd = Some(cwd);
                 }
             }
+            // (x-d33f) Re-derive the complete worker identity on every
+            // topology flush. A registry row can publish after placement, so
+            // a transient miss preserves the last durable pair rather than
+            // erasing it; a hit always replaces both fields authoritatively.
+            let worker_member_counts: HashMap<String, usize> = list
+                .iter()
+                .filter_map(|member| member.worker.clone())
+                .fold(HashMap::new(), |mut counts, worker| {
+                    *counts.entry(worker).or_default() += 1;
+                    counts
+                });
+            for member in list.iter_mut() {
+                let Some(worker) = member.worker.as_deref() else {
+                    continue;
+                };
+                let named_rows: Vec<&RegistryAgent> = self
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.name == worker)
+                    .collect();
+                let row = match (
+                    member.harness.as_deref(),
+                    member.harness_session_id.as_deref(),
+                ) {
+                    (Some(harness), Some(session_id)) => named_rows.iter().copied().find(|agent| {
+                        agent.harness.as_deref() == Some(harness)
+                            && agent_harness_session_id(agent) == Some(session_id)
+                    }),
+                    (None, None)
+                        if worker_member_counts.get(worker) == Some(&1)
+                            && named_rows.len() == 1 =>
+                    {
+                        named_rows.first().copied()
+                    }
+                    _ => None,
+                };
+                if let Some(facts) = row.and_then(Self::worker_facts) {
+                    member.harness = Some(facts.harness);
+                    member.harness_session_id = Some(facts.harness_session_id);
+                }
+            }
         }
         let members = self.squad_members.get(&sid).cloned().unwrap_or_default();
         if let Err(e) = crate::squad_store::upsert(&name, &key, &origins, &members) {
@@ -5625,16 +5770,15 @@ impl Core {
             .iter()
             .map(|(id, pane)| (*pane, id.clone()))
             .collect();
-        pane_owner_names.extend(
-            self.worker_pane
-                .iter()
-                .map(|(name, pane)| (*pane, name.clone())),
-        );
-        pane_owner_names.extend(
-            self.held_workers
-                .iter()
-                .map(|(pane, held)| (*pane, held.name.clone())),
-        );
+        if let Some(members) = self.squad_members.get(&sid) {
+            for member in members {
+                if let (Some(pane), Some(binding)) =
+                    (self.member_pane(member), worker_binding_key(member))
+                {
+                    pane_owner_names.insert(pane, binding);
+                }
+            }
+        }
         let pane_owner: HashMap<u64, &str> = pane_owner_names
             .iter()
             .map(|(pane, name)| (*pane, name.as_str()))
@@ -5736,6 +5880,7 @@ impl Core {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }),
         }
@@ -5774,24 +5919,82 @@ impl Core {
                     .map(|t| t.name.clone())
             })
             .flatten();
-        let harness_session_id = persisted_session_id.map(str::to_string).or_else(|| {
-            self.agents
-                .iter()
-                .find(|a| a.name == name)
-                .and_then(|a| a.harness_session_id.clone())
-        });
+        let named_rows: Vec<&RegistryAgent> =
+            self.agents.iter().filter(|a| a.name == name).collect();
+        let facts = match persisted_session_id {
+            Some(session_id) => {
+                let pair_rows: Vec<&RegistryAgent> = named_rows
+                    .iter()
+                    .copied()
+                    .filter(|a| agent_harness_session_id(a) == Some(session_id))
+                    .collect();
+                match pair_rows.as_slice() {
+                    [one] => Self::worker_facts(one),
+                    _ => None,
+                }
+            }
+            None => match named_rows.as_slice() {
+                [one] => Self::worker_facts(one),
+                _ => None,
+            },
+        };
+        let harness = facts.as_ref().map(|facts| facts.harness.clone());
+        let harness_session_id = persisted_session_id
+            .map(str::to_string)
+            .or_else(|| facts.as_ref().map(|facts| facts.harness_session_id.clone()));
         let members = self.squad_members.entry(sid).or_default();
-        match members
-            .iter_mut()
-            .find(|m| m.worker.as_deref() == Some(name))
-        {
+        let exact_identity = facts
+            .as_ref()
+            .map(|facts| (facts.harness.as_str(), facts.harness_session_id.as_str()));
+        let existing = exact_identity
+            .and_then(|(harness, session_id)| {
+                members.iter().position(|member| {
+                    member.worker.as_deref() == Some(name)
+                        && member.harness.as_deref() == Some(harness)
+                        && member.harness_session_id.as_deref() == Some(session_id)
+                })
+            })
+            .or_else(|| {
+                if named_rows.len() > 1 {
+                    return None;
+                }
+                let candidates: Vec<usize> = members
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, member)| {
+                        (member.worker.as_deref() == Some(name)).then_some(index)
+                    })
+                    .collect();
+                let [index] = candidates.as_slice() else {
+                    return None;
+                };
+                let member = &members[*index];
+                if exact_identity.is_some()
+                    && (member.harness.is_some() || member.harness_session_id.is_some())
+                {
+                    return None;
+                }
+                if let Some(session_id) = persisted_session_id {
+                    if member
+                        .harness_session_id
+                        .as_deref()
+                        .is_some_and(|existing| existing != session_id)
+                    {
+                        return None;
+                    }
+                }
+                Some(*index)
+            });
+        match existing.map(|index| &mut members[index]) {
             Some(m) if m.tombstone => {
                 m.tombstone = false;
                 m.tab_name = tab_name;
                 m.cwd = (!cwd.is_empty()).then(|| cwd.to_string());
+                m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
             Some(m) => {
+                m.harness = harness.clone().or(m.harness.clone());
                 m.harness_session_id = harness_session_id.or(m.harness_session_id.clone());
             }
             None => {
@@ -5802,6 +6005,7 @@ impl Core {
                     tab_name,
                     cwd,
                     worker: Some(name.to_string()),
+                    harness,
                     harness_session_id,
                 });
             }
@@ -5822,20 +6026,47 @@ impl Core {
 
     fn member_pane(&self, member: &crate::squad_store::StoredMember) -> Option<u64> {
         if let Some(worker) = member.worker.as_deref() {
-            return self.worker_pane.get(worker).copied().or_else(|| {
-                member
-                    .harness_session_id
-                    .as_deref()
-                    .and_then(|session_id| self.worker_session_pane.get(session_id).copied())
+            if let (Some(harness), Some(session_id)) = (
+                member.harness.as_deref(),
+                member.harness_session_id.as_deref(),
+            ) {
+                return self
+                    .worker_session_pane
+                    .get(&(harness.to_string(), session_id.to_string()))
+                    .copied()
                     .or_else(|| {
-                        self.held_workers.iter().find_map(|(pane, held)| {
-                            (held.name == worker
-                                || member.harness_session_id.as_deref()
-                                    == Some(held.harness_session_id.as_str()))
-                            .then_some(*pane)
-                        })
-                    })
-            });
+                        let matches: Vec<u64> = self
+                            .held_workers
+                            .iter()
+                            .filter(|(_, held)| {
+                                held.harness == harness && held.harness_session_id == session_id
+                            })
+                            .map(|(pane, _)| *pane)
+                            .collect();
+                        matches
+                            .as_slice()
+                            .first()
+                            .copied()
+                            .filter(|_| matches.len() == 1)
+                    });
+            }
+            return self
+                .unique_worker_pane_by_name(worker)
+                .ok()
+                .flatten()
+                .or_else(|| {
+                    let matches: Vec<u64> = self
+                        .held_workers
+                        .iter()
+                        .filter(|(_, held)| held.name == worker)
+                        .map(|(pane, _)| *pane)
+                        .collect();
+                    matches
+                        .as_slice()
+                        .first()
+                        .copied()
+                        .filter(|_| matches.len() == 1)
+                });
         }
         self.attached.get(&member.attach_id).copied()
     }
@@ -5847,6 +6078,69 @@ impl Core {
             .iter()
             .find(|t| tree::leaves(&t.root).contains(&pid))?;
         Some(tab.name.clone())
+    }
+
+    fn worker_pane_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
+        if let (Some(harness), Some(session_id)) =
+            (agent.harness.as_deref(), agent_harness_session_id(agent))
+        {
+            return self
+                .worker_session_pane
+                .get(&(harness.to_string(), session_id.to_string()))
+                .copied();
+        }
+        self.worker_pane
+            .get(&agent.name)
+            .and_then(|panes| (panes.len() == 1).then_some(panes[0]))
+    }
+
+    fn member_squad_for_agent(&self, agent: &RegistryAgent) -> Option<u64> {
+        let exact: Vec<u64> = match (agent.harness.as_deref(), agent_harness_session_id(agent)) {
+            (Some(harness), Some(session_id)) => self
+                .squad_members
+                .iter()
+                .filter_map(|(sid, members)| {
+                    members
+                        .iter()
+                        .any(|member| {
+                            member.worker.as_deref() == Some(agent.name.as_str())
+                                && member.harness.as_deref() == Some(harness)
+                                && member.harness_session_id.as_deref() == Some(session_id)
+                        })
+                        .then_some(*sid)
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        if exact.len() == 1 {
+            return exact.first().copied();
+        }
+        if exact.len() > 1 {
+            return None;
+        }
+        let legacy: Vec<u64> = self
+            .squad_members
+            .iter()
+            .filter_map(|(sid, members)| {
+                members
+                    .iter()
+                    .any(|member| {
+                        member.worker.as_deref() == Some(agent.name.as_str())
+                            && member.harness.is_none()
+                            && member.harness_session_id.is_none()
+                    })
+                    .then_some(*sid)
+            })
+            .collect();
+        (legacy.len() == 1).then(|| legacy[0])
+    }
+
+    fn unique_worker_pane_by_name(&self, name: &str) -> Result<Option<u64>, ()> {
+        match self.worker_pane.get(name) {
+            None => Ok(None),
+            Some(panes) if panes.len() == 1 => Ok(Some(panes[0])),
+            Some(_) => Err(()),
+        }
     }
 
     /// Write-through a raw upsert from captured fields (used when the in-session
@@ -5982,6 +6276,162 @@ impl Core {
         live_attach_ids_snapshot()
     }
 
+    /// Fold the cached registry rows into the same exact identity evidence the
+    /// standalone workspace-prune verb consumes. Unknown rows contribute no
+    /// verdict; only a positive `Alive` or `Dead` reading enters a set.
+    fn member_evidence(&self) -> crate::squad_store::MemberEvidence {
+        let mut evidence =
+            crate::squad_store::MemberEvidence::from_sets(HashSet::new(), HashSet::new());
+        for agent in &self.agents {
+            if let (Some(harness), Some(session_id)) =
+                (agent.harness.as_deref(), agent_harness_session_id(agent))
+            {
+                match agent.liveness {
+                    agents_view::Liveness::Alive => evidence.add_live_pair(harness, session_id),
+                    agents_view::Liveness::Dead => evidence.add_dead_pair(harness, session_id),
+                    agents_view::Liveness::Unmeasured => {}
+                }
+                continue;
+            }
+            let mut keys = Vec::new();
+            keys.push(agent.name.as_str());
+            if let Some(id) = agent.attach_id.as_deref() {
+                keys.push(id);
+            }
+            if let Some(id) = agent.effective_identity() {
+                keys.push(id);
+            }
+            let target = match agent.liveness {
+                agents_view::Liveness::Alive => true,
+                agents_view::Liveness::Dead => false,
+                agents_view::Liveness::Unmeasured => continue,
+            };
+            for key in keys {
+                if target {
+                    evidence.add_live(key);
+                } else {
+                    evidence.add_dead(key);
+                }
+            }
+        }
+        evidence
+    }
+
+    fn dead_sweep_count(&self) -> usize {
+        let mut evidence = self.member_evidence();
+        for entry in self.panes.values() {
+            if let Some(worker) = &entry.refused_worker {
+                evidence.add_dead(worker.clone());
+            }
+        }
+        self.squad_members
+            .values()
+            .flatten()
+            .filter(|member| {
+                matches!(
+                    evidence.verdict(member),
+                    crate::squad_store::MemberLiveness::Dead
+                )
+            })
+            .count()
+    }
+
+    fn worker_identity_published(&self, rows: &[RegistryAgent]) -> bool {
+        self.squad_members.values().flatten().any(|member| {
+            let Some(worker) = member.worker.as_deref() else {
+                return false;
+            };
+            let Some(agent) = rows.iter().find(|agent| agent.name == worker) else {
+                return false;
+            };
+            Self::worker_facts(agent).is_some()
+                && (member.harness.is_none() || member.harness_session_id.is_none())
+        })
+    }
+
+    /// Remove positively dead stored members from every surviving squad and
+    /// refresh the in-memory membership projection before the next Layout.
+    /// Registry-row cleanup remains the existing off-loop `fno-agents reap`
+    /// action, so one menu gesture covers both durable sideline stores.
+    fn sweep_dead_sideline(&mut self, client_id: u64) {
+        let refused: Vec<(u64, String)> = self
+            .panes
+            .iter()
+            .filter_map(|(&pid, entry)| {
+                entry
+                    .refused_worker
+                    .as_ref()
+                    .map(|worker| (pid, worker.clone()))
+            })
+            .collect();
+        let mut evidence = self.member_evidence();
+        for (_, worker) in &refused {
+            evidence.add_dead(worker.clone());
+        }
+        let live_cwds: Vec<String> = self.panes.values().map(|p| p.cwd.clone()).collect();
+        let origin_exists = |path: &str| Path::new(path).exists();
+        let now = crate::squad_store::now_epoch_secs();
+        let outcome = crate::squad_store::prune_with_evidence(
+            |squad| {
+                crate::squad_store::prune_decision_with_evidence(
+                    squad,
+                    true,
+                    &evidence,
+                    &live_cwds,
+                    &origin_exists,
+                    now,
+                )
+            },
+            &evidence,
+        );
+        match outcome {
+            Ok(outcome) => {
+                let loaded = crate::squad_store::load();
+                let identities: HashMap<(String, String), Vec<_>> = loaded
+                    .squads
+                    .into_iter()
+                    .map(|s| ((s.name, s.key), s.members))
+                    .collect();
+                let sids: Vec<u64> = self.squad_members.keys().copied().collect();
+                for sid in sids {
+                    let Some((name, key)) = self.squad_identity(sid) else {
+                        continue;
+                    };
+                    if let Some(members) = identities.get(&(name, key)) {
+                        self.squad_members.insert(sid, members.clone());
+                    } else {
+                        self.squad_members.insert(sid, Vec::new());
+                    }
+                }
+                // Refused restore placeholders are positive dead markers even
+                // when their registry row is gone. Remove their visible panes
+                // after the store pass; keep a last pane so the session's
+                // >=1-pane invariant remains intact.
+                let mut closed_placeholders = 0;
+                for (pid, _) in refused {
+                    if self.panes.len() <= 1 {
+                        break;
+                    }
+                    self.close_pane(pid);
+                    closed_placeholders += 1;
+                }
+                self.notice(
+                    client_id,
+                    format!(
+                        "swept {} dead member(s) and {} refused pane(s); kept {} live, {} unknown",
+                        outcome.members_reaped,
+                        closed_placeholders,
+                        outcome.members_kept_live,
+                        outcome.members_kept_unknown
+                    ),
+                );
+                self.reap_action(client_id);
+                self.push_layout(true);
+            }
+            Err(error) => self.notice(client_id, format!("sweep failed: {error}")),
+        }
+    }
+
     /// Materialize the persisted named squads at the first real attach (US2).
     /// `rows`/`cols` are the attaching client's dims; `home_sid` is its own cwd
     /// squad, restored as the active anchor afterward so the restored squads sit
@@ -6059,17 +6509,30 @@ impl Core {
         }
         let mut pruned_workers = 0usize;
         #[cfg(test)]
-        let hold_override = HOLD_WORKERS_OVERRIDE.with(|slot| *slot.borrow());
+        let hold_workers = HOLD_WORKERS_OVERRIDE.with(|slot| {
+            slot.borrow().unwrap_or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .as_deref()
+                    .map(crate::digest_overlay::mux_restore_hold_workers)
+                    .unwrap_or(true)
+            })
+        });
         #[cfg(not(test))]
-        let hold_override: Option<bool> = None;
-        let hold_workers = hold_override.unwrap_or_else(|| {
+        let hold_workers = {
             std::env::current_dir()
                 .ok()
                 .as_deref()
                 .map(crate::digest_overlay::mux_restore_hold_workers)
                 .unwrap_or(true)
-        });
-        let spawn_receipts = load_spawn_receipts();
+        };
+        let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
+            Ok(receipts) => (receipts, None),
+            Err(error) => {
+                self.notice_all(format!("restore: {error}"));
+                (HashMap::new(), Some(error))
+            }
+        };
         let mut worker_members_total = 0usize;
         let mut held_workers_total = 0usize;
         let mut refused_workers_total = 0usize;
@@ -6091,6 +6554,7 @@ impl Core {
             // (attach_id, pane, stored tab name). The tree lane places them by
             // slot; the legacy lane gives each its own tab.
             let mut member_panes: Vec<(String, u64, Option<String>)> = Vec::new();
+            let mut pane_aliases: HashMap<String, Option<u64>> = HashMap::new();
             // (x-c4d4) The zero-live-member fallback shell tab, if we create one;
             // a deferred template restore removes it once real template tabs land.
             let mut fallback_tid: Option<TabId> = None;
@@ -6125,20 +6589,26 @@ impl Core {
                     let worker_name = m.worker.as_deref().expect("checked above");
                     if hold_workers {
                         members.push(m.clone());
-                        let row = self.agents.iter().find(|agent| {
-                            agent.name == worker_name
-                                || m.harness_session_id.as_deref().is_some_and(|session_id| {
-                                    agent.harness_session_id.as_deref() == Some(session_id)
-                                        || agent.claude_session_uuid.as_deref() == Some(session_id)
-                                })
-                        });
+                        let matching_rows: Vec<&RegistryAgent> = self
+                            .agents
+                            .iter()
+                            .filter(|agent| worker_registry_match(m, agent, worker_name))
+                            .collect();
+                        let row = match matching_rows.as_slice() {
+                            [one] => Some(*one),
+                            [] => None,
+                            _ => {
+                                self.notice_all(format!(
+                                    "restore: {worker_name} is ambiguous; resume by exact session id"
+                                ));
+                                None
+                            }
+                        };
                         let held = row
                             .filter(|agent| Self::row_resumable(agent))
                             .and_then(Self::worker_facts)
                             .or_else(|| {
-                                m.harness_session_id
-                                    .as_deref()
-                                    .and_then(|session_id| spawn_receipts.get(session_id))
+                                receipt_for_member(&spawn_receipts, m)
                                     .cloned()
                                     .map(|mut facts| {
                                         facts.name = worker_name.to_string();
@@ -6146,27 +6616,38 @@ impl Core {
                                     })
                             });
                         let pane = if let Some(facts) = held {
-                            self.hold_worker_pane(facts, rows, cols, &cwd0).map(|pid| {
-                                held_workers_total += 1;
-                                pid
-                            })
+                            self.hold_worker_pane(facts, rows, cols, &cwd0)
+                                .inspect(|_| {
+                                    held_workers_total += 1;
+                                })
                         } else {
-                            let reason = row
-                                .and_then(Self::row_no_pane_reason)
-                                .map(Self::no_pane_reason_text)
-                                .unwrap_or("spawn receipt is missing");
-                            self.refused_worker_pane(worker_name, reason, rows, cols, &cwd0)
-                                .map(|pid| {
+                            let reason = restore_worker_refusal_reason(
+                                m,
+                                row,
+                                receipt_store_error.as_deref(),
+                                &spawn_receipts,
+                            );
+                            self.refused_worker_pane(worker_name, &reason, rows, cols, &cwd0)
+                                .inspect(|_| {
                                     refused_workers_total += 1;
-                                    pid
                                 })
                         };
                         match pane {
-                            Ok(pid) => member_panes.push((
-                                worker_name.to_string(),
-                                pid,
-                                m.tab_name.clone(),
-                            )),
+                            Ok(pid) => {
+                                let binding = worker_binding_key(m)
+                                    .unwrap_or_else(|| worker_name.to_string());
+                                if binding != worker_name {
+                                    match pane_aliases.entry(worker_name.to_string()) {
+                                        std::collections::hash_map::Entry::Vacant(entry) => {
+                                            entry.insert(Some(pid));
+                                        }
+                                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                                            entry.insert(None);
+                                        }
+                                    }
+                                }
+                                member_panes.push((binding, pid, m.tab_name.clone()));
+                            }
                             Err(error) => self.notice_all(format!(
                                 "restore: could not hold {worker_name}: {error}"
                             )),
@@ -6198,6 +6679,7 @@ impl Core {
                         tab_name: m.tab_name.clone(),
                         cwd: m.cwd.clone(),
                         worker: None,
+                        harness: None,
                         harness_session_id: None,
                     });
                     continue;
@@ -6238,6 +6720,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         });
                     }
@@ -6251,6 +6734,7 @@ impl Core {
                             tab_name: m.tab_name.clone(),
                             cwd: m.cwd.clone(),
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         });
                     }
@@ -6265,10 +6749,15 @@ impl Core {
             // half of one exists, per-tab, without touching the others.
             let mut placed: HashSet<u64> = HashSet::new();
             if !ps.tab_trees.is_empty() {
-                let pane_by_id: HashMap<&str, u64> = member_panes
+                let mut pane_by_id: HashMap<String, u64> = member_panes
                     .iter()
-                    .map(|(id, pid, _)| (id.as_str(), *pid))
+                    .map(|(id, pid, _)| (id.clone(), *pid))
                     .collect();
+                for (alias, pane) in pane_aliases {
+                    if let Some(pane) = pane {
+                        pane_by_id.entry(alias).or_insert(pane);
+                    }
+                }
                 for st in &ps.tab_trees {
                     let mut slot_pane: HashMap<&str, u64> = HashMap::new();
                     let mut missing: Vec<&str> = Vec::new();
@@ -7332,6 +7821,7 @@ impl Core {
             backlog: self.routed_backlog(),
             backlog_lanes: self.backlog_lanes.clone(),
             backlog_stale: self.backlog_stale,
+            sweep_dead_count: self.dead_sweep_count(),
         }
     }
 
@@ -7519,14 +8009,7 @@ impl Core {
                                 .and_then(|id| self.attached.get(id))
                                 .copied()
                                 == Some(pid)
-                                || self.worker_pane.get(a.name.as_str()).copied() == Some(pid)
-                                || a.harness_session_id
-                                    .as_deref()
-                                    .or(a.claude_session_uuid.as_deref())
-                                    .and_then(|session_id| {
-                                        self.worker_session_pane.get(session_id).copied()
-                                    })
-                                    == Some(pid)
+                                || self.worker_pane_for_agent(a) == Some(pid)
                         }
                     });
                     // One lookup: liveness AND the bare-pane label read the same
@@ -7611,7 +8094,8 @@ impl Core {
                                 pane_id: Some(pid),
                                 badge: None,
                                 reason: None,
-                                exited: pane_dead,
+                                exited: pane_dead
+                                    || e.is_some_and(|entry| entry.refused_worker.is_some()),
                                 unmeasured: false,
                                 answerable: None,
                                 attach_id: None,
@@ -7675,21 +8159,13 @@ impl Core {
                     // membership FIRST (cwd ownership only as a fallback), so
                     // the panel shows it where ResumeAgent will actually place
                     // the pane - the two lookups must agree.
-                    let squad = self
-                        .squad_members
-                        .iter()
-                        .find(|(_, ms)| {
-                            ms.iter()
-                                .any(|m| m.worker.as_deref() == Some(a.name.as_str()))
-                        })
-                        .map(|(sid, _)| *sid)
-                        .or_else(|| {
-                            self.session
-                                .squads
-                                .iter()
-                                .find(|s| s.owns_path(&a.cwd))
-                                .map(|s| s.id)
-                        });
+                    let squad = self.member_squad_for_agent(a).or_else(|| {
+                        self.session
+                            .squads
+                            .iter()
+                            .find(|s| s.owns_path(&a.cwd))
+                            .map(|s| s.id)
+                    });
                     out.push(AgentRow {
                         spawned_by_session: a.spawned_by_session.clone(),
                         harness_session_id: a.harness_session_id.clone(),
@@ -7727,13 +8203,16 @@ impl Core {
                     // Truly paneless (bg/headless/daemon/roster). Its attach map
                     // pointed at no live pane (else a pane row claimed it), so it
                     // stays watch-only attachable - the AC1-FR revert.
-                    let squad = mission_squad_for(&a.name).or_else(|| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|s| s.owns_path(&a.cwd))
-                            .map(|s| s.id)
-                    });
+                    let squad = self
+                        .member_squad_for_agent(a)
+                        .or_else(|| mission_squad_for(&a.name))
+                        .or_else(|| {
+                            self.session
+                                .squads
+                                .iter()
+                                .find(|s| s.owns_path(&a.cwd))
+                                .map(|s| s.id)
+                        });
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
@@ -9232,10 +9711,8 @@ impl Core {
                 let mut focus_pid = pid;
                 if let Some(held) = self.held_workers.get(&pid).cloned() {
                     let current = self.agents.iter().find(|agent| {
-                        agent.name == held.name
-                            || agent.harness_session_id.as_deref()
-                                == Some(held.harness_session_id.as_str())
-                            || agent.claude_session_uuid.as_deref()
+                        agent.harness.as_deref() == Some(held.harness.as_str())
+                            && agent_harness_session_id(agent)
                                 == Some(held.harness_session_id.as_str())
                     });
                     // (x-d401) The SESSION-AWARE gate, the same one
@@ -9608,26 +10085,68 @@ impl Core {
                 // second writer. A stale mapping (the pane died) is dropped
                 // and falls through to a fresh resume. Same reconcile-first
                 // shape as AttachAgent.
-                if let Some(&mapped) = self.worker_pane.get(&name) {
-                    if self.panes.contains_key(&mapped) {
-                        if let Some((sid, ti)) = self.session.find_pane(mapped) {
-                            let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
-                            self.set_view(client_id, sid, tid);
-                            if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                                tab.focus = mapped;
+                match self.unique_worker_pane_by_name(&name) {
+                    Err(()) => {
+                        self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                        return Flow::Continue;
+                    }
+                    Ok(Some(mapped)) => {
+                        if self.panes.contains_key(&mapped) {
+                            if let Some((sid, ti)) = self.session.find_pane(mapped) {
+                                let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                                self.set_view(client_id, sid, tid);
+                                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
+                                    tab.focus = mapped;
+                                }
+                                self.notice(client_id, "already resumed; focused existing pane");
+                                self.push_layout(true);
+                                return Flow::Continue;
                             }
-                            self.notice(client_id, "already resumed; focused existing pane");
-                            self.push_layout(true);
+                        } else {
+                            self.worker_pane.remove(&name);
+                        }
+                    }
+                    Ok(None) => {}
+                }
+                let stored_members: Vec<_> = self
+                    .squad_members
+                    .values()
+                    .flatten()
+                    .filter(|member| {
+                        !member.tombstone && member.worker.as_deref() == Some(name.as_str())
+                    })
+                    .cloned()
+                    .collect();
+                if stored_members.len() > 1 {
+                    self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                    return Flow::Continue;
+                }
+                let stored_member = stored_members.into_iter().next();
+                let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
+                    Ok(receipts) => (receipts, None),
+                    Err(error) => (HashMap::new(), Some(error)),
+                };
+                let facts = {
+                    let candidates: Vec<&RegistryAgent> = self
+                        .agents
+                        .iter()
+                        .filter(|a| {
+                            stored_member
+                                .as_ref()
+                                .map(|member| worker_registry_match(member, a, &name))
+                                .unwrap_or(a.name == name)
+                        })
+                        .collect();
+                    let a = match candidates.as_slice() {
+                        [] => {
+                            self.notice(client_id, "no such agent");
                             return Flow::Continue;
                         }
-                    } else {
-                        self.worker_pane.remove(&name);
-                    }
-                }
-                let facts = {
-                    let Some(a) = self.agents.iter().find(|a| a.name == name) else {
-                        self.notice(client_id, "no such agent");
-                        return Flow::Continue;
+                        [one] => *one,
+                        _ => {
+                            self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
+                            return Flow::Continue;
+                        }
                     };
                     let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
                         self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
@@ -9635,20 +10154,44 @@ impl Core {
                     if live_pane || !self.row_resumable_in_session(a) {
                         None // refused; notice below
                     } else {
-                        Self::worker_facts(a)
+                        Self::worker_facts(a).or_else(|| {
+                            let member = stored_member.as_ref()?;
+                            receipt_for_member(&fresh_receipts, member).cloned().map(
+                                |mut receipt| {
+                                    receipt.name = name.clone();
+                                    receipt
+                                },
+                            )
+                        })
                     }
                 };
-                let Some(facts) = facts else {
+                let Some(mut facts) = facts else {
+                    if let Some(error) = receipt_error {
+                        self.notice(client_id, error);
+                        return Flow::Continue;
+                    }
                     self.notice(client_id, "agent is not resumable");
                     return Flow::Continue;
                 };
+                if let Some(worker) = stored_member
+                    .as_ref()
+                    .and_then(|member| member.worker.clone())
+                {
+                    // The persisted member remains keyed by its original
+                    // worker name even when the registry display name changed.
+                    // Keep that join key while using the exact pair for lookup.
+                    facts.name = worker;
+                }
                 let sid = self
                     .squad_members
                     .iter()
                     .find(|(_, members)| {
-                        members
-                            .iter()
-                            .any(|member| member.worker.as_deref() == Some(name.as_str()))
+                        members.iter().any(|member| {
+                            stored_member
+                                .as_ref()
+                                .is_some_and(|stored| stored == member)
+                                || member.worker.as_deref() == Some(name.as_str())
+                        })
                     })
                     .map(|(sid, _)| *sid)
                     .or_else(|| {
@@ -10126,6 +10669,7 @@ impl Core {
                             tab_name: None,
                             cwd: None,
                             worker: None,
+                            harness: None,
                             harness_session_id: None,
                         },
                     );
@@ -10226,6 +10770,13 @@ impl Core {
                 // up-to-20s subprocess, since reap has no row-level state.
                 self.notice(client_id, "reaping exited agents…");
                 self.reap_action(client_id);
+                Flow::Continue
+            }
+            Command::SweepDead => {
+                // The sideline menu's global bulk action re-folds its target
+                // set here, after confirmation, so a row that became live is
+                // retained and a row that became unknown is not guessed dead.
+                self.sweep_dead_sideline(client_id);
                 Flow::Continue
             }
             Command::StopExternal { attach_id, name: _ } => {
@@ -11073,9 +11624,17 @@ impl Core {
                 branches,
                 tails,
             } => {
+                let identity_published = self.worker_identity_published(&rows);
                 self.agents = rows;
                 self.branch_by_cwd = branches;
                 self.tail_by_session = tails;
+                if identity_published {
+                    // A registry row can publish after a worker pane was
+                    // recorded. Force the existing debounce funnel to flush
+                    // the newly authoritative identity instead of waiting for
+                    // another topology mutation.
+                    self.mark_topology_dirty();
+                }
                 // (x-caef) The debounce flush for topology captures: a drag's
                 // events mark dirty without writing; the 1s registry tick is
                 // the coalescing timer that turns them into one store write.
@@ -16847,6 +17406,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-one".into()),
                 },
                 crate::squad_store::StoredMember {
@@ -16855,6 +17415,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness: Some("codex".into()),
                     harness_session_id: Some("codex-session-two".into()),
                 },
             ],
@@ -16928,16 +17489,16 @@ mod tests {
         let (trees, _) = core.stored_tab_trees(sid).unwrap();
         assert!(
             trees.iter().flat_map(|tree| &tree.slots).any(|slot| {
-                matches!(&slot.binding, LayoutBinding::Fno(id) if id == "t-codex-one")
+                matches!(&slot.binding, LayoutBinding::Fno(id) if id == "worker:codex:codex-session-one")
             }),
-            "topology capture keeps the held worker binding, not a shell"
+            "topology capture keeps the exact held worker binding, not a name-only join or shell"
         );
         let tid = core.session.squad(sid).unwrap().tabs[ti].id;
         core.clients[0].view = (sid, tid);
         set_resume_program(&["/bin/cat"]);
         let _resume_guard = ResumeProgramGuard;
         core.command(1, Command::FocusPane(held_pid));
-        let resumed_pid = core.worker_pane["t-codex-one"];
+        let resumed_pid = core.worker_pane["t-codex-one"][0];
         assert_ne!(resumed_pid, held_pid, "focus swaps in the harness process");
         assert!(
             !core.panes.contains_key(&held_pid),
@@ -16967,10 +17528,113 @@ mod tests {
     fn spawn_receipt_recovers_the_session_after_the_registry_name_is_gone() {
         let raw = r#"{"type":"agent_spawned","data":{"name":"old-name","provider":"codex","harness_session_id":"full-session","cwd":"/repo","model":"gpt-5.6-sol","substrate":"pane"}}"#;
         let receipts = parse_spawn_receipts(raw);
-        let receipt = &receipts["full-session"];
+        let receipt = receipts
+            .get(&(String::from("codex"), String::from("full-session")))
+            .expect("full receipt");
         assert_eq!(receipt.name, "old-name");
         assert_eq!(receipt.harness, "codex");
         assert_eq!(receipt.cwd, "/repo");
+    }
+
+    #[test]
+    fn spawn_receipt_accepts_thread_and_one_release_bg_alias() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"thread-worker","provider":"codex","harness_session_id":"thread-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"legacy-worker","provider":"claude","harness_session_id":"legacy-session","substrate":"bg"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 2);
+        assert_eq!(
+            receipts
+                .get(&(String::from("codex"), String::from("thread-session")))
+                .map(|receipt| receipt.harness.as_str()),
+            Some("codex")
+        );
+        assert_eq!(
+            receipts
+                .get(&(String::from("claude"), String::from("legacy-session")))
+                .map(|receipt| receipt.harness.as_str()),
+            Some("claude")
+        );
+    }
+
+    #[test]
+    fn spawn_receipts_keep_same_session_ids_distinct_across_harnesses() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"codex-worker","provider":"codex","harness_session_id":"same-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"claude-worker","provider":"claude","harness_session_id":"same-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"codex-worker","provider":"codex","harness_session_id":"same-session"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(
+            receipts
+                .get(&(String::from("claude"), String::from("same-session")))
+                .map(|receipt| receipt.name.as_str()),
+            Some("claude-worker")
+        );
+    }
+
+    #[test]
+    fn incomplete_removal_event_cannot_revoke_a_reused_name() {
+        let raw = concat!(
+            r#"{"type":"agent_spawned","data":{"name":"reused","provider":"codex","harness_session_id":"old-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_spawned","data":{"name":"reused","provider":"claude","harness_session_id":"new-session","substrate":"thread"}}"#,
+            "\n",
+            r#"{"type":"agent_removed","data":{"name":"reused","harness_session_id":"old-session"}}"#,
+        );
+        let receipts = parse_spawn_receipts(raw);
+        assert_eq!(receipts.len(), 2);
+    }
+
+    #[test]
+    fn restore_refuses_a_receipt_when_the_stored_harness_is_unknown() {
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("worker".into()),
+            harness: None,
+            harness_session_id: Some("full-session".into()),
+        };
+        let receipts = HashMap::from([(
+            (String::from("codex"), String::from("full-session")),
+            HeldWorker {
+                name: "worker".into(),
+                harness: "codex".into(),
+                harness_session_id: "full-session".into(),
+                cwd: "/repo".into(),
+            },
+        )]);
+        assert_eq!(
+            restore_worker_refusal_reason(&member, None, None, &receipts),
+            "harness is unknown"
+        );
+    }
+
+    #[test]
+    fn worker_restore_match_prefers_the_persisted_identity_pair_over_name() {
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("reused-name".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("old-session".into()),
+        };
+        let mut wrong = bg_row("reused-name", "/repo", None);
+        wrong.harness = Some("codex".into());
+        wrong.harness_session_id = Some("new-session".into());
+        let mut right = wrong.clone();
+        right.harness_session_id = Some("old-session".into());
+        assert!(!worker_registry_match(&member, &wrong, "reused-name"));
+        assert!(worker_registry_match(&member, &right, "reused-name"));
     }
 
     #[test]
@@ -16978,18 +17642,18 @@ mod tests {
         let raw = concat!(
             r#"{"type":"agent_spawned","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_removed","data":{"name":"removed","harness_session_id":"removed-session"}}"#,
+            r#"{"type":"agent_removed","data":{"name":"removed","provider":"codex","harness_session_id":"removed-session"}}"#,
             "\n",
             r#"{"type":"agent_spawned","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_row_reaped","data":{"name":"reaped","harness_session_id":"reaped-session"}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"reaped","provider":"codex","harness_session_id":"reaped-session"}}"#,
         );
         assert!(parse_spawn_receipts(raw).is_empty());
 
         let dormant = concat!(
             r#"{"type":"agent_spawned","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","cwd":"/repo","substrate":"pane"}}"#,
             "\n",
-            r#"{"type":"agent_row_reaped","data":{"name":"dormant","harness_session_id":"dormant-session","resumable":true}}"#,
+            r#"{"type":"agent_row_reaped","data":{"name":"dormant","provider":"claude","harness_session_id":"dormant-session","resumable":true}}"#,
         );
         assert_eq!(parse_spawn_receipts(dormant).len(), 1);
     }
@@ -17012,6 +17676,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: Some("worker".into()),
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -17090,6 +17755,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-live".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
@@ -17098,6 +17764,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-reaped".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
             ],
@@ -17166,6 +17833,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-one".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
                 crate::squad_store::StoredMember {
@@ -17174,6 +17842,7 @@ mod tests {
                     tab_name: None,
                     cwd: None,
                     worker: Some("t-codex-two".into()),
+                    harness: None,
                     harness_session_id: None,
                 },
             ],
@@ -19902,6 +20571,7 @@ mod tests {
                 tab_name: None,
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -19915,6 +20585,7 @@ mod tests {
             tab_name: None,
             cwd: None,
             worker: None,
+            harness: None,
             harness_session_id: None,
         }
     }
@@ -20602,6 +21273,252 @@ mod tests {
     }
 
     #[test]
+    fn persist_squad_refreshes_worker_harness_identity_from_registry() {
+        let _s = StoreScratch::new("persist-worker-identity");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            Tab {
+                name: None,
+                id: 7,
+                root: Node::Leaf(100),
+                focus: 100,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("worker".into()),
+                harness: None,
+                harness_session_id: None,
+            }],
+        );
+        let mut row = bg_row("worker", "/repo", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id = Some("full-codex-session".into());
+        core.agents = vec![row];
+
+        core.persist_squad(7);
+
+        let member = crate::squad_store::load().squads[0].members[0].clone();
+        assert_eq!(member.harness.as_deref(), Some("codex"));
+        assert_eq!(
+            member.harness_session_id.as_deref(),
+            Some("full-codex-session")
+        );
+    }
+
+    #[test]
+    fn persist_squad_does_not_bind_an_ambiguous_worker_name() {
+        let _s = StoreScratch::new("persist-worker-ambiguous");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        core.squad_members.insert(
+            7,
+            vec![crate::squad_store::StoredMember {
+                attach_id: String::new(),
+                tombstone: false,
+                tab_name: None,
+                cwd: None,
+                worker: Some("reused-name".into()),
+                harness: None,
+                harness_session_id: None,
+            }],
+        );
+        let mut first = bg_row("reused-name", "/repo", None);
+        first.harness = Some("codex".into());
+        first.harness_session_id = Some("session-one".into());
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        core.persist_squad(7);
+
+        let member = crate::squad_store::load().squads[0].members[0].clone();
+        assert!(member.harness.is_none());
+        assert!(member.harness_session_id.is_none());
+    }
+
+    #[test]
+    fn record_worker_member_keeps_repeated_names_as_distinct_members() {
+        let _s = StoreScratch::new("record-worker-repeated-name");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        let mut first = bg_row("reused-name", "/repo", None);
+        first.harness = Some("codex".into());
+        first.harness_session_id = Some("session-one".into());
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        core.record_worker_member(7, "reused-name", 100, "/repo", Some("session-one"));
+        core.record_worker_member(7, "reused-name", 101, "/repo", Some("session-two"));
+
+        let members = &core.squad_members[&7];
+        assert_eq!(members.len(), 2);
+        assert!(members.iter().any(|member| {
+            member.harness.as_deref() == Some("codex")
+                && member.harness_session_id.as_deref() == Some("session-one")
+        }));
+        assert!(members.iter().any(|member| {
+            member.harness.as_deref() == Some("claude")
+                && member.harness_session_id.as_deref() == Some("session-two")
+        }));
+    }
+
+    #[test]
+    fn record_worker_member_does_not_collapse_ambiguous_registry_names() {
+        let _s = StoreScratch::new("record-worker-ambiguous-name");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        let first = bg_row("reused-name", "/repo", None);
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        core.record_worker_member(7, "reused-name", 100, "/repo", None);
+        core.record_worker_member(7, "reused-name", 101, "/repo", None);
+
+        assert_eq!(core.squad_members[&7].len(), 2);
+    }
+
+    #[test]
+    fn persist_squad_does_not_copy_one_identity_to_repeated_name_members() {
+        let _s = StoreScratch::new("persist-worker-repeated-name");
+        let mut core = empty_core();
+        core.session.add_squad(
+            7,
+            vec!["/repo".into()],
+            Some("workers".into()),
+            leaf_tab(7, 100),
+        );
+        core.squad_members.insert(
+            7,
+            vec![
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("reused-name".into()),
+                    harness: None,
+                    harness_session_id: None,
+                },
+                crate::squad_store::StoredMember {
+                    attach_id: String::new(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: Some("reused-name".into()),
+                    harness: None,
+                    harness_session_id: None,
+                },
+            ],
+        );
+        let mut row = bg_row("reused-name", "/repo", None);
+        row.harness = Some("codex".into());
+        row.harness_session_id = Some("session-one".into());
+        core.agents = vec![row];
+
+        core.persist_squad(7);
+
+        let members = &crate::squad_store::load().squads[0].members;
+        assert!(members
+            .iter()
+            .all(|member| member.harness.is_none() && member.harness_session_id.is_none()));
+    }
+
+    #[test]
+    fn agent_rows_assign_repeated_worker_names_by_exact_identity() {
+        let mut core = empty_core();
+        core.session_name = "main".into();
+        core.session
+            .add_squad(7, vec!["/one".into()], Some("one".into()), leaf_tab(7, 100));
+        core.session
+            .add_squad(8, vec!["/two".into()], Some("two".into()), leaf_tab(8, 101));
+        let member = |harness: &str, session_id: &str| crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: Some("/elsewhere".into()),
+            worker: Some("reused-name".into()),
+            harness: Some(harness.into()),
+            harness_session_id: Some(session_id.into()),
+        };
+        core.squad_members
+            .insert(7, vec![member("codex", "session-one")]);
+        core.squad_members
+            .insert(8, vec![member("claude", "session-two")]);
+        let mut first = bg_row("reused-name", "/elsewhere", None);
+        first.harness = Some("codex".into());
+        first.harness_session_id = Some("session-one".into());
+        let mut second = first.clone();
+        second.harness = Some("claude".into());
+        second.harness_session_id = Some("session-two".into());
+        core.agents = vec![first, second];
+
+        let rows: Vec<_> = core
+            .agent_rows()
+            .into_iter()
+            .filter(|row| row.name == "reused-name")
+            .collect();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].squad, Some(7));
+        assert_eq!(rows[1].squad, Some(8));
+    }
+
+    #[test]
+    fn member_pane_uses_harness_session_pair_when_worker_names_repeat() {
+        let mut core = empty_core();
+        core.worker_pane.insert("reused-name".into(), vec![10, 11]);
+        core.worker_session_pane
+            .insert(("codex".into(), "session-one".into()), 10);
+        core.worker_session_pane
+            .insert(("claude".into(), "session-two".into()), 11);
+        let first = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: None,
+            worker: Some("reused-name".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("session-one".into()),
+        };
+        let second = crate::squad_store::StoredMember {
+            harness: Some("claude".into()),
+            harness_session_id: Some("session-two".into()),
+            ..first.clone()
+        };
+        assert_eq!(core.member_pane(&first), Some(10));
+        assert_eq!(core.member_pane(&second), Some(11));
+        assert!(core.unique_worker_pane_by_name("reused-name").is_err());
+    }
+
+    #[test]
     fn persist_squad_writes_named_workspace_and_dupe_is_taken() {
         let _s = StoreScratch::new("persist-named");
         let mut core = empty_core();
@@ -20831,6 +21748,7 @@ mod tests {
                 tab_name: Some("old".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -20957,6 +21875,7 @@ mod tests {
                 tab_name: Some("home".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );
@@ -21017,6 +21936,7 @@ mod tests {
                 tab_name: Some("src".into()),
                 cwd: None,
                 worker: None,
+                harness: None,
                 harness_session_id: None,
             }],
         );

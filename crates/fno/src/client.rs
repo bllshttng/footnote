@@ -937,6 +937,8 @@ struct View {
     /// (sessions cannot rename), so the row can never go stale.
     session: String,
     layout: LayoutView,
+    /// Server-authoritative count from the shared dead-member classifier.
+    sweep_dead_count: usize,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
@@ -1372,6 +1374,10 @@ enum ConfirmKind {
         squad: Option<u64>,
         dead: usize,
     },
+    /// Sweep the current dead-member set across the sideline stores. The
+    /// server re-folds candidates on Enter; `dead` only names the count shown
+    /// in the centered prompt.
+    SweepDead { dead: usize },
     /// Close one tab (the tab menu's destructive item). The captured stable
     /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
     /// VIEWED tab server-side, so Enter first selects the captured tab then
@@ -1985,7 +1991,7 @@ fn build_card_menu(
     match crate::link::plan_link(card.plan_path.as_deref().map(Path::new), obsidian) {
         crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::NoPlan) => {
             rows.push(PopupRow::Entry {
-                glyph: "📄".into(),
+                glyph: "▤".into(),
                 label: "Open plan".into(),
                 hint: "no plan".into(),
                 enabled: false,
@@ -1996,7 +2002,7 @@ fn build_card_menu(
         crate::link::PlanLink::Unavailable(crate::link::PlanUnavailable::ObsidianOff) => {}
         crate::link::PlanLink::Obsidian { .. } => {
             rows.push(PopupRow::Entry {
-                glyph: "📄".into(),
+                glyph: "▤".into(),
                 label: "Open plan".into(),
                 hint: String::new(),
                 enabled: true,
@@ -2005,7 +2011,7 @@ fn build_card_menu(
         }
         crate::link::PlanLink::PlainFile(_) => {
             rows.push(PopupRow::Entry {
-                glyph: "📄".into(),
+                glyph: "▤".into(),
                 label: "Open plan (file)".into(),
                 hint: String::new(),
                 enabled: true,
@@ -2191,6 +2197,7 @@ enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
+    SweepDead,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -2349,7 +2356,16 @@ async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
+#[cfg(test)]
 fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
+    build_sideline_menu_with_count(anchor, update, 0)
+}
+
+fn build_sideline_menu_with_count(
+    anchor: Anchor,
+    update: Option<&UpdateOutcome>,
+    dead_count: usize,
+) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -2379,10 +2395,12 @@ fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPop
         }
         _ => {}
     }
+    rows.push(entry("♺", &format!("Sweep dead ({dead_count})")));
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
+    actions.push(AuxAction::SweepDead);
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);
@@ -2462,6 +2480,7 @@ impl View {
             term,
             session,
             layout,
+            sweep_dead_count: 0,
             frames: HashMap::new(),
             panel_on: true,
             density,
@@ -3644,9 +3663,19 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
+        self.aux = Some(build_sideline_menu_with_count(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.dead_sweep_count(),
+        ));
         self.aux_esc.clear();
         self.update_probe_want = true;
+    }
+
+    /// Read the server's positive-dead count from the same classifier the
+    /// confirmed sweep invokes. Unknown and live rows are excluded.
+    fn dead_sweep_count(&self) -> usize {
+        self.sweep_dead_count
     }
 
     /// Rebuild an already-open sideline MENU so a landing update probe shows
@@ -3664,7 +3693,11 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
+        let mut menu = build_sideline_menu_with_count(
+            anchor,
+            self.update_outcome.as_ref(),
+            self.dead_sweep_count(),
+        );
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
@@ -5053,7 +5086,7 @@ impl View {
                     None,
                     None,
                     ChromeHit::Cmds(vec![Command::SelectTab(tab.id)]),
-                    &[s.name.clone()],
+                    std::slice::from_ref(&s.name),
                 ));
                 // Plain panes of the tab (v22): a pane already shown as an agent
                 // row is skipped (the agent row is the richer view of the same
@@ -6878,6 +6911,9 @@ impl View {
             ConfirmKind::ClearDead { dead, .. } => {
                 format!("clear {dead} dead row(s) in {label}?")
             }
+            ConfirmKind::SweepDead { dead } => {
+                format!("sweep {dead} dead sideline row(s)?")
+            }
             // A tab close is a GROUP close on the wire: the server reaps every
             // leaf in the tab, not the focused pane. Say the count when there is
             // more than one, so the prompt names what the Enter destroys. Read
@@ -6900,7 +6936,10 @@ impl View {
             .footer("enter confirm · esc cancel")
             .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
         let lines = [self.confirm_text(action)];
-        let anchor = if matches!(&action.action, ConfirmKind::CloseTab { .. }) {
+        let anchor = if matches!(
+            &action.action,
+            ConfirmKind::CloseTab { .. } | ConfirmKind::SweepDead { .. }
+        ) {
             OverlayAnchor::Center
         } else {
             OverlayAnchor::At {
@@ -8377,6 +8416,7 @@ fn row_is_inert(drow: &DisplayRow) -> bool {
     )
 }
 
+#[allow(clippy::type_complexity)]
 fn append_sorted_agent_group<'a>(
     out: &mut Vec<(DisplayRow<'a>, usize)>,
     group: &mut Vec<(Vec<(DisplayRow<'a>, usize)>, &'a AgentRow)>,
@@ -10553,6 +10593,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
+                sweep_dead_count,
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -10566,6 +10607,7 @@ async fn attach_and_run(
                     backlog_lanes,
                     backlog_stale,
                 });
+                view.sweep_dead_count = sweep_dead_count;
                 break;
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
@@ -10959,8 +11001,9 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, sweep_dead_count }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
+                    view.sweep_dead_count = sweep_dead_count;
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -12755,6 +12798,7 @@ async fn confirm_keys(
         }
         // Most confirms are one command; clear-dead (x-f300) fans out to one
         // Remove per exited row, so the commit path speaks in a list.
+        let is_sweep = matches!(&action.action, ConfirmKind::SweepDead { .. });
         let cmds = match action.action {
             ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
@@ -12795,8 +12839,16 @@ async fn confirm_keys(
                 }
                 picked
             }
+            ConfirmKind::SweepDead { dead } => {
+                if dead > 0 && view.dead_sweep_count() == 0 {
+                    view.set_notice("swept 0; state changed before confirmation".into());
+                    Vec::new()
+                } else {
+                    vec![Command::SweepDead]
+                }
+            }
         };
-        if cmds.is_empty() {
+        if cmds.is_empty() && !is_sweep {
             view.set_notice("nothing left to clear".into());
         }
         for cmd in cmds {
@@ -13788,6 +13840,14 @@ async fn execute_aux_action(
         AuxAction::OpenSettings => view.aux = Some(view.build_settings_modal()),
         AuxAction::OpenUpdate => {
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
+        }
+        AuxAction::SweepDead => {
+            let dead = view.dead_sweep_count();
+            view.aux = None;
+            view.open_confirm(ConfirmAction {
+                action: ConfirmKind::SweepDead { dead },
+                label: "sideline".into(),
+            });
         }
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
@@ -22895,7 +22955,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         row_menu_keys(&mut v, &[key], &mut buf).await.unwrap();
         assert_eq!(
-            v.rename.as_ref().map(|(t, _)| t.clone()),
+            v.rename.as_ref().map(|(t, _)| *t),
             Some(super::RenameTarget::Tab(want)),
             "the advertised key opened the rename overlay for this tab"
         );
@@ -24727,8 +24787,85 @@ mod tests {
             })
             .collect();
         assert_eq!(labels[0], "update ready");
-        assert_eq!(labels[1], "keybinds");
+        assert_eq!(labels[1], "Sweep dead (0)");
+        assert_eq!(labels[2], "keybinds");
         assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
+    }
+
+    #[test]
+    fn sideline_menu_shows_counted_bmp_recycle_sweep() {
+        let menu = build_sideline_menu_with_count(Anchor::Center, None, 7);
+        let i = menu
+            .popup
+            .rows
+            .iter()
+            .position(|row| {
+                matches!(
+                    row,
+                    PopupRow::Entry { glyph, label, .. }
+                        if glyph == "♺" && label == "Sweep dead (7)"
+                )
+            })
+            .expect("counted sweep entry");
+        let action_i = menu
+            .popup
+            .rows
+            .iter()
+            .take(i + 1)
+            .filter(|row| matches!(row, PopupRow::Entry { .. }))
+            .count()
+            - 1;
+        assert_eq!(menu.actions[action_i], AuxAction::SweepDead);
+        assert!(crate::popup::menu_glyph_is_bmp("♺"));
+        assert!(!crate::popup::menu_glyph_is_bmp("📄"));
+        assert_eq!(
+            menu.actions
+                .iter()
+                .filter(|action| **action == AuxAction::Detach)
+                .count(),
+            1,
+            "the global detach slot remains distinct"
+        );
+    }
+
+    #[tokio::test]
+    async fn sideline_sweep_confirm_reuses_centered_action_and_rechecks_count() {
+        let mut v = view_with_agents(vec![lifecycle_row("dead", true, false)]);
+        v.term = (30, 100);
+        v.sweep_dead_count = 1;
+        assert_eq!(v.dead_sweep_count(), 1);
+        v.open_sideline_menu(Anchor::Center);
+        let sweep = v
+            .aux
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|action| *action == AuxAction::SweepDead)
+            .unwrap();
+        v.aux.as_mut().unwrap().popup.sel = sweep;
+        let mut buf = Vec::new();
+        aux_execute_selected(&mut v, &mut buf).await.unwrap();
+        assert!(matches!(
+            v.confirm.as_ref().map(|action| &action.action),
+            Some(ConfirmKind::SweepDead { dead: 1 })
+        ));
+        let overlay = v.confirm_overlay_layout(30, v.confirm.as_ref().unwrap());
+        assert!(overlay
+            .framed
+            .lines
+            .first()
+            .is_some_and(|line| line.text.starts_with('┌')));
+
+        v.layout.agents.clear();
+        v.sweep_dead_count = 0;
+        assert_eq!(v.dead_sweep_count(), 0);
+        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "zero candidates sends no stale sweep");
+        assert!(v
+            .notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("swept 0")));
     }
 
     /// AC3-HP mirrored client-side: not-ready builds the menu with no row.

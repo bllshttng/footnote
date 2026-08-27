@@ -63,6 +63,11 @@ def root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # what a bare pytest process looks like. Declare the attended case here so
     # each test states the presence it is exercising instead of inheriting it.
     monkeypatch.setenv("FNO_THINK_SPAWN_PRESENCE", "attended")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: OwnedHarnessIdentity(None, None, (), "empty"),
+    )
+    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
     # resolve_repo_root is @cache'd and is warmed with the REAL worktree root
     # before this fixture runs. Without the clear, session resolution reads the
     # live target-state.md instead of this sandbox, and the ownership tests

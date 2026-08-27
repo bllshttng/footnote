@@ -41,6 +41,35 @@ That last gap carries a reap hazard behind an opt-in setting rather than a live 
 
 The wider point is the one to take from this page. A single flag is covering two different claims. "Has a durable session lane" and "has a driver fno can steer" are not the same assertion. One flag standing for both is the shape AGENTS.md warns about under *never infer the axis from a value*.
 
+## Three lanes, and which one you actually need
+
+Before reading the protocol below, rule it out. Codex has three re-entry lanes and only one of them needs an RPC. A flag often does the job. Reaching past it for the protocol is the expensive mistake this section exists to prevent.
+
+| lane | PTY | settings it carries | drives a turn with nobody watching |
+|---|---|---|---|
+| `codex resume <id> "<prompt>"` | required | `--cd`, `-s/--sandbox`, `--add-dir`, `-a/--ask-for-approval`, `-m/--model`, `--dangerously-bypass-hook-trust`, `-c` | no |
+| `codex exec resume <id>` | no | `-c` only | yes, one turn per process |
+| `codex app-server` | no | typed params on `thread/resume` | yes, many turns per process |
+
+**`codex resume` is the right tool for materialise-on-selection.** It needs no driver. It takes the prompt as a positional argument, so it resumes and drives one turn in a single command. A row holding an id and a cwd survives any server restart on its own, because the rollout on disk is the durable object. The pane is disposable by design.
+
+Two flags on that lane close the modals recorded as blocking unattended restore. `--cd <DIR>` sets the working root. Codex then never renders its "use session directory or current directory" prompt. That prompt defaults to the canonical checkout, and the correct answer is the worktree. `--dangerously-bypass-hook-trust` runs enabled hooks without persisted trust, which clears the hooks-trust gate. Neither needs a protocol and both were answered by hand three times on 2026-08-25.
+
+**What rules `codex resume` out is not capability, it is the terminal.** With stdin redirected it exits 1 in under a tenth of a second:
+
+```
+$ codex resume <id> --cd <dir> -s danger-full-access -a never "..." < /dev/null
+Error: stdin is not a terminal
+```
+
+So a worker that must RECEIVE a turn while nobody is looking cannot use it. The only way into a running TUI is keystrokes at a pane. That path yields `typed (pane <id>)` rather than delivery. It also refuses a review verb outright while a task runs.
+
+**That unattended case is the only one that needs more than a flag.** `codex exec resume` answers most of it. It needs no PTY and carries settings through `-c`. Its per-turn boot is roughly ten seconds, against a held connection's fraction of one. On turns that run for minutes that is a few percent, not a barrier.
+
+What the protocol adds over `codex exec resume` is narrower than a feature list suggests. It is steering or interrupting a turn already in flight, which needs a turn id that `codex exec resume` never emits. And it is `review/start`, which returns a `reviewThreadId` and is the only route by which an unattended codex worker can be reviewed at all. That second one is an integrity property rather than a convenience, for the reason given under *A pane worker is not a hosted thread*.
+
+Pick by the question being asked. A human coming back to a session wants `codex resume`. A worker taking one more turn wants `codex exec resume`. A worker that must be steered and reviewed unattended wants the protocol.
+
 ## The bit stays false, and that is not a formality
 
 `cli/src/fno/agents/harness_capabilities.toml` holds `thread = false` for codex. The bit is evidence of a working driver with its own unattended journey test. It is never an aspiration. `harness_map.py`'s rule is that it is never inherited.

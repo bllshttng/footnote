@@ -7,7 +7,7 @@ from unittest.mock import patch
 import psutil
 import pytest
 
-from fno.claims.session_pid import resolve_session_pid
+from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
 
 
 class _FakeProc:
@@ -41,7 +41,7 @@ class _FakeProc:
         return self._get(self._cmdline)
 
     def parent(self):
-        return self._parent
+        return self._get(self._parent)
 
 
 def _chain(*specs):
@@ -143,6 +143,16 @@ def test_walk_returns_none_on_negative_start_pid():
         os.environ.pop("FNO_SESSION_PID", None)
         with patch("psutil.Process", side_effect=ValueError("invalid pid")):
             assert resolve_session_pid(from_pid=-1) is None
+
+
+def test_process_list_permission_error_degrades_to_unproven_identity():
+    """Managed macOS sandboxes can deny psutil's parent-process census."""
+    child = _FakeProc(10, "bash", "/bin/bash", parent=PermissionError("sysctl denied"))
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("FNO_SESSION_PID", None)
+        with patch("psutil.Process", return_value=child):
+            assert resolve_session_pid(from_pid=10) is None
+            assert resolve_session_harness(from_pid=10) is None
 
 
 def test_env_override_non_positive_ignored():

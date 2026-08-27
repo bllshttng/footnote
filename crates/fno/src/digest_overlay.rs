@@ -472,6 +472,7 @@ pub(crate) fn mux_restore_hold_workers(cwd: &Path) -> bool {
 /// project tier would silently split those external callers off a project's
 /// sessions. Explicit isolation (`FNO_CONFIG`, inherited by every subprocess
 /// an isolated environment spawns) is the supported isolation for the mux.
+#[allow(dead_code)]
 pub(crate) fn config_explicit_top_str(key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env_os("FNO_CONFIG") {
         return read_top_file(&PathBuf::from(explicit), key);
@@ -506,9 +507,10 @@ fn global_config_toml() -> Option<PathBuf> {
 /// a lower-priority candidate (its `_prefer_toml` keeps both files). Exposed
 /// for the state-root resolver's divergence warning: a state_dir that lives
 /// only in this file is invisible to every TOML-only reader here.
+#[allow(dead_code)]
 pub(crate) fn global_settings_yaml_sibling() -> Option<PathBuf> {
     non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
-        .map(|p| PathBuf::from(p))
+        .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/settings.yaml")))
         .filter(|p| p.is_file())
 }
@@ -558,6 +560,7 @@ fn read_nested_file(path: &Path, section: &str, subsection: &str, key: &str) -> 
     )
 }
 
+#[allow(dead_code)]
 fn read_top_file(path: &Path, key: &str) -> Option<String> {
     read_top_value(&std::fs::read_to_string(path).ok()?, key)
 }

@@ -2965,7 +2965,9 @@ def _intake_impl(
             )
 
         locked_mutate_graph(_graph_path(), claim_mutator)
-        typer.echo(f'claimed {claim_id} via {claim_source}: "{spec["title"]}"')
+        typer.echo(
+            f'claimed {claim_id} via {claim_source}: "{spec["title"]}"'
+        )
         # Mirror nav fields onto the just-linked plan of the CLAIMED node too -
         # this branch returns early, so the append-path projection never runs.
         # Routed through the converger so parent_slug is injected consistently.
@@ -2985,7 +2987,14 @@ def _intake_impl(
         es.append(node)
         return es
 
-    locked_mutate_graph(_graph_path(), mutator)
+    try:
+        locked_mutate_graph(_graph_path(), mutator)
+    except ValueError as exc:
+        # Build-time refusals (the difficulty gate, an invalid band) land as
+        # a clean one-line error on the single-file lane; the multi lane
+        # already caught these per-file to skip, not abort, the batch.
+        typer.echo(f"error: intake refused: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     destination = roadmap_id if roadmap_id else "backlog"
     typer.echo(f'intake {new_id_holder[0]} -> {destination}: "{spec["title"]}"')
 
@@ -3105,7 +3114,7 @@ def cmd_intake(
 # -- update --
 
 
-@cli.command("note", hidden=True)
+@cli.command("note")
 def cmd_note(
     task_id: str = typer.Argument(..., help="Node id to append a progress note to."),
     text: str = typer.Argument(..., help="Progress note text (one line)."),
@@ -3119,6 +3128,7 @@ def cmd_note(
     ``task_done``/``run_summary`` (x-2057); it is also hand-runnable.
     """
     from fno.graph.store import append_progress_note
+    from fno.claims.self_identity import resolve_self_identity
 
     text = text.strip()
     if not text:
@@ -3126,6 +3136,14 @@ def cmd_note(
         raise typer.Exit(code=1)
 
     note = {"ts": datetime.now(timezone.utc).isoformat(), "text": text}
+    try:
+        identity = resolve_self_identity()
+    except Exception:  # noqa: BLE001 - an unprovable identity must not lose the note
+        identity = None
+    if identity is not None and identity.session_id:
+        note["source_session_id"] = identity.session_id
+    if identity is not None and identity.harness:
+        note["source_harness"] = identity.harness
     found, _ = append_progress_note(_graph_path(), task_id, note)
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
@@ -3180,10 +3198,11 @@ def cmd_update(
         "--model",
         help="Pin the model dispatchers launch this node's worker on (x-571f), e.g. fable|opus|sonnet or a full provider-model id. Single non-whitespace token. Pass 'null' to clear (revert to provider default).",
     ),
-    model_tier: Optional[str] = typer.Option(
+    _model_tier_tombstone: Optional[str] = typer.Option(
         None,
         "--model-tier",
-        help="Pin a minimum quality tier (high|medium|low) resolved to the cheapest reachable model at dispatch from the benchmark snapshot. Outranked by an exact --model. Pass 'null' to clear.",
+        hidden=True,
+        help="Retired: the work-difficulty axis is --difficulty.",
     ),
     batch: Optional[str] = typer.Option(
         None,
@@ -3308,6 +3327,7 @@ def cmd_update(
         ),
     ),
 ) -> None:
+    from fno._flag_aliases import refuse_retired_model_tier
     from fno.graph._constants import (
         PRIORITY_ORDER,
         has_node_id_prefix,
@@ -3324,6 +3344,8 @@ def cmd_update(
         _would_exceed_epic_depth,
     )
     from fno.graph._constants import EPIC_NEST_MAX_DEPTH
+
+    refuse_retired_model_tier(_model_tier_tombstone)
 
     if not has_node_id_prefix(task_id):
         typer.echo(
@@ -3760,39 +3782,20 @@ def cmd_update(
             except ValueError as exc:
                 typer.echo(f"fno backlog update: {exc}", err=True)
                 raise typer.Exit(code=2)
-            if revised_difficulty != node.get("difficulty"):
-                node["difficulty"] = revised_difficulty
-                # Same attributable trail the birth paths keep: a manual
-                # revision is the estimate most likely to have changed hands.
-                node.setdefault("difficulty_history", []).append(
-                    {
-                        "value": revised_difficulty,
-                        "source": "update",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    }
-                )
+            # The one canonical-write shape, shared with the claim lane: the
+            # drain rides the write, and a manual revision that keeps the
+            # band is a no-op on the history trail.
+            from fno.graph._constants import write_canonical_difficulty
+
+            write_canonical_difficulty(
+                node,
+                revised_difficulty,
+                "update",
+                datetime.now(timezone.utc).isoformat(),
+                history_on="change",
+            )
         if model is not None:
             node["model"] = None if model.lower() == "null" else model
-        if model_tier is not None:
-            typer.echo(
-                "warning: --model-tier is deprecated; use --difficulty",
-                err=True,
-            )
-            if model_tier.lower() == "null":
-                node["model_tier"] = None
-                node["difficulty"] = None
-            else:
-                try:
-                    band = normalize_difficulty(model_tier)
-                except ValueError:
-                    typer.echo(
-                        f"fno backlog update: invalid --model-tier {model_tier!r}; "
-                        "expected high, medium, or low.",
-                        err=True,
-                    )
-                    raise typer.Exit(code=2)
-                node["model_tier"] = band
-                node["difficulty"] = band
         if type_ is not None:
             node["type"] = type_
         if public is not None:
@@ -4577,13 +4580,10 @@ def cmd_next(
             "cwd": e.get("cwd"),
             "size": e.get("size"),
             "plan_path": e.get("plan_path"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
             # active-backlog drain can prefer it over cfg.model.
-            # model_tier rides alongside it so the dispatch-time tier resolver
-            # sees the annotation (else it silently falls back to the default).
             "model": e.get("model"),
-            "model_tier": e.get("model_tier"),
             # x-0676: the per-node dispatch overrides must ride in the next-JSON so
             # `advance`'s resolver routing (US1) actually fires for real graph nodes
             # (which come from this summary), not only for tests that inject them.
@@ -4989,15 +4989,13 @@ def cmd_ready(
             "project": e.get("project"),
             "cwd": e.get("cwd"),
             "parent": e.get("parent"),
-            "difficulty": e.get("difficulty") or e.get("model_tier"),
+            "difficulty": e.get("difficulty"),
             # select_lane_fill's dispatch-time collision gate compares plan file
             # surfaces; without this it has nothing to read.
             "plan_path": e.get("plan_path"),
             # x-571f: carry the model pin so the lane-fill dispatcher (select_lane_fill
             # -> _ready_nodes -> `fno backlog ready`) can thread it into the spawn.
-            # model_tier rides alongside so the tier resolver sees the annotation.
             "model": e.get("model"),
-            "model_tier": e.get("model_tier"),
         }
         for e in ready
     ]
@@ -9998,6 +9996,39 @@ def cmd_reconcile(
     closure_refused: Optional[str] = None
     supersession_files_by_pr: dict[int, list[str]] = {}
     entries = read_graph(_graph_path())
+    # x-baef: leftover model_tier rows read as no band everywhere now (the
+    # compat read died with the field), so the daily sweep names them until
+    # the one-shot migration clears the key. Self-extinguishing: zero rows,
+    # zero lines, and the migrated graph never trips it again. The split
+    # comes from the migration's own classifier, so the prescription printed
+    # here can never drift from the verdict the verb delivers.
+    from fno.graph.migrations import split_retired_tier_rows
+
+    def _name_ids(ids: list[str]) -> str:
+        # The one truncation shape both advisories share; a third copy is
+        # how the cap drifts between them.
+        return ", ".join(ids[:5]) + ("..." if len(ids) > 5 else "")
+
+    _drainable, _needs_decision = split_retired_tier_rows(entries)
+    if _drainable:
+        typer.echo(
+            f"reconcile: {len(_drainable)} row(s) still carry the retired "
+            "model_tier key ("
+            + _name_ids(_drainable)
+            + "); run `fno backlog migrate-difficulty --apply` (same-band "
+            "pairs drain, band-less rows gain their band)",
+            err=True,
+        )
+    if _needs_decision:
+        typer.echo(
+            f"reconcile: {len(_needs_decision)} row(s) need a hand-picked "
+            "band (divergent or unparseable model_tier; "
+            + _name_ids(_needs_decision)
+            + "); migrate-difficulty refuses them - pick the band with "
+            "`fno backlog update <id> --difficulty <band>`, which also "
+            "clears the retired key",
+            err=True,
+        )
     if pr_number is not None:
         from fno.pr.closure import (
             ClosureQueryError,
@@ -12059,6 +12090,37 @@ def cmd_migrate_priorities(
     typer.echo(json.dumps(receipt, sort_keys=True))
 
 
+@cli.command("migrate-difficulty", hidden=True)
+def cmd_migrate_difficulty(
+    apply: bool = typer.Option(
+        False, "--apply", help="Move each model_tier band onto difficulty and drop the retired key."
+    ),
+) -> None:
+    """Dry-run or apply the one-shot model_tier -> difficulty migration."""
+    from fno.graph.migrations import migrate_model_tier
+    from fno.graph.store import locked_mutate_graph, read_graph
+
+    def _run(entries: list[dict]) -> dict:
+        try:
+            return migrate_model_tier(entries, apply=apply)
+        except ValueError as exc:
+            typer.echo(f"fno backlog migrate-difficulty: {exc}", err=True)
+            raise typer.Exit(code=2)
+
+    if apply:
+        holder: list[dict] = []
+
+        def mutator(entries: list[dict]) -> list[dict]:
+            holder.append(_run(entries))
+            return entries
+
+        locked_mutate_graph(_graph_path(), mutator)
+        receipt = holder[0]
+    else:
+        receipt = _run(read_graph(_graph_path()))
+    typer.echo(json.dumps(receipt, sort_keys=True))
+
+
 # -- rank --
 
 
@@ -12814,8 +12876,15 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
     from fno.graph._constants import normalize_difficulty
 
     raw_difficulty = frontmatter.get("difficulty")
-    if raw_difficulty is None:
-        raw_difficulty = frontmatter.get("model_tier")
+    if raw_difficulty is None and frontmatter.get("model_tier") is not None:
+        # Same loss-signal as the intake lane (x-baef): the claim reads the
+        # canonical key only, so a plan still spelling model_tier must hear
+        # the band was dropped rather than wonder why the node has none.
+        typer.echo(
+            f"warning: {plan_path}: frontmatter model_tier is retired and no "
+            "longer read; set difficulty: low|medium|high to carry the band",
+            err=True,
+        )
     for entry in es:
         if entry.get("id") != claim_id:
             continue
@@ -12824,18 +12893,33 @@ def _apply_claim_in_place(es, claim_id: str, *, plan_path: str, spec: dict, proj
         if raw_difficulty is not None:
             try:
                 revised_difficulty = normalize_difficulty(raw_difficulty)
-            except ValueError as exc:
-                typer.echo(f"warning: {exc}; difficulty left unchanged", err=True)
-            else:
-                entry["difficulty"] = revised_difficulty
-                entry.setdefault("difficulty_history", []).append(
-                    {
-                        "value": revised_difficulty,
-                        "source": "blueprint",
-                        "ts": datetime.now(timezone.utc).isoformat(),
-                    }
+            except (ValueError, AttributeError, TypeError):
+                # AttributeError joins ValueError: a non-string difficulty
+                # dies inside strip()/lower() before the band check; warn and
+                # leave the band unchanged rather than traceback mid-claim.
+                typer.echo(
+                    f"warning: invalid difficulty {raw_difficulty!r} "
+                    "(expected one of: low, medium, high); "
+                    "difficulty left unchanged",
+                    err=True,
                 )
-        if claimed_type != DEFAULT_NODE_TYPE and entry.get("type") != claimed_type:
+            else:
+                # The one canonical-write shape, shared with cmd_update; the
+                # claim records every canonical write (the filed-versus-
+                # revised delta counts confirmations too).
+                from fno.graph._constants import write_canonical_difficulty
+
+                write_canonical_difficulty(
+                    entry,
+                    revised_difficulty,
+                    "blueprint",
+                    datetime.now(timezone.utc).isoformat(),
+                    history_on="always",
+                )
+        if (
+            claimed_type != DEFAULT_NODE_TYPE
+            and entry.get("type") != claimed_type
+        ):
             # `add` and `update` both refuse a write that would make a
             # third epic level; a doc-frontmatter lane that skips the cap
             # would be the decorative guard this whole change is about.
@@ -13034,11 +13118,8 @@ def _do_intake_multi(
                         f'  would claim: "{spec["title"]}"  (plan: {f})  (claims {prep["id"]})'
                     )
                     _apply_claim_in_place(
-                        preview_entries,
-                        prep["id"],
-                        plan_path=f,
-                        spec=spec,
-                        project=cli_project,
+                        preview_entries, prep["id"], plan_path=f,
+                        spec=spec, project=cli_project,
                     )
                     continue
                 # Grow the preview graph the way the real mutator grows its
@@ -14023,6 +14104,7 @@ _TRACKER_OWNED_VERBS = frozenset(
         "note",
         "remove",
         "migrate-priorities",
+        "migrate-difficulty",
         "reopen",
         "supersede",
         "unsupersede",

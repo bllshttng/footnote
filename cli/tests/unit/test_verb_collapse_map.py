@@ -64,7 +64,7 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    assert len(mapped) == 524, (
+    assert len(mapped) == 525, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
@@ -150,9 +150,12 @@ def test_live_baseline_matches_the_projected_allocation():
     # +4 for the hidden `law` proposal verbs (prepare, enact, resume,
     # inspect), each baselined in this PR.
     # x-6233 folds: +6 for the inbox mounts (decide, decisions, and the four
-    # law verbs under their new home), -1 for the retired runtime root.
+    # law verbs under their new home), -1 for the retired runtime root, which
+    # carried main to 127.
+    # +1 for `law set`, the direct operator writer baselined in this PR.
+    # +1 for `inbox law set`, the mounted spelling present on current main.
     # Bumped to the live count at rebase time, not a round number.
-    assert len(leaves) <= 127
+    assert len(leaves) <= 129
     assert "fno-agents" in leaves
 
 

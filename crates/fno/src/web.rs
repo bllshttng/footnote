@@ -113,12 +113,12 @@ fn graph_html_path_from_state_root(state_root: &Path) -> PathBuf {
 fn graph_html_path() -> PathBuf {
     #[cfg(not(test))]
     {
-        return graph_html_path_from_state_root(&crate::proto::mux_sidecar_root());
+        graph_html_path_from_state_root(&crate::proto::mux_sidecar_root())
     }
     #[cfg(test)]
     {
         let graph = crate::backlog_view::graph_path();
-        return graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")));
+        graph_html_path_from_state_root(graph.parent().unwrap_or_else(|| Path::new(".")))
     }
 }
 

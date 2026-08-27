@@ -25,6 +25,52 @@ def test_plan_help_renders():
     assert "graduate" in result.stdout
 
 
+def test_plan_validate_execution_refuses_post_gate_no_difficulty(tmp_path):
+    """x-baef round-5: validate-plan.sh runs --execution, which never reaches
+    PlanFrontmatter, so the difficulty gate must fire in THAT scope - a
+    post-gate plan with no difficulty is refused at authoring time, quoting
+    the bands; the on-gate twin passes the gate."""
+    post_gate = tmp_path / "post-gate.md"
+    post_gate.write_text(
+        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-27\n---\n# T\n\nBody.\n"
+    )
+    result = runner.invoke(app, ["do", "plan", "validate", str(post_gate), "--execution"])
+    assert result.exit_code == 1, result.output
+    assert "difficulty is required" in result.output
+    assert "low, medium, high" in result.output
+
+    # Round-12: undatable created is LENIENT at the authoring scope -
+    # validate-plan.sh dates those plans itself (filename date, tolerant
+    # reads), so the gate defers instead of refusing; the refusal the
+    # minting lanes raise never appears here.
+    no_created = tmp_path / "no-created.md"
+    no_created.write_text("---\nnode: x-baef\nstatus: ready\n---\n# T\n\nBody.\n")
+    import json as _json
+
+    r3 = runner.invoke(
+        app, ["do", "plan", "validate", str(no_created), "--execution", "--json"]
+    )
+    payload = _json.loads(r3.output)
+    assert not any(
+        "cannot read created" in v["message"] for v in payload["violations"]
+    ), "authoring scope defers undatable created to validate-plan.sh's own dating"
+
+    on_gate = tmp_path / "on-gate.md"
+    on_gate.write_text(
+        "---\nnode: x-baef\nstatus: ready\ncreated: 2026-08-26\n---\n"
+        "# T\n\n## Execution Strategy\n\n```yaml\n"
+        "execution_mode: sequential\n"
+        "waves:\n  - wave: 1\n    mode: sequential\n    name: w\n    tasks: ['1.1']\n"
+        "tasks:\n  - id: '1.1'\n    title: t\n    surface: ['cli/x.py']\n"
+        "    verify: pytest cli/x.py -q\n"
+        "    acceptance: [AC1-ERR]\n"
+        "```\n"
+    )
+    result2 = runner.invoke(app, ["do", "plan", "validate", str(on_gate), "--execution"])
+    assert result2.exit_code == 0, result2.output
+    assert "difficulty is required" not in result2.output
+
+
 def test_plan_stamp_help_renders():
     result = runner.invoke(app, ["do", "plan", "stamp", "--help"])
     assert result.exit_code == 0

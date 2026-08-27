@@ -779,9 +779,16 @@ def test_backlog_note_missing_node_returns_not_found(tmp_graph):
     assert found is False
 
 
-def test_backlog_note_cli_verb(tmp_graph):
+def test_backlog_note_cli_verb(tmp_graph, monkeypatch):
     from typer.testing import CliRunner
     from fno.cli import app
+    from types import SimpleNamespace
+
+    session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=session_id, harness="codex"),
+    )
 
     _seed(tmp_graph, {"id": "x-9", "title": "t"})
     res = CliRunner().invoke(app, ["backlog", "note", "x-9", "shipped wave 1", "-J"],
@@ -790,6 +797,43 @@ def test_backlog_note_cli_verb(tmp_graph):
     import json as _json
     payload = _json.loads(res.stdout)
     assert payload["id"] == "x-9" and payload["note"]["text"] == "shipped wave 1"
+    assert payload["note"]["source_session_id"] == session_id
+    assert payload["note"]["source_harness"] == "codex"
+
+
+def test_backlog_note_is_visible_and_preserves_details_and_prior_notes(tmp_graph):
+    from typer.testing import CliRunner
+    from fno.cli import app
+
+    _seed(
+        tmp_graph,
+        {
+            "id": "x-9",
+            "title": "t",
+            "details": "original rationale",
+            "progress_notes": [{"ts": "T1", "text": "first finding"}],
+        },
+    )
+    cli = CliRunner()
+
+    help_result = cli.invoke(app, ["backlog", "--help"], catch_exceptions=False)
+    assert help_result.exit_code == 0, help_result.output
+    assert "note" in help_result.output
+
+    appended = cli.invoke(
+        app,
+        ["backlog", "note", "x-9", "second finding", "-J"],
+        catch_exceptions=False,
+    )
+    assert appended.exit_code == 0, appended.output
+    import json as _json
+
+    node = _json.loads(tmp_graph.read_text())["entries"][0]
+    assert node["details"] == "original rationale"
+    assert [note["text"] for note in node["progress_notes"]] == [
+        "first finding",
+        "second finding",
+    ]
 
 
 def test_backlog_progress_adapter_task_done_stamps_node_and_plan(tmp_path, monkeypatch):
