@@ -1440,12 +1440,18 @@ def _codex_thread_spawn(
     from_name: str,
     model: Optional[str],
     yolo: bool,
+    account_env: Optional[Mapping[str, str]] = None,
+    route_env: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Delegate a Codex thread spawn to the Rust daemon lane.
 
     The Python runtime remains a compatibility front door; the held app-server
     child and registry row are owned by the Rust supervisor so both runtimes
     share recovery and full-session identity semantics.
+
+    ``account_env``/``route_env`` overlay the client subprocess environment.
+    They reach the app-server child only when this client also lazy-starts the
+    daemon (the child inherits the daemon's env); a warm daemon keeps its own.
     """
     import json
 
@@ -1477,8 +1483,12 @@ def _codex_thread_spawn(
     if yolo:
         argv += ["--yolo"]
     argv += ["--", message]
+    env = dict(os.environ)
+    for overlay in (route_env, account_env):
+        if overlay:
+            env.update(overlay)
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
     except subprocess.TimeoutExpired as exc:
         raise DispatchAskError(
             "codex thread spawn timed out after 180s", exit_code=2
@@ -2851,6 +2861,14 @@ def dispatch_spawn(
                 "drop it or use --substrate pane",
                 exit_code=2,
             )
+        if resume_session_id:
+            raise DispatchAskError(
+                f"--resume {resume_session_id} is not supported on the codex "
+                "thread lane yet; the daemon resumes a surviving row by name "
+                "(fno agents ask/resume <name>). Refusing rather than "
+                "silently spawning a fresh session.",
+                exit_code=2,
+            )
         session_id = _codex_thread_spawn(
             name=name,
             message=message,
@@ -2858,6 +2876,8 @@ def dispatch_spawn(
             from_name=from_name,
             model=model,
             yolo=yolo,
+            account_env=account_env,
+            route_env=route_env,
         )
         _emit_ev(
             "agent_ask_done",
