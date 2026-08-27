@@ -237,6 +237,7 @@ with EffectStore(
 frontmatter = {
     "node": "x-delivery-e2e",
     "status": "ready",
+    "difficulty": "medium",
     "created": now.date().isoformat(),
     # difficulty gates on created-after-2026-08-26 plans; the fixture stamps
     # created at run time, so past that boundary the plan needs the field.

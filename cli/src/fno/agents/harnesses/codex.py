@@ -513,6 +513,7 @@ def _run_codex(
     popen_cwd: Optional[Path] = None,
     agent_self: Optional[str] = None,
     route_env: Optional[dict[str, str]] = None,
+    bound_session_id: Optional[str] = None,
 ) -> CodexResult:
     """Shared subprocess driver for :func:`create` and :func:`resume`.
 
@@ -559,28 +560,28 @@ def _run_codex(
     exit_code: int = -1
     sigkill_escalated: bool = False
 
-    # Inject FNO_AGENT_* env vars so nested `fno agents ask` calls
-    # from inside this codex session attribute back to the parent agent.
-    # When agent_self is None (direct caller, no parent context) we pass
-    # env=None so the child inherits the parent process env unchanged.
-    spawn_env: Optional[dict[str, str]]
-    if agent_self is not None or route_env:
-        spawn_env = dict(os.environ)
-        if agent_self is not None:
-            spawn_env["FNO_AGENT_SELF"] = agent_self
-            spawn_env["FNO_AGENT_HARNESS"] = "codex"
-        if route_env:
-            # Codex-lane routing (x-db50 Item 4): the api key named by the
-            # model_provider's env_key. The base_url/model ride the -c config.
-            spawn_env.update(route_env)
-    else:
-        spawn_env = None
+    # Build an explicit child env so nested `fno agents ask` calls attribute
+    # to this worker, while an absent agent_self cannot inherit the caller's
+    # mesh identity.
+    spawn_env: dict[str, str]
+    spawn_env = dict(os.environ)
+    if agent_self is not None:
+        spawn_env["FNO_AGENT_SELF"] = agent_self
+        spawn_env["FNO_AGENT_HARNESS"] = "codex"
+    if route_env:
+        # Codex-lane routing (x-db50 Item 4): the api key named by the
+        # model_provider's env_key. The base_url/model ride the -c config.
+        spawn_env.update(route_env)
 
     from fno.setup.github_cli import worker_environment
 
     proxy_env = worker_environment(spawn_env or os.environ)
-    if spawn_env is not None or proxy_env != dict(os.environ):
-        spawn_env = proxy_env
+    spawn_env = proxy_env
+    from fno.harness_identity import stamp_child_harness_identity
+
+    spawn_env = stamp_child_harness_identity(
+        spawn_env, "codex", bound_session_id, agent_self=agent_self
+    )
 
     try:
         try:
@@ -850,6 +851,7 @@ def resume(
     timeout: Optional[float] = None,
     headless_yolo: Optional[bool] = None,
     reasoning_effort: Optional[str] = None,
+    agent_self: Optional[str] = None,
 ) -> CodexResult:
     """Spawn ``codex exec resume <session_id> --json ...`` from ``cwd``.
 
@@ -901,6 +903,8 @@ def resume(
         timeout=timeout,
         expect_session=False,
         popen_cwd=cwd,
+        agent_self=agent_self,
+        bound_session_id=session_id,
     )
 
 

@@ -107,6 +107,118 @@ def test_no_marker_returns_empty_identity():
     assert resolve_harness_identity({}) == HarnessIdentity(None, None)
 
 
+def test_canonical_pair_resolves_without_vendor_markers():
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
+
+    assert resolve_harness_identity(env) == HarnessIdentity(session_id, "claude")
+    assert resolve_owned_identity(env, prove=lambda _harness, _session: True) == OwnedHarnessIdentity(
+        session_id=session_id,
+        harness="claude",
+        disposition="canonical",
+    )
+
+
+def test_canonical_pair_requires_process_proof_and_respects_collision():
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
+
+    owned = resolve_owned_identity(
+        env,
+        prove=lambda _harness, _session: False,
+        collide=lambda _harness, _session: "victim",
+    )
+
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert owned.rejected == (
+        {
+            "harness": "claude",
+            "session_id": session_id,
+            "reason": "owned_by_live_row",
+            "owner": "victim",
+        },
+    )
+
+
+def test_canonical_pair_does_not_skip_collision_on_family_proof():
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": session_id,
+        "FNO_AGENT_SELF": "victim",
+        "CLAUDE_CODE_SESSION_ID": session_id,
+    }
+
+    owned = resolve_owned_identity(
+        env,
+        prove=lambda _harness, _session: True,
+        collide=lambda _harness, _session: "victim",
+    )
+
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert owned.rejected[0]["owner"] == "victim"
+
+
+def test_canonical_name_only_uses_same_family_vendor_session():
+    env = {"FNO_HARNESS_NAME": "codex", "CODEX_THREAD_ID": "thread-1"}
+
+    assert resolve_harness_identity(env) == HarnessIdentity("thread-1", "codex")
+    assert resolve_owned_identity(
+        env, prove=lambda _harness, _session: True
+    ).disposition == "canonical"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"FNO_HARNESS_SESSION_ID": "session-only"},
+        {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": "  "},
+        {"FNO_HARNESS_NAME": "  ", "FNO_HARNESS_SESSION_ID": "session"},
+    ],
+)
+def test_partial_canonical_stamp_has_named_refusal(env):
+    owned = resolve_owned_identity(env)
+    assert owned.disposition == "invalid"
+    assert owned.session_id is None
+    assert owned.harness is None
+
+
+def test_canonical_vendor_contradiction_refuses_instead_of_precedence_guessing():
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "11111111-1111-4111-8111-111111111111",
+        "CODEX_THREAD_ID": "22222222-2222-4222-8222-222222222222",
+    }
+
+    assert resolve_harness_identity(env) == HarnessIdentity(None, None)
+    owned = resolve_owned_identity(env)
+    assert owned.disposition == "contradiction"
+    assert owned.session_id is None
+    assert owned.harness is None
+
+
+def test_canonical_pair_refuses_mixed_vendor_families():
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "claude-session",
+        "CODEX_THREAD_ID": "codex-session",
+        "GEMINI_SESSION_ID": "gemini-session",
+    }
+
+    assert resolve_harness_identity(env) == HarnessIdentity(None, None)
+    assert resolve_owned_identity(env).disposition == "contradiction"
+
+
+def test_canonical_names_are_in_the_shared_scrub_inventory():
+    assert "FNO_HARNESS_NAME" in AMBIENT_IDENTITY_ENV
+    assert "FNO_HARNESS_SESSION_ID" in AMBIENT_IDENTITY_ENV
+    assert "FNO_HARNESS_CI" not in AMBIENT_IDENTITY_ENV
+
+
 # ---- ambiguity-aware owned resolution (AC1-HP / AC2-HP / AC5-CON) --------
 
 
@@ -485,6 +597,28 @@ def test_current_session_helpers_refuse_mixed_and_fall_back_to_legacy():
     # No canonical marker at all: the pre-migration claude fallback fires.
     assert current_session_id({"CLAUDE_SESSION_ID": " legacy "}) == "legacy"
     assert current_session_ids({}) == set()
+
+
+def test_current_session_helpers_include_canonical_session_id():
+    session_id = "11111111-1111-4111-8111-111111111111"
+    env = {"FNO_HARNESS_NAME": "claude", "FNO_HARNESS_SESSION_ID": session_id}
+
+    assert current_session_id(env) == session_id
+    assert current_session_ids(env) == {session_id}
+    assert current_session_id({"FNO_HARNESS_SESSION_ID": session_id}) is None
+
+
+def test_current_session_ids_ignore_partial_canonical_stamp():
+    assert current_session_ids({"FNO_HARNESS_SESSION_ID": "session-only"}) == set()
+
+
+def test_current_session_ids_refuse_canonical_vendor_contradiction():
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "claude-session",
+        "CODEX_THREAD_ID": "codex-session",
+    }
+    assert current_session_ids(env) == set()
 
 
 def test_ac1_hp_canonical_handle_is_first_eight():

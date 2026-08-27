@@ -54,6 +54,8 @@ def test_claude_bg_create_injects_agent_env(
     assert env is not None, "expected env kwarg to subprocess.run"
     assert env["FNO_AGENT_SELF"] == "alpha"
     assert env["FNO_AGENT_HARNESS"] == "claude"
+    assert env["FNO_HARNESS_NAME"] == "claude"
+    assert "FNO_HARNESS_SESSION_ID" not in env
     # Parent env must be preserved (sample check on PATH)
     assert "PATH" in env, "spawn env should inherit parent PATH"
 
@@ -95,6 +97,8 @@ def test_codex_create_threads_agent_self_to_run_codex(
     assert env is not None
     assert env["FNO_AGENT_SELF"] == "beta"
     assert env["FNO_AGENT_HARNESS"] == "codex"
+    assert env["FNO_HARNESS_NAME"] == "codex"
+    assert "FNO_HARNESS_SESSION_ID" not in env
     assert "PATH" in env
 
 
@@ -105,6 +109,7 @@ def test_codex_create_without_agent_self_skips_injection(
     from fno.agents.harnesses import codex as codex_mod
 
     captured: Dict[str, Any] = {}
+    monkeypatch.setenv("FNO_AGENT_SELF", "parent")
 
     def fake_popen(argv: list[str], **kw: Any) -> Any:
         captured["env"] = kw.get("env")
@@ -130,6 +135,42 @@ def test_codex_create_without_agent_self_skips_injection(
         )
 
     assert "FNO_REAL_GH" not in captured["env"]
+    assert "FNO_AGENT_SELF" not in captured["env"]
+
+
+def test_codex_resume_replaces_inherited_agent_self(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed worker receives its row name, never its caller's name."""
+    from fno.agents.harnesses import codex as codex_mod
+
+    captured: Dict[str, Any] = {}
+    monkeypatch.setenv("FNO_AGENT_SELF", "parent")
+
+    def fake_popen(argv: list[str], **kw: Any) -> Any:
+        captured["env"] = kw.get("env")
+        raise codex_mod.CodexInvocationError(1)
+
+    monkeypatch.setattr(codex_mod, "_subprocess_popen", fake_popen)
+
+    output_path = tmp_path / "out.jsonl"
+    output_path.touch()
+    with pytest.raises(codex_mod.CodexInvocationError):
+        codex_mod.resume(
+            session_id="session-child",
+            cwd=tmp_path,
+            prompt="continue",
+            from_name="orchestrator",
+            yolo=False,
+            output_path=output_path,
+            agent_self="child",
+        )
+
+    env = captured["env"]
+    assert env["FNO_AGENT_SELF"] == "child"
+    assert env["FNO_AGENT_HARNESS"] == "codex"
+    assert env["FNO_HARNESS_NAME"] == "codex"
+    assert env["FNO_HARNESS_SESSION_ID"] == "session-child"
 
 
 # ---------------------------------------------------------------------------

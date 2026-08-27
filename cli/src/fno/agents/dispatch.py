@@ -1199,6 +1199,7 @@ def _codex_followup_path(
             output_path=output_path,
             timeout=timeout_sec,
             reasoning_effort=existing.effort,
+            agent_self=name,
         )
     except codex_mod.CodexTimeoutError as exc:
         events.emit(

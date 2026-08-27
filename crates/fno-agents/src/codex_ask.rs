@@ -450,6 +450,7 @@ fn run_codex(
     expect_session: bool,
     popen_cwd: Option<&Path>,
     agent_self: Option<&str>,
+    bound_session_id: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     use std::process::{Command, Stdio};
 
@@ -473,11 +474,7 @@ fn run_codex(
         cmd.current_dir(cwd);
     }
 
-    // Set agent env vars when we know who we are (create path with agent_self).
-    if let Some(name) = agent_self {
-        cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_HARNESS", "codex");
-    }
+    crate::claims::stamp_command_env(&mut cmd, agent_self, "codex", bound_session_id);
 
     // Put the child in its own process group so SIGTERM/SIGKILL propagate
     // to codex's subshells (sandbox tooling). Python uses start_new_session=True.
@@ -787,7 +784,7 @@ pub fn codex_create(
         });
     }
     let argv = build_argv_create(cwd, &full_prompt, eff, model, reasoning_effort, add_dir);
-    run_codex(&argv, output_path, timeout, true, None, agent_self)
+    run_codex(&argv, output_path, timeout, true, None, agent_self, None)
 }
 
 /// Spawn `codex exec resume <session_id> --json ...` from `cwd`.
@@ -801,6 +798,7 @@ pub fn codex_resume(
     output_path: &Path,
     timeout: Option<Duration>,
     reasoning_effort: Option<&str>,
+    agent_self: Option<&str>,
 ) -> Result<CodexResult, CodexAskError> {
     let effective_prompt = normalize_codex_command(prompt);
     let full_prompt = inject_from_name(&effective_prompt, from_name);
@@ -822,7 +820,15 @@ pub fn codex_resume(
         });
     }
     let argv = build_argv_resume(cwd, session_id, &full_prompt, eff, reasoning_effort);
-    run_codex(&argv, output_path, timeout, false, Some(cwd), None)
+    run_codex(
+        &argv,
+        output_path,
+        timeout,
+        false,
+        Some(cwd),
+        agent_self,
+        Some(session_id),
+    )
 }
 
 // ===========================================================================
@@ -1227,6 +1233,8 @@ fn dispatch_create(
         effort: reasoning_effort.map(str::to_string),
         harness: Some("codex".to_string()),
         harness_session_id: Some(session_id.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,
@@ -1417,6 +1425,7 @@ fn dispatch_resume(
         &log_path,
         Some(timeout_sec),
         entry.effort.as_deref(),
+        Some(name),
     ) {
         Ok(r) => r,
         Err(e) => {

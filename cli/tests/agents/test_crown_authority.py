@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from fno.agents.crown import (
     AGENT_UNREGISTERED,
     REGISTRY_UNREADABLE,
@@ -62,6 +64,20 @@ def test_attended_human_still_authorized(monkeypatch):
     assert grant_error("any-scope", None) is None
 
 
+def test_agent_marker_without_session_identity_refuses_grant(monkeypatch):
+    """A stranded mesh marker is an unverified agent, never an attended human."""
+    monkeypatch.setenv("FNO_AGENT_SELF", "stranded-worker")
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None, disposition="empty"),
+    )
+
+    caller = calling_agent_row()
+
+    assert caller is REGISTRY_UNREADABLE
+    assert grant_error("some-scope", caller) is not None
+
+
 def test_known_agent_passes_through_to_crown_check(monkeypatch):
     """A readable registry with a matching row is NOT misread as unreadable:
     the sentinel is reserved for failures, not for found rows."""
@@ -106,6 +122,25 @@ def test_unregistered_agent_refuses_grant(monkeypatch):
     assert problem is not None
     # The refusal names the heal, not just "registry".
     assert "/fno-me" in problem or "wait for the row" in problem
+
+
+@pytest.mark.parametrize(
+    ("disposition", "harness"),
+    [("invalid", None), ("contradiction", None), ("name_only", None), ("canonical", "claude")],
+)
+def test_malformed_self_identity_refuses_grant(monkeypatch, disposition, harness):
+    """Malformed canonical identity is not an attended-human identity."""
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id=None, harness=harness, disposition=disposition
+        ),
+    )
+
+    caller = calling_agent_row()
+
+    assert caller is REGISTRY_UNREADABLE
+    assert grant_error("some-scope", caller) is not None
 
 
 def test_is_caller_row_is_harness_scoped_and_delegates() -> None:

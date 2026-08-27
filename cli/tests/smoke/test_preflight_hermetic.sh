@@ -64,7 +64,7 @@ else:
             problems.append(f"derivation misses {sorted(missing)}")
 
 # The last-resort literal.
-literal = re.search(r'^\s*HARNESS_MARKERS="(CODEX_THREAD_ID[^"]*)"\s*$', source, re.M)
+literal = re.search(r'^\s*HARNESS_MARKERS="(FNO_HARNESS_NAME[^"]*)"\s*$', source, re.M)
 if not literal:
     problems.append("cannot locate the hardcoded fallback marker list")
 elif missing := expected - set(literal.group(1).split()):

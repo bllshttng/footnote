@@ -2036,11 +2036,10 @@ pub fn bg_create(
     // last-wins). Reached without the Python front door too (direct client,
     // loop runtime).
     crate::model_env_scrub::scrub_onto(&mut cmd, extra_env);
-    cmd.env("FNO_AGENT_SELF", name);
-    cmd.env("FNO_AGENT_HARNESS", "claude");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    crate::claims::stamp_command_env(&mut cmd, Some(name), "claude", None);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     cmd.stdin(if use_stdin {
@@ -3092,8 +3091,7 @@ pub fn dispatch_claude_headless(
     // Same scrub + ordering rationale as bg_create above; no overlay env and
     // no daemon fork on this one-shot arm, so no settings floor is needed.
     crate::model_env_scrub::scrub_onto(&mut cmd, &[]);
-    cmd.env("FNO_AGENT_SELF", name);
-    cmd.env("FNO_AGENT_HARNESS", "claude");
+    crate::claims::stamp_command_env(&mut cmd, Some(name), "claude", None);
     cmd.env("FNO_AGENT_FROM", from_name);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -3608,6 +3606,8 @@ fn create(
         // resolved uuid. A bounded miss stays a named spawning row below.
         harness: Some("claude".to_string()),
         harness_session_id: session_uuid.clone(),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

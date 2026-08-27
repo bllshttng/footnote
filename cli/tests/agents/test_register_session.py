@@ -486,6 +486,7 @@ def test_ac7_fr_unreachable_registered_session_orphaned(tmp_path: Path, monkeypa
 
 BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
 REMINT = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"
+REMINT_SAME_PREFIX = "08054b1d-bbbb-47ab-a3d2-4a1e7a87eb4e"
 
 
 def _spawned_row(name: str = "target-x-f0c2", session_id: str = BIRTH):
@@ -511,7 +512,10 @@ def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) ->
 
     _spawned_row()
     entry = restamp_harness_session_id(
-        name="target-x-f0c2", harness="claude", session_id=REMINT
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=False,
     )
 
     assert entry is not None
@@ -522,9 +526,126 @@ def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) ->
     # claude addresses by the 8-hex jobId in short_id, so a restamp that fixed
     # only harness_session_id would leave attach/resume on the dead id.
     assert rows[0].short_id == "08054b1d"
+    assert rows[0].predecessor_session_ids == [BIRTH]
     # Untouched: the restamp corrects identity, not lifecycle.
     assert rows[0].status == "live"
     assert rows[0].name == "target-x-f0c2"
+
+
+def test_restamp_branches_a_crowned_live_row(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id, write_registry
+
+    _spawned_row()
+    row = load_registry()[0]
+    row.crown_level = 1
+    row.crown_scope = "scope-a"
+    row.crown_grantor = "human"
+    write_registry([row])
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=True,
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert len(rows) == 2
+    predecessor = next(row for row in rows if row.harness_session_id == BIRTH)
+    branch = next(row for row in rows if row.harness_session_id == REMINT)
+    assert predecessor.crown_level == 1
+    assert predecessor.crown_scope == "scope-a"
+    assert predecessor.crown_grantor == "human"
+    assert branch.name == "target-x-f0c2-branch-08054b1d"
+    assert branch.fno_id == REMINT
+    assert branch.forked_from_session_id == BIRTH
+    assert branch.crown_level is None
+    assert branch.crown_scope is None
+    assert branch.crown_grantor is None
+    assert branch.short_id == ""
+
+    again = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT
+    )
+    assert again is not None
+    assert again.name == branch.name
+
+    second_branch = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT_SAME_PREFIX
+    )
+    assert second_branch is not None
+    assert second_branch.name == "target-x-f0c2-branch-08054b1d-2"
+    assert len(load_registry()) == 3
+
+
+def test_restamp_succession_preserves_a_crowned_dead_predecessor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id, write_registry
+
+    _spawned_row()
+    row = load_registry()[0]
+    row.crown_level = 1
+    row.crown_scope = "scope-a"
+    row.crown_grantor = "human"
+    write_registry([row])
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=False,
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == REMINT
+    assert rows[0].predecessor_session_ids == [BIRTH]
+    assert rows[0].crown_level == 1
+
+
+def test_restamp_branches_an_uncrowned_live_row(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _spawned_row()
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=True,
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert len(rows) == 2
+    assert {row.harness_session_id for row in rows} == {BIRTH, REMINT}
+    assert entry.forked_from_session_id == BIRTH
+
+
+def test_restamp_refuses_a_stale_predecessor_observation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _spawned_row()
+
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2",
+        harness="claude",
+        session_id=REMINT,
+        predecessor_reachable=False,
+        expected_predecessor_session_id="session-captured-before-lock",
+    )
+
+    assert entry is None
+    assert load_registry()[0].harness_session_id == BIRTH
 
 
 def test_restamp_is_a_noop_when_the_id_already_matches(tmp_path: Path, monkeypatch) -> None:

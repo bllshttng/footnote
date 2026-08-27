@@ -39,6 +39,7 @@ the spellings.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from typing import Any, Optional
 
@@ -109,9 +110,16 @@ def calling_agent_row():
     from fno.agents.self_stamp import resolve_self_identity
 
     ident = resolve_self_identity()
-    if ident.disposition == "ambiguous":
+    if ident.disposition in {
+        "ambiguous",
+        "invalid",
+        "contradiction",
+        "name_only",
+    } or (ident.disposition == "canonical" and not ident.session_id):
         return REGISTRY_UNREADABLE
     if not ident.session_id or not ident.harness:
+        if (os.environ.get("FNO_AGENT_SELF") or "").strip():
+            return REGISTRY_UNREADABLE
         return None
     try:
         row = _find_by_session(load_registry(), ident.session_id, ident.harness)

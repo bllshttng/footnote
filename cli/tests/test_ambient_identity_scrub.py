@@ -175,6 +175,9 @@ def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None
     assert bg_envs, "no --bg subprocess env was captured"
     child_env = bg_envs[-1]
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "claude"
+            continue
         assert marker not in child_env, f"bg child inherited identity marker {marker}"
 
 
@@ -196,6 +199,9 @@ def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -
     assert explicit_envs, "headless spawn inherited the parent env with no scrub"
     child_env = explicit_envs[-1]
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "claude"
+            continue
         assert marker not in child_env, f"headless child inherited identity marker {marker}"
 
 
@@ -216,6 +222,31 @@ def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypat
     assert explicit_envs
     assert explicit_envs[-1]["PATH"].startswith("/proxy:")
     assert "FNO_REAL_GH" not in explicit_envs[-1]
+
+
+def test_headless_no_markers_without_overlay_stamps_child_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A clean operator shell still gets the canonical child family stamp."""
+    from fno.agents.harnesses import claude as claude_mod
+
+    for marker in ALL_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setattr(
+        "fno.setup.github_cli.worker_environment",
+        lambda base: dict(base),
+    )
+
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+
+    explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
+    assert explicit_envs
+    child_env = explicit_envs[-1]
+    assert child_env["FNO_HARNESS_NAME"] == "claude"
+    assert "FNO_HARNESS_SESSION_ID" not in child_env
 
 
 # --- the codex adapter crosses the same floor (x-b57a) ------------------------
@@ -304,6 +335,9 @@ def test_codex_spawn_scrubs_inherited_codex_identity_set(
     child_env = captured["env"]
     assert child_env is not None
     for marker in ALL_MARKERS:
+        if marker == "FNO_HARNESS_NAME":
+            assert child_env[marker] == "codex"
+            continue
         assert marker not in child_env, f"codex child inherited identity marker {marker}"
 
 

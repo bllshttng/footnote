@@ -14,7 +14,6 @@ from fno.dispatch_flags import (
     reject_empty_model,
     resolve_dispatch_provider,
 )
-
 _ALL_MARKERS = (
     "CODEX_THREAD_ID",
     "CLAUDE_CODE_SESSION_ID",
@@ -105,6 +104,24 @@ def test_whitespace_marker_is_absent():
 def test_no_marker_falls_to_builtin_claude():
     # AC1-EDGE: bare shell, no markers, no config default -> claude/builtin.
     assert resolve_dispatch_provider(None, env={}) == ("claude", "builtin-default")
+
+
+def test_canonical_harness_name_drives_inference():
+    assert infer_invoking_harness({"FNO_HARNESS_NAME": "codex"}) == "codex"
+    assert resolve_dispatch_provider(None, env={"FNO_HARNESS_NAME": "codex"}) == (
+        "codex",
+        "harness-inferred",
+    )
+
+
+def test_canonical_vendor_contradiction_is_not_inferred():
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "claude-session",
+        "CODEX_THREAD_ID": "codex-session",
+    }
+    assert infer_invoking_harness(env) is None
+    assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
 
 
 # --- model flag validation -------------------------------------------------

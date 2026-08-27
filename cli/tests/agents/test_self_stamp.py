@@ -102,6 +102,54 @@ def test_resolve_self_identity_refuses_unproven_mixed_harnesses(monkeypatch):
     assert "CODEX_THREAD_ID" in self_stamp.identity_ambiguity_message(identity)
 
 
+def test_resolve_self_identity_rejects_canonical_collision(monkeypatch):
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "victim-session",
+    }
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.row_owning_session_id",
+        lambda session_id: "victim-king" if session_id == "victim-session" else None,
+    )
+
+    identity = self_stamp.resolve_self_identity(env)
+
+    assert identity.disposition == "ambiguous"
+    assert identity.session_id is None
+    assert identity.harness is None
+    assert identity.rejected[0]["owner"] == "victim-king"
+
+
+def test_resolve_self_identity_accepts_process_proven_canonical_row(monkeypatch):
+    env = {
+        "FNO_HARNESS_NAME": "claude",
+        "FNO_HARNESS_SESSION_ID": "own-session",
+        "CLAUDE_CODE_SESSION_ID": "own-session",
+    }
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_attester_identity",
+        lambda _env: ("own-session", "process"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.row_owning_session_id",
+        lambda session_id: "own-worker" if session_id == "own-session" else None,
+    )
+
+    identity = self_stamp.resolve_self_identity(env)
+
+    assert identity.disposition == "canonical"
+    assert identity.session_id == "own-session"
+    assert identity.harness == "claude"
+
+
 def test_ambiguity_message_names_the_strip_set(monkeypatch):
     """x-b57a: the refusal tells a poisoned session exactly which env vars to
     strip, per family, built from the same list the scrub reads (runtime text

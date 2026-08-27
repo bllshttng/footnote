@@ -40,7 +40,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
@@ -197,11 +197,35 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # row, so without the bump a pre-v17 reader sees an unknown key AT its own
 # schema (read_forward is strictly greater-than), reaches AgentEntry(**row) and
 # TypeErrors - the PR #364 brick. The bump makes it a version gap instead.
-SCHEMA_VERSION = 17
+# v18 adds classified session lineage. Older readers must refuse rather than
+# silently erase predecessor or fork provenance on a read-modify-write.
+SCHEMA_VERSION = 18
 
 
 class RegistryVersionError(RuntimeError):
     """Raised when a registry file's schema_version != SCHEMA_VERSION."""
+
+
+SessionTransition = Literal["succession", "branch", "deferred"]
+
+
+def classify_session_transition(
+    predecessor_session_id: str,
+    successor_session_id: str,
+    predecessor_reachable: Optional[bool],
+) -> SessionTransition:
+    """Classify a new full session id from one existing truth result."""
+    if (
+        not predecessor_session_id
+        or not successor_session_id
+        or predecessor_session_id == successor_session_id
+    ):
+        return "deferred"
+    if predecessor_reachable is False:
+        return "succession"
+    if predecessor_reachable is True:
+        return "branch"
+    return "deferred"
 
 
 def _utc_now_iso() -> str:
@@ -276,6 +300,11 @@ class AgentEntry:
     # per-provider session-id fields (x-880e). load_registry back-fills it from a
     # legacy row's per-provider key on read; the Rust RegistryEntry mirrors it.
     harness_session_id: Optional[str] = None
+    # Classified session lineage. The current harness_session_id is the address
+    # used for delivery; these fields retain historical and parallel identities
+    # without changing the stable fno_id thread key.
+    predecessor_session_ids: list[str] = field(default_factory=list)
+    forked_from_session_id: Optional[str] = None
     # Spawn-time parent edge (Task 2.2, x-30f6). Ambient-captured from the
     # SPAWNING session's environment; never required of a caller. All three
     # default to None so pre-existing rows and callers that pass none of them
@@ -564,7 +593,9 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
             distinct.append(entry)
     if len(distinct) > 1:
         cands = ", ".join(
-            f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
+            f"{getattr(e, 'name', '?')} "
+            f"(session_id={getattr(e, 'harness_session_id', '') or '-'}, "
+            f"short={getattr(e, 'short_id', '') or '-'}, "
             f"{getattr(e, 'harness', '?')})"
             for e in distinct
         )
@@ -1607,6 +1638,8 @@ def restamp_harness_session_id(
     name: str,
     harness: str,
     session_id: str,
+    predecessor_reachable: Optional[bool] = None,
+    expected_predecessor_session_id: Optional[str] = None,
     registry_path: Optional[Path] = None,
 ) -> Optional[AgentEntry]:
     """Re-point a spawned worker's row at the session id its harness now uses.
@@ -1629,18 +1662,12 @@ def restamp_harness_session_id(
     Returns the updated entry, or ``None`` when there was nothing to do: no row
     under that name, a harness mismatch, or an id that already matches.
 
-    KNOWN LIMIT, deliberately not solved here. If a spawn ever produces two
-    descendants that are BOTH live, they inherit one ``FNO_AGENT_SELF`` and the
-    row ends up naming whichever restamped last. That is still strictly better
-    than the status quo it replaces -- a row pinned to the birth id addresses
-    NONE of them, where this addresses one -- so the fix stands on its own, but
-    it is not fork ownership. No such case has been observed: in the run that
-    reported this, the birth id went silent 35 seconds in while its successor
-    ran for three hours, with a 13/13 identical message prefix, so it was a
-    rename with carry-over. A genuine flap would not be silent either: every
-    correction emits ``session_id_restamped`` with the row name and the id it
-    moved to, so two live descendants read off events.jsonl as one name
-    alternating between two ids.
+    A crowned row is never re-pointed in place: this path has no liveness witness
+    for the predecessor, so it appends an independently addressable branch with
+    no crown and keeps the predecessor's authority on its original session.
+    An explicit reachability result classifies every row: live predecessors
+    branch, dead predecessors succeed in place, and unknown uncrowned rows retain
+    the historical correction because there is no authority to duplicate.
     """
     if not name or not session_id or not harness:
         return None
@@ -1654,6 +1681,71 @@ def restamp_harness_session_id(
             if entry.harness_session_id == session_id:
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
+            if (
+                expected_predecessor_session_id is not None
+                and stale != expected_predecessor_session_id
+            ):
+                return entries
+            crown_present = any(
+                getattr(entry, field) is not None
+                for field in ("crown_level", "crown_scope", "crown_grantor")
+            )
+            transition = classify_session_transition(
+                stale, session_id, predecessor_reachable
+            )
+            if transition == "branch" or (crown_present and transition == "deferred"):
+                existing = next(
+                    (
+                        candidate
+                        for candidate in entries
+                        if candidate.harness == harness
+                        and candidate.harness_session_id == session_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.forked_from_session_id == stale:
+                        restamped.append(existing)
+                        return entries
+                    raise ValueError(
+                        f"branch session {session_id!r} already has a registry row"
+                    )
+                branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
+                branch_base = branch_name
+                suffix = 2
+                while any(candidate.name == branch_name for candidate in entries):
+                    branch_name = f"{branch_base}-{suffix}"
+                    suffix += 1
+                branch = replace(
+                    entry,
+                    name=branch_name,
+                    aliases=[],
+                    harness_session_id=session_id,
+                    predecessor_session_ids=[],
+                    forked_from_session_id=stale or None,
+                    short_id="",
+                    messaging_socket_path=None,
+                    mcp_channel_id=None,
+                    cc_session_id=None,
+                    pid=None,
+                    pid_start_time=None,
+                    log_path="",
+                    last_message_at=None,
+                    last_reconciled_at=None,
+                    inside_leg=None,
+                    screen_state=None,
+                    exited_at=None,
+                    mux=None,
+                    crown_level=None,
+                    crown_scope=None,
+                    crown_grantor=None,
+                    fno_id=session_id,
+                )
+                entries.append(branch)
+                restamped.append(branch)
+                return entries
+            if stale and stale not in entry.predecessor_session_ids:
+                entry.predecessor_session_ids.append(stale)
             entry.harness_session_id = session_id
             # A row parked at `spawning` was waiting for exactly this: an id it
             # could not learn at spawn time. The worker has now named itself, so

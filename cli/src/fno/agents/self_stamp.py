@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from fno.claims.self_identity import resolve_self_identity
+from fno.claims.self_identity import resolve_self_identity as _resolve_self_identity
 from fno.harness_identity import canonical_handle
 
 _TAIL_BYTES = 256 * 1024
@@ -23,6 +23,16 @@ _EXPANDED_TAIL_BYTES = 2 * 1024 * 1024
 
 class IdentityAmbiguousError(RuntimeError):
     """The ambient markers disagree and no process-tree proof is available."""
+
+
+def resolve_self_identity(env: Optional[Mapping[str, str]] = None):
+    """Resolve owned identity with the runtime registry collision witness."""
+    def collide(_harness: str, session_id: str) -> Optional[str]:
+        from fno.agents.registry import row_owning_session_id
+
+        return row_owning_session_id(session_id)
+
+    return _resolve_self_identity(env, collide=collide)
 
 
 def identity_ambiguity_message(identity) -> str:

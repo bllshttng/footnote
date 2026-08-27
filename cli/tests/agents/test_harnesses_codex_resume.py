@@ -152,6 +152,8 @@ def test_resume_argv_pin(tmp_path, fake_popen):
     assert call.kwargs["stdin"] == subprocess.DEVNULL
     assert call.kwargs["stdout"] == subprocess.PIPE
     assert call.kwargs["stderr"] == subprocess.STDOUT
+    assert call.kwargs["env"]["FNO_HARNESS_NAME"] == "codex"
+    assert call.kwargs["env"]["FNO_HARNESS_SESSION_ID"] == "abc-uuid-1234"
 
 
 def test_resume_yolo_emits_dangerous_bypass_only(tmp_path, fake_popen):

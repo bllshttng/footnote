@@ -392,8 +392,9 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] =
-    &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1109,12 +1110,17 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
                     .and_then(Value::as_str)
                     .filter(|x| !x.is_empty())
                     .unwrap_or("-");
+                let id = e
+                    .get("harness_session_id")
+                    .and_then(Value::as_str)
+                    .filter(|x| !x.is_empty())
+                    .unwrap_or("-");
                 let p = e
                     .get("harness")
                     .and_then(Value::as_str)
                     .or_else(|| e.get("provider").and_then(Value::as_str))
                     .unwrap_or("?");
-                format!("{n} (short={s}, {p})")
+                format!("{n} (session_id={id}, short={s}, {p})")
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -1472,13 +1478,7 @@ fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> P
 /// falling back to the whole trimmed id when shorter. The row's `short_id`, so
 /// `peek`/`ask`/`resume` resolve the adopted orphan.
 fn derived_short_id(session_id: &str) -> String {
-    let s = session_id.trim();
-    let len = s.chars().count();
-    if len <= 8 {
-        s.to_string()
-    } else {
-        s.chars().skip(len - 8).collect()
-    }
+    crate::identity::canonical_handle(session_id.trim())
 }
 
 /// Derivable, stable row name for a synthesized entry so re-adopting upserts one
@@ -1531,6 +1531,8 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         effort: None,
         harness: Some(harness),
         harness_session_id: Some(session.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         cwd: id.owner_cwd.clone(),
         project_root: id.owner_cwd.clone(),
         session_id: None,
@@ -1603,6 +1605,8 @@ fn upsert_synthesized_row(
                 merged.host_mode = old.host_mode.clone();
                 merged.mux = old.mux.clone();
                 merged.exited_at = old.exited_at.clone();
+                merged.predecessor_session_ids = old.predecessor_session_ids.clone();
+                merged.forked_from_session_id = old.forked_from_session_id.clone();
                 reg.entries[i] = merged;
             }
             None => reg.entries.push(entry),
@@ -3837,10 +3841,17 @@ mod tests {
             claude_row("aa", "abcd1234", "11111111-0000-0000-0000-000000000000"),
             claude_row("bb", "abcd1234", "22222222-0000-0000-0000-000000000000"),
         ];
-        assert!(matches!(
-            find_agent_entry(&rows, "abcd1234"),
-            Err(ResolveError::Ambiguous(_))
-        ));
+        let error = find_agent_entry(&rows, "abcd1234").expect_err("short id is ambiguous");
+        let message = error.message();
+        assert!(message.contains("11111111-0000-0000-0000-000000000000"));
+        assert!(message.contains("22222222-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn adopted_display_id_uses_canonical_head_eight() {
+        let session = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4";
+
+        assert_eq!(derived_short_id(session), "019f48e1");
     }
 
     #[test]
@@ -5023,8 +5034,8 @@ mod tests {
             e.harness_session_id.as_deref(),
             Some("c7dc6218-493a-4299-916a-330ec0b0b055")
         );
-        assert_eq!(e.short_id, "c0b0b055");
-        assert_eq!(e.name, "target-c0b0b055");
+        assert_eq!(e.short_id, "c7dc6218");
+        assert_eq!(e.name, "target-c7dc6218");
 
         // Codex-alias-only manifest with no `harness` must not default to claude.
         let codex = ManifestIdentity {
@@ -5046,10 +5057,10 @@ mod tests {
     }
 
     #[test]
-    fn derived_short_id_uses_final_eight() {
+    fn derived_short_id_uses_canonical_head_eight() {
         assert_eq!(
             derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"),
-            "c0b0b055"
+            "c7dc6218"
         );
         assert_eq!(derived_short_id("abc12345"), "abc12345");
         assert_eq!(derived_short_id("short"), "short");
@@ -5190,7 +5201,11 @@ mod tests {
             owner_cwd: "/x".into(),
             ..Default::default()
         };
-        upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t")).unwrap();
+        let mut seeded = mint_synthesized_entry(&id, "t");
+        seeded.predecessor_session_ids = vec!["thread-predecessor".into()];
+        seeded.forked_from_session_id = Some("thread-root".into());
+        upsert_synthesized_row(&home.registry_json(), seeded).unwrap();
+        upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t2")).unwrap();
         let (row, fno_id, source) =
             synthesize_and_adopt("thread-seed-1234", &home, false).expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
@@ -5199,6 +5214,15 @@ mod tests {
             Some("thread-seed-1234")
         );
         assert_eq!(fno_id, None, "seeded row carried no fno_id");
+        let persisted = crate::state::load_registry(&home.registry_json()).unwrap();
+        assert_eq!(
+            persisted.entries[0].predecessor_session_ids,
+            vec!["thread-predecessor"]
+        );
+        assert_eq!(
+            persisted.entries[0].forked_from_session_id.as_deref(),
+            Some("thread-root")
+        );
         std::env::remove_var(crate::paths::HOME_ENV);
     }
 
@@ -5214,7 +5238,7 @@ mod tests {
             },
             "t0",
         );
-        existing.name = "dffdeeca".into();
+        existing.name = "01a0152f".into();
         existing.short_id = "transport".into();
         crate::state::update_registry(&home.registry_json(), |registry| {
             registry.entries.push(existing);
@@ -5234,7 +5258,7 @@ mod tests {
             panic!("registry collision must remain an adoption I/O error");
         };
         assert!(message.contains("collides with row"));
-        assert!(message.contains("dffdeeca"));
+        assert!(message.contains("01a0152f"));
     }
 
     #[test]

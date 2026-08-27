@@ -19,6 +19,37 @@ from fno.harness_names import KNOWN_HARNESSES
 # removed when no in-flight worker can carry the old variable.
 _HARNESS_ENV_WARNED = False
 
+FNO_HARNESS_NAME = "FNO_HARNESS_NAME"
+FNO_HARNESS_SESSION_ID = "FNO_HARNESS_SESSION_ID"
+
+
+def stamp_child_harness_identity(
+    environ: Optional[dict[str, str]],
+    harness: str,
+    session_id: Optional[str] = None,
+    *,
+    agent_self: Optional[str] = None,
+) -> dict[str, str]:
+    """Scrub inherited fno stamps, then apply the launcher's owned values."""
+    if environ is None:
+        environ = dict(os.environ)
+    for key in (
+        "FNO_AGENT_SELF",
+        "FNO_AGENT_HARNESS",
+        "FNO_AGENT_PROVIDER",
+        "FNO_AGENT_SESSION",
+    ):
+        environ.pop(key, None)
+    environ.pop(FNO_HARNESS_NAME, None)
+    environ.pop(FNO_HARNESS_SESSION_ID, None)
+    if agent_self:
+        environ["FNO_AGENT_SELF"] = agent_self
+    environ["FNO_AGENT_HARNESS"] = harness
+    environ[FNO_HARNESS_NAME] = harness
+    if session_id and session_id.strip():
+        environ[FNO_HARNESS_SESSION_ID] = session_id.strip()
+    return environ
+
 
 def harness_from_env(env: "Mapping[str, str]", *, warn: bool = True) -> "Optional[str]":
     """Resolve the ambient harness from the process environment.
@@ -123,6 +154,8 @@ _EXTRA_IDENTITY_NAMES: tuple[tuple[str, str], ...] = (
 )
 
 AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
+    FNO_HARNESS_NAME,
+    FNO_HARNESS_SESSION_ID,
     *(marker for marker, _ in HARNESS_SESSION_MARKERS),
     *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
     # The self-set markers scrub too. CLAUDECODE survives a fork, so a codex
@@ -141,6 +174,8 @@ AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
 # nothing (x-b57a). Family here labels which harness a name belongs to, not
 # which harness resolves - TARGET_SESSION_ID belongs to fno itself.
 AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
+    FNO_HARNESS_NAME: "fno",
+    FNO_HARNESS_SESSION_ID: "fno",
     **{marker: family for marker, family in HARNESS_SESSION_MARKERS},
     **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
     **dict(SELF_SET_HARNESS_MARKERS),
@@ -459,6 +494,90 @@ class HarnessIdentity:
     harness: Optional[str]
 
 
+@dataclass(frozen=True)
+class CanonicalHarnessIdentity:
+    """The fno-owned spawn stamp and its explicit parse disposition."""
+
+    session_id: Optional[str]
+    harness: Optional[str]
+    disposition: str
+
+
+def parse_canonical_identity(
+    env: Optional[Mapping[str, str]] = None,
+) -> CanonicalHarnessIdentity:
+    """Parse the fno-owned pair without treating a partial stamp as evidence."""
+    environ = os.environ if env is None else env
+    name_present = FNO_HARNESS_NAME in environ
+    session_present = FNO_HARNESS_SESSION_ID in environ
+    name = (environ.get(FNO_HARNESS_NAME) or "").strip()
+    session_id = (environ.get(FNO_HARNESS_SESSION_ID) or "").strip()
+    if not name_present and not session_present:
+        return CanonicalHarnessIdentity(None, None, "absent")
+    if not name_present or not name or (session_present and not session_id):
+        return CanonicalHarnessIdentity(None, None, "invalid")
+    if not session_present:
+        return CanonicalHarnessIdentity(None, name, "name_only")
+    return CanonicalHarnessIdentity(session_id, name, "complete")
+
+
+def _present_identity_markers(
+    env: Mapping[str, str],
+) -> tuple[tuple[str, str, str], ...]:
+    return tuple(
+        (marker, harness, value)
+        for marker, harness in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
+        if (value := (env.get(marker) or "").strip())
+    )
+
+
+def _vendor_identity(
+    markers: tuple[tuple[str, str, str], ...],
+) -> HarnessIdentity:
+    families: list[str] = []
+    winner: Optional[HarnessIdentity] = None
+    for _marker, harness, session_id in markers:
+        if harness not in families:
+            families.append(harness)
+        if winner is None:
+            winner = HarnessIdentity(session_id=session_id, harness=harness)
+    if len(families) > 1:
+        return HarnessIdentity(session_id=None, harness=None)
+    return winner or HarnessIdentity(session_id=None, harness=None)
+
+
+def _resolve_canonical_identity(
+    environ: Mapping[str, str],
+) -> tuple[HarnessIdentity, str, tuple[tuple[str, str, str], ...]]:
+    """Resolve canonical-first identity and name a malformed/contradictory stamp."""
+    canonical = parse_canonical_identity(environ)
+    markers = _present_identity_markers(environ)
+    vendor = _vendor_identity(markers)
+    if canonical.disposition == "absent":
+        return vendor, "absent", markers
+    if canonical.disposition == "invalid":
+        return HarnessIdentity(None, None), "invalid", markers
+    if len({harness for _marker, harness, _value in markers}) > 1:
+        return HarnessIdentity(None, None), "contradiction", markers
+    if vendor.harness and vendor.harness != canonical.harness:
+        return HarnessIdentity(None, None), "contradiction", markers
+    if (
+        canonical.session_id
+        and vendor.session_id
+        and session_identity_key(canonical.session_id)
+        != session_identity_key(vendor.session_id)
+    ):
+        return HarnessIdentity(None, None), "contradiction", markers
+    return (
+        HarnessIdentity(
+            session_id=canonical.session_id or vendor.session_id,
+            harness=canonical.harness,
+        ),
+        "canonical",
+        markers,
+    )
+
+
 def resolve_harness_identity(
     env: Optional[Mapping[str, str]] = None,
 ) -> HarnessIdentity:
@@ -477,18 +596,8 @@ def resolve_harness_identity(
     whenever exactly one family is present (the dominant case).
     """
     environ = os.environ if env is None else env
-    families: list[str] = []
-    winner: Optional[HarnessIdentity] = None
-    for marker, harness in HARNESS_SESSION_MARKERS:
-        session_id = (environ.get(marker) or "").strip()
-        if session_id:
-            if harness not in families:
-                families.append(harness)
-            if winner is None:
-                winner = HarnessIdentity(session_id=session_id, harness=harness)
-    if len(families) > 1:
-        return HarnessIdentity(session_id=None, harness=None)
-    return winner if winner is not None else HarnessIdentity(session_id=None, harness=None)
+    identity, _disposition, _markers = _resolve_canonical_identity(environ)
+    return identity
 
 
 def present_harness_markers(
@@ -502,11 +611,7 @@ def present_harness_markers(
     what "precedence" means across every caller.
     """
     environ = os.environ if env is None else env
-    return tuple(
-        (marker, harness, value)
-        for marker, harness in HARNESS_SESSION_MARKERS
-        if (value := (environ.get(marker) or "").strip())
-    )
+    return _present_identity_markers(environ)
 
 
 @dataclass(frozen=True)
@@ -570,6 +675,33 @@ def resolve_owned_identity(
     environ = os.environ if env is None else env
     markers = present_harness_markers(environ)
     present = tuple(markers)
+    identity, canonical_disposition, _ = _resolve_canonical_identity(environ)
+    if canonical_disposition == "invalid":
+        return OwnedHarnessIdentity(None, None, present, "invalid")
+    if canonical_disposition == "contradiction":
+        return OwnedHarnessIdentity(None, None, present, "contradiction")
+    if canonical_disposition == "canonical":
+        if not identity.session_id or not identity.harness:
+            return OwnedHarnessIdentity(None, None, present, "ambiguous")
+        verdict = prove(identity.harness, identity.session_id) if prove else None
+        owner = collide(identity.harness, identity.session_id) if collide else None
+        if owner:
+            canonical_rejected = (
+                {
+                    "harness": identity.harness,
+                    "session_id": identity.session_id,
+                    "reason": "owned_by_live_row",
+                    "owner": owner,
+                },
+            )
+            return OwnedHarnessIdentity(
+                None, None, present, "ambiguous", canonical_rejected
+            )
+        if verdict is not True:
+            return OwnedHarnessIdentity(None, None, present, "ambiguous")
+        return OwnedHarnessIdentity(
+            identity.session_id, identity.harness, present, "canonical"
+        )
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")
     distinct = {harness for _, harness, _ in markers}
@@ -873,8 +1005,15 @@ def current_session_id(env: Optional[Mapping[str, str]] = None) -> Optional[str]
 def current_session_ids(env: Optional[Mapping[str, str]] = None) -> set[str]:
     """Return every nonblank canonical or legacy ambient session id."""
     environ = os.environ if env is None else env
-    return {
+    _identity, disposition, _markers = _resolve_canonical_identity(environ)
+    if disposition in {"invalid", "contradiction"}:
+        return set()
+    ids = {
         session_id
         for marker, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
         if (session_id := (environ.get(marker) or "").strip())
     }
+    canonical = parse_canonical_identity(environ)
+    if canonical.disposition == "complete" and canonical.session_id:
+        ids.add(canonical.session_id)
+    return ids

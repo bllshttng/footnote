@@ -136,6 +136,27 @@ def test_full_uuid_resolves_too(_registry_home):
     assert resolve_agent(CLAUDE_UUID).entry.harness_session_id == CLAUDE_UUID
 
 
+def test_same_head_eight_full_ids_resolve_distinctly_and_short_refuses():
+    """Full session ids are join keys; their shared display head is ambiguous."""
+    from fno.agents.registry import AgentEntry, AgentResolutionError, resolve_agent_in
+
+    first = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    second = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae5"
+    rows = [
+        AgentEntry(name="first", cwd="/one", log_path="", harness="codex",
+                   harness_session_id=first),
+        AgentEntry(name="second", cwd="/two", log_path="", harness="codex",
+                   harness_session_id=second),
+    ]
+
+    assert resolve_agent_in(rows, first).entry.name == "first"
+    assert resolve_agent_in(rows, second).entry.name == "second"
+    with pytest.raises(AgentResolutionError, match="ambiguous") as exc:
+        resolve_agent_in(rows, "019f48e1")
+    assert first in str(exc.value)
+    assert second in str(exc.value)
+
+
 def test_adoption_is_idempotent(_registry_home):
     """Concurrent/repeat adoption upserts one row, never a duplicate."""
     _write_claude_session(_registry_home, CLAUDE_UUID)

@@ -511,6 +511,29 @@ def test_harness_markers_match_rust_consumers() -> None:
         )
 
 
+def test_rust_spawn_writers_use_the_shared_identity_stamp_helper() -> None:
+    """Every Rust provider writer must scrub and stamp through one helper."""
+    from pathlib import Path
+
+    repo_root = _find_repo_root(Path(__file__).resolve().parent)
+    if repo_root is None:
+        pytest.skip("Rust sources not present in this checkout")
+    rust_root = repo_root / "crates" / "fno-agents" / "src"
+    writers = (
+        "claude_ask.rs",
+        "codex_ask.rs",
+        "gemini_ask.rs",
+        "agy_ask.rs",
+        "opencode_ask.rs",
+        "opencode_serve.rs",
+    )
+    for filename in writers:
+        source = (rust_root / filename).read_text()
+        assert "FNO_AGENT_HARNESS" not in source or "stamp_command_env" in source, (
+            f"{filename} writes FNO_AGENT_HARNESS without the shared identity scrub"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # Unconditional `ask` auto-routing (ab-73da4ac2).
 #
