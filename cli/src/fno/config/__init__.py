@@ -304,14 +304,21 @@ class RenderTargetConfig(BaseModel):
     def _warn_unknown_keys(cls, data: object) -> object:
         if isinstance(data, dict):
             known = set(cls.model_fields)
-            unknown = [key for key in data if key not in known]
-            if unknown:
-                raise ValueError(
-                    "backlog.render_targets: unknown key(s) "
-                    f"{', '.join(repr(k) for k in unknown)} in row "
-                    f"{data.get('path')!r} (allowed: {', '.join(sorted(known))}). "
-                    "A misspelled scope would otherwise publish every project."
-                )
+            for key in data:
+                if key not in known:
+                    # WARN, never raise. This validator runs inside
+                    # load_settings(), so raising here turns one typo in one
+                    # render-target row into a ValidationError out of every
+                    # settings-loading fno command. The row is REFUSED instead
+                    # at the point of use, in roadmap_public._configured_targets,
+                    # where skipping it costs one board and nothing else.
+                    _LOG.warning(
+                        "config.backlog.render_targets: unknown key %r in row "
+                        "%r - the row will not render (allowed: %s)",
+                        key,
+                        data.get("path"),
+                        ", ".join(sorted(known)),
+                    )
         return data
 
     @field_validator("path")

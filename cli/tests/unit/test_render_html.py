@@ -170,18 +170,56 @@ def test_public_projection_never_emits_private_plan_links():
         assert "obsidian://" not in document
 
 
-def test_renderer_modules_do_not_open_or_parse_graph_json_directly():
+def test_renderer_modules_never_read_the_graph_store_themselves():
+    """The rule is "go through fno.graph's reader", not "never import json".
+
+    The previous shape of this guard walked for an `import json` node, so
+    `__import__("json")` slipped past it and the test was green by
+    construction rather than by behavior. It also aimed at the wrong symbol:
+    json.dumps for the payload was never the hazard. Reading the store
+    directly is - a second reader is what undercounts done, because closed
+    work migrates to graph-archive.json.
+
+    Asserts a POSITIVE marker (the sanctioned reader is called) alongside the
+    absence, so a renderer that stopped reading anything at all still fails.
+    """
     import ast
     from fno.graph import roadmap_public, render_html
 
+    def _calls(tree):
+        names = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+                if isinstance(func.value, ast.Name):
+                    names.add(f"{func.value.id}.{func.attr}")
+        return names
+
+    forbidden = {"json.load", "json.loads", "read_json", "loads", "load"}
     for module in (render_html, roadmap_public):
-        source = inspect.getsource(module)
-        tree = ast.parse(source)
-        assert not any(
-            isinstance(node, (ast.Import, ast.ImportFrom))
-            and any(alias.name == "json" for alias in node.names)
-            for node in ast.walk(tree)
-        )
+        called = _calls(ast.parse(inspect.getsource(module)))
+        leaked = called & forbidden
+        assert not leaked, f"{module.__name__} parses the store itself: {leaked}"
+
+    # Positive control: the sanctioned reader IS reached, so the absence above
+    # cannot pass merely because nothing reads anything.
+    entrypoint = ast.parse(inspect.getsource(render_html.load_render_entries))
+    assert "read_graph_with_archive" in _calls(entrypoint)
+    assert "entries_with_archive" in _calls(entrypoint)
+
+
+def test_the_payload_is_serialized_with_the_real_json_module():
+    """Guard the dodge itself: __import__ must not come back to duck a linter."""
+    source = inspect.getsource(
+        __import__("fno.graph.render_html", fromlist=["render_html"])
+    )
+    assert '__import__("json")' not in source
+    assert "json.dumps(" in source
 
 
 def test_obsidian_url_builds_and_normalizes_internal_paths():

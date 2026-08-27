@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import html
+import json
 import os
 import re
 import tempfile
@@ -732,8 +733,7 @@ def _dashboard_html(
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
     )
-    json_module = __import__("json")
-    payload = json_module.dumps(
+    payload = json.dumps(
         {
             "nodes": rows,
             "status_order": list(_DASHBOARD_STATUS_ORDER),
@@ -751,7 +751,8 @@ def _dashboard_html(
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         f"<title>{html.escape(title)}</title><style>{_DASHBOARD_CSS}</style></head>"
         f'<body data-local="{str(local).lower()}"><header class="page"><h1>{html.escape(title)}</h1>'
-        '<p class="lede">Every open node, plus recent closed context. <b id="totalCount">0</b> nodes.</p>'
+        '<p class="lede">Every open node, plus recent closed context. '
+        f'<b id="totalCount">{len(rows)}</b> nodes.</p>'
         '<div class="stats" id="stats"></div><div class="filters">'
         '<input type="search" id="q" placeholder="Search title, id, or description…" aria-label="Search nodes">'
         '<div class="chips" id="statusChips" role="group" aria-label="Filter by status"></div>'

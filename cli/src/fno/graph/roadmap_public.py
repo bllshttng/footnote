@@ -266,6 +266,25 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         out: list[RenderTargetConfig] = []
         seen_paths: set[Path] = set()
         for row in rows:
+            # An unknown key is refused HERE, not in the settings validator: a
+            # raise there bricks every fno command over one typo. `scope`
+            # defaults to `all`, so a misspelled scope key that is merely
+            # ignored publishes every project on a page meant to name one.
+            # Skipping the row costs that one board.
+            unknown = (
+                [key for key in row if key not in RenderTargetConfig.model_fields]
+                if isinstance(row, dict)
+                else []
+            )
+            if unknown:
+                print(
+                    "Warning: skipping backlog.render_targets row "
+                    f"{row.get('path')!r}: unknown key(s) "
+                    f"{', '.join(repr(k) for k in unknown)}; a misspelled scope "
+                    "would otherwise publish every project",
+                    file=sys.stderr,
+                )
+                continue
             try:
                 target = RenderTargetConfig.model_validate(row)
             except Exception as exc:

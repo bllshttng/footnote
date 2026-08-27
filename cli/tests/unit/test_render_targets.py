@@ -157,29 +157,43 @@ def test_relative_target_path_rejected():
     assert "absolute" in str(exc.value)
 
 
-def test_misspelled_target_key_is_refused_not_ignored():
-    """A warned-and-ignored typo published every project.
+def test_misspelled_target_key_refuses_the_row_without_bricking_settings(monkeypatch, capsys):
+    """Both halves. Either alone is the wrong fix.
 
-    `scope` defaults to `all`, so a misspelled scope key on a public row used
-    to validate and widen the page to the whole graph. Refuse the row instead;
-    _configured_targets skips a malformed row with a warning, so the blast
-    radius is that one row not rendering.
+    Ignoring the typo publishes every project: `scope` defaults to `all`, so a
+    misspelled scope key on a public row silently widens the page to the whole
+    graph. Raising in the settings validator is worse - one typo in one row
+    then takes down every settings-loading fno command. So load_settings warns
+    and keeps working, and the RENDER layer refuses the row.
     """
-    import pytest
+    from fno.config import SettingsModel
+    from fno.graph import roadmap_public
 
-    from fno.config import RenderTargetConfig
+    bad_row = {"path": "/tmp/x.html", "scop": "fno", "projection": "roadmap"}
 
-    with pytest.raises(Exception) as excinfo:
-        RenderTargetConfig.model_validate(
-            {"path": "~/v/x.html", "scop": "fno", "projection": "roadmap"}
-        )
-    message = str(excinfo.value)
-    assert "'scop'" in message and "publish every project" in message
-
-    ok = RenderTargetConfig.model_validate(
-        {"path": "~/v/x.html", "scope": "fno", "projection": "roadmap"}
+    # Half one: settings still load. Nothing else fno does may break.
+    settings = SettingsModel.model_validate(
+        {"backlog": {"render_targets": [bad_row]}}
     )
-    assert ok.scope == "fno"
+    assert settings is not None
+
+    # Half two: the row does not render, and the other rows still do.
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                bad_row,
+                {"path": "/tmp/good.html", "scope": "fno", "projection": "roadmap"},
+            ]
+        },
+    )
+    targets = roadmap_public._configured_targets()
+    paths = [t.path for t in targets]
+
+    assert "/tmp/x.html" not in paths, "a misspelled scope must not publish every project"
+    assert "/tmp/good.html" in paths, "one bad row must not take out the others"
+    err = capsys.readouterr().err
+    assert "'scop'" in err and "publish every project" in err
 
 
 def test_state_file_collision_skips_target(_isolate, tmp_path, monkeypatch, capsys):
