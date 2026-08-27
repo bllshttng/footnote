@@ -5075,7 +5075,7 @@ def attach_agent(name: str) -> AttachResult:
         # silently falling through to an attach it just refused.
         raise DispatchAskError(
             (landed.stderr or landed.stdout or "fno mux thread refused").strip(),
-            exit_code=1,
+            exit_code=landed.returncode,
         )
 
     if existing.harness in ("codex", "gemini"):

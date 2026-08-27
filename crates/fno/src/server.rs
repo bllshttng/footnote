@@ -2155,7 +2155,7 @@ impl<'a> SlotCapture<'a> {
 /// nothing durable remains in this subtree.
 fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
     match node {
-        Node::Leaf(p) => (*p != skip).then(|| Node::Leaf(*p)),
+        Node::Leaf(p) => (*p != skip).then_some(Node::Leaf(*p)),
         Node::Branch { axis, children } => {
             let kept: Vec<(f32, Node)> = children
                 .iter()
@@ -5969,6 +5969,11 @@ impl Core {
             .collect();
         let mut trees = Vec::with_capacity(sq.tabs.len());
         let mut active_tab = 0;
+        // If pruning hollows out the active tab itself, `active_tab` has no
+        // surviving position to copy - remember where the NEXT tab lands so
+        // restore falls onto the nearest surviving tab instead of silently
+        // defaulting to index 0 (an unrelated tab picked as "active").
+        let mut active_pruned_at: Option<usize> = None;
         for (i, t) in sq.tabs.iter().enumerate() {
             // (x-07c2) Prune the thread pane's leaf before capture: it is
             // never persisted, so restore rebuilds no pane (and no split) for
@@ -5980,7 +5985,12 @@ impl Core {
                 None => None,
                 Some(pid) => match node_without_leaf(&t.root, pid) {
                     Some(root) => Some(root),
-                    None => continue,
+                    None => {
+                        if i == sq.active_tab {
+                            active_pruned_at = Some(trees.len());
+                        }
+                        continue;
+                    }
                 },
             };
             if i == sq.active_tab {
@@ -5996,6 +6006,9 @@ impl Core {
                 slots: capture.slots,
                 focus,
             });
+        }
+        if let Some(pos) = active_pruned_at {
+            active_tab = pos.min(trees.len().saturating_sub(1));
         }
         Some((trees, active_tab))
     }
@@ -7568,6 +7581,12 @@ impl Core {
                 }
             }
         };
+        // `id` is a primary key everywhere a client is looked up
+        // (`clients.iter().find(|c| c.id == id)`); a stale entry still
+        // queued for teardown (e.g. `CoreMsg::Gone` not yet drained) must
+        // not survive a fresh attach under the same id, or lookups can
+        // resolve to the dying client instead of this one.
+        self.clients.retain(|c| c.id != id);
         self.clients.push(Client {
             id,
             reliable_tx,
@@ -20198,6 +20217,38 @@ mod tests {
         // session - the pane is still there and still the dedicated slot.
         assert!(core.session.find_pane(thread_pid).is_some());
         assert_eq!(core.thread_pane.as_ref().map(|&(_, p)| p), Some(thread_pid));
+    }
+
+    #[test]
+    fn stored_tab_trees_remaps_active_tab_when_the_active_tab_is_pruned_away() {
+        // (x-07c2) When the ACTIVE tab is the one entirely hollowed out by
+        // the thread-pane prune, the remap in the loop above never fires
+        // (its guard never sees a tab that `continue`d past it) - active_tab
+        // must not silently default to 0, which would land restore on a
+        // tab unrelated to the one that vanished.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, thread_pid) = core.thread_pane.clone().unwrap();
+        let (sid, thread_tab_idx) = core
+            .session
+            .find_pane(thread_pid)
+            .expect("the thread pane is in the live tree");
+
+        // Sandwich the thread tab between two ordinary sibling tabs, and
+        // make the thread tab (pure thread pane, no other content) active.
+        let squad = core.session.squad_mut(sid).unwrap();
+        let thread_tab = squad.tabs.remove(thread_tab_idx);
+        squad.tabs = vec![leaf_tab(9001, 9101), thread_tab, leaf_tab(9002, 9102)];
+        squad.active_tab = 1;
+
+        let (trees, active) = core.stored_tab_trees(sid).unwrap();
+        assert_eq!(trees.len(), 2, "only the two sibling tabs survive the prune");
+        assert_eq!(
+            active, 1,
+            "active_tab lands on the surviving tab that followed the pruned one, not index 0"
+        );
     }
 
     #[test]
