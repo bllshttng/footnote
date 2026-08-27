@@ -86,12 +86,30 @@ fn attach_pane_at(scratch: &Scratch, cwd: &str) -> (common::ServerProc, FakeClie
 fn a_live_pane_protects_a_squad_inside_the_grace_window() {
     let scratch = Scratch::new("prune-live-pane");
     let origin = seed(&scratch, &now_stamp());
-    let _pane = attach_pane_at(&scratch, &origin);
+    let (_server, mut client) = attach_pane_at(&scratch, &origin);
+    // Wait for the shell to DRAW, not just for the pane to exist. A pane whose
+    // shell has not spoken yet reads `Unmeasured`, never pristine, so a prune
+    // that raced the prompt could not fold the tab even when folding it was
+    // wrong - the test would pass on timing rather than on the guard. Waiting
+    // for output puts the pane in the state the tab arm actually acts on.
+    let pane = client.focus();
+    client.wait_pane_text(15, pane, |text| !text.trim().is_empty());
 
     let (receipt, store) = prune(&scratch);
     assert!(
         store.contains(&origin),
-        "a squad with a live pane under its origin was pruned; store={store}"
+        "a squad with a live pane under its origin was pruned; \
+         receipt={receipt} store={store}"
+    );
+    // The tab arm and the squad arm run in ONE prune. Folding this squad's only
+    // pristine tab would remove the squad, and the server de-persists a removed
+    // squad, so the row would vanish with `pruned_count` still 0 - the squad arm
+    // reporting it kept something the tab arm had already erased. The store
+    // check above cannot tell those apart on its own, so name the tab counter:
+    // this squad has one tab, and one tab is never surplus.
+    assert_eq!(
+        receipt["tabs_closed"], 0,
+        "prune closed the workspace's only tab; {receipt}"
     );
     // Assert on the ORIGIN and the counter, never the seeded key: the store
     // recomputes `key` on load, so a control keyed on it passes whether or not

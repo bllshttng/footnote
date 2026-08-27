@@ -1923,6 +1923,19 @@ struct TabPruneOutcome {
 
 fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabPruneOutcome {
     let mut out = TabPruneOutcome::default();
+    // Tabs per workspace, so the fold below can tell a surplus tab from the
+    // only one. Closing the only one removes the whole squad, and the server
+    // de-persists a removed squad's store row - so the tab arm would delete
+    // exactly the row the live-pane arm below promises to protect, in one
+    // command. Folding surplus tabs is this arm's job; destroying a workspace
+    // is `squad close`, and the store consequence belongs to the squad arm.
+    let mut tabs_per_squad: std::collections::HashMap<(&str, u64), usize> =
+        std::collections::HashMap::new();
+    for tab in tabs {
+        *tabs_per_squad
+            .entry((tab.session.as_str(), tab.squad_id))
+            .or_default() += 1;
+    }
     for tab in tabs {
         if tab
             .squad_name
@@ -1931,6 +1944,15 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
             && !include_named
         {
             out.skipped_named += 1;
+            continue;
+        }
+        if tabs_per_squad
+            .get(&(tab.session.as_str(), tab.squad_id))
+            .copied()
+            .unwrap_or(0)
+            < 2
+        {
+            out.kept += 1;
             continue;
         }
         if !tab.pristine || tab.pane_count == 0 {
@@ -1967,6 +1989,13 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
 /// re-evaluated under the store lock against fresh fs state, and the receipt is
 /// built from the locked closure's actual removals - never the pre-lock
 /// candidate list (AC1-UI). `--dry-run` writes nothing.
+///
+/// Two arms run in ONE call and they must not contradict each other. The tab arm
+/// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
+/// protects a squad's row inside the grace window. Since the server de-persists a
+/// squad whose last tab closes, the tab arm never touches a workspace's only tab -
+/// otherwise the fold would delete the very row the squad arm had just kept, and
+/// the receipt would report `pruned_count: 0` over a row that is gone.
 fn squad_prune(args: &[OsString]) -> i32 {
     let mut dry_run = false;
     let mut include_named = false;
@@ -6285,6 +6314,48 @@ mod tests {
         assert_eq!(outcome.closed, 0);
         assert_eq!(outcome.skipped_named, 1);
         assert_eq!(outcome.kept, 1);
+    }
+
+    #[test]
+    fn workspace_prune_never_folds_a_workspace_only_tab() {
+        // The tab arm folds SURPLUS pristine tabs. A squad's only tab is not
+        // surplus: closing it removes the squad, and the server de-persists a
+        // removed squad's store row, so one prune run would take both the live
+        // pane and the record the live-pane arm exists to protect. Two pristine
+        // tabs on one squad still fold - that is what this arm is for.
+        let only = vec![LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id: 11,
+            pane_count: 1,
+            pristine: true,
+        }];
+        let outcome = prune_live_tabs(&only, false, false);
+        assert_eq!(outcome.closed, 0, "a workspace's only tab is never closed");
+        assert_eq!(outcome.would_close, 0);
+        assert_eq!(outcome.kept, 1);
+
+        let pair = vec![
+            LiveTab {
+                session: "main".into(),
+                squad_id: 1,
+                squad_name: None,
+                tab_id: 11,
+                pane_count: 1,
+                pristine: true,
+            },
+            LiveTab {
+                session: "main".into(),
+                squad_id: 1,
+                squad_name: None,
+                tab_id: 12,
+                pane_count: 1,
+                pristine: true,
+            },
+        ];
+        let outcome = prune_live_tabs(&pair, false, true);
+        assert_eq!(outcome.would_close, 2, "surplus pristine tabs still fold");
     }
 
     #[test]
