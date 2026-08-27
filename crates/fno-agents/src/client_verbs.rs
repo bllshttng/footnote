@@ -1735,6 +1735,12 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
             // that prompt is a hang. Attended it is a wrong default a human
             // must catch.
             //
+            // Conditional, per codex's own docs: the prompt appears only when
+            // the process cwd differs from the session's saved directory. The
+            // config key `tui.resume_cwd` answers it globally, and --cd
+            // outranks that. This lane wants --cd because it is per
+            // invocation and names the directory outright.
+            //
             // Spliced BEFORE the subcommand, beside the grant, which is the
             // only global-before-subcommand precedent in this tree. The spawn
             // lanes are not it: they spell the flag `-C`, after `exec` in the

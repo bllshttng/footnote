@@ -127,6 +127,14 @@ def _build_resume_argv(
         # Attended that is a wrong default a human must catch. Unattended it
         # is the wrong tree, which looks like success.
         #
+        # The prompt is CONDITIONAL: codex raises it only when the process cwd
+        # differs from the session's saved directory. A worker already saved
+        # at its worktree never sees it. There is also a config answer,
+        # `tui.resume_cwd`, set to "current" or "session", which --cd
+        # outranks. --cd is still what this lane wants: it is per invocation
+        # and names the directory outright, where the config is global to the
+        # codex install and only picks a side.
+        #
         # Placed BEFORE the subcommand, beside the -c grant, which is the
         # only global-before-subcommand precedent in this tree. The spawn
         # lanes are NOT that precedent, whatever the shape suggests: both
