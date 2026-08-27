@@ -963,3 +963,447 @@ fn cap_truncated_remainder_is_always_hard() {
     assert!(blockers[0].hard, "what cannot be inspected cannot be filed");
     assert!(blockers_withhold(&blockers, true));
 }
+
+// --- x-aecc: declining must satisfy coverage ---------------------------------
+//
+// The tiling predicate is ANSWERED at this head, never clean at this head.
+// A branch whose ONLY attestation is a `fail` whose findings are all
+// terminally dispositioned must read covered exactly like a pass chain; one
+// non-terminal finding withholds that answer and is named by key. A
+// pass-chain covering proves nothing here (the pass arms above already pin
+// those), so every test's only attestation is a fail.
+
+use fno_agents::loopcheck::{blockers_withhold, unattested_reviewers_scan};
+
+/// A fail at `head` that reviewed base..head, raised `findings`, and recorded
+/// `dispositions` - the declining round in one event.
+fn declined_round(
+    base: &str,
+    head: &str,
+    findings: serde_json::Value,
+    dispositions: serde_json::Value,
+) -> String {
+    let mut data = serde_json::json!({
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s",
+        "attester_session_id": "sess-peer",
+        "branch": BRANCH,
+        "reviewed_base_sha": base,
+        "reviewed_head_sha": head,
+        "reviewed_file_count": 2,
+        "reviewed_line_count": 20,
+        "findings": findings,
+    });
+    if dispositions
+        .as_array()
+        .map(|a| !a.is_empty())
+        .unwrap_or(false)
+    {
+        data["dispositions"] = dispositions;
+    }
+    serde_json::json!({
+        "ts": "2026-08-26T19:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": data,
+    })
+    .to_string()
+}
+
+fn declined(key: &str) -> serde_json::Value {
+    serde_json::json!({"finding_key": key, "disposition": "declined", "reason": "not worth the churn"})
+}
+
+#[test]
+fn xaecc_marker1_fail_only_chain_fully_dispositioned_reads_covered() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, _shas, head) = repo_with(repo, 2);
+    let k1 = "a.py:1:correctness";
+    let k2 = "b.py:2:correctness";
+    let events = events_file(
+        repo,
+        &[declined_round(
+            &base,
+            &head,
+            serde_json::json!([
+                finding(k1, "correctness", None, true),
+                finding(k2, "correctness", None, true),
+            ]),
+            serde_json::json!([declined(k1), declined(k2)]),
+        )],
+    );
+    let tiling = tiling_for(repo, &events);
+    assert!(
+        tiling.tiled,
+        "the fail's range read base..head: {:?}",
+        tiling.gaps
+    );
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    // POSITIVE markers, the row's own words: a positive count and the
+    // reviewed state, never an absence. Covered(0) serializes "uncovered", so
+    // the n > 0 match is exactly the "covered" string the Python gate reads.
+    assert!(
+        matches!(rep.coverage, Coverage::Covered(n) if n > 0),
+        "an answered fail must count like a pass: {:?}",
+        rep.coverage
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+    let local: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].name, "code-review");
+    assert_eq!(local[0].verdict, CoverageVerdict::Reviewed);
+    // Marker 3: the covered answer pins the SAME head the declining round
+    // attested - no commit, no further review, between declining and merging.
+    assert_eq!(local[0].reviewed_sha, head);
+    assert_eq!(local[0].freshness, Some(Freshness::Fresh));
+
+    // The same answered fail satisfies the config.review.reviewers gate.
+    let (unattested, _malformed) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert!(
+        unattested.is_empty(),
+        "an answered fail satisfies the reviewers gate: {unattested:?}"
+    );
+}
+
+#[test]
+fn xaecc_fixed_in_a_later_round_answers_too() {
+    // The other terminal disposition: findings raised in round 1, fixed, and
+    // a LATER round reviewed the fix delta (the specimen shape). The only
+    // attestations are fails.
+    let at_specimen = |sha: &str| {
+        if sha == SPECIMEN_HEAD {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let events = specimen_events();
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_specimen,
+        BRANCH,
+        SPECIMEN_HEAD,
+        None,
+        None,
+        false,
+    );
+    assert!(
+        matches!(rep.coverage, Coverage::Covered(n) if n > 0),
+        "fixed-and-reviewed findings answer the head: {:?}",
+        rep.coverage
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+}
+
+#[test]
+fn xaecc_marker2_one_nonterminal_finding_withholds_and_is_named() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, _shas, head) = repo_with(repo, 2);
+    let k1 = "a.py:1:correctness";
+    let k2 = "b.py:2:correctness";
+    // Only k1 is dispositioned; k2 is left open on the same head.
+    let events = events_file(
+        repo,
+        &[declined_round(
+            &base,
+            &head,
+            serde_json::json!([
+                finding(k1, "correctness", None, true),
+                finding(k2, "correctness", None, true),
+            ]),
+            serde_json::json!([declined(k1)]),
+        )],
+    );
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    // The pair-half of the marker: NOT covered, and not by absence - the
+    // blockers list NAMES the open finding by key.
+    assert!(
+        !rep.verdicts
+            .iter()
+            .any(|v| v.producer == CoverageProducer::LocalAttestation
+                && v.verdict == CoverageVerdict::Reviewed),
+        "an unanswered fail must not count as a review"
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+    let blockers = disposition_blockers(&events, BRANCH, &head, false);
+    assert_eq!(blockers.len(), 1, "the refusal names exactly one finding");
+    assert_eq!(blockers[0].finding_key, k2);
+    assert_eq!(blockers[0].axis, "open");
+    assert!(blockers_withhold(&blockers, false));
+
+    // The reviewers gate withholds on the same evidence, failed_at_head.
+    let (unattested, _malformed) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert_eq!(unattested.len(), 1);
+}
+
+#[test]
+fn xaecc_cap_files_the_soft_remainder_and_answers() {
+    // Filed at the cap is the third terminal disposition: rounds spent with
+    // only non-hard blockers, the fail still answers (the merge gate files
+    // them; only a CONFIRMED correctness/security finding keeps withholding).
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 3);
+    let k = "a.py:1:correctness";
+    // Three fail rounds, each at its own head (the loop's non-fix commits),
+    // finding never dispositioned, unconfirmed so not hard.
+    let lines: Vec<String> = [&shas[0], &shas[1], &head]
+        .iter()
+        .map(|h| {
+            declined_round(
+                &base, // every round read the full range
+                h,
+                serde_json::json!([finding(k, "correctness", None, true)]),
+                serde_json::json!([]),
+            )
+        })
+        .collect();
+    let events = events_file(repo, &lines);
+    let tiling = tiling_for(repo, &events);
+    assert!(tiling.rounds_exhausted, "3 rounds spends the budget of 2");
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    assert!(
+        matches!(rep.coverage, Coverage::Covered(n) if n > 0),
+        "the cap files the soft remainder; the fail answers: {:?}",
+        rep.coverage
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+}
+
+/// A same-head RETRACTION of a pass (review finding 1): the retraction is
+/// the pair's latest fail, the pair's own round-1 fail carried findings that
+/// are all declined, and the chain's blockers are empty - the exact shape a
+/// chain-global guard would read as answered. The retribution it must not
+/// buy: the revoked pass must NOT come back as a Reviewed verdict.
+#[test]
+fn xaecc_r1_a_retraction_never_resurrects_the_revoked_pass() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 2);
+    let k = "a.py:1:correctness";
+    let fail_with_findings = declined_round(
+        &base,
+        &shas[0],
+        serde_json::json!([finding(k, "correctness", None, true)]),
+        serde_json::json!([declined(k)]),
+    );
+    let pass =
+        attestation("code-review", &shas[0], &head, "pass").replace("\"sess-a\"", "\"sess-peer\"");
+    let retraction = serde_json::json!({
+        "ts": "2026-08-26T20:00:00Z",
+        "type": "review_attestation",
+        "source": "hook",
+        "data": {
+            "reviewer": "code-review",
+            "head_sha": head,
+            "verdict": "fail",
+            "session_id": "s-op",
+            "attester_session_id": "sess-op",
+            "retracts_attester": "sess-peer",
+            "branch": BRANCH,
+            "reviewed_file_count": 2,
+            "reviewed_line_count": 20,
+        }
+    })
+    .to_string();
+    let events = events_file(repo, &[fail_with_findings, pass, retraction]);
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    // The pair's latest entry is the retraction: is_pass=false,
+    // is_retraction=true -> no verdict at all, covered nowhere. A `pass`
+    // arm would have counted; the retraction revoked it and nothing may
+    // restore it by decline.
+    assert!(
+        !rep.verdicts
+            .iter()
+            .any(|v| v.producer == CoverageProducer::LocalAttestation),
+        "a retraction revokes; it never covers: {:?}",
+        rep.verdicts
+    );
+    assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+    let (unattested, _m) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert_eq!(
+        unattested.len(),
+        1,
+        "the reviewers gate withholds on the retraction too"
+    );
+}
+
+/// A bystander reviewer's findings-free fail (review finding 2): another
+/// reviewer's declined findings must not satisfy it, on the coverage axis or
+/// the reviewers gate.
+#[test]
+fn xaecc_r2_a_bystanders_findings_free_fail_stays_unanswered() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, _shas, head) = repo_with(repo, 2);
+    let k = "a.py:1:correctness";
+    let events = events_file(
+        repo,
+        &[
+            declined_round(
+                &base,
+                &head,
+                serde_json::json!([finding(k, "correctness", None, true)]),
+                serde_json::json!([declined(k)]),
+            ),
+            attestation("sigma", &base, &head, "fail"),
+        ],
+    );
+    let at_head = |sha: &str| {
+        if sha == head {
+            Freshness::Fresh
+        } else {
+            Freshness::Stale
+        }
+    };
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &at_head,
+        BRANCH,
+        &head,
+        None,
+        None,
+        false,
+    );
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    // The findings carrier answers; the bystander does not.
+    assert_eq!(locals.len(), 1, "only the carrier pair promotes");
+    assert_eq!(locals[0].name, "code-review");
+    assert_eq!(locals[0].verdict, CoverageVerdict::Reviewed);
+    let (unattested, _m) = unattested_reviewers_scan(
+        repo.join("events.jsonl").as_path(),
+        &["code-review".to_string(), "sigma".to_string()],
+        &at_head,
+        BRANCH,
+        &head,
+        false,
+    );
+    assert_eq!(
+        unattested.len(),
+        1,
+        "sigma stays unattested: {unattested:?}"
+    );
+}

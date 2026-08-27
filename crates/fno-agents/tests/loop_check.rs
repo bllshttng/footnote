@@ -5563,7 +5563,7 @@ fn attestation_scope_both_scans_agree_on_foreign_line() {
     let reviewers = vec!["code-review".to_string()];
 
     let (unattested, _malformed) =
-        unattested_reviewers_scan(&p, &reviewers, &carried, "feature/b", COV_HEAD);
+        unattested_reviewers_scan(&p, &reviewers, &carried, "feature/b", COV_HEAD, false);
     assert_eq!(
         unattested.len(),
         1,
