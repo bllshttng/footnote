@@ -107,6 +107,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -146,6 +147,7 @@ fn layout_e2e_pane_run_places_left_and_refuses_too_small_split() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -661,6 +663,7 @@ fn exact_placement(at: u64, split: Dir) -> PanePlacement {
         here: false,
         fallback: PlacementFallback::Refuse,
         max_panes: None,
+        thread_pane: false,
     }
 }
 
@@ -685,6 +688,7 @@ fn exact_current_places_beside_anchor_not_focus() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -730,6 +734,7 @@ fn exact_current_refuses_stale_anchor_selector_and_min_size() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -794,6 +799,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -814,6 +820,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -841,6 +848,7 @@ fn legacy_focused_split_keeps_new_tab_fallback() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();
@@ -907,6 +915,7 @@ fn layout_graft_replaces_anchor_and_preserves_enclosing_tab() {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         },
     )
     .unwrap();

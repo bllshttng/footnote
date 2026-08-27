@@ -590,6 +590,15 @@ pub struct PanePlacement {
     /// split refuses. Absent on legacy and non-agent placement requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_panes: Option<usize>,
+    /// (x-07c2) Route this reach into the ONE dedicated thread pane instead
+    /// of an ordinary placement: no slot yet opens one (never persisted as a
+    /// squad member), a slot on another row repoints it in place, a slot on
+    /// this row focuses it. Mutually exclusive with `here`, `at`, `split`
+    /// and a non-default `target` (the dedicated pane owns its geometry);
+    /// the server refuses a conflicting combination. `#[serde(default)]`
+    /// keeps every existing placement wire-identical.
+    #[serde(default)]
+    pub thread_pane: bool,
 }
 
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
@@ -4461,6 +4470,7 @@ mod tests {
             here: false,
             fallback: PlacementFallback::NewTab,
             max_panes: None,
+            thread_pane: false,
         };
         for msg in [
             ClientMsg::Control {

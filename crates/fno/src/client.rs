@@ -36,8 +36,8 @@ use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
     AgentRow, AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg,
     Color, Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
-    PlacementFallback, ProtoError, Reach, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION,
-    MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
+    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
@@ -13408,6 +13408,7 @@ async fn execute_row_menu_action(
                         at: None,
                         fallback: PlacementFallback::NewTab,
                         max_panes: None,
+                        thread_pane: false,
                     },
                 }),
             )
@@ -15221,6 +15222,7 @@ async fn attach_place_keys(
                     at: None,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             }),
         )
@@ -16219,7 +16221,7 @@ fn map_color(c: Color) -> CtColor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, TabMeta};
+    use crate::proto::{AnswerOption, AnswerablePrompt, PaneMeta, Reach, TabMeta};
     use crate::vt::frame_text;
 
     #[test]
@@ -27977,6 +27979,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             })
         );
@@ -28346,6 +28349,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             })
         );
@@ -28396,6 +28400,7 @@ mod tests {
                     here: false,
                     fallback: PlacementFallback::NewTab,
                     max_panes: None,
+                    thread_pane: false,
                 },
             }),
             "Enter must attach to the marked workspace, not here"

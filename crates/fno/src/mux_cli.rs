@@ -2822,6 +2822,7 @@ pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
                     at,
                     fallback,
                     max_panes,
+                    thread_pane: false,
                 },
             },
         });
