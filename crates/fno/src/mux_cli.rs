@@ -2341,9 +2341,13 @@ pub const EXIT_NO_SERVER: i32 = 24; // thread: no live mux server to drive (x-07
 fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> String {
     let name = &row.name;
     // Ask the same function the server ships in AgentRow.reach, so the CLI
-    // hint and the TUI's actual reach behavior can never drift apart.
+    // hint and the TUI's actual reach behavior can never drift apart. Gate on
+    // `!exited` same as the caller must: thread_reach's contract assumes an
+    // already-live row (reach_thread_pane filters exited rows before ever
+    // calling it), and an exited row's attach_id is not an attachability
+    // signal on its own (agents_view.rs's own doc comment on attach_id).
     let tier = crate::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref());
-    if matches!(tier, crate::proto::Reach::Drive) {
+    if !row.exited && matches!(tier, crate::proto::Reach::Drive) {
         format!(
             "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
         )

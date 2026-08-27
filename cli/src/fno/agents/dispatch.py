@@ -379,6 +379,11 @@ _MUX_THREAD_NO_SERVER = 24
 # or a deployed binary older than `mux thread` (version skew). Neither can be
 # a refusal about the agent, so it falls through to the inline path too.
 _MUX_THREAD_USAGE = 2
+# The Rust EXIT_CONTROL_UNANSWERED (20): the verb sent, but the server never
+# replied within its own timeout - outcome unknown, not a refusal. Falls
+# through to the inline path rather than surfacing a hard failure for a
+# merely slow mux server.
+_MUX_THREAD_UNANSWERED = 20
 
 # x-c393: how recent an inside_leg report must be for a worker to count as
 # "provably live" when a follow-up fails to route. Mirrors the Rust
@@ -5064,6 +5069,7 @@ def attach_agent(name: str) -> AttachResult:
     if landed is not None and landed.returncode not in (
         _MUX_THREAD_NO_SERVER,
         _MUX_THREAD_USAGE,
+        _MUX_THREAD_UNANSWERED,
     ):
         # The server answered with a refusal: surface it verbatim rather than
         # silently falling through to an attach it just refused.
