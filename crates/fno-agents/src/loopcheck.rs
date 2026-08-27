@@ -1259,15 +1259,15 @@ fn is_documentation_path(path: &str) -> bool {
     p.ends_with(".md") || p.starts_with("docs/")
 }
 
-/// Whether a lane THIS code drives can fire the harness's review verb (claude
-/// `/code-review`, codex `/review`). The self-review floor only applies on
-/// these: gemini/agy have no native review verb and opencode's recorded
-/// `/review-changes` has no fireable lane (the daemon lane submits text, the
-/// mux row declares submit unsupported), so flooring code-review would demand
-/// an attestation nothing produces and wedge the loop. Their path is route 3
-/// (a spawned reviewer), which is deferred. Pure so a unit test pins the set.
-fn harness_can_self_review(harness: Option<&str>) -> bool {
-    matches!(harness, Some("claude") | Some("codex"))
+/// Whether this harness can run the review this machinery recommends. The
+/// recommendation is the fno-owned review lane, which runs as ordinary tool
+/// calls wherever the plugin runs, so every harness qualifies unconditionally.
+/// The native per-harness verbs this used to gate on (claude `/code-review`,
+/// codex `/review`) remain the operator's explicit choice; no machinery
+/// depends on them any more, which is the point of owning the reviewer.
+/// Mirrors `harness_can_self_review` in `cli/src/fno/review_capability.py`.
+fn harness_can_self_review(_harness: Option<&str>) -> bool {
+    true
 }
 
 /// The KNOWN harnesses with no native self-review verb. A set, not
@@ -17772,19 +17772,16 @@ git_bounded();";
     }
 
     #[test]
-    fn self_review_gate_only_floors_harnesses_with_a_verb() {
-        // The floor wedges a harness whose native verb the session cannot run,
-        // so it applies only where a self-review verb exists. Route 3 (a spawned
-        // reviewer) is the path for harnesses without one and is deferred.
+    fn self_review_gate_floors_every_harness() {
+        // The fno-owned review lane runs as ordinary tool calls wherever the
+        // plugin runs, so every harness self-reviews now - no KNOWN harness
+        // is verbless any more.
         assert!(harness_can_self_review(Some("claude")));
         assert!(harness_can_self_review(Some("codex")));
-        // opencode's /review-changes is recorded but no lane this code drives
-        // can fire it (daemon lane submits text; mux declares submit
-        // unsupported), so the floor must not demand its attestation.
-        assert!(!harness_can_self_review(Some("opencode")));
-        assert!(!harness_can_self_review(Some("gemini")));
-        assert!(!harness_can_self_review(Some("agy")));
-        assert!(!harness_can_self_review(None));
+        assert!(harness_can_self_review(Some("opencode")));
+        assert!(harness_can_self_review(Some("gemini")));
+        assert!(harness_can_self_review(Some("agy")));
+        assert!(harness_can_self_review(None));
     }
 
     #[test]

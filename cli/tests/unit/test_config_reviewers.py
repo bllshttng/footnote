@@ -166,6 +166,7 @@ def test_doctor_review_reports_sigma_retired(
     assert "unavailable: sigma" in r.output
     assert "sigma is retired" in r.output
     assert "run `/fno:review`" in r.output
+    assert "`declare` is never substituted for you" in r.output
 
 
 def test_doctor_review_marks_declare_as_self_cert(
