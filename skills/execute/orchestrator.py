@@ -583,9 +583,8 @@ def effective_blockers(strategy: ExecutionStrategy, task_id: str) -> Set[str]:
     wave), so a plan without per-task edges schedules exactly as the old
     whole-wave barrier did.
     """
-    declared = strategy.blocked_by.get(task_id)
-    if declared:
-        return set(declared)
+    if task_id in strategy.blocked_by:
+        return set(strategy.blocked_by[task_id])
     for pos, wave in enumerate(strategy.waves):
         if task_id in wave.tasks:
             if pos == 0:
@@ -1124,6 +1123,65 @@ def _shell_fno(argv: List[str], what: str) -> bool:
     return _shell_fno_result(argv, what) is not None
 
 
+def _ambient_session_ids() -> Set[str]:
+    """Return full session ids this orchestrator can identify as its own."""
+    return {
+        value.strip()
+        for name in (
+            "TARGET_SESSION_ID",
+            "FNO_HARNESS_SESSION_ID",
+            "CODEX_THREAD_ID",
+            "CODEX_SESSION_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+        )
+        if (value := os.environ.get(name, "").strip())
+    }
+
+
+def _task_claim_state(node_id: str, task_id: str) -> tuple[Optional[bool], Optional[str]]:
+    """Read one task claim as ``(live, holder)`` without mutating state.
+
+    ``False`` means the claim is free or stale, ``True`` means a live holder
+    exists, and ``None`` means the claim could not be read. Unknown is kept
+    fail-closed by callers so an unreadable claim never becomes dispatchable.
+    """
+    result = _shell_fno_result(
+        ["fno", "agents", "claim", "status", f"task:{node_id}:{task_id}", "--json"],
+        f"task claim read for {node_id}/{task_id}",
+    )
+    if result is None:
+        return None, None
+    try:
+        payload = json.loads(result.stdout.decode("utf-8", "replace"))
+    except ValueError:
+        print(
+            f"orchestrator: note: unreadable task claim for {node_id}/{task_id}; "
+            "suppressing dispatch",
+            file=sys.stderr,
+        )
+        return None, None
+    if not isinstance(payload, dict):
+        print(
+            f"orchestrator: note: malformed task claim for {node_id}/{task_id}; "
+            "suppressing dispatch",
+            file=sys.stderr,
+        )
+        return None, None
+    state = payload.get("state")
+    if state in {"live", "suspect"}:
+        return True, str(payload.get("holder") or "")
+    if state in {"free", "stale", "expired", "dead"}:
+        return False, str(payload.get("holder") or "")
+    print(
+        f"orchestrator: note: unknown task claim state {state!r} for "
+        f"{node_id}/{task_id}; suppressing dispatch",
+        file=sys.stderr,
+    )
+    return None, str(payload.get("holder") or "")
+
+
 #: Boundary outcomes that release the claim as done.
 _TERMINAL_OUTCOMES = ("SUCCESS", "DONE_WITH_CONCERNS")
 #: Boundary outcomes that give the task back to pending. NOT "": the `blocked`
@@ -1509,7 +1567,7 @@ def load_plan_strategy(
         blocked_by={
             str(t["id"]): [str(d) for d in t.get("blocked_by", [])]
             for t in raw.get("tasks", [])
-            if isinstance(t, dict) and t.get("id")
+            if isinstance(t, dict) and t.get("id") and t.get("blocked_by_declared", False)
         },
     )
 
@@ -1683,6 +1741,8 @@ if __name__ == "__main__":
                 sys.exit(1)
         completed: List[str] = list(dict.fromkeys(completed_tasks))
         claimed: List[str] = []
+        blocked: List[str] = []
+        own_session_ids = _ambient_session_ids()
         if node_id:
             result = _shell_fno_result(
                 ["fno", "backlog", "task", "list", node_id, "--json"],
@@ -1704,12 +1764,41 @@ if __name__ == "__main__":
                 if status == "done":
                     completed.append(str(row.get("id")))
                 elif status == "in_progress":
-                    claimed.append(str(row.get("id")))
+                    task_id = str(row.get("id"))
+                    claim_live, claim_holder = _task_claim_state(node_id, task_id)
+                    if claim_live is False:
+                        # A stale task claim is exactly the recovery path that
+                        # task update --status in_progress owns. Do not let a
+                        # stranded graph row suppress that recovery.
+                        continue
+                    if claim_live is True and (
+                        claim_holder in own_session_ids
+                        or str(row.get("owner") or "") in own_session_ids
+                    ):
+                        # A resumed session may still own the live claim while
+                        # its graph row is unfinished. Re-offer it so the task
+                        # transition can resume the work idempotently.
+                        continue
+                    # An unreadable or foreign-live claim suppresses dispatch.
+                    claimed.append(task_id)
+                elif status == "pending":
+                    continue
+                else:
+                    task_id = str(row.get("id"))
+                    blocked.append(task_id)
+                    print(
+                        f"orchestrator: note: task {node_id}/{task_id} has "
+                        f"unsupported status {status!r}; suppressing dispatch",
+                        file=sys.stderr,
+                    )
             completed = list(dict.fromkeys(completed))
+            claimed = list(dict.fromkeys(claimed))
+            blocked = list(dict.fromkeys(blocked))
         print(json.dumps({
-            "ready": ready_tasks(strategy, completed, claimed),
+            "ready": ready_tasks(strategy, completed, [*claimed, *blocked]),
             "completed": completed,
             "claimed": claimed,
+            "blocked": blocked,
         }))
     elif "--next" in sys.argv:
         next_wave = get_next_wave(strategy, completed_tasks)

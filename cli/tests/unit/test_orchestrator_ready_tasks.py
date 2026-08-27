@@ -92,6 +92,16 @@ class TestReadyTasks:
         assert orch.effective_blockers(strategy, "2.1") == {"1.1"}
         assert orch.effective_blockers(strategy, "3.1") == {"2.1"}
 
+    def test_explicit_empty_blockers_override_wave_derivation(self):
+        orch = _load_orch()
+        strategy = _strategy(
+            orch,
+            [(1, ["1.1"]), (2, ["2.1"])],
+            {"2.1": []},
+        )
+        assert orch.effective_blockers(strategy, "2.1") == set()
+        assert orch.ready_tasks(strategy, set(), set()) == ["1.1", "2.1"]
+
     def test_shim_returns_none_when_all_complete(self):
         orch = _load_orch()
         strategy = _strategy(orch, [(1, ["1.1"]), (2, ["2.1"])])
@@ -153,6 +163,58 @@ class TestReadyCli:
         assert out["completed"] == ["1.1"]
         # The claimed sibling never dispatches; the freed dependent still does.
         assert out["ready"] == ["2.1"]
+
+    def test_stale_task_claim_is_reoffered(self, tmp_path):
+        plan, state = _write_fixture(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_fno = bin_dir / "fno"
+        fake_fno.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = backlog ]; then\n"
+            "  cat <<'EOF'\n"
+            '{"node": "x-demo", "tasks": ['
+            '{"id": "1.2", "status": "in_progress", "owner": "peer"},'
+            '{"id": "2.1", "status": "pending", "owner": null}'
+            "]}\nEOF\n"
+            "elif [ \"$1\" = agents ]; then\n"
+            "  echo '{\"key\":\"task:x-demo:1.2\",\"state\":\"stale\"}'\n"
+            "fi\n"
+        )
+        fake_fno.chmod(fake_fno.stat().st_mode | stat.S_IEXEC)
+        proc = _run_cli(
+            [str(plan), "--ready", "--state", str(state), "--node", "x-demo"],
+            env_path=str(bin_dir),
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.2", "2.1"]
+        assert out["claimed"] == []
+
+    def test_unknown_task_status_is_blocked(self, tmp_path):
+        plan, state = _write_fixture(tmp_path)
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake_fno = bin_dir / "fno"
+        fake_fno.write_text(
+            "#!/bin/sh\ncat <<'EOF'\n"
+            '{"node": "x-demo", "tasks": ['
+            '{"id": "1.2", "status": "cancelled", "owner": null},'
+            '{"id": "2.1", "status": "pending", "owner": null}'
+            "]}\nEOF\n"
+        )
+        fake_fno.chmod(fake_fno.stat().st_mode | stat.S_IEXEC)
+        proc = _run_cli(
+            [str(plan), "--ready", "--state", str(state), "--node", "x-demo"],
+            env_path=str(bin_dir),
+            cwd=tmp_path,
+        )
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["2.1"]
+        assert out["claimed"] == []
+        assert out["blocked"] == ["1.2"]
 
     def test_failed_node_read_degrades_to_state(self, tmp_path):
         plan, state = _write_fixture(tmp_path)
