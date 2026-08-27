@@ -1115,6 +1115,89 @@ fn cap_verdict_count_for(repo: &std::path::Path, rows: &[String]) -> usize {
 }
 
 #[test]
+fn cap_a_spent_budget_discharges_coverage_with_no_attestation_at_all() {
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (_base, shas, head) = repo_with(repo, 4);
+    // The case that produced the 12-round PRs. Three rounds against a budget
+    // of 2, and the chain does NOT tile: every attestation starts at shas[0],
+    // so base..shas[0] is an uncovered gap and the fail arm contributes no
+    // verdict. Before the discharge this was Covered(0) - "uncovered" - and
+    // the gate refused, naming a terminal act the same call would not permit.
+    // Every remedy for it names a review verb, and running one spends a round
+    // already spent, so nothing could ever clear it.
+    let events = events_file(
+        repo,
+        &[
+            attestation("code-review", &shas[0], &shas[1], "fail"),
+            attestation("code-review", &shas[1], &shas[2], "fail"),
+            attestation("code-review", &shas[2], &head, "fail"),
+        ],
+    );
+    let tiling = tiling_for(repo, &events);
+    assert!(
+        tiling.rounds_exhausted,
+        "three rounds must spend a budget of 2: {:?}",
+        tiling.rounds_used
+    );
+    assert!(
+        !tiling.tiled,
+        "this specimen must NOT tile - a tiled chain covers by its own arm and \
+         would not exercise the discharge: {:?}",
+        tiling.gaps
+    );
+    let rep = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &head,
+        Some(&tiling),
+        None,
+        false,
+    );
+    // The POSITIVE marker: covered, by the budget alone, with no attestation
+    // verdict behind it. Covered(0) reads as "uncovered" downstream, so the
+    // count is load-bearing and an assert on `matches!(Covered(_))` would
+    // pass on the broken answer.
+    assert_eq!(
+        rep.coverage,
+        Coverage::Covered(1),
+        "a spent budget must discharge the obligation: {:?}",
+        rep.verdicts
+    );
+
+    // The control: the SAME chain under a budget of 10 is NOT discharged and
+    // stays uncovered, so the discharge cannot leak below the cap.
+    let under = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 10);
+    assert!(!under.rounds_exhausted);
+    let rep_under = classify_coverage_tiled(
+        &[],
+        &[],
+        &events,
+        &[],
+        true,
+        None,
+        &|_| Freshness::Stale,
+        BRANCH,
+        &head,
+        Some(&under),
+        None,
+        false,
+    );
+    assert_eq!(
+        rep_under.coverage,
+        Coverage::Covered(0),
+        "under the cap the same chain must stay uncovered: {:?}",
+        rep_under.verdicts
+    );
+}
+
+#[test]
 fn cap_a_retraction_never_mints_coverage_at_the_head_it_revoked() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
