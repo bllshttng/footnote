@@ -437,12 +437,30 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
     ``resolve_transcript`` is the shared per-harness resolver (it handles codex
     and opencode as well as claude), so adopting a codex rollout does not need a
     second copy of codex's date-partitioned path shape.
+
+    Only a per-session file (``kind == "jsonl"``) yields a stamp. opencode
+    resolves to its SHARED SQLite store, whose mtime is the last write by ANY
+    session; stamping that would be a plausible, near-always-wrong answer that
+    nothing downstream could falsify. A null the receipt explains is better.
     """
     from fno.provenance.resolver import resolve_transcript
 
     try:
-        resolved = resolve_transcript(hit.harness, hit.session_id, hit.cwd)
+        # Pass the SAME store roots the probes used. resolve_transcript's claude
+        # arm otherwise falls back to an import-time `~/.claude/projects`, so
+        # under FNO_CLAUDE_PROJECTS_DIR it reads a different tree than the one
+        # that produced this hit and the stamp is null every time - including in
+        # every test, where it is the one read that escapes the fixture roots.
+        resolved = resolve_transcript(
+            hit.harness,
+            hit.session_id,
+            hit.cwd,
+            projects_root=_claude_projects_dir(),
+            codex_sessions_dir=_codex_sessions_dir(),
+        )
         if not resolved.resolved or not resolved.transcript_path:
+            return None
+        if resolved.kind != "jsonl":
             return None
         mtime = Path(resolved.transcript_path).stat().st_mtime
     except Exception:  # noqa: BLE001 - a stamp is a nicety; adoption still lands

@@ -253,8 +253,14 @@ class AgentEntry:
       reachable; flipped to ``"orphaned"`` by US2's follow-up path when
       ``locate_session`` or the 250 ms liveness probe fails.
     - ``last_message_at`` is the UTC ISO timestamp of the most recent
-      successful follow-up send (bumped post-send, monotone per
-      ``update_registry`` flock).
+      OBSERVED activity on the session. Two writers, and only the first is
+      monotone: a successful follow-up send bumps it post-send under the
+      ``update_registry`` flock, and an adoption stamps the mtime of the
+      session's own transcript file (never a shared store's - see
+      ``store_fallback._transcript_last_write``). Read it as "newest activity
+      anything has seen", not as "last send": an adoption of a long-dead
+      session writes an old stamp here on purpose, and re-adopting after the
+      store changed can move it backwards.
 
     Schema v3 (Phase 5 US6) adds ``mcp_channel_id``:
 
@@ -1572,9 +1578,13 @@ def register_existing_session(
                     entry.model = model
                 if effort is not None:
                     entry.effort = effort
-                # Only ever FILLS. A refresh reads a transcript mtime, and a
-                # store that has since been pruned would otherwise erase a real
-                # stamp with None.
+                # A None never erases: a refresh reads a transcript mtime, and a
+                # store pruned since would otherwise blank a real stamp. A
+                # non-None DOES overwrite, including backwards - re-adopting a
+                # row whose store was replaced by an older copy moves the stamp
+                # back. That is deliberate: the field means "the newest activity
+                # anything has OBSERVED", and a stale observation that outranks
+                # the current one is the wrong answer to keep.
                 if last_message_at is not None:
                     entry.last_message_at = last_message_at
                 return entries

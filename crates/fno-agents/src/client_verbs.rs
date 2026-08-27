@@ -2866,10 +2866,18 @@ pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
                                 )
                             },
                         ),
-                    // Never "unreadable": nothing here read a transcript. The
-                    // adopting write resolves the stamp, so a null means the
-                    // store held no transcript for this session, and only that.
-                    None => "no transcript found in the harness store; last_message_at=null".into(),
+                    // Never "unreadable": nothing on this side read a
+                    // transcript. Name the resolver that actually ran, because
+                    // the two sources use different ones and only one of them
+                    // is store-wide. The manifest path resolves through
+                    // claude_adopt::transcript_activity, which is claude-only,
+                    // so a codex manifest adoption lands here with its rollout
+                    // sitting on disk; saying "the store held nothing" there
+                    // would be the same false absence this receipt just lost.
+                    None if source == AdoptSource::Manifest => {
+                        "no transcript resolved from the target manifest (that path resolves claude only); last_message_at=null".into()
+                    }
+                    None => "no transcript resolved for this session in the harness store; last_message_at=null".into(),
                 };
                 eprintln!("adopted {name} ({handle})\n  {activity}");
             }

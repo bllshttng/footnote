@@ -1100,3 +1100,38 @@ def test_adopt_records_last_message_at_for_a_codex_rollout(tmp_path, monkeypatch
         .replace("+00:00", "Z")
     )
     assert entry.last_message_at == expected
+
+
+def test_adopt_refuses_a_shared_store_mtime_as_a_session_stamp(monkeypatch):
+    """A store-wide mtime is a wrong answer, not a cheap one. Refuse it.
+
+    opencode keeps every session in ONE SQLite database, so `resolve_transcript`
+    answers with the store's path and kind="opencode-db". Stat'ing that gives
+    the last write by ANY session, which would land on the adopted row as if it
+    were this session's last message: a plausible stamp, always wrong except by
+    coincidence, and unfalsifiable once written. None is the honest answer.
+    """
+    from fno.agents import store_fallback
+    from fno.provenance.resolver import ResolvedTranscript
+
+    sid = "ses_abc123"
+    calls = []
+
+    def _resolved(harness, session_id, cwd, **kw):
+        calls.append(harness)
+        # A real, freshly-written path: the guard must key on `kind`, not on
+        # the file being absent.
+        return ResolvedTranscript(
+            harness=harness,
+            session_id=session_id,
+            cwd=cwd,
+            resolved=True,
+            transcript_path=__file__,
+            kind="opencode-db",
+        )
+
+    monkeypatch.setattr("fno.provenance.resolver.resolve_transcript", _resolved)
+
+    hit = store_fallback.StoreHit(harness="opencode", session_id=sid, cwd="/repo/one")
+    assert store_fallback._transcript_last_write(hit) is None
+    assert calls == ["opencode"], "the resolver must still be consulted"

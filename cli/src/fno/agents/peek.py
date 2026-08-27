@@ -513,7 +513,16 @@ def _status_events(
     """
     if events_path is None:
         return []
-    wants = {v for v in (short_id, session_id, f"worker:{short_id}") if v}
+    # Build the `worker:` token only from a NON-EMPTY short_id. Interpolating an
+    # empty one yields the bare literal "worker:", which is truthy, survives the
+    # `if v` filter, and then matches every `worker:<name>` source through the
+    # substring arm below - so a row with no short_id (every non-claude adopted
+    # orphan) rendered OTHER workers' status lines as its own and returned them
+    # on the fast path, before its transcript was ever read.
+    tokens = [short_id, session_id]
+    if short_id:
+        tokens.append(f"worker:{short_id}")
+    wants = {v for v in tokens if v}
     lines: list[str] = []
     try:
         with events_path.open("r", encoding="utf-8") as fh:
@@ -952,6 +961,10 @@ def peek(
     resolver = resolve if resolve is not None else _default_resolve
 
     session, suggestions = resolver(handle)
+    # True when `session` was rebuilt from a registry row rather than found by
+    # the live-session resolver. Such a session is dead by construction, which
+    # both the empty-transcript arm and the follow loop below must know.
+    row_derived = False
     if session is None:
         # The default substrate (a mux pane) is invisible to the live-session
         # resolver: its content is a PTY, not a transcript. Try the registry's
@@ -984,6 +997,7 @@ def peek(
         # The row carries the harness and the session id, which is all the
         # reader needs, so read the conversation rather than deny it exists.
         session = _row_as_session(row)
+        row_derived = session is not None
 
     if session is None:
         # Name the instrument. Both reads above (the live-session resolver and
@@ -1055,6 +1069,18 @@ def peek(
         err.write(f"observe not yet supported for {exc.agent}\n")
         return EXIT_UNSUPPORTED
 
+    if not records and row_derived:
+        # A dead row whose transcript did not resolve. "no activity yet" is the
+        # one answer this must never give: the row's session ENDED, so idle is
+        # false, and the module contract forbids a blank exit-0 a caller could
+        # read as idle. Name the row, the store searched, and the next move.
+        err.write(
+            f"registry row {handle} exists ({agent} session {session_id}), but no "
+            f"{agent} transcript resolved for it. The row outlived its store: the "
+            "session was pruned, or its store is not mounted here.\n"
+        )
+        return EXIT_NOT_FOUND
+
     if not records and not follow:
         _emit_no_activity(out, json_out)
         return EXIT_OK
@@ -1063,6 +1089,17 @@ def peek(
         _emit_record(out, rec, json_out)
     if not records:
         _emit_no_activity(out, json_out)
+
+    if follow and row_derived:
+        # Never tail a dead row. The follow loop leaves only on rotation, a
+        # false `is_live`, or Ctrl-C, and `cmd_peek` passes no `is_live`, so a
+        # `--follow` on an adopted orphan would block forever waiting for
+        # writes that cannot come. The tail above is the whole answer.
+        err.write(
+            f"--follow: {handle} is a recovered row, not a live session; "
+            "showed the tail only\n"
+        )
+        return EXIT_OK
 
     if follow:
         # Re-resolve the transcript path for the follow loop (records above came

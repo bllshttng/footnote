@@ -1114,3 +1114,145 @@ def test_peek_reads_adopted_orphan_row_instead_of_lying(tmp_path, monkeypatch):
         assert "orphaned ping" in out.getvalue()
         assert "peer not found" not in err.getvalue()
         assert "fno agents adopt" not in err.getvalue()
+
+
+def _adopted_codex_registry(tmp_path, monkeypatch, session_id, *, with_rollout=True):
+    """An adopted codex orphan: empty short_id, optional rollout on disk."""
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    if with_rollout:
+        day = tmp_path / "sessions" / "2026" / "08" / "27"
+        day.mkdir(parents=True, exist_ok=True)
+        (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}}
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response_item",
+                            "payload": {
+                                "type": "message",
+                                "role": "user",
+                                "content": [{"type": "input_text", "text": "my own message"}],
+                            },
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+    registry_path = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="01a04292",
+                harness="codex",
+                harness_session_id=session_id,
+                status="orphaned",
+                origin="adopted",
+                cwd="/tmp/proj",
+                log_path="",
+                short_id="",
+            )
+        ],
+        path=registry_path,
+    )
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry_path)
+
+
+def test_peek_empty_short_id_never_matches_other_workers_events(tmp_path, monkeypatch):
+    """An empty short_id must not turn into the catch-all token ``worker:``.
+
+    ``wants`` interpolated ``f"worker:{short_id}"`` before filtering falsy
+    entries, so an empty short_id (every non-claude adopted orphan) produced the
+    bare literal "worker:", which the substring arm then matched against every
+    ``worker:<name>`` event source. peek rendered OTHER workers' status lines as
+    this session's, on the fast path, before its own transcript was read.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+    events = tmp_path / "events.jsonl"
+    events.write_text(
+        "\n".join(
+            [
+                json.dumps({"kind": "task_started", "source": "worker:someone-else"}),
+                json.dumps({"kind": "task_done", "source": "worker:another-worker"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        events_path=events,
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0, err.getvalue()
+    # Positive marker: THIS session's own transcript line is what was rendered.
+    assert "my own message" in out.getvalue()
+    assert "someone-else" not in out.getvalue()
+    assert "another-worker" not in out.getvalue()
+
+
+def test_peek_row_without_a_transcript_is_not_reported_idle(tmp_path, monkeypatch):
+    """A dead row whose store is gone must not answer "no activity yet".
+
+    The row resolves, so "peer not found" is wrong; the session ended, so idle
+    is wrong too. The module contract forbids a blank exit-0 a caller could read
+    as idle, which is exactly what an empty record list produced here.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id, with_rollout=False)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 13
+    assert "no activity yet" not in out.getvalue()
+    message = err.getvalue()
+    assert "registry row 01a04292 exists" in message
+    assert "no codex transcript resolved" in message
+
+
+def test_peek_follow_on_a_recovered_row_returns_instead_of_tailing(tmp_path, monkeypatch):
+    """--follow must not block forever on a session that cannot write again.
+
+    The follow loop exits only on rotation, a false ``is_live``, or Ctrl-C, and
+    ``cmd_peek`` passes no ``is_live``. On a recovered row all three are
+    unreachable, so the call hung after printing the tail.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        follow=True,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    assert "my own message" in out.getvalue()
+    assert "recovered row, not a live session" in err.getvalue()
