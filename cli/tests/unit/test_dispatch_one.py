@@ -321,6 +321,35 @@ def test_no_account_is_byte_identical(monkeypatch, tmp_path):
     assert calls[0]["account_env"] is None
 
 
+# --- the account axis the minted row carries (x-d285 task 2.3) --------------
+
+
+def test_dispatch_threads_the_launch_account_id(monkeypatch, tmp_path):
+    # The loop dispatch path stamps the account id this launch rides onto the
+    # minted row (the cutover record wins, then the flag account): the row
+    # names its account axis, the same contract as pane and bg spawns.
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda acc: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/home/u/.claude-alt"}),
+    )
+    v = dispatch._dispatch_one(session="s", node=None, project=None, account="rr")
+    assert v["outcome"] == "launched"
+    assert calls[0]["launch_account"] == "rr", "the loop path's row names its account"
+
+
+def test_dispatch_without_an_account_asserts_nothing_the_seam_must_overwrite(
+    monkeypatch, tmp_path,
+):
+    # No account, no cutover: the loop path passes launch_account=None and the
+    # pane seam's own positive-default stamp is its own matrix row. Asserting
+    # None here keeps this path from guessing a value the seam owns.
+    calls, _gate = _wire(monkeypatch, tmp_path, next_node={"id": "x-1", "slug": "a", "cwd": str(tmp_path)})
+    v = dispatch._dispatch_one(session="s", node=None, project=None)
+    assert v["outcome"] == "launched"
+    assert calls[0]["launch_account"] is None
+
+
 def test_handover_claim_holder_rides_the_provenance(monkeypatch, tmp_path):
     # The pane env clears omitted keys, and target init only supplies
     # --handover-from when FNO_NODE_CLAIM_HOLDER exists, so without this the

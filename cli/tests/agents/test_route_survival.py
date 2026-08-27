@@ -740,9 +740,11 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
 #   attach (inline)      dispatch.attach_agent         2.1
 #   resume live wake     resume_cli wake arm           2.1
 #   resume dead          resume_cli --resume arm       2.1
-#   mux attach           crates/fnO server AttachAgent 2.2 (cargo matrix)
+#   mux attach           crates/fno server AttachAgent 2.2 (cargo matrix)
 #   mux ResumeAgent      crates/fno server ResumeAgent 2.2 (cargo matrix)
 #   spawn --resume       dispatch_spawn revive         route: x-ae2d, account: 1.1
+#   bg fresh spawn       dispatch_spawn picker         2.3
+#   loop dispatch        fno/dispatch launch_account   2.3 (test_dispatch_one)
 #   background observe   SessionStart restamp          3.1
 #   fork observe         SessionStart restamp          3.1
 #
@@ -888,7 +890,6 @@ def test_matrix_attach_default_row_stays_bare(tmp_path, monkeypatch) -> None:
     )
 
 
-@_WAVE2
 def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch) -> None:
     """Door: resume (the Python wake arm; the dead relaunch arm is Rust's and
     carries --settings there). The woken attach runs under the recorded
@@ -919,6 +920,14 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
         provider="zai",
     )
     seen: dict = {}
+    reads: list[str] = []
+
+    def _state():
+        # Stateful supervisor: the row sits at "Needs input" until the first
+        # wake injects the message, then it is "Working" - the transition the
+        # exit-16 loop needs to observe on its post-wake read.
+        reads.append("r")
+        return "Working" if len(reads) > 1 else "Needs input"
 
     def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen["route_env"] = route_env
@@ -933,9 +942,7 @@ def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch)
         execvp=lambda *a, **k: None,
         emit_event=lambda *a, **k: None,
         wake_fn=_wake,
-        agents_state_fn=lambda: {"deadbeef": {"live_status": next(
-            iter(["Needs input", "Working"])
-        )}},
+        agents_state_fn=lambda: {"deadbeef": {"live_status": _state()}},
     )
     assert res.exit_code == 0
     assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
@@ -982,6 +989,118 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
     row = load_registry()[0]
     assert row.launch_account == "makers", (
         "a revive inherits the source row's account axis"
+    )
+
+
+def _fake_bg_seam(monkeypatch):
+    """The bg spawn seam: no live session, a resolvable spawn uuid, and a
+    bg_create that succeeds without launching anything."""
+    from fno.agents.harnesses.base import ProviderResult
+
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.session_is_live", lambda short: False
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.resolve_session_uuid_at_spawn",
+        lambda *a: "sess-2",
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.bg_create",
+        lambda **kwargs: ProviderResult(0, "", "", 1, session_id_out="feedface"),
+    )
+
+
+def test_matrix_bg_fresh_spawn_routed_row_stamps_the_picked_account(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: bg spawn, routed control. A fresh spawn the picker resolves onto
+    the makers account stamps THAT id - the row names the account it rides."""
+    from fno.agents import dispatch
+    from fno.agents.registry import load_registry
+
+    _routed_glm_row(tmp_path, monkeypatch)
+    _fake_bg_seam(monkeypatch)
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        "fno.agents.dispatch._pick_account_overlay",
+        lambda **kwargs: _Overlay(),
+    )
+    result = dispatch.dispatch_spawn(
+        name="fresh-routed",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+    )
+    assert result.kind == "created"
+    rows = {r.name: r for r in load_registry()}
+    assert rows["fresh-routed"].launch_account == "makers", (
+        "a picked overlay names the account the fresh row records"
+    )
+
+
+def test_matrix_bg_fresh_spawn_default_control_stamps_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: bg spawn, default-Anthropic control. No picker fires, so the
+    fresh row positively records "default" - never an absence that a later
+    read could mistake for legacy-unknown."""
+    from fno.agents import dispatch
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _fake_bg_seam(monkeypatch)
+    result = dispatch.dispatch_spawn(
+        name="fresh-default",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+    )
+    assert result.kind == "created"
+    rows = {r.name: r for r in load_registry()}
+    assert rows["fresh-default"].launch_account == "default", (
+        "a fresh spawn with no account pick positively records default"
+    )
+
+
+def test_matrix_spawn_resume_default_control_inherits_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: spawn --resume, default-Anthropic control. A source row that
+    positively recorded "default" (and no route file) revives under the same
+    value - inheritance is exact, not normalized."""
+    from fno.agents import dispatch
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="plain-row",
+                cwd=str(tmp_path),
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-1",
+                launch_account="default",
+            )
+        ]
+    )
+    _fake_bg_seam(monkeypatch)
+    result = dispatch.dispatch_spawn(
+        name="plain-row",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+        resume_session_id="sess-1",
+    )
+    assert result.kind == "created"
+    row = [r for r in load_registry() if r.name == "plain-row"][0]
+    assert row.launch_account == "default", (
+        "a revive inherits the source row's exact account value"
     )
 
 
