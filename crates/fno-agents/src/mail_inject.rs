@@ -750,6 +750,10 @@ fn is_well_formed_paired_fno_mail_at(text: &str, registry_path: &Path) -> bool {
     if count_open_tags(text, "<fno_mail") != 1 || count_ci(text, "</fno_mail>") != 1 {
         return false;
     }
+    let trimmed = text.trim_end();
+    if !trimmed.to_ascii_lowercase().ends_with("</fno_mail>") {
+        return false;
+    }
     let open_end = match text.find('>') {
         Some(end) => end,
         None => return false,
@@ -762,10 +766,9 @@ fn is_well_formed_paired_fno_mail_at(text: &str, registry_path: &Path) -> bool {
     if !fleet_has_crown_at(registry_path) {
         return true;
     }
-    known_trailers_for_origin(origin).iter().any(|trailer| {
-        text.trim_end()
-            .ends_with(&format!("{trailer}\n</fno_mail>"))
-    })
+    known_trailers_for_origin(origin)
+        .iter()
+        .any(|trailer| trimmed.ends_with(&format!("{trailer}\n</fno_mail>")))
 }
 
 /// Refuse a payload that embeds a forged `<fno_mail` open tag or `</fno_mail>`
@@ -1394,6 +1397,18 @@ mod tests {
     }
 
     #[test]
+    fn legacy_fno_mail_trailer_matches_python() {
+        const PY_SOURCE: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../cli/src/fno/mail/envelope.py"
+        ));
+        assert_eq!(
+            LEGACY_FNO_MAIL_TRAILER,
+            python_joined_literals(PY_SOURCE, "LEGACY_FNO_MAIL_TRAILER = (")
+        );
+    }
+
+    #[test]
     fn origin_trailer_template_matches_python() {
         // The same cross-language pin as fno_mail_trailer_matches_python, for
         // the origin branch of mail_trailer. Without it, a Python rewording
@@ -1445,6 +1460,14 @@ mod tests {
         let path = registry_fixture("crownless", "");
         let wrapped = "<fno_mail from=\"a\">body\n</fno_mail>";
         assert!(is_well_formed_paired_fno_mail_at(wrapped, &path));
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn paired_door_rejects_content_after_crownless_close_tag() {
+        let path = registry_fixture("crownless-tail", "");
+        let wrapped = "<fno_mail from=\"a\">body\n</fno_mail>trailing";
+        assert!(!is_well_formed_paired_fno_mail_at(wrapped, &path));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
