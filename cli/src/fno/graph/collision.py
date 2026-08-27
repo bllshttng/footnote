@@ -65,15 +65,23 @@ def _default_thresholds() -> CollisionThresholds:
 
 # Lazy on purpose: partition() must import under a dep-less python (the
 # orchestrator's --ready path runs there), so the fno.config import rides the
-# first thresholds read, never the module import.
-DEFAULT_THRESHOLDS: CollisionThresholds | None = None
+# first thresholds read, never the module import. The public
+# DEFAULT_THRESHOLDS attribute resolves through module __getattr__ below, so
+# `from fno.graph.collision import DEFAULT_THRESHOLDS` still yields the dict.
+_DEFAULT_THRESHOLDS: CollisionThresholds | None = None
 
 
 def _default_thresholds_loaded() -> CollisionThresholds:
-    global DEFAULT_THRESHOLDS
-    if DEFAULT_THRESHOLDS is None:
-        DEFAULT_THRESHOLDS = _default_thresholds()
-    return DEFAULT_THRESHOLDS
+    global _DEFAULT_THRESHOLDS
+    if _DEFAULT_THRESHOLDS is None:
+        _DEFAULT_THRESHOLDS = _default_thresholds()
+    return _DEFAULT_THRESHOLDS
+
+
+def __getattr__(name: str):
+    if name == "DEFAULT_THRESHOLDS":
+        return _default_thresholds_loaded()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True)
