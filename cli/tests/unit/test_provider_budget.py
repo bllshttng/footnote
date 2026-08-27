@@ -9,14 +9,20 @@ uncapped fan-out read as a pass on the night this node was filed.
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import pytest
 
 from fno.agents.model_routing import ROUTE_PROVIDER_ENV, bind_route_provider
 from fno.agents.spawn_gate import provider_lanes_cap
-from fno.config import AgentsBlock, ProviderBudget, provider_subagent_budget
+from fno.config import (
+    AgentsBlock,
+    ProviderBudget,
+    assert_subagent_budget,
+    provider_subagent_budget,
+)
 from fno.review_capability import (
-    _PANEL_WIDTH,
-    ReviewerVerdict,
     SessionCapability,
     detect_session,
     resolve_reviewers,
@@ -29,13 +35,11 @@ def _budget(**kwargs) -> tuple[int | None, int | None]:
 
 
 def _session(**kwargs) -> SessionCapability:
-    base = {"harness": "claude", "substrate": "interactive", "attended": True}
+    base: dict[str, Any] = {"harness": "claude", "substrate": "interactive", "attended": True}
     base.update(kwargs)
     return SessionCapability(**base)
 
 
-def _sigma(session: SessionCapability) -> ReviewerVerdict:
-    return resolve_reviewers(["sigma"], session)[0]
 
 
 # --- the record ------------------------------------------------------------
@@ -105,6 +109,67 @@ def test_subagent_budget_fails_open_on_every_unknown():
     assert provider_subagent_budget(None) is None
 
 
+# --- assert_subagent_budget: the relocated refusing consumer (x-25a7 w5) ---
+#
+# The panel-width branch in review_capability.py refused and died with the
+# panel. The refusal lives again here, fan-out-neutral: any site that DECLARES
+# a width in skill text calls this before dispatching (Locked Decision 7).
+
+
+def test_a_width_over_budget_is_refused_with_all_three_names():
+    # AC3b-MARKER. The refusal must name the provider, the declared width and
+    # the budget, or a wedged session cannot tell what to shrink.
+    check = assert_subagent_budget(4, "zai")
+    assert check.permitted is False
+    assert "zai" in check.reason
+    assert "4" in check.reason
+    assert "budget of 1" in check.reason
+
+
+def test_a_width_within_budget_permits():
+    # AC3b-HP. Budget 1 tolerates exactly a width-1 fan-out.
+    assert assert_subagent_budget(1, "zai").permitted is True
+
+
+def test_every_unreadable_input_permits_and_records_why():
+    # AC3b-ERR. Unreadable width, no-budget provider, unknown provider: all
+    # three permit, none silently. Fail-open here is the documented posture of
+    # provider_subagent_budget; refusing over an unreadable config would wedge
+    # every session on the machine.
+    unreadable_width = assert_subagent_budget(None, "zai")
+    assert unreadable_width.permitted is True and "unreadable" in unreadable_width.reason
+    no_entry = assert_subagent_budget(4, "anthropic")
+    assert no_entry.permitted is True and "no budget entry" in no_entry.reason
+    unknown = assert_subagent_budget(4, "unknown")
+    assert unknown.permitted is True
+
+
+def test_no_stamp_permits_and_records_the_reason():
+    # AC3b-EDGE. No stamp means no fno route, so no budget can be known. The
+    # permit is RECORDED with that reason, not returned silently.
+    check = assert_subagent_budget(4, provider=None)
+    assert check.permitted is True
+    assert check.reason == "no route stamp; budget unknown"
+
+
+def test_the_env_stamp_drives_the_check_when_no_provider_is_passed(monkeypatch):
+    monkeypatch.setenv("FNO_ROUTE_PROVIDER", "zai")
+    check = assert_subagent_budget(4)
+    assert check.permitted is False
+    assert "zai" in check.reason
+
+
+def test_the_declaring_skill_sites_call_the_guard_by_name():
+    # AC3b-INV. The guard exists to be CALLED by the sites that declare a
+    # width in skill text. If neither site invokes it, the refusal relocated
+    # into a function nobody runs.
+    root = Path(__file__).resolve().parents[3]
+    think = (root / "skills" / "think" / "SKILL.md").read_text(encoding="utf-8")
+    growth = (root / "skills" / "growth-launch" / "SKILL.md").read_text(encoding="utf-8")
+    assert "fno config assert-subagent-budget" in think
+    assert "fno config assert-subagent-budget" in growth
+
+
 # --- the stamp -------------------------------------------------------------
 
 
@@ -127,89 +192,42 @@ def test_an_unstamped_session_resolves_unknown_and_never_guesses():
     assert detect_session(env={}).provider == "unknown"
 
 
-# --- route resolution ------------------------------------------------------
+# --- route resolution -------------------------------------------------------
+#
+# The panel whose width this section measured is retired. What stays pinned:
+# the budget-1 provider resolves the DEFAULT reviewer (the fno lane) to a
+# literal `satisfiable` with no substitution branch in between, and the retired
+# sigma name refuses naming the replacement.
 
 
-def test_a_budget_of_one_refuses_the_panel_and_names_its_cause():
-    # AC2-HP. The reason has to teach the operator the fix, so it carries the
-    # provider, the number, and the route that runs instead.
-    verdict = _sigma(_session(provider="zai"))
-    assert verdict.status == "unavailable"
-    assert "zai" in verdict.reason
-    assert "subagent budget of 1" in verdict.reason
-    assert verdict.resolves_to == "code-review"
-
-
-def test_the_budget_downgrade_does_not_block_the_run():
-    # AC2-EDGE. Fail-closed here wedges every worker on a shared account over a
-    # review that is still going to run.
-    verdict = _sigma(_session(provider="zai"))
-    assert verdict.blocks_autonomy is False
-    assert "resolved route: code-review" in verdict.line()
-
-
-def test_an_unstamped_session_keeps_the_panel():
-    # AC1-EDGE, second half.
-    assert _sigma(_session(provider="unknown")).status == "satisfiable"
-
-
-def test_a_provider_with_no_budget_keeps_the_panel():
-    # AC3-EDGE.
-    verdict = _sigma(_session(provider="anthropic"))
+def test_the_default_reviewer_is_satisfiable_on_a_budget_of_one():
+    # The fno lane runs inline, so a shared account with a subagent budget of 1
+    # still gets a real reviewer with a real attestation path.
+    verdict = resolve_reviewers(["code-review"], _session(provider="zai"))[0]
     assert verdict.status == "satisfiable"
-    assert verdict.resolves_to is None
+    assert verdict.blocks_autonomy is False
+    assert "/fno:review" in verdict.reason
 
 
-def test_a_budget_that_covers_the_panel_keeps_it(monkeypatch):
-    monkeypatch.setattr(
-        "fno.review_capability.provider_subagent_budget", lambda _p: _PANEL_WIDTH
-    )
-    assert _sigma(_session(provider="zai")).status == "satisfiable"
+def test_a_provider_with_no_budget_resolves_the_same_way():
+    verdict = resolve_reviewers(["code-review"], _session(provider="anthropic"))[0]
+    assert verdict.status == "satisfiable"
 
 
-@pytest.mark.parametrize("budget", [2, 3, 5])
-def test_a_budget_below_the_panel_width_still_refuses(monkeypatch, budget):
-    # A budget of 3 is not permission to run a six-wide panel. Treating every
-    # value above 1 as unlimited would let an operator's declared quota be
-    # exceeded by the panel it was written to bound.
-    monkeypatch.setattr(
-        "fno.review_capability.provider_subagent_budget", lambda _p: budget
-    )
-    verdict = _sigma(_session(provider="zai"))
-    assert verdict.status == "unavailable"
-    assert f"subagent budget of {budget}" in verdict.reason
-    assert f"panel dispatches {_PANEL_WIDTH}" in verdict.reason
+def test_an_unstamped_session_resolves_the_default_reviewer_too():
+    verdict = resolve_reviewers(["code-review"], _session(provider="unknown"))[0]
+    assert verdict.status == "satisfiable"
 
 
-def test_the_substitute_must_be_runnable_before_it_clears_the_block():
-    # A gemini session under a budget can run neither the panel nor the
-    # self-review verb. Recording the substitute there would trade a two-second
-    # init refusal for a stop-gate wedge with no reviewer that can attest.
-    verdict = _sigma(_session(harness="gemini", provider="zai"))
-    assert verdict.resolves_to is None
-    assert verdict.blocks_autonomy is True
-    assert "subagent budget of 1" in verdict.reason
-    assert "cannot run here either" in verdict.reason
-    assert "no code-review verb for" in verdict.reason
-
-
-def test_a_non_budget_refusal_never_substitutes():
-    # AC2-ERR, the assertion that keeps the downgrade honest. A gemini harness
-    # cannot dispatch the panel either, but that is a misconfiguration the
-    # operator has to see - running something else there would hide it.
-    verdict = _sigma(_session(harness="gemini", provider="unknown"))
-    assert verdict.status == "unavailable"
-    assert verdict.resolves_to is None
-    assert verdict.blocks_autonomy is True
-    assert "needs subagent-dispatch, unavailable on" in verdict.reason
-
-
-def test_the_budget_is_checked_before_the_harness():
-    # Reversing the order answers the harness question on exactly the sessions
-    # this exists for, and a budgeted claude worker resolves satisfiable again.
-    verdict = _sigma(_session(harness="codex", provider="zai"))
-    assert "subagent budget of 1" in verdict.reason
-    assert verdict.resolves_to == "code-review"
+def test_retired_sigma_refuses_and_names_the_replacement():
+    # No budget reading rescues or worsens a retired name: the refusal is the
+    # same on every provider, and it names the default lane.
+    for provider in ("zai", "anthropic", "unknown"):
+        verdict = resolve_reviewers(["sigma"], _session(provider=provider))[0]
+        assert verdict.status == "unavailable", provider
+        assert verdict.blocks_autonomy is True, provider
+        assert "retired" in verdict.reason
+        assert "/fno:review" in verdict.reason
 
 
 # --- the stamp is set or cleared, never inherited ---------------------------

@@ -44,7 +44,9 @@ def test_every_entry_is_a_descriptor():
             "human",
             "harness-skill",
         }
-        assert d.requires in {"none", "subagent-dispatch", "operator", "skill"}
+        assert d.requires in {
+            "none", "subagent-dispatch", "operator", "skill", "retired",
+        }
         assert d.invocation.strip(), f"{name} must name how to satisfy the gate"
 
 
@@ -72,30 +74,29 @@ def test_declare_is_the_only_self_cert():
     assert _RESOLVABLE_REVIEWERS["declare"].requires == "none"
 
 
-def test_sigma_needs_subagent_dispatch():
-    """The capability that was missing on #618, now declared instead of implied."""
-    assert _RESOLVABLE_REVIEWERS["sigma"].requires == "subagent-dispatch"
-    assert _RESOLVABLE_REVIEWERS["sigma"].asserts == "review-evidence"
+def test_sigma_is_retired():
+    """The six-agent panel is gone; every resolution names its replacement."""
+    d = _RESOLVABLE_REVIEWERS["sigma"]
+    assert d.requires == "retired"
+    assert d.asserts == "review-evidence"
+    assert d.invocation == "/fno:review"
 
 
 def test_code_review_is_self_servable():
-    """`/code-review` is self-servable: a session that wrote the diff runs its
-    own harness's review verb (claude /code-review, codex /review, opencode
-    /review-changes, agy /fno:review) and attests. requires=none (not
-    operator) is what keeps an unattended run from being refused at init for
-    naming it."""
+    """`/code-review` is self-servable: a session that wrote the diff runs the
+    owned fno review lane and attests. requires=none (not operator) is what
+    keeps an unattended run from being refused at init for naming it.
+
+    No per-harness map: the owned lane is the invocation on every harness,
+    which is the portability the sigma-retirement recharter bought. The
+    harness's own native verb (claude /code-review, codex /review) remains
+    the operator's explicit choice (docs/architecture/review-lanes.md), never
+    something this table recommends, since a recommendation depending on a
+    harness transport is the fragile part the recharter removed."""
     d = _RESOLVABLE_REVIEWERS["code-review"]
     assert d.kind == "local-attestation"
     assert d.requires == "none"
-    # The claude value carries the arg grammar with the <level> placeholder;
-    # self_review_invocation substitutes a validated level (never ultra).
-    # The scalar is the portable fallback an unknown harness receives.
-    assert d.invocations == {
-        "claude": "/code-review <level> --comment",
-        "codex": "/review",
-        "opencode": "/review-changes",
-        "agy": "/fno:review",
-    }
+    assert d.invocations is None
     assert d.invocation == "/fno:review"
 
 
@@ -148,18 +149,23 @@ def _doctor_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: s
 
 
 def test_doctor_review_reports_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    r = _doctor_review(tmp_path, monkeypatch, "[sigma]", {"CLAUDE_CODE_SESSION_ID": "s1"})
-    assert r.exit_code == 0
-    assert "satisfiable: sigma" in r.output
-
-
-def test_doctor_review_reports_unavailable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     r = _doctor_review(
-        tmp_path, monkeypatch, "[sigma]", {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"}
+        tmp_path, monkeypatch, "[code-review]", {"CLAUDE_CODE_SESSION_ID": "s1"}
     )
+    assert r.exit_code == 0
+    assert "satisfiable: code-review" in r.output
+
+
+def test_doctor_review_reports_sigma_retired(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """A retired reviewer is unavailable on every session, attended or not -
+    unlike a capability gap, no session can ever satisfy it."""
+    r = _doctor_review(tmp_path, monkeypatch, "[sigma]", {"CLAUDE_CODE_SESSION_ID": "s1"})
     assert r.exit_code == 1
     assert "unavailable: sigma" in r.output
-    assert "harness=gemini substrate=headless" in r.output
+    assert "sigma is retired" in r.output
+    assert "run `/fno:review`" in r.output
     assert "`declare` is never substituted for you" in r.output
 
 

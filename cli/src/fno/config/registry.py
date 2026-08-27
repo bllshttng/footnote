@@ -193,7 +193,7 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Project-registered reviewers, as [review.reviewer_registry.<name>] tables with the built-in descriptor fields (kind, requires, invocation, asserts). Unioned with footnote's own reviewers so config.review.reviewers may name one; built-ins win a name collision. asserts=invocation is the honest rung for a harness skill: it proves the skill ran at the reviewed commit and claims nothing about its verdict.",
     ),
     "review.reviewers": Meta(
-        "advanced", "Local-attestation reviewers (sigma | /code-review | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
+        "advanced", "Local-attestation reviewers (code-review | peer | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot. sigma is retired; naming it here refuses at init with `/fno:review` named as the replacement.",
     ),
     "review.self_review_required": Meta(
         "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false to opt out and restore unreviewed code-PR shipping.",

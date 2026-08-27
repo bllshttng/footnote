@@ -582,20 +582,18 @@ def _self_review_clause(project_root: Optional[Path] = None) -> str:
         from fno.review_capability import (
             detect_session,
             diff_review_level,
-            harness_can_self_review,
             self_review_invocation,
         )
 
         s = detect_session()
-        if not harness_can_self_review(s.harness):
-            return ""
         verb = self_review_invocation(s.harness, level=diff_review_level(project_root))
     except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
         return ""
     harness = s.harness or "unknown"
     clause = (
-        f"self-review required for code ({harness}): run `{verb}`, then "
-        "`bash skills/review/scripts/emit-attestation.sh code-review`"
+        f"self-review required for code ({harness}): run `{verb}` (the lane "
+        "emits its own attestation; `bash skills/review/scripts/"
+        "emit-attestation.sh code-review` is the recovery path when it could not)"
     )
     if s.substrate != "headless":
         clause += f"; refused? fno agents mail send '{verb}' --to-self --raw"

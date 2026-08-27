@@ -1194,28 +1194,20 @@ const REVIEW_ORDER: &str = "close every finding, commit and push first, then \
 /// human to remember.
 /// The fourth element encodes per-harness verb overrides as
 /// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
-/// rendering. The self-review verb is the one case: `/code-review <level>
-/// --comment` on claude (the Python builder sizes `<level>` from the
-/// diff; `ultra` is not issuable). No `--fix`: this table is the machinery
-/// hint for a worker held at a head-pinned gate, and a fix pass moves HEAD
-/// and voids the attestation. `/review` bare on codex, `/review-changes`
-/// bare on opencode (its flag grammar is unverified against its docs, and an
-/// appended guess is the codex trap in a new coat). The codex value
-/// must stay bare - prose after the verb flips codex to a no-merge-base review
-/// target - so a no-whitespace check on it is a unit test. The scalar is the
-/// harness-portable fallback an UNKNOWN harness receives: `/fno:review`, never
-/// claude's verb silently (opencode/agy workers were handed `/code-review`, a
-/// verb their harness cannot run). agy has no native verb and takes the fno
-/// review. Kept honest against the Python descriptor's `invocations` map by
-/// check-reviewer-descriptor-parity.sh.
+/// rendering - which is now every row: the machinery recommendation is the
+/// fno-owned review lane, which runs as ordinary tool calls on every harness,
+/// so no native per-harness verb is recommended anymore. The native verbs
+/// (`/code-review` on claude, `/review` on codex) remain the operator's
+/// explicit choice, documented in docs/architecture/review-lanes.md.
+/// `sigma` is RETIRED: its invocation names the replacement (the default
+/// lane), never a hint that the panel runs, and a config still naming sigma
+/// is refused at init by the Python capability check with the same
+/// replacement in the refusal. No `--fix` in any hint: a fix pass moves HEAD
+/// and voids the attestation the round just earned. Kept honest against the
+/// Python descriptor table by check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
-    ("sigma", "/fno:review sigma", false, ""),
-    (
-        "code-review",
-        "/fno:review",
-        false,
-        "claude=/code-review <level> --comment;codex=/review;opencode=/review-changes;agy=/fno:review",
-    ),
+    ("sigma", "/fno:review", false, ""),
+    ("code-review", "/fno:review", false, ""),
     ("declare", "/fno:review declare", true, ""),
 ];
 
@@ -1267,15 +1259,15 @@ fn is_documentation_path(path: &str) -> bool {
     p.ends_with(".md") || p.starts_with("docs/")
 }
 
-/// Whether a lane THIS code drives can fire the harness's review verb (claude
-/// `/code-review`, codex `/review`). The self-review floor only applies on
-/// these: gemini/agy have no native review verb and opencode's recorded
-/// `/review-changes` has no fireable lane (the daemon lane submits text, the
-/// mux row declares submit unsupported), so flooring code-review would demand
-/// an attestation nothing produces and wedge the loop. Their path is route 3
-/// (a spawned reviewer), which is deferred. Pure so a unit test pins the set.
-fn harness_can_self_review(harness: Option<&str>) -> bool {
-    matches!(harness, Some("claude") | Some("codex"))
+/// Whether this harness can run the review this machinery recommends. The
+/// recommendation is the fno-owned review lane, which runs as ordinary tool
+/// calls wherever the plugin runs, so every harness qualifies unconditionally.
+/// The native per-harness verbs this used to gate on (claude `/code-review`,
+/// codex `/review`) remain the operator's explicit choice; no machinery
+/// depends on them any more, which is the point of owning the reviewer.
+/// Mirrors `harness_can_self_review` in `cli/src/fno/review_capability.py`.
+fn harness_can_self_review(_harness: Option<&str>) -> bool {
+    true
 }
 
 /// The KNOWN harnesses with no native self-review verb. A set, not
@@ -1284,15 +1276,17 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 /// in `cli/src/fno/harness_names.py` minus the verb table in
 /// `cli/src/fno/review_capability.py`; the two are pinned to each other by
 /// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
-/// on both sides or the suite goes red.
-const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy", "opencode"];
+/// on both sides or the suite goes red. Empty since the owned lane retired
+/// the verb table: the fno review lane runs wherever the plugin runs, so no
+/// KNOWN harness is verbless for review purposes and every attributed run
+/// floors.
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
-/// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
-/// harness (gemini/agy; opencode's verb is recorded but no lane this code
-/// drives can fire it) does not, because the floor would demand an
-/// attestation no native verb there produces. An UNRESOLVED harness (absent
+/// "verbless". With the owned lane as the default reviewer no KNOWN harness
+/// escapes the floor - claude and codex never did, and gemini/agy/opencode
+/// stopped when their release table emptied. An UNRESOLVED harness (absent
 /// or ambiguous ambient markers - a claude session started from a codex
 /// shell) floors, because ambiguity about who authored the run is not
 /// permission to skip its review. The explicit `--author-harness none` pin is
@@ -10423,20 +10417,59 @@ const PROBE_CAP: usize = 3;
 /// last-mile action to perform; cap it so the reason stays readable.
 const PROBE_STDERR_CAP: usize = 500;
 
+/// Probe stdout is the run's positive marker and travels on the probe row;
+/// cap it so one row cannot blow the event's data-size budget. The cap keeps
+/// the END of the output (a verdict line is a tail), and the row's truncation
+/// marker names what was cut.
+const PROBE_OUTPUT_CAP: usize = 2000;
+
 enum ProbeOutcome {
-    Pass,
-    Fail { code: Option<i32>, stderr: String },
-    Timeout,
+    /// Exit 0 AND captured stdout: the run produced its own positive marker.
+    /// Output is the evidence; exit status alone proves a shell ran.
+    Pass { stdout: String },
+    /// Exit 0 with nothing on stdout: no marker, so no verdict on the change.
+    /// A silent probe is exactly the vacuous pass (`test -f residue`) the
+    /// probe contract records as a trap; SKIP holds the gate without claiming
+    /// the probe failed.
+    Skip,
+    Fail {
+        code: Option<i32>,
+        stderr: String,
+        stdout: String,
+    },
+    /// The RUNNER could not answer. Distinct from FAIL on purpose - the
+    /// probe never executed, so its subject is untested, not failing. `kind`
+    /// keeps the three causes distinguishable in the event map: a real
+    /// timeout renders as the legacy `timeout` token, spawn and wait
+    /// failures render as `blocked:<kind>` instead of being absorbed into it.
+    Blocked { kind: &'static str, why: String },
 }
 
 impl ProbeOutcome {
-    /// Event rendering: `pass` | `fail:<code>` | `timeout`.
+    /// Event rendering: `pass` | `fail:<code>` | `timeout` | `blocked:<kind>`
+    /// | `skip`. The legacy vocabulary the scoreboard folds join on;
+    /// `verdict` is the four-state contract prove-it reads.
     fn render(&self) -> String {
         match self {
-            ProbeOutcome::Pass => "pass".to_string(),
+            ProbeOutcome::Pass { .. } => "pass".to_string(),
             ProbeOutcome::Fail { code: Some(c), .. } => format!("fail:{c}"),
             ProbeOutcome::Fail { code: None, .. } => "fail:signal".to_string(),
-            ProbeOutcome::Timeout => "timeout".to_string(),
+            ProbeOutcome::Skip => "skip".to_string(),
+            ProbeOutcome::Blocked {
+                kind: "timeout", ..
+            } => "timeout".to_string(),
+            ProbeOutcome::Blocked { kind, .. } => format!("blocked:{kind}"),
+        }
+    }
+
+    /// PASS satisfies, FAIL blocks, SKIP and BLOCKED carry NO verdict (the
+    /// UNANSWERED shape: they hold the gate without naming a failure).
+    fn verdict(&self) -> &'static str {
+        match self {
+            ProbeOutcome::Pass { .. } => "PASS",
+            ProbeOutcome::Skip => "SKIP",
+            ProbeOutcome::Fail { .. } => "FAIL",
+            ProbeOutcome::Blocked { .. } => "BLOCKED",
         }
     }
 }
@@ -11156,15 +11189,17 @@ fn parse_probes_for(content: &str, key: &str) -> ProbeDecl {
 /// block reason exists to surface. Char-boundary aware because `String::drain`
 /// and `truncate` panic mid-character, and probe stderr regularly carries
 /// arrows, box-drawing, and accented words.
-fn keep_last_on_char_boundary(s: &mut String, cap: usize) {
+fn keep_last_on_char_boundary(s: &mut String, cap: usize) -> Option<usize> {
     if s.len() <= cap {
-        return;
+        return None;
     }
+    let total = s.len();
     let start = s.len() - cap;
     let cut = (start..=s.len())
         .find(|i| s.is_char_boundary(*i))
         .unwrap_or(s.len());
     s.drain(..cut);
+    Some(total)
 }
 
 /// SIGKILL a process group, ignoring "already gone".
@@ -11197,33 +11232,60 @@ fn killpg(pgid: i32) {
 fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcome {
     use std::os::unix::process::CommandExt;
 
-    let spawned = Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn();
+    // The pipefail preamble closes the `| tail -5` trap at the runner: a
+    // pipeline whose real command fails can no longer read as pass through
+    // the truncating tail's exit 0. Bash-only: on Linux /bin/sh is commonly
+    // dash, and dash treats an illegal option on the special builtin `set`
+    // as an ABORT with status 2 regardless of the `2>/dev/null` redirect (a
+    // special builtin's own errors are not an ordinary command failure a
+    // redirect can swallow), so the preamble would kill every probe before
+    // its command ran. A no-bash host falls back to plain sh with NO
+    // preamble, losing only the pipeline-trap closure, not the probe.
+    let bash_wrapped = format!("set -o pipefail 2>/dev/null; {cmd}");
+    let spawned = {
+        let build = |shell: &str, script: &str| {
+            Command::new(shell)
+                .arg("-c")
+                .arg(script)
+                .current_dir(cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .process_group(0)
+                .spawn()
+        };
+        match build("bash", &bash_wrapped) {
+            Ok(child) => Ok(child),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => build("sh", cmd),
+            Err(e) => Err(e),
+        }
+    };
 
     let mut child = match spawned {
         Ok(c) => c,
         Err(e) => {
-            return ProbeOutcome::Fail {
-                code: Some(127),
-                stderr: format!("probe spawn failed: {e}"),
+            return ProbeOutcome::Blocked {
+                kind: "spawn",
+                why: format!("probe spawn failed: {e}"),
             }
         }
     };
 
-    // Capture the pgid before any wait() can reap the leader.
+    // Capture the pgid before any wait() could reap the leader.
     let pgid = child.id() as i32;
 
-    let mut pipe = child.stderr.take();
-    let drain = std::thread::spawn(move || {
+    let mut out_pipe = child.stdout.take();
+    let out_drain = std::thread::spawn(move || {
         let mut buf = String::new();
-        if let Some(ref mut p) = pipe {
+        if let Some(ref mut p) = out_pipe {
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let mut err_pipe = child.stderr.take();
+    let err_drain = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(ref mut p) = err_pipe {
             let _ = p.read_to_string(&mut buf);
         }
         buf
@@ -11233,50 +11295,75 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     let outcome = loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // Exit 0 alone is not a PASS: the run must also have produced
+                // its own output, the positive marker. A silent success is
+                // SKIP - held, never counted.
                 break if status.success() {
-                    ProbeOutcome::Pass
+                    ProbeOutcome::Pass {
+                        stdout: String::new(),
+                    }
                 } else {
                     ProbeOutcome::Fail {
                         code: status.code(),
                         stderr: String::new(),
+                        stdout: String::new(),
                     }
                 };
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
                     kill_process_group(&mut child);
-                    break ProbeOutcome::Timeout;
+                    break ProbeOutcome::Blocked {
+                        kind: "timeout",
+                        why: format!("timed out after {}s (killed)", timeout.as_secs()),
+                    };
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => {
                 kill_process_group(&mut child);
-                break ProbeOutcome::Fail {
-                    code: None,
-                    stderr: format!("probe wait failed: {e}"),
+                break ProbeOutcome::Blocked {
+                    kind: "wait",
+                    why: format!("probe wait failed: {e}"),
                 };
             }
         }
     };
 
-    // Reap any descendant still holding the stderr write end, so the drain sees
+    // Reap any descendant still holding a pipe's write end, so the drains see
     // EOF. Without this a backgrounding probe blocks the join indefinitely even
     // though the shell itself exited cleanly.
     killpg(pgid);
 
-    // On timeout the stderr tail is worthless (the reason names the timeout) and
-    // joining risks the very hang we just escaped if anything outlived the group
-    // kill. Drop the handle instead: the thread ends when the pipe closes.
-    if matches!(outcome, ProbeOutcome::Timeout) {
+    // On a runner failure the output tail is worthless (the reason names the
+    // block) and joining risks the very hang we just escaped if anything
+    // outlived the group kill. Drop the handles instead: the threads end when
+    // the pipes close.
+    if matches!(outcome, ProbeOutcome::Blocked { .. }) {
         return outcome;
     }
 
-    let mut stderr = drain.join().unwrap_or_default();
-    keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
+    let mut stdout = out_drain.join().unwrap_or_default();
+    let stdout_total = keep_last_on_char_boundary(&mut stdout, PROBE_OUTPUT_CAP);
+    if let Some(total) = stdout_total {
+        // The truncation marker travels IN the captured text: a reader of the
+        // row must be able to tell cut evidence from naturally short output,
+        // which the cap's docstring promises.
+        stdout.insert_str(
+            0,
+            &format!("[fno probe: truncated, last {PROBE_OUTPUT_CAP} of {total} bytes] "),
+        );
+    }
+    let mut stderr = err_drain.join().unwrap_or_default();
+    let _stderr_total = keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
     match outcome {
-        ProbeOutcome::Fail { code, stderr: s } if s.is_empty() => {
-            ProbeOutcome::Fail { code, stderr }
-        }
+        ProbeOutcome::Pass { .. } if stdout.trim().is_empty() => ProbeOutcome::Skip,
+        ProbeOutcome::Pass { .. } => ProbeOutcome::Pass { stdout },
+        ProbeOutcome::Fail { code, .. } => ProbeOutcome::Fail {
+            code,
+            stderr,
+            stdout,
+        },
         other => other,
     }
 }
@@ -11457,12 +11544,14 @@ fn evaluate_done_probes(
         // operator reads to know which file to edit - and never in the key.
         results.insert(cmd.clone(), Value::String(outcome.render()));
         match &outcome {
-            ProbeOutcome::Pass => {}
-            ProbeOutcome::Timeout => failures.push(format!(
-                "{source} probe `{cmd}` timed out after {}s (killed)",
-                timeout.as_secs()
+            ProbeOutcome::Pass { .. } => {}
+            ProbeOutcome::Skip => failures.push(format!(
+                "{source} probe `{cmd}` exited 0 with no output - SKIP, not a pass (a probe must emit its own positive marker)"
             )),
-            ProbeOutcome::Fail { code, stderr } => {
+            ProbeOutcome::Blocked { why, .. } => {
+                failures.push(format!("{source} probe `{cmd}` BLOCKED: {why}"))
+            }
+            ProbeOutcome::Fail { code, stderr, .. } => {
                 let code = code.map(|c| c.to_string()).unwrap_or("signal".to_string());
                 let tail = if stderr.trim().is_empty() {
                     String::new()
@@ -13146,16 +13235,50 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
     let mut results: Vec<Value> = Vec::new();
     let mut failed_reason: Option<String> = None;
     for cmd in &probes {
+        // A probe may carry its claim as a trailing ` # <claim>` comment; the
+        // claim travels on the row so a reader sees what the run answered,
+        // not just what it ran. Bare commands keep today's shape.
+        let claim = cmd.find(" # ").map(|idx| cmd[idx + 3..].trim().to_string());
         let outcome = run_probe(cmd, work_dir, PROBE_TIMEOUT);
+        // One source for the row's verdict vocabulary, borrowed before the
+        // consuming match moves the outcome's fields.
+        let verdict = outcome.verdict();
         let entry = match outcome {
-            ProbeOutcome::Pass => serde_json::json!({"cmd": cmd, "outcome": "pass"}),
-            ProbeOutcome::Timeout => {
+            ProbeOutcome::Pass { stdout } => serde_json::json!({
+                "cmd": cmd,
+                "verdict": verdict,
+                "claim": claim,
+                "stdout": stdout,
+            }),
+            ProbeOutcome::Skip => {
                 if failed_reason.is_none() {
-                    failed_reason = Some(format!("`{cmd}` timed out"));
+                    failed_reason = Some(format!(
+                        "`{cmd}` exited 0 with no output - SKIP, not a pass"
+                    ));
                 }
-                serde_json::json!({"cmd": cmd, "outcome": "timeout"})
+                serde_json::json!({
+                    "cmd": cmd,
+                    "verdict": verdict,
+                    "claim": claim,
+                    "stdout": "",
+                })
             }
-            ProbeOutcome::Fail { code, stderr } => {
+            ProbeOutcome::Blocked { why, .. } => {
+                if failed_reason.is_none() {
+                    failed_reason = Some(format!("`{cmd}` BLOCKED: {why}"));
+                }
+                serde_json::json!({
+                    "cmd": cmd,
+                    "verdict": verdict,
+                    "claim": claim,
+                    "why": why,
+                })
+            }
+            ProbeOutcome::Fail {
+                code,
+                stderr,
+                stdout,
+            } => {
                 let c = code
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "signal".to_string());
@@ -13164,8 +13287,10 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                 }
                 serde_json::json!({
                     "cmd": cmd,
-                    "outcome": format!("fail:{c}"),
+                    "verdict": verdict,
+                    "claim": claim,
                     "code": code,
+                    "stdout": stdout,
                     "stderr": stderr,
                 })
             }
@@ -16674,11 +16799,13 @@ git_bounded();";
     #[test]
     fn block_reason_names_the_reviewers_gate_not_a_bot() {
         // AC2: the old string claimed a bot had not reviewed while
-        // required_bots was empty and the real blocker was local.
+        // required_bots was empty and the real blocker was local. sigma is
+        // retired, so the unmet reason names the lane, never a panel run.
         let reason = build_block_reason(&reviewers_gate_pr(), "abc", true, true);
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("sigma"), "got: {reason}");
-        assert!(reason.contains("/fno:review sigma"), "got: {reason}");
+        assert!(reason.contains("/fno:review"), "got: {reason}");
+        assert!(!reason.contains("/fno:review sigma"), "got: {reason}");
         assert!(!reason.contains("bot reviewer"), "got: {reason}");
     }
 
@@ -17263,46 +17390,24 @@ git_bounded();";
 
     #[test]
     fn reviewer_invocation_resolves_the_author_harness_verb() {
-        // Per-harness: code-review names the harness's own verb. A codex author
-        // is told /review, a claude author /code-review; unknown harness falls
-        // back to the scalar, which is the portable fno do review - never
-        // claude's verb silently.
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("codex")),
-            Some(("/review", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("claude")),
-            Some(("/code-review <level> --comment", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("opencode")),
-            Some(("/review-changes", false))
-        );
-        assert_eq!(
-            reviewer_invocation_for("code-review", Some("agy")),
-            Some(("/fno:review", false))
-        );
+        // The owned lane is the invocation on EVERY harness: an inline lane
+        // runs wherever the plugin runs, so a transport-dependent verb here
+        // would be the fragile part. sigma is retired and also names the lane
+        // (the refusal tells a wedged session what to run instead).
+        for harness in ["codex", "claude", "opencode", "agy"] {
+            assert_eq!(
+                reviewer_invocation_for("code-review", Some(harness)),
+                Some(("/fno:review", false)),
+                "harness {harness} must name the portable lane"
+            );
+        }
         assert_eq!(
             reviewer_invocation_for("code-review", None),
             Some(("/fno:review", false))
         );
         assert_eq!(
             reviewer_invocation_for("sigma", Some("codex")),
-            Some(("/fno:review sigma", false))
-        );
-        // The codex and opencode self-review verbs must stay bare: prose after
-        // the codex verb flips it to a no-merge-base review target (a verified
-        // constraint, not a style), and opencode's grammar is unverified.
-        let (codex_verb, _) = reviewer_invocation_for("code-review", Some("codex")).unwrap();
-        assert!(
-            !codex_verb.chars().any(|c| c.is_whitespace()),
-            "codex self-review verb must be bare, got {codex_verb:?}"
-        );
-        let (opencode_verb, _) = reviewer_invocation_for("code-review", Some("opencode")).unwrap();
-        assert!(
-            !opencode_verb.chars().any(|c| c.is_whitespace()),
-            "opencode self-review verb must stay bare until its grammar is verified, got {opencode_verb:?}"
+            Some(("/fno:review", false))
         );
     }
 
@@ -17667,19 +17772,16 @@ git_bounded();";
     }
 
     #[test]
-    fn self_review_gate_only_floors_harnesses_with_a_verb() {
-        // The floor wedges a harness whose native verb the session cannot run,
-        // so it applies only where a self-review verb exists. Route 3 (a spawned
-        // reviewer) is the path for harnesses without one and is deferred.
+    fn self_review_gate_floors_every_harness() {
+        // The fno-owned review lane runs as ordinary tool calls wherever the
+        // plugin runs, so every harness self-reviews now - no KNOWN harness
+        // is verbless any more.
         assert!(harness_can_self_review(Some("claude")));
         assert!(harness_can_self_review(Some("codex")));
-        // opencode's /review-changes is recorded but no lane this code drives
-        // can fire it (daemon lane submits text; mux declares submit
-        // unsupported), so the floor must not demand its attestation.
-        assert!(!harness_can_self_review(Some("opencode")));
-        assert!(!harness_can_self_review(Some("gemini")));
-        assert!(!harness_can_self_review(Some("agy")));
-        assert!(!harness_can_self_review(None));
+        assert!(harness_can_self_review(Some("opencode")));
+        assert!(harness_can_self_review(Some("gemini")));
+        assert!(harness_can_self_review(Some("agy")));
+        assert!(harness_can_self_review(None));
     }
 
     #[test]
@@ -17693,9 +17795,11 @@ git_bounded();";
         assert!(!self_review_floor_applies(None, true));
         assert!(self_review_floor_applies(Some("claude"), false));
         assert!(self_review_floor_applies(Some("codex"), true));
-        assert!(!self_review_floor_applies(Some("opencode"), false));
-        assert!(!self_review_floor_applies(Some("gemini"), false));
-        assert!(!self_review_floor_applies(Some("agy"), false));
+        // The owned fno review lane runs wherever the plugin runs, so no
+        // KNOWN harness is verbless any more: gemini/agy/opencode floor too.
+        assert!(self_review_floor_applies(Some("opencode"), false));
+        assert!(self_review_floor_applies(Some("gemini"), false));
+        assert!(self_review_floor_applies(Some("agy"), false));
         // An unrecognized spelling is an unattributed run: it floors rather
         // than passing an unknown name through the verb table.
         assert!(self_review_floor_applies(Some("hermes"), false));
@@ -21389,13 +21493,139 @@ mod done_probe_tests {
     fn probe_outcomes_render_pass_fail_and_exit_code() {
         let tmp = tempfile::tempdir().unwrap();
         let t = Duration::from_secs(10);
-        assert_eq!(run_probe("exit 0", tmp.path(), t).render(), "pass");
+        // PASS requires exit 0 AND output: the run's own positive marker.
+        assert_eq!(run_probe("echo probe-ok", tmp.path(), t).render(), "pass");
+        // A silent exit 0 is SKIP, not pass: `test -f residue` reading as a
+        // pass is the vacuous-probe trap this vocabulary exists to close.
+        assert_eq!(run_probe("exit 0", tmp.path(), t).render(), "skip");
         assert_eq!(run_probe("exit 3", tmp.path(), t).render(), "fail:3");
         assert_eq!(
             run_probe("fno-no-such-binary-xyz", tmp.path(), t).render(),
             "fail:127",
             "a missing binary must fail closed as 127, never pass"
         );
+    }
+
+    #[test]
+    fn probe_run_verdicts_map_the_four_states() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = Duration::from_secs(10);
+        assert_eq!(run_probe("echo marker", tmp.path(), t).verdict(), "PASS");
+        assert_eq!(run_probe("exit 0", tmp.path(), t).verdict(), "SKIP");
+        assert_eq!(
+            run_probe("echo out; exit 4", tmp.path(), t).verdict(),
+            "FAIL"
+        );
+        assert_eq!(
+            run_probe("sleep 30", tmp.path(), Duration::from_millis(150)).verdict(),
+            "BLOCKED",
+            "a runner timeout is BLOCKED, distinct from FAIL: the probe never ran"
+        );
+    }
+
+    #[test]
+    fn probe_run_pipefail_closes_the_tail_trap() {
+        // `failing | tail -5` reads exit 0 through the tail's status; the
+        // pipefail preamble must surface the real failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = run_probe(
+            "echo buried | grep -q nothing && echo found; exit 3 | tail -1",
+            tmp.path(),
+            Duration::from_secs(10),
+        );
+        assert_eq!(
+            outcome.verdict(),
+            "FAIL",
+            "the trap must read FAIL, not PASS"
+        );
+    }
+
+    #[test]
+    fn a_blocked_probe_keeps_the_timeout_token_and_names_other_causes() {
+        // A real timeout renders as the legacy token the scoreboard joins
+        // on; spawn and wait failures must not be absorbed into it, or a
+        // misconfigured probe reads as "too slow" when it never ran.
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = run_probe("sleep 5", tmp.path(), Duration::from_millis(100));
+        assert!(matches!(
+            &outcome,
+            ProbeOutcome::Blocked {
+                kind: "timeout",
+                ..
+            }
+        ));
+        assert_eq!(outcome.render(), "timeout");
+        assert_eq!(
+            ProbeOutcome::Blocked {
+                kind: "spawn",
+                why: "boom".into()
+            }
+            .render(),
+            "blocked:spawn"
+        );
+    }
+
+    #[test]
+    fn oversized_probe_output_travels_with_its_marker() {
+        // The cap's contract: cut evidence is NAMED, so a short-looking tail
+        // cannot pass as naturally short output.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(&plan, fm("done_probes:\n  - \"seq 1 5000\"")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 0);
+        let body: Value = serde_json::from_str(&json).unwrap();
+        let out = body["results"][0]["stdout"].as_str().unwrap();
+        assert!(
+            out.contains("[fno probe: truncated"),
+            "row must name the cut: {out}"
+        );
+    }
+
+    #[test]
+    fn probe_run_rows_carry_verdict_claim_and_captured_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(
+            &plan,
+            fm("done_probes:\n  - \"echo header-present # the route returns the header\""),
+        )
+        .unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 0);
+        let body: Value = serde_json::from_str(&json).unwrap();
+        let row = &body["results"][0];
+        assert_eq!(row["verdict"], "PASS");
+        assert_eq!(row["claim"], "the route returns the header");
+        // Captured output travels IN the row, not by path alone.
+        assert!(row["stdout"].as_str().unwrap().contains("header-present"));
+    }
+
+    #[test]
+    fn probe_run_silent_success_is_not_a_pass() {
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(&plan, fm("done_probes:\n  - \"exit 0\"")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 1, "a silent probe must not satisfy the gate");
+        let body: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(body["results"][0]["verdict"], "SKIP");
+        assert!(body["reason"].as_str().unwrap().contains("SKIP"));
     }
 
     /// The close-probe gate reads its OWN key, not done_probes. One parser,
@@ -21418,7 +21648,7 @@ mod done_probe_tests {
     fn probe_run_exit_contract() {
         let tmp = tempfile::tempdir().unwrap();
         let passing = tmp.path().join("pass.md");
-        std::fs::write(&passing, fm("close_probes:\n  - \"exit 0\"")).unwrap();
+        std::fs::write(&passing, fm("close_probes:\n  - \"echo probe-passed\"")).unwrap();
         let failing = tmp.path().join("fail.md");
         std::fs::write(&failing, fm("close_probes:\n  - \"exit 7\"")).unwrap();
         let bad = tmp.path().join("bad.md");
@@ -21628,7 +21858,11 @@ mod done_probe_tests {
         // plan_path is repo-relative in practice; resolving against the process
         // cwd would read nothing and silently drop the gate.
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        std::fs::write(
+            tmp.path().join("plan.md"),
+            fm("done_probes:\n  - echo probe-ok"),
+        )
+        .unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21726,7 +21960,11 @@ mod done_probe_tests {
         // `plans/p.md#wave-1` must resolve to plans/p.md, not a literal filename
         // containing the fragment (which would read nothing -> silent Absent).
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - exit 0")).unwrap();
+        std::fs::write(
+            tmp.path().join("plan.md"),
+            fm("done_probes:\n  - echo probe-ok"),
+        )
+        .unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21750,7 +21988,11 @@ mod done_probe_tests {
         // timeout loop is already over and only the group kill bounds the join.
         let tmp = tempfile::tempdir().unwrap();
         let start = std::time::Instant::now();
-        let outcome = run_probe("sleep 300 & exit 0", tmp.path(), Duration::from_secs(30));
+        let outcome = run_probe(
+            "sleep 300 & echo probe-ok",
+            tmp.path(),
+            Duration::from_secs(30),
+        );
         assert_eq!(outcome.render(), "pass");
         assert!(
             start.elapsed() < Duration::from_secs(10),
@@ -21785,13 +22027,13 @@ mod done_probe_tests {
         let events = tmp.path().join("events.jsonl");
         match evaluate_done_probes(
             plan.to_str(),
-            Some(&project(&["true"])),
+            Some(&project(&["echo probe-ok"])),
             tmp.path(),
             &events,
             "s1",
             Duration::from_secs(10),
         ) {
-            ProbeGate::Pass(results) => assert_eq!(results["true"], "pass"),
+            ProbeGate::Pass(results) => assert_eq!(results["echo probe-ok"], "pass"),
             _ => panic!("a passing project probe must let the gate through"),
         }
     }
@@ -21893,7 +22135,7 @@ mod done_probe_tests {
         // A 4th in the project declaration is still a loud refusal.
         match evaluate_done_probes(
             plan.to_str(),
-            Some(&project(&["true", "true", "true", "true"])),
+            Some(&project(&["echo a", "echo b", "echo c", "echo d"])),
             tmp.path(),
             &events,
             "s1",

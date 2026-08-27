@@ -382,7 +382,7 @@ A probe is what forces that last mile before the session can claim done.
 
 ```yaml
 done_probes:
-  - "fno agents mail list --kind report --since 24h | grep -q groom"
+  - "fno agents mail list --kind report --since 24h | grep -o groom"
 ```
 
 **Assert freshness, never bare existence.**
@@ -395,6 +395,12 @@ lookup) so it can only pass if the thing ran recently.
 **End in a predicate, not a pipeline tail.**
 `... | grep -q x` exits on the grep; `... | tail -5` exits on the tail and
 masks the real status, so a broken command reads as a pass.
+
+**Emit stdout on success, never a silent flag.** A PASS with empty stdout
+reads as vacuous and is held to `SKIP`, which never satisfies this gate - so
+`grep -q`/`-s` and any other output-suppressing predicate silently blocks a
+probe that would otherwise pass forever. Use `grep -o` (or `grep -c`, or any
+predicate that prints the thing it matched) so a real pass carries evidence.
 
 **Use the block form above, or a single-line inline list** (`done_probes: ["cmd"]`).
 A declaration in any other shape (a multi-line inline list, say) refuses done as

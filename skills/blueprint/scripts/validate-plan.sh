@@ -309,6 +309,17 @@ except yaml.YAMLError as exc:
         else
             warn "missing 'project:' field in frontmatter (intake will fall back to cwd-based inference)"
         fi
+        # Advisory, never a gate: an unpassable gate trains the waive. A code
+        # plan with no done_probes simply has no runtime evidence declared;
+        # name the absence and the reason so the omission is a choice on the
+        # record, not a default nobody noticed.
+        if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | grep -qE '^[[:space:]]*done_probes:'; then
+            ok "declares done_probes (runtime evidence bound at ship)"
+        elif awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
+                | grep -qE '^[[:space:]]*domain:[[:space:]]*code'; then
+            warn "code plan declares no done_probes; runtime evidence is undeclared (advisory: add a probe or record why not - /fno:review prove-it is the lane)"
+        fi
         if awk '/^---/{c++; if(c==2) exit; next} c==1{print}' "$PLAN_DIR" \
                 | grep -qE '^dispatch_hold:'; then
             _hold_out=""

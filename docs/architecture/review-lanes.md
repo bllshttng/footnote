@@ -1,23 +1,27 @@
 # Native review lanes
 
-How to actually get a diff reviewed by the harness's native review verb
-(Claude `/code-review`, codex `/review`), and the constraints each
-trigger lane carries.
-This is the operational counterpart to [coordination](coordination.md)
-(which covers who owns work) and [cross-model-review](cross-model-review.md)
-(which covers the `fno` sigma/peer panels, a different surface).
+How a diff gets reviewed: the fno-owned review lane by default, with each trigger lane's constraints below. Harness-native review verbs (Claude `/code-review`, codex `/review`) remain operator-chosen alternates. This doc is the operational counterpart to [coordination](coordination.md), which covers who owns work. For the cross-model peer lane see [cross-model-review](cross-model-review.md), a different surface.
 
-The load-bearing correction this doc exists to carry: the widespread
-belief that `/code-review` "cannot be self-invoked by the session that
-wrote the diff" is too strong.
-Self-invocation has worked for several workers, so it is the first lane
-to try - but it has also been refused, so it is not a guarantee.
+## The lane menu (after the panel retirement)
 
-The obligation to use one of these lanes on a code payload is enforced at the stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno do pr merge`, not only in this prose: a code PR that reaches the gate with no head-pinned `review_attestation` is held, and the held reason names this harness's verb.
-This doc is the lane menu; the gate is the authority.
-Opt out with `config.review.self_review_required = false`.
+| Mode | What it is | Gate weight | Harness availability |
+|---|---|---|---|
+| `/fno:review` (default, optional level) | the owned lane: inline finder angles, dedup, three-state verify (CONFIRMED/PLAUSIBLE/REFUTED), cite-or-drop, carry-forward, one `code-review` attestation | full: the emit satisfies the reviewers gate | every harness (it runs inline as ordinary tool calls) |
+| `/fno:review prove-it` | runtime evidence at the changed code's real surface, validator refuses an unprobed PASS | a PASS satisfies a declared `done_probe`; a FAIL blocks | every harness |
+| `/fno:review cleanup` | apply-or-skip terminus, four angles once, skips recorded | none: no attestation, no threads | every harness |
+| `/fno:review peer` | cross-model second opinion | verdict-gated attestation with `--attest`, or a posted review with `--post` | needs a second provider |
+| `/fno:review research` | advisory research-verify panel over a doc deliverable | advisory only | needs the Task tool |
+| `/fno:review declare` | self-cert attestation, the bottom of the trust spectrum | clears an empty `reviewers` gate only | every harness |
+| native verbs (`/code-review`, `/review`) | the harness's own review | full via `hooks/code-review-attest.sh` | per harness |
+| `sigma` | RETIRED | - | refuses everywhere, names the lane |
 
-Who the floor applies to: a harness with a native review verb floors. A run that cannot be attributed also floors. That covers absent markers, ambiguous markers, no target manifest, and an unrecognized spelling. Ambiguity about who authored the change is not permission to skip its review. A KNOWN verbless harness (gemini/agy) does not floor, because no native verb there can satisfy it. The Python merge gate attributes the run from the target manifest's `harness:` field first. When no manifest carries a harness, a single-family ambient resolve is the fallback. The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out. A verbless manifest alone never releases the floor. Release needs a clean ambient read that agrees on the same verbless family. An absent, ambiguous, or contradicting ambient read is not agreement and floors. One divergence stays, on purpose. A stale verbful manifest floors a merge by a verbless session whose own stop gate does not floor. That direction demands a review and never drops one, and the manifest names the run the PR belongs to. The manifest is an init-time snapshot that outlives its session, and nothing ties it to the PR being merged. A dead run's verbless stamp must not disengage the floor for an unrelated PR merged from that checkout. Before this rule the Python half read only ambient markers. Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review. That is the default state of any session under a multi-CLI shell.
+The retirement measurement sits here so nobody rebuilds the panel from first principles. PR 1170 walked six rounds and produced 84 findings, of which 8 were real. Six readers of one diff yield six sets of objections, not six times the defects. One inline adversarial reviewer caught all 8 real defects in three rounds. The six specialist hunters remain individually invocable as agents. Only the six-at-once panel is gone.
+
+Before the lane existed, this doc carried a load-bearing correction. The widespread belief that `/code-review` cannot be self-invoked by the session that wrote the diff was too strong even then. The owned lane makes it moot now: the session reviews its own diff inline and dispatches zero review subagents. It emits the same head-pinned attestation a native pass produces.
+
+One of these lanes is obligatory on a code payload. The stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno do pr merge` enforce that obligation, not just this prose. A code PR that reaches the gate with no head-pinned `review_attestation` is held. The held reason names this harness's verb. This doc is the lane menu, and the gate is the authority. Opt out with `config.review.self_review_required = false`.
+
+Who the floor applies to: a harness with a native review verb floors. A run that cannot be attributed also floors. That covers absent markers, ambiguous markers, no target manifest, and an unrecognized spelling. Ambiguity about who authored the change is not permission to skip its review. The fno-owned review lane runs as ordinary tool calls wherever the plugin runs, so no KNOWN harness is verbless any more and every attributed run floors. The Python merge gate attributes the run from the target manifest's `harness:` field first. When no manifest carries a harness, a single-family ambient resolve is the fallback. The stop gate attributes from its ambient markers, and `--author-harness none` is the explicit hermetic opt-out. A verbless manifest alone never releases the floor. Release needs a clean ambient read that agrees on the same verbless family. An absent, ambiguous, or contradicting ambient read is not agreement and floors. One divergence stays, on purpose. A stale verbful manifest floors a merge by a verbless session whose own stop gate does not floor. That direction demands a review and never drops one, and the manifest names the run the PR belongs to. The manifest is an init-time snapshot that outlives its session, and nothing ties it to the PR being merged. A dead run's verbless stamp must not disengage the floor for an unrelated PR merged from that checkout. Before this rule the Python half read only ambient markers. Two families meant "no floor", so a claude session started from a codex shell merged code PRs with zero review. That is the default state of any session under a multi-CLI shell.
 
 ## Lane 0: the provider budget decides the route before any lane runs
 
@@ -25,15 +29,9 @@ A lane is how a review is triggered. This is about how WIDE it is allowed to be,
 
 `config.agents.provider_limits.<provider>` (renamed from `max_lanes`) is a `ProviderBudget` record. `lanes` caps concurrent spawned workers on that account, and `subagents` caps in-session fan-out. The built-in zai budget is `lanes = 5, subagents = 1`, because that account is shared. A provider absent from the table is uncapped in both dimensions, which is what a dedicated account gets.
 
-`fno.review_capability` reads the budget in the `subagent-dispatch` branch, before the harness check. Under a `subagent budget` below 2, `sigma` resolves `unavailable` and the reason names the provider, the number, and the route that runs instead. The verdict records `resolves_to = code-review`, stops blocking, and prints a `resolved route:` line in `fno config doctor --review` and in the `fno do target init` receipt. So the receipt shows which route this worker GOT, not which one the config asked for.
+`fno.config.assert_subagent_budget` is the fan-out-neutral guard. Any skill that DECLARES a dispatch width in its text calls it before dispatching (`fno config assert-subagent-budget --width <n>`). A refusal names the provider, the width and the budget. The default review lane needs no such check - it runs inline and dispatches zero review subagents, so a budget of 1 costs it nothing. The retired panel's route-substitution branch is gone with the panel. Under that branch a low budget made `sigma` unavailable and resolved it to `code-review`. Now the lane IS the default on every harness. A configured `sigma` name is refused at init, and the refusal names the lane. The gate never consumes a name the route cannot produce.
 
-The substitute is `code-review` and never `declare`. `code-review` still runs a real review. It still emits a head-pinned `review_attestation`. `declare` is a self-cert, so it clears the gate with nothing behind it. The budget is also the ONLY cause that substitutes. A `sigma` unavailable because the harness cannot dispatch subagents is a misconfiguration the operator has to see. It refuses exactly as it did before.
-
-Two boundaries, stated rather than papered over.
-
-The first is enforcement. A native subagent is a harness-internal Task call. fno never observes it, so no guard in the spawn path can stop one. The constraint is in ROUTE RESOLUTION for that reason. A worker cannot fan out a panel it was never handed. An operator who types `/fno:review sigma` by hand is overriding this. `skills/review/references/sigma.md` prints the provider and the budget before it dispatches, so the override is visible rather than silent. Total prevention needs a harness hook that does not exist.
-
-The second is the stop gate. `loopcheck.rs` reads `config.review.reviewers` from `config.toml` by NAME. It matches an attestation against that name and never consults the provider budget. So a project that configures `reviewers = ["sigma"]` AND routes its workers to a budgeted provider gets a `code-review` attestation the gate rejects. The default `reviewers` list is empty, so no stock install is affected. Closing this means the gate consumes the resolved route rather than the configured name. That belongs with the `agents.provider_limits` consolidation, not here.
+One boundary stays, stated rather than papered over. A native subagent is a harness-internal Task call. fno never observes it. The guard is a DECLARATION check plus the skill text that carries it, not a hard cap on a native dispatch. Total prevention needs a harness hook that does not exist. Where fno routes the dispatch (spawn, the owned lane), the budget is a real cap.
 
 Why it is not a mailed cap. It was tried, and it caught nothing. On 2026-08-22 four zai workers were mailed a one-subagent cap by hand. Three replied, and all three said their review had already run. Every message was delivered and none was late on the bus. One of the three had already spent eight subagents on a single PR. None of the eight returned, so the account paid for the panel and got zero findings. A worker reaches its review on its own schedule. No out-of-band message beats it there.
 
@@ -47,12 +45,7 @@ Skill(skill="code-review", args="<level> --comment")
 -> Skill "code-review" launched (forked execution, running in the background).
 ```
 
-This was confirmed by three separate workers executing it across
-multiple review rounds.
-The forked run found real defects that two separate hand-rolled review
-passes (dispatched `fno:code-reviewer` subagents) both missed,
-including one silent-data-loss bug.
-Use bare args.
+This was confirmed by three separate workers executing it across multiple review rounds. The forked run found real defects that two separate hand-rolled review passes (dispatched `fno:code-reviewer` subagents) both missed, including one silent-data-loss bug. Use bare args.
 
 ### Aiming it at a specific PR
 
@@ -409,7 +402,7 @@ It proves a commit was pinned. It does not prove a review happened.
 
 Every producer bottoms out in the same script, `skills/review/scripts/emit-attestation.sh`. It records the reviewer name and the verdict PASSED.
 
-sigma calls the script itself, from inside its own skill, on a clean pass. `hooks/code-review-attest.sh` calls it for native code review on Claude and Codex too.
+On a clean pass (`pass` only when the classifier yields zero blocking findings), the fno review lane calls the script itself, from its emit step. `hooks/code-review-attest.sh` calls it for native code review on Claude and Codex too.
 
 Claude's hook is wired on two events, because `/code-review` reaches a clean pass two different ways. A `PostToolUse(ReportFindings)` pass fires the hook directly. A Skill-tool self-invocation runs `/code-review` as a forked subagent, whose verdict never reaches ReportFindings, only its final text. A `SubagentStop` trigger reads that text instead, so the second path also fires the hook.
 

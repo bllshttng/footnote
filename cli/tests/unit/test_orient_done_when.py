@@ -140,7 +140,7 @@ def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
     root = repo("")
     monkeypatch.setattr(rc, "_git_out", lambda cwd, *a: None)
     line = _done_when_line({}, root)
-    assert "/code-review <level> --comment" in line
+    assert "/fno:review <level>" in line
     # 20 files, 2000 added lines: over the medium file cap, inside high's.
     # Expected is built through the same sizing function, so this asserts the
     # wiring (diff shape -> sized invocation) without spelling a level here.
@@ -153,11 +153,10 @@ def test_self_review_floor_sizes_the_level_from_the_diff(repo, monkeypatch):
         lambda cwd, *a: "abc123" if a[0] == "merge-base" else rows,
     )
     line = _done_when_line({}, root)
-    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment" in line
+    assert f"/fno:review {rc.level_for_diff(20, 2000)}" in line
 
 
-def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatch):
-    # A master-default repo: the origin/main probe comes back empty, so the
+def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatch):    # A master-default repo: the origin/main probe comes back empty, so the
     # sized invocation must come through the origin/master merge-base. The
     # sibling test feeds every merge-base probe a SHA and never gets there.
     import fno.review_capability as rc
@@ -181,12 +180,15 @@ def test_self_review_floor_sizes_the_level_from_master_fallback(repo, monkeypatc
 
     monkeypatch.setattr(rc, "_git_out", git_out)
     line = _done_when_line({}, root)
-    assert f"/code-review {rc.level_for_diff(20, 2000)} --comment" in line
+    assert f"/fno:review {rc.level_for_diff(20, 2000)}" in line
 
 
-def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
+def test_stock_install_announces_a_satisfiable_lane_floor_on_gemini(
     repo, monkeypatch
 ):
+    # The owned lane runs wherever the plugin runs, so a harness with no native
+    # review verb no longer reads as an unsatisfiable floor. The announcement
+    # names the lane, never a transport-dependent verb.
     import fno.review_capability as rc
 
     monkeypatch.setattr(
@@ -197,7 +199,9 @@ def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
         ),
     )
     line = _done_when_line({}, repo(""))
-    assert "self-review required for code" not in line
+    assert "self-review required for code (gemini)" in line
+    assert "/fno:review <level>" in line
+    assert "--to-self --raw" in line
     assert "/code-review" not in line
 
 
@@ -262,9 +266,12 @@ def test_registry_reviewer_producer_appends_the_emit_step(repo):
 
 
 def test_configured_reviewers_are_announced_with_their_invocation(repo):
+    # sigma is retired: a configured name still renders, but the invocation it
+    # names is the owned lane, and the init-time refusal carries the message.
     root = repo('[review]\nreviewers = ["sigma"]\n')
     line = _done_when_line({}, root)
-    assert "sigma -> /fno:review sigma" in line, line
+    assert "sigma -> /fno:review]" in line, line
+    assert "/fno:review sigma" not in line, line
 
 
 def test_app_bots_and_local_gates_compose(repo):

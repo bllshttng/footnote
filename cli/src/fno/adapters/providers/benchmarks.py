@@ -43,32 +43,101 @@ class BenchmarkError(RuntimeError):
 # lives ONLY here, never downstream. GLM routes on the claude harness via the
 # z.ai secondary lane (the GLM routing work owns that flag mapping). These are
 # curated defaults an operator edits, not an exhaustive registry.
+#
+# Every id here was verified against a configured provider at implementation
+# time (2026-08-26): the codex ids against the codex app-server model surface,
+# the GLM spellings against the z.ai lane (glm-5.3[1m] is the 1M-context
+# suffix form that lane serves), the claude ids against the harness's own
+# current model-id set. Two operator-named candidates were OMITTED because no
+# configured provider serves an id matching them: `gemini-3.7-flash` (the
+# google surface here tops out at antigravity-gemini-3.x and gemini-2.5) and
+# opencode's "0x Alpha Free" tier (a marketing name; opencode's real free ids
+# are hy3-free, mimo-v2.5-free, muse-spark-1.2-contributor-free,
+# nemotron-3-ultra-free, nemotron-3.5-lightning-free - none carries the 0x
+# or alpha name). The omission is the rule working: an unverifiable id is
+# never guessed into a routing table.
 REACHABILITY: dict[str, tuple[str, str]] = {
-    "claude-opus-4-8": ("claude", "claude-opus-4-8"),
+    "claude-fable-5": ("claude", "claude-fable-5"),
+    "claude-opus-5": ("claude", "claude-opus-5"),
     "claude-sonnet-5": ("claude", "claude-sonnet-5"),
     "claude-haiku-4-5": ("claude", "claude-haiku-4-5"),
-    "glm-5.3": ("claude", "glm-5.3"),
+    "glm-5.3[1m]": ("claude", "glm-5.3[1m]"),
     "glm-4.7": ("claude", "glm-4.7"),
-    "gpt-5.5": ("codex", "gpt-5.5"),
-    "gpt-5.4": ("codex", "gpt-5.4"),
+    "gpt-5.6-sol": ("codex", "gpt-5.6-sol"),
+    "gpt-5.6-terra": ("codex", "gpt-5.6-terra"),
+    "gpt-5.6-luna": ("codex", "gpt-5.6-luna"),
 }
 
 # Static fallback tier bands (curated) used ONLY when no snapshot exists, so tier
 # resolution still works offline / on a virgin install: routing degrades, never
 # blocks. The resolver picks the cheapest reachable model within a band; order
-# here is not significant.
+# here is not significant. `max` is the deliberate exception: a max request
+# takes the STRONGEST reachable model, not the cheapest that clears (see
+# route_resolve.resolve_tier). The previous generation of this table (gpt-5.5 /
+# gpt-5.4 / claude-opus-4-8) drifted a full model release with nothing
+# detecting it; the staleness test in cli/tests/unit/test_tier_table.py is the
+# tripwire that fires when it drifts again.
 STATIC_TIERS: dict[str, list[str]] = {
-    # gpt-5.5 is the current codex flagship (high); gpt-5.4, the prior flagship,
-    # sits a band down (medium). Both route on the codex harness.
-    "high": ["claude-opus-4-8", "gpt-5.5"],
-    "medium": ["claude-sonnet-5", "gpt-5.4", "glm-5.3"],
-    "low": ["glm-4.7", "claude-haiku-4-5"],
+    "max": ["claude-fable-5", "gpt-5.6-sol"],
+    "high": ["claude-opus-5", "gpt-5.6-sol"],
+    "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
+    "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
 }
 
 
 def reachable(name: str) -> Optional[tuple[str, str]]:
     """Return ``(provider, model)`` for a benchmark model name, or None if unmapped."""
     return REACHABILITY.get(name)
+
+
+def unreachable_tier_ids(
+    tiers: Optional[Mapping[str, list]] = None,
+    reach: Optional[Mapping[str, tuple[str, str]]] = None,
+) -> list[str]:
+    """Tier-table ids no reachability row serves, listed BY NAME.
+
+    A tier naming a model nobody mapped resolves to a fallback nobody chose,
+    which is the failure class a full model generation of silent drift
+    produced. Pure: both arguments exist so a test can plant a dead id in a
+    copy and watch the flag fire by name (the positive control).
+    """
+    table = tiers if tiers is not None else STATIC_TIERS
+    rows = reach if reach is not None else REACHABILITY
+    seen: set[str] = set()
+    flagged: list[str] = []
+    for names in table.values():
+        for name in names:
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in rows:
+                flagged.append(name)
+    return sorted(flagged)
+
+
+def empty_bands_for_harness(
+    harnesses: tuple[str, ...] = ("claude", "codex"),
+    tiers: Optional[Mapping[str, list]] = None,
+) -> dict[str, list[str]]:
+    """Bands whose static tier resolves to NOTHING for a harness, per harness.
+
+    The doctor-line shape: a band an entire provider cannot serve is a
+    routing hole an operator must see, not discover at dispatch.
+    """
+    table = tiers if tiers is not None else STATIC_TIERS
+    out: dict[str, list[str]] = {}
+    for harness in harnesses:
+        empty = [
+            band
+            for band, names in table.items()
+            if not any(
+                (row := reachable(n)) is not None and row[0] == harness
+                for n in names
+            )
+        ]
+        if empty:
+            out[harness] = sorted(empty)
+    return out
 
 
 def _api_key(env: Optional[Mapping[str, str]] = None) -> str:

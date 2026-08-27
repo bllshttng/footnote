@@ -46,6 +46,33 @@ OPERATOR_REVIEWER = {
     )
 }
 
+# `sigma` was the only built-in that declared `requires: subagent-dispatch`;
+# it retired to `requires: retired` (unconditionally unavailable, checked
+# before any capability read), so it can no longer exercise the
+# subagent-dispatch axis. This registry-only reviewer keeps that axis under
+# test, same pattern as OPERATOR_REVIEWER above.
+SUBAGENT_REVIEWER = {
+    "subagent-only": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="subagent-dispatch",
+        invocation="/fno:review",
+        asserts="review-evidence",
+    )
+}
+
+# The `_invoke_init`/`_invoke_gate` end-to-end tests drive real config load,
+# so the registry has to travel through the YAML fixture rather than a Python
+# `registry=` kwarg.
+SUBAGENT_REVIEWER_YAML = (
+    "[subagent-only]\n"
+    "    reviewer_registry:\n"
+    "      subagent-only:\n"
+    "        kind: local-attestation\n"
+    "        requires: subagent-dispatch\n"
+    "        invocation: /fno:review\n"
+    "        asserts: review-evidence\n"
+)
+
 
 def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: str) -> None:
     cfg = tmp_path / "settings.yaml"
@@ -64,17 +91,19 @@ def _clear_cache():
 
 
 def test_refusal_names_reviewer_capability_harness_substrate_and_remedies():
-    verdicts = resolve_reviewers(["sigma"], GEMINI_HEADLESS)
+    verdicts = resolve_reviewers(
+        ["subagent-only"], GEMINI_HEADLESS, registry=SUBAGENT_REVIEWER
+    )
     msg = refusal_message(verdicts, GEMINI_HEADLESS)
     assert msg is not None
-    assert "sigma" in msg
+    assert "subagent-only" in msg
     assert "subagent-dispatch" in msg
     assert "harness=gemini" in msg
     assert "substrate=headless" in msg
     assert "change config.review.reviewers" in msg
-    # The remedy must be reachable. `sigma` here is `unavailable`, and the
-    # subagent-dispatch branch never reads session.attended, so "run attended"
-    # would be a remedy that provably cannot clear this gate.
+    # The remedy must be reachable. `subagent-only` here is `unavailable`, and
+    # the subagent-dispatch branch never reads session.attended, so "run
+    # attended" would be a remedy that provably cannot clear this gate.
     assert "run attended" not in msg
     assert "emit-attestation.sh" in msg
 
@@ -104,7 +133,7 @@ def test_init_exits_non_zero_before_touching_the_init_script(
 def test_satisfiable_reviewer_does_not_refuse(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    _config(tmp_path, monkeypatch, "[sigma]")
+    _config(tmp_path, monkeypatch, "[code-review]")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "s1")
     monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
     for var in ("TARGET_UNATTENDED", "FNO_BG", "FNO_AGENT_SELF"):
@@ -234,7 +263,7 @@ def test_unclassifiable_session_is_unverifiable_not_unavailable():
     is not the same claim as "this harness cannot dispatch subagents"."""
     s = detect_session({})
     assert s.harness == "unknown"
-    (v,) = resolve_reviewers(["sigma"], s)
+    (v,) = resolve_reviewers(["subagent-only"], s, registry=SUBAGENT_REVIEWER)
     assert v.status == "unverifiable"
     assert v.blocks_autonomy is False
     assert "cannot be verified" in v.reason
@@ -251,7 +280,7 @@ def test_known_incapable_harness_still_refuses():
 def test_unverifiable_session_does_not_refuse_init(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    _config(tmp_path, monkeypatch, "[sigma]")
+    _config(tmp_path, monkeypatch, SUBAGENT_REVIEWER_YAML)
     for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
                 "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
                 "FNO_BG", "FNO_AGENT_SELF"):
@@ -465,12 +494,12 @@ def test_init_command_refuses_and_prints_the_reason(
     """AC1 end to end: the refusal must reach stderr from the real command, not
     merely be returned by `refusal_message`."""
     r = _invoke_init(
-        tmp_path, monkeypatch, "[sigma]",
+        tmp_path, monkeypatch, SUBAGENT_REVIEWER_YAML,
         {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"},
     )
     assert r.exit_code == 2
     assert "subagent-dispatch" in r.output
-    assert "sigma" in r.output
+    assert "subagent-only" in r.output
     assert "harness=gemini" in r.output
     assert "substrate=headless" in r.output
     assert "change config.review.reviewers" in r.output
@@ -484,7 +513,7 @@ def test_init_command_refuses_before_the_bootstrap_script_runs(
     (exit 2, a different message) would win instead."""
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "empty-plugin-root"))
     r = _invoke_init(
-        tmp_path, monkeypatch, "[sigma]",
+        tmp_path, monkeypatch, SUBAGENT_REVIEWER_YAML,
         {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"},
     )
     assert r.exit_code == 2
@@ -497,7 +526,7 @@ def test_init_command_prints_the_unverifiable_note(
 ):
     """An unclassifiable session proceeds, but never silently."""
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "empty-plugin-root"))
-    r = _invoke_init(tmp_path, monkeypatch, "[sigma]", {})
+    r = _invoke_init(tmp_path, monkeypatch, SUBAGENT_REVIEWER_YAML, {})
     assert "note target init:" in r.output
     assert "cannot be verified" in r.output
     # It got past the reviewer check and died on the absent plugin root instead.
@@ -522,16 +551,16 @@ def test_init_command_writes_no_state_when_it_refuses(
     assert not (repo / ".fno" / "target-state.md").exists()
 
 
-def test_codex_can_satisfy_a_sigma_gate():
-    """Codex reaches the sigma panel through project custom agents /
-    `spawn_agent`, and a surface without that primitive reports the downgrade
-    and runs the panel sequentially - slower, but it still reaches a verdict and
-    still attests (docs/HARNESSES.md, docs/SKILL-COMPAT-MATRIX.md).
+def test_codex_can_satisfy_a_subagent_dispatch_gate():
+    """Codex reaches a subagent-dispatch reviewer through project custom
+    agents / `spawn_agent` (docs/HARNESSES.md, docs/SKILL-COMPAT-MATRIX.md).
 
     Treating codex as incapable hard-exits `fno do target init` on a configuration
     the project documents as supported: a false refusal, which is a worse
     failure than the late wedge this check exists to prevent."""
-    (v,) = resolve_reviewers(["sigma"], CODEX_HEADLESS)
+    (v,) = resolve_reviewers(
+        ["subagent-only"], CODEX_HEADLESS, registry=SUBAGENT_REVIEWER
+    )
     assert v.status == "satisfiable"
     assert v.blocks_autonomy is False
     assert refusal_message([v], CODEX_HEADLESS) is None
@@ -754,7 +783,7 @@ def test_check_review_gate_checks_apps_even_when_reviewers_pass(
     monkeypatch.setattr(rc, "_app_ever_acted", _NEVER)
     r = _invoke_gate(
         tmp_path, monkeypatch,
-        "    reviewers: [sigma]\n    github_apps: [typo-bot-name]\n",
+        "    reviewers: [code-review]\n    github_apps: [typo-bot-name]\n",
         {"CLAUDE_CODE_SESSION_ID": "s1"},
     )
     assert r.exit_code == REVIEW_GATE_REFUSED

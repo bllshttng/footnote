@@ -399,6 +399,18 @@ def _report_review_capability(json_out: bool = False) -> int:
     blocked = [v for v in verdicts if v.blocks_autonomy]
     peer_blocked = local_peers_refusal_message(peer_verdicts, session) is not None
 
+    # Tier staleness: a band no configured provider can serve, and a tier id
+    # no reachability row maps, are both routing holes an operator must see
+    # here rather than at dispatch. This table drifted a full model release
+    # with nothing detecting it; this line is the tripwire.
+    from fno.adapters.providers.benchmarks import (
+        empty_bands_for_harness,
+        unreachable_tier_ids,
+    )
+
+    dead_ids = unreachable_tier_ids()
+    empty_bands = empty_bands_for_harness()
+
     if json_out:
         typer.echo(
             _json.dumps(
@@ -418,7 +430,7 @@ def _report_review_capability(json_out: bool = False) -> int:
                                 v.descriptor.invocation if v.descriptor else None
                             ),
                             "reason": v.reason,
-                            "resolved_route": v.resolves_to or v.name,
+                            "resolved_route": v.name,
                         }
                         for v in verdicts
                     ],
@@ -433,6 +445,10 @@ def _report_review_capability(json_out: bool = False) -> int:
                         if peer_verdicts
                         else "not-configured"
                     ),
+                    "tier_staleness": {
+                        "unreachable_tier_ids": dead_ids,
+                        "empty_bands": empty_bands,
+                    },
                 }
             )
         )
@@ -444,6 +460,15 @@ def _report_review_capability(json_out: bool = False) -> int:
     else:
         for reviewer_verdict in verdicts:
             typer.echo(f"  {reviewer_verdict.line()}")
+    if dead_ids:
+        typer.echo(
+            "  WARN tier staleness: ids no reachability row serves: "
+            + ", ".join(dead_ids)
+        )
+    for harness, bands in empty_bands.items():
+        typer.echo(
+            f"  WARN tier staleness: {harness} cannot serve band(s): {', '.join(bands)}"
+        )
     if peer_verdicts:
         state = "unavailable" if peer_blocked else "satisfiable"
         typer.echo(f"  local peer gate: {state}")
@@ -491,11 +516,6 @@ def _report_gates() -> None:
     ):
         rung = v.descriptor.asserts if v.descriptor else "unknown"
         typer.echo(f"  reviewer: {v.name} - asserts {rung}{_RUNG_GLOSS.get(rung, '')}")
-        if v.resolves_to is not None:
-            # The gate an operator reads here is the one that will RUN, not the
-            # one config.review.reviewers names. Printing only the configured
-            # name would teach the wrong reviewer on every routed worker.
-            typer.echo(f"    resolved route: {v.resolves_to} - {v.reason}")
 
 
 _RUNG_GLOSS = {
@@ -684,6 +704,31 @@ def status_sinks_cmd(
         return
     for t in targets:
         typer.echo(f"{t['project']}\t{t['cwd']}\tinterval={t['interval_seconds']}s")
+
+
+@app.command("assert-subagent-budget", hidden=True)
+def assert_subagent_budget_cmd(
+    width: int = typer.Option(..., "--width", "-w", help="The fan-out width the caller declares."),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        "-P",
+        help="Provider whose budget applies; defaults to the FNO_ROUTE_PROVIDER stamp.",
+    ),
+) -> None:
+    """Refuse a declared fan-out wider than the provider's subagent budget.
+
+    Prints the verdict's reason and exits 0 on a permit, 1 on a refusal.
+    Fails open: no stamp, no budget entry or an unreadable config permits,
+    with the reason saying so. This is the seam skill text calls before
+    declaring a panel width (x-25a7 Locked Decision 7).
+    """
+    from fno.config import assert_subagent_budget
+
+    check = assert_subagent_budget(width, provider)
+    prefix = "permit" if check.permitted else "refused"
+    typer.echo(f"{prefix}: {check.reason}")
+    raise typer.Exit(0 if check.permitted else 1)
 
 
 @app.command("get")

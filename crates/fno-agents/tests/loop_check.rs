@@ -3196,8 +3196,13 @@ fn reviewers_gate_blocks_without_attestation() {
         d.message
     );
     assert!(
-        d.message.contains("sigma") && d.message.contains("/fno:review sigma"),
+        d.message.contains("sigma") && d.message.contains("/fno:review"),
         "block reason must name the reviewer and its invocation: {}",
+        d.message
+    );
+    assert!(
+        !d.message.contains("/fno:review sigma"),
+        "sigma is retired; the invocation names the lane, never a panel run: {}",
         d.message
     );
     assert!(
@@ -4493,7 +4498,7 @@ fn fire_probe_gate(cwd: &Path, manifest: &Path, transcript: &Path, mock: &MockBi
 /// DonePRGreen, with this fire's probe result recorded in the loop_check event.
 #[test]
 fn done_probes_ac1_hp_passing_probe_grants_done() {
-    let (tmp, manifest, transcript) = probe_fixture("sess-probe-hp", &["exit 0"]);
+    let (tmp, manifest, transcript) = probe_fixture("sess-probe-hp", &["echo probe-passed"]);
     let cwd = tmp.path();
     let mock = MockBins::green();
 
@@ -4513,7 +4518,7 @@ fn done_probes_ac1_hp_passing_probe_grants_done() {
         "probe evidence must be recorded in the loop_check event"
     );
     assert!(
-        events.contains("\"exit 0\":\"pass\""),
+        events.contains("\"echo probe-passed\":\"pass\""),
         "the probe result for THIS fire must be recorded: {events}"
     );
 }

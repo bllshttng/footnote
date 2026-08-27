@@ -165,3 +165,25 @@ def classify(
         f"classified: {record['findings_blocking']} blocking, "
         f"{record['findings_nonblocking']} nonblocking"
     )
+
+
+@review_app.command("resolve-level", hidden=True)
+def resolve_level(
+    level: str = typer.Argument(
+        None,
+        help="Explicit level token (low medium high xhigh max); omit to size from the diff.",
+    ),
+    provider: str = typer.Option(
+        None, "--provider", help="Route provider scope; defaults to the session stamp."
+    ),
+) -> None:
+    """Resolve a review level to (band, effort, model); the seam the skill,
+    the tests and the invocation event all call."""
+    from fno.review_level import resolve_review_level
+
+    resolution = resolve_review_level(
+        level.strip().lower() if level else None,
+        provider=provider,
+        project_root=Path.cwd(),
+    )
+    sys.stdout.write(json.dumps(resolution.as_dict(), ensure_ascii=False) + "\n")

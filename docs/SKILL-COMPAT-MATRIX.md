@@ -54,7 +54,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | `/target bg` dispatches fresh `claude --bg` workers (claude-only lane). Codex build dispatch is a separate prose-brief path through an owned-PTY `pane` or one-shot `headless` spawn; it never masquerades as `claude --bg`. |
 | setup | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Interactive wizard; single conversation. |
 | ship-docs | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Generates architecture + how-to docs. |
-| sigma-review | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Spawns reviewer agents through the driver-native primitive. Codex uses project custom agents/`spawn_agent` when available and otherwise announces sequential execution. |
+| review | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | The default lane runs INLINE on every harness (ordinary tool calls, zero review subagents) - that portability is the point. Only peer mode needs a second provider, and research mode needs the Task tool. |
 | spec | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Creates plan folder; no looping. |
 | speculate | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | N worktree variants via the driver-native subagent primitive; Codex falls back explicitly to sequential execution when `spawn_agent` is unavailable. |
 | tdd | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Red-green-refactor discipline, single session. |
