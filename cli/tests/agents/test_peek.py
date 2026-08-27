@@ -386,6 +386,23 @@ def test_peek_reader_claude_tails_and_skips_torn(tmp_path):
     assert [r.text for r in recs] == ["first", "second"]
 
 
+def test_peek_distinguishes_fno_mail_as_peer(tmp_path):
+    """fno_mail user turns must be labelled with role 'peer', not 'user'."""
+    sess = _Session()
+    lines = [
+        _user("operator prompt"),
+        _user('<fno_mail from="cc-12345678" harness="claude">peer mail content</fno_mail>'),
+        _assistant("assistant response"),
+    ]
+    _claude_transcript(tmp_path, sess.cwd, sess.session_id, lines)
+    recs = recent_records("claude", sess.session_id, sess.cwd, 10, projects_root=tmp_path)
+    assert [(r.role, r.text) for r in recs] == [
+        ("user", "operator prompt"),
+        ("peer", '<fno_mail from="cc-12345678" harness="claude">peer mail content</fno_mail>'),
+        ("assistant", "assistant response"),
+    ]
+
+
 def test_peek_reader_unsupported_raises(tmp_path):
     """AC2-ERR: an agent with no arm raises ObserveUnsupported."""
     try:
