@@ -12,7 +12,19 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 LANE="$REPO_ROOT/skills/review/references/single-lane.md"
-FNO_BIN="${FNO:-fno}"
+# `fno` is never on PATH in CI (a bare name would shadow the Python entry
+# point every other smoke step resolves, per .github/actions/smoke-setup) and
+# `do review classify` is a Python-owned verb, not the Rust front's. Resolve
+# in the same order the codebase already uses elsewhere: an explicit
+# override, the CI-built Rust front (which shells out to the same verb), then
+# the always-available `uv run` invocation of the local worktree source.
+if [ -n "${FNO_BIN:-}" ]; then
+  fno_run() { "$FNO_BIN" "$@"; }
+elif [ -n "${FNO_RUST_FRONT:-}" ]; then
+  fno_run() { "$FNO_RUST_FRONT" "$@"; }
+else
+  fno_run() { (cd "$REPO_ROOT" && uv run --project cli fno-py "$@"); }
+fi
 
 PASS=0
 FAIL=0
@@ -155,7 +167,7 @@ case "$v" in
 esac
 
 echo "== AC1-HP: the real classifier counts a CONFIRMED finding BLOCKING"
-if ! "$FNO_BIN" do review classify --findings-file "$TMP/findings-good.json" --emit-record > "$TMP/classified.json" 2>"$TMP/classify.err"; then
+if ! fno_run do review classify --findings-file "$TMP/findings-good.json" --emit-record > "$TMP/classified.json" 2>"$TMP/classify.err"; then
   fail "classify refused the findings file (deployment without 'do review classify' is too old for this suite)"
   cat "$TMP/classify.err" >&2
 else
@@ -171,7 +183,7 @@ echo "== AC1-HP: a style-category finding is nonblocking; the emit ground truth"
 cat > "$TMP/findings-style.json" <<'EOF'
 [{"file": "src/fee.py", "line": 4, "summary": "dict literal spacing", "failure_scenario": "inconsistent spacing in the returned dict", "category": "style", "verdict": "PLAUSIBLE"}]
 EOF
-if "$FNO_BIN" do review classify --findings-file "$TMP/findings-style.json" --emit-record > "$TMP/classified-style.json" 2>/dev/null; then
+if fno_run do review classify --findings-file "$TMP/findings-style.json" --emit-record > "$TMP/classified-style.json" 2>/dev/null; then
   b="$(jq -r '.findings_blocking' "$TMP/classified-style.json")"
   [ "$b" = "0" ] && pass "style finding classified nonblocking; lane would emit pass" || fail "style finding blocking ($b); emit decision would flip"
 else
