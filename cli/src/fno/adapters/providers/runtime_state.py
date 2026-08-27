@@ -1429,10 +1429,18 @@ def evaluate_quota_signal(
 ) -> QuotaSignal:
     """Probe one provider's headroom and derive the defer/cutover verdicts.
 
-    Fail-open and opt-in (Locked Decisions 1/4/5/6): no provider,
-    ``defer_dispatch`` off (the default), or ``p0`` short-circuits to a probe-
-    less UNKNOWN with both verdicts false, so a fresh install never defers and
-    never reroutes.
+    Fail-open and opt-in (Locked Decisions 1/4/5/6): no provider, quota
+    observation off (the default), or ``p0`` short-circuits to a probe-less
+    UNKNOWN with both verdicts false, so a fresh install never probes, never
+    defers and never reroutes.
+
+    Looking and acting are separate decisions (x-763a). ``observe`` arms the
+    probe and the snapshot write; ``defer_dispatch`` arms the verdicts that
+    hold or reroute a dispatch, and implies ``observe`` because deferring
+    requires looking. With ``observe`` on and ``defer_dispatch`` off the probe
+    runs, the snapshot is written, and both verdicts stay false - a working
+    meter with no behavioural change to dispatch, which is the posture that
+    was unavailable and the reason the sensor was dark.
 
     This is the ONE probe site the dispatcher owns: it refreshes the snapshot
     (probe-on-stale) before consulting headroom, so the ~1-minute tick pays at
@@ -1450,9 +1458,14 @@ def evaluate_quota_signal(
     # quota for another project's launch, and an absent record there reads as
     # UNKNOWN, which proceeds instead of cutting over.
     quota = load_quota_config(repo_root=repo_root)
-    if not quota.defer_dispatch:
+    if not (quota.observe or quota.defer_dispatch):
         return QuotaSignal(
-            provider_id, HeadroomState.UNKNOWN, None, False, False, "defer-dispatch-off"
+            provider_id,
+            HeadroomState.UNKNOWN,
+            None,
+            False,
+            False,
+            "quota-observation-off",
         )
     if (priority or "").strip().lower() == "p0":
         return QuotaSignal(
@@ -1483,6 +1496,12 @@ def evaluate_quota_signal(
             threshold_pct=quota.defer_threshold_pct,
         )
     defer = cutover = False
+    if not quota.defer_dispatch:
+        # Observation-only: the probe ran and the snapshot was written, so the
+        # meter works, and neither verdict fires. Reported as "observed" rather
+        # than "probed" so a caller can tell a reading that could have acted
+        # from one that was never allowed to.
+        return QuotaSignal(provider_id, h.state, h.resets_at, False, False, "observed")
     if h.state is HeadroomState.EXHAUSTED:
         defer = cutover = True
     elif h.state is HeadroomState.LOW and h.resets_at is not None:
