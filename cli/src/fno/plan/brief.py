@@ -240,19 +240,19 @@ def validate_task_edges(parsed: dict[str, Any]) -> list[str]:
         path = [root]
         iterators = [iter(edges[root])]
         while iterators:
-            dep = next(iterators[-1], None)
-            if dep is None:
+            dependency = next(iterators[-1], None)
+            if dependency is None:
                 iterators.pop()
                 colour[path.pop()] = BLACK
                 continue
-            state = colour.get(dep)
+            state = colour.get(dependency)
             if state == GREY:
-                start = path.index(dep)
-                errors.append("cycle: " + " -> ".join([*path[start:], dep]))
+                start = path.index(dependency)
+                errors.append("cycle: " + " -> ".join([*path[start:], dependency]))
             elif state == WHITE:
-                colour[dep] = GREY
-                path.append(dep)
-                iterators.append(iter(edges[dep]))
+                colour[dependency] = GREY
+                path.append(dependency)
+                iterators.append(iter(edges[dependency]))
     return errors
 
 
