@@ -2036,6 +2036,69 @@ def test_doctor_codex_app_server_report_respects_codex_home(tmp_path, monkeypatc
     assert report["socket_path"].endswith("app-server-control/app-server-control.sock")
 
 
+def _short_codex_home(monkeypatch):
+    """A CODEX_HOME short enough for the 104-char AF_UNIX bind limit (pytest's
+    tmp_path on macOS is not; dir="/tmp" escapes the long TMPDIR). Caller
+    cleans up the returned parent."""
+    import shutil
+    import tempfile
+
+    home = tempfile.mkdtemp(prefix="fno-x571-", dir="/tmp")
+    monkeypatch.setenv("CODEX_HOME", home)
+    socket_dir = Path(home) / "app-server-control"
+    socket_dir.mkdir(parents=True)
+    return socket_dir / "app-server-control.sock", home
+
+
+def test_codex_app_server_report_stale_file_reads_absent(tmp_path, monkeypatch):
+    """A unix socket file survives its process: a regular file at the socket
+    path must read absent, never present, however long it sits on disk."""
+    import shutil
+
+    monkeypatch.setattr(doctor, "_CODEX_APP_SERVER_PROBE_TIMEOUT_S", 0.5)
+    sock_path, home = _short_codex_home(monkeypatch)
+    try:
+        sock_path.write_bytes(b"")
+        assert doctor._codex_app_server_report()["present"] is False
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_codex_app_server_report_dead_socket_inode_reads_absent(tmp_path, monkeypatch):
+    """The measured specimen: a real socket inode whose creating process is
+    gone. The file exists, nothing listens, the probe reads absent."""
+    import shutil
+    import socket as _socket
+
+    monkeypatch.setattr(doctor, "_CODEX_APP_SERVER_PROBE_TIMEOUT_S", 0.5)
+    sock_path, home = _short_codex_home(monkeypatch)
+    try:
+        listener = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        listener.bind(str(sock_path))
+        listener.close()  # inode remains on disk; no process listens
+        assert sock_path.exists()
+        assert doctor._codex_app_server_report()["present"] is False
+    finally:
+        shutil.rmtree(home, ignore_errors=True)
+
+
+def test_codex_app_server_report_live_listener_reads_present(tmp_path, monkeypatch):
+    """Positive control: a live listener on the control socket reads present."""
+    import shutil
+    import socket as _socket
+
+    monkeypatch.setattr(doctor, "_CODEX_APP_SERVER_PROBE_TIMEOUT_S", 0.5)
+    sock_path, home = _short_codex_home(monkeypatch)
+    listener = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    listener.bind(str(sock_path))
+    listener.listen(1)
+    try:
+        assert doctor._codex_app_server_report()["present"] is True
+    finally:
+        listener.close()
+        shutil.rmtree(home, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------
 # Deployed claude plugin cache freshness (x-4be1): the hooks Claude sessions
 # actually run come from ~/.claude/plugins/cache, not the wheel. Same

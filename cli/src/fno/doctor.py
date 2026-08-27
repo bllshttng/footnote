@@ -46,6 +46,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -2258,8 +2259,9 @@ def _emit_human(
     cas = result.get("codex_app_server") or {}
     if not cas.get("present"):
         out(
-            "fno doctor: codex app-server daemon not running (no control socket); "
-            "live mail to codex sessions demotes to durable. Start it BEFORE the "
+            "fno doctor: codex app-server daemon not running (no daemon listening "
+            "on its control socket); live mail to codex sessions demotes to durable. "
+            "Start it BEFORE the "
             "codex TUI: `codex app-server daemon start` (or "
             "`codex app-server daemon bootstrap` for durable SSH-driven use). A "
             "session launched before the daemon cannot receive live mail without a restart."
@@ -2564,17 +2566,33 @@ def _codex_hooks_report() -> dict[str, Any]:
     }
 
 
-def _codex_app_server_report() -> dict[str, Any]:
-    """Whether the codex app-server control socket exists.
+#: Bound on the connect probe below. A wedged daemon can accept the TCP-level
+#: handshake but never answer; without a timeout the advisory path blocks every
+#: plain `fno doctor` behind it. A module constant so a test can shrink it.
+_CODEX_APP_SERVER_PROBE_TIMEOUT_S = 1.0
 
-    The socket at ``$CODEX_HOME/app-server-control/app-server-control.sock``
-    exists only while a codex app-server daemon runs (``codex app-server daemon
-    start``). Absent it, live mail to a codex session demotes to durable, so a
-    plain ``fno doctor`` names the fix for hand-started sessions no spawn
-    preflight can reach."""
+
+def _codex_app_server_report() -> dict[str, Any]:
+    """Whether a codex app-server daemon is listening on its control socket.
+
+    The socket file at ``$CODEX_HOME/app-server-control/app-server-control.sock``
+    is not proof of a daemon: a unix socket file survives the process that
+    created it, so a dead daemon can leave the file on disk indefinitely. The
+    probe is a connect: a live daemon accepts it, and a refusal (or a missing
+    file) is the dead marker. Absent it, live mail to a codex session demotes
+    to durable, so a plain ``fno doctor`` names the fix for hand-started
+    sessions no spawn preflight can reach."""
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
     socket_path = codex_home / "app-server-control" / "app-server-control.sock"
-    return {"present": socket_path.exists(), "socket_path": str(socket_path)}
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(_CODEX_APP_SERVER_PROBE_TIMEOUT_S)
+    try:
+        present = sock.connect_ex(str(socket_path)) == 0
+    except OSError:
+        present = False
+    finally:
+        sock.close()
+    return {"present": present, "socket_path": str(socket_path)}
 
 
 def _codex_version() -> Optional[str]:
@@ -3169,8 +3187,8 @@ def _harness_surface_report() -> dict[str, Any]:
     # uninstalled codex must not nag a user who no longer runs it.
     if shutil.which("codex") is not None:
         try:
-            # Reuse the socket probe already stored above: a second stat can
-            # disagree with it when the daemon starts between the two calls.
+            # Reuse the socket probe already stored above: a second connect
+            # can disagree with it when the daemon starts between the two calls.
             report["codex_context_window"] = _codex_context_window_report(
                 app_server_present=(report.get("codex_app_server") or {}).get("present")
             )
