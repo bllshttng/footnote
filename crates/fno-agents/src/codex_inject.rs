@@ -1104,15 +1104,18 @@ pub fn parse_thread_read_cwd(raw: &str) -> Option<String> {
 /// Classify a `turn/start` response frame into delivered / not-delivered.
 ///
 /// - `.result.turn.id` is a string -> `Ok(())` (turn accepted; DELIVERED).
-/// - `.error` whose message mentions "not found"/"thread" -> `Err("thread-not-loaded")`
+/// - `.error` whose message mentions "not found"/"thread" -> `Reason("thread-not-loaded")`
 ///   (the session is embedded / not attached to the daemon -> durable fallback).
-/// - anything else (other rpc error, unparseable) -> `Err("rpc-error")`.
+/// - any other `.error` -> `Server(message)`: the daemon said WHY, and the
+///   reason must survive to the receipt.
+/// - an error object with no message, or a result frame with no turn id ->
+///   `Reason("unexpected-response")`; unparseable frames -> `Reason("invalid-response")`.
 ///
-/// The `Err` value IS the `mail-inject` JSON `reason` token.
-pub fn classify_turn_start_response(raw: &str) -> Result<(), &'static str> {
+/// The `Reason` value IS the `mail-inject` JSON `reason` token.
+pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
     let v: serde_json::Value = match serde_json::from_str(raw) {
         Ok(v) => v,
-        Err(_) => return Err("rpc-error"),
+        Err(_) => return Err(ReviewStartError::Reason("invalid-response")),
     };
     if v.get("result")
         .and_then(|r| r.get("turn"))
@@ -1129,10 +1132,18 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), &'static str> {
             .unwrap_or("")
             .to_lowercase();
         if msg.contains("not found") || msg.contains("thread") {
-            return Err("thread-not-loaded");
+            return Err(ReviewStartError::Reason("thread-not-loaded"));
         }
+        return match err
+            .get("message")
+            .and_then(|m| m.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            Some(m) => Err(ReviewStartError::Server(m.to_string())),
+            None => Err(ReviewStartError::Reason("unexpected-response")),
+        };
     }
-    Err("rpc-error")
+    Err(ReviewStartError::Reason("unexpected-response"))
 }
 
 /// Deliver `text` into codex `thread_id` over the app-server daemon socket.
@@ -1140,11 +1151,11 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), &'static str> {
 /// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
 /// daemon answering -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
-pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), &'static str> {
+pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
     let sock = codex_app_server_socket_path();
     match tokio::time::timeout(HANDSHAKE_TIMEOUT, inject(&sock, thread_id, text)).await {
         Ok(r) => r,
-        Err(_) => Err("io-error"),
+        Err(_) => Err(ReviewStartError::Reason("io-error")),
     }
 }
 
@@ -1167,30 +1178,30 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
-async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), &'static str> {
+async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
     let conn = UnixStream::connect(sock)
         .await
-        .map_err(|e| connect_refused_reason(&e))?;
+        .map_err(|e| ReviewStartError::Reason(connect_refused_reason(&e)))?;
     let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
         Ok((ws, _resp)) => ws,
-        Err(_) => return Err("handshake-failed"),
+        Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
     };
     let (mut sink, mut stream) = ws.split();
 
     sink.send(Message::Text(initialize_request_json().into()))
         .await
-        .map_err(|_| "io-error")?;
+        .map_err(|_| ReviewStartError::Reason("io-error"))?;
     read_until_id(&mut stream, &serde_json::json!("init")).await?;
 
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
-        .map_err(|_| "io-error")?;
+        .map_err(|_| ReviewStartError::Reason("io-error"))?;
 
     sink.send(Message::Text(
         turn_start_request_json(thread_id, text).into(),
     ))
     .await
-    .map_err(|_| "io-error")?;
+    .map_err(|_| ReviewStartError::Reason("io-error"))?;
     let resp = read_until_id(&mut stream, &serde_json::json!(1)).await?;
     classify_turn_start_response(&resp)
 }
@@ -1827,7 +1838,10 @@ mod tests {
             .await,
             Err(ReviewStartError::Reason("no-daemon"))
         );
-        assert_eq!(inject(&socket, "t", "hi").await, Err("no-daemon"));
+        assert_eq!(
+            inject(&socket, "t", "hi").await,
+            Err(ReviewStartError::Reason("no-daemon"))
+        );
         assert_eq!(discover(&socket).await, Err("no-daemon"));
         let absent = temp.path().join("absent.sock");
         let mut in_flight = false;
@@ -1847,17 +1861,38 @@ mod tests {
     #[test]
     fn classify_thread_not_loaded_on_thread_error() {
         let raw = r#"{"id":1,"error":{"code":-32000,"message":"thread not found"}}"#;
-        assert_eq!(classify_turn_start_response(raw), Err("thread-not-loaded"));
+        assert_eq!(
+            classify_turn_start_response(raw),
+            Err(ReviewStartError::Reason("thread-not-loaded"))
+        );
     }
 
     #[test]
-    fn classify_rpc_error_on_other_error_or_garbage() {
+    fn classify_preserves_server_message_and_splits_unreadable_frames() {
+        // A structured error names its cause; the reason must carry it out
+        // instead of collapsing into one undiagnosable token.
         let other = r#"{"id":1,"error":{"code":-32601,"message":"method not implemented"}}"#;
-        assert_eq!(classify_turn_start_response(other), Err("rpc-error"));
-        assert_eq!(classify_turn_start_response("not json"), Err("rpc-error"));
+        assert_eq!(
+            classify_turn_start_response(other),
+            Err(ReviewStartError::Server("method not implemented".into()))
+        );
+        // Unparseable frame.
+        assert_eq!(
+            classify_turn_start_response("not json"),
+            Err(ReviewStartError::Reason("invalid-response"))
+        );
         // A result without a string turn id is not a confirmed delivery.
         let no_turn = r#"{"id":1,"result":{}}"#;
-        assert_eq!(classify_turn_start_response(no_turn), Err("rpc-error"));
+        assert_eq!(
+            classify_turn_start_response(no_turn),
+            Err(ReviewStartError::Reason("unexpected-response"))
+        );
+        // An error object with no message has nothing to preserve.
+        let bare = r#"{"id":1,"error":{"code":-32000}}"#;
+        assert_eq!(
+            classify_turn_start_response(bare),
+            Err(ReviewStartError::Reason("unexpected-response"))
+        );
     }
 
     #[test]

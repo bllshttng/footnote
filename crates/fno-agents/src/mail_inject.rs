@@ -899,16 +899,19 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return code;
     }
 
-    let result = match args.provider {
+    let result: Result<(), String> = match args.provider {
         MailInjectProvider::Claude => deliver_via_control_sock(
             &args.session,
             &text,
             args.attempts,
             args.interval_ms,
             args.enter_delay_ms,
-        ),
+        )
+        .map_err(|reason| reason.to_string()),
         MailInjectProvider::Codex => {
-            crate::codex_inject::deliver_via_codex_daemon(&args.session, &text).await
+            crate::codex_inject::deliver_via_codex_daemon(&args.session, &text)
+                .await
+                .map_err(|reason| reason.to_string())
         }
     };
 
@@ -937,7 +940,7 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             if reason == NOT_INJECTABLE {
                 eprintln!("{NOT_INJECTABLE_HELP}");
             }
-            emit(false, reason)
+            emit(false, &reason)
         }
     }
 }
