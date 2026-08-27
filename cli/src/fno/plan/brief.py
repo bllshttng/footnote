@@ -182,6 +182,7 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
             "acceptance": [str(a) for a in acceptance],
             "notes": str(t.get("notes", "")).strip(),
             "blocked_by": [str(b) for b in blocked_by],
+            "blocked_by_declared": "blocked_by" in t,
         })
 
     waves = parsed.get("waves", [])
@@ -211,34 +212,59 @@ def list_task_ids(parsed: dict[str, Any]) -> list[str]:
 def validate_task_edges(parsed: dict[str, Any]) -> list[str]:
     """Validate declared per-task ``blocked_by`` edges.
 
-    Returns one error string per problem, empty when clean. Two checks over
-    declared edges only: an edge naming an unknown task id, and a cycle among
-    declared edges (a self-edge included). Derived wave edges - the ones a
-    task with no ``blocked_by`` inherits from its previous wave - go backward
-    by construction and are never checked here.
+    Returns one error string per problem, empty when clean. Unknown ids are
+    checked on declared edges. Cycles are checked on effective edges, including
+    inherited previous-wave blockers and self-edges.
     """
     errors: list[str] = []
-    known = set(list_task_ids(parsed))
-    edges: dict[str, list[str]] = {
-        t["id"]: [str(d) for d in t.get("blocked_by", [])]
-        for t in parsed.get("tasks", [])
-    }
-    for task_id, deps in edges.items():
+    tasks = parsed.get("tasks", [])
+    task_ids = list_task_ids(parsed)
+    known = set(task_ids)
+    declared: dict[str, list[str]] = {}
+    for task in tasks:
+        task_id = task["id"]
+        if task.get("blocked_by_declared", "blocked_by" in task):
+            declared[task_id] = [str(d) for d in task.get("blocked_by", [])]
+
+    for task_id, deps in declared.items():
         for dep in deps:
             if dep not in known:
                 errors.append(f"task {task_id} blocked_by unknown task {dep}")
+
+    wave_tasks: list[list[str]] = []
+    task_wave: dict[str, int] = {}
+    waves = parsed.get("waves", [])
+    if isinstance(waves, list):
+        for wave in waves:
+            if not isinstance(wave, dict):
+                continue
+            raw_tasks = wave.get("tasks", [])
+            if not isinstance(raw_tasks, list):
+                raw_tasks = [raw_tasks]
+            current = [str(task_id) for task_id in raw_tasks]
+            wave_tasks.append(current)
+            for task_id in current:
+                task_wave.setdefault(task_id, len(wave_tasks) - 1)
+
+    effective: dict[str, list[str]] = {}
+    for task_id in task_ids:
+        if task_id in declared:
+            effective[task_id] = declared[task_id]
+            continue
+        position = task_wave.get(task_id)
+        effective[task_id] = wave_tasks[position - 1] if position and position > 0 else []
 
     # Iterative DFS with a colour map (white/grey/black); a grey hit is a
     # back-edge and the grey stack spells the cycle out. Plans are small, so
     # the exact path is cheaper to carry than Kahn's leftover set would be.
     WHITE, GREY, BLACK = 0, 1, 2
-    colour = dict.fromkeys(edges, WHITE)
-    for root in edges:
+    colour = dict.fromkeys(effective, WHITE)
+    for root in effective:
         if colour[root] != WHITE:
             continue
         colour[root] = GREY
         path = [root]
-        iterators = [iter(edges[root])]
+        iterators = [iter(effective[root])]
         while iterators:
             dependency = next(iterators[-1], None)
             if dependency is None:
@@ -252,7 +278,7 @@ def validate_task_edges(parsed: dict[str, Any]) -> list[str]:
             elif state == WHITE:
                 colour[dependency] = GREY
                 path.append(dependency)
-                iterators.append(iter(edges[dependency]))
+                iterators.append(iter(effective[dependency]))
     return errors
 
 
