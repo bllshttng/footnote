@@ -572,6 +572,14 @@ enum CoreMsg {
         pane: u64,
         reply: ControlReply,
     },
+    /// (x-07c2) `fno agents attach` with a live mux: reach `name` through the
+    /// dedicated thread pane (the TUI reach's twin; see
+    /// [`ControlVerb::ThreadPane`]).
+    ThreadPane {
+        name: String,
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
     TabJoin {
         src_tab: TabSel,
         anchor_pane: u64,
@@ -2136,6 +2144,32 @@ impl<'a> SlotCapture<'a> {
     /// The slot name capture gave `pane` (for the persisted focus marker).
     fn slot_of(&self, pane: u64) -> Option<String> {
         self.by_pane.get(&pane).cloned()
+    }
+}
+
+/// The live tree minus one pane (x-07c2): the dedicated thread pane's leaf is
+/// pruned from a topology before capture, and a split it hollowed out
+/// collapses, because the thread pane is NEVER persisted - a pane binds a
+/// session to geometry, a thread binds a session to a row, and a persisted
+/// slot would re-bind a thread to a rectangle across a restart. `None` means
+/// nothing durable remains in this subtree.
+fn node_without_leaf(node: &Node, skip: u64) -> Option<Node> {
+    match node {
+        Node::Leaf(p) => (*p != skip).then(|| Node::Leaf(*p)),
+        Node::Branch { axis, children } => {
+            let kept: Vec<(f32, Node)> = children
+                .iter()
+                .filter_map(|(w, n)| node_without_leaf(n, skip).map(|n| (*w, n)))
+                .collect();
+            match kept.len() {
+                0 => None,
+                1 => kept.into_iter().next().map(|(_, n)| n),
+                _ => Some(Node::Branch {
+                    axis: *axis,
+                    children: kept,
+                }),
+            }
+        }
     }
 }
 
@@ -5934,9 +5968,27 @@ impl Core {
             .map(|(pane, name)| (*pane, name.as_str()))
             .collect();
         let mut trees = Vec::with_capacity(sq.tabs.len());
-        for t in &sq.tabs {
+        let mut active_tab = 0;
+        for (i, t) in sq.tabs.iter().enumerate() {
+            // (x-07c2) Prune the thread pane's leaf before capture: it is
+            // never persisted, so restore rebuilds no pane (and no split) for
+            // a thread. A tab the prune hollowed out entirely is not captured,
+            // and a skipped tab - the active one included - never leaves a
+            // dangling `active_tab` index behind (position IS the tab's
+            // durable identity in `tab_trees`).
+            let pruned = match self.thread_pane.as_ref().map(|(_, pid)| *pid) {
+                None => None,
+                Some(pid) => match node_without_leaf(&t.root, pid) {
+                    Some(root) => Some(root),
+                    None => continue,
+                },
+            };
+            if i == sq.active_tab {
+                active_tab = trees.len();
+            }
+            let root = pruned.as_ref().unwrap_or(&t.root);
             let mut capture = SlotCapture::new(&pane_owner);
-            let tree = capture.node_to_spec(&t.root);
+            let tree = capture.node_to_spec(root);
             let focus = capture.slot_of(t.focus);
             trees.push(StoredTabTree {
                 tab_name: t.name.clone(),
@@ -5945,7 +5997,7 @@ impl Core {
                 focus,
             });
         }
-        Some((trees, sq.active_tab))
+        Some((trees, active_tab))
     }
 
     /// Write the topology lane for `sid` beside its membership row. A write
@@ -9637,6 +9689,10 @@ impl Core {
             .iter()
             .find(|c| c.id == client_id)
             .map(|c| c.dims)
+            // A passive observer's (0,0) sentinel must never size a pane -
+            // fall back to the view rect (the control-path reach rides an
+            // observer client).
+            .filter(|(r, c)| *r > 0 && *c > 0)
             .unwrap_or((vp.rows, vp.cols));
         // Slot: take it, then verify against the live tree (the diff-pane
         // stale-id guard - a recorded pane closed by any other path reads as
@@ -9796,6 +9852,101 @@ impl Core {
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(row.name.clone());
         }
+    }
+
+    /// (x-07c2) The outside-the-TUI reach (`fno agents attach` with a live
+    /// mux), run as the exact command a TUI reach runs: a synthetic OBSERVER
+    /// client (0,0 - read-only, no squad or PTY of its own) whose reliable
+    /// channel collects the notices, then the real AttachAgent thread-pane
+    /// command. One implementation, two doors, no drift; the observer is
+    /// removed through the same Gone path a Detach takes, and the reply is
+    /// the landing notice on success or the refusal's Err.
+    fn thread_pane_ctl(
+        &mut self,
+        name: &str,
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    ) {
+        if let Some(rows) = agents {
+            // Same source and cadence as the off-loop reader's tick; assigning
+            // only guarantees the command resolves against the snapshot the
+            // CLI just saw.
+            self.agents = rows;
+        }
+        // A row already pane-hosted HERE has its viewport: answer with the
+        // location instead of opening a second one.
+        let hosted = self.agents.iter().find(|a| {
+            (a.name == name || a.attach_id.as_deref() == Some(name))
+                && a.mux.as_ref().is_some_and(|(s, _)| s == &self.session_name)
+        });
+        if let Some(a) = hosted {
+            let pane = a.mux.as_ref().expect("checked").1;
+            let _ = reply.send(ServerMsg::Notice {
+                text: format!(
+                    "{} hosts pane {pane} in this session; focus it in the mux",
+                    a.name
+                ),
+            });
+            return;
+        }
+        let cwd = self
+            .agents
+            .iter()
+            .find(|a| a.name == name || a.attach_id.as_deref() == Some(name))
+            .map(|a| a.cwd.clone())
+            .unwrap_or_default();
+        let (tx, mut rx) = mpsc::channel::<ServerMsg>(256);
+        const CONTROL_CLIENT: u64 = u64::MAX;
+        self.attach(
+            CONTROL_CLIENT,
+            0,
+            0,
+            cwd,
+            name.to_string(),
+            tx,
+            DirtyMap::default(),
+            Arc::new(Notify::new()),
+        );
+        // Drop the observer's cold-attach snapshot (layout + frames): only
+        // the reach's notice is the payload, and an empty buffer guarantees it
+        // is never the message a full channel drops.
+        while rx.try_recv().is_ok() {}
+        self.command(
+            CONTROL_CLIENT,
+            Command::AttachAgent {
+                id: name.to_string(),
+                placement: PanePlacement {
+                    thread_pane: true,
+                    ..Default::default()
+                },
+            },
+        );
+        // Harvest the notice the reach emitted (every path ends in exactly
+        // one) and tear the observer out through Gone.
+        let landing = loop {
+            match rx.try_recv() {
+                Ok(ServerMsg::Notice { text }) => break Some(text),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
+        let _ = self.self_tx.try_send(CoreMsg::Gone(CONTROL_CLIENT));
+        let landed = self.thread_pane.as_ref().is_some_and(|(k, _)| k == name);
+        let msg = match (landed, landing) {
+            (true, Some(text)) => ServerMsg::Notice { text },
+            (true, None) => ServerMsg::Notice {
+                text: format!("thread pane -> {name}"),
+            },
+            (false, Some(text)) => ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: text,
+            },
+            (false, None) => ServerMsg::Err {
+                code: err_code::BAD_REQUEST,
+                msg: format!("no such agent: {name}"),
+            },
+        };
+        let _ = reply.send(msg);
     }
 
     fn command(&mut self, client_id: u64, cmd: Command) -> Flow {
@@ -11983,6 +12134,14 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
+            CoreMsg::ThreadPane {
+                name,
+                agents,
+                reply,
+            } => {
+                self.thread_pane_ctl(&name, agents, reply);
+                Flow::Continue
+            }
             CoreMsg::TabJoin {
                 src_tab,
                 anchor_pane,
@@ -13441,6 +13600,16 @@ async fn handle_control(
             core_tx
                 .send(CoreMsg::PaneFocus {
                     pane,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::ThreadPane { name } => {
+            let agents = read_guard_agents().await;
+            core_tx
+                .send(CoreMsg::ThreadPane {
+                    name,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -19795,6 +19964,121 @@ mod tests {
         assert!(notices.iter().any(|t| t.contains("no such agent")));
         assert!(notices.iter().any(|t| t.contains("more than one row")));
         assert!(core.thread_pane.is_none(), "no slot recorded on a refusal");
+    }
+
+    #[test]
+    fn thread_pane_ctl_lands_the_reach_and_replies_where() {
+        // AC8-HP (server half): the control verb drives the SAME reach a TUI
+        // gesture drives, records the slot, persists nothing, and replies
+        // with the landing.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        let new_pid = core.next_pane_id;
+
+        core.thread_pane_ctl("deadbee1", Some(agents), tx);
+
+        assert_eq!(
+            core.thread_pane,
+            Some(("deadbee1".to_string(), new_pid)),
+            "the control reach records the slot"
+        );
+        assert!(core.squad_members.is_empty(), "no squad member persisted");
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("thread pane -> target-a"),
+                "the reply names the landing: {text}"
+            ),
+            other => panic!("expected a Notice landing, got {other:?}"),
+        }
+        // The observer's removal rides the core queue (CoreMsg::Gone), so it
+        // happens on the loop's next drain, not synchronously here.
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn thread_pane_ctl_refuses_an_unknown_name() {
+        let (mut core, _client_id, _p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+
+        core.thread_pane_ctl("nosuchrow", None, tx);
+
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Err { msg, .. } => {
+                assert!(msg.contains("no such agent"), "names the refusal: {msg}")
+            }
+            other => panic!("expected an Err refusal, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none());
+        assert!(core.panes.len() == 1, "nothing spawned");
+    }
+
+    #[test]
+    fn thread_pane_ctl_answers_a_pane_hosted_row_with_its_location() {
+        // A row already pane-hosted in this session has its viewport: the
+        // verb answers with the pane instead of opening a second one.
+        let (mut core, _client_id, p1, _rx) = thread_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        let mut hosted = bg_row("hosted-row", "/tmp/seen", None);
+        hosted.mux = Some(("test".to_string(), p1));
+        let name = core.session_name.clone();
+        core.session_name = "test".to_string();
+        let agents = vec![hosted];
+
+        core.thread_pane_ctl("hosted-row", Some(agents), tx);
+
+        core.session_name = name;
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Notice { text } => assert!(
+                text.contains("hosts pane") && text.contains("hosted-row"),
+                "names the existing pane: {text}"
+            ),
+            other => panic!("expected a Notice, got {other:?}"),
+        }
+        assert!(core.thread_pane.is_none(), "no thread pane minted");
+    }
+
+    #[test]
+    fn stored_tab_trees_prunes_the_thread_pane_and_remaps_active_tab() {
+        // (x-07c2) The dedicated thread pane is never persisted: capture
+        // prunes its leaf, a tab it hollowed out is not captured at all, and
+        // a skipped tab - the active one included - never leaves a dangling
+        // `active_tab` (position IS the durable tab identity in tab_trees).
+        // The thread pane carries an `attached` binding, so an un-pruned
+        // capture WOULD name its slot Fno(deadbee1): the absent binding is
+        // the red/green pair, not a vacuous one.
+        set_attach_program(&["/bin/cat"]);
+        let (mut core, client_id, _p1, _rx) = thread_core();
+        core.agents = vec![bg_row("target-a", "/tmp/seen", Some("deadbee1"))];
+        core.command(client_id, thread_reach_cmd("deadbee1"));
+        let (_, thread_pid) = core.thread_pane.clone().unwrap();
+        let (sid, _ti) = core
+            .session
+            .find_pane(thread_pid)
+            .expect("the thread pane is in the live tree");
+
+        let (trees, active) = core.stored_tab_trees(sid).unwrap();
+        assert!(
+            trees
+                .iter()
+                .flat_map(|t| &t.slots)
+                .all(|s| !matches!(&s.binding, LayoutBinding::Fno(id) if id == "deadbee1")),
+            "no captured slot names the thread pane's attach id"
+        );
+        assert!(
+            active < trees.len(),
+            "active_tab remapped into the captured range (active={active}, {} trees)",
+            trees.len()
+        );
+        assert!(
+            trees.iter().all(|t| !t.slots.is_empty()),
+            "no hollowed tab was captured"
+        );
+        // Positive control: the prune touched the CAPTURE, not the live
+        // session - the pane is still there and still the dedicated slot.
+        assert!(core.session.find_pane(thread_pid).is_some());
+        assert_eq!(core.thread_pane.as_ref().map(|&(_, p)| p), Some(thread_pid));
     }
 
     #[test]
