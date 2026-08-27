@@ -447,7 +447,7 @@ def _transcript_last_write(hit: "StoreHit") -> Optional[str]:
 
     try:
         # Pass the SAME store roots the probes used. resolve_transcript's claude
-        # arm otherwise falls back to an import-time `~/.claude/projects`, so
+        # arm otherwise falls back to its import-time default projects root, so
         # under FNO_CLAUDE_PROJECTS_DIR it reads a different tree than the one
         # that produced this hit and the stamp is null every time - including in
         # every test, where it is the one read that escapes the fixture roots.
