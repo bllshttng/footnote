@@ -30,7 +30,7 @@ IMPOSSIBLE names the two acts that can clear it: a non-author GitHub approval on
 
 ## The round budget
 
-`config.review.max_rounds` (default 2, at least 1) budgets the review rounds on a branch since the last pass. A round is a review VERDICT. CI failures, lint failures and rebases are not rounds, and a pass resets the counter. A PR merges after one to three reviews and never waits for a round to come back clean.
+`config.review.max_rounds` (default 2, at least 1) budgets the review rounds across the whole life of a PR. A round is a review VERDICT, whatever its verdict: a pass is one round like any other and refunds nothing, though it still satisfies coverage on its own terms. CI failures, lint failures and rebases are not rounds. A PR merges after one to three reviews and never waits for a round to come back clean.
 
 At the cap the gate stops asking for reviews. A hard finding answers IMPOSSIBLE. Everything else is filed as a node and the merge proceeds, with the filed keys and their node ids on the merge receipt. One review stays the floor, so an unreviewed PR is still uncovered. A finding the gate cannot FILE is one it must not wave through, so a filing failure refuses instead.
 
