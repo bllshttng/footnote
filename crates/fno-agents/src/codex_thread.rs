@@ -14,13 +14,19 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-const APP_SERVER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// Total budget for one id-matched request/response exchange (handshake,
+/// turn/start, steer, interrupt, review). Frames unrelated to the id arrive
+/// interleaved and are parked, so the budget bounds the whole exchange, not
+/// any single frame.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Total budget for one whole turn. Codex streams a turn as an unbounded
+/// burst of notification frames with quiet gaps while the model thinks, so
+/// this deadline is the ONLY bound on the wait for `turn/completed`.
 const TURN_TIMEOUT: Duration = Duration::from_secs(600);
-const MAX_FRAMES_PER_RESPONSE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ThreadStartError {
@@ -366,21 +372,27 @@ impl CodexThread {
             .map_err(ThreadDriverError::Io)?;
         self.stdin.flush().await.map_err(ThreadDriverError::Io)?;
         let id = id.into();
-        for _ in 0..MAX_FRAMES_PER_RESPONSE {
-            let value = self.read_value().await?;
+        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let value = self.read_value(remaining).await?;
             if value.get("id") == Some(&id) {
                 return Ok(value);
             }
             self.pending.push_back(value);
         }
-        Err(ThreadDriverError::Protocol(
-            "response frame ceiling exceeded".into(),
-        ))
     }
 
-    async fn read_value(&mut self) -> Result<Value, ThreadDriverError> {
+    /// Read one JSON frame, bounded by `read_timeout`. Callers that wait on a
+    /// turn pass their remaining whole-turn budget: a fixed per-frame timeout
+    /// would fire during the app-server's quiet gaps and abort a turn that was
+    /// still running.
+    async fn read_value(&mut self, read_timeout: Duration) -> Result<Value, ThreadDriverError> {
         let mut line = String::new();
-        let read = tokio::time::timeout(APP_SERVER_READ_TIMEOUT, self.stdout.read_line(&mut line))
+        let read = tokio::time::timeout(read_timeout, self.stdout.read_line(&mut line))
             .await
             .map_err(|_| ThreadDriverError::Timeout)?
             .map_err(ThreadDriverError::Io)?;
@@ -410,8 +422,16 @@ impl CodexThread {
             return parse_turn_completed_notification(&value.to_string())
                 .ok_or_else(|| ThreadDriverError::Protocol("turn completion disappeared".into()));
         }
-        for _ in 0..MAX_FRAMES_PER_RESPONSE {
-            let value = self.read_value().await?;
+        // The turn budget is the only ceiling. A frame-count bound aborts
+        // turns larger than the constant after the app-server already ran
+        // them, and a per-frame timeout aborts turns with quiet gaps.
+        let deadline = Instant::now() + TURN_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let value = self.read_value(remaining).await?;
             if let Some(turn) = parse_turn_completed_notification(&value.to_string()) {
                 if turn.turn_id == turn_id {
                     return Ok(turn);
@@ -420,9 +440,6 @@ impl CodexThread {
                 self.pending.push_back(value);
             }
         }
-        Err(ThreadDriverError::Protocol(
-            "turn completion frame ceiling exceeded".into(),
-        ))
     }
 
     pub async fn drive_turn(&mut self, text: &str) -> Result<TurnResult, ThreadDriverError> {
@@ -434,14 +451,10 @@ impl CodexThread {
             text,
             self.effort.as_deref(),
         );
-        let response = tokio::time::timeout(TURN_TIMEOUT, self.request(request_id, request))
-            .await
-            .map_err(|_| ThreadDriverError::Timeout)??;
+        let response = self.request(request_id, request).await?;
         let turn_id = parse_turn_start_response(&response)?;
         self.current_turn_id = Some(turn_id.clone());
-        let result = tokio::time::timeout(TURN_TIMEOUT, self.take_completed(&turn_id))
-            .await
-            .map_err(|_| ThreadDriverError::Timeout)??;
+        let result = self.take_completed(&turn_id).await?;
         self.current_turn_id = None;
         Ok(result)
     }
