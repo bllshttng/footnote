@@ -107,7 +107,11 @@ def test_project_filter_keeps_rows_in_dom_and_lists_unscoped(tmp_path: Path):
     render_graph_html(entries, out)
     text = out.read_text()
 
-    assert re.findall(r'data-project="([^"]+)"', text) == []
+    assert set(re.findall(r'data-project="([^"]+)"', text)) == {
+        "alpha",
+        "beta",
+        UNSCOPED_LABEL,
+    }
     assert "alpha-card" in text and "beta-card" in text and "unscoped-card" in text
     assert UNSCOPED_LABEL in text
     assert "is-hidden" in text
@@ -231,3 +235,25 @@ def test_legacy_object_project_state_preserves_true_selected_projects():
 
     assert "saved[p] === true" in _DASHBOARD_JS
     assert "saved[p] === false" not in _DASHBOARD_JS
+
+
+def test_dashboard_contains_static_content_without_javascript(tmp_path: Path):
+    out = tmp_path / "graph.html"
+    render_graph_html(
+        [_entry("no-js-marker", project="alpha", title="Visible without JavaScript")],
+        out,
+    )
+
+    text = out.read_text()
+    main = text.split('<main id="board">', 1)[1].split("</main>", 1)[0]
+    assert "Visible without JavaScript" in main
+    assert 'class="group"' in main
+    assert 'class="fallback-detail"' in main
+
+
+def test_legacy_all_hidden_project_state_remains_an_active_empty_selection():
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "projectFilterActive" in _DASHBOARD_JS
+    assert "saved[p] === true" in _DASHBOARD_JS
+    assert "state.projectFilterActive" in _DASHBOARD_JS

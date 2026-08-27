@@ -1185,17 +1185,20 @@ _DASHBOARD_JS = """\
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
   var ALL = counts(NODES);
-  var state = { q:'', status:new Set(), projects:new Set(), group:'', prio:'', size:'', from:'', planOnly:false, prOnly:false, open:{} };
+  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', planOnly:false, prOnly:false, open:{} };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
     try {
       var saved = JSON.parse(localStorage.getItem(PROJECT_KEY) || '[]');
-      if (Array.isArray(saved)) return new Set(saved);
-      if (saved && typeof saved === 'object') return new Set(Object.keys(saved).filter(function (p) { return saved[p] === true; }));
+      if (Array.isArray(saved)) return { selected:new Set(saved), active:saved.length > 0 };
+      if (saved && typeof saved === 'object') {
+        if (Array.isArray(saved.selected)) return { selected:new Set(saved.selected), active:saved.active !== false };
+        return { selected:new Set(Object.keys(saved).filter(function (p) { return saved[p] === true; })), active:true };
+      }
     } catch (e) {}
-    return new Set();
+    return { selected:new Set(), active:false };
   }
-  function saveProjects() { try { localStorage.setItem(PROJECT_KEY, JSON.stringify(Array.from(state.projects))); } catch (e) {} }
+  function saveProjects() { try { localStorage.setItem(PROJECT_KEY, JSON.stringify({selected:Array.from(state.projects), active:state.projectFilterActive})); } catch (e) {} }
   var statsEl = document.getElementById('stats');
   var statRows = [['Total', NODES.length, ''], ['In progress', ALL.in_progress || 0, ''],
     ['In review', ALL.in_review || 0, ''], ['Ready', ALL.ready || 0, ''], ['Blocked', ALL.blocked || 0, ''],
@@ -1216,10 +1219,10 @@ _DASHBOARD_JS = """\
   var projectChips = document.getElementById('projectChips');
   projectNames.forEach(function (p) { var b = document.createElement('button'); b.className = 'chip project-chip'; b.type = 'button';
     b.dataset.project = p; b.textContent = p; b.setAttribute('aria-pressed', 'false'); b.addEventListener('click', function () {
-      if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p); saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
-  state.projects = loadProjects();
+      if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p); state.projectFilterActive = true; saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
+  var loadedProjects = loadProjects(); state.projects = loadedProjects.selected; state.projectFilterActive = loadedProjects.active;
   var queryProject = new URLSearchParams(window.location.search).get('project');
-  if (queryProject && projectNames.indexOf(queryProject) >= 0) state.projects = new Set([queryProject]);
+  if (queryProject && projectNames.indexOf(queryProject) >= 0) { state.projects = new Set([queryProject]); state.projectFilterActive = true; }
   function syncProjects() { projectChips.querySelectorAll('[data-project]').forEach(function (b) {
     b.setAttribute('aria-pressed', state.projects.has(b.dataset.project) ? 'true' : 'false'); }); }
   syncProjects();
@@ -1238,7 +1241,7 @@ _DASHBOARD_JS = """\
   buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
   var openStatuses = new Set(['in_progress', 'in_review', 'ready', 'blocked']); openStatuses.forEach(function (s) { if (ORDER.indexOf(s) >= 0) state.status.add(s); });
   ORDER.forEach(function (s) { var b = statusChips.querySelector('[data-s="' + s + '"]'); if (b) b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); });
-  function projectMatch(n) { return !state.projects.size || state.projects.has(n.project); }
+  function projectMatch(n) { return !state.projectFilterActive || state.projects.has(n.project); }
   function matches(n) {
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
@@ -1358,6 +1361,69 @@ def _dashboard_rows(
     return rows
 
 
+def _dashboard_static_detail(row: dict[str, object], *, local: bool) -> str:
+    parts = ['<div class="detail">', '<div class="kv">']
+    if local:
+        parts.append(f'<span><b>id</b> {html.escape(str(row.get("id") or ""))}</span>')
+    parts.append(f'<span><b>status</b> {html.escape(str(row.get("s") or ""))}</span>')
+    if row.get("p"):
+        parts.append(f'<span><b>priority</b> {html.escape(str(row["p"]))}</span>')
+    if row.get("sz"):
+        parts.append(f'<span><b>size</b> {html.escape(str(row["sz"]))}</span>')
+    parts.append("</div>")
+    if local:
+        for heading, key in (("Dependencies", "bb"), ("Unblocks", "su")):
+            related = row.get(key) or []
+            if not isinstance(related, list) or not related:
+                continue
+            parts.append(f'<div class="blk"><div class="h">{heading}</div>')
+            for item in related:
+                if not isinstance(item, dict):
+                    continue
+                parts.append(
+                    f'<div class="item"><b>{html.escape(str(item.get("id") or "?"))}</b> '
+                    f'{html.escape(str(item.get("s") or "unknown"))} '
+                    f'{html.escape(str(item.get("t") or ""))}</div>'
+                )
+            parts.append("</div>")
+        if row.get("d"):
+            parts.append(f'<p>{html.escape(str(row["d"]))}</p>')
+        if row.get("pl"):
+            parts.append(
+                f'<div class="planrow"><span class="plan">{html.escape(str(row["pl"]))}</span></div>'
+            )
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _dashboard_static_html(rows: list[dict], *, local: bool) -> str:
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("g") or "uncategorized"), []).append(row)
+    parts: list[str] = []
+    for group in sorted(groups):
+        group_rows = groups[group]
+        parts.append(
+            f'<section class="group"><div class="ghead"><span class="caret">▼</span>'
+            f'<h2>{html.escape(group)}</h2><span class="gc">{len(group_rows)}</span></div>'
+            '<div class="rows">'
+        )
+        for row in group_rows:
+            project = html.escape(str(row.get("project") or ""), quote=True)
+            node_id = html.escape(str(row.get("id") or ""), quote=True) if local else ""
+            parts.append(
+                f'<div class="row" data-project="{project}" data-status="{html.escape(str(row.get("s") or ""), quote=True)}">'
+                f'<div class="rmain"><span class="rid">{node_id}</span>'
+                f'<span class="rt">{html.escape(str(row.get("t") or ""))}</span>'
+                f'<span class="meta"><span class="pill">{html.escape(str(row.get("s") or ""))}</span></span>'
+                f'<span class="dot">{html.escape(str(row.get("u") or row.get("c") or ""))}</span></div>'
+                '<details class="fallback-detail"><summary>Details</summary>'
+                f'{_dashboard_static_detail(row, local=local)}</details></div>'
+            )
+        parts.append("</div></section>")
+    return "".join(parts)
+
+
 def _dashboard_html(
     entries: list[dict],
     *,
@@ -1376,6 +1442,7 @@ def _dashboard_html(
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
     config = json_module.dumps({"local": local}, separators=(",", ":"))
     generated = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    static_board = _dashboard_static_html(rows, local=local)
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -1392,7 +1459,7 @@ def _dashboard_html(
         '<select id="sizeSel" aria-label="Filter by size"><option value="">All sizes</option></select>'
         '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
-        '</div><div id="shown"></div></header><main id="board"><section class="group" hidden></section></main>'
+        f'</div><div id="shown"></div></header><main id="board">{static_board}</main>'
         f'<footer>rendered {generated}</footer><script id="config" type="application/json">{config}</script>'
         f'<script id="data" type="application/json">{payload}</script><script>{_DASHBOARD_JS}</script></body></html>\n'
     )
