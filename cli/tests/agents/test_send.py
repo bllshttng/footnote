@@ -285,6 +285,87 @@ def test_dispatch_send_stamps_registered_sender_by_canonical_handle(
     assert f'from_session="{sender_session}"' in envelope
 
 
+def test_dispatch_send_self_proof_beats_same_bucket_registry_sibling(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A proven self handle is never re-inferred from the registry.
+
+    The auto-stamp puts the caller's head-8 handle in ``from_name``. A
+    registered codex sibling spawned in the same UUIDv7 bucket is the unique
+    registry hit for that head, so registry inference alone stamps the
+    stranger's full session id as ``from_session``. The ambient self proof
+    must win.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from types import SimpleNamespace
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.harness_identity import canonical_handle
+
+    own_session = "77777777-7777-7777-8777-777777777777"
+    stranger_session = "77777777-9999-7997-8997-777777777779"
+    assert canonical_handle(own_session) == canonical_handle(stranger_session)
+
+    monkeypatch.setattr(
+        "fno.agents.self_stamp.resolve_self_identity",
+        lambda *args, **kwargs: SimpleNamespace(
+            session_id=own_session, harness="codex", disposition="proven"
+        ),
+    )
+
+    write_registry(
+        [
+            AgentEntry(
+                name="same-bucket-stranger",
+                harness="codex",
+                harness_session_id=stranger_session,
+                short_id=canonical_handle(stranger_session),
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="88888888-8888-4888-8888-888888888888",
+                short_id="88888888",
+                cwd=str(tmp_path),
+                log_path="",
+                status="live",
+            ),
+        ]
+    )
+    captured: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_switchboard_exchange",
+        lambda *_args, **_kwargs: False,
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_mail_inject_claude",
+        lambda _recipient, text, **_kwargs: captured.append(text) or True,
+    )
+
+    from fno.agents.dispatch import dispatch_send
+
+    result = dispatch_send(
+        name="red",
+        message="self proof wins over bucket sibling",
+        provider=None,
+        cwd=tmp_path,
+        from_name=canonical_handle(own_session),
+    )
+
+    assert result.delivery == "hosted"
+    assert len(captured) == 1
+    envelope = captured[0]
+    assert f'from_session="{own_session}"' in envelope
+    assert stranger_session not in envelope
+
+
 @pytest.mark.parametrize(
     ("sender_harness", "sender_session", "wire_harness"),
     [

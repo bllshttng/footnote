@@ -5960,10 +5960,34 @@ def _resolve_sender_entry(
         return None
 
 
+def _proven_self_sender(from_name: str) -> tuple[Optional[str], Optional[str]]:
+    """Proven sender identity when ``from_name`` is this session's own handle.
+
+    The auto-stamp puts the caller's head-8 handle in ``from_name``. Under
+    codex UUIDv7 that head is a truncated timestamp bucket, so a registered
+    same-bucket sibling can be the UNIQUE registry hit for it and registry
+    inference alone would stamp a stranger's full session id as
+    ``from_session``. When the ambient identity proves this process owns the
+    handle, its full id is already collision-free and wins - the same rule
+    ``resolve_self_session_id`` documents for the envelope's ``from_session``.
+    """
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    session_id = getattr(ident, "session_id", None)
+    harness = getattr(ident, "harness", None)
+    if session_id and harness and canonical_handle(session_id) == from_name:
+        return harness, session_id
+    return None, None
+
+
 def _sender_provenance(
-    entries: list[AgentEntry], from_name: str
+    sender: Optional[AgentEntry],
+    from_name: str,
 ) -> tuple[Optional[str], Optional[str]]:
-    sender = _resolve_sender_entry(entries, from_name)
+    self_harness, self_session = _proven_self_sender(from_name)
+    if self_session is not None:
+        return self_harness, self_session
     if sender is None:
         return None, None
     return (
@@ -7848,7 +7872,9 @@ def _queue_durable_fallback(
         )
 
     msg_id = msg_id or generate_msg_id()
-    provider_from, from_session = _sender_provenance(entries, from_name)
+    provider_from, from_session = _sender_provenance(
+        _resolve_sender_entry(entries, from_name), from_name
+    )
     if mail_ctx is None:
         mail_ctx = _build_mail_ctx(
             from_name,
@@ -8263,7 +8289,9 @@ def dispatch_send(
             from fno.inbox.store import generate_msg_id
 
             sender_entry = _resolve_sender_entry(entries, from_name)
-            provider_from, from_session = _sender_provenance(entries, from_name)
+            provider_from, from_session = _sender_provenance(
+                sender_entry, from_name
+            )
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
@@ -8619,7 +8647,7 @@ def dispatch_send(
 
                 msg_id = generate_msg_id()
                 provider_from, from_session = _sender_provenance(
-                    timeout_entries, from_name
+                    _resolve_sender_entry(timeout_entries, from_name), from_name
                 )
                 timeout_recipient = canonical_handle(
                     timeout_entry.harness_session_id
