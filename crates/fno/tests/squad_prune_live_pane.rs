@@ -146,9 +146,19 @@ fn past_the_grace_window_a_live_pane_stops_protecting() {
     // weeks, so the pane arm expires on the same clock as the origin arm.
     let scratch = Scratch::new("prune-stale-pane");
     let origin = seed(&scratch, "2001-01-01T00:00:00Z");
-    let _pane = attach_pane_at(&scratch, &origin);
+    let (_server, mut client) = attach_pane_at(&scratch, &origin);
+    // Same reason as the grace-window test: wait for the shell to draw, so the
+    // tab arm sees a pristine tab and this proves the SQUAD arm did the removal.
+    // A run that raced the prompt could reach `pruned_count: 1` with the tab arm
+    // never having had a chance to fire, which measures nothing about the order.
+    let pane = client.focus();
+    client.wait_pane_text(15, pane, |text| !text.trim().is_empty());
 
     let (receipt, store) = prune(&scratch);
+    assert_eq!(
+        receipt["tabs_closed"], 0,
+        "the squad arm must do the removal, not the tab arm; {receipt}"
+    );
     assert!(
         !store.contains(&origin),
         "a live pane still held a squad decades past grace; store={store}"
