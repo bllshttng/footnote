@@ -17796,9 +17796,11 @@ git_bounded();";
         assert!(!self_review_floor_applies(None, true));
         assert!(self_review_floor_applies(Some("claude"), false));
         assert!(self_review_floor_applies(Some("codex"), true));
-        assert!(!self_review_floor_applies(Some("opencode"), false));
-        assert!(!self_review_floor_applies(Some("gemini"), false));
-        assert!(!self_review_floor_applies(Some("agy"), false));
+        // The owned fno review lane runs wherever the plugin runs, so no
+        // KNOWN harness is verbless any more: gemini/agy/opencode floor too.
+        assert!(self_review_floor_applies(Some("opencode"), false));
+        assert!(self_review_floor_applies(Some("gemini"), false));
+        assert!(self_review_floor_applies(Some("agy"), false));
         // An unrecognized spelling is an unattributed run: it floors rather
         // than passing an unknown name through the verb table.
         assert!(self_review_floor_applies(Some("hermes"), false));
