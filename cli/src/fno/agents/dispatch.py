@@ -107,6 +107,24 @@ def _switchboard_identity(entry: AgentEntry) -> SwitchboardIdentity:
     }
 
 
+def _is_codex_thread_entry(entry: AgentEntry) -> bool:
+    """Whether the row is a daemon-hosted Codex app-server thread.
+
+    Mirrors the Rust ``is_codex_thread_entry`` (daemon.rs): codex harness,
+    interactive host mode (load_registry coerces a missing/null host_mode to
+    "exec", so the None default here never reads as interactive), an empty
+    ``short_id`` (codex rows carry the full id in ``harness_session_id``), and
+    no mux ref. A codex PANE row fails the short_id/mux legs and keeps its
+    real lanes.
+    """
+    return (
+        entry.harness == "codex"
+        and (entry.host_mode or "exec") == "interactive"
+        and not entry.short_id
+        and entry.mux is None
+    )
+
+
 def _update_registry_if_recipient_unchanged(
     name: str,
     expected_identity: RecipientIdentity,
@@ -7906,6 +7924,27 @@ def _deliver_live(
                 or not entry.mux
             ):
                 break
+        return False
+
+    # Codex hosted thread (x-de10): the daemon's thread actor drives the turn.
+    # A thread row (harness codex, interactive, no short_id, no mux ref) has
+    # neither a pane for _mux_pane_send above nor a live route through
+    # agent.deliver below - the Rust daemon does not implement deliver for a
+    # thread, so the old fallthrough silently demoted every live mail send to
+    # the durable queue. The switchboard arm answers delivered on turn
+    # ACCEPTANCE (start/steer ack), never a whole-turn wait.
+    if _is_codex_thread_entry(entry):
+        delivered = _switchboard_exchange(
+            entry.name,
+            from_name,
+            wrapped,
+            None,
+            to_identity=_switchboard_identity(entry),
+            from_identity=None,
+        )
+        if delivered:
+            return True
+        _record("codex-thread-switchboard-miss")
         return False
 
     # Route key is the canonical harness, legacy provider as fallback (x-ec59):

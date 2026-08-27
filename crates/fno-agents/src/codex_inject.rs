@@ -407,8 +407,19 @@ pub fn review_start_request_json(
     target: &ReviewTarget,
     delivery: ReviewDelivery,
 ) -> String {
+    review_start_request_json_with_id(1, thread_id, target, delivery)
+}
+
+/// Same request with a caller-chosen id: the thread actor matches responses
+/// per request id and must not collide with the id-1 handshake exchanges.
+pub fn review_start_request_json_with_id(
+    id: u64,
+    thread_id: &str,
+    target: &ReviewTarget,
+    delivery: ReviewDelivery,
+) -> String {
     json!({
-        "id": 1,
+        "id": id,
         "method": "review/start",
         "params": {
             "threadId": thread_id,

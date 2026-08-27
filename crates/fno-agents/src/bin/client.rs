@@ -394,11 +394,10 @@ async fn run(args: Vec<String>) -> i32 {
         .unwrap_or_default();
 
     let home = AgentsHome::from_env();
-    let codex_thread_target = fno_agents::state::load_registry(&home.registry_json())
-        .ok()
-        .is_some_and(|registry| {
-            fno_agents::codex_ask::is_codex_thread_target(&registry, &agent_name)
-        });
+    // x-de10 (AC20): the codex-thread-target lookup moved INTO the agent.ask
+    // block below, derived from the registry read already performed there. The
+    // old spot loaded the registry for EVERY client verb and swallowed read
+    // failures at `.ok()`.
 
     // Claude `ask` is handled entirely client-side (ab-cc926b4e): claude is a
     // `claude --bg` shellout, not a daemon-PTY agent, so it bypasses the daemon
@@ -412,32 +411,41 @@ async fn run(args: Vec<String>) -> i32 {
         // dispatch_ask after Task 1.1 (unknown-name check precedes provider
         // selection). Provider-mismatch logic (inside maybe_run_claude_ask) still
         // applies for existing rows.
+        //
+        // x-de10 (AC20): ONE registry read for the whole ask path. The
+        // codex-thread-target lookup below derives from THIS read - the old
+        // second load ran for EVERY client verb and swallowed failures at
+        // `.ok()`.
+        use fno_agents::claude_ask::{emit_event, py_repr};
+        use fno_agents::state::load_registry;
+        // A corrupt/unreadable registry must surface as exit 12 ("registry
+        // read failed"), NOT degrade to an empty registry where every name
+        // looks unknown (exit 16 + a forensically wrong unknown-name
+        // event). Python parity: dispatch_ask raises exit 12 on
+        // (OSError, ValueError, RegistryVersionError); the lib dispatch
+        // fns do the same. A MISSING file is not an error (load_registry
+        // returns the default). Sigma-review finding, this PR.
+        let registry = match load_registry(&home.registry_json()) {
+            Ok(r) => r,
+            Err(e) => {
+                emit_event(
+                    &home.events_jsonl(),
+                    "agent_ask_failed",
+                    &[
+                        ("stage", "registry-read".into()),
+                        ("name", agent_name.clone().into()),
+                        ("error", e.to_string().into()),
+                    ],
+                );
+                eprintln!("registry read failed: {e}");
+                return 12;
+            }
+        };
+        // A codex thread target falls through to the daemon ask below instead
+        // of the unresolvable-create error.
+        let codex_thread_target =
+            fno_agents::codex_ask::is_codex_thread_target(&registry, &agent_name);
         {
-            use fno_agents::claude_ask::{emit_event, py_repr};
-            use fno_agents::state::load_registry;
-            // A corrupt/unreadable registry must surface as exit 12 ("registry
-            // read failed"), NOT degrade to an empty registry where every name
-            // looks unknown (exit 16 + a forensically wrong unknown-name
-            // event). Python parity: dispatch_ask raises exit 12 on
-            // (OSError, ValueError, RegistryVersionError); the lib dispatch
-            // fns do the same. A MISSING file is not an error (load_registry
-            // returns the default). Sigma-review finding, this PR.
-            let registry = match load_registry(&home.registry_json()) {
-                Ok(r) => r,
-                Err(e) => {
-                    emit_event(
-                        &home.events_jsonl(),
-                        "agent_ask_failed",
-                        &[
-                            ("stage", "registry-read".into()),
-                            ("name", agent_name.clone().into()),
-                            ("error", e.to_string().into()),
-                        ],
-                    );
-                    eprintln!("registry read failed: {e}");
-                    return 12;
-                }
-            };
             if registry.find_name_or_full_session_id(&agent_name).is_none() {
                 // Event parity: Python's dispatch_ask emits agent_ask_failed
                 // stage="unknown-name" before raising; this pre-check is the
@@ -632,9 +640,39 @@ async fn run(args: Vec<String>) -> i32 {
             "fno-agents: could not resolve current dir ({e}); daemon will pick a fallback cwd"
         ),
     }
+    // x-de10 (AC19): for a codex THREAD spawn the daemon RPC is what creates
+    // the registry row, so the spawn gate is held across exactly this exchange
+    // (acquire before the write, release after the response read) - one gate
+    // evaluation per spawn, and the first spawn's row is counted before the
+    // second is evaluated. Other verbs skip this entirely. Read before
+    // `method`/`params` move into the request.
+    let daemon_bound_thread_spawn = method == "agent.spawn"
+        && params.get("provider").and_then(|v| v.as_str()) == Some("codex")
+        && params.get("substrate").and_then(|v| v.as_str()) == Some("thread");
+    // Snapshot before `params` moves into the request: the relocated gate
+    // honors the same spawn-control flags the shared construction reads.
+    let daemon_gate_flags = gate_flags_from_params(&params);
     let req = Request::new(1, method, params);
 
-    match call(&home, &daemon_bin, &req).await {
+    let daemon_spawn_gate = if daemon_bound_thread_spawn {
+        let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match fno_agents::spawn_gate::run_gate(
+            &config_cwd,
+            &home.registry_json(),
+            &agent_name,
+            "bg",
+            daemon_gate_flags,
+        ) {
+            Ok(guard) => Some(guard),
+            Err(code) => return code,
+        }
+    } else {
+        None
+    };
+
+    let call_result = call(&home, &daemon_bin, &req).await;
+    drop(daemon_spawn_gate);
+    match call_result {
         Ok(resp) => match resp.payload {
             ResponsePayload::Err(err) => {
                 eprintln!("fno-agents: {}", err.message);
@@ -1124,19 +1162,15 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // held across dispatch so the next waiter's count includes the newcomer
     // (bg: the mutex until the roster/registry row exists; headless: the
     // worker:<name> slot claim for the call duration), then dropped.
-    let mut gate_guard = if substrate == "pane" {
+    // x-de10 (AC19): the codex THREAD spawn's registry row is created by the
+    // DAEMON spawn RPC (the ("codex", "bg") arm below returns None), so a
+    // guard held here drops before any row exists and two rapid thread spawns
+    // both pass the cap. The gate moves to run(), wrapped around that RPC.
+    let codex_thread_fallthrough = provider == "codex" && substrate == "bg";
+    let mut gate_guard = if substrate == "pane" || codex_thread_fallthrough {
         None
     } else {
-        let flags = fno_agents::spawn_gate::GateFlags {
-            force: params
-                .get("force")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            no_wait: params
-                .get("no_wait")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
+        let flags = gate_flags_from_params(&params);
         let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
@@ -2229,6 +2263,23 @@ fn fresh_here_flags(params: &Value) -> (bool, bool) {
     (fresh, here)
 }
 
+/// The spawn-control flags one gate evaluation honors: the `--force` and
+/// `--no-wait` CLI flags land in the spawn params as booleans. Both gate
+/// constructions (the daemon-bound codex-thread gate and the shared one)
+/// read through this, so neither can drop a flag.
+fn gate_flags_from_params(params: &Value) -> fno_agents::spawn_gate::GateFlags {
+    fno_agents::spawn_gate::GateFlags {
+        force: params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        no_wait: params
+            .get("no_wait")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
 /// Pure cwd precedence for a spawn/ask dispatch: explicit `--cwd` > `--here`
 /// (caller) > default canonical. x-85fe inverted the default: with no explicit
 /// cwd source the worker lands on the canonical root, so the identical command
@@ -2346,16 +2397,43 @@ fn format_success(
             } else {
                 // Follow-up path: print the reply verbatim (no added newline; println!
                 // in the caller adds the newline, matching Python's behaviour).
+                // A `reply: null` with `status: "in_flight"` is the codex
+                // thread actor's bounded-ask receipt: the turn is still
+                // driving, so say THAT instead of printing an empty line that
+                // reads as an empty answer.
+                if result.get("reply").is_none_or(Value::is_null)
+                    && result.get("status").and_then(|v| v.as_str()) == Some("in_flight")
+                {
+                    let turn_id = result
+                        .get("turn_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    return Some(format!(
+                        "in flight: turn {turn_id} is still driving; the reply surfaces via \
+                         agent_ask_done"
+                    ));
+                }
                 let reply = result.get("reply").and_then(|v| v.as_str()).unwrap_or("");
                 Some(reply.to_string())
             }
         }
         "stop" => {
-            if let Some(short_id) = result.get("short_id").and_then(|v| v.as_str()) {
-                Some(format!("stopped: {name} ({short_id})"))
-            } else {
-                Some(format!("stopped: {name}"))
+            let mut line = match result.get("short_id").and_then(|v| v.as_str()) {
+                Some(short_id) => format!("stopped: {name} ({short_id})"),
+                None => format!("stopped: {name}"),
+            };
+            // A codex thread stop names what happened to the in-flight turn:
+            // a bare "stopped" over an interrupt the daemon never confirmed is
+            // the exact report-it-did-not-perform shape this field exists to
+            // prevent. `no-turn` (nothing was driving) stays silent.
+            if let Some(outcome) = result
+                .get("interrupt")
+                .and_then(|v| v.as_str())
+                .filter(|outcome| *outcome != "no-turn")
+            {
+                line.push_str(&format!(" (turn {outcome})"));
             }
+            Some(line)
         }
         "rm" => {
             let harness = result.get("harness").and_then(Value::as_str).unwrap_or("");
@@ -3375,6 +3453,18 @@ mod tests {
 
     /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
     #[test]
+    /// A codex thread stop names the interrupt outcome; `no-turn` stays silent.
+    #[test]
+    fn format_success_stop_names_the_interrupt_outcome() {
+        let result =
+            json!({"stopped": true, "backend": "codex-thread", "interrupt": "interrupted"});
+        let out = format_success("stop", "t", &result, false, true, false).expect("stop line");
+        assert_eq!(out, "stopped: t (turn interrupted)");
+        let no_turn = json!({"stopped": true, "backend": "codex-thread", "interrupt": "no-turn"});
+        let out = format_success("stop", "t", &no_turn, false, true, false).expect("stop line");
+        assert_eq!(out, "stopped: t");
+    }
+
     fn format_success_stop_with_short_id() {
         let result = json!({"stopped": true, "short_id": "fo-1a2b"});
         let out = format_success("stop", "foo", &result, false, true, false);
@@ -3804,6 +3894,22 @@ mod tests {
         assert_eq!(out, Some(String::new()));
     }
 
+    /// The codex-thread bounded-ask receipt: `reply: null` + in_flight prints
+    /// the in-flight line, never an empty line that reads as an empty answer.
+    #[test]
+    fn format_success_ask_in_flight_prints_the_turn_not_nothing() {
+        let result = json!({
+            "reply": null,
+            "backend": "codex-thread",
+            "turn_id": "turn-9",
+            "status": "in_flight",
+        });
+        let out = format_success("ask", "myagent", &result, false, true, false)
+            .expect("in_flight formats a line");
+        assert!(out.contains("turn-9"), "names the turn: {out}");
+        assert!(out.contains("in flight"), "names the state: {out}");
+    }
+
     /// AC3-HP: build_request accepts --from-name, --yolo, --timeout without error.
     /// These flags are forwarded to the daemon so `ask` can be called with full
     /// Python-parity flag surface without exit 2 (unknown flag).
@@ -4132,6 +4238,20 @@ mod tests {
         let (_m, params) = build_request("spawn", &args).expect("gate flags must parse");
         assert_eq!(params["force"], true);
         assert_eq!(params["no_wait"], true);
+    }
+
+    /// Both gate constructions (the daemon-bound codex-thread gate and the
+    /// shared one) read their flags through `gate_flags_from_params`: a
+    /// hardcoded `GateFlags { force: false, .. }` refused a `--force` spawn at
+    /// capacity and made `--no-wait` queue for a slot.
+    #[test]
+    fn gate_flags_read_from_params_for_both_gate_constructions() {
+        let forced = gate_flags_from_params(&serde_json::json!({"force": true, "no_wait": true}));
+        assert!(forced.force);
+        assert!(forced.no_wait);
+        let defaults = gate_flags_from_params(&serde_json::json!({}));
+        assert!(!defaults.force);
+        assert!(!defaults.no_wait);
     }
 
     #[test]

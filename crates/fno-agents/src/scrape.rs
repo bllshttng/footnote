@@ -547,6 +547,7 @@ mod tests {
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
         }
     }
 

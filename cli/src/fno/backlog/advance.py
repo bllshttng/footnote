@@ -1230,10 +1230,12 @@ def _spawn_worker(
     ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
 
-    Returns the spawn receipt's short_id. Raises SpawnAlreadyRunning on a
-    name-collision (a peer beat us in the boot window), DispatchResolveError on an
-    unresolvable harness/substrate/verb (caught non-fatally by the caller), and
-    SpawnError otherwise.
+    Returns the spawn receipt's LAUNCH IDENTITY: the claude short_id, or for a
+    codex thread the FULL harness_session_id (codex has no short id; a head-8
+    slice is refused by shape - ruling d-513d9d22). Raises SpawnAlreadyRunning
+    on a name-collision (a peer beat us in the boot window),
+    DispatchResolveError on an unresolvable harness/substrate/verb (caught
+    non-fatally by the caller), and SpawnError otherwise.
     """
     is_reconcile = bool(reconcile_manifest)
     agent_name = _worker_agent_name(
@@ -1297,6 +1299,10 @@ def _spawn_worker(
     # around a builtin that ignored the key. A DispatchResolveError propagates to the
     # caller's non-fatal spawn-failure path.
     from fno.agents import harness_map
+    from fno.harness_identity import (
+        CODEX_SHORT_ADDRESS_RULE,
+        is_unsafe_short_address,
+    )
 
     node_verb = (verb or "").strip() or None
     resolve_kwargs: dict = {
@@ -1376,31 +1382,54 @@ def _spawn_worker(
             f"{(stderr or proc.stdout or '').strip()[:200]}"
         )
     # Receipt shape is substrate-dependent (mirrors dispatch-node.sh). A `bg`
-    # spawn lands a DETACHED thread and returns a compact JSON receipt with a
-    # short_id we require as launch proof: {"name", "short_id", ...}. A `headless`
-    # one-shot (a codex/others failover) already ran to completion on exit 0 - no
-    # detached thread, no short_id - so the clean exit IS the proof and we skip
-    # the requirement (else the parse below would raise SpawnError, release the
+    # spawn lands a DETACHED thread and returns a compact JSON receipt whose
+    # launch identity we require as launch proof: {"name", "short_id", ...} for
+    # claude, and for a codex thread {"short_id": "", "harness_session_id"/
+    # "session_id": <full id>} - codex has no short id, so the FULL session id
+    # is the launch proof (x-de10; the old short_id-only parse raised
+    # SpawnError for every codex thread dispatch). A `headless` one-shot (a
+    # codex/others failover) already ran to completion on exit 0 - no detached
+    # thread, no id - so the clean exit IS the proof and we skip the
+    # requirement (else the parse below would raise SpawnError, release the
     # reservation, and redispatch a node whose headless worker already ran).
     if substrate != "thread":
         return "headless"
-    # Keep scanning past a line that merely MENTIONS short_id but is not the JSON
-    # receipt (banner/log noise) - only stop once a short_id is actually parsed.
+    # Keep scanning past a line that merely MENTIONS an id field but is not the
+    # JSON receipt (banner/log noise) - only stop once an id actually parses.
     short_id = ""
+    harness_session_id = ""
     for line in (proc.stdout or "").splitlines():
-        if '"short_id"' in line:
-            try:
-                short_id = json.loads(line).get("short_id", "")
-            except json.JSONDecodeError:
-                continue
-            if short_id:
-                break
-    if not short_id:
+        if '"short_id"' not in line and '"harness_session_id"' not in line and '"session_id"' not in line:
+            continue
+        try:
+            receipt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        short_id = receipt.get("short_id") or ""
+        harness_session_id = (
+            receipt.get("harness_session_id") or receipt.get("session_id") or ""
+        )
+        if short_id or harness_session_id:
+            break
+    launch_identity = short_id or harness_session_id
+    if not launch_identity:
         raise SpawnError(
-            f"fno agents spawn exit 0 but no short_id receipt: "
+            f"fno agents spawn exit 0 but no launch-identity receipt: "
             f"{(proc.stdout or proc.stderr or '').strip()[:200]}"
         )
-    return short_id
+    # A bare 8-hex id aimed at codex is a 65.5-second timestamp bucket, not an
+    # address: refuse by shape instead of binding a duplicate worker to the
+    # wrong session (ruling d-513d9d22, harness_identity.is_unsafe_short_address).
+    resolved_harness = (resolved.get("harness") or "").strip()
+    for token in (short_id, harness_session_id):
+        if token and is_unsafe_short_address(token, resolved_harness or None):
+            raise SpawnError(
+                f"fno agents spawn receipt carries a codex head-8 launch "
+                f"identity ({token}): {CODEX_SHORT_ADDRESS_RULE}"
+            )
+    return launch_identity
 
 
 # ---------------------------------------------------------------------------

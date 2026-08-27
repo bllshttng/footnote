@@ -353,6 +353,14 @@ fn raw_monotonic_nanos() -> u64 {
         .saturating_add(ts.tv_nsec.max(0) as u64)
 }
 
+/// Serializes every test that mutates the PROCESS `PATH` (or resolves a
+/// subprocess through it): two tests racing `set_var` under the default
+/// parallel test threads make the loser inherit the winner's stub dir - or a
+/// deleted tempdir, which exits 127. Take `PATH_TEST_MUTEX` around both the
+/// mutation and the PATH-dependent work. cfg(test) in the lib only.
+#[cfg(test)]
+pub static PATH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
