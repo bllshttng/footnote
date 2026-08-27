@@ -1284,6 +1284,7 @@ fn dispatch_create(
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        sandbox_posture: None,
     };
 
     match update_registry(registry_path, |reg| {

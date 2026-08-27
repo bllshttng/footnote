@@ -393,7 +393,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
 const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
 ];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
@@ -1564,6 +1564,7 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
             Some(id.fno_id.clone())
         },
         delivery_policy: None,
+        sandbox_posture: None,
         spawn_trigger: None,
         spawned_by_session: parent_session,
         spawned_by_harness: parent_harness,

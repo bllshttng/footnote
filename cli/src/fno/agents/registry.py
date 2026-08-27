@@ -200,7 +200,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # TypeErrors - the PR #364 brick. The bump makes it a version gap instead.
 # v18 adds classified session lineage. Older readers must refuse rather than
 # silently erase predecessor or fork provenance on a read-modify-write.
-SCHEMA_VERSION = 18
+# v19 (x-de10): additive `sandbox_posture` - the sandbox a codex thread was
+# LAUNCHED with, mirrored here so a Python write-back cannot erase the Rust
+# stamp (the same X3 erasure v16 closed for origin/spawn_trigger). The daemon
+# applies it on thread/resume; None on every other row. Same additive-optional
+# shape and forward-compat rationale as v11-v18.
+SCHEMA_VERSION = 19
 
 
 class RegistryVersionError(RuntimeError):
@@ -332,6 +337,13 @@ class AgentEntry:
     # evidence for "did a birth trigger spawn this?" was a timestamp gap
     # between a node's created_at and a worker's registry row.
     spawn_trigger: Optional[str] = None
+    # Sandbox posture the worker was launched with (v19, x-de10):
+    # "danger-full-access" or "workspace-write"; stamped by the daemon's codex
+    # thread lane at spawn and applied on thread/resume, so a daemon restart
+    # cannot silently demote a yolo worker. None on every other row. Mirrors
+    # the Rust RegistryEntry so a Python write-back preserves the stamp
+    # (additive-optional, the v11-v19 shape).
+    sandbox_posture: Optional[str] = None
     # What created this row, written once at birth and never restamped:
     # "operator" for a session a human started by hand (the SessionStart
     # register hook / ``fno agents register``), "spawn" for a worker footnote

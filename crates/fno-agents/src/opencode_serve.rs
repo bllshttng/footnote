@@ -834,6 +834,7 @@ fn dispatch_opencode_serve_inner(
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        sandbox_posture: None,
     };
     let registry_path = home.registry_json();
     match update_registry(&registry_path, |reg| {

@@ -200,6 +200,13 @@ fn codex_thread_resume_identity(
     Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
 }
 
+/// Whether the row was launched with the danger-full-access posture (x-de10
+/// v19): the resume lane applies it so a daemon restart cannot silently demote
+/// a yolo worker to workspace-write. `None` (pre-v19 rows) reads safe.
+fn entry_posture_is_full_access(entry: &RegistryEntry) -> bool {
+    entry.sandbox_posture.as_deref() == Some("danger-full-access")
+}
+
 fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
     entry.harness_name() == "codex"
         && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
@@ -3605,6 +3612,7 @@ fn build_claude_stream_entry(
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        sandbox_posture: None,
     }
 }
 
@@ -3994,6 +4002,7 @@ fn build_codex_thread_entry(
     driver: &crate::codex_thread::CodexThread,
     model: Option<&str>,
     effort: Option<&str>,
+    yolo: bool,
 ) -> RegistryEntry {
     let cwd_s = cwd.to_string_lossy().into_owned();
     let session_id = driver.thread_id().to_string();
@@ -4043,6 +4052,16 @@ fn build_codex_thread_entry(
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        // v19: the launch posture is the resume posture. The doc's old warning
+        // that "a registry row records no sandbox posture" died here.
+        sandbox_posture: Some(
+            if yolo {
+                "danger-full-access"
+            } else {
+                "workspace-write"
+            }
+            .to_string(),
+        ),
     }
 }
 
@@ -4080,7 +4099,7 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
         }
     };
-    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort);
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort, yolo);
     let session_id = entry.harness_session_id.clone().unwrap_or_default();
     let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
         if registry
@@ -4204,8 +4223,7 @@ async fn ensure_codex_thread_handle(
         cwd,
         &session_id,
         entry.model.as_deref(),
-        // Posture resume is x-1.5's change; safe default until then.
-        false,
+        entry_posture_is_full_access(entry),
         entry.effort.as_deref(),
     )
     .await
@@ -9109,6 +9127,7 @@ mod tests {
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
         }
     }
 
@@ -11516,6 +11535,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 route_settings_path: None,
                 fno_id: None,
                 delivery_policy: None,
+                sandbox_posture: None,
             });
         })
         .unwrap();
@@ -11600,6 +11620,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 route_settings_path: None,
                 fno_id: None,
                 delivery_policy: None,
+                sandbox_posture: None,
             });
         })
         .unwrap();
@@ -11753,6 +11774,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 route_settings_path: None,
                 fno_id: None,
                 delivery_policy: None,
+                sandbox_posture: None,
             });
         })
         .unwrap();
@@ -12222,6 +12244,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 route_settings_path: None,
                 fno_id: None,
                 delivery_policy: None,
+                sandbox_posture: None,
             });
         })
         .unwrap();
@@ -12446,6 +12469,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -12498,6 +12522,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
         }
     }
 
@@ -12796,6 +12821,86 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     /// recovery pass, never Live-forever. The resume is made to fail
     /// deterministically via a nonexistent cwd (app-server spawn cannot even
     /// start there).
+    /// AC11: a yolo spawn stamps the posture on the row; the resume lane's
+    /// helper reads it back.
+    #[test]
+    fn build_codex_thread_entry_stamps_the_launch_posture() {
+        let worktree = tempfile::tempdir().unwrap();
+        let json = r#"#!/usr/bin/env python3
+import json, sys
+for line in sys.stdin:
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        continue
+    if msg.get("method") == "initialize":
+        sys.stdout.write(json.dumps({"id": msg.get("id"), "result": {}}) + "\n")
+    elif msg.get("method") == "thread/start":
+        sys.stdout.write(json.dumps({"id": msg.get("id"), "result": {"thread": {"id": "thread-p", "path": "/tmp/p.jsonl"}}}) + "\n")
+    sys.stdout.flush()
+"#;
+        let _guard = CODEX_LANE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let bin_dir = tempfile::tempdir().unwrap();
+        let fake = bin_dir.path().join("codex");
+        std::fs::write(&fake, json).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let saved_path = std::env::var_os("PATH");
+        let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
+        prefixed.push(":");
+        if let Some(rest) = saved_path.as_ref() {
+            prefixed.push(rest);
+        }
+        std::env::set_var("PATH", &prefixed);
+        let start = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                    .await
+                    .expect("yolo thread starts")
+            });
+        if let Some(path) = saved_path {
+            std::env::set_var("PATH", path);
+        } else {
+            std::env::remove_var("PATH");
+        }
+        let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
+        assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
+        assert!(entry_posture_is_full_access(&yolo));
+        let bounded = build_codex_thread_entry("t", worktree.path(), &start, None, None, false);
+        assert_eq!(bounded.sandbox_posture.as_deref(), Some("workspace-write"));
+        assert!(!entry_posture_is_full_access(&bounded));
+    }
+
+    /// AC12: a PRE-v19 row (no posture key) still parses and reads the safe
+    /// default - never a parse failure, never an accidental escalation.
+    #[test]
+    fn pre_v19_row_without_posture_parses_with_the_safe_default() {
+        let raw = json!({
+            "name": "legacy-thread",
+            "short_id": "",
+            "legacy_provider": "",
+            "harness": "codex",
+            "harness_session_id": "0198old-0000-7000-8000-000000000001",
+            "cwd": "/tmp",
+            "project_root": "/tmp",
+            "host_mode": "interactive",
+            "status": "live",
+            "created_at": "2026-08-01T00:00:00Z",
+        });
+        let entry: RegistryEntry = serde_json::from_value(raw).expect("pre-v19 row parses");
+        assert_eq!(entry.sandbox_posture, None);
+        assert!(
+            !entry_posture_is_full_access(&entry),
+            "an unrecorded posture reads the safe default, never full access"
+        );
+    }
+
     /// AC16: a codex PANE row (mux ref set) must refuse from the ask lane
     /// naming the pane verb, never reach ensure_codex_thread_handle and die
     /// with the confusing "is not a Codex thread".
@@ -14348,6 +14453,7 @@ done
                 route_settings_path: None,
                 fno_id: None,
                 delivery_policy: None,
+                sandbox_posture: None,
             });
         })
         .unwrap();
@@ -14408,6 +14514,7 @@ done
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
         }
     }
 

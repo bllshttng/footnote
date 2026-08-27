@@ -120,7 +120,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // than erase those fields during a read-modify-write.
 //
 // Accepted set widens to 1..=18.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 18;
+// v19 (x-de10) adds `sandbox_posture` - the sandbox posture a codex thread was
+// launched with, applied by `thread/resume` across a daemon restart. Same
+// additive-optional shape as v11-v18: skip-when-None keeps old rows slim, and
+// the bump turns a pre-v19 reader's silent erasure into a loud refusal.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 19;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -623,6 +627,18 @@ pub struct RegistryEntry {
     /// daemon's read-modify-write would drop a Python-stamped policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_policy: Option<String>,
+    /// Sandbox posture the worker was LAUNCHED with (x-de10, v19):
+    /// `Some("danger-full-access")` for a `--yolo` codex thread,
+    /// `Some("workspace-write")` for the bounded default. Recorded at spawn by
+    /// the codex thread lane and applied by `thread/resume`, so a daemon
+    /// restart can no longer silently demote a danger-full-access worker to
+    /// workspace-write (or escalate, if a posture is ever added that the
+    /// resume lane defaults away from). `None` on rows that predate the field
+    /// or whose harness records no posture; the resume lane then applies the
+    /// safe default. Same X3 passthrough duty as `origin`: a field the struct
+    /// does not know is dropped on write-back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_posture: Option<String>,
     /// Registration origin (x-944f, v16), mirroring Python's `AgentEntry`:
     /// `Some("operator")` for a session a human started by hand (`fno agents
     /// register`, `/fno-me`), `Some("spawn")` for a footnote-created worker,
@@ -1776,6 +1792,7 @@ mod tests {
             route_settings_path: None,
             fno_id: None,
             delivery_policy: None,
+            sandbox_posture: None,
             origin: None,
             spawn_trigger: None,
             legacy_claude_short_id: None,

@@ -1392,6 +1392,32 @@ mod tests {
         assert_eq!(value["params"]["expectedTurnId"], "turn-1");
     }
 
+    /// AC11: the resume request carries the recorded posture, so a daemon
+    /// restart cannot silently demote a yolo worker to workspace-write.
+    #[test]
+    fn thread_resume_carries_the_recorded_sandbox_posture() {
+        let full: Value = serde_json::from_str(&thread_resume_request_with_options(
+            1,
+            "thread-p",
+            std::path::Path::new("/tmp/w"),
+            None,
+            true,
+            "never",
+        ))
+        .unwrap();
+        assert_eq!(full["params"]["sandbox"], "danger-full-access");
+        let bounded: Value = serde_json::from_str(&thread_resume_request_with_options(
+            1,
+            "thread-p",
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+        ))
+        .unwrap();
+        assert_eq!(bounded["params"]["sandbox"], "workspace-write");
+    }
+
     #[test]
     fn turn_start_carries_reasoning_effort_when_requested() {
         let value: Value = serde_json::from_str(&turn_start_request_json_with_effort(
