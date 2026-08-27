@@ -1191,7 +1191,7 @@ _DASHBOARD_JS = """\
     try {
       var saved = JSON.parse(localStorage.getItem(PROJECT_KEY) || '[]');
       if (Array.isArray(saved)) return new Set(saved);
-      if (saved && typeof saved === 'object') return new Set(Object.keys(saved).filter(function (p) { return saved[p] === false; }));
+      if (saved && typeof saved === 'object') return new Set(Object.keys(saved).filter(function (p) { return saved[p] === true; }));
     } catch (e) {}
     return new Set();
   }
@@ -1242,7 +1242,7 @@ _DASHBOARD_JS = """\
   function matches(n) {
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
-    if (state.size && state.size !== n.sz) return false; if (state.from && (n.u || n.c || '') < state.from) return false;
+    if (state.size && state.size !== n.sz) return false; if (state.from && (n.s === 'done' || n.s === 'superseded') && (n.u || n.c || '') < state.from) return false;
     if (state.planOnly && !(n.pl && n.s !== 'done' && n.s !== 'superseded')) return false; if (state.prOnly && !n.pr) return false;
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
     return true;
@@ -1252,6 +1252,7 @@ _DASHBOARD_JS = """\
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + '</span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (n.bb && n.bb.length) { h += '<div class=\"blk\"><div class=\"h\">Dependencies</div>' + n.bb.map(function (b) { return '<div class=\"item\">blocked by <b>' + esc(b.id) + '</b> ' + esc(b.s) + (b.t ? ' — ' + esc(b.t) : '') + '</div>'; }).join('') + '</div>'; }
+    if (n.su && n.su.length) { h += '<div class=\"blk\"><div class=\"h\">Unblocks</div>' + n.su.map(function (b) { return '<div class=\"item\"><b>' + esc(b.id) + '</b> ' + esc(b.s) + (b.t ? ' — ' + esc(b.t) : '') + '</div>'; }).join('') + '</div>'; }
     if (n.sb) h += '<div class=\"blk\"><div class=\"h\">Superseded by</div><div class=\"item\"><b>' + esc(n.sb.id) + '</b> ' + esc(n.sb.s) + (n.sb.t ? ' — ' + esc(n.sb.t) : '') + '</div></div>';
     if (n.d) h += '<p>' + esc(n.d) + '</p>'; else if (LOCAL) h += '<p>No description recorded.</p>';
     if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
@@ -1295,6 +1296,8 @@ def _dashboard_rows(
             "project": _project_key(entry),
             "c": str(entry.get("created_at") or "")[:10],
             "u": str(entry.get("touched_at") or "")[:10],
+            "pl": bool(entry.get("plan_path")),
+            "pr": bool(entry.get("pr_number")),
         }
         if local:
             row.update(
@@ -1310,6 +1313,17 @@ def _dashboard_rows(
                         )
                         else ""
                     ),
+                    "su": [
+                        {
+                            "id": str(successor.get("id") or "?"),
+                            "s": str(successor.get("status") or "unknown"),
+                            "t": str(successor.get("title") or "")[:90],
+                        }
+                        for successor in source
+                        if isinstance(successor.get("id"), str)
+                        and isinstance(entry.get("id"), str)
+                        and entry.get("id") in (successor.get("blocked_by") or [])
+                    ],
                     "sb": (
                         {
                             "id": str(entry.get("superseded_by")),

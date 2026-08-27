@@ -182,3 +182,52 @@ def test_obsidian_url_builds_and_normalizes_internal_paths():
 def test_project_color_is_deterministic():
     assert _project_color("gamma") == _project_color("gamma")
     assert _project_color(None) == "hsl(0, 0%, 70%)"
+
+
+def test_public_rows_keep_safe_plan_and_pr_flags_without_private_values():
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    document = render_public_backlog_html(
+        [
+            _entry(
+                "public-flags",
+                project="alpha",
+                plan_path="/Users/me/private-plan.md",
+                pr_number=1208,
+                pr_url="https://github.com/acme/project/pull/1208",
+            )
+        ],
+        "alpha",
+    )
+
+    assert '"pl":true' in document
+    assert '"pr":true' in document
+    assert "/Users/me/private-plan.md" not in document
+    assert "1208" not in document
+
+
+def test_dashboard_date_filter_only_applies_to_closed_statuses():
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "n.s === 'done' || n.s === 'superseded'" in _DASHBOARD_JS
+    assert "state.from" in _DASHBOARD_JS
+
+
+def test_local_rows_include_reverse_successor_context(tmp_path: Path):
+    entries = [
+        _entry("blocker", project="alpha", title="Blocker"),
+        _entry("dependent", project="alpha", title="Dependent", blocked_by=["blocker"]),
+    ]
+    out = tmp_path / "graph.html"
+    render_graph_html(entries, out)
+
+    text = out.read_text()
+    assert '"su":[{"id":"dependent"' in text
+    assert "Unblocks" in text
+
+
+def test_legacy_object_project_state_preserves_true_selected_projects():
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "saved[p] === true" in _DASHBOARD_JS
+    assert "saved[p] === false" not in _DASHBOARD_JS
