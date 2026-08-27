@@ -212,20 +212,34 @@ def _builtin_rows() -> list[dict[str, Any]]:
     `model_routing._DEFAULT_PROVIDERS` uses, and it is what keeps adding a
     model a config edit rather than a Python edit.
 
-    Bands are emitted weakest-first so a model listed in two bands keeps the
-    STRONGEST one: the later row wins the fold.
+    A model the table lists in two bands (`gpt-5.6-sol` is in both `max` and
+    `high`) keeps the STRONGEST one, picked by rank here rather than by the
+    order rows happen to be emitted in. One row per name, so the fold has no
+    same-name ordering to depend on.
     """
     from fno.adapters.providers import benchmarks as _bm
 
+    strongest: dict[str, str] = {}
+    for band, names in _bm.STATIC_TIERS.items():
+        if band not in _BAND_RANK:
+            continue
+        for name in names:
+            held = strongest.get(name)
+            if held is None or _BAND_RANK[band] > _BAND_RANK[held]:
+                strongest[name] = band
     rows: list[dict[str, Any]] = []
-    for band in ("low", "medium", "high", "max"):
-        for name in _bm.STATIC_TIERS.get(band, []):
-            reach = _bm.REACHABILITY.get(name)
-            if reach is None:
-                continue
-            rows.append(
-                {"name": name, "harness": reach[0], "model": reach[1], "band": band}
-            )
+    for name in sorted(strongest):
+        reach = _bm.REACHABILITY.get(name)
+        if reach is None:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "harness": reach[0],
+                "model": reach[1],
+                "band": strongest[name],
+            }
+        )
     return rows
 
 
