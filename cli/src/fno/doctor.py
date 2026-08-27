@@ -46,6 +46,7 @@ import os
 import re
 import signal
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -2564,17 +2565,33 @@ def _codex_hooks_report() -> dict[str, Any]:
     }
 
 
-def _codex_app_server_report() -> dict[str, Any]:
-    """Whether the codex app-server control socket exists.
+#: Bound on the connect probe below. A wedged daemon can accept the TCP-level
+#: handshake but never answer; without a timeout the advisory path blocks every
+#: plain `fno doctor` behind it. A module constant so a test can shrink it.
+_CODEX_APP_SERVER_PROBE_TIMEOUT_S = 1.0
 
-    The socket at ``$CODEX_HOME/app-server-control/app-server-control.sock``
-    exists only while a codex app-server daemon runs (``codex app-server daemon
-    start``). Absent it, live mail to a codex session demotes to durable, so a
-    plain ``fno doctor`` names the fix for hand-started sessions no spawn
-    preflight can reach."""
+
+def _codex_app_server_report() -> dict[str, Any]:
+    """Whether a codex app-server daemon answers its control socket.
+
+    The socket file at ``$CODEX_HOME/app-server-control/app-server-control.sock``
+    is not proof of a daemon: a unix socket file survives the process that
+    created it, so a dead daemon can leave the file on disk indefinitely. The
+    probe is a connect: a live daemon accepts it, and a refusal (or a missing
+    file) is the dead marker. Absent it, live mail to a codex session demotes
+    to durable, so a plain ``fno doctor`` names the fix for hand-started
+    sessions no spawn preflight can reach."""
     codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
     socket_path = codex_home / "app-server-control" / "app-server-control.sock"
-    return {"present": socket_path.exists(), "socket_path": str(socket_path)}
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(_CODEX_APP_SERVER_PROBE_TIMEOUT_S)
+    try:
+        present = sock.connect_ex(str(socket_path)) == 0
+    except OSError:
+        present = False
+    finally:
+        sock.close()
+    return {"present": present, "socket_path": str(socket_path)}
 
 
 def _codex_version() -> Optional[str]:
