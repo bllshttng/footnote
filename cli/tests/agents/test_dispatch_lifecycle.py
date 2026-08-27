@@ -2168,7 +2168,7 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
-    from fno.agents import dispatch
+    from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
     calls: list[str] = []
@@ -2178,6 +2178,14 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
         return 0
 
     monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
+    # No live mux server here (x-07c2): stub _run_mux instead of letting the
+    # mux-aware branch exec the real fno binary - this test is about the
+    # inline claude-attach fallback, not a live mux round-trip.
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(24, stderr="fno mux thread: no live mux server"),
+    )
 
     result = dispatch.attach_agent("worker-claude")
     assert result.provider == "claude"
@@ -2250,11 +2258,18 @@ def test_attach_claude_propagates_nonzero_exit(
     )
     _force_claude_on_path(monkeypatch, tmp_path)
 
-    from fno.agents import dispatch
+    from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod, "claude_attach", lambda short_id: 4
+    )
+    # No live mux server here (x-07c2): stub _run_mux instead of letting the
+    # mux-aware branch exec the real fno binary.
+    monkeypatch.setattr(
+        mux_spawn,
+        "_run_mux",
+        lambda *a, **k: _mux_reply(24, stderr="fno mux thread: no live mux server"),
     )
 
     result = dispatch.attach_agent("worker-claude")
