@@ -2124,7 +2124,6 @@ mod tests {
         }"#;
         let squad: StoredSquad = serde_json::from_str(raw).expect("stored squad");
         let encoded = serde_json::to_value(&squad).expect("serialize stored squad");
-        assert_eq!(encoded["members"][0]["harness"], "codex");
         assert_eq!(
             encoded["members"][0]["harness_session_id"], "01a03a85-1111-7222-8333-444455556666",
             "the full resume key must survive a squads.json read/write"

@@ -1771,7 +1771,7 @@ event_types:
           description: "Resolved model requested for the spawned worker."
         substrate:
           type: string
-          description: "Spawn substrate: pane, thread, legacy bg, or headless."
+          description: "Spawn substrate: pane, bg, or headless."
         # Parent-edge provenance (x-30f6): the spawning session's ambient env,
         # captured at launch so a worker can be traced BACK to the conversation
         # that decided to spawn it. All optional; absent for legacy spawns.
