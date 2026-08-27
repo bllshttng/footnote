@@ -1255,4 +1255,84 @@ def test_peek_follow_on_a_recovered_row_returns_instead_of_tailing(tmp_path, mon
     )
     assert rc == 0
     assert "my own message" in out.getvalue()
-    assert "recovered row, not a live session" in err.getvalue()
+    message = err.getvalue()
+    assert "no writer to tail" in message
+    # Says what was measured, never that the session is dead: `row_derived`
+    # only means the live-session resolver missed, and liveness is `truth`'s.
+    assert "not a live session" not in message
+
+
+def test_peek_lines_zero_does_not_claim_the_store_is_gone(tmp_path, monkeypatch):
+    """``--lines 0`` is a request for no records, not evidence of a pruned store.
+
+    ``recent_records`` returns ``[]`` for at least four reasons. Reading that
+    one absence as one cause made peek answer "the row outlived its store" for
+    a rollout sitting readable on disk: both halves of the sentence false, and
+    the exact shape this module was just fixed for.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id)
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        lines=0,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    assert "outlived its store" not in err.getvalue()
+    assert "pruned" not in err.getvalue()
+
+
+def test_peek_resolved_but_empty_transcript_blames_neither_store_nor_idle(
+    tmp_path, monkeypatch
+):
+    """A transcript that resolves and reads empty gets a third answer.
+
+    Not "the store is gone" (it resolved) and not "no activity yet" (this row
+    answered no liveness probe). Report the measurement and stop.
+    """
+    session_id = "01a04292-22f0-7501-9967-b96c053b01f2"
+    _adopted_codex_registry(tmp_path, monkeypatch, session_id, with_rollout=False)
+    # A rollout carrying session_meta only: resolves, yields zero records.
+    day = tmp_path / "sessions" / "2026" / "08" / "27"
+    day.mkdir(parents=True, exist_ok=True)
+    (day / f"rollout-2026-08-27T02-34-28-{session_id}.jsonl").write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": session_id, "cwd": "/tmp/proj"}})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "01a04292",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        codex_sessions_dir=tmp_path / "sessions",
+        mux_lookup=lambda h: None,
+    )
+    assert rc == 0
+    message = err.getvalue()
+    assert "transcript resolved" in message
+    assert "no records were read" in message
+    assert "outlived its store" not in message
+    assert "no activity yet" not in out.getvalue()
+
+
+def test_status_events_with_nothing_to_scope_on_returns_nothing():
+    """An unidentifiable session must not inherit the whole shared events file.
+
+    ``wants`` could not be empty before the ``worker:`` fix (it always held that
+    literal). Now it can, and the scope test short-circuits on an empty set, so
+    every line would render as this session's status.
+    """
+    from fno.agents.peek import _status_events
+
+    assert _status_events(Path("/nonexistent"), "", "") == []

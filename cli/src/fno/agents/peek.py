@@ -523,6 +523,14 @@ def _status_events(
     if short_id:
         tokens.append(f"worker:{short_id}")
     wants = {v for v in tokens if v}
+    if not wants:
+        # Nothing identifies this session, so nothing in a SHARED events file
+        # can be attributed to it. Before the fix above `wants` always held the
+        # literal "worker:" and so was never empty; now that it can be, the
+        # `if wants and ...` scope test below would short-circuit and render
+        # every line in the file as this session's status - wider than the bug
+        # this function was just fixed for.
+        return []
     lines: list[str] = []
     try:
         with events_path.open("r", encoding="utf-8") as fh:
@@ -760,6 +768,34 @@ class _RegistrySession:
         self.session_id = session_id
         self.short_id = short_id
         self.cwd = cwd
+
+
+def _transcript_resolves(
+    agent: str,
+    session_id: str,
+    cwd: str,
+    projects_root: Optional[Path],
+    codex_sessions_dir: Optional[Path],
+) -> bool:
+    """True when this session's transcript exists in its harness store.
+
+    Distinct from ``_follow_target``, which answers "is there a single file to
+    TAIL" and so returns None for opencode by design. Here opencode resolves
+    like any other harness, because the question is whether the store still
+    holds the session at all.
+    """
+    from fno.provenance.resolver import resolve_transcript
+
+    try:
+        return resolve_transcript(
+            agent,
+            session_id,
+            cwd,
+            projects_root=projects_root,
+            codex_sessions_dir=codex_sessions_dir,
+        ).resolved
+    except Exception:  # noqa: BLE001 - an unreadable store answers "cannot say"
+        return False
 
 
 def _row_as_session(row) -> Optional[_RegistrySession]:
@@ -1069,17 +1105,32 @@ def peek(
         err.write(f"observe not yet supported for {exc.agent}\n")
         return EXIT_UNSUPPORTED
 
-    if not records and row_derived:
-        # A dead row whose transcript did not resolve. "no activity yet" is the
-        # one answer this must never give: the row's session ENDED, so idle is
-        # false, and the module contract forbids a blank exit-0 a caller could
-        # read as idle. Name the row, the store searched, and the next move.
+    if not records and row_derived and lines > 0:
+        # An empty record list has at least four causes: the transcript did not
+        # resolve, --lines 0, a resolved-but-metadata-only claude stub, and
+        # opencode reading idle, locked and unknown-id all as empty. Only the
+        # FIRST justifies saying the store is gone, so ask the resolver rather
+        # than inferring a cause from the absence -- reading one absence as one
+        # cause is the defect this whole path exists to remove. (--lines 0 is
+        # excluded above: `cmd_peek` documents it as "0 for none", so an empty
+        # list there is the caller's own request, not a finding.)
+        if not _transcript_resolves(
+            agent, session_id, cwd, projects_root, codex_sessions_dir
+        ):
+            err.write(
+                f"registry row {handle} exists ({agent} session {session_id}), but no "
+                f"{agent} transcript resolved for it. The row outlived its store: the "
+                "session was pruned, or its store is not mounted here.\n"
+            )
+            return EXIT_NOT_FOUND
+        # The transcript IS there and read as empty. Still never "idle": this
+        # row did not answer a liveness probe, so say what was measured and
+        # leave the verdict to the caller.
         err.write(
-            f"registry row {handle} exists ({agent} session {session_id}), but no "
-            f"{agent} transcript resolved for it. The row outlived its store: the "
-            "session was pruned, or its store is not mounted here.\n"
+            f"registry row {handle} exists and its {agent} transcript resolved, "
+            "but no records were read from it.\n"
         )
-        return EXIT_NOT_FOUND
+        return EXIT_OK
 
     if not records and not follow:
         _emit_no_activity(out, json_out)
@@ -1095,9 +1146,14 @@ def peek(
         # false `is_live`, or Ctrl-C, and `cmd_peek` passes no `is_live`, so a
         # `--follow` on an adopted orphan would block forever waiting for
         # writes that cannot come. The tail above is the whole answer.
+        # Says only what was measured. `row_derived` means the live-session
+        # resolver did not match this handle, which is not proof the session is
+        # dead; liveness verdicts belong to `fno agents truth`. Refusing to
+        # tail is still right, because nothing here can observe the writer.
         err.write(
-            f"--follow: {handle} is a recovered row, not a live session; "
-            "showed the tail only\n"
+            f"--follow: {handle} resolved from its registry row, not from a live "
+            "session, so there is no writer to tail; showed the tail only. "
+            "For a liveness verdict: fno agents truth\n"
         )
         return EXIT_OK
 
