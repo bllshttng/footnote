@@ -413,9 +413,12 @@ agents_king_app = typer.Typer(
     help="The king session manifest and escalation controls.",
     no_args_is_help=True,
 )
-agents_king_app.command("init")(init_cmd)
-agents_king_app.command("done")(done_cmd)
-agents_king_app.command("escalate")(escalate_cmd)
+# `fno king` forwards here, so this app is the ONLY door to every king verb. A
+# hand-written subset silently strands the rest: `manifest-path` and `board`
+# were re-registered nowhere, and the stop hook's `fno king manifest-path`
+# resolver exited 2 on every stop, disarming the king gate it guards. Copy the
+# whole list so a verb added to `king_app` can never miss this door again.
+agents_king_app.registered_commands = list(king_app.registered_commands)
 
 
 def main() -> None:  # pragma: no cover - console-script shim
