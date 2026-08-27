@@ -284,6 +284,7 @@ def _extract_pairs(
 
 def _claude_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
     from fno.agents import read
+    from fno.mail.envelope import contains_fno_mail_tag
 
     pairs: list[tuple[str, str, Optional[float]]] = []
     for line in read._read_jsonl_tail(path, _TAIL_RECORDS_READ):
@@ -294,13 +295,14 @@ def _claude_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
         if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
             continue
         text = _text_from_content(msg.get("content"))
-        if text:
+        if text and not contains_fno_mail_tag(text):
             pairs.append((msg["role"], text, _parse_ts(rec.get("timestamp"))))
     return pairs
 
 
 def _codex_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
     from fno.agents import read
+    from fno.mail.envelope import contains_fno_mail_tag
 
     pairs: list[tuple[str, str, Optional[float]]] = []
     for line in read._read_jsonl_tail(path, _TAIL_RECORDS_READ):
@@ -313,7 +315,7 @@ def _codex_pairs(path: Path) -> list[tuple[str, str, Optional[float]]]:
         if payload.get("role") not in ("user", "assistant"):
             continue
         text = _text_from_content(payload.get("content"))
-        if text:
+        if text and not contains_fno_mail_tag(text):
             pairs.append((payload["role"], text, _parse_ts(rec.get("timestamp"))))
     return pairs
 
@@ -322,6 +324,7 @@ def _opencode_pairs(
     db_path: Path, session_id: str
 ) -> list[tuple[str, str, Optional[float]]]:
     from fno.agents import discover
+    from fno.mail.envelope import contains_fno_mail_tag
 
     rows = discover.opencode_query(
         db_path,
@@ -337,7 +340,7 @@ def _opencode_pairs(
         if role not in ("user", "assistant") or not isinstance(text, str):
             continue
         text = text.strip()
-        if not text:
+        if not text or contains_fno_mail_tag(text):
             continue
         ts = (ts_ms / 1000.0) if isinstance(ts_ms, (int, float)) else None
         pairs.append((role, text, ts))

@@ -405,3 +405,28 @@ def test_all_records_after_cutoff_omits_tail(tmp_path):
     brief, tag = resolve_dispatch_brief(node, briefs_dir=tmp_path, projects_root=tmp_path)
     assert tag == "synth-details"  # tail omitted, not injected
     assert "LATER_UNRELATED" not in brief
+
+
+def test_tail_omits_fno_mail_turns(tmp_path):
+    """fno_mail peer turns in transcripts must not be ingested into synthesized autobriefs."""
+    cwd = "/Users/bb16/code/footnote"
+    sid = "abcd1234-0000-0000-0000-00000000mail"
+    _write_claude_transcript(
+        tmp_path, cwd, sid,
+        [
+            _claude_msg("user", "REAL_OPERATOR_REQUEST", "2026-07-21T00:00:10Z"),
+            _claude_msg("user", '<fno_mail from="cc-peer123" harness="claude">PEER_MAIL_SECRET</fno_mail>', "2026-07-21T00:00:20Z"),
+            _claude_msg("assistant", "ASSISTANT_RESPONSE", "2026-07-21T00:00:30Z"),
+        ],
+    )
+    node = {
+        "id": "x-1", "title": "T", "details": "one-liner",
+        "source_harness": "claude", "source_session_id": sid, "source_cwd": cwd,
+        "created_at": "2026-07-21T00:01:00Z",
+    }
+    brief, tag = resolve_dispatch_brief(node, briefs_dir=tmp_path, projects_root=tmp_path)
+    assert tag == "synth-details+tail"
+    assert "REAL_OPERATOR_REQUEST" in brief
+    assert "ASSISTANT_RESPONSE" in brief
+    assert "PEER_MAIL_SECRET" not in brief
+
