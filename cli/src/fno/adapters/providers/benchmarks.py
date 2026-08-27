@@ -36,6 +36,11 @@ class BenchmarkError(RuntimeError):
     """A benchmark refresh/read failed loudly (never a silent/truncated file)."""
 
 
+# FALLBACK TABLE, never the authority. `config.routing.models` overrides any row
+# here per field and extends the set with models it never named, so adding a
+# model is a config edit and not an edit to this file. Kept because a tier
+# request must still resolve on an install that declares nothing.
+#
 # Reachability: benchmark model name -> (provider harness, --model value). A row
 # absent here is invisible to routing (unmapped -> unreachable); name-massaging
 # lives ONLY here, never downstream. GLM routes on the claude harness via the

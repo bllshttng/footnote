@@ -439,3 +439,65 @@ def test_precedence_chain_labels_sources():
     assert model == "glm-5.3-flash" and source == "task-difficulty(low)"
     model, source, _ = rr.resolve_dispatch_model(inventory=inv)
     assert model is None and source == "provider-default"
+
+
+# --- the built-in fallback (config overrides AND extends it) ---------------- #
+
+
+class _FakeRouting:
+    def __init__(self, models, objective="cheapest-that-clears", prefer=""):
+        self.models = models
+        self.objective = objective
+        self.prefer_harness = prefer
+
+
+class _FakeSettings:
+    def __init__(self, models, **kw):
+        self.routing = _FakeRouting(models, **kw)
+
+
+def _resolved(models):
+    """resolve_inventory against a config declaring exactly ``models``."""
+    return rr.resolve_inventory(settings=_FakeSettings(models), snapshot={})
+
+
+def test_the_builtin_table_answers_when_config_declares_nothing():
+    """The fallback keeps a tier request answerable. Without it, review level
+    names no model and /code-review drops to the provider default on every
+    install that has declared no inventory."""
+    inv = _resolved([])
+    assert inv.rows, "the built-in fallback must seed the inventory"
+    assert inv.declared is False, "seeded rows are not a config declaration"
+    model, _chain = rr.resolve_tier("high", settings=_FakeSettings([]), snapshot={})
+    assert model is not None
+
+
+def test_config_overrides_a_builtin_row_per_field():
+    """A config row REPLACES the built-in of the same name field by field, and
+    the fields it does not name keep the built-in value."""
+    inv = _resolved([{"name": "glm-4.7", "model": "glm-4.7-pinned"}])
+    row = inv.rows["glm-4.7"]
+    assert row.model == "glm-4.7-pinned"
+    assert row.harness == "claude", "an unnamed field keeps the built-in value"
+    assert row.band == "low", "an unnamed field keeps the built-in value"
+    assert inv.declared is True
+
+
+def test_config_extends_the_builtin_table_with_a_new_name():
+    """A name the built-in never carried is ADDED, never swapped in beside a
+    table that then wins: adding a model stays a config edit."""
+    inv = _resolved([
+        {"name": "local-llama", "harness": "claude", "model": "llama-x", "band": "high"},
+    ])
+    assert "local-llama" in inv.rows, "config must extend the table"
+    assert "glm-4.7" in inv.rows, "extending must not drop the built-in rows"
+
+
+def test_the_grid_still_injects_nothing_when_config_declares_nothing():
+    """The fallback seeds rows, so the grid reads `declared` rather than
+    `rows`. A virgin install stays inert and says why."""
+    candidate, chain = rr.resolve_grid(
+        "high", "p1", {"claude": "ok"}, inventory=_resolved([])
+    )
+    assert candidate is None
+    assert chain[-1] == "grid=no-inventory-declared"

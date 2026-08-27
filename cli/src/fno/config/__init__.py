@@ -1807,14 +1807,23 @@ class RoutingModelBlock(BaseModel):
 class RoutingBlock(BaseModel):
     """Config-first model routing inventory (nested under 'config.routing').
 
-    The declared inventory is the PRIMARY routing surface: nothing built-in is
-    authoritative, so a stranger's install declares its own models (local,
-    ollama, gemini-only) and never inherits this machine's fleet. A virgin
-    install declares nothing; the grid records ``no-inventory-declared`` and
-    injects nothing. ``fno/routing_sample.toml`` ships as a labelled sample
-    (inside the package, so a wheel finds it) that no code path reads. The
-    objective is itself a config key because users differ (cheapest vs
-    strongest vs stay-in-a-harness).
+    Config is the PRIMARY routing surface. A small built-in table is a
+    FALLBACK under it, never the authority: config OVERRIDES it per model and
+    per field and EXTENDS it with models it never named, so adding a model is
+    a config edit and never a Python edit. A stranger's install can therefore
+    declare its own models (local, ollama, gemini-only) and every one of them
+    outranks the built-in row of the same name.
+
+    The fallback keeps a tier request answerable on an install that declares
+    nothing: review level resolves a model for every level. The GRID stays
+    config-first regardless - a virgin install records
+    ``no-inventory-declared`` and injects nothing, because the grid reads
+    whether config DECLARED a row, not whether any row exists.
+
+    ``fno/routing_sample.toml`` ships as a labelled sample (inside the
+    package, so a wheel finds it) that no code path reads. The objective is
+    itself a config key because users differ (cheapest vs strongest vs
+    stay-in-a-harness).
     """
 
     model_config = ConfigDict(extra="ignore")

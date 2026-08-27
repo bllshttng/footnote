@@ -152,7 +152,11 @@ The two layers compose by design. The stage table picks the coordinate per verb;
 
 ## The declared inventory and the dispatch grid
 
-`config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`. Nothing built-in is authoritative. Adding a model, provider or harness is a config edit. A stranger's install declares its own fleet. A virgin install records `grid=no-inventory-declared` and injects nothing.
+`config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`.
+
+A small built-in table sits under this key as a **fallback**, never the authority. Config overrides it and extends it. A row naming an existing model replaces only the fields it names. A new name is added to the set. Adding a model, provider or harness stays a config edit. It is never a Python edit. A stranger's install declares a fleet that outranks every built-in row.
+
+The fallback keeps a tier request answerable where nothing is declared. Review level names a model for every level. Answering nothing drops `/code-review` to the provider default everywhere. The grid is unaffected and stays config-first. A virgin install records `grid=no-inventory-declared` and injects nothing. The grid asks whether config declared a row, not whether any row exists.
 
 `cli/src/fno/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config routing init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
 

@@ -99,11 +99,18 @@ class InventoryRow:
 
 @dataclasses.dataclass(frozen=True)
 class Inventory:
-    """The declared inventory plus its objective (both config-owned)."""
+    """The resolved inventory plus its objective (the objective is config-owned).
+
+    ``rows`` is the built-in fallback table overridden and extended by config.
+    ``declared`` says whether CONFIG named any row, which ``rows`` alone can no
+    longer answer now that the fallback seeds it. The grid reads ``declared``:
+    a virgin install still injects nothing.
+    """
 
     rows: dict[str, InventoryRow] = dataclasses.field(default_factory=dict)
     objective: str = _OBJECTIVES[0]
     prefer_harness: str = ""
+    declared: bool = False
 
 
 def _field(source: Mapping[str, Any] | object, name: str, default: Any = "") -> Any:
@@ -132,6 +139,7 @@ def inventory_from_rows(
     objective: str = _OBJECTIVES[0],
     prefer_harness: str = "",
     snapshot: Optional[dict] = None,
+    declared: bool = True,
 ) -> Inventory:
     """Fold declared rows into an :class:`Inventory`.
 
@@ -189,7 +197,36 @@ def inventory_from_rows(
             context=merged.get("context"),
         )
     obj = objective if objective in _OBJECTIVES else _OBJECTIVES[0]
-    return Inventory(rows=out, objective=obj, prefer_harness=prefer_harness or "")
+    return Inventory(
+        rows=out, objective=obj, prefer_harness=prefer_harness or "", declared=declared
+    )
+
+
+
+def _builtin_rows() -> list[dict[str, Any]]:
+    """The built-in table as inventory rows: a FALLBACK, never the authority.
+
+    Config overrides and extends these. `inventory_from_rows` folds per name
+    and per field, so a config row naming an existing model replaces only the
+    fields it names, and a new name is simply added. That is the same merge
+    `model_routing._DEFAULT_PROVIDERS` uses, and it is what keeps adding a
+    model a config edit rather than a Python edit.
+
+    Bands are emitted weakest-first so a model listed in two bands keeps the
+    STRONGEST one: the later row wins the fold.
+    """
+    from fno.adapters.providers import benchmarks as _bm
+
+    rows: list[dict[str, Any]] = []
+    for band in ("low", "medium", "high", "max"):
+        for name in _bm.STATIC_TIERS.get(band, []):
+            reach = _bm.REACHABILITY.get(name)
+            if reach is None:
+                continue
+            rows.append(
+                {"name": name, "harness": reach[0], "model": reach[1], "band": band}
+            )
+    return rows
 
 
 def resolve_inventory(
@@ -210,11 +247,13 @@ def resolve_inventory(
         routing = getattr(settings, "routing", None)
         if snapshot is None:
             snapshot = bm.load_snapshot()
+        cfg_rows = list(getattr(routing, "models", []) or [])
         return inventory_from_rows(
-            list(getattr(routing, "models", []) or []),
+            _builtin_rows() + cfg_rows,
             objective=str(getattr(routing, "objective", "") or ""),
             prefer_harness=str(getattr(routing, "prefer_harness", "") or ""),
             snapshot=snapshot,
+            declared=bool(cfg_rows),
         )
     except Exception:  # noqa: BLE001 - a routing read never breaks a spawn
         return Inventory()
@@ -347,7 +386,10 @@ def resolve_grid(
     if prio not in {"p0", "p1", "p2", "p3"}:
         chain.append("grid=invalid-input")
         return None, chain
-    if not inv.rows:
+    # Reads `declared`, not `rows`: the built-in fallback seeds rows, and the
+    # grid stays config-first on purpose. A virgin install injects nothing and
+    # says so, exactly as before the fallback existed.
+    if not inv.declared or not inv.rows:
         chain.append("grid=no-inventory-declared")
         return None, chain
 
@@ -568,20 +610,14 @@ def resolve_tier(
             return None, chain
         inv = inventory
     else:
+        # The built-in fallback seeds this, so a tier request still names a
+        # model on an install that declares nothing - review level resolves one
+        # for every level, and answering None would drop `/code-review` to the
+        # provider default everywhere. Config overrides and extends the seed.
         inv = resolve_inventory(settings=settings, snapshot=snapshot)
         if not inv.rows:
-            # Nothing declared in config. The GRID stays config-first and
-            # injects nothing (resolve_grid records no-inventory-declared), but
-            # a tier request must still name a model: review level resolves one
-            # for every level, and answering None would drop `/code-review` to
-            # the provider default on every install that declares no inventory,
-            # which is every fresh one. So fall back to the curated static
-            # table. A declared inventory still wins whenever one exists - the
-            # rule the inventory enforces is that an install never INHERITS
-            # another machine's fleet, and declaring one overrides this.
-            model, static_chain = _resolve_tier_static(band, provider)
-            chain.extend(static_chain)
-            return model, chain
+            chain.append("no declared inventory -> provider default")
+            return None, chain
 
     rows = _scoped_rows(inv, provider)
     floor_rank = _BAND_RANK[band]
@@ -600,28 +636,6 @@ def resolve_tier(
     return None, chain
 
 
-
-def _resolve_tier_static(band: str, provider: Optional[str]) -> tuple[Optional[str], list[str]]:
-    """Resolve a band from the curated static table, scoped to one harness.
-
-    The pre-inventory resolver, kept for the no-inventory-declared case only.
-    Walks ``_STATIC_FALLTHROUGH`` so a band the harness cannot serve degrades
-    within that harness instead of returning nothing, and never crosses to a
-    foreign harness. The chain names ``static`` so a reader can tell which
-    source answered, and so ``review_level._degraded_max`` can still see that a
-    max request was served by a lower band.
-    """
-    from fno.adapters.providers import benchmarks as _bm
-
-    for cand_band in _STATIC_FALLTHROUGH.get(band, [band]):
-        for name in _bm.STATIC_TIERS.get(cand_band, []):
-            row = _bm.REACHABILITY.get(name)
-            if row is None:
-                continue
-            if provider is not None and row[0] != provider:
-                continue
-            return row[1], [f"static {cand_band} -> {name}"]
-    return None, ["static table has no reachable model -> provider default"]
 
 
 def resolve_dispatch_model(
