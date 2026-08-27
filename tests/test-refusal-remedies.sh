@@ -15,9 +15,11 @@
 #   3. client_verbs.rs resume cwd messages (source-level: the paths eprintln
 #      inside the command flow with env side effects)
 #
-# Every assert is a POSITIVE marker: a string that must be present, never
-# only an absence (a missing marker has three explanations; a present one
-# has one).
+# Every REMEDY claim is pinned by a positive marker: a string that must be
+# present. The two absence checks (--force, branch -D) are backstops paired
+# with a positive sibling on the same message; they guard against
+# reintroduction, never stand alone as the evidence a remedy landed (an
+# absence has three explanations; a present marker has one).
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -79,17 +81,38 @@ else
 fi
 
 # --- 2. preflight.sh -------------------------------------------------------
-# The check is named before the rm -rf, and the loss is stated first.
-require "$PRE" "pgrep -f preflight" "preflight: refusal names the liveness check"
+# The check is named before the rm -rf, and the loss is stated first. The
+# needle pins the -fl + read-what-matched form: bare `pgrep -f` substring
+# false-positives on an editor holding the path, which strands a stale lock.
+require "$PRE" "pgrep -fl preflight.sh" "preflight: refusal names the liveness check"
+require "$PRE" "read what matched" "preflight: check says to read the match, not trust it"
 require_before "$PRE" "LOSES the mutual" "rm -rf '\$LOCKDIR'" \
     "preflight: loss precedes rm -rf"
 # The command remains discoverable (last resort stays a real rung).
 require "$PRE" "rm -rf '\$LOCKDIR'" "preflight: rm -rf remains the last rung"
 
-# --- 3. client_verbs.rs resume cwd messages --------------------------------
-require "$CV" "the row is the resume handle" "resume: messages name the handle cost"
-require "$CV" "fno agents adopt" "resume: messages name adopt as recovery"
-require "$CV" "gone for good" "resume: rm framed as the gone-for-good case"
+# --- 3. resume cwd messages, BOTH runtimes ----------------------------------
+# Each property is pinned by a marker that sits on ONE physical source line
+# (a phrase split across a Rust string continuation is not pinned by grep),
+# and the Python fallback is pinned separately so it cannot drift while the
+# Rust path holds the marker.
+RC="$REPO_ROOT/cli/src/fno/agents/resume_cli.py"
+for pair in "rust:$CV" "python:$RC"; do
+    rt=${pair%%:*}
+    f=${pair#*:}
+    require "$f" "the row is the resume handle" "resume($rt): messages name the handle cost"
+    require "$f" "fno agents adopt" "resume($rt): rm-then-adopt rebind pair named"
+    require "$f" "gone for good" "resume($rt): rm framed as the gone-for-good case"
+    require "$f" "recoverable first" "resume($rt): path-recovery check precedes the remedy"
+done
+
+# --- 4. dispatch.py rm fallback refusals -------------------------------------
+DIS="$REPO_ROOT/cli/src/fno/agents/dispatch.py"
+require "$DIS" "resume handle" "rm-fallback: names the handle cost"
+require "$DIS" "Recover the id from the harness" "rm-fallback: names the recovery remedy"
+# The needle matches the single literal line that closes both refusals.
+require "$DIS" "fno agents rm --help\`, not here." \
+    "rm-fallback: override lives in --help, never in the refusal"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "$FAILURES check(s) failed"

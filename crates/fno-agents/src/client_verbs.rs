@@ -2422,13 +2422,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     if cwd.is_empty() {
         eprintln!(
-            "fno agents resume: agent {} has no recorded cwd. The row is inert without one, \
-             but it still carries the session id (the resume handle). If the full \
-             `harness_session_id` was retained, `fno agents adopt` rebinds it; `fno agents \
-             rm {}` only deletes that handle, so run it when the row is dead weight, not to \
-             clear this refusal.",
-            py_repr_str(&name),
-            name
+            "fno agents resume: agent {} has no recorded cwd. \
+             the row is the resume handle and still carries the session id: the harness \
+             itself can reach the session directly (e.g. claude --resume <id>). To re-drive \
+             it under fno, rm this row and `fno agents adopt <id>` rebinds a fresh one \
+             with a live cwd - that pair spends the recorded route bindings. rm alone just \
+             deletes the handle.",
+            py_repr_str(&name)
         );
         return 13;
     }
@@ -2519,13 +2519,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     if !Path::new(cwd).is_dir() {
         eprintln!(
             "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
-             is recoverable first (renamed worktree base, unmounted volume): the row is the \
-             resume handle, and `fno agents rm {}` deletes it along with the session binding. \
-             If the full `harness_session_id` was retained, `fno agents adopt` rebinds it to a \
-             live cwd. rm is for a path that is gone for good.",
+             is recoverable first (renamed worktree base, unmounted volume): \
+             the row is the resume handle. To re-drive the session under fno from a live cwd, \
+             rm this row and `fno agents adopt <id>` rebinds a fresh one; rm alone deletes the \
+             handle and the session binding with it. rm is for a path that is gone for good.",
             py_repr_str(cwd),
-            py_repr_str(&name),
-            name
+            py_repr_str(&name)
         );
         return 13;
     }
@@ -2671,13 +2670,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // misleading "agent_resumed" event followed by a failed exec.
     if let Err(exc) = std::env::set_current_dir(cwd) {
         eprintln!(
-            "fno agents resume: cwd {} for agent {} is no longer reachable: {exc}. Check \
-             whether the path is recoverable first (renamed worktree base, unmounted volume): \
-             the row is the resume handle, and `fno agents rm {}` deletes it along with the \
-             session binding. rm is for a path that is gone for good.",
+            "fno agents resume: cwd {} for agent {} is no longer reachable: {exc}. \
+             the row is the resume handle; rm deletes it and the session binding with it. \
+             rm is for a path that is gone for good - recover the path (or rm, then \
+             `fno agents adopt <id>` to rebind from a live cwd) instead of clearing this \
+             refusal.",
             py_repr_str(cwd),
-            py_repr_str(&name),
-            name
+            py_repr_str(&name)
         );
         return 13;
     }

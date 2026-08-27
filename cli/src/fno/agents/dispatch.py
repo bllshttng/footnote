@@ -3810,8 +3810,12 @@ def _teardown_harness_session(
         # addresses it. Silently dropping the row would orphan it for good.
         return _fail(
             f"registry entry has no {harness} session id on file; cannot "
-            "tear down the harness record. Re-run with --force to drop the "
-            "registry row anyway.",
+            "tear down the harness record. Recover the id from the harness "
+            "first if it can still name the session (rm tears the record "
+            "down itself once it can address it); dropping the row without "
+            "one orphans that record - it stays behind in the harness, "
+            "findable only by hand. The override is documented in "
+            "`fno agents rm --help`, not here.",
             exit_code=12,
         )
 
@@ -3935,8 +3939,12 @@ def rm_agent(
                         # the registry-only removal at the bottom.
                         raise DispatchAskError(
                             f"registry entry {name!r} has no short id on file; "
-                            f"cannot rm via claude shellout. Re-run with --force "
-                            "to drop the orphan registry entry.",
+                            "cannot rm via claude shellout. The row is the "
+                            "resume handle; dropping it without a teardown "
+                            "orphans the harness session record behind it. "
+                            "Bind a short id (re-spawn or adopt the session) "
+                            "and rm again; the override is documented in "
+                            "`fno agents rm --help`, not here.",
                             exit_code=12,
                         )
                     # --force on a corrupted row: skip the claude shellout,

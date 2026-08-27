@@ -749,7 +749,9 @@ acquire_lock() {
         # executes remedy text literally.
         echo "preflight: lock held by an unidentified holder (no readable $LOCKDIR/holder)." >&2
         echo "preflight: check whether one is running first: a wait queue in" >&2
-        echo "  ${LOCKDIR}.queue.d or a live 'pgrep -f preflight' hit means one is." >&2
+        echo "  ${LOCKDIR}.queue.d means one is; for a process check, 'pgrep -fl preflight.sh'" >&2
+        echo "  and read what matched - a bash run of the script counts, an editor or grep" >&2
+        echo "  holding the path does not ('-f' substring-matches any argv naming it)." >&2
         echo "preflight: only if none is running: removing '$LOCKDIR' LOSES the mutual" >&2
         echo "  exclusion any running preflight still depends on (the dir holds only lock" >&2
         echo "  state): rm -rf '$LOCKDIR'" >&2
