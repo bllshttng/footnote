@@ -115,6 +115,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         route_settings_path: None,
         fno_id: None,
         delivery_policy: None,
+        sandbox_posture: None,
         spawn_trigger: None,
         spawned_by_session: parent_session,
         spawned_by_harness: parent_harness,
