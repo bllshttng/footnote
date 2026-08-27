@@ -9040,16 +9040,8 @@ mod tests {
         // Specimen guard (x-d19e): this branch is the landed bar - safe verb,
         // self-proceeding command, and the hand-teardown cost named. A rewrite
         // that drops any of the three must fail here, not in a king's reign.
-        assert!(
-            message.contains("rm proceeds on its own"),
-            "{}",
-            message
-        );
-        assert!(
-            message.contains("spends the resume handle"),
-            "{}",
-            message
-        );
+        assert!(message.contains("rm proceeds on its own"), "{}", message);
+        assert!(message.contains("spends the resume handle"), "{}", message);
         // This refusal used to offer `claude stop <row>` then `claude rm <row>`
         // as a by-hand alternative, and this test required it. Ruling
         // d-1900e419 retired that pair: the harness row IS the resume handle,
@@ -9094,9 +9086,7 @@ mod tests {
         let response = handle_rm_with(
             &ctx,
             &request,
-            &|| {
-                crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new())
-            },
+            &|| crate::claude_roster::ClaudeAgentsSnapshot::known(Vec::new()),
             &|_| panic!("an unresolvable row must not reach claude rm"),
             &|_, _| panic!("an unresolvable row must not reach mux kill"),
             &|_, _| PaneProbe::Unknown,
@@ -9104,17 +9094,17 @@ mod tests {
         .await;
 
         let message = &response.error().expect("still live must refuse").message;
-        assert!(message.contains("no resolvable harness row id"), "{}", message);
+        assert!(
+            message.contains("no resolvable harness row id"),
+            "{}",
+            message
+        );
         assert!(
             message.contains("fno agents stop idless-live"),
             "{}",
             message
         );
-        assert!(
-            message.contains("rm proceeds on its own"),
-            "{}",
-            message
-        );
+        assert!(message.contains("rm proceeds on its own"), "{}", message);
         assert!(message.contains("resume handle"), "{}", message);
         assert!(!message.contains("--force"), "{}", message);
         assert_eq!(
@@ -9285,11 +9275,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(
-            error.message.contains("resume handle"),
-            "{}",
-            error.message
-        );
+        assert!(error.message.contains("resume handle"), "{}", error.message);
         assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
@@ -9335,11 +9321,7 @@ mod tests {
             "{}",
             error.message
         );
-        assert!(
-            error.message.contains("resume handle"),
-            "{}",
-            error.message
-        );
+        assert!(error.message.contains("resume handle"), "{}", error.message);
         assert!(!error.message.contains("--force"), "{}", error.message);
         assert_eq!(
             state::load_registry(&home.registry_json())
