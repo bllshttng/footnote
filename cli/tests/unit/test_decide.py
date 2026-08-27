@@ -941,7 +941,7 @@ def test_review_list_reports_multiple_live_rulings_without_picking_a_winner(
         "subjectless": 1,
         "invalid_authority": 1,
         # The count says how many; only this says which.
-        "invalid_authority_values": {"banana": 1},
+        "invalid_authority_values": [{"value": "banana", "count": 1}],
     }
 
 
@@ -3404,7 +3404,9 @@ def test_invalid_authority_detail_caps_the_spellings_it_prints():
 
     assert _invalid_authority_detail({}) == ""
 
-    many = {f"crown-l2-x-{i:04d}": 40 - i for i in range(40)}
+    many = [
+        {"value": f"crown-l2-x-{i:04d}", "count": 40 - i} for i in range(40)
+    ]
     rendered = _invalid_authority_detail({"invalid_authority_values": many})
 
     assert rendered.count(" x") == _INVALID_AUTHORITY_SHOWN
@@ -3464,11 +3466,38 @@ def test_review_list_names_out_of_enum_authority_values(monkeypatch):
     quality = decide_mod.review_list()["data_quality"]
 
     assert quality["invalid_authority"] == 3
-    # Ordered by count desc, then name, so the worst offender reads first.
-    assert list(quality["invalid_authority_values"].items()) == [
-        ("crown-l1", 2),
-        ("banana", 1),
+    # A LIST, ordered by count desc then name, so the worst offender reads
+    # first and no serializer can re-sort the ranking away.
+    assert quality["invalid_authority_values"] == [
+        {"value": "crown-l1", "count": 2},
+        {"value": "banana", "count": 1},
     ]
-    assert sum(quality["invalid_authority_values"].values()) == (
+    assert sum(row["count"] for row in quality["invalid_authority_values"]) == (
         quality["invalid_authority"]
     )
+
+
+def test_review_list_breakdown_survives_a_key_sorting_serializer():
+    """`--output report.json` writes through json.dumps(sort_keys=True).
+
+    A dict would carry the ranking in insertion order and lose it there, filing
+    a one-row `banana` above a forty-row `crown-l1`.
+    """
+    import json as _json
+
+    report = {
+        "data_quality": {
+            "invalid_authority": 41,
+            "invalid_authority_values": [
+                {"value": "crown-l1", "count": 40},
+                {"value": "banana", "count": 1},
+            ],
+        }
+    }
+
+    round_tripped = _json.loads(_json.dumps(report, sort_keys=True))
+
+    assert round_tripped["data_quality"]["invalid_authority_values"] == [
+        {"value": "crown-l1", "count": 40},
+        {"value": "banana", "count": 1},
+    ]

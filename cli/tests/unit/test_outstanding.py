@@ -1908,14 +1908,46 @@ def test_operator_authority_refusal_names_the_chat_door(
     assert "Nothing was closed" in refused.output
     # And the door is now named.
     assert "/fno:law" in refused.output
-    # The advised retry must not be the identical command. _resolve_decider
-    # keys on ambient identity plus this one flag, so a literal re-run takes
-    # exit 3 forever.
-    assert "WITHOUT --authority operator" in refused.output
+    # The advised retry must actually work. `record_decision` calls
+    # `require_operator_session()` before it reads authority at all, so EVERY
+    # --answer from an agent refuses and no --authority value changes that.
+    # Advising a different flag would loop forever; the message must say so
+    # and point at the close that records nothing.
+    assert "cannot record ANY answer here" in refused.output
+    assert "NO --answer" in refused.output
+    assert "WITHOUT --authority" not in refused.output
     # Canonical spelling only: `fno law` is a retired root (d-add90c60).
     assert "fno inbox law set" in refused.output
     assert "`fno law set" not in refused.output
 
     # The question really is still open: a refused answer must never retire it.
+    after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
+    assert [q["id"] for q in after["questions"]] == [qid]
+
+
+def test_bad_origin_is_not_told_to_go_write_law(root: Path):
+    """A typo'd --origin gets its own remedy, not the authority two-step.
+
+    The law text would tell this caller to drop `--authority operator`, which
+    they never passed, and would never name the value that actually failed.
+    """
+    qid = (
+        runner.invoke(outstanding_app, ["ask", "which lane?"])
+        .stdout.strip()
+        .splitlines()[-1]
+    )
+
+    refused = runner.invoke(
+        outstanding_app,
+        ["clear", qid, "--answer", "the codex lane", "--origin", "bogus"],
+    )
+
+    assert refused.exit_code == 3, refused.output
+    # Names the value that failed, and the vocabulary it had to come from.
+    assert "bogus" in refused.output
+    # Never the authority remedy: wrong door for this error.
+    assert "/fno:law" not in refused.output
+    assert "Nothing was closed" in refused.output
+
     after = json.loads(runner.invoke(outstanding_app, ["--json"]).stdout)
     assert [q["id"] for q in after["questions"]] == [qid]

@@ -134,8 +134,14 @@ fi
 # narrowed shape 4 to `<...>` only, on the theory that interpolation means
 # description; the daemon.rs specimen refutes it, since the brace there sits
 # after a word, not against the root.
+#
+# SUBVERB pairs with the ARGUMENT shapes (1 and 2) only, never with shape 3.
+# Shape 3 is "command dangling at end of line", and one optional word there
+# turns any trailing prose into a hit: `"... came from fno test earlier"` would
+# match where only `"... fno test"` did before. That is a flood, and unlike the
+# daemon.rs specimen it is unbounded prose rather than one declarable site.
 SUBVERB='([[:space:]]+[a-z][a-z-]*)?'
-ARG="${SUBVERB}"'([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8}|[[:space:]]*"[[:space:]]*$)'
+ARG="(${SUBVERB}"'([[:space:]]+[<{$]|[[:space:]]+[0-9a-f]{8})|[[:space:]]*"[[:space:]]*$)'
 PATTERN=""
 for cmd in "${CMDS[@]}"; do
     PATTERN="${PATTERN}${PATTERN:+|}${cmd}${ARG}"
@@ -156,11 +162,17 @@ for shape in "set <subject> <decision>" "set {subject}" "set 7c5dcf5d"; do
         fail "pattern misses sub-verb shape '${shape}'; a leaf under a retired root would pass"
 done
 
-# The negative control. A retired command NAMED rather than instructed must
-# stay clear, or the widening above has traded a blind spot for a flood.
+# Negative controls, one per way the sub-verb widening could flood. The first
+# is a mid-sentence mention. The second is the shape SUBVERB deliberately does
+# NOT reach: a wrapped string whose trailing prose ends the line, which would
+# turn every sentence mentioning a retired command into a hit.
 NEGATIVE_CANARY="${CMDS[0]} is now ${INSTEAD[0]}"
 printf '%s\n' "$NEGATIVE_CANARY" | grep -qE "$PATTERN" &&
     fail "pattern matches a descriptive mention; it would flood the report"
+
+TRAILING_PROSE_CANARY="\"the value came from ${CMDS[0]} earlier\""
+printf '%s\n' "$TRAILING_PROSE_CANARY" | grep -qE "$PATTERN" &&
+    fail "sub-verb reached the end-of-line shape; trailing prose would flood the report"
 
 # --- 3. Scan the caller-facing surfaces ------------------------------------
 # A surface is a directory plus an extension, never a `**` pathspec (see the

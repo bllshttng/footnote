@@ -328,9 +328,19 @@ def clear(
                         origin=origin,
                         events_root=root,
                     )["decision_id"]
+                except UnknownOriginError as exc:
+                    # A bad --origin is a typo, not an authority problem. It
+                    # gets its own clause because the law two-step below would
+                    # tell the caller to drop a flag they never passed and
+                    # never name the value that actually failed.
+                    typer.echo(
+                        f"outstanding: refused: {exc}. Nothing was closed; "
+                        f"all {len(targets)} question(s) stay open.",
+                        err=True,
+                    )
+                    raise typer.Exit(3)
                 except (
                     RefusedAuthorityError,
-                    UnknownOriginError,
                     UnattributedAuthorityError,
                 ) as exc:
                     # Refuse the CLOSE too, never just the decision. Closing a
@@ -349,18 +359,26 @@ def clear(
                     # operator's real instruction stalled until they opened a
                     # second terminal (specimen d-796ed205). The two-step path
                     # below needs no terminal and already ships.
+                    #
+                    # --answer is what is refused, NOT the --authority value.
+                    # `record_decision` calls `require_operator_session()`
+                    # before it reads authority at all, so every --answer from
+                    # an agent session refuses identically. Advising a re-run
+                    # with a different --authority would loop forever.
                     typer.echo(
                         f"outstanding: refused: {exc}. Nothing was closed; "
                         f"all {len(targets)} question(s) stay open.\n"
-                        "The operator does not need a second terminal. Compose "
-                        "the ruling in chat with `/fno:law <the ruling>`; their "
-                        "approval records it in the law lane. Then re-run this "
-                        "close WITHOUT --authority operator, citing that "
-                        "`d-...` id in --answer: the law is already recorded, "
-                        "so this close only needs to retire the question. "
-                        "Re-running with --authority operator still refuses. "
-                        "At a terminal, `fno inbox law set <subject> "
-                        "<decision>` is the same destination in one call.",
+                        "An agent session cannot record ANY answer here, "
+                        "whatever --authority says, so changing that flag will "
+                        "not help. The operator still does not need a second "
+                        "terminal: compose the ruling in chat with `/fno:law "
+                        "<the ruling>` and their approval records it in the "
+                        "law lane. Once it is recorded, retire this question "
+                        "with `fno inbox outstanding clear <qid>` and NO "
+                        "--answer; the ruling already lives in the law lane, "
+                        "so this close only has to close. At a terminal, "
+                        "`fno inbox law set <subject> <decision>` is the same "
+                        "destination in one call.",
                         err=True,
                     )
                     raise typer.Exit(3)

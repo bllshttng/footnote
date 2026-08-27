@@ -1312,12 +1312,18 @@ def review_list() -> dict[str, Any]:
             # Kept as an integer beside the breakdown: --review-list --json is
             # a read surface, so removing this key would break its readers.
             "invalid_authority": invalid_authority,
-            "invalid_authority_values": dict(
-                sorted(
+            # A LIST, not a dict, because the order is the ranking. A dict
+            # carries rank only in its insertion order, and every serializer is
+            # free to drop that: `--output report.json` writes through
+            # `json.dumps(sort_keys=True)`, which would file `banana` above a
+            # 40-row `crown-l1`. A list survives any of them.
+            "invalid_authority_values": [
+                {"value": value, "count": count}
+                for value, count in sorted(
                     invalid_authority_values.items(),
                     key=lambda item: (-item[1], item[0]),
                 )
-            ),
+            ],
         },
         "damaged": damaged,
     }

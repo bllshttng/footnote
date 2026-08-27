@@ -593,15 +593,15 @@ def _invalid_authority_detail(quality: dict) -> str:
     the tally that was supposed to catch a minted spelling could not report
     one. Returns a leading-space suffix so callers append it unconditionally.
     """
-    values = quality.get("invalid_authority_values") or {}
+    values = quality.get("invalid_authority_values") or []
     if not values:
         return ""
     # Capped because the motivating value is `crown-l2-<node>`, one distinct
     # spelling per node, over a machine-wide index. Uncapped, a large journal
-    # turns this summary into a single line of tens of kilobytes. The dict is
-    # sorted by count descending, so the cap keeps the worst offenders.
-    shown = list(values.items())[:_INVALID_AUTHORITY_SHOWN]
-    listed = ", ".join(f"{name} x{count}" for name, count in shown)
+    # turns this summary into a single line of tens of kilobytes. The producer
+    # ranks by count descending, so the cap keeps the worst offenders.
+    shown = values[:_INVALID_AUTHORITY_SHOWN]
+    listed = ", ".join(f"{row['value']} x{row['count']}" for row in shown)
     remaining = len(values) - len(shown)
     if remaining > 0:
         listed += f", +{remaining} more (see --json)"
