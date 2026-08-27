@@ -879,22 +879,52 @@ fn round_budget_is_computed_even_when_tiling_fails_closed() {
 }
 
 #[test]
-fn round_budget_exhausted_needs_more_than_max() {
+fn max_rounds_two_is_exhausted_by_the_second_round() {
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
     let (base, shas, head) = repo_with(repo, 3);
-    let events = events_file(
+    // The boundary walked, not sampled. This test used to assert the OPPOSITE
+    // - that two rounds against a max of 2 were not exhausted - under the
+    // message "max_rounds is a budget, not an off-by-one", which is precisely
+    // the off-by-one it pinned: `>` meant a cap of 2 permitted a third round.
+    // Nobody reads `max_rounds = 2` and expects three reviews.
+    let one = events_file(
+        repo,
+        &[attestation_round(
+            "code-review",
+            &base,
+            &shas[0],
+            "fail",
+            None,
+        )],
+    );
+    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 2);
+    assert_eq!(t1.rounds_used, 1);
+    assert!(
+        !t1.rounds_exhausted,
+        "one round of two is under the cap, and the second must stay fundable"
+    );
+
+    let two = events_file(
         repo,
         &[
             attestation_round("code-review", &base, &shas[0], "fail", None),
             attestation_round("code-review", &shas[0], &head, "fail", None),
         ],
     );
-    let tiling = compute_range_tiling("git", repo, "origin/main", &events, BRANCH, &head, 2);
-    assert_eq!(tiling.rounds_used, 2);
+    let t2 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 2);
+    assert_eq!(t2.rounds_used, 2);
     assert!(
-        !tiling.rounds_exhausted,
-        "max_rounds is a budget, not an off-by-one"
+        t2.rounds_exhausted,
+        "two means two: the SECOND round is the last one the budget funds"
+    );
+
+    // And a max of 3 leaves the same two rounds unexhausted, so the boundary
+    // tracks the configured number rather than being pinned to 2.
+    let t2_of_3 = compute_range_tiling("git", repo, "origin/main", &two, BRANCH, &head, 3);
+    assert!(
+        !t2_of_3.rounds_exhausted,
+        "two of three is still under the cap"
     );
 }
 

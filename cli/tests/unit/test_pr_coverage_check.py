@@ -1133,18 +1133,59 @@ def test_ac7_marker_exhausted_decline_exits_impossible(monkeypatch, tmp_path, ca
     assert "hooks/git-protection.py:302:security" in line
 
 
-def test_ac7_hp_two_rounds_refuse_three_say_how_many_remain(
+def test_max_rounds_two_means_exactly_two_rounds(monkeypatch, tmp_path):
+    """The boundary, pinned per round, because the key is named max_rounds.
+
+    Nobody reads `max_rounds = 2` and expects three reviews. It used to mean
+    three: the comparison was `>`, so the budget tripped only once a THIRD
+    round had already run. Round 2 is now the last one, and this walks the
+    boundary rather than asserting a single side of it - an off-by-one is
+    invisible from one sample.
+    """
+    seen = {}
+    for n in (1, 2, 3):
+        _specimen_gates(monkeypatch)
+        _seed_soft_cap(tmp_path, rounds=n)
+        monkeypatch.setattr(
+            _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-cap01"]
+        )
+        state, _refusal, _head, note = _coverage_gate.coverage_verdict(
+            42, str(tmp_path), recompute=False
+        )
+        seen[n] = (state, note)
+
+    # Round 1 of 2: under the cap, so the finding still blocks.
+    assert seen[1][0] == _coverage_gate.REFUSED, seen[1]
+
+    # Round 2 of 2: the LAST round the budget funds. Discharged here, not on
+    # round 3 - that is the whole point of the rename-shaped fix.
+    assert seen[2][0] == _coverage_gate.COVERED, seen[2]
+    # Either receipt is correct here and which one depends on the row: a
+    # covered row takes the filed-at-cap note, an uncovered one takes the
+    # discharge waiver. Both must NAME the cap, which is the auditable part.
+    assert "(2/2" in seen[2][1], seen[2][1]
+
+    # Round 3 stays discharged: past the cap is not a different rule.
+    assert seen[3][0] == _coverage_gate.COVERED, seen[3]
+
+
+def test_ac7_hp_under_the_cap_refuses_and_says_how_many_remain(
     monkeypatch, tmp_path, capsys
 ):
-    """The same chain at two rounds: exit 3 with the budget named, not 5."""
+    """The same chain UNDER the cap: exit 3 with the budget named, not 5.
+
+    One round of a two-round maximum. This used to seed two rounds and still
+    expect a refusal, which only held because `max_rounds` was compared with
+    `>` and so meant three. Two means two, so the last fundable round here is
+    the next one."""
     _specimen_gates(monkeypatch)
-    _ac7_seed(tmp_path, rounds=2)
+    _ac7_seed(tmp_path, rounds=1)
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     cap = capsys.readouterr()
     line = (cap.err.strip().splitlines() or [""])[0]
     assert rc == _coverage_gate.REFUSED == 3
-    assert "2/2 review rounds used" in line
-    assert "the next round reports impossible" in line
+    assert "1/2 review rounds used" in line
+    assert "the next round is the last the budget funds" in line
 
 
 def test_ac7_impossible_refuses_the_merge_with_its_own_name(
@@ -1417,10 +1458,13 @@ def test_cap_refuses_when_filing_fails(monkeypatch, tmp_path):
 
 
 def test_under_the_cap_a_soft_finding_still_blocks(monkeypatch, tmp_path):
-    """One review is the floor and the budget still bites: at two rounds the
-    same soft finding REFUSES rather than being filed."""
+    """One review is the floor and the budget still bites: UNDER the cap the
+    same soft finding REFUSES rather than being filed.
+
+    One round of a two-round maximum. Seeded at two this passed only under the
+    old `>` comparison, where a cap of 2 permitted a third round."""
     _specimen_gates(monkeypatch)
-    _seed_soft_cap(tmp_path, rounds=2)
+    _seed_soft_cap(tmp_path, rounds=1)
     monkeypatch.setattr(
         _coverage_gate,
         "file_findings_at_cap",

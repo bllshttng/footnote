@@ -2400,7 +2400,21 @@ pub fn unattested_reviewers_scan(
                     && latest_is_retraction.get(*name) != Some(&true)
                     && fail_carries.get(*name) == Some(&true))
             }
-            None => true,
+            // No attestation from this reviewer AT THIS HEAD. Held while the
+            // budget can still fund a round - one review stays the floor, so
+            // an unreviewed PR is still unattested and rounds_exhausted is
+            // false at zero rounds.
+            //
+            // Past the cap it must yield, for the same reason the Some(false)
+            // arm beside it already does: the demand is unsatisfiable there.
+            // The only thing that clears "attest at this head" is another
+            // review round, and the budget will not fund one. Worse, this arm
+            // is re-armed by every FIX: an attestation is head-pinned, so
+            // closing the findings from round 2 moves HEAD and voids it. That
+            // is the treadmill the round cap exists to end, and leaving it
+            // here would keep the stop gate demanding rounds the merge gate
+            // has already discharged.
+            None => !rounds_exhausted,
         })
         .map(|name| UnattestedReviewer {
             name: name.to_string(),
@@ -3041,7 +3055,7 @@ fn read_pr_info(
         // there is no second axis to count.
         tiling.rounds_used =
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
-        tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
+        tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
         let comments_arr: &[Value] = reviews_json
             .get("comments")
             .and_then(|v| v.as_array())
@@ -3807,6 +3821,11 @@ fn publish_coverage_status(
     _optional_bots: &[String],
     optional_lane_configured: bool,
     reviewers: &[String],
+    // Whether the review round budget is spent. Past the cap the
+    // required-local-pass veto below must not hold the status red: the only
+    // thing that clears it is another review round, and the budget will not
+    // fund one.
+    budget_spent: bool,
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
     // HEAD, the "unknown" sentinel from a failed git read) would POST to a
@@ -3892,7 +3911,15 @@ fn publish_coverage_status(
         },
         Some(false) => {}
     }
-    let local_pass_required = reviewers.iter().any(|r| is_code_review_reviewer(r));
+    // Past the cap the configured code-review pass is no longer required, for
+    // the same reason the merge gate discharges there: "attest at this head"
+    // is satisfiable only by a round the budget will not fund, and every FIX
+    // moves HEAD and voids the last attestation. Leaving the veto in place
+    // kept fno/review-coverage RED forever on exactly the PRs the cap had
+    // already released, which is the unpassable-guard shape the cap exists to
+    // end. Coverage itself already discharged upstream; this is the same
+    // ruling applied to the published status.
+    let local_pass_required = !budget_spent && reviewers.iter().any(|r| is_code_review_reviewer(r));
     // event_head == pr_head_oid already holds; the early return above enforces it.
     let covered = coverage.coverage.is_covered()
         && (!local_pass_required
@@ -5908,7 +5935,7 @@ pub fn compute_range_tiling(
     // fail-closed early returns: a merge-base failure answers tiling
     // not-tiled but the round budget honestly.
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
-    tiling.rounds_exhausted = tiling.rounds_used > max_rounds.max(1);
+    tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
     // answers the whole question fail-closed.
     let merge_out = git_bounded(git_bin, &["merge-base", head_sha, base_ref], cwd);
@@ -10198,6 +10225,7 @@ fn run_done(
             optional_bots,
             optional_lane_configured,
             reviewers,
+            info.range_tiling.rounds_exhausted,
         );
     }
     Ok(info)
@@ -12841,6 +12869,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     &inputs.optional_bots,
                     inputs.optional_lane_configured,
                     &required_reviewers,
+                    pr_info.range_tiling.rounds_exhausted,
                 );
             }
             (
@@ -12917,6 +12946,9 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &inputs.optional_bots,
                         inputs.optional_lane_configured,
                         &required_reviewers,
+                        // No tiling on the failed-read path, so no budget
+                        // claim. The Unknown arm never reaches the veto.
+                        false,
                     );
                 }
                 // The persisted row above is schema-gated (the pr_num == 0

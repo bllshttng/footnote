@@ -371,7 +371,7 @@ def coverage_verdict(
     # verdict.
     filed_note = ""
     cap_filed = False
-    if disposition_named and rounds > max_rounds:
+    if disposition_named and rounds >= max_rounds:
         if disposition_hard:
             return (
                 IMPOSSIBLE,
@@ -463,7 +463,11 @@ def coverage_verdict(
     #
     # The waiver is NAMED in the note, never silent, so a merge that happened
     # on a spent budget is legible afterward.
-    if rounds > max_rounds:
+    # `>=`, not `>`. max_rounds is a MAXIMUM: 2 means two rounds, and the
+    # second one is the last. The old `>` let a third round run before the
+    # budget tripped, so `max_rounds = 2` silently meant three reviews -
+    # a reading nobody would arrive at from the key's own name.
+    if rounds >= max_rounds:
         # The waiver names what it waived. Past the cap this arm preempts the
         # sized coverage refusals below - the required-reviewer attestation
         # conjunct included - and that is deliberate: a conjunct that still
@@ -1089,11 +1093,13 @@ def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
     before the next round reports impossible. Zero remaining is still worth
     saying - the next round is the one that trips, and a worker who cannot
     see the budget cannot choose to stop."""
-    remaining = max_rounds - rounds
+    # One less than the raw difference: at rounds = max_rounds - 1 the NEXT
+    # round is the last the budget funds, so zero remain after it.
+    remaining = max_rounds - rounds - 1
     if remaining <= 0:
         return (
             f"{rounds}/{max_rounds} review rounds used; the next round "
-            "reports impossible"
+            "is the last the budget funds"
         )
     plural = "" if remaining == 1 else "s"
     return (
