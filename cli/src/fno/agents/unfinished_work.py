@@ -329,6 +329,14 @@ def classify(
             if node.status != "in_progress":
                 continue
             claim_state = (node.claim or {}).get("state")
+            if claim_state is None:
+                # A claim view with no state word is unreadable, not
+                # non-free: the dimension says unknown rather than silently
+                # dropping the node.
+                _mark_unknown(
+                    KIND_STARTED, f"claim state unreadable for {node.node_id}"
+                )
+                continue
             if claim_state != "free":
                 # Non-free (live, suspect, stale, corrupted) excludes the
                 # node outright, whatever the graph's owner fields say.
@@ -644,6 +652,32 @@ def dirty_path_count(worktree: Path, *, runner=None) -> Optional[int]:
         return None
     lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
     return len(lines)
+
+
+def report_roots() -> "list[Path]":
+    """Every project scope the report covers. The scheduled tick and the
+    manual verb resolve their roots here so the two surfaces cannot
+    disagree on scope: the invoking repo (when it is a checkout) plus the
+    distinct cwd of every tracked sidecar."""
+    roots: list[Path] = []
+    try:
+        from fno.paths import resolve_repo_root
+
+        root = resolve_repo_root()
+        if (root / ".git").exists():
+            roots.append(root)
+    except Exception:  # noqa: BLE001 - an unknown scope must not scan `/`
+        pass
+    try:
+        from fno.tracker import sidecar as sidecar_store
+
+        for sc in sidecar_store.load_all().values():
+            cwd = getattr(sc, "cwd", None)
+            if cwd and Path(cwd) not in roots:
+                roots.append(Path(cwd))
+    except Exception:  # noqa: BLE001 - no sidecar store means the repo root only
+        pass
+    return roots
 
 
 # --- the IO seam ---------------------------------------------------------------
@@ -1153,29 +1187,34 @@ def publish_report(
                 },
             )
 
-    try:
-        from fno.agents.stale_escalate import escalate_unfinished
-        from fno.carveout.core import resolve_carveout_root, resolve_session_id
-        from fno.paths import resolve_repo_root
-
+    # The mail gate refuses an incomplete scan as not-the-news; the durable
+    # question lane holds the same line: a partial finding set never asks.
+    if not snapshot.complete:
+        note("watchdog escalation withheld: incomplete scan")
+    else:
         try:
-            session_id = resolve_session_id(resolve_repo_root())
-        except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
-            session_id = None
-        outcome, qid = escalate_unfinished(
-            list(snapshot.findings),
-            root=resolve_carveout_root(),
-            session_id=session_id,
-            cwd=Path.cwd(),
-        )
-        if outcome == "none":
-            note("watchdog escalation: no unfinished-work findings")
-        else:
-            note(
-                f"watchdog escalation: {outcome} {qid} "
-                f"({len(snapshot.findings)} finding(s))"
+            from fno.agents.stale_escalate import escalate_unfinished
+            from fno.carveout.core import resolve_carveout_root, resolve_session_id
+            from fno.paths import resolve_repo_root
+
+            try:
+                session_id = resolve_session_id(resolve_repo_root())
+            except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
+                session_id = None
+            outcome, qid = escalate_unfinished(
+                list(snapshot.findings),
+                root=resolve_carveout_root(),
+                session_id=session_id,
+                cwd=Path.cwd(),
             )
-    except Exception as exc:  # noqa: BLE001 - named, never fatal to the report
-        note(f"watchdog escalation failed: {exc}")
+            if outcome == "none":
+                note("watchdog escalation: no unfinished-work findings")
+            else:
+                note(
+                    f"watchdog escalation: {outcome} {qid} "
+                    f"({len(snapshot.findings)} finding(s))"
+                )
+        except Exception as exc:  # noqa: BLE001 - named, never fatal to the report
+            note(f"watchdog escalation failed: {exc}")
 
     return payload

@@ -4048,7 +4048,7 @@ def _run_unfinished_report(
     from fno.agents import unfinished_work as uw
     from fno.paths import resolve_repo_root
 
-    roots = [Path(resolve_repo_root())]
+    roots = uw.report_roots() or [Path(resolve_repo_root())]
     snapshot = uw.build_report(roots, now_s=now)
 
     recipient = mail_to

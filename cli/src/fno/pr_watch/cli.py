@@ -152,20 +152,14 @@ def _catchup_roots() -> list[Path]:
 
 
 def _watchdog_recovery_roots() -> list[Path]:
-    """Resolve every distinct project scope for the launchd watchdog scan."""
-    roots: list[Path] = []
-    try:
-        from fno.paths import resolve_repo_root
+    """Resolve every distinct project scope for the launchd watchdog scan.
 
-        root = resolve_repo_root()
-        if (root / ".git").exists():
-            roots.append(root)
-    except Exception:  # noqa: BLE001 - an unknown scope must not scan `/`
-        pass
-    for root in _catchup_roots():
-        if root not in roots:
-            roots.append(root)
-    return roots
+    One shared resolver with the manual report verb
+    (unfinished_work.report_roots): the tick and a hand-run must name the
+    same fleet, or the two report surfaces disagree on scope."""
+    from fno.agents import unfinished_work as _uw
+
+    return _uw.report_roots()
 
 
 class ClaimAdapter:

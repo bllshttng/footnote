@@ -4223,3 +4223,75 @@ def test_clearing_verbs_name_the_main_worktree_not_the_reporting_one(tmp_path):
     for w in obs.worktrees:
         if Path(w.path).name == "linked":
             assert w.repo_root == str(main)
+
+
+# --- review-round fixes: unknown reads and one shared fleet scope ----------
+
+
+def test_claim_view_without_a_state_word_reads_unknown_not_excluded():
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-nostate", claim_state=None)]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_STARTED].state == uw.UNKNOWN_DIM
+
+
+def test_publish_withholds_the_durable_question_on_an_incomplete_scan(
+    tmp_path, monkeypatch
+):
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    called = []
+    monkeypatch.setattr(
+        _se, "escalate_unfinished", lambda f, **kw: called.append(1) or ("recorded", "q")
+    )
+
+    snap = uw.classify(
+        _uw_obs(graph_ok=False, nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)])
+    )
+    assert snap.complete is False
+    notes: list[str] = []
+    uw.publish_report(
+        snap, source="manual", now_s=NOW_1840, mail_to="", log=notes.append
+    )
+    assert called == []
+    assert any("incomplete scan" in note for note in notes)
+
+
+def test_manual_report_and_tick_share_one_fleet_scope(monkeypatch):
+    """The manual verb and the tick resolve their roots through one shared
+    resolver, so a hand-run names the same fleet the tick's digest named."""
+    from fno.agents import cli as agents_cli
+    from fno.pr_watch import cli as prcli
+
+    monkeypatch.setattr(uw, "report_roots", lambda: [Path("/fleet/scope")])
+    assert prcli._watchdog_recovery_roots() == [Path("/fleet/scope")]
+
+    class _Snap:
+        generated_at = "x"
+        findings = ()
+        complete = True
+        warnings = ()
+        dimensions = {
+            dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+        }
+
+    captured = {}
+
+    def _fake_build(roots, **kw):
+        captured["roots"] = [str(r) for r in roots]
+        return _Snap()
+
+    monkeypatch.setattr(uw, "build_report", _fake_build)
+    monkeypatch.setattr(
+        uw, "publish_report", lambda s, **kw: {"counts": {}, "findings": [], "warnings": []}
+    )
+    agents_cli.cmd_watchdog(
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+    )
+    assert captured["roots"] == ["/fleet/scope"]
