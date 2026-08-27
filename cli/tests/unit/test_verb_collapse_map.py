@@ -66,9 +66,10 @@ def test_map_covers_current_surface_once():
     # `agents orphans` both landed at 323 and the truth is 324.
     # Counted from the merged file, not taken from either side: main carried
     # 529 and a branch added `config routing`, `doctor route`, `route init`
-    # and `route inventory`; this branch adds `agents king manifest-path`.
-    # +1 for `backlog join`, the held-worktree joiner spawner (x-8d1d).
-    assert len(mapped) == 535, (
+    # and `route inventory`; this branch adds `agents recover` from the
+    # re-entry work, and main independently added `agents king manifest-path`
+    # and `backlog join` (the held-worktree joiner spawner, x-8d1d).
+    assert len(mapped) == 536, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
