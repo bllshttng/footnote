@@ -1897,6 +1897,85 @@ def test_round_budget_naive_pass_timestamp_never_crashes_the_gate():
     assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
 
 
+def test_attestation_chain_dedupes_the_global_mirror_on_invocation_id(
+    monkeypatch, tmp_path
+):
+    """One attestation, two stores, ONE round.
+
+    review_attestation rides GLOBAL_MIRROR_TYPES, and the mirror stamps
+    `repo` onto its copy alone, so the project row and the global row carry
+    different payloads. Dedup keyed on the whole payload therefore admitted
+    both rows and the chain counted every mirrored attestation twice - which
+    the per-PR-total budget turns into "one review reads 2/2" and fires the
+    cap after a single round. The invocation_id is minted once by the
+    producer and lands identically on both rows; it is the dedup key. The
+    payload fallback keeps pre-invocation_id rows deduped when the two
+    stores genuinely agree."""
+    from fno.pr import _reviews
+
+    head = "46695fffd00000000000000000000000000000000"
+    base_data = {
+        "reviewer": "code-review",
+        "head_sha": head,
+        "verdict": "fail",
+        "session_id": "s-1",
+        "attester_session_id": "s-1",
+        "branch": "feature/x-8439",
+        "reviewed_base_sha": "a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3",
+        "reviewed_head_sha": head,
+        "reviewed_file_count": 3,
+        "reviewed_line_count": 40,
+        "invocation_id": "ri-1",
+    }
+
+    def _row(data):
+        return json.dumps(
+            {"ts": "2026-08-26T10:00:00Z", "type": "review_attestation", "data": data}
+        ) + "\n"
+
+    project = tmp_path / "project-events.jsonl"
+    project.write_text(_row(base_data), encoding="utf-8")
+    global_log = tmp_path / "global-events.jsonl"
+    global_log.write_text(
+        _row({**base_data, "repo": "bllshttng/footnote"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        _reviews,
+        "_coverage_logs",
+        lambda cwd, project_events: (project, global_log, "bllshttng/footnote"),
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-8439", head=head
+    )
+    assert len(chain) == 1, "the mirrored copy must dedup, not double-count"
+    assert _coverage_gate.rounds_since_last_pass(chain) == 1
+
+    # Fallback: rows with no invocation_id dedup only when the payloads
+    # really are identical (the pre-field shape).
+    legacy = {k: v for k, v in base_data.items() if k != "invocation_id"}
+    project.write_text(_row(legacy), encoding="utf-8")
+    global_log.write_text(_row(legacy), encoding="utf-8")
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-8439", head=head
+    )
+    assert len(chain) == 1, "identical legacy payloads still dedup"
+
+    # Negative control: two distinct invocations are two rounds, so the key
+    # is not so wide it collapses real rounds.
+    project.write_text(_row(base_data), encoding="utf-8")
+    second = {**base_data, "invocation_id": "ri-2"}
+    global_log.write_text(
+        _row({**base_data, "repo": "bllshttng/footnote"})
+        + _row({**second, "repo": "bllshttng/footnote"}),
+        encoding="utf-8",
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-8439", head=head
+    )
+    assert len(chain) == 2, "two distinct invocations are two rounds"
+    assert _coverage_gate.rounds_since_last_pass(chain) == 2
+
+
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
     """The helper rides the shared _rest_pages reader (page-per-call arrays)
     and maps the three fields the counter reads; a failed read answers with
