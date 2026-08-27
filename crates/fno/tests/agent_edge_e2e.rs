@@ -514,10 +514,9 @@ fn agent_edge_bare_list_roster_renders_every_live_session() {
     let items: serde_json::Value = serde_json::from_str(raw).unwrap();
     let items = items.as_array().unwrap();
     let terminal = |v: &serde_json::Value| {
-        matches!(
-            v["state"].as_str(),
-            Some("stopped") | Some("done") | Some("failed")
-        )
+        v["state"]
+            .as_str()
+            .is_some_and(fno::agents_view::is_terminal_state)
     };
     let live: Vec<&serde_json::Value> = items.iter().filter(|v| !terminal(v)).collect();
     let n = live.len();

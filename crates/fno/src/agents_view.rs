@@ -169,10 +169,12 @@ impl RegistryAgent {
 }
 
 /// One claude-roster worker as the sideline consumes it (three fields, not
-/// the supervisor's model): `short_id` is the `claude attach <id>` jobId (the
-/// first `-`-segment of the roster `sessionId`, == the roster map key), and
-/// `name` is already fallback-resolved (`dispatch.seed.name` else
-/// `cc-<short_id>`, the adopted-name convention).
+/// the supervisor's model): `short_id` is the `claude attach <id>` jobId -
+/// in the bare-list shape the item's explicit `id` field with the sessionId
+/// prefix as fallback, in the legacy map the sessionId's first `-` segment
+/// (== the map key) - and `name` is already fallback-resolved (flat `name`,
+/// else `dispatch.seed.name`, else `cc-<short_id>`, the adopted-name
+/// convention).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RosterWorker {
     pub short_id: String,
@@ -331,6 +333,16 @@ fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
     out
 }
 
+/// A terminal session state in `claude agents --json` and the bare-list
+/// roster. The daemon catalog lingers on finished sessions, and two
+/// consumers key off the same set: `parse_roster` (a terminal item is not
+/// roster presence, so no live sideline row) and `parse_claude_agents`
+/// (terminal -> `ObservedExternal::Terminal` for reconcile). One helper so
+/// the consumers cannot drift apart when upstream adds a state.
+pub fn is_terminal_state(state: &str) -> bool {
+    matches!(state, "stopped" | "done" | "failed")
+}
+
 /// Parse the claude daemon roster into the sideline's three-field workers.
 /// Tolerant `Value` access ONLY - no typed struct: the `procStart`
 /// u64 -> date-string drift once zeroed every typed-parse consumer, and
@@ -342,37 +354,39 @@ fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
 /// `workers` key - is an UNRECOGNIZED shape and returns `None` (the caller
 /// keeps last-good foreign rows): a silent `Some(empty)` is indistinguishable
 /// from a genuinely empty fleet, which is exactly how the bare-list drift hid.
-/// A non-empty container that yields zero recognizable workers is drift too
-/// (`None`); only an EMPTY recognized container (`[]`, `{"workers":{}}`) is a
-/// valid empty roster. In the bare list, an item whose `state` is terminal
-/// (`stopped|done|failed`, the same mapping `parse_claude_agents` uses) is
-/// not a live session and is skipped: roster presence means attachable, and a
-/// finished session is not.
+/// A non-empty container where NO item was recognizable - not parsed, not a
+/// terminal-state skip - is drift too (`None`). An all-terminal roster is a
+/// recognized EMPTY LIVE FLEET (`Some(empty)`): the sessions were understood
+/// and none is attachable, so the sideline must clear, not hold last-good.
+/// In the bare list, an item whose `state` is terminal is skipped (roster
+/// presence means attachable, and a finished session is not); a legacy-map
+/// worker has no `state` field and the file lists only live workers.
 pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let workers: Vec<&serde_json::Value> = match &doc {
+    let (workers, bare_list): (Vec<&serde_json::Value>, bool) = match &doc {
         // Current claude shape: a bare list of worker objects.
-        serde_json::Value::Array(items) => items.iter().collect(),
+        serde_json::Value::Array(items) => (items.iter().collect(), true),
         // Legacy shape: a map of short-id -> worker under "workers".
-        serde_json::Value::Object(_) => doc
-            .get("workers")?
-            .as_object()?
-            .values()
-            .collect::<Vec<_>>(),
+        serde_json::Value::Object(_) => (
+            doc.get("workers")?
+                .as_object()?
+                .values()
+                .collect::<Vec<_>>(),
+            false,
+        ),
         _ => return None,
     };
     let mut out = Vec::with_capacity(workers.len());
+    let mut terminal_skips = 0usize;
     for w in &workers {
-        // The daemon catalog lingers on finished sessions; a terminal `state`
-        // (bare-list only - the legacy file has no state field and lists only
-        // live workers) means the session is not attachable, so it is not
-        // roster presence. An unknown/missing state stays (tolerant, and
+        // A terminal `state` means the session is not attachable, so it is
+        // not roster presence. An unknown/missing state stays (tolerant, and
         // `parse_claude_agents` holds unknowns rather than dropping them).
-        if matches!(
-            w.get("state").and_then(|v| v.as_str()),
-            Some("stopped") | Some("done") | Some("failed")
-        ) {
-            continue;
+        if let Some(state) = w.get("state").and_then(|v| v.as_str()) {
+            if is_terminal_state(state) {
+                terminal_skips += 1;
+                continue;
+            }
         }
         let Some(session_id) = w
             .get("sessionId")
@@ -381,21 +395,26 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
         else {
             continue;
         };
-        // short_id is the `claude attach` jobId. Prefer the explicit `id`
-        // field (the key `parse_claude_agents` joins on) with the sessionId
-        // prefix as fallback, so the two id joins cannot split if upstream
-        // ever issues id != prefix. An id that leads with `-` (defensive:
-        // upstream drift) would be a meaningless attach target; skip the
-        // worker, same as a missing sessionId.
-        let short_id = w
-            .get("id")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty() && !s.starts_with('-'))
-            .or_else(|| session_id.split('-').next().filter(|s| !s.is_empty()))
-            .unwrap_or(session_id);
-        if short_id.is_empty() || short_id.starts_with('-') {
+        // short_id is the `claude attach` jobId. In the bare list prefer the
+        // explicit `id` field (the key `parse_claude_agents` joins on) with
+        // the sessionId prefix as fallback, so the two id joins cannot split
+        // if upstream ever issues id != prefix. The legacy map keeps its
+        // historical prefix contract - an `id` field there is not read. An
+        // id that leads with `-` (defensive: upstream drift) would be a
+        // meaningless attach target; the prefix (or the skip, when it is
+        // empty too) takes over, same as a missing sessionId.
+        let prefix = session_id.split('-').next().filter(|s| !s.is_empty());
+        let short_id = if bare_list {
+            w.get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty() && !s.starts_with('-'))
+                .or(prefix)
+        } else {
+            prefix
+        };
+        let Some(short_id) = short_id else {
             continue;
-        }
+        };
         let short_id = short_id.to_string();
         let cwd = w
             .get("cwd")
@@ -422,15 +441,18 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
             account: None,
         });
     }
-    // Refuse the silent empty (x-2f03): a non-empty container that yielded
-    // zero recognizable workers is schema drift, not an empty fleet - `None`
-    // keeps the caller's last-good rows instead of blanking the sideline.
+    // Refuse the silent empty (x-2f03): a non-empty container where NOTHING
+    // was recognized - no parsed worker and no terminal skip - is schema
+    // drift, not an empty fleet; `None` keeps the caller's last-good rows.
+    // An all-terminal roster is NOT drift: every item was understood, so it
+    // returns `Some(empty)` and the sideline clears its finished rows instead
+    // of holding them as fake-live last-good forever (codex review round 2).
     // Boundary: PARTIAL recognition (some workers parse, some skip) still
     // returns the parsed subset. Alien rows among valid ones are doctrine
     // (tolerate-alien-row, tested), and a partial rename degrades visibly on
     // the sideline rather than as a fake-empty success; a ratio guard here
     // would break the documented 1-of-4 alien-row case.
-    if !workers.is_empty() && out.is_empty() {
+    if !workers.is_empty() && out.is_empty() && terminal_skips == 0 {
         return None;
     }
     Some(out)
@@ -1827,7 +1849,9 @@ pub fn parse_claude_agents(
         }
         let observed = match obj.get("state").and_then(|v| v.as_str()) {
             Some("working") | Some("blocked") => ObservedExternal::Live,
-            Some("stopped") | Some("done") | Some("failed") => ObservedExternal::Terminal,
+            // Same terminal set as parse_roster's roster-presence filter -
+            // `is_terminal_state` holds the two consumers to one set.
+            Some(state) if is_terminal_state(state) => ObservedExternal::Terminal,
             // A new/malformed/missing state for a PRESENT tracked id is per-id
             // schema drift, NOT absence (codex P2): keep it in the map as
             // `Unknown` so reconcile holds the record rather than deleting it as
@@ -2697,10 +2721,9 @@ mod tests {
         let live: Vec<&serde_json::Value> = items
             .iter()
             .filter(|v| {
-                !matches!(
-                    v.get("state").and_then(|s| s.as_str()),
-                    Some("stopped") | Some("done") | Some("failed")
-                )
+                !v.get("state")
+                    .and_then(|s| s.as_str())
+                    .is_some_and(is_terminal_state)
             })
             .collect();
         assert!(
@@ -2749,6 +2772,23 @@ mod tests {
         assert_eq!(workers[0].name, "live-id-wins");
         assert_eq!(workers[1].short_id, "ef56ab78");
         assert!(!workers.iter().any(|w| w.name.contains("skips")));
+    }
+
+    #[test]
+    fn parse_roster_all_terminal_roster_is_a_recognized_empty_fleet() {
+        // The fleet finished: every catalog item is terminal (the daemon
+        // lingers on finished sessions). Every skip was RECOGNIZED, so this
+        // is an empty live fleet, not drift - Some(empty) lets the sideline
+        // clear instead of holding last-good rows as fake-live forever
+        // (codex review round 2).
+        let raw = r#"[
+            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"a",
+             "kind":"background","startedAt":3,"state":"done"},
+            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"b",
+             "kind":"background","startedAt":4,"state":"failed"}]"#;
+        assert_eq!(parse_roster(raw), Some(Vec::new()));
+        // Zero recognizable workers (no state, no sessionId) is still drift.
+        assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
     }
 
     // ---- Union merge + dual-doc ReaderState (x-0a2e task 1.2) ----
