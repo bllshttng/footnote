@@ -237,6 +237,7 @@ with EffectStore(
 frontmatter = {
     "node": "x-delivery-e2e",
     "status": "ready",
+    "difficulty": "medium",
     "created": now.date().isoformat(),
     "completion": "delivery",
     "company_work": {
