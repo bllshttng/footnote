@@ -163,6 +163,17 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
                     f"Execution Strategy task '{task_id}' acceptance item "
                     f"{item_index} must be a non-empty string"
                 )
+        blocked_by = t.get("blocked_by", [])
+        if not isinstance(blocked_by, list):
+            raise BriefParseError(
+                f"Execution Strategy task '{task_id}' blocked_by must be a list of task ids"
+            )
+        for item_index, item in enumerate(blocked_by, start=1):
+            if not isinstance(item, str) or not item.strip():
+                raise BriefParseError(
+                    f"Execution Strategy task '{task_id}' blocked_by item "
+                    f"{item_index} must be a non-empty task id"
+                )
         normalized_tasks.append({
             "id": task_id,
             "title": str(t.get("title", "")),
@@ -170,6 +181,7 @@ def parse_execution_strategy(yaml_text: str) -> dict[str, Any]:
             "verify": str(t.get("verify", "")),
             "acceptance": [str(a) for a in acceptance],
             "notes": str(t.get("notes", "")).strip(),
+            "blocked_by": [str(b) for b in blocked_by],
         })
 
     waves = parsed.get("waves", [])
@@ -194,6 +206,54 @@ def find_task(parsed: dict[str, Any], task_id: str) -> dict[str, Any] | None:
 def list_task_ids(parsed: dict[str, Any]) -> list[str]:
     """Return all task ids from the parsed execution strategy."""
     return [t["id"] for t in parsed.get("tasks", [])]
+
+
+def validate_task_edges(parsed: dict[str, Any]) -> list[str]:
+    """Validate declared per-task ``blocked_by`` edges.
+
+    Returns one error string per problem, empty when clean. Two checks over
+    declared edges only: an edge naming an unknown task id, and a cycle among
+    declared edges (a self-edge included). Derived wave edges - the ones a
+    task with no ``blocked_by`` inherits from its previous wave - go backward
+    by construction and are never checked here.
+    """
+    errors: list[str] = []
+    known = set(list_task_ids(parsed))
+    edges: dict[str, list[str]] = {
+        t["id"]: [str(d) for d in t.get("blocked_by", [])]
+        for t in parsed.get("tasks", [])
+    }
+    for task_id, deps in edges.items():
+        for dep in deps:
+            if dep not in known:
+                errors.append(f"task {task_id} blocked_by unknown task {dep}")
+
+    # Iterative DFS with a colour map (white/grey/black); a grey hit is a
+    # back-edge and the grey stack spells the cycle out. Plans are small, so
+    # the exact path is cheaper to carry than Kahn's leftover set would be.
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = dict.fromkeys(edges, WHITE)
+    for root in edges:
+        if colour[root] != WHITE:
+            continue
+        colour[root] = GREY
+        path = [root]
+        iterators = [iter(edges[root])]
+        while iterators:
+            dep = next(iterators[-1], None)
+            if dep is None:
+                iterators.pop()
+                colour[path.pop()] = BLACK
+                continue
+            state = colour.get(dep)
+            if state == GREY:
+                start = path.index(dep)
+                errors.append("cycle: " + " -> ".join([*path[start:], dep]))
+            elif state == WHITE:
+                colour[dep] = GREY
+                path.append(dep)
+                iterators.append(iter(edges[dep]))
+    return errors
 
 
 # ---------------------------------------------------------------------------
