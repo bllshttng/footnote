@@ -102,9 +102,12 @@ echo "    Branch: $BRANCH_NAME" >&2
 # states its loss first (an agent executes remedy text literally).
 if [ -e "$WORKTREE_PATH" ]; then
     echo "Worktree path already exists: $WORKTREE_PATH" >&2
-    echo "Reuse it instead: the existing worktree is enterable as-is." >&2
-    echo "Or archive it with the guarded remover, which checks dirty/" >&2
-    echo "unpushed/live-session first: scripts/setup/archive-worktree.sh $WORKTREE_PATH" >&2
+    echo "Reuse it instead: if 'git worktree list' names it, it is enterable as-is." >&2
+    echo "(If that listing does NOT name it, the path is leftover non-worktree"
+    echo "content - inspect it by hand before touching it.)" >&2
+    echo "Or archive it with the guarded remover, which checks dirty/unpushed/"
+    echo "live-session first (fno repos ship it; run from the repo root):"
+    echo "  scripts/setup/archive-worktree.sh $WORKTREE_PATH" >&2
     echo "Only if removal is certain: uncommitted changes and unpushed commits in that" >&2
     echo "worktree are LOST - then run plain 'git worktree remove $WORKTREE_PATH'" >&2
     echo "(no --force: git itself refuses a dirty tree, and that refusal is a save)." >&2

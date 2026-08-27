@@ -736,16 +736,27 @@ def resume_logic(
     session_id = _session_id_for(entry)
 
     if not cwd:
+        if session_id:
+            return ResumeResult(
+                exit_code=13,
+                stderr=(
+                    f"fno agents resume: agent {name!r} has no recorded cwd. "
+                    "the row is the resume handle and still carries the session "
+                    "id: the harness itself can reach the session directly "
+                    "(e.g. claude --resume <id>). To re-drive it under fno, rm "
+                    "this row and `fno agents adopt <id>` rebinds a fresh one "
+                    "with a live cwd - that pair spends the recorded route "
+                    "bindings. rm alone just deletes the handle.\n"
+                ),
+            )
+        # Neither cwd nor session id: nothing to resume and nothing to
+        # rebind. Do not claim an id the row does not carry.
         return ResumeResult(
             exit_code=13,
             stderr=(
-                f"fno agents resume: agent {name!r} has no recorded cwd. "
-                "the row is the resume handle and still carries the session "
-                "id: the harness itself can reach the session directly "
-                "(e.g. claude --resume <id>). To re-drive it under fno, rm "
-                "this row and `fno agents adopt <id>` rebinds a fresh one "
-                "with a live cwd - that pair spends the recorded route "
-                "bindings. rm alone just deletes the handle.\n"
+                f"fno agents resume: agent {name!r} has no recorded cwd and "
+                "no session id. The row holds nothing resumable; rm it and "
+                "re-spawn is the honest cleanup, and nothing is lost.\n"
             ),
         )
 

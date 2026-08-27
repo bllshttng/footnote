@@ -14,6 +14,9 @@
 #   2. preflight.sh unidentified-lock refusal
 #   3. client_verbs.rs resume cwd messages (source-level: the paths eprintln
 #      inside the command flow with env side effects)
+#   4. rm-naming refusals in dispatch.py and the Rust ask twins
+#      (claude_ask/codex_ask/gemini_ask) + their teardown warnings
+#   5. the stop/rm livelock exits in daemon.rs (no_op dead ends named)
 #
 # Every REMEDY claim is pinned by a positive marker: a string that must be
 # present. The two absence checks (--force, branch -D) are backstops paired
@@ -91,28 +94,45 @@ require_before "$PRE" "LOSES the mutual" "rm -rf '\$LOCKDIR'" \
 # The command remains discoverable (last resort stays a real rung).
 require "$PRE" "rm -rf '\$LOCKDIR'" "preflight: rm -rf remains the last rung"
 
-# --- 3. resume cwd messages, BOTH runtimes ----------------------------------
-# Each property is pinned by a marker that sits on ONE physical source line
-# (a phrase split across a Rust string continuation is not pinned by grep),
-# and the Python fallback is pinned separately so it cannot drift while the
-# Rust path holds the marker.
-RC="$REPO_ROOT/cli/src/fno/agents/resume_cli.py"
-for pair in "rust:$CV" "python:$RC"; do
-    rt=${pair%%:*}
-    f=${pair#*:}
-    require "$f" "the row is the resume handle" "resume($rt): messages name the handle cost"
-    require "$f" "fno agents adopt" "resume($rt): rm-then-adopt rebind pair named"
-    require "$f" "gone for good" "resume($rt): rm framed as the gone-for-good case"
-    require "$f" "recoverable first" "resume($rt): path-recovery check precedes the remedy"
-done
+# --- 3. resume cwd messages ---------------------------------------------------
+# The Rust arms have no unit seam (they eprintln inside the command flow), so
+# each property is pinned by a marker on ONE physical source line (a phrase
+# split across a Rust string continuation is not pinned by grep). The Python
+# twin is NOT grepped here: cli/tests/agents/test_resume_cli.py asserts the
+# RENDERED ResumeResult.stderr, the stronger instrument - a source grep over
+# the same messages would false-green on a fragment refactor.
+require "$CV" "the row is the resume handle" "resume(rust): messages name the handle cost"
+require "$CV" "fno agents adopt" "resume(rust): rm-then-adopt rebind pair named"
+require "$CV" "gone for good" "resume(rust): rm framed as the gone-for-good case"
+require "$CV" "recoverable first" "resume(rust): path-recovery check precedes the remedy"
+require "$CV" "nothing resumable" "resume(rust): idless row told the truth, no id claim"
 
-# --- 4. dispatch.py rm fallback refusals -------------------------------------
+# --- 4. rm-naming refusals: dispatch.py + the Rust ask twins -------------------
+# The ask twins are the guard-on-one-of-N-paths trap: dispatch.py was rewritten
+# while claude_ask/codex_ask/gemini_ask kept the rm-first text.
 DIS="$REPO_ROOT/cli/src/fno/agents/dispatch.py"
-require "$DIS" "resume handle" "rm-fallback: names the handle cost"
-require "$DIS" "Recover the id from the harness" "rm-fallback: names the recovery remedy"
+require "$DIS" "from the harness if it can still name" "rm-fallback(py): names the recovery remedy"
+require "$DIS" "Recover the short id from the harness" "rm-fallback(py): short-id variant named too"
+require "$DIS" "drops the row and its route" "rm-fallback(py): names what rm drops"
 # The needle matches the single literal line that closes both refusals.
 require "$DIS" "fno agents rm --help\`, not here." \
-    "rm-fallback: override lives in --help, never in the refusal"
+    "rm-fallback(py): override lives in --help, never in the refusal"
+require "$DIS" "the exchange finished" "teardown(py): states the exchange finished first"
+
+for pair in "claude:crates/fno-agents/src/claude_ask.rs" "codex:crates/fno-agents/src/codex_ask.rs" "gemini:crates/fno-agents/src/gemini_ask.rs"; do
+    h=${pair%%:*}
+    f="$REPO_ROOT/${pair#*:}"
+    require "$f" "from the harness if it can still name" "followup($h): names the recovery remedy"
+    require "$f" "drops the row and its route" "followup($h): names what rm drops"
+done
+require "$REPO_ROOT/crates/fno-agents/src/codex_ask.rs" "the exchange finished" "teardown(codex): states the exchange finished first"
+require "$REPO_ROOT/crates/fno-agents/src/gemini_ask.rs" "the exchange finished" "teardown(gemini): states the exchange finished first"
+
+# --- 5. stop/rm livelock exits -------------------------------------------------
+DM="$REPO_ROOT/crates/fno-agents/src/daemon.rs"
+require "$DM" "If stop answers no_op" "rm(live): names the stop no_op dead end"
+require "$DM" "If stop refuses or no-ops" "rm(idless): names the stop dead end"
+require "$DM" "stop-then-rm has no exit here" "stop_claude(idless): no false rm-clears claim"
 
 if [[ "$FAILURES" -gt 0 ]]; then
     echo "$FAILURES check(s) failed"

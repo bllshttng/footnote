@@ -3237,7 +3237,10 @@ fn followup(
         _ => {
             return AskOutcome::err(
                 format!(
-                    "registry entry {} has no short id on file; cannot follow up. Remove with 'fno agents rm {}' and recreate.",
+                    "registry entry {} has no short id on file; cannot follow up. Recover the \
+                     short id from the harness if it can still name the session; 'fno agents rm {}' \
+                     drops the row and its route bindings, so run it to recreate, not to clear this \
+                     refusal.",
                     py_repr(name), name
                 ),
                 12,

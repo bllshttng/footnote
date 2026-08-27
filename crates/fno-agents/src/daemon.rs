@@ -6068,7 +6068,10 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
                 ErrorCode::InvalidStatus,
                 format!(
                     "agent {name} is claude but has no short id and no live process \
-                     to stop; note that `rm` clears the row but does not stop a session"
+                     to stop. `rm` will refuse this row too while it is stored live, so \
+                     stop-then-rm has no exit here: the row can neither prove liveness \
+                     nor be addressed. The override for that case is documented in \
+                     `fno agents rm --help`, not here."
                 ),
             );
         }
@@ -6387,7 +6390,10 @@ async fn handle_rm_with(
             format!(
                 "agent {name} is still live. Stop it with `fno agents stop {name}`; rm \
                  proceeds on its own once the row is gone. Forcing it through orphans a \
-                 live process and spends the row's resume handle."
+                 live process and spends the row's resume handle. If stop answers no_op \
+                 (no addressable session behind the row), the row cannot prove liveness \
+                 either way; the override for that case is documented in `fno agents rm \
+                 --help`, not here."
             )
         } else if harness_row_id.is_none() {
             // claude_row_provably_absent short-circuits to `false` (not
@@ -6400,7 +6406,10 @@ async fn handle_rm_with(
                 "agent {name} is still live, but it has no resolvable harness row id, so \
                  its presence in `claude agents --json --all` cannot be checked. Stop it \
                  with `fno agents stop {name}`; rm proceeds on its own once the row is \
-                 gone. Forcing it through spends the resume handle the row still holds."
+                 gone. Forcing it through spends the resume handle the row still holds. \
+                 If stop refuses or no-ops because the row has no addressable session, \
+                 the row cannot prove liveness either way; the override for that case is \
+                 documented in `fno agents rm --help`, not here."
             )
         } else if roster_known {
             format!(

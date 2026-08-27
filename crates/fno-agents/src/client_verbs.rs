@@ -2421,15 +2421,26 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .unwrap_or("");
 
     if cwd.is_empty() {
-        eprintln!(
-            "fno agents resume: agent {} has no recorded cwd. \
-             the row is the resume handle and still carries the session id: the harness \
-             itself can reach the session directly (e.g. claude --resume <id>). To re-drive \
-             it under fno, rm this row and `fno agents adopt <id>` rebinds a fresh one \
-             with a live cwd - that pair spends the recorded route bindings. rm alone just \
-             deletes the handle.",
-            py_repr_str(&name)
-        );
+        if !session_id.is_empty() {
+            eprintln!(
+                "fno agents resume: agent {} has no recorded cwd. \
+                 the row is the resume handle and still carries the session id: the harness \
+                 itself can reach the session directly (e.g. claude --resume <id>). To re-drive \
+                 it under fno, rm this row and `fno agents adopt <id>` rebinds a fresh one \
+                 with a live cwd - that pair spends the recorded route bindings. rm alone just \
+                 deletes the handle.",
+                py_repr_str(&name)
+            );
+        } else {
+            // Neither cwd nor session id: nothing to resume and nothing to
+            // rebind. Do not claim an id the row does not carry.
+            eprintln!(
+                "fno agents resume: agent {} has no recorded cwd and no session id. \
+                 The row holds nothing resumable; rm it and re-spawn is the honest cleanup, \
+                 and nothing is lost.",
+                py_repr_str(&name)
+            );
+        }
         return 13;
     }
 
