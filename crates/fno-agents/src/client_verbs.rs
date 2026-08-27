@@ -1700,7 +1700,10 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
 }
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
-/// Returns `None` for unsupported providers.
+/// Returns `None` for an unsupported provider AND for an unreadable capability
+/// contract. The caller distinguishes them: it rejects an unsupported harness
+/// before it ever gets here, so a `None` from this function reaches the
+/// "resume contract is invalid" refusal, never the "not supported" one.
 fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
     let mut argv = crate::harness_capabilities::render_session_argv(
         provider,
