@@ -1854,7 +1854,8 @@ def link_to_spawn_flags(link) -> List[str]:
 
     No new axis vocabulary: harness is ``-H``, the vendor/model route is
     ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is claude-only in the Rust client,
+    their own flags. ``--substrate bg`` is claude + opencode in the Rust client
+    (the dispatch resolver refuses the non-claude ones),
     so a codex link that left substrate unset resolves to a pane rather than
     being handed a substrate its harness rejects.
     """

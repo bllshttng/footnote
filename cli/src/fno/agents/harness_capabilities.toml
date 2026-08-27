@@ -1,4 +1,4 @@
-map_version = 9
+map_version = 10
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]

@@ -36,7 +36,7 @@ def test_packaged_contract_is_complete_for_every_known_harness():
     ).read_text(encoding="utf-8") == (
         root / "cli/src/fno/agents/harness_capabilities.toml"
     ).read_text(encoding="utf-8")
-    assert MAP_VERSION == 9
+    assert MAP_VERSION == 10
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
     for harness in known_harnesses():
         caps = capabilities(harness)
