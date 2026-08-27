@@ -990,9 +990,17 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// a session. Tests override the program via `set_resume_program`, mirroring
 /// `set_attach_program`.
 ///
-/// This is the THIRD codex resume argv builder in the tree, beside the Python
+/// This is the third INTERACTIVE codex resume argv builder, beside the Python
 /// `_build_resume_argv` and its Rust twin in fno-agents. A fix applied to two
 /// of three reads as done, so a change to codex's resume argv belongs here too.
+///
+/// The word interactive is load-bearing: two MORE builders render the headless
+/// `codex exec resume` form, `harnesses/codex.py`'s `resume` and
+/// `codex_ask.rs`'s `build_argv_resume`. Five in all. Those two take neither
+/// `--cd` nor `--add-dir` (that subcommand accepts neither) and pin the
+/// directory through the subprocess cwd instead, so they are a separate
+/// question, not more copies of this one. A reader trusting a bare count of
+/// three would skip them.
 ///
 /// It deliberately does NOT emit `--cd`, and that is a decision, not a gap
 /// nobody noticed. The other two splice a

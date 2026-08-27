@@ -74,6 +74,9 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     assert "resume" in res.exec_argv
     sid = "00000000-1111-2222-3333-444444444444"
     assert res.exec_argv.index("resume") < res.exec_argv.index(sid)
+    # Assert the tail too, not just the order. Order alone passes with a token
+    # appended after the id, which is exactly what the comment above denies.
+    assert res.exec_argv[-2:] == ["resume", sid]
     # The -c grant is global, so it must still precede the subcommand.
     assert any("writable_roots=" in arg for arg in res.exec_argv)
     grant_at = next(
@@ -1467,6 +1470,20 @@ def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
     was answered by hand during the 2026-08-25 fleet recovery. Unattended it
     is a hang, and answered wrong it is the wrong tree, which looks like
     success.
+
+    WHAT THIS TEST DOES NOT PROVE. It asserts argv shape. It does not observe
+    the modal being suppressed, and no test here does, so do not read a green
+    run as proof the hang is gone. Suppression rests on two things instead.
+    Codex's own reference documents the flag as `--cd, -C` and states that an
+    explicit override takes precedence over the `tui.resume_cwd` config, with
+    the prompt raised only when the process cwd differs from the session's
+    saved directory. And on codex-cli 0.149.1 the flag was probed in both
+    positions: a nonexistent directory fails with `No such file or directory`
+    BEFORE the terminal check, which is a positive marker that the value is
+    read rather than parsed and dropped.
+
+    Neither is the behavior itself. Closing that needs a recorded session
+    resumed against a real tty, which no unit test can host.
     """
     from fno.agents.resume_cli import _build_resume_argv
 
