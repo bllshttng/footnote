@@ -65,8 +65,9 @@ def test_map_covers_current_surface_once():
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
     # Counted from the merged file, not taken from either side: main carried
-    # 525 and this branch adds `backlog task list` and `backlog task update`.
-    assert len(mapped) == 527, (
+    # 527 and this branch adds `config assert-subagent-budget` and
+    # `do review resolve-level`.
+    assert len(mapped) == 529, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

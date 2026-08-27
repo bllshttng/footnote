@@ -526,3 +526,5 @@ agents mail pane-prepare	T1	agents mail pane-prepare	0
 agents mail seed-provenance	T1	agents mail seed-provenance	0
 mail pane-prepare	T1	mail pane-prepare	0
 mail seed-provenance	T1	mail seed-provenance	0
+config assert-subagent-budget	T1	config assert-subagent-budget	6	
+do review resolve-level	T1	do review resolve-level	10	
