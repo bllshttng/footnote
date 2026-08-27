@@ -1,8 +1,6 @@
 # Dynamic Parallelization
 
-Automatic optimization that upgrades sequential waves to parallel, with
-`collision.partition` serializing any tasks whose file sets overlap. Activated
-when the plan contains a `## File Ownership Map` section.
+Automatic optimization that upgrades sequential waves to parallel, with `collision.partition` serializing any tasks whose file sets overlap. The rule activates on a `## File Ownership Map` section.
 
 ## Activation
 
@@ -26,23 +24,15 @@ Build mapping: task_id -> set of file paths
 
 ## The Partition Rule
 
-`collision.partition` (cli/src/fno/graph/collision.py) groups a wave's tasks
-by shared normalized path; two tasks writing under one hidden shared output
-root (`.fno/`, `docs/`, ...) land in one group too. A task with no parseable
-file list is `unevaluated` - its own verdict, never a silent pass.
+`collision.partition` (cli/src/fno/graph/collision.py) groups a wave's tasks by shared normalized path. Two tasks writing under one hidden shared output root (`.fno/`, `docs/`, ...) land in one group too. A task with no parseable file list is `unevaluated`: its own verdict, never a silent pass.
 
-A wave's tasks run as soon as their blockers are complete, whether those
-blockers are declared in `blocked_by` or derived from file overlap:
+A wave's tasks run as soon as their blockers are complete, whether those blockers are declared in `blocked_by` or derived from file overlap:
 
-- Tasks in disjoint groups dispatch concurrently - the wave stays parallel.
-- A group of overlapping tasks runs in id order: each task's derived edge
-  names the group mate before it.
-- An unevaluated task runs last: it waits for every evaluated task in the
-  wave.
+- Tasks in disjoint groups dispatch concurrently. The wave stays parallel.
+- A group of overlapping tasks runs in id order: each task's derived edge names the group mate before it.
+- An unevaluated task runs last: it waits for every evaluated task in the wave.
 
-The overlap never downgrades the wave. The `--ready` query unions the
-derived edges with the declared ones, so `/execute waves` dispatches the
-ready set concurrently while the edges hold the overlapping tasks back.
+The overlap never downgrades the wave. The `--ready` query unions the derived edges with the declared ones. `/execute waves` dispatches the ready set concurrently while the edges hold the overlapping tasks back.
 
 ## Rules
 
@@ -55,12 +45,11 @@ ready set concurrently while the edges hold the overlapping tasks back.
 ## Edge Cases
 
 ### Per-task readiness partitions file overlap
-Per-task readiness controls dependency availability, and derived edges carry
-file overlap into that same query. If A, B, and C share files, A and B may
-still dispatch while C waits on its group mate - partial parallelization
-within one wave is the supported path.
+
+Per-task readiness controls dependency availability, and derived edges carry file overlap into that same query. If A, B, and C share files, A and B can still dispatch while C waits on its group mate. Partial parallelization within one wave is the supported path.
 
 ### Malformed or missing map
+
 If the ownership map is present but malformed, log a warning and use the declared strategy.
 
 ## Extended Decision Tree

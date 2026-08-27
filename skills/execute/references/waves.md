@@ -209,17 +209,7 @@ fi
 READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" "${READY_ARGS[@]}")
 ```
 
-A task appears under `ready` when its effective blockers are all complete and
-no peer holds it. A declared `blocked_by` list wins, including an explicit
-empty list. A task without that key derives every task in the previous wave.
-Inside a parallel wave, `collision.partition` adds derived edges: tasks
-sharing a file (or a hidden shared output root) serialize in wave order, and
-a task with no parseable file list waits for every evaluated sibling. Live
-foreign task claims appear under `claimed`. Stale or self-owned claims are
-re-offered. Tasks held back by unfinished blockers appear under `blocked_on`
-with those blockers and re-enter `ready` on a later round - no action needed
-for them now. Unknown task-row statuses appear under `blocked` and never
-dispatch. Dispatch every entry under `ready` before running the query again:
+A task appears under `ready` when its effective blockers are all complete and no peer holds it. A declared `blocked_by` list wins, including an explicit empty list. A task without that key derives every task in the previous wave. Inside a parallel wave, `collision.partition` adds derived edges: tasks sharing a file (or a hidden shared output root) serialize in wave order, and a task with no parseable file list waits for every evaluated sibling. Live foreign task claims appear under `claimed`. Stale or self-owned claims are re-offered. Tasks held back by unfinished blockers appear under `blocked_on` with those blockers and re-enter `ready` on a later round, so they need no action now. Unknown task-row statuses appear under `blocked` and never dispatch. Dispatch every entry under `ready` before running the query again:
 
 **If mode: sequential**
 - Execute each ready task in order using fno:archer
@@ -232,10 +222,7 @@ dispatch. Dispatch every entry under `ready` before running the query again:
 - Update STATE.md as each task completes, then rerun the `--ready` query; do not wait for the round
 - Tasks under `blocked_on` need no action; their derived edges hold them until a later round
 
-`bands` maps each task to its wave's `difficulty` band (the plan frontmatter
-band is the fallback). A pulling worker takes only tasks at or below its own
-band; the band-to-harness-and-model mapping lives in config, never in the
-plan.
+`bands` maps each task to its wave's `difficulty` band, with the plan frontmatter band as the fallback. A pulling worker takes only tasks at or below its own band. The band-to-harness-and-model mapping lives in config, never in the plan.
 
 An empty `ready` list does not prove execution is complete. If `claimed` is
 non-empty, wait for peer claims to leave `in_progress` and rerun `--ready`. If
