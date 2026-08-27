@@ -1923,16 +1923,18 @@ struct TabPruneOutcome {
 
 fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabPruneOutcome {
     let mut out = TabPruneOutcome::default();
-    // Tabs per workspace, so the fold below can tell a surplus tab from the
-    // only one. Closing the only one removes the whole squad, and the server
-    // de-persists a removed squad's store row - so the tab arm would delete
-    // exactly the row the live-pane arm below promises to protect, in one
-    // command. Folding surplus tabs is this arm's job; destroying a workspace
-    // is `squad close`, and the store consequence belongs to the squad arm.
-    let mut tabs_per_squad: std::collections::HashMap<(&str, u64), usize> =
+    // Tabs still open per workspace, counted up front and decremented as this
+    // loop folds. A workspace's LAST tab is never surplus: closing it removes
+    // the squad, and the server de-persists a removed squad's store row, so the
+    // tab arm would delete exactly the row the live-pane arm below promises to
+    // protect, in one command. A static count is not enough - three pristine
+    // tabs would each read "not the last one" and the loop would close all
+    // three. Folding surplus tabs is this arm's job; destroying a workspace is
+    // `squad close`, and the store consequence belongs to the squad arm.
+    let mut open_tabs: std::collections::HashMap<(&str, u64), usize> =
         std::collections::HashMap::new();
     for tab in tabs {
-        *tabs_per_squad
+        *open_tabs
             .entry((tab.session.as_str(), tab.squad_id))
             .or_default() += 1;
     }
@@ -1946,12 +1948,10 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
             out.skipped_named += 1;
             continue;
         }
-        if tabs_per_squad
-            .get(&(tab.session.as_str(), tab.squad_id))
-            .copied()
-            .unwrap_or(0)
-            < 2
-        {
+        let open = open_tabs
+            .get_mut(&(tab.session.as_str(), tab.squad_id))
+            .expect("counted above");
+        if *open < 2 {
             out.kept += 1;
             continue;
         }
@@ -1959,8 +1959,13 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
             out.kept += 1;
             continue;
         }
+        // Both branches decrement on the SAME counter, and only when the tab
+        // actually goes: a refused or failed close leaves it open, so the
+        // remaining count must not move or the next tab of this squad would
+        // read one fewer than are really there.
         if dry_run {
             out.would_close += 1;
+            *open -= 1;
             continue;
         }
         let Ok(sock) = proto::socket_path(&tab.session) else {
@@ -1976,7 +1981,10 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
                 force: false,
             },
         ) {
-            Ok(ServerMsg::TabClosed { .. }) => out.closed += 1,
+            Ok(ServerMsg::TabClosed { .. }) => {
+                out.closed += 1;
+                *open -= 1;
+            }
             Ok(_) | Err(_) => out.kept += 1,
         }
     }
@@ -6321,8 +6329,10 @@ mod tests {
         // The tab arm folds SURPLUS pristine tabs. A squad's only tab is not
         // surplus: closing it removes the squad, and the server de-persists a
         // removed squad's store row, so one prune run would take both the live
-        // pane and the record the live-pane arm exists to protect. Two pristine
-        // tabs on one squad still fold - that is what this arm is for.
+        // pane and the record the live-pane arm exists to protect. Surplus
+        // pristine tabs still fold - that is what this arm is for - but the
+        // count has to DECREMENT as they go. A static count reads "not the last
+        // one" for every tab of a three-tab squad and folds the workspace away.
         let only = vec![LiveTab {
             session: "main".into(),
             squad_id: 1,
@@ -6336,26 +6346,23 @@ mod tests {
         assert_eq!(outcome.would_close, 0);
         assert_eq!(outcome.kept, 1);
 
-        let pair = vec![
-            LiveTab {
-                session: "main".into(),
-                squad_id: 1,
-                squad_name: None,
-                tab_id: 11,
-                pane_count: 1,
-                pristine: true,
-            },
-            LiveTab {
-                session: "main".into(),
-                squad_id: 1,
-                squad_name: None,
-                tab_id: 12,
-                pane_count: 1,
-                pristine: true,
-            },
-        ];
+        let pristine_tab = |tab_id: u64| LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id,
+            pane_count: 1,
+            pristine: true,
+        };
+        let pair = vec![pristine_tab(11), pristine_tab(12)];
         let outcome = prune_live_tabs(&pair, false, true);
-        assert_eq!(outcome.would_close, 2, "surplus pristine tabs still fold");
+        assert_eq!(outcome.would_close, 1, "the surplus tab folds");
+        assert_eq!(outcome.kept, 1, "one tab is left standing");
+
+        let three = vec![pristine_tab(11), pristine_tab(12), pristine_tab(13)];
+        let outcome = prune_live_tabs(&three, false, true);
+        assert_eq!(outcome.would_close, 2, "the count decrements as tabs fold");
+        assert_eq!(outcome.kept, 1, "a workspace never folds to zero tabs");
     }
 
     #[test]
