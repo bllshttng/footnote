@@ -344,7 +344,10 @@ fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
 /// from a genuinely empty fleet, which is exactly how the bare-list drift hid.
 /// A non-empty container that yields zero recognizable workers is drift too
 /// (`None`); only an EMPTY recognized container (`[]`, `{"workers":{}}`) is a
-/// valid empty roster.
+/// valid empty roster. In the bare list, an item whose `state` is terminal
+/// (`stopped|done|failed`, the same mapping `parse_claude_agents` uses) is
+/// not a live session and is skipped: roster presence means attachable, and a
+/// finished session is not.
 pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let workers: Vec<&serde_json::Value> = match &doc {
@@ -360,6 +363,17 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     };
     let mut out = Vec::with_capacity(workers.len());
     for w in &workers {
+        // The daemon catalog lingers on finished sessions; a terminal `state`
+        // (bare-list only - the legacy file has no state field and lists only
+        // live workers) means the session is not attachable, so it is not
+        // roster presence. An unknown/missing state stays (tolerant, and
+        // `parse_claude_agents` holds unknowns rather than dropping them).
+        if matches!(
+            w.get("state").and_then(|v| v.as_str()),
+            Some("stopped") | Some("done") | Some("failed")
+        ) {
+            continue;
+        }
         let Some(session_id) = w
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -367,12 +381,19 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
         else {
             continue;
         };
-        // short_id is the roster map key == the `claude attach` jobId. A
-        // sessionId that leads with `-` (defensive: upstream drift) would yield
-        // an empty first segment and thus a meaningless attach target; skip that
+        // short_id is the `claude attach` jobId. Prefer the explicit `id`
+        // field (the key `parse_claude_agents` joins on) with the sessionId
+        // prefix as fallback, so the two id joins cannot split if upstream
+        // ever issues id != prefix. An id that leads with `-` (defensive:
+        // upstream drift) would be a meaningless attach target; skip the
         // worker, same as a missing sessionId.
-        let short_id = session_id.split('-').next().unwrap_or(session_id);
-        if short_id.is_empty() {
+        let short_id = w
+            .get("id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty() && !s.starts_with('-'))
+            .or_else(|| session_id.split('-').next().filter(|s| !s.is_empty()))
+            .unwrap_or(session_id);
+        if short_id.is_empty() || short_id.starts_with('-') {
             continue;
         }
         let short_id = short_id.to_string();
@@ -404,6 +425,11 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     // Refuse the silent empty (x-2f03): a non-empty container that yielded
     // zero recognizable workers is schema drift, not an empty fleet - `None`
     // keeps the caller's last-good rows instead of blanking the sideline.
+    // Boundary: PARTIAL recognition (some workers parse, some skip) still
+    // returns the parsed subset. Alien rows among valid ones are doctrine
+    // (tolerate-alien-row, tested), and a partial rename degrades visibly on
+    // the sideline rather than as a fake-empty success; a ratio guard here
+    // would break the documented 1-of-4 alien-row case.
     if !workers.is_empty() && out.is_empty() {
         return None;
     }
@@ -2661,22 +2687,36 @@ mod tests {
     // The CURRENT claude shape (x-2f03): a bare list, as captured from
     // `claude agents --json` (claude 2.1.247, 2026-08-27). The fixture is a
     // mechanically redacted copy of that capture: item count, per-item key
-    // set and order, value types, and the id==sessionId-prefix invariant are
-    // the real document's; names/cwds/UUID tails are redacted.
+    // set and order, value types, states, and the id==sessionId-prefix
+    // invariant are the real document's; names/cwds/UUID tails are redacted.
     #[test]
-    fn parse_roster_bare_list_capture_yields_every_session() {
+    fn parse_roster_bare_list_capture_yields_every_live_session() {
         let raw = include_str!("../tests/testdata/roster-bare-list.json");
         let doc: serde_json::Value = serde_json::from_str(raw).unwrap();
         let items = doc.as_array().unwrap();
+        let live: Vec<&serde_json::Value> = items
+            .iter()
+            .filter(|v| {
+                !matches!(
+                    v.get("state").and_then(|s| s.as_str()),
+                    Some("stopped") | Some("done") | Some("failed")
+                )
+            })
+            .collect();
+        assert!(
+            live.len() < items.len(),
+            "capture must carry terminal items for this test to prove they skip"
+        );
         let workers = parse_roster(raw).unwrap();
-        // Positive marker 1: the parsed count equals the capture's session
-        // count, and every short_id keys off the item's own sessionId.
+        // Positive marker 1: the parsed count equals the capture's LIVE
+        // session count (terminal-catalog sessions are not roster presence),
+        // and every short_id keys off the item's own id/sessionId.
         assert_eq!(
             workers.len(),
-            items.len(),
-            "every captured session must parse to a worker"
+            live.len(),
+            "every LIVE captured session parses; terminal ones skip"
         );
-        for (w, item) in std::iter::zip(&workers, items) {
+        for (w, item) in std::iter::zip(&workers, live) {
             let sid = item.get("sessionId").and_then(|v| v.as_str()).unwrap();
             assert_eq!(w.short_id, sid.split('-').next().unwrap());
             assert_eq!(w.cwd, item.get("cwd").and_then(|v| v.as_str()).unwrap());
@@ -2684,6 +2724,31 @@ mod tests {
             // must not have fired for a named capture item.
             assert_eq!(w.name, item.get("name").and_then(|v| v.as_str()).unwrap());
         }
+    }
+
+    #[test]
+    fn parse_roster_bare_list_state_and_id_semantics() {
+        // Terminal states skip (roster presence means attachable); the
+        // explicit `id` field is the attach key, prefix is the fallback; an
+        // unknown state stays (tolerant, parse_claude_agents holds unknowns).
+        let raw = r#"[
+            {"id":"aaaabbbb","sessionId":"ccccdddd-1","cwd":"/w","name":"live-id-wins",
+             "kind":"background","startedAt":1,"state":"working"},
+            {"id":"ef56ab78","sessionId":"ef56ab78-2","cwd":"/x","name":"unknown-state",
+             "kind":"background","startedAt":2,"state":"weird"},
+            {"id":"11112222","sessionId":"11112222-3","cwd":"/y","name":"done-skips",
+             "kind":"background","startedAt":3,"state":"done"},
+            {"id":"33334444","sessionId":"33334444-4","cwd":"/z","name":"stopped-skips",
+             "kind":"background","startedAt":4,"state":"stopped"}]"#;
+        let workers = parse_roster(raw).unwrap();
+        assert_eq!(workers.len(), 2, "done and stopped skip, unknown stays");
+        assert_eq!(
+            workers[0].short_id, "aaaabbbb",
+            "explicit id wins over prefix"
+        );
+        assert_eq!(workers[0].name, "live-id-wins");
+        assert_eq!(workers[1].short_id, "ef56ab78");
+        assert!(!workers.iter().any(|w| w.name.contains("skips")));
     }
 
     // ---- Union merge + dual-doc ReaderState (x-0a2e task 1.2) ----

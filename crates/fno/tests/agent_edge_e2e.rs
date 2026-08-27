@@ -501,18 +501,31 @@ fn agent_edge_inject_vs_typing_interlock() {
 
 /// x-2f03 end-to-end: N live claude sessions in the daemon roster (the real
 /// bare-list shape `claude agents --json` emits) render as N sideline rows at
-/// an attached client. The harness isolates `FNO_CLAUDE_DAEMON_DIR` to
-/// `<scratch>/iso-daemon`, so planting the fixture there IS the live roster
-/// the server's reader polls; the hermetic registry stays empty, so every
-/// roster session must surface as a watch-only foreign row (attach_id set,
-/// pane_id None) - no registry row to own or suppress it.
+/// an attached client; terminal-catalog sessions (state done/stopped/failed)
+/// do not render - roster presence means attachable. The harness isolates
+/// `FNO_CLAUDE_DAEMON_DIR` to `<scratch>/iso-daemon`, so planting the fixture
+/// there IS the live roster the server's reader polls; the hermetic registry
+/// stays empty, so every live roster session must surface as a watch-only
+/// foreign row (attach_id set, pane_id None) - no registry row to own or
+/// suppress it.
 #[test]
-fn agent_edge_bare_list_roster_renders_every_session() {
+fn agent_edge_bare_list_roster_renders_every_live_session() {
     let raw = include_str!("testdata/roster-bare-list.json");
     let items: serde_json::Value = serde_json::from_str(raw).unwrap();
     let items = items.as_array().unwrap();
-    let n = items.len();
-    let expected: Vec<(String, String)> = items
+    let terminal = |v: &serde_json::Value| {
+        matches!(
+            v["state"].as_str(),
+            Some("stopped") | Some("done") | Some("failed")
+        )
+    };
+    let live: Vec<&serde_json::Value> = items.iter().filter(|v| !terminal(v)).collect();
+    let n = live.len();
+    assert!(
+        n < items.len(),
+        "capture must carry terminal items to prove they skip"
+    );
+    let expected: Vec<(String, String)> = live
         .iter()
         .map(|v| {
             let sid = v["sessionId"].as_str().unwrap();
