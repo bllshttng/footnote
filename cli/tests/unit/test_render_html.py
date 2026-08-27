@@ -613,3 +613,182 @@ def test_a_persisted_selection_naming_absent_projects_does_not_blank_the_board()
     assert (
         "state.projectFilterActive = loadedProjects.active && state.projects.size > 0;"
     ) in _DASHBOARD_JS
+
+
+def test_type_is_public_but_parent_ids_are_not(tmp_path: Path):
+    """The pair. A type names a KIND of work and is safe to publish; a parent
+    is a node id and is not.
+
+    Probed with the gate's own LEAK_PATTERNS over the data-bearing markup, and
+    paired with the local render firing the same probe, so the public zero
+    cannot pass on a document that carries nothing.
+    """
+    from fno.graph.render_html import LEAK_PATTERNS
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entries = [
+        _entry("ab-9a000001", project="fno", title="An epic", type="epic"),
+        _entry("ab-9a000002", project="fno", title="A bug", type="bug",
+               parent="ab-9a000001"),
+    ]
+    public = render_public_backlog_html(entries, "fno")
+    local_path = tmp_path / "local.html"
+    render_graph_html(entries, local_path)
+    local = local_path.read_text()
+
+    assert '"ty":"epic"' in public and '"ty":"bug"' in public, "type is public"
+    assert '"pa":' not in public, "a parent id must never reach a public board"
+    assert "ab-9a000001" not in _payload(public)
+
+    fired = sorted(n for n, p in LEAK_PATTERNS if p.search(_payload(public)))
+    assert fired == [], f"public leaks {fired}"
+    local_fired = sorted(n for n, p in LEAK_PATTERNS if p.search(_payload(local)))
+    assert "node-id" in local_fired, "the probe never fires, so the zero proves nothing"
+    assert '"pa":"ab-9a000001"' in local, "the local board DOES carry ancestry"
+
+
+def test_the_design_tokens_survived_the_port():
+    """The port shipped 10 custom properties against the original's 25, which
+    is why the first board read grey: every status foreground had a paired
+    background and only the foregrounds came across.
+
+    Counts the tokens and names the ones that carry the design, rather than
+    counting rules, which says nothing about WHICH rules.
+    """
+    import re
+
+    from fno.graph.render_html import _DASHBOARD_CSS as css
+
+    tokens = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+    assert len(tokens) >= 25, f"only {len(tokens)} design tokens: {sorted(tokens)}"
+    for required in (
+        "--ready-bg", "--done-bg", "--idea-bg", "--sup-bg", "--prog-bg",
+        "--defer-bg", "--blocked-bg", "--accent-soft", "--shadow", "--ink-2",
+    ):
+        assert required in tokens, f"{required} did not survive the port"
+
+    # The five losses named on the node, each asserted by its own marker.
+    assert "prefers-color-scheme" in css, "no dark mode"
+    assert ':root[data-theme="dark"]' in css, "no explicit dark override"
+    assert ".rmain:hover" in css, "rows do not respond to the pointer"
+    assert "position:sticky" in css, "the filter bar scrolls away"
+    assert "box-shadow" in css, "nothing has depth"
+    assert ".row[data-s=done] .rt" in css, "closed work is not de-emphasized"
+
+
+def test_every_status_and_type_has_a_class_the_stylesheet_defines():
+    """Two lists that must not drift: the vocabulary the JS emits, and the
+    rules the stylesheet carries. A pill with no rule renders unstyled."""
+    from fno.graph.render_html import (
+        _DASHBOARD_CSS,
+        _DASHBOARD_STATUS_COLORS,
+        _DASHBOARD_STATUS_ORDER,
+        _DASHBOARD_TYPE_CLASSES,
+        _DASHBOARD_TYPE_FALLBACK,
+    )
+
+    for status in _DASHBOARD_STATUS_ORDER:
+        assert f".s-{status}" in _DASHBOARD_CSS, f"status {status} has no pill rule"
+        assert status in _DASHBOARD_STATUS_COLORS, f"status {status} has no bar colour"
+    for cls in list(_DASHBOARD_TYPE_CLASSES.values()) + [_DASHBOARD_TYPE_FALLBACK]:
+        assert f".{cls}" in _DASHBOARD_CSS, f"type class {cls} has no rule"
+    # Every colour the bar can emit must name a token the stylesheet defines.
+    for status, colour in _DASHBOARD_STATUS_COLORS.items():
+        token = colour.removeprefix("var(").removesuffix(")")
+        assert f"{token}:" in _DASHBOARD_CSS, f"{status} points at undefined {token}"
+
+
+def test_the_live_claim_is_keyed_on_local_not_on_projection(tmp_path: Path):
+    """A local board IS re-rendered on every graph mutation; a published one is
+    a snapshot at publish time. Saying either of the other is a lie about how
+    fresh the page is.
+
+    Keyed on `local`, because `render_graph_html` passes local=True and leaves
+    projection at its default. Keying on projection labelled the operator's own
+    live board a snapshot, which is the same defect pointed the other way, so
+    this asserts BOTH directions rather than only the published one.
+    """
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entries = [_entry("ab-14000001", project="fno", title="A node")]
+    local_path = tmp_path / "local.html"
+    render_graph_html(entries, local_path)
+    local = local_path.read_text()
+    public = render_public_backlog_html(entries, "fno")
+
+    assert "re-rendered on every graph mutation" in local
+    assert "snapshot" not in local.split("</header>")[0]
+    assert "snapshot" in public.split("</header>")[0]
+    assert "re-rendered on every graph mutation" not in public
+
+
+def test_the_light_palette_meets_wcag_aa_on_small_text():
+    """Every pill, chip and badge on this board is 10.5px to 12.5px, so 4.5:1
+    is the bar for all of them.
+
+    The port shipped four pairs below it: ready 3.43, accent 3.99, muted 4.03
+    and deferred 4.20. Every status chip is pressed on first paint, so the
+    failing state was the board's default rather than an edge case.
+    """
+    import re
+
+    from fno.graph.render_html import _DASHBOARD_CSS
+
+    def _lum(value: str) -> float:
+        h = value.lstrip("#")
+        parts = []
+        for i in (0, 2, 4):
+            c = int(h[i : i + 2], 16) / 255
+            parts.append(c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4)
+        return 0.2126 * parts[0] + 0.7152 * parts[1] + 0.0722 * parts[2]
+
+    def _ratio(fg: str, bg: str) -> float:
+        a, b = _lum(fg), _lum(bg)
+        return (max(a, b) + 0.05) / (min(a, b) + 0.05)
+
+    light = _DASHBOARD_CSS.split(":root {", 1)[1].split("}", 1)[0]
+    tok = dict(re.findall(r"(--[a-z0-9-]+):\s*(#[0-9a-fA-F]{6})", light))
+
+    pairs = [
+        ("--ready", "--ready-bg"),
+        ("--done", "--done-bg"),
+        ("--idea", "--idea-bg"),
+        ("--sup", "--sup-bg"),
+        ("--prog", "--prog-bg"),
+        ("--defer", "--defer-bg"),
+        ("--blocked", "--blocked-bg"),
+        ("--bug", "--bug-bg"),
+        ("--epic", "--epic-bg"),
+        ("--accent", "--accent-soft"),
+        ("--muted", "--surface-2"),
+        ("--ink-2", "--surface-2"),
+        ("--muted", "--surface"),
+    ]
+    failures = []
+    for fg, bg in pairs:
+        assert fg in tok and bg in tok, f"{fg} or {bg} vanished from the palette"
+        got = _ratio(tok[fg], tok[bg])
+        if got < 4.5:
+            failures.append(f"{fg} on {bg} = {got:.2f}")
+    assert not failures, "below 4.5:1 on small text: " + ", ".join(failures)
+
+
+def test_the_public_board_removes_the_id_track_not_just_its_width():
+    """A zero-width grid column still takes the gap between it and the next.
+
+    Collapsing the id column to 0 left an 11px indent on every public row
+    rather than none, because `gap` applies between all tracks including
+    zero-width ones. The track has to go, not its width.
+    """
+    from fno.graph.render_html import _DASHBOARD_CSS as css
+
+    assert 'body[data-local="false"] .rid { display:none }' in css, (
+        "the empty id span still occupies a grid cell on public boards"
+    )
+    assert 'body[data-local="false"] .rmain { grid-template-columns:1fr auto auto }' in css
+    assert "grid-template-columns:0 1fr" not in css, (
+        "a zero-width track still costs its gap; remove the track instead"
+    )
+    # The narrow layout re-points meta and dot, which would otherwise address
+    # a column that no longer exists on a public board.
+    assert 'body[data-local="false"] .meta, body[data-local="false"] .dot { grid-column:1 }' in css
