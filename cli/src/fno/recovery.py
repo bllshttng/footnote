@@ -1022,7 +1022,7 @@ def _redispatch(
     *,
     pre_spawn: Optional[Callable[[], bool]] = None,
     flags: Optional[Sequence[str]] = None,
-) -> bool | str:
+) -> "bool | str | _Failed":
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
