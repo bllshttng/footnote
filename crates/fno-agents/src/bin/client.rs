@@ -649,20 +649,19 @@ async fn run(args: Vec<String>) -> i32 {
     let daemon_bound_thread_spawn = method == "agent.spawn"
         && params.get("provider").and_then(|v| v.as_str()) == Some("codex")
         && params.get("substrate").and_then(|v| v.as_str()) == Some("thread");
+    // Snapshot before `params` moves into the request: the relocated gate
+    // honors the same spawn-control flags the shared construction reads.
+    let daemon_gate_flags = gate_flags_from_params(&params);
     let req = Request::new(1, method, params);
 
     let daemon_spawn_gate = if daemon_bound_thread_spawn {
-        let flags = fno_agents::spawn_gate::GateFlags {
-            force: false,
-            no_wait: false,
-        };
         let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
             &home.registry_json(),
             &agent_name,
             "bg",
-            flags,
+            daemon_gate_flags,
         ) {
             Ok(guard) => Some(guard),
             Err(code) => return code,
@@ -1171,16 +1170,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     let mut gate_guard = if substrate == "pane" || codex_thread_fallthrough {
         None
     } else {
-        let flags = fno_agents::spawn_gate::GateFlags {
-            force: params
-                .get("force")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            no_wait: params
-                .get("no_wait")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
+        let flags = gate_flags_from_params(&params);
         let config_cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
         match fno_agents::spawn_gate::run_gate(
             &config_cwd,
@@ -2271,6 +2261,23 @@ fn fresh_here_flags(params: &Value) -> (bool, bool) {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     (fresh, here)
+}
+
+/// The spawn-control flags one gate evaluation honors: the `--force` and
+/// `--no-wait` CLI flags land in the spawn params as booleans. Both gate
+/// constructions (the daemon-bound codex-thread gate and the shared one)
+/// read through this, so neither can drop a flag.
+fn gate_flags_from_params(params: &Value) -> fno_agents::spawn_gate::GateFlags {
+    fno_agents::spawn_gate::GateFlags {
+        force: params
+            .get("force")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        no_wait: params
+            .get("no_wait")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
 }
 
 /// Pure cwd precedence for a spawn/ask dispatch: explicit `--cwd` > `--here`
@@ -4231,6 +4238,20 @@ mod tests {
         let (_m, params) = build_request("spawn", &args).expect("gate flags must parse");
         assert_eq!(params["force"], true);
         assert_eq!(params["no_wait"], true);
+    }
+
+    /// Both gate constructions (the daemon-bound codex-thread gate and the
+    /// shared one) read their flags through `gate_flags_from_params`: a
+    /// hardcoded `GateFlags { force: false, .. }` refused a `--force` spawn at
+    /// capacity and made `--no-wait` queue for a slot.
+    #[test]
+    fn gate_flags_read_from_params_for_both_gate_constructions() {
+        let forced = gate_flags_from_params(&serde_json::json!({"force": true, "no_wait": true}));
+        assert!(forced.force);
+        assert!(forced.no_wait);
+        let defaults = gate_flags_from_params(&serde_json::json!({}));
+        assert!(!defaults.force);
+        assert!(!defaults.no_wait);
     }
 
     #[test]
