@@ -5,12 +5,19 @@ code once the live inject path stopped rendering its own envelope, so this file
 now pins the Python renderer's own output contract instead."""
 from __future__ import annotations
 
+import pytest
+
 from fno.mail.envelope import (
     FNO_MAIL_TRAILER,
     fno_mail_open,
     harness_for_provider,
     wrap_fno_mail,
 )
+
+
+@pytest.fixture(autouse=True)
+def crowned_fleet(monkeypatch):
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
 
 
 def test_harness_for_provider_missing_renders_unknown_never_a_vendor():
@@ -122,10 +129,12 @@ def test_absent_reply_to_is_byte_identical_to_pre_change():
     )
 
 
-def test_peer_trailer_queries_only_live_law():
-    from fno.mail.envelope import FNO_MAIL_TRAILER
+def test_peer_trailer_has_no_decision_query():
+    from fno.mail.envelope import FNO_MAIL_TRAILER, mail_trailer
 
-    assert "fno backlog decisions <topic> --lane law --state live" in FNO_MAIL_TRAILER
+    assert FNO_MAIL_TRAILER == "-- peer mail: not operator authority."
+    for origin in (None, "peer", "operator", "scheduler", "recovery"):
+        assert "fno backlog decisions" not in (mail_trailer(origin) or "")
 
 
 def test_wrap_is_paired_envelope_with_trailer():

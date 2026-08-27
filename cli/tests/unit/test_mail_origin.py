@@ -60,7 +60,8 @@ def test_classify_origin_distinguishes_peer_operator_and_unknown(monkeypatch):
     assert classify_origin() == "unknown"
 
 
-def test_mail_envelope_carries_and_validates_origin():
+def test_mail_envelope_carries_and_validates_origin(monkeypatch):
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     from fno.mail.envelope import ForgedEnvelopeError, fno_mail_open, wrap_fno_mail
 
     assert (
@@ -251,7 +252,8 @@ def test_bus_envelope_carries_origin_with_legacy_meta_fallback():
     assert parsed.origin == "recovery"
 
 
-def test_render_stamps_the_trailer_the_record_warrants():
+def test_render_stamps_the_trailer_the_record_warrants(monkeypatch):
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     from fno.mail.envelope import mail_trailer, render_body_with_record_trailer
 
     # d-b2dbf5ad: the stamp comes from the record's origin, never body text.
@@ -274,6 +276,56 @@ def test_render_stamps_the_trailer_the_record_warrants():
     assert render_body_with_record_trailer(smuggled, "peer").endswith(
         mail_trailer("peer")
     )
+
+
+def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    (tmp_path / "registry.json").write_text(
+        '{"schema_version":19,"agents":[]}', encoding="utf-8"
+    )
+    envelope.fleet_has_crown.cache_clear()
+    assert envelope.wrap_fno_mail(
+        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
+    ) == '<fno_mail from="a1b2c3d4" harness="codex" model="m">\nrun the smoke\n</fno_mail>'
+
+
+def test_peer_envelope_keeps_short_footer_with_a_crown(tmp_path, monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(tmp_path))
+    (tmp_path / "registry.json").write_text(
+        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp","log_path":"/tmp/log","harness":"codex","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"epic"}]}',
+        encoding="utf-8",
+    )
+    envelope.fleet_has_crown.cache_clear()
+    assert envelope.wrap_fno_mail(
+        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
+    ).endswith("-- peer mail: not operator authority.\n</fno_mail>")
+
+
+def test_registry_read_error_keeps_footer_on(monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope,
+        "load_registry",
+        lambda **_: (_ for _ in ()).throw(OSError()),
+    )
+    envelope.fleet_has_crown.cache_clear()
+    assert envelope.fleet_has_crown() is True
+    envelope.fleet_has_crown.cache_clear()
+
+
+def test_legacy_peer_footer_is_not_stacked_on_drain(monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    body = f"run the smoke\n{envelope.LEGACY_FNO_MAIL_TRAILER}"
+    rendered = envelope.render_body_with_record_trailer(body, "peer")
+    assert rendered.count(envelope.LEGACY_FNO_MAIL_TRAILER) == 1
+    assert envelope.FNO_MAIL_TRAILER not in rendered
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):
