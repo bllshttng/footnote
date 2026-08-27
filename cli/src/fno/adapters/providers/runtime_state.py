@@ -482,10 +482,16 @@ def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
     """Best-effort parse of the ``usage`` block into UsageSnapshot entries.
 
     Mirrors ``_parse_state_payload``: a partially-corrupt entry (string
-    ``used_pct``, missing ``resets_at``, non-dict window) is dropped with a
-    warning, never raised. ``used_pct`` is re-clamped on disk-read so a
-    hand-corrupted value can never escape the [0, 100] invariant. An empty
-    ``windows`` list is preserved (it reads as UNKNOWN, never OK).
+    ``used_pct``, non-dict window) is dropped with a warning, never raised.
+    ``used_pct`` is re-clamped on disk-read so a hand-corrupted value can never
+    escape the [0, 100] invariant. An empty ``windows`` list is preserved (it
+    reads as UNKNOWN, never OK).
+
+    ``resets_at`` is nullable and may be absent, so a window written before
+    x-763a and a reset-less window written after it both load. ``partial``
+    defaults False and ``confidence`` defaults ``unknown``: a row already on
+    disk was written by a probe that recorded neither, and claiming ``exact``
+    for it would assert precision nobody measured.
     """
     out: dict[str, UsageSnapshot] = {}
     block = raw.get("usage") or {}
@@ -506,11 +512,12 @@ def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
                 bad = True
                 break
             try:
+                raw_reset = w.get("resets_at")
                 windows.append(
                     UsageWindow(
                         label=str(w["label"]),
                         used_pct=_clamp_pct(float(w["used_pct"])),
-                        resets_at=float(w["resets_at"]),
+                        resets_at=None if raw_reset is None else float(raw_reset),
                     )
                 )
             except (KeyError, TypeError, ValueError):
@@ -525,6 +532,8 @@ def _parse_usage_payload(raw: dict[str, Any]) -> dict[str, UsageSnapshot]:
                 windows=tuple(windows),
                 probed_at=float(entry["probed_at"]),
                 source=str(entry.get("source", "")),
+                partial=bool(entry.get("partial", False)),
+                confidence=str(entry.get("confidence") or "unknown"),
             )
         except (KeyError, TypeError, ValueError) as exc:
             logger.warning("runtime_state: dropping malformed usage for %r: %s", pid, exc)
@@ -1349,17 +1358,35 @@ def _headroom_from(
     UNKNOWN proceeds - turning a successful "this provider is exhausted"
     observation into a launch onto the walled provider.
     """
-    binding = [w for w in (snap.windows if snap else ()) if w.resets_at > now]
+    # A window with no reset can never be "already reset", so the check that
+    # exempts a stale window cannot exempt it: it always binds, on percentage
+    # alone. That is the whole point of retaining it (x-763a).
+    binding = [
+        w
+        for w in (snap.windows if snap else ())
+        if w.resets_at is None or w.resets_at > now
+    ]
     exhausted = [w for w in binding if w.used_pct >= 100.0]
     if rlu is not None or exhausted:
-        resets = [w.resets_at for w in exhausted]
+        # A certain exhaustion is never downgraded for want of a deadline. When
+        # no exhausted window carries a reset and there is no provider lock,
+        # the state is EXHAUSTED with an unknown reset rather than a softer
+        # verdict with a known one.
+        resets = [w.resets_at for w in exhausted if w.resets_at is not None]
         if rlu is not None:
             resets.append(rlu)
-        return Headroom(HeadroomState.EXHAUSTED, min(resets))
+        return Headroom(HeadroomState.EXHAUSTED, min(resets) if resets else None)
     if snap is None or not snap.windows:
         # No data at all, or a snapshot that reported no windows: UNKNOWN,
         # never OK (empty windows must not read as headroom).
         return Headroom(HeadroomState.UNKNOWN, None)
+    if snap.partial:
+        # The probe could not read the response whole, so some window it was
+        # meant to see is missing. Round toward strength: floor at LOW and
+        # never answer OK from a reading with a hole in it. The reset offered
+        # is the soonest one actually observed, or None when nothing binds.
+        soonest = [w.resets_at for w in binding if w.resets_at is not None]
+        return Headroom(HeadroomState.LOW, min(soonest) if soonest else None)
     if not binding:
         # Snapshot has windows but every one has already reset: the limits are
         # fresh, so there is headroom.

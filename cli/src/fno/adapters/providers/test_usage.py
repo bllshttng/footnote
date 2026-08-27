@@ -453,21 +453,6 @@ class TestZaiProbe:
                             "type": "TOKENS_LIMIT",
                             "unit": 3,
                             "number": 5,
-                            "percentage": 20,
-                            "nextResetTime": None,
-                        }
-                    ]
-                },
-            },
-            {
-                "success": True,
-                "code": 200,
-                "data": {
-                    "limits": [
-                        {
-                            "type": "TOKENS_LIMIT",
-                            "unit": 3,
-                            "number": 5,
                             "usage": "1000",
                             "percentage": 20,
                             "nextResetTime": 1783807404000,
@@ -478,7 +463,19 @@ class TestZaiProbe:
         ],
     )
     def test_zai_parser_never_emits_percentage_only_success(self, payload) -> None:
-        """AC3-ERR: unknown/malformed Z.AI payloads have no positive window marker."""
+        """AC3-ERR: unknown/malformed Z.AI payloads have no positive window marker.
+
+        Every payload here carries at most ONE limit row, so a dropped row
+        leaves ``()`` and correctly reads unknown. That is why this control
+        stayed green through the false green: the defect needs a MIXED row
+        list, where a dropped row leaves a survivor to answer in its place.
+        The mixed cases live in ``test_usage_false_green.py`` (x-763a).
+
+        A reset-less row that is otherwise well-formed is no longer one of
+        these cases: it is RETAINED with ``resets_at = None`` and binds on its
+        percentage, because the endpoint reported the limit and its
+        utilization and only the reset is missing.
+        """
         import fno.adapters.providers.usage as usage_mod
 
         parse = getattr(usage_mod, "_parse_zai_windows", None)
@@ -541,7 +538,13 @@ class TestZaiProbe:
         if probe is None:
             pytest.fail("Z.AI probe is not implemented")
         repo_root = Path("/project")
-        snapshot, reason = probe(_zai_record(), now=1000.0, repo_root=repo_root)
+        # The clock has to sit near the reset it is reading. A 300-minute
+        # window whose reset is 56 YEARS out describes a different span, and
+        # since x-763a that reset is dropped to None rather than published as
+        # this window's (AC9-ERR). One hour before the reset is coherent.
+        snapshot, reason = probe(
+            _zai_record(), now=1783807404.0 - 3600.0, repo_root=repo_root
+        )
 
         assert reason is None
         assert snapshot is not None

@@ -82,11 +82,19 @@ class UsageWindow:
     escapes the invariant. ``resets_at`` is unix epoch seconds UTC, matching
     ``rate_limited_until``; a value already in the past means the window has
     reset and never binds a headroom verdict.
+
+    ``resets_at`` is OPTIONAL (x-763a). A window with no reset is still
+    evidence: the endpoint reported the limit and reported its utilization,
+    and only the reset is missing. Dropping such a row is what let a live
+    z.ai response lose its binding five-hour cap and answer with a surviving
+    one-minute tool limit at 0.6%, which reads as headroom. A reset-less
+    window binds on percentage alone and can never be "already reset", so
+    the reset check that exempts a stale window cannot exempt it.
     """
 
     label: str  # "5h" | "weekly" | provider-native label
     used_pct: float
-    resets_at: float
+    resets_at: float | None
 
     def __post_init__(self) -> None:
         clamped = _clamp_pct(self.used_pct)
@@ -102,12 +110,29 @@ class UsageSnapshot:
     windows); an empty tuple reads as UNKNOWN headroom, never OK. ``source``
     records how the reading was obtained for the ``fno config accounts usage``
     display and for debugging drift.
+
+    ``partial`` marks a response the probe could not read whole: at least one
+    row of a recognized limit type was rejected. The per-window guards are
+    each correct about their own row and none of them can see that a sibling
+    row has answered in the rejected row's place, so the marker is per
+    RESPONSE and sits beside them. It floors headroom at LOW and forbids OK,
+    which turns "we never saw the window that matters" into a positive marker
+    instead of an absence with three explanations.
+
+    ``confidence`` says how precise the reading is: ``exact`` when the source
+    reports counts, ``percent_only`` when it reports a percentage alone,
+    ``estimated`` when it was derived, ``unknown`` when it cannot be told. A
+    row already on disk reads ``unknown``, never ``exact`` - an old row's
+    precision is exactly what is not known. This module only carries the
+    field; acting on it is the router's decision.
     """
 
     provider_id: str
     windows: tuple[UsageWindow, ...]
     probed_at: float
     source: str  # "oauth-endpoint" | "session-events" | ...
+    partial: bool = False
+    confidence: str = "unknown"  # exact | percent_only | estimated | unknown
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +550,10 @@ def _probe_claude(
             windows=_parse_claude_windows(payload),
             probed_at=now,
             source="oauth-endpoint",
+            # The endpoint reports a utilization percentage and no counts, so
+            # a reading here is never better than percent-precise. codexbar
+            # reports `percentOnly` for this same account and endpoint.
+            confidence="percent_only",
         ), None
     if unattributable:
         # Every candidate credential either belongs to someone else or could not
@@ -586,20 +615,48 @@ def _find_rate_limits(obj: Any) -> dict | None:
     return None
 
 
+def _label_for_minutes(minutes: int | None) -> str:
+    """The window label for a span the payload STATES, in minutes.
+
+    One vocabulary for every lane, so ``weekly`` cannot come to mean two
+    different spans depending on which parser produced it. ``None`` reads
+    ``unknown`` rather than inheriting whatever a key position implies: a
+    label is a claim about a span, and a parser that has not been told the
+    span has no claim to make.
+    """
+    if minutes is None:
+        return "unknown"
+    if minutes == 300:
+        return "5h"
+    if minutes == 10080:
+        return "weekly"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440}d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60}h"
+    return f"{minutes}m"
+
+
 def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
     """Parse a codex ``rate_limits`` payload into windows.
 
-    Verified live (x-6bcf): ``rate_limits`` has ``primary`` (~5h) and
-    ``secondary`` (weekly) sub-objects, each ``{used_percent: 0-100 float,
-    resets_at: ABSOLUTE unix epoch seconds, window_minutes: int}``. ``resets_at``
-    is absolute (NOT an offset), so it is used directly. A sub-object missing
-    either field is skipped.
+    Verified live (x-6bcf): ``rate_limits`` has ``primary`` and ``secondary``
+    sub-objects, each ``{used_percent: 0-100 float, resets_at: ABSOLUTE unix
+    epoch seconds, window_minutes: int}``. ``resets_at`` is absolute (NOT an
+    offset), so it is used directly. A sub-object missing ``used_percent`` or
+    ``resets_at`` is skipped.
+
+    ``primary`` and ``secondary`` are an ITERATION ORDER and nothing more. The
+    label comes from ``window_minutes``, because the position lies: a live
+    payload measured 2026-08-27 carried ``primary.window_minutes = 10080`` (a
+    week) with ``secondary`` null, so keying the label on the position
+    published the only window codex reports as ``5h``.
     """
     rl = _find_rate_limits(payload)
     if rl is None:
         return ()
     out: list[UsageWindow] = []
-    for key, label in (("primary", "5h"), ("secondary", "weekly")):
+    for key in ("primary", "secondary"):
         sub = rl.get(key)
         if not isinstance(sub, dict):
             continue
@@ -609,11 +666,22 @@ def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
             continue
         try:
             out.append(
-                UsageWindow(label=label, used_pct=float(pct), resets_at=float(resets_at))
+                UsageWindow(
+                    label=_label_for_minutes(_window_minutes(sub.get("window_minutes"))),
+                    used_pct=float(pct),
+                    resets_at=float(resets_at),
+                )
             )
         except (TypeError, ValueError):
             continue
     return tuple(out)
+
+
+def _window_minutes(value: Any) -> int | None:
+    """A positive integer span in minutes, or None. Booleans are not spans."""
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        return None
+    return value
 
 
 def _probe_codex(
@@ -643,6 +711,9 @@ def _probe_codex(
                 windows=windows,
                 probed_at=now,
                 source="session-events",
+                # The payload reports counts behind its percentages and the
+                # reset is an absolute epoch, so nothing here is inferred.
+                confidence="exact",
             ), None
     return None, "probe-failed"
 
@@ -655,34 +726,80 @@ def _zai_integer(value: Any) -> int | None:
 
 
 def _zai_window_label(unit: int, number: int, window_minutes: int) -> str:
-    if window_minutes == 300:
-        return "5h"
-    if window_minutes == 10080:
-        return "weekly"
-    return f"{number}{_ZAI_UNIT_SUFFIX[unit]}"
+    return _label_for_minutes(window_minutes)
 
 
-def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
-    """Parse Z.AI's quota/limit response into reset-bearing usage windows.
+# A reset is published as a window's own reset only when the distance to it is
+# consistent with the window's span. Measured: the TIME_LIMIT row's
+# nextResetTime is the PLAN-PERIOD reset, not that window's, so a one-minute
+# tool limit was published resetting five days out - false in whichever
+# direction a consumer reads it. The tolerance is generous because a real reset
+# is a wall the vendor rounds; it only has to separate "this window's reset"
+# from "a reset four orders of magnitude away".
+_ZAI_RESET_TOLERANCE = 2.0  # the reset may sit up to 2x the span ahead
 
-    The endpoint's percentage is a fallback only. A window is usable only
-    when its limit, unit, and millisecond reset are all valid; this prevents a
-    percentage-only response from becoming a false green headroom reading.
+
+def _zai_confidence(payload: Any) -> str:
+    """``exact`` when every retained row reports counts, else ``percent_only``.
+
+    z.ai reports ``usage``/``remaining`` integers on some rows and a bare
+    ``percentage`` on others. A response mixing them is only as precise as its
+    coarsest row, so the whole reading is percent_only.
     """
+    data = payload.get("data") if isinstance(payload, dict) else None
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list) or not limits:
+        return "unknown"
+    for raw in limits:
+        if not isinstance(raw, dict) or raw.get("type") not in _ZAI_LIMIT_TYPES:
+            continue
+        if _zai_integer(raw.get("usage")) is None:
+            return "percent_only"
+    return "exact"
+
+
+def _parse_zai_windows(
+    payload: Any, *, with_partial: bool = False, now: float | None = None
+) -> Any:
+    """Parse Z.AI's quota/limit response into usage windows.
+
+    Returns the windows, or ``(windows, partial)`` when ``with_partial`` is set.
+    ``partial`` is True when a row of a RECOGNIZED limit type was rejected, so
+    the response was not read whole.
+
+    The per-window guard that follows is correct about each row it rejects. It
+    was wrong about one thing only: that rejecting a row makes the response
+    safe. On a live two-row body the binding five-hour TOKENS_LIMIT was
+    rejected for a missing ``nextResetTime`` and a one-minute tool limit at
+    0.6% survived to answer in its place, so headroom read OK on a provider
+    inside its five-hour wall. Two things follow, and they are separate:
+
+    - A row with a valid limit, unit and percentage but NO reset is RETAINED
+      with ``resets_at = None``. The endpoint reported the limit and its
+      utilization; only the reset is missing, and that is still evidence.
+    - A row rejected for anything else marks the whole response ``partial``,
+      which floors headroom at LOW. An unknown is a safe answer. A partial
+      green is not.
+    """
+    empty: tuple[UsageWindow, ...] = ()
     if (
         not isinstance(payload, dict)
         or payload.get("success") is not True
         or payload.get("code") != 200
     ):
-        return ()
+        return (empty, False) if with_partial else empty
     data = payload.get("data")
     limits = data.get("limits") if isinstance(data, dict) else None
     if not isinstance(limits, list):
-        return ()
+        return (empty, False) if with_partial else empty
 
+    observed = time.time() if now is None else now
     windows: list[UsageWindow] = []
+    partial = False
     for raw in limits:
         if not isinstance(raw, dict) or raw.get("type") not in _ZAI_LIMIT_TYPES:
+            # Not a limit type this parser claims to understand, so its absence
+            # from the result is not a gap in what was asked for.
             continue
         unit = _zai_integer(raw.get("unit"))
         number = _zai_integer(raw.get("number"))
@@ -693,9 +810,8 @@ def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
             or number is None
             or number <= 0
             or percentage is None
-            or reset_millis is None
-            or reset_millis <= 0
         ):
+            partial = True
             continue
         optional_values = {
             name: _zai_integer(raw.get(name))
@@ -705,6 +821,7 @@ def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
             name in raw and raw[name] is not None and value is None
             for name, value in optional_values.items()
         ):
+            partial = True
             continue
         window_minutes = number * _ZAI_UNIT_MINUTES[unit]
         used_pct = float(percentage)
@@ -717,14 +834,24 @@ def _parse_zai_windows(payload: Any) -> tuple[UsageWindow, ...]:
                 used_pct = 100.0 * used / usage
             elif current is not None:
                 used_pct = 100.0 * current / usage
+        resets_at: float | None = None
+        if reset_millis is not None and reset_millis > 0:
+            candidate = reset_millis / 1000.0
+            span = window_minutes * 60.0
+            # Never invent a reset, and never publish one belonging to a
+            # different span. A reset already past is kept as-is: the existing
+            # headroom rule reads that as "this window has reset".
+            if candidate - observed <= span * _ZAI_RESET_TOLERANCE:
+                resets_at = candidate
         windows.append(
             UsageWindow(
                 label=_zai_window_label(unit, number, window_minutes),
                 used_pct=used_pct,
-                resets_at=reset_millis / 1000.0,
+                resets_at=resets_at,
             )
         )
-    return tuple(windows)
+    result = tuple(windows)
+    return (result, partial) if with_partial else result
 
 
 def _probe_zai(
@@ -757,7 +884,7 @@ def _probe_zai(
         payload = json.loads(body)
     except (json.JSONDecodeError, ValueError):
         return None, "probe-failed"
-    windows = _parse_zai_windows(payload)
+    windows, partial = _parse_zai_windows(payload, with_partial=True, now=now)
     if not windows:
         return None, "probe-failed"
     return UsageSnapshot(
@@ -765,6 +892,8 @@ def _probe_zai(
         windows=windows,
         probed_at=now,
         source="quota-endpoint",
+        partial=partial,
+        confidence=_zai_confidence(payload),
     ), None
 
 
