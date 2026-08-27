@@ -642,7 +642,9 @@ def _default_pid_alive(pid: Optional[int]) -> Optional[bool]:
     from fno.agents.spawn_gate import _pid_alive
 
     try:
-        return _pid_alive(pid)
+        # No recorded start token on a claim row: the existence check stands
+        # on its own, the same posture legacy registry rows get.
+        return _pid_alive(pid, None)
     except Exception:  # noqa: BLE001 - a broken probe is unreadable, not dead
         return None
 
@@ -757,16 +759,21 @@ def collect_observations(
         except Exception as exc:  # noqa: BLE001 - a failed listing is a warning
             warnings.append(f"worktree list failed for {root}: {exc}")
             listed = []
-        fetched_ok[str(root)] = fetch_origin_main(Path(root), runner=runner)
-        if not fetched_ok[str(root)]:
+        # The listing's first row is the repository's MAIN worktree: clearing
+        # verbs name it, never whichever linked worktree happened to run the
+        # report (a finding that says "cd <some worktree>" targets the wrong
+        # checkout).
+        main_path = str(Path(listed[0][1])) if listed else str(root)
+        fetched_ok[main_path] = fetch_origin_main(Path(root), runner=runner)
+        if not fetched_ok[main_path]:
             warnings.append(f"git fetch origin main failed for {root}")
         for branch, path in listed:
-            if str(Path(path)) == str(Path(root)):
+            if str(Path(path)) == main_path:
                 continue  # the main worktree: shared surface, excluded
             if not Path(path).is_dir():
                 warnings.append(f"worktree vanished before scan: {path}")
                 continue
-            worktree_rows.append((path, str(root), branch))
+            worktree_rows.append((path, main_path, branch))
 
     # Claims per node.
     claim_fn = claim_status_fn

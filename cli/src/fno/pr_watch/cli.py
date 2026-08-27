@@ -673,21 +673,34 @@ def tick() -> None:
                         for item in recoverable_results
                         if item["outcome"] == "deferred"
                     }
-                    recovery_sig = _wd.union_signature(
-                        prev_recovery_sig,
-                        _wd.verdict_signature(
-                            {
-                                **payload,
-                                "verdicts": [
-                                    d for d in payload["verdicts"]
-                                    if _wd.Verdict(**d).verdict != _wd.LEAVE
-                                ],
-                            }
-                        ),
+                    published_sids = {
+                        item["session_id"]
+                        for item in recoverable_results
+                        if item["outcome"] != "deferred"
+                    }
+                    parts = [
+                        part
+                        for part in _wd.union_signature(
+                            prev_recovery_sig,
+                            _wd.verdict_signature(
+                                {
+                                    **payload,
+                                    "verdicts": [
+                                        d for d in payload["verdicts"]
+                                        if _wd.Verdict(**d).verdict != _wd.LEAVE
+                                    ],
+                                }
+                            ),
+                        ).split(";")
+                        if part
+                    ]
+                    parts.extend(
+                        f"{sid}:{_wd.RECOVERABLE}"
+                        for sid in sorted(published_sids)
                     )
                     recovery_sig = ";".join(
                         part
-                        for part in recovery_sig.split(";")
+                        for part in parts
                         if ":" not in part
                         or part.split(":", 1)[0] not in deferred_sids
                     )

@@ -4069,3 +4069,56 @@ def test_ac9_manual_and_tick_stamps_agree_for_one_snapshot(tmp_path, monkeypatch
     assert manual["unfinished_complete"] == tick["unfinished_complete"] is True
     assert manual["unfinished_signature"] == tick["unfinished_signature"]
     assert manual["source"] == "manual" and tick["source"] == "tick"
+
+
+# --- two defects the first live sweep caught -------------------------------
+
+
+def test_pid_probe_answers_with_a_live_process():
+    """Positive control: the pid probe must actually answer. The first live
+    run read every claim-holder pid as unreadable (a wrong arity on the
+    spawn-gate probe raised inside its own try/except), which made every
+    held worktree unknown-liveness."""
+    import os
+
+    assert uw._default_pid_alive(os.getpid()) is True
+    assert uw._default_pid_alive(None) is None
+
+
+def test_clearing_verbs_name_the_main_worktree_not_the_reporting_one(tmp_path):
+    """A report run from inside a linked worktree must still scope its
+    clearing verbs to the repository's MAIN worktree: `git worktree list`
+    from any linked tree lists the main tree first, and that is the root a
+    human or agent should stand in."""
+    import subprocess as _sp
+
+    main = tmp_path / "main"
+    main.mkdir()
+    for argv in (
+        ["init", "-q"],
+        ["config", "user.email", "t@t.t"],
+        ["config", "user.name", "t"],
+    ):
+        _sp.run(["git", "-C", str(main), *argv], check=True)
+    (main / "a.txt").write_text("base\n", encoding="utf-8")
+    _sp.run(["git", "-C", str(main), "add", "a.txt"], check=True)
+    _sp.run(["git", "-C", str(main), "commit", "-q", "-m", "base"], check=True)
+    linked = tmp_path / "linked"
+    _sp.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "feat"],
+        check=True,
+    )
+
+    obs = uw.collect_observations(
+        [linked],
+        now_s=NOW_1840,
+        graph_entries=[],
+        registry_rows=({}, True),
+        claim_status_fn=lambda node: {"state": "free"},
+        truth_resolver=lambda handle: None,
+        pr_candidates=[],
+    )
+    assert obs.worktrees, "linked worktree must be enumerated"
+    for w in obs.worktrees:
+        if Path(w.path).name == "linked":
+            assert w.repo_root == str(main)
