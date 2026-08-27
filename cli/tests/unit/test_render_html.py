@@ -613,3 +613,86 @@ def test_a_persisted_selection_naming_absent_projects_does_not_blank_the_board()
     assert (
         "state.projectFilterActive = loadedProjects.active && state.projects.size > 0;"
     ) in _DASHBOARD_JS
+
+
+def test_type_is_public_but_parent_ids_are_not(tmp_path: Path):
+    """The pair. A type names a KIND of work and is safe to publish; a parent
+    is a node id and is not.
+
+    Probed with the gate's own LEAK_PATTERNS over the data-bearing markup, and
+    paired with the local render firing the same probe, so the public zero
+    cannot pass on a document that carries nothing.
+    """
+    from fno.graph.render_html import LEAK_PATTERNS
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entries = [
+        _entry("ab-9a000001", project="fno", title="An epic", type="epic"),
+        _entry("ab-9a000002", project="fno", title="A bug", type="bug",
+               parent="ab-9a000001"),
+    ]
+    public = render_public_backlog_html(entries, "fno")
+    local_path = tmp_path / "local.html"
+    render_graph_html(entries, local_path)
+    local = local_path.read_text()
+
+    assert '"ty":"epic"' in public and '"ty":"bug"' in public, "type is public"
+    assert '"pa":' not in public, "a parent id must never reach a public board"
+    assert "ab-9a000001" not in _payload(public)
+
+    fired = sorted(n for n, p in LEAK_PATTERNS if p.search(_payload(public)))
+    assert fired == [], f"public leaks {fired}"
+    local_fired = sorted(n for n, p in LEAK_PATTERNS if p.search(_payload(local)))
+    assert "node-id" in local_fired, "the probe never fires, so the zero proves nothing"
+    assert '"pa":"ab-9a000001"' in local, "the local board DOES carry ancestry"
+
+
+def test_the_design_tokens_survived_the_port():
+    """The port shipped 10 custom properties against the original's 25, which
+    is why the first board read grey: every status foreground had a paired
+    background and only the foregrounds came across.
+
+    Counts the tokens and names the ones that carry the design, rather than
+    counting rules, which says nothing about WHICH rules.
+    """
+    import re
+
+    from fno.graph.render_html import _DASHBOARD_CSS as css
+
+    tokens = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+    assert len(tokens) >= 25, f"only {len(tokens)} design tokens: {sorted(tokens)}"
+    for required in (
+        "--ready-bg", "--done-bg", "--idea-bg", "--sup-bg", "--prog-bg",
+        "--defer-bg", "--blocked-bg", "--accent-soft", "--shadow", "--ink-2",
+    ):
+        assert required in tokens, f"{required} did not survive the port"
+
+    # The five losses named on the node, each asserted by its own marker.
+    assert "prefers-color-scheme" in css, "no dark mode"
+    assert ':root[data-theme="dark"]' in css, "no explicit dark override"
+    assert ".rmain:hover" in css, "rows do not respond to the pointer"
+    assert "position:sticky" in css, "the filter bar scrolls away"
+    assert "box-shadow" in css, "nothing has depth"
+    assert ".row[data-s=done] .rt" in css, "closed work is not de-emphasized"
+
+
+def test_every_status_and_type_has_a_class_the_stylesheet_defines():
+    """Two lists that must not drift: the vocabulary the JS emits, and the
+    rules the stylesheet carries. A pill with no rule renders unstyled."""
+    from fno.graph.render_html import (
+        _DASHBOARD_CSS,
+        _DASHBOARD_STATUS_COLORS,
+        _DASHBOARD_STATUS_ORDER,
+        _DASHBOARD_TYPE_CLASSES,
+        _DASHBOARD_TYPE_FALLBACK,
+    )
+
+    for status in _DASHBOARD_STATUS_ORDER:
+        assert f".s-{status}" in _DASHBOARD_CSS, f"status {status} has no pill rule"
+        assert status in _DASHBOARD_STATUS_COLORS, f"status {status} has no bar colour"
+    for cls in list(_DASHBOARD_TYPE_CLASSES.values()) + [_DASHBOARD_TYPE_FALLBACK]:
+        assert f".{cls}" in _DASHBOARD_CSS, f"type class {cls} has no rule"
+    # Every colour the bar can emit must name a token the stylesheet defines.
+    for status, colour in _DASHBOARD_STATUS_COLORS.items():
+        token = colour.removeprefix("var(").removesuffix(")")
+        assert f"{token}:" in _DASHBOARD_CSS, f"{status} points at undefined {token}"

@@ -1,0 +1,184 @@
+// Executes the board's own JavaScript against a minimal DOM, so a behavioral
+// regression fails a test instead of surviving a substring assertion.
+//
+// Review of PR 1208 found four JS defects the string-matching tests could not
+// see: group headers counting the unfiltered set, an empty project selection
+// blanking the board, positional bar colours, and a stale persisted selection.
+// All four are behavior. This runs the real code and reads the real result.
+//
+// Reads the rendered document on argv[2], writes a JSON verdict to stdout.
+
+import { readFileSync } from "node:fs";
+
+const doc = readFileSync(process.argv[2], "utf8");
+
+/* ---------- the smallest DOM that the board actually uses ---------- */
+
+class ClassList {
+  constructor(el) { this.el = el; }
+  get _set() { return new Set(String(this.el.className || "").split(/\s+/).filter(Boolean)); }
+  _write(s) { this.el.className = [...s].join(" "); }
+  add(c) { const s = this._set; s.add(c); this._write(s); }
+  remove(c) { const s = this._set; s.delete(c); this._write(s); }
+  contains(c) { return this._set.has(c); }
+}
+
+class El {
+  constructor(tag) {
+    this.tagName = String(tag).toUpperCase();
+    this.children = [];
+    this.parentNode = null;
+    this.dataset = {};
+    this.attrs = {};
+    this.style = {};
+    this.className = "";
+    this.textContent = "";
+    this._html = "";
+    this.hidden = false;
+    this.id = "";
+    this._listeners = {};
+    this.classList = new ClassList(this);
+  }
+  set innerHTML(v) { this._html = String(v); if (v === "") this.children = []; }
+  get innerHTML() { return this._html; }
+  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(k, fn) { (this._listeners[k] ||= []).push(fn); }
+  click() { (this._listeners.click || []).forEach((f) => f({ target: this })); }
+  closest(sel) {
+    const want = sel.replace(".", "");
+    let n = this;
+    while (n) { if (n.classList.contains(want)) return n; n = n.parentNode; }
+    return null;
+  }
+  scrollIntoView() {}
+  get descendants() {
+    const out = [];
+    const walk = (n) => n.children.forEach((c) => { out.push(c); walk(c); });
+    walk(this);
+    return out;
+  }
+  querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  querySelectorAll(sel) {
+    const m = sel.match(/^\[([\w-]+)(?:="?([^"\]]*)"?)?\]$/);
+    return this.descendants.filter((n) => {
+      if (sel.startsWith(".")) return n.classList.contains(sel.slice(1));
+      if (m) {
+        const key = m[1].replace(/^data-/, "").replace(/-(\w)/g, (_, c) => c.toUpperCase());
+        const has = m[1].startsWith("data-") ? key in n.dataset : m[1] in n.attrs;
+        if (!has) return false;
+        if (m[2] === undefined) return true;
+        return (m[1].startsWith("data-") ? n.dataset[key] : n.attrs[m[1]]) === m[2];
+      }
+      return n.tagName === sel.toUpperCase();
+    });
+  }
+}
+
+const byId = new Map();
+const body = new El("body");
+body.dataset.local = /data-local="true"/.test(doc) ? "true" : "false";
+
+const document = {
+  body,
+  createElement: (t) => new El(t),
+  getElementById: (id) => byId.get(id) || null,
+};
+for (const id of [
+  "stats", "totalCount", "planCount", "prCount", "statusChips", "projectChips",
+  "groupSel", "typeSel", "prioSel", "sizeSel", "fromDate", "q", "planOnly",
+  "prOnly", "shown", "board", "datef",
+]) {
+  const el = new El("div");
+  el.id = id;
+  byId.set(id, el);
+}
+const dataEl = new El("script");
+dataEl.textContent = doc.split('<script id="data" type="application/json">')[1].split("</script>")[0];
+byId.set("data", dataEl);
+
+const store = new Map();
+const localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+};
+const location = { search: process.env.BOARD_QUERY || "", hash: process.env.BOARD_HASH || "" };
+const window = { location, addEventListener() {} };
+
+/* ---------- run the board's own code ---------- */
+
+const js = doc.split("<script>")[1].split("</script>")[0];
+const seed = process.env.BOARD_SEED_PROJECTS;
+if (seed) store.set("fno-kanban-project-state", seed);
+
+new Function("document", "window", "location", "localStorage", "URLSearchParams", js)(
+  document, window, location, localStorage, URLSearchParams,
+);
+
+/* ---------- read what it produced ---------- */
+
+const board = byId.get("board");
+const groups = board.children;
+const rows = board.descendants.filter((n) => n.classList.contains("row"));
+const visible = rows.filter((r) => !r.classList.contains("is-hidden"));
+
+const api = {
+  shown: byId.get("shown").textContent,
+  totalRows: rows.length,
+  visibleRows: visible.length,
+  visibleIds: visible.map((r) => r.id).filter(Boolean),
+  groups: groups.map((g) => ({
+    open: g.dataset.open,
+    hidden: g.classList.contains("is-hidden"),
+    count: (g.querySelector(".gc") || {}).textContent,
+    bar: (g.querySelector(".tw") || {}).innerHTML || "",
+  })),
+  projectChips: byId.get("projectChips").children.map((b) => ({
+    project: b.dataset.project,
+    pressed: b.getAttribute("aria-pressed"),
+  })),
+  statusChips: byId.get("statusChips").children.map((b) => ({
+    status: b.dataset.s,
+    pressed: b.getAttribute("aria-pressed"),
+  })),
+  rowHtml: rows.map((r) => ({
+    id: r.id,
+    type: r.dataset.type,
+    html: (r.querySelector(".rmain") || {}).innerHTML || "",
+  })),
+};
+
+/* ---------- optional scripted interactions ---------- */
+
+const act = process.env.BOARD_ACTION;
+if (act) {
+  const [kind, arg] = act.split(":");
+  if (kind === "toggleProject") {
+    const times = Number(process.env.BOARD_ACTION_TIMES || 1);
+    for (let i = 0; i < times; i++) {
+      byId.get("projectChips").children
+        .filter((b) => b.dataset.project === arg).forEach((b) => b.click());
+    }
+  }
+  if (kind === "expand") {
+    const row = rows.find((r) => r.id === arg);
+    if (row) row.querySelector(".rmain").click();
+    api.detail = row ? (row.querySelector(".detail") || {}).innerHTML || "" : null;
+  }
+  const after = board.descendants.filter((n) => n.classList.contains("row"));
+  api.after = {
+    totalRows: after.length,
+    visibleRows: after.filter((r) => !r.classList.contains("is-hidden")).length,
+    shown: byId.get("shown").textContent,
+    projectChips: byId.get("projectChips").children.map((b) => ({
+      project: b.dataset.project,
+      pressed: b.getAttribute("aria-pressed"),
+    })),
+    // What the board PERSISTED. The blank-board bug survived a reload
+    // because an active-but-empty selection was written back.
+    persisted: store.get("fno-kanban-project-state") || null,
+  };
+}
+
+process.stdout.write(JSON.stringify(api));
