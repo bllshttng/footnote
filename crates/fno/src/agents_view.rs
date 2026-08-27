@@ -336,16 +336,30 @@ fn isolated_account_dirs() -> Vec<(String, PathBuf)> {
 /// u64 -> date-string drift once zeroed every typed-parse consumer, and
 /// tolerant per-field access means unread fields cannot break the parse. A
 /// worker missing `sessionId` is skipped alone (tolerate-alien-row, like a
-/// registry row without `name`); a missing `workers` key is an empty roster;
-/// a malformed document is `None` (the caller keeps last-good foreign rows).
+/// registry row without `name`). Two recognized shapes (x-2f03): a BARE LIST
+/// of worker objects (`claude agents --json`, measured 2026-08-27) and the
+/// legacy map under `workers`. Anything else - including an object with no
+/// `workers` key - is an UNRECOGNIZED shape and returns `None` (the caller
+/// keeps last-good foreign rows): a silent `Some(empty)` is indistinguishable
+/// from a genuinely empty fleet, which is exactly how the bare-list drift hid.
+/// A non-empty container that yields zero recognizable workers is drift too
+/// (`None`); only an EMPTY recognized container (`[]`, `{"workers":{}}`) is a
+/// valid empty roster.
 pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let workers = match doc.get("workers") {
-        Some(w) => w.as_object()?,
-        None => return Some(Vec::new()),
+    let workers: Vec<&serde_json::Value> = match &doc {
+        // Current claude shape: a bare list of worker objects.
+        serde_json::Value::Array(items) => items.iter().collect(),
+        // Legacy shape: a map of short-id -> worker under "workers".
+        serde_json::Value::Object(_) => doc
+            .get("workers")?
+            .as_object()?
+            .values()
+            .collect::<Vec<_>>(),
+        _ => return None,
     };
     let mut out = Vec::with_capacity(workers.len());
-    for w in workers.values() {
+    for w in &workers {
         let Some(session_id) = w
             .get("sessionId")
             .and_then(|v| v.as_str())
@@ -368,11 +382,16 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
             .unwrap_or_default()
             .to_string();
         let name = w
-            .get("dispatch")
-            .and_then(|d| d.get("seed"))
-            .and_then(|s| s.get("name"))
+            .get("name")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
+            .or_else(|| {
+                w.get("dispatch")
+                    .and_then(|d| d.get("seed"))
+                    .and_then(|s| s.get("name"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+            })
             .map(str::to_string)
             .unwrap_or_else(|| format!("cc-{short_id}"));
         out.push(RosterWorker {
@@ -381,6 +400,12 @@ pub fn parse_roster(raw: &str) -> Option<Vec<RosterWorker>> {
             cwd,
             account: None,
         });
+    }
+    // Refuse the silent empty (x-2f03): a non-empty container that yielded
+    // zero recognizable workers is schema drift, not an empty fleet - `None`
+    // keeps the caller's last-good rows instead of blanking the sideline.
+    if !workers.is_empty() && out.is_empty() {
+        return None;
     }
     Some(out)
 }
@@ -2572,9 +2597,11 @@ mod tests {
 
     // The roster parser (x-0a2e task 1.1): tolerant Value access over
     // claude's roster.json. Cites the "torn roster" and "missing sessionId"
-    // Failure Modes bullets.
+    // Failure Modes bullets. LEGACY shape only (x-2f03): claude now emits a
+    // bare list, covered by the fixture test below; this pins the map so the
+    // fix stays additive.
     #[test]
-    fn parse_roster_live_shape_yields_three_field_workers() {
+    fn parse_roster_legacy_workers_map_yields_three_field_workers() {
         let raw = r#"{"workers":{
             "ab12cd34":{"sessionId":"ab12cd34-9f00-4a2b-8888-000000000001",
                         "cwd":"/w","procStart":1751000000,
@@ -2612,14 +2639,51 @@ mod tests {
     }
 
     #[test]
-    fn parse_roster_garbage_is_none_and_missing_workers_is_empty() {
-        // Garbage doc -> None (caller keeps last-good, AC1-ERR); a document
-        // without a workers key (or with an empty map) is a VALID empty
-        // roster, not a parse failure.
+    fn parse_roster_garbage_is_none_and_unrecognized_shape_is_none() {
+        // Garbage doc -> None (caller keeps last-good, AC1-ERR). An object
+        // with NO workers key is an UNRECOGNIZED shape now (x-2f03), not an
+        // empty roster: returning Some(empty) there is indistinguishable from
+        // a genuinely empty fleet and is exactly how the bare-list drift hid.
+        // An EMPTY recognized container is still a valid empty roster.
         assert_eq!(parse_roster("not json"), None);
         assert_eq!(parse_roster(r#"{"workers": 3}"#), None);
-        assert_eq!(parse_roster("{}"), Some(Vec::new()));
+        assert_eq!(parse_roster("{}"), None);
+        assert_eq!(parse_roster(r#"{"proto":1}"#), None);
+        assert_eq!(parse_roster(r#""str""#), None);
         assert_eq!(parse_roster(r#"{"workers":{}}"#), Some(Vec::new()));
+        assert_eq!(parse_roster("[]"), Some(Vec::new()));
+        // A non-empty container yielding zero recognizable workers is drift,
+        // not empty: None keeps the caller's last-good rows.
+        assert_eq!(parse_roster(r#"[{"cwd":"/w"}]"#), None);
+        assert_eq!(parse_roster(r#"{"workers":{"orphan":{"cwd":"/w"}}}"#), None);
+    }
+
+    // The CURRENT claude shape (x-2f03): a bare list, as captured from
+    // `claude agents --json` (claude 2.1.247, 2026-08-27). The fixture is a
+    // mechanically redacted copy of that capture: item count, per-item key
+    // set and order, value types, and the id==sessionId-prefix invariant are
+    // the real document's; names/cwds/UUID tails are redacted.
+    #[test]
+    fn parse_roster_bare_list_capture_yields_every_session() {
+        let raw = include_str!("../tests/testdata/roster-bare-list.json");
+        let doc: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let items = doc.as_array().unwrap();
+        let workers = parse_roster(raw).unwrap();
+        // Positive marker 1: the parsed count equals the capture's session
+        // count, and every short_id keys off the item's own sessionId.
+        assert_eq!(
+            workers.len(),
+            items.len(),
+            "every captured session must parse to a worker"
+        );
+        for (w, item) in std::iter::zip(&workers, items) {
+            let sid = item.get("sessionId").and_then(|v| v.as_str()).unwrap();
+            assert_eq!(w.short_id, sid.split('-').next().unwrap());
+            assert_eq!(w.cwd, item.get("cwd").and_then(|v| v.as_str()).unwrap());
+            // Flat `name` is the bare-list field; the fallback convention
+            // must not have fired for a named capture item.
+            assert_eq!(w.name, item.get("name").and_then(|v| v.as_str()).unwrap());
+        }
     }
 
     // ---- Union merge + dual-doc ReaderState (x-0a2e task 1.2) ----
