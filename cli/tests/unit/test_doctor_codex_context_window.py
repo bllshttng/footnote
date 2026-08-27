@@ -10,6 +10,7 @@ allowed to make.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 from fno import doctor
@@ -488,6 +489,27 @@ def test_a_profile_supplied_window_is_named_as_such(tmp_path, monkeypatch) -> No
     assert "profiles.big.model_context_window=1000000" in _emit(report)[0]
 
 
+def _live_daemon_socket(monkeypatch):
+    """A real listening unix socket where the daemon's control socket lives.
+
+    The probe is a connect now, so a bare touched file reads dead (the file
+    survives its process).  Returns (listener, home) for the caller to close
+    and remove; a short CODEX_HOME keeps the bind path under the AF_UNIX
+    104-char limit.
+    """
+    import shutil
+    import socket as _socket
+    import tempfile
+
+    short = tempfile.mkdtemp(prefix="fno-x571-", dir="/tmp")
+    (Path(short) / "app-server-control").mkdir(parents=True)
+    monkeypatch.setenv("CODEX_HOME", short)
+    listener = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    listener.bind(str(Path(short) / "app-server-control" / "app-server-control.sock"))
+    listener.listen(1)
+    return listener, short
+
+
 def test_a_live_app_server_daemon_is_named_as_the_thing_holding_the_cap_down(
     tmp_path, monkeypatch
 ) -> None:
@@ -496,13 +518,17 @@ def test_a_live_app_server_daemon_is_named_as_the_thing_holding_the_cap_down(
     the actionable half, and the operator only sees it if the line says it."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     _write(tmp_path, configured=1000000, cached_max=272000)
-    sock = tmp_path / "app-server-control" / "app-server-control.sock"
-    sock.parent.mkdir(parents=True)
+    (tmp_path / "app-server-control").mkdir()
 
     assert "app-server daemon is live" not in _emit(doctor._codex_context_window_report())[0]
 
-    sock.touch()
-    assert "app-server daemon is live" in _emit(doctor._codex_context_window_report())[0]
+    listener, short = _live_daemon_socket(monkeypatch)
+    try:
+        _write(Path(short), configured=1000000, cached_max=272000)
+        assert "app-server daemon is live" in _emit(doctor._codex_context_window_report())[0]
+    finally:
+        listener.close()
+        shutil.rmtree(short, ignore_errors=True)
 
 
 def test_the_daemon_warning_reaches_the_raised_cap_branch(tmp_path, monkeypatch) -> None:
@@ -510,11 +536,15 @@ def test_the_daemon_warning_reaches_the_raised_cap_branch(tmp_path, monkeypatch)
     what pulls 828400 back to 258400.  The clause used to sit in the other
     branch, so the run about to lose 570k tokens was the one told nothing."""
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    _write(tmp_path, configured=1000000, cached_max=872000)
     (tmp_path / "app-server-control").mkdir()
-    (tmp_path / "app-server-control" / "app-server-control.sock").touch()
+    listener, short = _live_daemon_socket(monkeypatch)
 
-    line = _emit(doctor._codex_context_window_report())[0]
+    try:
+        _write(Path(short), configured=1000000, cached_max=872000)
+        line = _emit(doctor._codex_context_window_report())[0]
+    finally:
+        listener.close()
+        shutil.rmtree(short, ignore_errors=True)
 
     assert "above its 272000 base" in line
     assert "drops this to 258400" in line
