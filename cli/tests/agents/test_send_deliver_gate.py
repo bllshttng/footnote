@@ -304,6 +304,107 @@ def test_deliver_live_codex_daemon_unreachable(
 
 
 # ---------------------------------------------------------------------------
+# x-de10: a hosted codex THREAD row routes through the switchboard (turn
+# acceptance), never agent.deliver or a pane send. Old shape: the row fell to
+# the route_harness != "claude" demote, whose agent.deliver RPC the daemon
+# does not implement for threads, so every live mail send silently demoted to
+# the durable queue.
+# ---------------------------------------------------------------------------
+
+def _register_codex_thread_peer(name: str = "codex-thread-agent") -> None:
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name=name,
+            harness="codex",
+            cwd="/tmp",
+            log_path="/tmp/codex-thread-agent.log",
+            harness_session_id="0198c0de-0000-7000-8000-00000000000a",
+            host_mode="interactive",
+            status="live",
+        )
+    ])
+
+
+def test_deliver_live_codex_thread_routes_through_switchboard_not_deliver(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_codex_thread_peer()
+
+    rpc_calls: list[dict] = []
+
+    def _mock_rpc(method: str, params: dict, **kwargs):
+        rpc_calls.append({"method": method, "params": params})
+        if method == "agent.switchboard_v2":
+            assert params["to"] == "codex-thread-agent"
+            assert params["recipient_identity"]["harness"] == "codex"
+            assert params["recipient_identity"]["short_id"] == ""
+            assert params["mirror"] is False, "a thread reply cannot be mirrored mid-turn"
+            return {
+                "delivered": True,
+                "identity_verified": True,
+                "transport": "switchboard",
+                "turn_id": "turn-1",
+            }
+        return None
+
+    from fno.agents import dispatch as dispatch_mod
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _mock_rpc)
+
+    from fno.agents.dispatch import dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="codex-thread-agent",
+        message="hey hosted thread",
+        provider=None,
+        cwd=cwd,
+    )
+
+    assert result.delivery == "hosted", f"got {result.delivery!r}"
+    methods = [call["method"] for call in rpc_calls]
+    assert methods == ["agent.switchboard_v2"], (
+        f"a thread row must reach ONLY the switchboard, saw {methods}"
+    )
+
+
+def test_deliver_live_codex_thread_switchboard_miss_demotes_durable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_codex_thread_peer()
+
+    def _mock_rpc(method: str, params: dict, **kwargs):
+        if method == "agent.switchboard_v2":
+            return {"delivered": False, "reason": "codex thread unavailable: gone"}
+        return None
+
+    from fno.agents import dispatch as dispatch_mod
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _mock_rpc)
+
+    from fno.agents.dispatch import dispatch_send
+    from fno.inbox.store import read_all_threads
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    result = dispatch_send(
+        name="codex-thread-agent",
+        message="hello anyone",
+        provider=None,
+        cwd=cwd,
+    )
+
+    assert result.delivery == "durable", f"miss must demote durable, got {result.delivery!r}"
+    # The durable queue keys on the recipient's id head (matching the existing
+    # codex-peer tests, which read "deadbeef" for deadbeef-0000-...).
+    threads = read_all_threads("0198c0de")
+    assert threads, "the body must land in the durable queue"
+
+
+# ---------------------------------------------------------------------------
 # AC4-ERR (Python): CLI output format for codex delivered via PTY
 # ---------------------------------------------------------------------------
 

@@ -777,10 +777,14 @@ impl From<TurnResult> for TurnReceipt {
 }
 
 pub enum ThreadCommand {
-    /// Drive (or steer into) a turn; the reply resolves at completion.
+    /// Drive (or steer into) a turn; `reply` resolves at completion and the
+    /// optional `accept` resolves at ACCEPTANCE (the turn/start ack when idle,
+    /// the steer ack when driving) - the protocol's own delivery receipt, for
+    /// callers like the switchboard that must not wait out a whole turn.
     Submit {
         body: String,
         reply: oneshot::Sender<Result<TurnReceipt, String>>,
+        accept: Option<oneshot::Sender<Result<String, String>>>,
     },
     /// Interrupt the in-flight turn and report its terminal state.
     Interrupt {
@@ -796,6 +800,9 @@ pub enum ThreadCommand {
     /// (`kill_on_drop`), and the ack fires only AFTER that drop.
     Shutdown { ack: oneshot::Sender<()> },
 }
+
+type SubmitReplyTx = oneshot::Sender<Result<TurnReceipt, String>>;
+type AcceptTx = oneshot::Sender<Result<String, String>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterruptOutcome {
@@ -827,11 +834,23 @@ impl CodexThreadActor {
         &self,
         body: String,
     ) -> Result<oneshot::Receiver<Result<TurnReceipt, String>>, String> {
+        self.submit_with_accept(body, None).await
+    }
+
+    /// [`CodexThreadActor::submit`] with an acceptance channel: `accept`
+    /// resolves Ok(turn_id) the moment the actor accepts the body (start or
+    /// steer ack) and Err if the turn is refused.
+    pub async fn submit_with_accept(
+        &self,
+        body: String,
+        accept: Option<AcceptTx>,
+    ) -> Result<oneshot::Receiver<Result<TurnReceipt, String>>, String> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.tx
             .send(ThreadCommand::Submit {
                 body,
                 reply: reply_tx,
+                accept,
             })
             .await
             .map_err(|_| "codex thread actor is gone".to_string())?;
@@ -1107,7 +1126,11 @@ impl ActorCtx {
 
     async fn handle_command(&mut self, cmd: ThreadCommand, frames: &mut mpsc::Receiver<Value>) {
         match cmd {
-            ThreadCommand::Submit { body, reply } => self.handle_submit(body, reply, frames).await,
+            ThreadCommand::Submit {
+                body,
+                reply,
+                accept,
+            } => self.handle_submit(body, reply, accept, frames).await,
             ThreadCommand::Interrupt { ack } => {
                 let outcome = self.handle_interrupt(frames).await;
                 let _ = ack.send(outcome);
@@ -1137,14 +1160,15 @@ impl ActorCtx {
     async fn handle_submit(
         &mut self,
         body: String,
-        reply: oneshot::Sender<Result<TurnReceipt, String>>,
+        reply: SubmitReplyTx,
+        accept: Option<AcceptTx>,
         frames: &mut mpsc::Receiver<Value>,
     ) {
         let driving_turn = self.driving.as_ref().map(|driving| driving.turn_id.clone());
         match driving_turn {
             // Idle: drive a fresh turn. The reply resolves when the completion
             // routes in the main loop.
-            None => self.start_turn(body, reply, frames).await,
+            None => self.start_turn(body, reply, accept, frames).await,
             Some(expected) => {
                 // Driving: steer into the in-flight turn instead of queueing
                 // behind it. The steer ack returns in milliseconds; the
@@ -1174,8 +1198,13 @@ impl ActorCtx {
                             .as_mut()
                             .filter(|driving| driving.turn_id == expected);
                         match still_driving {
-                            Some(driving) => driving.waiters.push(reply),
-                            None => self.start_turn(body, reply, frames).await,
+                            Some(driving) => {
+                                if let Some(accept) = accept {
+                                    let _ = accept.send(Ok(expected));
+                                }
+                                driving.waiters.push(reply);
+                            }
+                            None => self.start_turn(body, reply, accept, frames).await,
                         }
                     }
                     Err(_) => {
@@ -1202,7 +1231,7 @@ impl ActorCtx {
                                 }
                             }
                         }
-                        self.start_turn(body, reply, frames).await;
+                        self.start_turn(body, reply, accept, frames).await;
                     }
                 }
             }
@@ -1212,7 +1241,8 @@ impl ActorCtx {
     async fn start_turn(
         &mut self,
         body: String,
-        reply: oneshot::Sender<Result<TurnReceipt, String>>,
+        reply: SubmitReplyTx,
+        accept: Option<AcceptTx>,
         frames: &mut mpsc::Receiver<Value>,
     ) {
         let sent = self.driver.send_turn_start(&body).await;
@@ -1224,6 +1254,9 @@ impl ActorCtx {
             .and_then(|value| parse_turn_start_response_value(&value).map_err(|e| e.to_string()))
         {
             Ok(turn_id) => {
+                if let Some(accept) = accept {
+                    let _ = accept.send(Ok(turn_id.clone()));
+                }
                 self.driver.note_turn_started(&turn_id);
                 self.shared.set_turn_id(Some(turn_id.clone()));
                 self.driving = Some(Driving {
@@ -1232,6 +1265,9 @@ impl ActorCtx {
                 });
             }
             Err(error) => {
+                if let Some(accept) = accept {
+                    let _ = accept.send(Err(error.clone()));
+                }
                 let _ = reply.send(Err(error));
             }
         }

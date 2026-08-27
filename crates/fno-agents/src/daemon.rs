@@ -5083,6 +5083,80 @@ fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool
     )
 }
 
+/// Drive a mail body into a hosted codex thread through its actor. Delivered
+/// means ACCEPTED (start/steer ack carries the turn id); the reply itself
+/// surfaces later via `agent_ask_done`. Any acceptance failure demotes to the
+/// durable path the same way the claude stream lane's drive failures do.
+async fn deliver_to_codex_thread(
+    ctx: &Ctx,
+    req: &Request,
+    to_entry: &RegistryEntry,
+    from: &str,
+    body: &str,
+    timeout_ms: u64,
+) -> Response {
+    let to = to_entry.name.clone();
+    let handle = match ensure_codex_thread_handle(ctx, to_entry).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            return Response::ok(
+                req.id,
+                json!({"delivered": false, "reason": format!("codex thread unavailable: {error}")}),
+            )
+        }
+    };
+    let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
+    if let Err(error) = handle.submit_with_accept(body.to_string(), Some(accept_tx)).await {
+        return Response::ok(req.id, json!({"delivered": false, "reason": error}));
+    }
+    // Acceptance is a start/steer ack (milliseconds in practice); the caller's
+    // timeout_ms is the outer backstop, same shape as the claude drive bound.
+    let outcome =
+        match tokio::time::timeout(Duration::from_millis(timeout_ms), accept_rx).await {
+            Ok(Ok(Ok(turn_id))) => Ok(turn_id),
+            Ok(Ok(Err(reason))) => Err(reason),
+            Ok(Err(_)) => Err("codex thread actor dropped the acceptance".into()),
+            Err(_) => Err("turn acceptance timed out".into()),
+        };
+    match outcome {
+        Ok(turn_id) => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_injected",
+                &json!({
+                    "name": to,
+                    "from_name": from,
+                    "provider": "codex",
+                    "transport": "switchboard",
+                    "turn_id": turn_id,
+                }),
+            );
+            Response::ok(
+                req.id,
+                json!({
+                    "delivered": true,
+                    "identity_verified": true,
+                    "transport": "switchboard",
+                    "turn_id": turn_id,
+                    "reply": null,
+                }),
+            )
+        }
+        Err(reason) => {
+            let _ = ctx.emitter.emit(
+                "agent_deliver_demoted",
+                &json!({
+                    "name": to,
+                    "from_name": from,
+                    "provider": "codex",
+                    "transport": "switchboard",
+                    "reason": reason,
+                }),
+            );
+            Response::ok(req.id, json!({"delivered": false, "reason": reason}))
+        }
+    }
+}
+
 async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
     let to = match req.params.get("to").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -5160,6 +5234,16 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
             req.id,
             json!({"delivered": false, "reason": "recipient-identity-changed"}),
         );
+    }
+
+    // A codex hosted thread is driven through its actor (x-de10): submit the
+    // body and answer delivered on ACCEPTANCE - the protocol's own receipt
+    // (turn/start ack when idle, steer ack when driving) - never a whole-turn
+    // wait. The claude stream lane below waits out the turn because it mirrors
+    // B's reply; a codex thread's reply surfaces later via `agent_ask_done`,
+    // so there is nothing to mirror here.
+    if is_codex_thread_entry(&to_entry) {
+        return deliver_to_codex_thread(ctx, req, &to_entry, &from, &body, timeout_ms).await;
     }
 
     // B must be a held stream-json thread. A non-claude peer (PTY lane) or a
@@ -15492,6 +15576,10 @@ while True:
             if m2.get("method") == "turn/steer" and not steered:
                 send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
                 steered = True
+            elif m2.get("method") == "turn/interrupt":
+                # Post-completion interrupts are refused promptly, like the
+                # real app-server refusing an unknown turn.
+                send({"id": m2.get("id"), "error": {"message": f"turn-{turn_n} is not active"}})
         send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
 "#;
 
@@ -15730,6 +15818,116 @@ while True:
             let stop_res = stop.result().expect("stop errored");
             assert_eq!(stop_res["interrupt"], "interrupted");
             std::env::remove_var("FNO_CODEX_ASK_WAIT_MS");
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// AC8 make-it-fail probe: mail arriving MID-TURN answers delivered on the
+    /// STEER ACK (milliseconds) and drives exactly ONE shared turn. Old shape:
+    /// the thread fell out of the switchboard as not-a-live-stream-thread, so
+    /// `delivered` read false - this assert fails there.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
+        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+            let home = tmp_home("codex-mail");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+            let registry =
+                load_registry_offloaded(home.registry_json()).await.expect("registry");
+            let row = registry.find("t").expect("thread row").clone();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let params = json!({
+                "to": "t",
+                "from": "king",
+                "body": "hello thread",
+                "mirror": false,
+                "recipient_identity": {
+                    "harness": "codex",
+                    "session_id": row.harness_session_id,
+                    "short_id": "",
+                    "created_at": row.created_at,
+                },
+            });
+            let started = std::time::Instant::now();
+            let resp = handle_switchboard(
+                &ctx,
+                &Request::new(4, "agent.switchboard_v2", params),
+            )
+            .await;
+            let res = resp.result().expect("switchboard errored");
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(5),
+                "delivery must answer on the steer ack, took {:?}",
+                started.elapsed()
+            );
+            assert_eq!(res["delivered"], true, "codex mail: {res:?}");
+            assert_eq!(res["identity_verified"], true);
+            assert_eq!(res["turn_id"], "turn-1", "steered into the shared turn");
+
+            // The body reached the thread: the steered turn carries it, so the
+            // completion event names the same single turn.
+            tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
+            let events = read_events(&home);
+            let done: Vec<_> = events
+                .iter()
+                .filter(|e| e["type"] == "agent_ask_done")
+                .collect();
+            assert_eq!(done.len(), 1, "one shared turn: {events:?}");
+            let injected = events.iter().any(|e| {
+                e["type"] == "agent_deliver_injected"
+                    && e["data"]["transport"] == "switchboard"
+                    && e["data"]["provider"] == "codex"
+            });
+            assert!(injected, "injected event missing: {events:?}");
+
+            // Cleanup: the actor holds a real child process.
+            handle_stop(&ctx, &Request::new(5, "agent.stop", json!({"name": "t"}))).await;
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// AC8 (idle half): mail to an IDLE codex thread starts the turn itself
+    /// and answers delivered with that turn id - no pane, no durable demote.
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
+        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+            let home = tmp_home("codex-mail-idle");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            // No seed: the row is idle at mail time.
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+            let registry =
+                load_registry_offloaded(home.registry_json()).await.expect("registry");
+            let row = registry.find("t").expect("thread row").clone();
+
+            let params = json!({
+                "to": "t",
+                "from": "king",
+                "body": "wake up",
+                "mirror": false,
+                "recipient_identity": {
+                    "harness": "codex",
+                    "session_id": row.harness_session_id,
+                    "short_id": "",
+                    "created_at": row.created_at,
+                },
+            });
+            let resp = handle_switchboard(
+                &ctx,
+                &Request::new(4, "agent.switchboard_v2", params),
+            )
+            .await;
+            let res = resp.result().expect("switchboard errored");
+            assert_eq!(res["delivered"], true, "idle codex mail: {res:?}");
+            assert_eq!(res["turn_id"], "turn-1", "started the turn: {res:?}");
+
+            handle_stop(&ctx, &Request::new(5, "agent.stop", json!({"name": "t"}))).await;
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
         })
