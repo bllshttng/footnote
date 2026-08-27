@@ -27,6 +27,7 @@ from fno.graph.render import (
     UNSCOPED_LABEL,  # noqa: F401  re-exported for importers; see the note below
     _project_key,
 )
+from fno.graph.statuses import is_terminal_entry
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -825,17 +826,31 @@ _DASHBOARD_JS = """\
 
 
 def _row_status(entry: object, missing: str = "unknown") -> str:
-    """The status a row and every projection of it must agree on.
+    """The status this module's row and its four projections must agree on.
 
-    `completed_at` is authoritative. A legacy or archived row can carry it
-    beside a stale open status, and a projection that reads `status` raw then
-    contradicts the row rendered beside it: a finished dependency shows open
-    inside the red Dependencies box, and the parent rollup counts it open.
-    One rule, so a fifth reader cannot drift from the other four.
+    A legacy or archived row can carry `completed_at` beside a stale open
+    status, and a projection that reads `status` raw then contradicts the row
+    rendered beside it: a finished dependency shows open inside the red
+    Dependencies box, and the parent rollup counts it open.
+
+    Closure is asked of `is_terminal_entry`, never of a bare `completed_at`
+    truthiness test, which that helper's own docstring forbids. A pre-migration
+    row encodes deferral INSIDE `completed_at` as a `deferred:` sentinel, and
+    deferral is a returnable rung, so a bare test relabels deferred work done.
+    The render path reads through `read_graph_with_archive`, which does not run
+    the recompute migration, so the sentinel reaches this function intact.
+
+    The `completed_at` term keeps a row that is terminal by `status` alone,
+    carrying no timestamp, on its stored status. A `superseded` row that DOES
+    carry `completed_at` still reads `done` here, which is the behaviour this
+    module already had for the row's own status and is left unchanged.
+
+    Scope is this module. `roadmap_public.public_backlog_entries` selects on
+    raw `status` and does NOT share this rule.
     """
     if not isinstance(entry, dict) or not entry:
         return missing
-    if entry.get("completed_at"):
+    if is_terminal_entry(entry) and entry.get("completed_at"):
         return "done"
     return str(entry.get("status") or missing)
 
@@ -906,11 +921,6 @@ def _dashboard_rows(
                     "ki": [
                         {
                             "id": str(child.get("id") or "?"),
-                            # Same completed_at-is-authoritative rule the row's
-                            # own status uses above. A legacy child can carry a
-                            # completed_at beside a stale open status, and
-                            # without this the parent rollup counts it open
-                            # while the child's own row reads done.
                             "s": _row_status(child),
                             "t": str(child.get("title") or "")[:90],
                             "ty": str(child.get("type") or ""),

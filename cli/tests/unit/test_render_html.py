@@ -863,3 +863,48 @@ def test_an_unresolvable_relation_id_still_reports_not_found():
     rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
 
     assert rows["ab-00000030"]["bb"] == [{"id": "ab-missing1", "s": "not found", "t": ""}]
+
+
+def test_a_legacy_deferred_sentinel_in_completed_at_is_not_read_as_done():
+    """A pre-migration row encodes deferral INSIDE completed_at as a `deferred:`
+    sentinel, and deferral is a returnable rung. The render path reads through
+    read_graph_with_archive, which does not run the recompute migration, so the
+    sentinel arrives intact. A bare truthiness test relabels that work done: the
+    parent shows a full kidBar and a deferred blocker reads as finished inside
+    the Dependencies box, so the node looks unblocked."""
+    entries = [
+        _entry("ab-00000040", project="fno", title="parent"),
+        _entry(
+            "ab-00000041",
+            project="fno",
+            title="legacy deferred",
+            parent="ab-00000040",
+            status="deferred",
+            completed_at="deferred:2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "ab-00000042",
+            project="fno",
+            title="really done",
+            parent="ab-00000040",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000041"]["s"] == "deferred", "the sentinel is not a completion"
+    assert rows["ab-00000042"]["s"] == "done", "control: a real timestamp still closes"
+    assert sorted((k["id"], k["s"]) for k in rows["ab-00000040"]["ki"]) == [
+        ("ab-00000041", "deferred"),
+        ("ab-00000042", "done"),
+    ], "the parent rollup must not count deferred work as finished"
+
+
+def test_a_terminal_status_without_a_timestamp_keeps_its_stored_status():
+    """`superseded` carrying no completed_at reads as itself, not as done."""
+    entries = [_entry("ab-00000050", project="fno", status="superseded")]
+
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000050"]["s"] == "superseded"
