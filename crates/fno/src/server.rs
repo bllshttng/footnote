@@ -1002,22 +1002,39 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// question, not more copies of this one. A reader trusting a bare count of
 /// three would skip them.
 ///
-/// It deliberately does NOT emit `--cd`, and that is a decision, not a gap
-/// nobody noticed. The other two splice a
-/// `-c sandbox_workspace_write.writable_roots=` grant beside it. A linked
-/// worktree's `.git` is a FILE pointing at `<repo>/.git/worktrees/<name>`,
-/// outside the workspace a bounded sandbox makes writable. So `--cd
-/// <worktree>` WITHOUT that grant roots a bounded worker where it cannot write
-/// git metadata, and its next commit dies. A worker that cannot commit is a
-/// worse outcome than the directory prompt `--cd` removes.
+/// It deliberately does NOT emit `--cd`, and the reason is narrower than it
+/// first looks.
+///
+/// This lane already spawns the pane AT the row's directory, via
+/// `spawn_pane_cmd(&argv, .., &spawn_cwd)` below. Codex raises its
+/// directory prompt only when the process cwd differs from the session's
+/// saved directory. So for a worker whose saved directory is the tree it is
+/// being restored into, the two agree, no prompt appears, and `--cd` would
+/// be a no-op naming the path codex already picked.
+///
+/// The prompt DOES appear on the other branch, where `restore_member_cwd`
+/// fell back because the row's directory is gone. There `--cd` is exactly
+/// the wrong answer: it pins the fallback, the squad canonical cwd or
+/// `$HOME`, when codex left alone still offers the recorded session
+/// directory, which usually survives and a human can take. `$HOME` is also
+/// not a trusted codex project, so pinning it can raise the folder-trust
+/// screen instead, an unattended hang of the kind `--cd` exists to remove.
+///
+/// A SEPARATE, PRE-EXISTING problem lives here and is not caused by any of
+/// the above. A restored bounded worker in a linked worktree is already
+/// rooted where `.git` is a FILE pointing at `<repo>/.git/worktrees/<name>`,
+/// outside the writable workspace, so its next commit already fails. The
+/// other two builders splice a `-c sandbox_workspace_write.writable_roots=`
+/// grant that fixes this. This lane has none, and adding `--cd` neither
+/// causes nor cures it.
 ///
 /// The grant does not travel here. `codex_writable_config_args` shells
-/// `fno do plan path`, folds in the state dirs, and carries the invariant that
-/// omitting the state root leaves a resumed worker unable to write its claim
-/// lockfile. Copying that is a fourth divergent implementation of subtle
-/// logic. Depending on fno-agents inverts a deliberate boundary: fno never
-/// links it, it shells the binary at runtime. So this lane needs `--cd` and
-/// the grant together, decided on that boundary, never a flag bolted on alone.
+/// `fno do plan path`, folds in the state dirs, and carries the invariant
+/// that omitting the state root leaves a resumed worker unable to write its
+/// claim lockfile. Copying it is a fourth divergent implementation of subtle
+/// logic. Depending on fno-agents inverts a boundary its own Cargo.toml
+/// records: fno never links it, it shells the binary at runtime. Shelling
+/// the resume verb for a rendered argv is the open candidate.
 fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(mut argv) = RESUME_PROGRAM.with(|p| p.borrow().clone()) {

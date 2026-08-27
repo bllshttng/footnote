@@ -4311,6 +4311,15 @@ mod tests {
             build_resume_argv("codex", "uuid-2", None),
             Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
         );
+        // An EMPTY cwd is absent too, which is what Python's `if cwd` does.
+        // Pinned here because nothing else is: drop the `.filter` and this is
+        // the only assertion that fails, instead of a bare `--cd ""` reaching
+        // codex, which cannot start on it.
+        assert_eq!(
+            build_resume_argv("codex", "uuid-3", Some("")),
+            Some(vec!["codex".into(), "resume".into(), "uuid-3".into()]),
+            "empty cwd must be treated as absent, matching the Python twin"
+        );
         assert_eq!(
             build_resume_argv("claude", "abc123", None),
             Some(vec!["claude".into(), "--resume".into(), "abc123".into()])
