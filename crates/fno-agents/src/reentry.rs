@@ -59,13 +59,15 @@ impl ReentryTransition {
         }
     }
 
-    /// True for the transitions that LAUNCH a process (resume/recover). An
-    /// attach re-enters a session that is already running, so the row's own
-    /// transport key (the 8-hex jobId) is the natural target and a row with
-    /// both ids does not force a selection. A launch must name exactly one
-    /// valid id, so a two-id row refuses until the caller selects.
-    fn launches(self) -> bool {
-        matches!(self, ReentryTransition::Resume | ReentryTransition::Recover)
+    /// True only for RECOVER, the explicit chooser. An attach re-enters a
+    /// session that is already running (the row's own transport key is the
+    /// target), and a smart resume continues the row's PRIMARY id - the
+    /// canonical address delivery already follows - recording any different
+    /// observed id as the related id rather than demanding a selection.
+    /// Recovery exists precisely to select between two valid ids, so it
+    /// refuses until the caller names one.
+    fn requires_selection(self) -> bool {
+        matches!(self, ReentryTransition::Recover)
     }
 }
 
@@ -239,7 +241,7 @@ pub fn resolve_reentry_with(
             }
         }
         None => {
-            if transition.launches() && !primary.is_empty() && !related.is_empty() {
+            if transition.requires_selection() && !primary.is_empty() && !related.is_empty() {
                 return Err(format!(
                     "row {name:?} holds two valid session ids ({primary}, {related}); name one with --session"
                 ));
@@ -737,6 +739,12 @@ mod tests {
 
         // Attach needs no selection: it targets the row's own transport key.
         let plan = resolve_reentry_with(r, "forked", ReentryTransition::Attach, None, &binding_ok)
+            .unwrap();
+        assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+        // A smart resume also needs no selection: it continues the primary
+        // (the canonical address delivery follows) and never demands one.
+        let plan = resolve_reentry_with(r, "forked", ReentryTransition::Resume, None, &binding_ok)
             .unwrap();
         assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }

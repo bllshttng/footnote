@@ -807,10 +807,19 @@ def _attach(name: str = "router"):
     return attach_agent(name)
 
 
-@_WAVE2
 def test_matrix_attach_routed_row_carries_account_and_route(tmp_path, monkeypatch) -> None:
     """Door: inline attach. Routed row: the claude invocation must carry the
     account namespace and the route settings, never ambient env."""
+    import fno.agents.account_env as account_env_mod
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
+    )
     _routed_glm_row(tmp_path, monkeypatch)
     _no_mux(monkeypatch)
     captured = _capture_claude_invocation(monkeypatch)
@@ -822,12 +831,11 @@ def test_matrix_attach_routed_row_carries_account_and_route(tmp_path, monkeypatc
     argv, env = captured[0]["argv"], captured[0]["env"]
     assert argv[:2] == ["claude", "attach"], argv
     assert "--settings" in argv, f"the recorded route must ride the argv: {argv}"
-    assert env and env.get("CLAUDE_CONFIG_DIR"), (
+    assert env and env.get("CLAUDE_CONFIG_DIR") == "/acct/makers/.claude", (
         f"the recorded account namespace must ride the env: {env}"
     )
 
 
-@_WAVE2
 def test_matrix_attach_unknown_account_refuses_before_claude(tmp_path, monkeypatch) -> None:
     """Door: inline attach. A routed row with no launch-account evidence
     refuses; bare `claude attach` is never observed."""
@@ -881,15 +889,59 @@ def test_matrix_attach_default_row_stays_bare(tmp_path, monkeypatch) -> None:
 
 
 @_WAVE2
-def test_matrix_resume_dead_routed_row_restores_the_binding(tmp_path, monkeypatch) -> None:
-    """Door: resume, dead arm. The relaunch argv carries --resume <id> AND the
-    route settings under the recorded account namespace."""
-    _routed_glm_row(tmp_path, monkeypatch)
-    from fno.agents import resume_cli
+def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch) -> None:
+    """Door: resume (the Python wake arm; the dead relaunch arm is Rust's and
+    carries --settings there). The woken attach runs under the recorded
+    account namespace with the route restored into its env."""
+    import fno.agents.account_env as account_env_mod
 
-    argv = resume_cli._build_resume_argv("claude", "sess-1")
-    assert argv, "the contract renderer must produce a resume argv"
-    assert "--settings" in argv, f"the recorded route must ride the argv: {argv}"
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
+    )
+    _routed_glm_row(tmp_path, monkeypatch)
+    from types import SimpleNamespace
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = SimpleNamespace(
+        name="router",
+        harness="claude",
+        cwd=str(tmp_path),
+        short_id="deadbeef",
+        harness_session_id="sess-1",
+        route_settings_path=_routed_claude_row(tmp_path, monkeypatch),
+        launch_account="makers",
+        provider="zai",
+    )
+    seen: dict = {}
+
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
+        seen["route_env"] = route_env
+        seen["account_env"] = account_env
+
+    res = resume_logic(
+        name="router",
+        registry_loader=lambda: [entry],
+        path_checker=lambda b: True,
+        cwd_checker=lambda c: True,
+        claim_fn=lambda s: None,
+        execvp=lambda *a, **k: None,
+        emit_event=lambda *a, **k: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": next(
+            iter(["Needs input", "Working"])
+        )}},
+    )
+    assert res.exit_code == 0
+    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+    assert seen["route_env"] and "ANTHROPIC_BASE_URL" in seen["route_env"], (
+        "the recorded route must ride the wake env"
+    )
 
 
 def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch) -> None:

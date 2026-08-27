@@ -294,6 +294,7 @@ def _default_wake_fn(
     message: str,
     route_env: Optional[dict[str, str]],
     cwd: str,
+    account_env: Optional[dict[str, str]] = None,
     timeout: float = _WAKE_ATTEMPT_TIMEOUT_SEC,
 ) -> None:
     """One wake attempt: pty + routed env + clear/send/submit.
@@ -356,6 +357,14 @@ def _default_wake_fn(
     scrub_incoherent_model_env_and_notify(
         env, routed=overlay_restores_model_env(route_env)
     )
+    # x-d285: the account binding (CLAUDE_CONFIG_DIR) applies before the
+    # route overlay, same precedence as every spawn seam - account selects
+    # the namespace, route wins endpoint/auth/model. Cleared FIRST so an
+    # ambient dir from the caller's shell (an alt-account alias) cannot
+    # survive a row bound to a different account.
+    if account_env:
+        env.pop("CLAUDE_CONFIG_DIR", None)
+        env.update(account_env)
     # Scrub only when there is something to restore, matching
     # bg_create/headless_create (harnesses/claude.py): a route-less row (the
     # common default-account case) keeps its ambient auth untouched rather
@@ -409,6 +418,8 @@ def _resume_claude_wake(
     cwd: str,
     harness: str,
     route_settings_path: Optional[str],
+    launch_account: Optional[str] = None,
+    provider: Optional[str] = None,
     message: str,
     emit_event: Any,
     wake_fn: Any,
@@ -473,6 +484,44 @@ def _resume_claude_wake(
             return ResumeResult(exit_code=claim_exit, stderr=claim_msg + "\n")
 
     route_env: Optional[dict[str, str]] = None
+    # x-d285: the account axis resolves under the same `not skipped` gate as
+    # the route - a skip-eligible row launches nothing, so there is nothing
+    # to mis-bill. A routed or non-Anthropic row with UNKNOWN account
+    # refuses (exit 3, the re-entry refusal code): a woken attach inherits
+    # the caller's ambient namespace, and guessing one is the wrong-bill
+    # door. A proven default row keeps its ambient env untouched.
+    account_env: Optional[dict[str, str]] = None
+    routed_row = bool(route_settings_path)
+    non_anthropic = bool(provider) and provider != "anthropic"
+    if not skipped:
+        if launch_account is None and (routed_row or non_anthropic):
+            shape = "routed" if routed_row else f"on provider {provider!r}"
+            return ResumeResult(
+                exit_code=3,
+                stderr=(
+                    f"fno agents resume: agent {name!r} is {shape} and "
+                    "records no launch account; waking it would guess a "
+                    "namespace and bill the wrong account. Restamp the row "
+                    "or re-spawn the worker.\n"
+                ),
+            )
+        if launch_account not in (None, "default"):
+            from fno.agents.account_env import (
+                AccountResolutionError,
+                resolve_account_overlay,
+            )
+
+            try:
+                account_env = dict(resolve_account_overlay(launch_account).env)
+            except AccountResolutionError as exc:
+                return ResumeResult(
+                    exit_code=3,
+                    stderr=(
+                        f"fno agents resume: launch account {launch_account!r} "
+                        f"recorded on agent {name!r} no longer resolves: "
+                        f"{exc}\n"
+                    ),
+                )
     # Gated on `not skipped`: route_env only feeds the wake attempts below,
     # which never run for a skip-eligible row. Restoring it unconditionally
     # meant a row that needed no wake at all (already Working/Idle/Done) but
@@ -498,7 +547,13 @@ def _resume_claude_wake(
         for _attempt in range(_WAKE_ATTEMPTS):
             teardown_unconfirmed = False
             try:
-                wake_fn(short_id, message=message, route_env=route_env, cwd=cwd)
+                wake_fn(
+                    short_id,
+                    message=message,
+                    route_env=route_env,
+                    cwd=cwd,
+                    account_env=account_env,
+                )
             except subprocess.TimeoutExpired:
                 last_err = "wake attempt timed out"
             except _WakeTeardownUnconfirmed as exc:
@@ -927,6 +982,8 @@ def resume_logic(
             cwd=cwd,
             harness=harness,
             route_settings_path=getattr(entry, "route_settings_path", None),
+            launch_account=getattr(entry, "launch_account", None),
+            provider=getattr(entry, "provider", None),
             message=message,
             emit_event=emit_event,
             wake_fn=wake_fn if wake_fn is not None else _default_wake_fn,

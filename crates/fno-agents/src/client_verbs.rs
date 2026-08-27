@@ -2545,32 +2545,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
-    if print_command {
-        if let Some(session) = mux_session.as_deref() {
-            // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
-            // from inside the route file reaches the printed command (AC5).
-            let pane = mux_pane_run_argv(session, cwd, &argv);
-            let pane_q = pane
-                .iter()
-                .map(|a| shlex_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("fno {}", pane_q);
-        } else {
-            let argv_q = argv
-                .iter()
-                .map(|a| shlex_quote(a))
-                .collect::<Vec<_>>()
-                .join(" ");
-            println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
-        }
-        return 0;
-    }
-
-    // Validate cwd for ALL paths before claiming, delegating, or launching. A
-    // deleted worktree is a cleanup job, not a resume. The exec path
-    // re-checks via set_current_dir below (race-free for its own chdir), but
-    // bailing here means a gone cwd never acquires the session claim, and
+    // Validate cwd for ALL paths before printing, claiming, delegating, or
+    // launching. A deleted worktree is a cleanup job, not a resume. The exec
+    // path re-checks via set_current_dir below (race-free for its own chdir),
+    // but bailing here means a gone cwd never acquires the session claim, and
     // never burns a wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
         eprintln!(
@@ -2583,6 +2561,65 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             py_repr_str(&name)
         );
         return 13;
+    }
+
+    // x-d285: a claude row's re-entry resolves through the canonical plan so
+    // the ACCOUNT axis (and, on the attach arm, the route) rides every launch
+    // shape below - delegation, --print-command, the mux pane relaunch, and
+    // the in-terminal exec. The dead arm's own `--settings` splice stays the
+    // route carrier there (it applies the identical usability rule), so only
+    // the plan's env is layered on that arm's argv; a duplicate --settings
+    // from the plan argv would hand claude the flag twice. A proven default
+    // row resolves to no env and no route: byte-identical to today.
+    let reentry_env = if harness == "claude" {
+        match crate::reentry::resolve_reentry(
+            &home.registry_json(),
+            &name,
+            crate::reentry::ReentryTransition::Resume,
+            None,
+        ) {
+            Ok(plan) => plan.env,
+            Err(reason) => {
+                eprintln!("fno agents resume: refused: {reason}");
+                return crate::reentry::REENTRY_REFUSED_EXIT;
+            }
+        }
+    } else {
+        Default::default()
+    };
+
+    if print_command {
+        // x-d285: paths and ids only. The env prefix names the config dir the
+        // row recorded; nothing from inside the route file is printed.
+        let env_prefix = reentry_env
+            .iter()
+            .map(|(k, v)| format!("{}={}", shlex_quote(k), shlex_quote(v)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let env_prefix = if env_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{env_prefix} ")
+        };
+        if let Some(session) = mux_session.as_deref() {
+            // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
+            // from inside the route file reaches the printed command (AC5).
+            let pane = mux_pane_run_argv(session, cwd, &argv);
+            let pane_q = pane
+                .iter()
+                .map(|a| shlex_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("fno {}{}", env_prefix, pane_q);
+        } else {
+            let argv_q = argv
+                .iter()
+                .map(|a| shlex_quote(a))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("cd {} && exec {}{}", shlex_quote(cwd), env_prefix, argv_q);
+        }
+        return 0;
     }
 
     // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
@@ -2637,6 +2674,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // the stale pre-EnterWorktree cwd from the registry entry itself.
             .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
+        // x-d285: the delegated wake re-resolves the same plan on the Python
+        // side; carrying the env here keeps the two runtimes from disagreeing
+        // if a stale binary lags one side of the rule.
+        for (key, value) in &reentry_env {
+            command.env(key, value);
+        }
         if cross_project {
             command.arg("--cross-project");
         }
@@ -2689,10 +2732,15 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
     if let Some(session) = mux_session.as_deref() {
         let pane = mux_pane_run_argv(session, cwd, &argv);
-        match std::process::Command::new("fno")
-            .args(&pane)
-            .stdin(std::process::Stdio::null())
-            .status()
+        let mut pane_command = std::process::Command::new("fno");
+        pane_command.args(&pane).stdin(std::process::Stdio::null());
+        // x-d285: the account namespace rides the pane relaunch. The mux CLI
+        // forwards its environment to the pane child; the server-side
+        // canonical resolution lands with the mux gestures (wave 2.2).
+        for (key, value) in &reentry_env {
+            pane_command.env(key, value);
+        }
+        match pane_command.status()
         {
             Ok(s) if s.success() => {
                 // session_id is the transport short_id, empty on a pane row;
@@ -2755,7 +2803,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // Replace the process with the provider CLI (os.execvp equivalent).
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let mut exec_command = std::process::Command::new(&argv[0]);
+    exec_command.args(&argv[1..]);
+    for (key, value) in &reentry_env {
+        exec_command.env(key, value);
+    }
+    let err = exec_command.exec();
     // exec only returns on failure.
     eprintln!("fno agents resume: failed to exec {}: {err}", argv[0]);
     1
@@ -3054,12 +3107,43 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
+    // x-d285: the inline attach consumes the canonical re-entry plan. A fresh
+    // claude process re-resolves its account namespace from ambient env, so a
+    // bare `claude attach` from the wrong shell lands in the wrong config
+    // namespace (the falsified "attach has nothing to do" premise). The plan
+    // restores the recorded account namespace and route settings together, or
+    // refuses before anything launches. A proven default row keeps the
+    // historical bare invocation: the plan carries no env and no --settings.
+    let plan = match crate::reentry::resolve_reentry(
+        &home.registry_json(),
+        &name,
+        crate::reentry::ReentryTransition::Attach,
+        None,
+    ) {
+        Ok(p) => p,
+        Err(reason) => {
+            eprintln!("fno agents attach: refused: {reason}");
+            append_agents_event(
+                &events_path,
+                "agent_attach_refused",
+                &[
+                    ("name", Value::String(name.clone())),
+                    ("provider", Value::String("claude".to_string())),
+                    ("reason", Value::String("reentry-plan-refused".to_string())),
+                    ("detail", Value::String(reason)),
+                ],
+            );
+            return crate::reentry::REENTRY_REFUSED_EXIT;
+        }
+    };
+    let mut command = std::process::Command::new(&plan.argv[0]);
+    command.args(&plan.argv[1..]);
+    for (key, value) in &plan.env {
+        command.env(key, value);
+    }
+
     // Inherit stdio so the claude TUI takes over; mirror its exit code.
-    match std::process::Command::new("claude")
-        .arg("attach")
-        .arg(short_id)
-        .status()
-    {
+    match command.status() {
         Ok(status) => {
             let exit_code = status.code().unwrap_or(1);
             append_agents_event(

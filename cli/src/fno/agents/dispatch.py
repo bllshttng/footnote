@@ -5206,6 +5206,84 @@ def reconcile_agents(
     )
 
 
+def _reentry_binding_for_row(entry: "object") -> "tuple[Optional[dict[str, str]], Optional[str], Optional[dict[str, str]]]":
+    """The launch binding a re-entry of this claude row must restore, or a refusal.
+
+    The Python-side arm of the x-d285 rule, applied when the Rust client is
+    not installed (with one installed, the runtime router serves attach and
+    resume from the Rust binary, whose doors consume the canonical
+    ``fno-agents reentry-plan`` verdict). Same rule, same primitives the Rust
+    resolver uses: the account axis is three-valued, the route file must still
+    record a route, and missing evidence on a routed or non-Anthropic row
+    refuses rather than guessing a namespace - a silent default is how the
+    wrong bill gets paid.
+
+    Returns ``(binding_env, settings_path, scrub_vars)``:
+    - ``binding_env``: the account overlay (``CLAUDE_CONFIG_DIR``), or None
+      for a proven default/legacy row;
+    - ``settings_path``: the validated route-settings path, or None;
+    - ``scrub_vars``: auth vars the caller must clear from the child env so
+      an ambient credential cannot override the binding (claude prefers an
+      env credential over a settings file).
+
+    Raises :class:`DispatchAskError` (exit 3) naming the missing evidence.
+    """
+    launch_account = getattr(entry, "launch_account", None)
+    route_path = getattr(entry, "route_settings_path", None) or None
+    provider = getattr(entry, "provider", None)
+    routed = bool(route_path)
+    non_anthropic = bool(provider) and provider != "anthropic"
+
+    if launch_account is None and (routed or non_anthropic):
+        shape = "routed" if routed else f"on provider {provider!r}"
+        raise DispatchAskError(
+            f"agent row {entry.name!r} is {shape} and records no launch "
+            "account; re-entering it would guess a namespace. Restamp the "
+            "row or re-spawn the worker.",
+            exit_code=3,
+        )
+
+    binding_env: Optional[dict[str, str]] = None
+    scrub_vars: tuple = ()
+    if launch_account not in (None, "default"):
+        from fno.agents.account_env import (
+            AccountResolutionError,
+            SCRUB_AUTH_VARS,
+            resolve_account_overlay,
+        )
+
+        try:
+            overlay = resolve_account_overlay(launch_account)
+        except AccountResolutionError as exc:
+            raise DispatchAskError(
+                f"launch account {launch_account!r} recorded on row "
+                f"{entry.name!r} no longer resolves: {exc}",
+                exit_code=3,
+            ) from exc
+        binding_env = dict(overlay.env)
+        scrub_vars = SCRUB_AUTH_VARS
+
+    settings_path: Optional[str] = None
+    if route_path:
+        from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+        try:
+            read_route_settings(route_path)
+        except RouteRestoreError as exc:
+            raise DispatchAskError(
+                f"agent row {entry.name!r} was launched on the route recorded "
+                f"at {route_path}, and it cannot be restored ({exc}). Refusing "
+                "to re-enter it on the default account.",
+                exit_code=3,
+            ) from exc
+        settings_path = route_path
+        from fno.agents.account_env import SCRUB_AUTH_VARS as _SCRUB
+
+        scrub_vars = _SCRUB
+
+    return binding_env, settings_path, list(scrub_vars)
+
+
 def attach_agent(name: str) -> AttachResult:
     """Interactive attach to a running agent session.
 
@@ -5329,8 +5407,20 @@ def attach_agent(name: str) -> AttachResult:
 
     from fno.agents.harnesses import claude as claude_mod
 
+    # x-d285: the inline attach restores the row's recorded launch binding or
+    # refuses before anything launches. A fresh claude process re-resolves its
+    # account namespace from ambient env, so a bare `claude attach` from the
+    # wrong shell lands in the wrong config namespace. A proven default row
+    # resolves to no binding and keeps the historical bare invocation.
+    binding_env, settings_path, scrub_vars = _reentry_binding_for_row(existing)
+
     try:
-        exit_code = claude_mod.claude_attach(short_id)
+        exit_code = claude_mod.claude_attach(
+            short_id,
+            env=binding_env,
+            settings_path=settings_path,
+            scrub_vars=scrub_vars,
+        )
     except FileNotFoundError as exc:
         raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
     except OSError as exc:
