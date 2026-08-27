@@ -1441,22 +1441,7 @@ When the resolved signal is `UNKNOWN` for any reason and the launch proceeds any
 
 ### CLI
 
-- `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %,
-  resets-in). `--refresh` forces a probe past the TTL cache and renders that probe's
-  own result, with no second cache read: two reads of one observation can disagree,
-  and that disagreement is what once printed `unknown` while the probe returned real
-  windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON
-  and `unknown (<slug>)` in human output, where the slug names the boundary that
-  failed - `harness-unsupported` (no probe for this CLI), `auth-unsupported` (an
-  api_key record; the probes read OAuth bearers), `unattributed` (no credential
-  provably this record's), `credential-rejected` (the request WAS issued and the endpoint answered 401/403 on every bearer, so the repair is a re-login rather than a network investigation), `probe-failed`, `probe-error`, `record-missing`,
-  `config-unreadable`, `no-windows`, or `not-probed` (no `--refresh` and no fresh
-  snapshot). Capability is classified before attribution, so an unsupported harness
-  or an api_key record is never reported as an account-binding fault it does not
-  have. A known provider additionally
-  carries `"persisted": false` when the reading is good but its cache write lost the
-  update-lock race; the reading is still displayed, because persistence and
-  displayability are separate outcomes.
+- `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %, resets-in). `--refresh` forces a probe past the TTL cache and renders that probe's own result, with no second cache read. Two reads of one observation can disagree, and that disagreement is what once printed `unknown` while the probe returned real windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON and `unknown (<slug>)` in human output. The slug names the boundary that failed: `harness-unsupported` (no probe for this CLI), `auth-unsupported` (an api_key record, and the probes read OAuth bearers), `unattributed` (no credential provably this record's), `credential-rejected` (the request WAS issued and the endpoint answered 401/403 on every bearer, so the repair is a re-login and not a network investigation), `probe-failed`, `probe-error`, `record-missing`, `config-unreadable`, `no-windows`, or `not-probed` (no `--refresh` and no fresh snapshot). Capability is classified before attribution. So an unsupported harness or an api_key record is never reported as an account-binding fault it does not have. A known provider additionally carries `"persisted": false` when the reading is good but its cache write lost the update-lock race. The reading is still displayed, because persistence and displayability are separate outcomes.
 - `fno config accounts list` gains a compact `headroom=` column, plus a `usage=<age>` column.
 - `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
 
@@ -1472,11 +1457,11 @@ Three shapes a snapshot can carry, each added because its absence had already pr
 
 **A window with no reset is retained, not dropped.** `UsageWindow.resets_at` is optional. When the endpoint reports a limit and its utilization but no reset, the window is kept with `resets_at = None` and binds headroom on its percentage alone. Such a window can never be "already reset", so the check that exempts a stale window cannot exempt it: it always binds. Dropping it is what let a live z.ai response lose its binding five-hour cap and answer with a surviving one-minute tool limit at 0.6 percent, which reads as headroom. The sensor reported a healthy provider sitting inside its five-hour wall.
 
-**A response that was not read whole is marked `partial`.** The per-window guards are each correct about the row they reject, and none of them can see that a sibling row has answered in a rejected row's place. So the marker sits beside them, per RESPONSE rather than per window. A partial snapshot floors headroom at `LOW` and never returns `OK`. That converts "we never saw the window that matters" from an absence into a positive marker.
+**A response that was not read whole is marked `partial`.** The per-window guards are each correct about the row they reject. None of them can see that a sibling row has answered in a rejected row's place. So the marker sits beside them, per RESPONSE rather than per window. A partial snapshot floors headroom at `LOW` and never returns `OK`. That converts "we never saw the window that matters" from an absence into a positive marker.
 
 **A reset must fit the window's own span before it is published as that window's reset.** Measured: z.ai's `TIME_LIMIT` row carries the PLAN-PERIOD reset. A one-minute tool limit was published resetting five days out, which is false in whichever direction a consumer reads it. Where the span and the distance disagree, the reset drops to `None`. The retention rule above has already made that a legal, binding shape. No reset is ever invented.
 
-**Every window label comes from the span the payload states.** `_label_for_minutes` is one vocabulary shared by every lane, so `weekly` cannot come to mean two spans. For codex, `primary` and `secondary` are an iteration order and nothing else: a live payload carried `primary.window_minutes = 10080` with `secondary` null, so keying the label on the position published the only window codex reports as `5h`. A sub-object with no `window_minutes` reads `unknown` rather than inheriting its position's assumption.
+**Every window label comes from the span the payload states.** `_label_for_minutes` is one vocabulary shared by every lane. So `weekly` cannot come to mean two spans. For codex, `primary` and `secondary` are an iteration order and nothing more. A live payload carried `primary.window_minutes = 10080` with `secondary` null. Keying the label on the position therefore published the only window codex reports as `5h`. A sub-object with no `window_minutes` reads `unknown` rather than inheriting its position's assumption.
 
 **`UsageSnapshot.confidence` says how precise a reading is** - `exact`, `percent_only`, `estimated` or `unknown`. codex reports counts and reads `exact`. The claude OAuth endpoint reports a percentage alone and reads `percent_only`. A row already on disk reads `unknown`, never `exact`: an old row's precision is exactly what is not known. The field travels. Acting on it is a routing decision and lives elsewhere.
 
