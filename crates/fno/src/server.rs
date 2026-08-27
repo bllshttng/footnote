@@ -440,6 +440,26 @@ enum CoreMsg {
         records: Vec<crate::squad_store::ExternalLifecycle>,
         notices: Vec<String>,
     },
+    /// (x-d285) The canonical re-entry plan for one gesture, resolved OFF the
+    /// core loop (`fno-agents reentry-plan`), routed back so the pane spawn +
+    /// placement run on the core loop as before. `Err` is the visible refusal:
+    /// a timeout, malformed verdict, missing binary, `resolved != true`, or the
+    /// resolver's own named evidence gap - the handler starts NO pane on it.
+    ReentryPlanReady {
+        id: u64,
+        request: Box<ReentrySpawnRequest>,
+        verdict: Result<ReentryVerdict, String>,
+    },
+    /// (x-d285) A batch's pre-resolved attach plans (restore's members or a
+    /// picker recruit's selected ids, keyed by attach id), routed back so the
+    /// existing loop re-enters on the core loop with the verdicts in hand.
+    /// An `Err` value is that member's visible refusal: its row is kept and
+    /// no pane starts for it.
+    BatchPlansReady {
+        id: u64,
+        plans: HashMap<String, Result<ReentryVerdict, String>>,
+        replay: Box<BatchReplay>,
+    },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
     Query(tokio::sync::oneshot::Sender<ServerMsg>),
@@ -1645,6 +1665,109 @@ struct HeldWorker {
     cwd: String,
 }
 
+/// (x-d285) The canonical re-entry verdict a mux gesture consumes, parsed from
+/// `fno-agents reentry-plan`'s JSON. `argv` is the provider invocation (ids
+/// and file PATHS only - never a settings value), `env` the `KEY=VALUE`
+/// assignments (the account's `CLAUDE_CONFIG_DIR`) that prefix it through
+/// `env(1)`, and `config_dir` the bare dir for the pane-title roster lookup.
+#[derive(Debug, Clone, PartialEq)]
+struct ReentryVerdict {
+    argv: Vec<String>,
+    env: Vec<String>,
+    config_dir: Option<std::path::PathBuf>,
+}
+
+impl ReentryVerdict {
+    /// Parse the resolver's machine output. Every non-conforming shape is the
+    /// same refusal the raw subprocess failure is: `resolved != true` carries
+    /// no launch, so nothing may spawn off it.
+    fn from_plan_json(raw: &[u8]) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_slice(raw)
+            .map_err(|e| format!("malformed re-entry verdict: {e}"))?;
+        if value.get("resolved").and_then(|v| v.as_bool()) != Some(true) {
+            return Err("re-entry verdict is not resolved".to_string());
+        }
+        let argv = value
+            .get("argv")
+            .and_then(|v| v.as_array())
+            .and_then(|a| {
+                a.iter()
+                    .map(|x| x.as_str().map(str::to_string))
+                    .collect::<Option<Vec<_>>>()
+            })
+            .ok_or_else(|| "re-entry verdict carries no argv".to_string())?;
+        if argv.is_empty() {
+            return Err("re-entry verdict carries an empty argv".to_string());
+        }
+        let env = value
+            .get("env")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let config_dir = value
+            .get("claude_config_dir")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from);
+        Ok(Self {
+            argv,
+            env,
+            config_dir,
+        })
+    }
+
+    /// The argv the pane runs: `env(1)` assignments prefixed onto the provider
+    /// invocation, argv tokens throughout (never a shell string).
+    fn prefixed_argv(&self) -> Vec<String> {
+        if self.env.is_empty() {
+            return self.argv.clone();
+        }
+        let mut argv = vec!["env".to_string()];
+        argv.extend(self.env.iter().cloned());
+        argv.extend(self.argv.iter().cloned());
+        argv
+    }
+}
+
+/// (x-d285) What the core loop re-enters once a gesture's re-entry plan
+/// arrives. The gesture arms re-run with the verdict in hand: every gate
+/// (shape, catalog, reconcile-focus, placement) is an idempotent read, so the
+/// second pass makes exactly the placement decision the first pass would
+/// have - only the argv construction moved off-loop into the canonical
+/// resolver.
+#[derive(Debug, Clone)]
+enum ReentrySpawnRequest {
+    /// Re-enter `attach_agent_gesture` for `attach_id` under its original
+    /// placement (open-here, split/drop, or the thread-pane reach).
+    Attach {
+        attach_id: String,
+        placement: crate::proto::PanePlacement,
+    },
+    /// Re-enter `resume_agent_gesture` for a claude row.
+    Resume { name: String },
+    /// Re-enter the held-worker resume behind `Command::FocusPane(pid)` -
+    /// restore's interactive arm replays with the verdict staged.
+    FocusHeld { pid: u64 },
+}
+
+/// (x-d285) What a batch re-enters once its pre-resolved plans land. The
+/// single-verdict slot covers one-gesture-one-spawn replays; a batch is
+/// N spawns under one gesture, so its plans arrive keyed by attach id and
+/// this names the loop that consumes them. Every gate inside those loops
+/// is an idempotent read, so a replay after partial progress skips the
+/// already-recruited members and consumes only what remains.
+#[derive(Debug, Clone)]
+enum BatchReplay {
+    /// Re-enter restore's member loop (once per server lifetime).
+    Restore { home_sid: u64, rows: u16, cols: u16 },
+    /// Re-enter the picker's bulk recruit for the selected ids.
+    Recruit { squad: String, ids: Vec<String> },
+}
+
 fn parse_spawn_receipts(raw: &str) -> HashMap<(String, String), HeldWorker> {
     let mut receipts: HashMap<(String, String), HeldWorker> = HashMap::new();
     for line in raw.lines() {
@@ -1975,6 +2098,18 @@ struct Core {
     topology_dirty: bool,
     /// (x-caef) When the last topology flush ran, for the debounce window.
     last_topology_flush: Option<Instant>,
+    /// (x-d285) The canonical re-entry verdict for the gesture the
+    /// `ReentryPlanReady` continuation just re-dispatched. Consumed exactly
+    /// once by the receiving arm (`take()` at its argv construction); empty in
+    /// steady state. One-shot by construction: a second gesture arriving
+    /// without a verdict resolves fresh.
+    reentry_verdict: Option<ReentryVerdict>,
+    /// (x-d285) A batch's pre-resolved attach plans, keyed by attach id:
+    /// staged by the `BatchPlansReady` handler, drained per member by the
+    /// consuming loop (restore or a picker recruit). Empty outside a batch
+    /// (and in every legacy-path test: no entry means the reconstructed
+    /// argv stands).
+    batch_plans: HashMap<String, Result<ReentryVerdict, String>>,
 }
 
 /// At most one `human_touch(inject)` per pane per window: the first keystroke
@@ -2532,6 +2667,34 @@ async fn run_agent_action(verb: &str, name: &str) -> String {
         Ok(Err(_)) => format!("{verb} {name}: unavailable"),
         Ok(Ok(status)) if status.success() => format!("{past} {name}"),
         Ok(Ok(_)) => format!("{verb} {name}: failed"),
+    }
+}
+
+/// (x-d285) Resolve one row's re-entry plan through the canonical resolver
+/// (`fno-agents reentry-plan <name> --transition <t>`), OFF the core loop and
+/// bounded. The account/route verdict is the one implementation every gesture
+/// consumes - this server never rebuilds it. Every failure shape (timeout,
+/// missing binary, non-zero refusal, malformed JSON, `resolved != true`) is a
+/// typed `Err` the caller surfaces as a notice; no pane starts on it.
+async fn run_reentry_plan(name: &str, transition: &str) -> Result<ReentryVerdict, String> {
+    const PLAN_TIMEOUT: Duration = Duration::from_secs(20);
+    let mut command =
+        crate::process_admission::tokio_command(crate::digest_overlay::fno_agents_bin());
+    command
+        .args(["reentry-plan", name, "--transition", transition])
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    match tokio::time::timeout(PLAN_TIMEOUT, fut).await {
+        Err(_) => Err(format!("re-entry plan for {name}: timed out")),
+        Ok(Err(_)) => Err(format!("re-entry plan for {name}: fno-agents unavailable")),
+        Ok(Ok(o)) if o.status.success() => {
+            ReentryVerdict::from_plan_json(&o.stdout).map_err(|e| format!("{name}: {e}"))
+        }
+        Ok(Ok(o)) => Err(first_line_or(
+            &String::from_utf8_lossy(&o.stderr),
+            &format!("re-entry plan for {name}: refused"),
+        )),
     }
 }
 
@@ -5744,6 +5907,7 @@ impl Core {
         replace: Option<u64>,
         rows: u16,
         cols: u16,
+        plan: Option<&ReentryVerdict>,
     ) -> Result<(u64, TabId, Option<String>), String> {
         let Some((bin, token)) = Self::resume_form(&facts.harness) else {
             return Err("agent harness has no resume form".into());
@@ -5767,7 +5931,13 @@ impl Core {
                 facts.name
             )
         });
-        let argv = resume_argv_for(bin, token, &facts.harness_session_id);
+        // (x-d285) A staged re-entry verdict replaces the bare provider argv;
+        // its `env` prefix carries the row's recorded account context. Rows
+        // off the claude axis (or without a plan) resume exactly as before.
+        let argv = match plan {
+            Some(verdict) => verdict.prefixed_argv(),
+            None => resume_argv_for(bin, token, &facts.harness_session_id),
+        };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
             entry.name = Some(facts.name.clone());
@@ -6937,6 +7107,12 @@ impl Core {
                     Some((a, d)) => (Some(a.as_str()), Some(d.as_path())),
                     None => (None, None),
                 };
+                // (x-d285) A staged re-entry plan (a live claude member)
+                // supplies the argv and its config dir; a staged refusal keeps
+                // the member and spawns nothing - the visible outcome the
+                // plan promises. No entry is an off-axis member: the
+                // reconstructed argv stands, exactly as before.
+                let spawn = self.staged_batch_argv(&m.attach_id, acct, cd);
                 // (x-caef case 2/3) Spawn at the member's OWN stored cwd when it
                 // still exists - a worktree worker restores into its worktree,
                 // not the squad's `origins[0]`. A gone cwd (an archived worktree)
@@ -6953,13 +7129,16 @@ impl Core {
                         m.attach_id
                     ));
                 }
-                let argv = attach_argv(&m.attach_id, acct, cd);
-                match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
-                    Ok(pid) => {
+                let spawned = spawn.and_then(|(argv, dir)| {
+                    self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)
+                        .map(|pid| (pid, dir))
+                });
+                match spawned {
+                    Ok((pid, dir)) => {
                         // (x-ed59) Title the restored pane from its registered name
                         // (the roster, the sidepane's source) so it matches the
                         // fresh-spawn label across reattach/restart.
-                        self.name_attached_pane(pid, &m.attach_id, cd);
+                        self.name_attached_pane(pid, &m.attach_id, dir.as_deref());
                         self.attached.insert(m.attach_id.clone(), pid);
                         member_panes.push((m.attach_id.clone(), pid, m.tab_name.clone()));
                         members.push(crate::squad_store::StoredMember {
@@ -7311,6 +7490,210 @@ impl Core {
             let notice = run_agent_action(verb, &name).await;
             let _ = core_tx.send(CoreMsg::DispatchResult { id, notice }).await;
         });
+    }
+
+    /// (x-d285) Resolve a gesture's re-entry plan OFF the core loop and
+    /// re-dispatch the gesture when the verdict lands. `request` names the
+    /// gesture to re-enter (the attach id + its placement, or the resume
+    /// name); the `ReentryPlanReady` handler stuffs the verdict into
+    /// `reentry_verdict` and replays the SAME command, so every gate
+    /// (shape, catalog, reconcile-focus, placement) re-runs against live
+    /// state and the arm proceeds with the canonical argv. A refusal routes
+    /// back as a notice and no pane starts. `row_name` is the REGISTRY name
+    /// the resolver keys on (never the attach id, which is transport-local).
+    fn resolve_reentry(
+        &self,
+        client_id: u64,
+        row_name: &str,
+        transition: &str,
+        request: ReentrySpawnRequest,
+    ) {
+        let core_tx = self.self_tx.clone();
+        let name = row_name.to_string();
+        let transition = transition.to_string();
+        tokio::spawn(async move {
+            let verdict = run_reentry_plan(&name, &transition).await;
+            let _ = core_tx
+                .send(CoreMsg::ReentryPlanReady {
+                    id: client_id,
+                    request: Box::new(request),
+                    verdict,
+                })
+                .await;
+        });
+    }
+
+    /// (x-d285) The live claude attach members restore must plan for, as
+    /// (attach_id, registry name) pairs. Reads the same sources the restore
+    /// loop reads - the squad store, the registry file, the live-id snapshot -
+    /// so the batch and the loop agree on membership without a third
+    /// resolver. Worker members never appear: restore holds them idle and
+    /// their resume gesture (a focus) plans its own re-entry.
+    fn restore_plan_targets(&self) -> Vec<(String, String)> {
+        let store = crate::squad_store::load();
+        if store.squads.is_empty() {
+            return Vec::new();
+        }
+        let live = live_attach_ids_snapshot();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let rows = std::fs::read_to_string(agents_view::registry_path())
+            .ok()
+            .and_then(|raw| agents_view::derive_rows(&raw, now));
+        let Some(rows) = rows else {
+            return Vec::new();
+        };
+        store
+            .squads
+            .iter()
+            .flat_map(|s| s.members.iter())
+            .filter(|m| !m.tombstone && m.worker.is_none() && live.contains(&m.attach_id))
+            .filter_map(|m| {
+                rows.iter()
+                    .find(|a| {
+                        a.attach_id.as_deref() == Some(m.attach_id.as_str())
+                            && a.harness.as_deref() == Some("claude")
+                    })
+                    .map(|a| (m.attach_id.clone(), a.name.clone()))
+            })
+            .collect()
+    }
+
+    /// (x-d285) Resolve a batch of (attach id, registry name) plans OFF the
+    /// core loop and route them back with the loop to re-enter. Every entry
+    /// lands - a verdict or that member's refusal - so the consuming loop
+    /// never waits and never guesses.
+    fn resolve_plan_batch(
+        &self,
+        client_id: u64,
+        wanted: Vec<(String, String)>,
+        replay: BatchReplay,
+    ) {
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let mut plans = HashMap::new();
+            for (attach_id, name) in wanted {
+                plans.insert(attach_id, run_reentry_plan(&name, "attach").await);
+            }
+            let _ = core_tx
+                .send(CoreMsg::BatchPlansReady {
+                    id: client_id,
+                    plans,
+                    replay: Box::new(replay),
+                })
+                .await;
+        });
+    }
+
+    /// (x-d285) Restore through the canonical re-entry plans. Every live
+    /// claude attach member's plan resolves OFF the core loop first, then the
+    /// existing restore loop runs with the verdicts staged. No claude member
+    /// to plan restores synchronously, exactly as before - which also keeps
+    /// the runtime-less test attach paths free of a spawn.
+    fn restore_with_plans(&mut self, client_id: u64, rows: u16, cols: u16, home_sid: u64) {
+        let wanted = self.restore_plan_targets();
+        if wanted.is_empty() {
+            self.restore_squads(rows, cols, home_sid);
+            self.reconcile_external_lifecycle();
+            return;
+        }
+        self.resolve_plan_batch(
+            client_id,
+            wanted,
+            BatchReplay::Restore {
+                home_sid,
+                rows,
+                cols,
+            },
+        );
+    }
+
+    /// (x-d285) Consume one member's staged batch plan. `Ok` is the argv to
+    /// spawn with (plus its config dir for the pane title); `Err` is the
+    /// member's visible refusal - spawn nothing. No staged entry is an
+    /// off-axis member: the reconstructed argv stands, exactly as before.
+    fn staged_batch_argv(
+        &mut self,
+        attach_id: &str,
+        acct: Option<&str>,
+        cd: Option<&std::path::Path>,
+    ) -> Result<(Vec<String>, Option<std::path::PathBuf>), String> {
+        match self.batch_plans.remove(attach_id) {
+            Some(Ok(verdict)) => {
+                let dir = verdict.config_dir.clone();
+                Ok((verdict.prefixed_argv(), dir))
+            }
+            Some(Err(reason)) => Err(reason),
+            None => Ok((
+                attach_argv(attach_id, acct, cd),
+                cd.map(std::path::Path::to_path_buf),
+            )),
+        }
+    }
+
+    /// (x-d285) The registry row NAME behind an attach id when that row is a
+    /// claude row, from the live catalog (the sidepane's in-memory source).
+    /// This is the identifier the resolver requests plans by; the attach id
+    /// itself is transport-local and never a registry key. The resolver is
+    /// claude-only, so a non-claude or harness-less row answers None and its
+    /// attach keeps the legacy argv.
+    fn attach_claude_row(&self, attach_id: &str) -> Option<String> {
+        self.agents
+            .iter()
+            .find(|a| a.attach_id.as_deref() == Some(attach_id))
+            .filter(|a| a.harness.as_deref() == Some("claude"))
+            .map(|a| a.name.clone())
+    }
+
+    /// (x-d285) One attach gesture's spawn argv. `None` means the canonical
+    /// resolution is now running off-loop and the caller must stop - the
+    /// verdict re-enters this gesture through `ReentryPlanReady`. A replayed
+    /// gesture holds the staged verdict (its argv IS the answer, config dir
+    /// included). Every non-claude row keeps the legacy argv unchanged - that
+    /// axis carries no route or account binding to preserve.
+    fn attach_gesture_argv(
+        &mut self,
+        client_id: u64,
+        id: &str,
+        placement: &crate::proto::PanePlacement,
+    ) -> Option<(Vec<String>, Option<std::path::PathBuf>)> {
+        if let Some(verdict) = self.reentry_verdict.take() {
+            return Some((verdict.prefixed_argv(), verdict.config_dir));
+        }
+        if let Some(name) = self.attach_claude_row(id) {
+            self.resolve_reentry(
+                client_id,
+                &name,
+                "attach",
+                ReentrySpawnRequest::Attach {
+                    attach_id: id.to_string(),
+                    placement: placement.clone(),
+                },
+            );
+            return None;
+        }
+        let (acct, cd) = self.attach_account_ctx(id);
+        Some((attach_argv(id, acct.as_deref(), cd.as_deref()), cd))
+    }
+
+    /// (x-d285) A resume gesture's re-entry plan. A replayed gesture holds
+    /// the staged verdict; otherwise the caller (a claude row only) fires the
+    /// off-loop resolution and `None` tells it to stop - the verdict re-enters
+    /// the gesture through `ReentryPlanReady`. The caller gates the claude
+    /// check: this never runs for another harness.
+    fn resume_gesture_plan(
+        &mut self,
+        client_id: u64,
+        row_name: &str,
+        request: ReentrySpawnRequest,
+    ) -> Option<ReentryVerdict> {
+        if let Some(verdict) = self.reentry_verdict.take() {
+            return Some(verdict);
+        }
+        self.resolve_reentry(client_id, row_name, "resume", request);
+        None
     }
 
     /// (x-9c5f) Shell `fno agents mail send <name> <text>` OFF the core loop, mirroring
@@ -7686,11 +8069,10 @@ impl Core {
         // stays on its own cwd squad.
         if !self.restored && !passive {
             self.restored = true;
-            self.restore_squads(rows, cols, view.0);
-            // (x-7561) One bounded `claude agents --all` reconcile of the loaded
-            // external tombstones, off the core loop; a no-tombstone store is a
-            // no-op. Runs after restore so `self.external_lifecycle` is populated.
-            self.reconcile_external_lifecycle();
+            // (x-d285) Restore resolves every live claude member's re-entry
+            // plan off-loop first and runs the loop when the batch lands; the
+            // reconcile-after-restore ordering lives inside.
+            self.restore_with_plans(id, rows, cols, view.0);
         }
     }
 
@@ -9730,8 +10112,19 @@ impl Core {
         let argv = match tier {
             Reach::Drive => {
                 let id = row.attach_id.clone().expect("Drive implies attach_id");
-                let (acct, cd) = self.attach_account_ctx(&id);
-                attach_argv(&id, acct.as_deref(), cd.as_deref())
+                // (x-d285) The Drive argv is the canonical re-entry plan for a
+                // claude row. `None` means the plan is resolving off-loop; the
+                // replay carries a thread_pane placement, which re-lands in
+                // this reach with the verdict staged.
+                let placement = crate::proto::PanePlacement {
+                    thread_pane: true,
+                    ..Default::default()
+                };
+                let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement)
+                else {
+                    return Flow::Continue;
+                };
+                argv
             }
             Reach::Follow => peek_argv(&row.name),
             Reach::Locate => locate_argv(&row),
@@ -10383,7 +10776,23 @@ impl Core {
                             .find(|client| client.id == client_id)
                             .map(|client| client.dims)
                             .unwrap_or((vp.rows, vp.cols));
-                        match self.resume_worker_into(&facts, sid, Some(pid), rows, cols) {
+                        // (x-d285) A claude row's held resume runs the
+                        // canonical re-entry plan; the `None` arm fires the
+                        // off-loop resolution and this focus replays with the
+                        // verdict staged. Other harnesses resume as before.
+                        let plan = if facts.harness == "claude" {
+                            let Some(plan) = self.resume_gesture_plan(
+                                client_id,
+                                &facts.name,
+                                ReentrySpawnRequest::FocusHeld { pid },
+                            ) else {
+                                return Flow::Continue;
+                            };
+                            Some(plan)
+                        } else {
+                            None
+                        };
+                        match self.resume_worker_into(&facts, sid, Some(pid), rows, cols, plan.as_ref()) {
                             Ok((resumed, _, fallback_notice)) => {
                                 focus_pid = resumed;
                                 if let Some(notice) = fallback_notice {
@@ -10560,8 +10969,13 @@ impl Core {
                         .map(|c| c.dims)
                         .unwrap_or((vp.rows, vp.cols));
                     // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
-                    let (acct, cd) = self.attach_account_ctx(&id);
-                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                    // (x-d285) The argv comes from the canonical re-entry plan
+                    // for a claude row; `None` means the plan is resolving and
+                    // this gesture re-enters with the verdict staged.
+                    let Some((argv, cd)) = self.attach_gesture_argv(client_id, &id, &placement)
+                    else {
+                        return Flow::Continue;
+                    };
                     let pane_count = self
                         .viewed_tab(view)
                         .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
@@ -10678,15 +11092,6 @@ impl Core {
                     };
                     (dest, placement.clone())
                 };
-                // Spawn `claude attach <id>`: the claude supervisor PTYs the
-                // detached bg session into this pane. cwd is the agent row's,
-                // falling back to the owner squad's only when the row lacks one.
-                let (rows, cols) = self
-                    .clients
-                    .iter()
-                    .find(|c| c.id == client_id)
-                    .map(|c| c.dims)
-                    .unwrap_or((vp.rows, vp.cols));
                 let spawn_cwd = if row_cwd.is_empty() {
                     self.session
                         .squad(owner)
@@ -10695,8 +11100,18 @@ impl Core {
                 } else {
                     row_cwd
                 };
-                let (acct, cd) = self.attach_account_ctx(&id);
-                let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                // (x-d285) The argv comes from the canonical re-entry plan for
+                // a claude row; `None` means the plan is resolving and this
+                // gesture re-enters with the verdict staged.
+                let (rows, cols) = self
+                    .clients
+                    .iter()
+                    .find(|c| c.id == client_id)
+                    .map(|c| c.dims)
+                    .unwrap_or((vp.rows, vp.cols));
+                let Some((argv, cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
+                    return Flow::Continue;
+                };
                 let permit = match crate::process_admission::admit_pane(
                     self.placement_pane_count(dest, &effective),
                     effective.max_panes,
@@ -10796,6 +11211,7 @@ impl Core {
                     Ok(receipts) => (receipts, None),
                     Err(error) => (HashMap::new(), Some(error)),
                 };
+                let mut row_name: Option<String> = None;
                 let facts = {
                     let candidates: Vec<&RegistryAgent> = self
                         .agents
@@ -10824,6 +11240,9 @@ impl Core {
                     if live_pane || !self.row_resumable_in_session(a) {
                         None // refused; notice below
                     } else {
+                        // (x-d285) The live registry name is the resolver's
+                        // key; it outranks the display name the facts carry.
+                        row_name = Some(a.name.clone());
                         Self::worker_facts(a).or_else(|| {
                             let member = stored_member.as_ref()?;
                             receipt_for_member(&fresh_receipts, member).cloned().map(
@@ -10878,8 +11297,29 @@ impl Core {
                     .find(|c| c.id == client_id)
                     .map(|c| c.dims)
                     .unwrap_or((vp.rows, vp.cols));
+                // (x-d285) A claude row's resume runs the canonical re-entry
+                // plan; the `None` arm fires the off-loop resolution and the
+                // gesture replays with the verdict staged. A receipt-only row
+                // (no registry row) has no recorded binding, so its name
+                // misses the resolver and the visible refusal is the design -
+                // no bare claude resume on this axis.
+                let plan = if facts.harness == "claude" {
+                    let name = row_name.unwrap_or_else(|| facts.name.clone());
+                    let Some(plan) = self.resume_gesture_plan(
+                        client_id,
+                        &name,
+                        ReentrySpawnRequest::Resume {
+                            name: name.clone(),
+                        },
+                    ) else {
+                        return Flow::Continue;
+                    };
+                    Some(plan)
+                } else {
+                    None
+                };
                 let (pid, tid, fallback_notice) =
-                    match self.resume_worker_into(&facts, sid, None, rows, cols) {
+                    match self.resume_worker_into(&facts, sid, None, rows, cols, plan.as_ref()) {
                         Ok(result) => result,
                         Err(error) => {
                             self.notice(client_id, format!("resume failed: {error}"));
@@ -11270,6 +11710,32 @@ impl Core {
                 }
                 let mut recruited = 0usize;
                 let mut skipped: Vec<String> = Vec::new();
+                // (x-d285) The picker is N spawns under one gesture, so its
+                // claude rows plan as a batch keyed by attach id - never the
+                // single-verdict slot, which one replay could spend on the
+                // wrong member. Every gate below is an idempotent read, so
+                // the replay revalidates and skips whatever a partial earlier
+                // pass already recruited. An off-axis-only selection plans
+                // nothing and takes the legacy loop with no spawn.
+                let wanted: Vec<(String, String)> = ids
+                    .iter()
+                    .filter_map(|id| self.attach_claude_row(id).map(|n| (id.clone(), n)))
+                    .collect();
+                if !wanted.is_empty()
+                    && wanted
+                        .iter()
+                        .any(|(id, _)| !self.batch_plans.contains_key(id))
+                {
+                    self.resolve_plan_batch(
+                        client_id,
+                        wanted,
+                        BatchReplay::Recruit {
+                            squad: name.clone(),
+                            ids: ids.clone(),
+                        },
+                    );
+                    return Flow::Continue;
+                }
                 for id in &ids {
                     if id.len() != 8 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
                         skipped.push(format!("{id} (bad id)"));
@@ -11293,7 +11759,16 @@ impl Core {
                         .map(|s| s.canonical_cwd().to_string())
                         .unwrap_or_default();
                     let (acct, cd) = self.attach_account_ctx(id);
-                    let argv = attach_argv(id, acct.as_deref(), cd.as_deref());
+                    // (x-d285) A staged plan supplies the argv; a staged
+                    // refusal skips the id with the reason named.
+                    let (argv, dir) =
+                        match self.staged_batch_argv(id, acct.as_deref(), cd.as_deref()) {
+                            Ok(pair) => pair,
+                            Err(reason) => {
+                                skipped.push(format!("{id} ({reason})"));
+                                continue;
+                            }
+                        };
                     let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -11301,7 +11776,7 @@ impl Core {
                             continue;
                         }
                     };
-                    self.name_attached_pane(pid, id, cd.as_deref());
+                    self.name_attached_pane(pid, id, dir.as_deref());
                     let tid = self.session.mint_tab_id();
                     let tab = Tab {
                         name: None,
@@ -11780,6 +12255,66 @@ impl Core {
             CoreMsg::DispatchResult { id, notice } => {
                 if !notice.is_empty() {
                     self.notice(id, notice);
+                }
+                Flow::Continue
+            }
+            // (x-d285) A gesture's canonical re-entry verdict landed. A
+            // refusal is a one-line notice and nothing spawns; a resolution
+            // re-dispatches the SAME command with the verdict staged, so every
+            // gate re-runs against live state before the pane spawns.
+            CoreMsg::ReentryPlanReady {
+                id,
+                request,
+                verdict,
+            } => {
+                match verdict {
+                    Err(reason) => self.notice(id, reason),
+                    Ok(verdict) => {
+                        // Stage exactly one verdict; the receiving arm takes
+                        // it at its argv construction. A vanished client
+                        // (detached mid-resolution) drops the replay - the
+                        // re-dispatch's client_view read refuses it.
+                        self.reentry_verdict = Some(verdict);
+                        match *request {
+                            ReentrySpawnRequest::Attach {
+                                attach_id,
+                                placement,
+                            } => {
+                                self.command(
+                                    id,
+                                    Command::AttachAgent {
+                                        id: attach_id,
+                                        placement,
+                                    },
+                                );
+                            }
+                            ReentrySpawnRequest::Resume { name } => {
+                                self.command(id, Command::ResumeAgent { name });
+                            }
+                            ReentrySpawnRequest::FocusHeld { pid } => {
+                                self.command(id, Command::FocusPane(pid));
+                            }
+                        }
+                        self.reentry_verdict = None;
+                    }
+                }
+                Flow::Continue
+            }
+            // (x-d285) A batch's plans landed: stage them keyed by attach id
+            // and re-enter the loop that asked. A refused entry keeps its
+            // row and starts no pane (the consuming loop's own Err handling).
+            CoreMsg::BatchPlansReady { id, plans, replay } => {
+                self.batch_plans = plans;
+                match *replay {
+                    BatchReplay::Restore { home_sid, rows, cols } => {
+                        self.restore_squads(rows, cols, home_sid);
+                        // (x-7561) The external-tombstone reconcile runs
+                        // AFTER restore, as the synchronous path orders it.
+                        self.reconcile_external_lifecycle();
+                    }
+                    BatchReplay::Recruit { squad, ids } => {
+                        self.command(id, Command::RecruitAgents { squad, ids });
+                    }
                 }
                 Flow::Continue
             }
@@ -12653,6 +13188,8 @@ async fn serve(
         restored: false,
         topology_dirty: false,
         last_topology_flush: None,
+        reentry_verdict: None,
+        batch_plans: HashMap::new(),
     };
 
     // The off-loop registry reader (4a-G2): a 1s interval task stats/reads
@@ -22126,6 +22663,297 @@ mod tests {
         );
     }
 
+    // ---- (x-d285) mux gestures through the canonical re-entry plan -------
+
+    /// A verdict shaped like the resolver's machine output for a routed
+    /// claude row: the account's env assignments prefix the provider argv.
+    /// `FNO_ACCOUNT` is the positive marker - only the verdict's env prefix
+    /// ever sets it on an attach pane (the reconstructed argv carries none
+    /// for a catalog row with no recorded account).
+    fn staged_reentry_verdict() -> ReentryVerdict {
+        ReentryVerdict {
+            argv: vec!["/bin/cat".into(), "deadbee1".into()],
+            env: vec![
+                "FNO_ACCOUNT=makers".into(),
+                "CLAUDE_CONFIG_DIR=/acct/makers/.claude".into(),
+            ],
+            config_dir: Some("/acct/makers/.claude".into()),
+        }
+    }
+
+    fn claude_bg_row(name: &str, cwd: &str, attach: Option<&str>) -> RegistryAgent {
+        let mut row = bg_row(name, cwd, attach);
+        row.harness = Some("claude".into());
+        row
+    }
+
+    #[test]
+    fn reentry_verdict_parse_accepts_only_a_resolved_plan() {
+        // The machine grammar: a resolved verdict with argv + env parses; an
+        // unresolved one, malformed JSON, a missing argv, or an empty argv is
+        // the same refusal - nothing may spawn off it.
+        let ok = br#"{"resolved":true,"argv":["claude","attach","deadbee1"],"env":{"FNO_ACCOUNT":"makers"},"claude_config_dir":"/acct/.claude"}"#;
+        let verdict = ReentryVerdict::from_plan_json(ok).expect("a resolved plan parses");
+        assert_eq!(verdict.argv, vec!["claude", "attach", "deadbee1"]);
+        assert_eq!(verdict.env, vec!["FNO_ACCOUNT=makers"]);
+        assert_eq!(
+            verdict.config_dir.as_deref(),
+            Some(std::path::Path::new("/acct/.claude"))
+        );
+        assert_eq!(
+            verdict.prefixed_argv(),
+            vec![
+                "env",
+                "FNO_ACCOUNT=makers",
+                "claude",
+                "attach",
+                "deadbee1"
+            ],
+            "the env assignments prefix the provider argv"
+        );
+        for bad in [
+            br#"{"resolved":false}"#.as_slice(),
+            br#"{"argv":["claude"]}"#.as_slice(),
+            br#"not json"#.as_slice(),
+            br#"{"resolved":true,"argv":[]}"#.as_slice(),
+        ] {
+            assert!(
+                ReentryVerdict::from_plan_json(bad).is_err(),
+                "refused: {}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        // No env means the argv runs bare, with no env(1) prefix.
+        let bare = br#"{"resolved":true,"argv":["claude"]}"#;
+        assert_eq!(
+            ReentryVerdict::from_plan_json(bare).unwrap().prefixed_argv(),
+            vec!["claude"]
+        );
+    }
+
+    #[test]
+    fn attach_gesture_runs_the_staged_reentry_verdict() {
+        // AC5-HP: an AttachAgent gesture for a claude row spawns the
+        // canonical verdict's env-prefixed argv, never a locally
+        // reconstructed one. The staged verdict stands in for what the
+        // ReentryPlanReady continuation delivers.
+        set_attach_program(&["/bin/cat"]); // the legacy argv, which must NOT run
+        let (mut core, client_id, _p1, _p2, _rx) = seen_test_core();
+        core.agents = vec![claude_bg_row("routed-glm", "/tmp/seen", Some("deadbee1"))];
+        core.reentry_verdict = Some(staged_reentry_verdict());
+        let new_pid = core.next_pane_id;
+
+        core.command(client_id, Command::attach_agent("deadbee1"));
+
+        let entry = core.panes.get(&new_pid).expect("the attach spawned");
+        assert_eq!(
+            entry.account.as_deref(),
+            Some("makers"),
+            "the verdict's env prefix ran; a reconstructed argv carries no account"
+        );
+        assert_eq!(entry.cmd.as_deref(), Some("cat"));
+        assert_eq!(core.attached.get("deadbee1"), Some(&new_pid));
+        assert!(
+            core.reentry_verdict.is_none(),
+            "the verdict was consumed, not left staged"
+        );
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn attach_gesture_refusal_is_a_notice_and_starts_no_pane() {
+        // The resolver's refusal routes back as a one-line notice; no pane,
+        // no mapping, and no staged verdict leaks into a later gesture.
+        let (mut core, client_id, _p1, _p2, mut rx) = seen_test_core();
+        core.agents = vec![claude_bg_row("routed-glm", "/tmp/seen", Some("deadbee1"))];
+        let panes_before = core.panes.len();
+
+        core.handle(CoreMsg::ReentryPlanReady {
+            id: client_id,
+            request: Box::new(ReentrySpawnRequest::Attach {
+                attach_id: "deadbee1".into(),
+                placement: PanePlacement::default(),
+            }),
+            verdict: Err("route settings missing: floor-only file".into()),
+        });
+
+        assert_eq!(core.panes.len(), panes_before, "no pane started");
+        assert!(!core.attached.contains_key("deadbee1"));
+        assert!(core.reentry_verdict.is_none());
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("floor-only file"),
+            "the refusal names its reason: {notices}"
+        );
+    }
+
+    #[test]
+    fn resume_agent_runs_the_staged_reentry_verdict() {
+        // AC5-HP: a ResumeAgent gesture for a dead claude row spawns the
+        // canonical verdict's argv (env prefix + the recorded session id),
+        // never the bare `claude --resume` form.
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-reentry-resume");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        let mut row = exited_claude_row("routed-glm", Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec"));
+        row.cwd = cwd.to_string_lossy().into_owned();
+        row.harness = Some("claude".into());
+        row.harness_session_id = Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into());
+        core.agents = vec![row];
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.reentry_verdict = Some(ReentryVerdict {
+            argv: vec![
+                "/bin/cat".into(),
+                "--resume".into(),
+                "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
+            ],
+            env: vec!["FNO_ACCOUNT=makers".into()],
+            config_dir: Some("/acct/makers/.claude".into()),
+        });
+
+        core.command(1, Command::ResumeAgent { name: "routed-glm".into() });
+
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(notices.contains("resumed routed-glm"), "{notices}");
+        let new_panes: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(new_panes.len(), 1, "exactly one resumed pane");
+        let entry = core.panes.get(&new_panes[0]).unwrap();
+        assert_eq!(
+            entry.account.as_deref(),
+            Some("makers"),
+            "the verdict's env prefix ran"
+        );
+        assert_eq!(
+            entry.name.as_deref(),
+            Some("routed-glm"),
+            "the resumed pane is titled from the registry row"
+        );
+        for pid in new_panes {
+            core.reap_pane(pid);
+        }
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn recruit_consumes_staged_batch_plans() {
+        // The picker is N spawns under one gesture: every claude id's plan
+        // arrives keyed by attach id. A verdict spawns with its account; a
+        // refusal skips the id with the reason named. (The batch fire itself
+        // needs a runtime; this stages the replay state directly.)
+        set_attach_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        let (c, mut rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.agents = vec![
+            claude_bg_row("routed-a", "/x", Some("deadbee1")),
+            claude_bg_row("routed-b", "/x", Some("deadbee2")),
+        ];
+        core.batch_plans.insert("deadbee1".into(), Ok(staged_reentry_verdict()));
+        core.batch_plans.insert(
+            "deadbee2".into(),
+            Err("row records no launch account".into()),
+        );
+        let new_pid = core.next_pane_id;
+
+        core.command(
+            1,
+            Command::RecruitAgents {
+                squad: "team".into(),
+                ids: vec!["deadbee1".into(), "deadbee2".into()],
+            },
+        );
+
+        assert_eq!(
+            core.panes[&new_pid].account.as_deref(),
+            Some("makers"),
+            "the planned id spawned with its verdict account"
+        );
+        assert!(
+            !core.attached.contains_key("deadbee2"),
+            "the refused id started no pane"
+        );
+        let notices = drain_notices(&mut rx).join("\n");
+        assert!(
+            notices.contains("no launch account"),
+            "the refusal is visible in the recruit report: {notices}"
+        );
+        core.reap_pane(new_pid);
+    }
+
+    #[test]
+    fn batch_plans_ready_stages_and_replays_the_recruit() {
+        // The BatchPlansReady continuation stages the map and re-enters the
+        // recruit command, which then consumes the staged plans end to end.
+        set_attach_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.session.add_squad(
+            1,
+            vec!["/x".into()],
+            None,
+            Tab {
+                name: None,
+                id: 5,
+                root: Node::Leaf(1),
+                focus: 1,
+            },
+        );
+        let (c, _rx) = client_with_rx(1);
+        core.clients.push(c);
+        core.agents = vec![claude_bg_row("routed-a", "/x", Some("deadbee1"))];
+        let new_pid = core.next_pane_id;
+        let mut plans = HashMap::new();
+        plans.insert("deadbee1".into(), Ok(staged_reentry_verdict()));
+
+        core.handle(CoreMsg::BatchPlansReady {
+            id: 1,
+            plans,
+            replay: Box::new(BatchReplay::Recruit {
+                squad: "team".into(),
+                ids: vec!["deadbee1".into()],
+            }),
+        });
+
+        assert_eq!(
+            core.panes[&new_pid].account.as_deref(),
+            Some("makers"),
+            "the replayed recruit spawned the planned pane"
+        );
+        core.reap_pane(new_pid);
+    }
+
     #[test]
     fn restore_merges_unnamed_lane_into_home_squad() {
         // Operator decision: an unnamed lane persists and comes back. Because
@@ -23641,6 +24469,8 @@ mod tests {
             restored: false,
             topology_dirty: false,
             last_topology_flush: None,
+            reentry_verdict: None,
+            batch_plans: HashMap::new(),
         }
     }
 
