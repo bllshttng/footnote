@@ -3879,10 +3879,13 @@ event_types:
           description: "The model the transcript shows the worker actually answering as, when the tail names one."
         resets_at:
           type: number
-          description: "Epoch the refusal body said the window reopens, when one was parseable. Absent when the body named no time, or named one that could not be resolved to an epoch."
+          description: "Epoch the window reopens: a stamp the body resolved, or the window the body NAMES added to the observation time. Absent only when the body named neither, because an invented deadline is worse than an absent one."
+        reset_is_derived:
+          type: boolean
+          description: "True when resets_at came from the NAMED window plus the observation time rather than a resolved stamp. Such an epoch is a bound, never shorter than the real reset, and a later probe returning an unambiguous endpoint epoch supersedes it."
         reset_stamp_unparsed:
           type: string
-          description: "A reset stamp that WAS present and was refused - a naive stamp with no accounts.<id>.reset_timezone configured. Present instead of resets_at, never alongside it."
+          description: "A reset stamp that WAS present and was refused - a naive stamp with no accounts.<id>.reset_timezone configured. Evidence only, never an epoch: a vendor stamp carries no offset and the named window does not disambiguate it (UTC+7, +8 and +9 all land inside a five-hour window). It may now appear ALONGSIDE a derived resets_at."
         excerpt:
           type: string
           description: "The refusal body excerpt, capped by the taxonomy at 256 chars."
@@ -3943,6 +3946,9 @@ event_types:
         redispatched:
           type: boolean
           description: "True only when a replacement worker actually started."
+        reason:
+          type: string
+          description: "Which give-up branch abandoned the work, when redispatched is false; empty when it is true. Every recorded failover_swapped on the reference machine read redispatched=false with only one failover_exhausted beside twenty of them, so one boolean stood in for at least six causes and none was diagnosable. Slugs: no-session-uuid | transcript-not-visible | auto-switch-disarmed | node-missing | node-done | stop-failed | claim-held | spawn-failed | chain-empty | unknown."
     consumers: [operator]
 
   - name: provider_window_closing
