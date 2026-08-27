@@ -371,7 +371,11 @@ def coverage_verdict(
         # (stale head, missing local pass, reviewer refusal) keep their own
         # refusals: those name a remedy that can actually work, and the
         # corroboration question may dissolve once the head is re-attested.
-        return REFUSED, corroboration, "", recompute_note
+        # recompute_note plus the filed node ids when the cap arm fired on the
+        # way here (same receipt contract as the returns above and below).
+        return REFUSED, corroboration, "", "; ".join(
+            x for x in (recompute_note, filed_note) if x
+        )
 
     # Same branch order run_merge has always used: the attestation refusal is
     # checked first, so a config requiring code-review with no row names the

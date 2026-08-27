@@ -2347,22 +2347,8 @@ pub fn unattested_reviewers_scan(
             .and_then(|v| v.as_str())
             .map(|s| !s.is_empty())
             .unwrap_or(false);
-        if !is_pass && !is_retraction {
-            let carries = val
-                .pointer("/data/findings")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter().any(|p| {
-                        p.get("finding_key")
-                            .and_then(|v| v.as_str())
-                            .map(|k| !k.is_empty())
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if carries {
-                fail_carries.insert(r.clone(), true);
-            }
+        if !is_pass && !is_retraction && line_carries_keyed_findings(&val) {
+            fail_carries.insert(r.clone(), true);
         }
         // The SAME zero-evidence predicate the coverage axis uses: a review
         // of nothing must not satisfy the config.review.reviewers gate either,
@@ -5972,6 +5958,24 @@ pub fn compute_range_tiling(
 /// `reviewed_line_count` is an honest 0, so a 0-line row WITH files counts,
 /// and a 0-line row from before the field existed (file count absent) is
 /// still skipped - absence must not be read as "had files".
+/// Whether a `review_attestation` line carries at least one keyed finding -
+/// the answered-fail evidence predicate, ONE spelling for the reviewers scan
+/// and the coverage promotion (x-aecc review 2, finding 4: the hand-copied
+/// pair had already been flagged as the drift shape).
+fn line_carries_keyed_findings(val: &Value) -> bool {
+    val.pointer("/data/findings")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter().any(|p| {
+                p.get("finding_key")
+                    .and_then(|v| v.as_str())
+                    .map(|k| !k.is_empty())
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 fn zero_evidence_attestation(val: &Value) -> bool {
     if val
         .pointer("/data/reviewed_line_count")
@@ -6105,25 +6109,14 @@ fn local_latest_attestations(
         // x-aecc: a fail that RAISED keyed findings marks its own pair as
         // answer-capable. Per-pair, never chain-global: a bystander's
         // findings-free fail must not ride another reviewer's dispositions
-        // (review finding 2), and a retraction line marks nothing. Recorded
-        // BEFORE the insert consumes the key; for a non-retraction line
-        // key_attester IS the line's own attester.
-        if !is_pass && !is_retraction {
-            let carries = val
-                .pointer("/data/findings")
-                .and_then(|v| v.as_array())
-                .map(|a| {
-                    a.iter().any(|p| {
-                        p.get("finding_key")
-                            .and_then(|v| v.as_str())
-                            .map(|k| !k.is_empty())
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false);
-            if carries {
-                raised_findings.insert(pair_key.clone());
-            }
+        // (review finding 2), and a retraction line marks nothing. The mark
+        // is CUMULATIVE across the pair's rounds by design - round 1 raises,
+        // round 2 records the dispositions, and the pair's latest fail is
+        // the answered verdict (the fix-delta shape). Recorded BEFORE the
+        // insert consumes the key; for a non-retraction line key_attester IS
+        // the line's own attester.
+        if !is_pass && !is_retraction && line_carries_keyed_findings(&val) {
+            raised_findings.insert(pair_key.clone());
         }
         latest.insert(
             pair_key,
@@ -6483,7 +6476,11 @@ pub fn classify_coverage_tiled(
     // promotes (it revokes, it never covers), and terminality is read with
     // the pass-only authorship basis - `read_pr_info` re-runs the disposition
     // scan with a `self_attested_alone` that INCLUDES these fail verdicts, so
-    // a solo author's decline still withholds `reviewed` there.
+    // a solo author's decline still withholds `reviewed` there. The ROW
+    // itself may read covered on that solo shape (mirroring the solo-pass
+    // default path); the merge gate's disposition pass is the surface that
+    // refuses it, and `fno do pr status`'s ready conjunct does not re-derive
+    // dispositions - a documented split (x-aecc review 2, finding 2).
     let rounds_exhausted = tiling.map(|t| t.rounds_exhausted).unwrap_or(false);
     let answered_fail = |lp: &LocalPass| {
         !lp.is_pass
