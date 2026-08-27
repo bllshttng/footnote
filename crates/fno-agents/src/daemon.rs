@@ -2702,7 +2702,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                     )
                 } else {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        run_reconcile_sweep(&home_sweep, &emitter_sweep)
+                        // Startup sweep: every thread row reads hosted. The
+                        // async recovery pass owns resume-and-settle here and
+                        // has not run yet, so settling unhosted rows now would
+                        // stamp Orphaned rows the recovery pass is about to
+                        // resume.
+                        run_reconcile_sweep(&home_sweep, &emitter_sweep, &|_| true)
                     }))
                     .unwrap_or_else(|_| {
                         Err(
@@ -4219,6 +4224,16 @@ async fn ensure_codex_thread_handle(
 /// app-server children without delaying the supervisor's accept loop.
 fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
+        recover_codex_threads(&ctx).await;
+    });
+}
+
+/// The recovery pass body, split from the scheduler so a test can await it
+/// (the spawned task is fire-and-forget). Resume-or-settle: a candidate that
+/// resumes goes Live; one that fails is stamped Orphaned (AC15), never left
+/// reading Live forever.
+async fn recover_codex_threads(ctx: &Ctx) {
+    {
         let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
             Ok(registry) => registry,
             Err(error) => {
@@ -4251,10 +4266,25 @@ fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
                         "daemon_recovery_error",
                         &json!({"op": "resume_codex_thread", "name": entry.name, "error": error}),
                     );
+                    // A failed resume leaves the row readable Live forever
+                    // unless it is settled here: Orphaned, because the
+                    // rollout on disk is still the durable object a later
+                    // resume (or a human) can pick up. Only a row that is
+                    // still non-terminal is stamped - never overwrite a
+                    // terminal status a concurrent stop just wrote.
+                    let recover_name = entry.name.clone();
+                    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+                        if let Some(entry) = registry.find_mut(&recover_name) {
+                            if is_non_terminal(entry.status) {
+                                entry.status = AgentStatus::Orphaned;
+                            }
+                        }
+                    })
+                    .await;
                 }
             }
         }
-    });
+    }
 }
 
 /// Map a provider name string to a per-CLI readiness detector.
@@ -5106,18 +5136,20 @@ async fn deliver_to_codex_thread(
         }
     };
     let (accept_tx, accept_rx) = tokio::sync::oneshot::channel();
-    if let Err(error) = handle.submit_with_accept(body.to_string(), Some(accept_tx)).await {
+    if let Err(error) = handle
+        .submit_with_accept(body.to_string(), Some(accept_tx))
+        .await
+    {
         return Response::ok(req.id, json!({"delivered": false, "reason": error}));
     }
     // Acceptance is a start/steer ack (milliseconds in practice); the caller's
     // timeout_ms is the outer backstop, same shape as the claude drive bound.
-    let outcome =
-        match tokio::time::timeout(Duration::from_millis(timeout_ms), accept_rx).await {
-            Ok(Ok(Ok(turn_id))) => Ok(turn_id),
-            Ok(Ok(Err(reason))) => Err(reason),
-            Ok(Err(_)) => Err("codex thread actor dropped the acceptance".into()),
-            Err(_) => Err("turn acceptance timed out".into()),
-        };
+    let outcome = match tokio::time::timeout(Duration::from_millis(timeout_ms), accept_rx).await {
+        Ok(Ok(Ok(turn_id))) => Ok(turn_id),
+        Ok(Ok(Err(reason))) => Err(reason),
+        Ok(Err(_)) => Err("codex thread actor dropped the acceptance".into()),
+        Err(_) => Err("turn acceptance timed out".into()),
+    };
     match outcome {
         Ok(turn_id) => {
             let _ = ctx.emitter.emit(
@@ -7372,18 +7404,23 @@ struct ReconcileOutcome {
 ///   already-`Orphaned` or terminal (`Exited`/`PermanentDead`) entry unchanged.
 /// - `Err` (inconclusive): preserve status, record an inconsistency. Never
 ///   orphan on a probe timeout (Failure Modes / Errors invariant).
-fn plan_reconcile<P, D, L, B>(
+#[allow(clippy::too_many_arguments)]
+fn plan_reconcile<P, D, L, B, H, R>(
     entries: &[RegistryEntry],
     mut probe: P,
     mut budget_exhausted: D,
     mut pid_live: L,
     mut bg_live: B,
+    mut thread_hosted: H,
+    mut rollout_exists: R,
 ) -> (Vec<ReconcileChange>, ReconcileOutcome)
 where
     P: FnMut(&RegistryEntry) -> Result<bool, crate::provider::ReachabilityProbeError>,
     D: FnMut() -> bool,
     L: FnMut(&RegistryEntry) -> bool,
     B: FnMut(&RegistryEntry) -> bool,
+    H: FnMut(&RegistryEntry) -> bool,
+    R: FnMut(&RegistryEntry) -> bool,
 {
     let mut changes = Vec::new();
     let mut out = ReconcileOutcome::default();
@@ -7391,6 +7428,29 @@ where
         if budget_exhausted() {
             out.deferred = entries.len() - i;
             break;
+        }
+        // A Codex thread hosted by THIS daemon is owned by its actor: the
+        // stale registry pid must not settle it. A row no longer hosted is
+        // settled by its rollout: the rollout file on disk is the durable
+        // object, so its presence means Orphaned (resumable later, by a human
+        // or a resume verb), its absence means the thread never got far enough
+        // to persist anything and is Exited. Before the actor rewrite this arm
+        // always returned None, so a permanently dead thread read Live forever.
+        if is_codex_thread_entry(entry) {
+            let new_status = if thread_hosted(entry) {
+                None
+            } else if rollout_exists(entry) {
+                out.updated.push(entry.name.clone());
+                Some(AgentStatus::Orphaned)
+            } else {
+                out.updated.push(entry.name.clone());
+                Some(AgentStatus::Exited)
+            };
+            changes.push(ReconcileChange {
+                name: entry.name.clone(),
+                new_status,
+            });
+            continue;
         }
         // A one-shot `ask` agent has no daemon-managed process, so its liveness is
         // decided by process-liveness alone (it has none): terminal `exited`.
@@ -7418,17 +7478,6 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
-            });
-            continue;
-        }
-        // A Codex thread is rehydrated by the daemon's startup resume pass.
-        // Its app-server child may have died with the previous supervisor, so
-        // the stale registry pid must not settle the durable thread to Exited
-        // before recovery gets a chance to resume it.
-        if is_codex_thread_entry(entry) {
-            changes.push(ReconcileChange {
-                name: entry.name.clone(),
-                new_status: None,
             });
             continue;
         }
@@ -7927,6 +7976,7 @@ fn codex_session_for_pid_shellout(pid: u32) -> Option<String> {
 fn run_reconcile_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
+    thread_hosted: &dyn Fn(&RegistryEntry) -> bool,
 ) -> Result<ReconcileSweepResult, String> {
     use crate::provider::ReachabilityProbeError;
 
@@ -7995,12 +8045,23 @@ fn run_reconcile_sweep(
             Err(_) => true,
         }
     };
+    // The rollout file recorded at spawn is the durable codex thread object
+    // (docs/architecture/codex-thread-driver.md); its existence is what makes
+    // an unhosted thread Orphaned (resumable) instead of Exited.
+    let rollout_exists = |e: &RegistryEntry| -> bool {
+        e.log_path
+            .as_deref()
+            .map(Path::new)
+            .is_some_and(Path::is_file)
+    };
     let (changes, outcome) = plan_reconcile(
         &entries,
         probe,
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
         bg_live,
+        thread_hosted,
+        rollout_exists,
     );
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
@@ -8099,7 +8160,14 @@ fn handle_reconcile(ctx: &Ctx, req: &Request) -> Response {
         registry,
         entries,
         outcome,
-    } = match run_reconcile_sweep(&ctx.home, &ctx.emitter) {
+    } = match run_reconcile_sweep(&ctx.home, &ctx.emitter, &|entry: &RegistryEntry| {
+        match ctx.codex_threads.try_lock() {
+            Ok(guard) => guard.contains_key(&entry.name),
+            // An actor is mid insert/remove: hosted, so a race can never
+            // settle a thread the map is about to name.
+            Err(_) => true,
+        }
+    }) {
         Ok(r) => r,
         Err(msg) => return Response::err(req.id, ErrorCode::Internal, msg),
     };
@@ -12649,6 +12717,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             || false,
             |_| true,
             |_| false,
+            |_| false,
+            |_| false,
         );
         assert_eq!(out.orphans, vec!["live-but-gone".to_string()]);
         assert_eq!(out.recovered, vec!["back-from-dead".to_string()]);
@@ -12662,6 +12732,160 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         assert_eq!(changes[1].new_status, Some(AgentStatus::Live));
     }
 
+    /// A codex THREAD row: no short_id, interactive host mode, full session id,
+    /// and a recorded rollout path (the durable resume object).
+    fn thread_entry(name: &str, status: AgentStatus, log_path: Option<String>) -> RegistryEntry {
+        let mut entry = rentry(name, status, None);
+        entry.pid = Some(999_999_999);
+        entry.short_id = String::new();
+        entry.legacy_provider = String::new();
+        entry.harness = Some("codex".into());
+        entry.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        entry.session_id = None;
+        entry.harness_session_id = Some(format!("0198thread-{name}-00000000000000"));
+        entry.log_path = log_path;
+        entry
+    }
+
+    #[test]
+    fn reconcile_leaves_a_hosted_codex_thread_untouched() {
+        let entries = vec![thread_entry(
+            "t-hosted",
+            AgentStatus::Live,
+            Some("/tmp/r.jsonl".into()),
+        )];
+        let (changes, _) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,
+            |_| true,  // thread_hosted: the daemon map names this row
+            |_| false, // rollout_exists (irrelevant while hosted)
+        );
+        assert_eq!(
+            changes[0].new_status, None,
+            "a hosted thread is the daemon's own; the stale pid must not settle it"
+        );
+    }
+
+    #[test]
+    fn reconcile_settles_an_unhosted_thread_with_a_rollout_to_orphaned() {
+        let entries = vec![thread_entry(
+            "t-resumable",
+            AgentStatus::Live,
+            Some("/tmp/r.jsonl".into()),
+        )];
+        let (changes, _) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false, // not hosted: the actor is gone (daemon restart, resume failed)
+            |_| true,  // the rollout file exists: the durable object survives
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Orphaned),
+            "resumable thread reads Orphaned, never Live-forever"
+        );
+    }
+
+    /// AC15: a row whose startup resume FAILED reads Orphaned after the
+    /// recovery pass, never Live-forever. The resume is made to fail
+    /// deterministically via a nonexistent cwd (app-server spawn cannot even
+    /// start there).
+    /// AC16: a codex PANE row (mux ref set) must refuse from the ask lane
+    /// naming the pane verb, never reach ensure_codex_thread_handle and die
+    /// with the confusing "is not a Codex thread".
+    #[tokio::test(flavor = "current_thread")]
+    async fn ask_a_codex_pane_row_refuses_naming_the_pane_verb() {
+        let home = tmp_home("codex-pane-ask");
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut entry = thread_entry("t-pane", AgentStatus::Live, None);
+            entry.mux = Some(state::MuxRef {
+                session: "main".into(),
+                pane_id: 3,
+            });
+            entry.log_path = Some("/tmp/t-pane.log".into());
+            registry.entries.push(entry);
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent"));
+        let resp = handle_ask(
+            &ctx,
+            &Request::new(1, "agent.ask", json!({"name": "t-pane", "message": "hi"})),
+        )
+        .await;
+        match &resp.payload {
+            crate::protocol::ResponsePayload::Err(e) => {
+                assert_eq!(e.code, ErrorCode::InvalidStatus);
+                assert!(
+                    e.message.contains("pane worker") && e.message.contains("mux pane send"),
+                    "refusal must name the pane verb: {}",
+                    e.message
+                );
+                assert!(
+                    !e.message.contains("is not a Codex thread"),
+                    "the confusing thread refusal must not surface: {}",
+                    e.message
+                );
+            }
+            _ => panic!("a pane row must refuse, got: {resp:?}"),
+        }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovery_stamps_a_failed_codex_thread_resume_orphaned() {
+        let home = tmp_home("codex-recover-orphaned");
+        state::update_registry(&home.registry_json(), |registry| {
+            let mut entry = thread_entry(
+                "t-dead",
+                AgentStatus::Live,
+                Some("/tmp/t-dead.jsonl".into()),
+            );
+            entry.cwd = "/nonexistent-cwd-for-resume-failure".into();
+            entry.project_root = entry.cwd.clone();
+            entry.harness_session_id = Some("0198dead-0000-7000-8000-00000000000f".into());
+            entry.codex_session_id = entry.harness_session_id.clone();
+            entry.pid = None;
+            registry.entries.push(entry);
+        })
+        .unwrap();
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+        recover_codex_threads(&ctx).await;
+        let registry = load_registry_offloaded(home.registry_json())
+            .await
+            .expect("registry readable");
+        assert_eq!(
+            registry.find("t-dead").map(|entry| entry.status),
+            Some(AgentStatus::Orphaned),
+            "a failed resume must settle the row Orphaned, not Live-forever"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[test]
+    fn reconcile_settles_an_unhosted_thread_without_a_rollout_to_exited() {
+        let entries = vec![thread_entry("t-gone", AgentStatus::Live, None)];
+        let (changes, _) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false, // not hosted
+            |_| false, // no rollout: the thread never got far enough to persist
+        );
+        assert_eq!(
+            changes[0].new_status,
+            Some(AgentStatus::Exited),
+            "an unhosted thread with no rollout is gone, not Live-forever"
+        );
+    }
+
     #[test]
     fn reconcile_does_not_orphan_a_live_interactive_host_on_store_miss() {
         // US4 (task 2.3): an interactive host whose session-store probe returns
@@ -12673,7 +12897,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
         let exec = rentry("one-shot", AgentStatus::Live, None);
         let entries = vec![interactive, exec];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true, |_| false);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(
             changes[0].new_status, None,
             "a live interactive host must not be orphaned on a session-store miss"
@@ -12702,6 +12934,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             |_| Ok(false), // both store-miss
             || false,
             |e| e.name == "live-tui", // only live-tui's worker pid is alive
+            |_| false,
+            |_| false,
             |_| false,
         );
         assert_eq!(
@@ -12746,6 +12980,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             || false,
             |e| e.name == "live-pane", // only live-pane's pid is alive
             |_| false,
+            |_| false,
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -12780,6 +13016,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             || false,
             |e| e.name == "live-orphan",
             |_| false,
+            |_| false,
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -12798,7 +13036,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // Guards the blast radius of the pid gate above: `pid_live` is true for a
         // row with no recorded pid, so exec rows keep their old behavior.
         let entries = vec![rentry("pidless", AgentStatus::Orphaned, None)];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
         assert_eq!(out.recovered, vec!["pidless".to_string()]);
     }
@@ -12828,6 +13074,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             || false,
             |_| true,
             |_| false,
+            |_| false,
+            |_| false,
         );
         assert_eq!(changes[0].new_status, None, "must NOT flip on inconclusive");
         assert!(out.orphans.is_empty());
@@ -12843,7 +13091,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             rentry("done", AgentStatus::Exited, None),
             rentry("dead", AgentStatus::PermanentDead, None),
         ];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true, |_| false);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(false),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         assert!(changes.iter().all(|c| c.new_status.is_none()));
         assert!(out.orphans.is_empty() && out.updated.is_empty());
     }
@@ -12873,6 +13129,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             || false,
             |_| true,
             |_| false,
+            |_| false,
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status,
@@ -12890,7 +13148,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     fn reconcile_one_shot_ask_already_terminal_is_untouched() {
         // An ask already Exited must not be re-flagged as updated (idempotent).
         let entries = vec![ask_entry("done-ask", AgentStatus::Exited)];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(changes[0].new_status, None);
         assert!(out.updated.is_empty());
     }
@@ -12910,7 +13176,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         );
 
         // Present in the roster == running: leave the row alone.
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| true);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| true,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(
             changes[0].new_status, None,
             "a bg thread claude's daemon still lists must not be reaped to exited"
@@ -12919,7 +13193,15 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
 
         // Absent from the roster == genuinely gone: the ask reap still applies,
         // so this is a liveness check, not a blanket exemption for claude rows.
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Ok(true),
+            || false,
+            |_| true,
+            |_| false,
+            |_| false,
+            |_| false,
+        );
         assert_eq!(changes[0].new_status, Some(AgentStatus::Exited));
         assert_eq!(out.updated, vec!["think-web-copy".to_string()]);
     }
@@ -13176,6 +13458,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
                 }
             },
             |_| true,
+            |_| false,
+            |_| false,
             |_| false,
         );
         assert_eq!(out.deferred, 2, "two trailing entries should defer");
@@ -13509,7 +13793,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // sweep core (load -> sort -> write -> emit) directly.
         let home = tmp_home("sweep-empty");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let result = run_reconcile_sweep(&home, &emitter).expect("empty sweep ok");
+        let result = run_reconcile_sweep(&home, &emitter, &|_| false).expect("empty sweep ok");
         assert!(result.entries.is_empty());
         assert_eq!(result.outcome, ReconcileOutcome::default());
         std::fs::remove_dir_all(home.root()).ok();
@@ -15835,8 +16119,9 @@ while True:
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
             assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            let registry =
-                load_registry_offloaded(home.registry_json()).await.expect("registry");
+            let registry = load_registry_offloaded(home.registry_json())
+                .await
+                .expect("registry");
             let row = registry.find("t").expect("thread row").clone();
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -15853,11 +16138,8 @@ while True:
                 },
             });
             let started = std::time::Instant::now();
-            let resp = handle_switchboard(
-                &ctx,
-                &Request::new(4, "agent.switchboard_v2", params),
-            )
-            .await;
+            let resp =
+                handle_switchboard(&ctx, &Request::new(4, "agent.switchboard_v2", params)).await;
             let res = resp.result().expect("switchboard errored");
             assert!(
                 started.elapsed() < std::time::Duration::from_secs(5),
@@ -15902,8 +16184,9 @@ while True:
             // No seed: the row is idle at mail time.
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
             assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
-            let registry =
-                load_registry_offloaded(home.registry_json()).await.expect("registry");
+            let registry = load_registry_offloaded(home.registry_json())
+                .await
+                .expect("registry");
             let row = registry.find("t").expect("thread row").clone();
 
             let params = json!({
@@ -15918,11 +16201,8 @@ while True:
                     "created_at": row.created_at,
                 },
             });
-            let resp = handle_switchboard(
-                &ctx,
-                &Request::new(4, "agent.switchboard_v2", params),
-            )
-            .await;
+            let resp =
+                handle_switchboard(&ctx, &Request::new(4, "agent.switchboard_v2", params)).await;
             let res = resp.result().expect("switchboard errored");
             assert_eq!(res["delivered"], true, "idle codex mail: {res:?}");
             assert_eq!(res["turn_id"], "turn-1", "started the turn: {res:?}");
