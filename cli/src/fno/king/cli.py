@@ -413,12 +413,17 @@ agents_king_app = typer.Typer(
     help="The king session manifest and escalation controls.",
     no_args_is_help=True,
 )
-# `fno king` forwards here, so this app is the ONLY door to every king verb. A
-# hand-written subset silently strands the rest: `manifest-path` and `board`
-# were re-registered nowhere, and the stop hook's `fno king manifest-path`
-# resolver exited 2 on every stop, disarming the king gate it guards. Copy the
-# whole list so a verb added to `king_app` can never miss this door again.
-agents_king_app.registered_commands = list(king_app.registered_commands)
+agents_king_app.command("init")(init_cmd)
+agents_king_app.command("done")(done_cmd)
+agents_king_app.command("escalate")(escalate_cmd)
+# `fno king` forwards here, so this app is the only door to a king verb, and a
+# verb missing here is reachable from nowhere. `manifest-path` was left off and
+# the stop hook's `fno king manifest-path` resolver exited 2 on every stop,
+# which the hook reads as "cannot answer" and so disarms the king gate it
+# guards. `board` is the one deliberate omission: the board lives at
+# `fno inbox board`, and test_agents_king_excludes_board_while_inbox_keeps_it
+# pins that. Do not "restore" it by copying king_app's whole command list.
+agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 
 
 def main() -> None:  # pragma: no cover - console-script shim

@@ -67,7 +67,7 @@ def test_map_covers_current_surface_once():
     # Counted from the merged file, not taken from either side: main carried
     # 529 and this branch adds `config routing`, `doctor route`, `route init`
     # and `route inventory`.
-    assert len(mapped) == 533, (
+    assert len(mapped) == 534, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
