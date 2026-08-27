@@ -71,6 +71,7 @@ class SessionMetrics:
     cache_create_tokens: int = 0
     assistant_messages: int = 0
     user_messages: int = 0
+    mail_messages: int = 0
     subagent_messages: int = 0
     compaction_count: int = 0
     models: dict = field(default_factory=dict)
@@ -186,7 +187,23 @@ def _accumulate_entry(
     msg_type = obj.get("type")
 
     if msg_type == "user":
-        metrics.user_messages += 1
+        from fno.mail.envelope import contains_fno_mail_tag
+
+        msg = obj.get("message")
+        msg_content = msg.get("content") if isinstance(msg, dict) else obj.get("content")
+        text = ""
+        if isinstance(msg_content, str):
+            text = msg_content
+        elif isinstance(msg_content, list):
+            text = " ".join(
+                b.get("text", "")
+                for b in msg_content
+                if isinstance(b, dict) and isinstance(b.get("text"), str)
+            )
+        if contains_fno_mail_tag(text):
+            metrics.mail_messages += 1
+        else:
+            metrics.user_messages += 1
 
     elif msg_type == "assistant":
         msg = obj.get("message", {})
@@ -389,6 +406,7 @@ def merge_metrics(all_metrics: list[SessionMetrics]) -> SessionMetrics:
         combined.cache_create_tokens += m.cache_create_tokens
         combined.assistant_messages += m.assistant_messages
         combined.user_messages += m.user_messages
+        combined.mail_messages += m.mail_messages
         combined.subagent_messages += m.subagent_messages
         combined.compaction_count += m.compaction_count
         for model, count in m.models.items():
@@ -428,6 +446,7 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
             },
             "messages": {
                 "user": metrics.user_messages,
+                "mail": metrics.mail_messages,
                 "assistant": metrics.assistant_messages,
                 "subagent": metrics.subagent_messages,
             },
@@ -458,7 +477,10 @@ def print_metrics(metrics: SessionMetrics, as_json: bool = False):
     print(f"  Cache create: {format_tokens(metrics.cache_create_tokens):>10}")
     print(f"  Total:        {format_tokens(metrics.total_tokens):>10}")
     print(f"{'─' * 50}")
-    print(f"  Messages:     {metrics.assistant_messages} assistant, {metrics.user_messages} user")
+    msg_summary = f"  Messages:     {metrics.assistant_messages} assistant, {metrics.user_messages} user"
+    if metrics.mail_messages:
+        msg_summary += f", {metrics.mail_messages} mail"
+    print(msg_summary)
     if metrics.subagent_messages:
         print(f"  Subagents:    {metrics.subagent_messages}")
     print(f"  Compactions:  {metrics.compaction_count}")
