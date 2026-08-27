@@ -289,6 +289,11 @@ pub async fn ensure_daemon(
     // Detached, own process group: the daemon must outlive this client.
     let mut cmd = tokio::process::Command::new(daemon_bin);
     cmd.process_group(0);
+    // The daemon outlives this client. Inheriting a caller's captured stdout or
+    // stderr keeps `Command::output()` open after the client exits, so a
+    // captured spawn/restart waits forever on a pipe the daemon owns.
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
     cmd.env("FNO_AGENTS_HOME", home.root());
     // Name the home in argv too, not just the env (x-cd31): a bare
     // `fno-agents-daemon` row in ps cannot be attributed to the home it

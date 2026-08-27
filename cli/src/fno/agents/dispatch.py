@@ -1432,6 +1432,80 @@ def _opencode_serve_spawn(
     return str(short_id)
 
 
+def _codex_thread_spawn(
+    *,
+    name: str,
+    message: str,
+    cwd: Path,
+    from_name: str,
+    model: Optional[str],
+    yolo: bool,
+) -> str:
+    """Delegate a Codex thread spawn to the Rust daemon lane.
+
+    The Python runtime remains a compatibility front door; the held app-server
+    child and registry row are owned by the Rust supervisor so both runtimes
+    share recovery and full-session identity semantics.
+    """
+    import json
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_binary()
+    if binary is None:
+        raise DispatchAskError(
+            "codex thread spawn needs the fno-agents runtime; install it "
+            "(cargo build --release -p fno-agents) or use --substrate pane",
+            exit_code=13,
+        )
+    argv = [
+        str(binary),
+        "spawn",
+        "--name",
+        name,
+        "--harness",
+        "codex",
+        "--substrate",
+        "thread",
+        "--cwd",
+        str(cwd),
+    ]
+    if from_name:
+        argv += [f"--from-name={from_name}"]
+    if model:
+        argv += [f"--model={model}"]
+    if yolo:
+        argv += ["--yolo"]
+    argv += ["--", message]
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired as exc:
+        raise DispatchAskError(
+            "codex thread spawn timed out after 180s", exit_code=2
+        ) from exc
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"exit {proc.returncode}"
+        raise DispatchAskError(f"codex thread spawn failed: {detail}", exit_code=2)
+    try:
+        receipt = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError) as exc:
+        raise DispatchAskError(
+            f"codex thread spawn printed no receipt: {proc.stdout[:200]!r}",
+            exit_code=2,
+        ) from exc
+    session_id = (
+        receipt.get("harness_session_id")
+        or receipt.get("session_id")
+        or receipt.get("short_id")
+    )
+    if not session_id:
+        raise DispatchAskError(
+            f"codex thread receipt carries no full session id: {receipt!r}",
+            exit_code=2,
+        )
+    return str(session_id)
+
+
 def _claude_create_path(
     *,
     name: str,
@@ -2753,13 +2827,51 @@ def dispatch_spawn(
             exit_code=2,
         )
 
-    # 3b. codex plain spawn (no --once) in Python fallback -> exit 13.
+    # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
+    # runtime delegates there instead of silently downgrading to a one-shot.
     if provider == "codex" and not once:
-        raise DispatchAskError(
-            f"plain spawn for provider {provider!r} requires the fno-agents daemon "
-            f"(Rust runtime); use --once for an ephemeral one-shot, or install the "
-            f"fno-agents binary",
-            exit_code=13,
+        unsupported = next(
+            (
+                flag
+                for flag, value in (
+                    ("--role", launch_role),
+                    ("--add-dir", add_dir),
+                    ("--agent", agent),
+                    ("--tools", tools),
+                    ("--deny-tools", deny_tools),
+                    ("--effort", effort),
+                )
+                if value
+            ),
+            None,
+        )
+        if unsupported is not None:
+            raise DispatchAskError(
+                f"{unsupported} is not supported on the codex thread lane; "
+                "drop it or use --substrate pane",
+                exit_code=2,
+            )
+        session_id = _codex_thread_spawn(
+            name=name,
+            message=message,
+            cwd=cwd,
+            from_name=from_name,
+            model=model,
+            yolo=yolo,
+        )
+        _emit_ev(
+            "agent_ask_done",
+            stage="dispatch",
+            name=name,
+            provider="codex",
+            substrate="thread",
+        )
+        return SpawnResult(
+            kind="created",
+            name=name,
+            provider="codex",
+            short_id=session_id,
+            effective_message=effective_message,
         )
 
     registry_path = paths.agents_registry_path()

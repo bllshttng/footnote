@@ -394,6 +394,11 @@ async fn run(args: Vec<String>) -> i32 {
         .unwrap_or_default();
 
     let home = AgentsHome::from_env();
+    let codex_thread_target = fno_agents::state::load_registry(&home.registry_json())
+        .ok()
+        .is_some_and(|registry| {
+            fno_agents::codex_ask::is_codex_thread_target(&registry, &agent_name)
+        });
 
     // Claude `ask` is handled entirely client-side (ab-cc926b4e): claude is a
     // `claude --bg` shellout, not a daemon-PTY agent, so it bypasses the daemon
@@ -492,7 +497,9 @@ async fn run(args: Vec<String>) -> i32 {
         // through to the daemon RPC, whose `handle_ask` PTY screen is the wrong
         // shape for `ask` (Locked Decision 3). The daemon path below is now
         // unreachable for `agent.ask`.
-        return unresolvable_ask_exit(&params, &agent_name);
+        if !codex_thread_target {
+            return unresolvable_ask_exit(&params, &agent_name);
+        }
     }
 
     // Task 1.3a: intercept `spawn` (NOT host/promote, which also map to
@@ -890,7 +897,7 @@ fn validate_effort_for_spawn(
 /// - codex/gemini/agy/opencode + `headless`: dispatch_*_once (one-shot, client-side).
 /// - opencode + `bg`: dispatch_opencode_serve (persistent session on a shared
 ///   `opencode serve`, x-d9f9; detached `run --attach` writer streams events).
-/// - codex/gemini/agy + `bg`: hard error (bg is claude + opencode -> use headless).
+/// - codex + `bg`: daemon-hosted app-server thread; gemini/agy + `bg`: hard error.
 /// - no resolvable / unknown provider: stderr usage error + exit 2.
 ///
 /// Returns `Some(exit_code)` when handled client-side, `None` to fall through.
@@ -1332,15 +1339,21 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             ))
         }
 
-        // bg is claude + opencode: claude's detached `--bg` thread, opencode's
-        // serve-hosted session (the arm above). codex/gemini/agy have no
-        // detached-interactive substrate. Hard error pointing to headless;
-        // never a silent substrate swap. (The harness-capability `thread` bit
-        // is a separate claim - autonomous dispatch readiness - and opencode's
-        // reads false until steering ships; this interactive arm is unaffected.)
+        // Codex thread is supervisor-hosted by the daemon. Returning `None`
+        // preserves the request's `substrate=thread` so the daemon can own the
+        // held app-server process and register its full thread identity.
+        ("codex", "bg") => None,
+
+        // bg is claude + opencode + codex: claude's detached `--bg` thread,
+        // opencode's serve-hosted session, and Codex's app-server lane. Gemini
+        // and agy have no detached-interactive substrate. Hard error pointing
+        // to headless; never a silent substrate swap. (The harness-capability
+        // `thread` bit is a separate claim - autonomous dispatch readiness -
+        // and opencode's reads false until steering ships; this interactive
+        // arm is unaffected.)
         (other, "bg") => {
             eprintln!(
-                "substrate 'bg' (detached interactive thread) is claude + opencode; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
+                "substrate 'bg' (detached interactive thread) is claude + codex + opencode; provider {} has no detached-thread substrate - use --substrate headless for a one-shot",
                 py_repr(other)
             );
             Some(2)
@@ -2507,15 +2520,24 @@ fn format_success(
                 .get("status")
                 .and_then(|v| v.as_str())
                 .unwrap_or("live");
-            Some(
-                serde_json::to_string(&json!({
-                    "name": name,
-                    "short_id": short_id,
-                    "harness": harness,
-                    "status": status,
-                }))
-                .unwrap_or_default(),
-            )
+            let session_id = result
+                .get("harness_session_id")
+                .or_else(|| result.get("session_id"))
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty());
+            let mut receipt = json!({
+                "name": name,
+                "short_id": short_id,
+                "harness": harness,
+                "status": status,
+            });
+            if let Some(session_id) = session_id {
+                receipt["session_id"] = json!(session_id);
+                if result.get("harness_session_id").is_some() {
+                    receipt["harness_session_id"] = json!(session_id);
+                }
+            }
+            Some(serde_json::to_string(&receipt).unwrap_or_default())
         }
         _ => None,
     }

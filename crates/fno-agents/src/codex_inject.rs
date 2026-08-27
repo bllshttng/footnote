@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use crate::protocol::{Request, ResponsePayload};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use tokio::net::UnixStream;
@@ -810,6 +811,59 @@ fn emit_review_invocation_event(
 /// round-trip needs the user's daemon and stays a manual verification, as
 /// `turn/start` already documents for its own path; the pure builders above are
 /// the correct-by-construction unit-tested core.
+async fn deliver_via_hosted_codex_thread(
+    thread_id: &str,
+    target_raw: &str,
+    delivery: ReviewDelivery,
+) -> Option<Result<(String, String), ReviewStartError>> {
+    let home = crate::paths::AgentsHome::from_env();
+    let registry = match crate::state::load_registry(&home.registry_json()) {
+        Ok(registry) => registry,
+        Err(_) => return None,
+    };
+    let row = registry.find_name_or_full_session_id(thread_id)?;
+    if row.harness_name() != "codex"
+        || row.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE
+    {
+        return None;
+    }
+    let request = Request::new(
+        1,
+        "agent.review-start",
+        json!({
+            "thread_id": thread_id,
+            "target": target_raw,
+            "delivery": match delivery {
+                ReviewDelivery::Inline => "inline",
+                ReviewDelivery::Detached => "detached",
+            },
+        }),
+    );
+    let response = crate::client::call(&home, &crate::client::resolve_daemon_bin(), &request).await;
+    Some(match response {
+        Ok(response) => match response.payload {
+            ResponsePayload::Ok(result) => {
+                let turn_id = result
+                    .get("turn_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty());
+                let review_thread_id = result
+                    .get("review_thread_id")
+                    .and_then(|value| value.as_str())
+                    .filter(|value| !value.is_empty());
+                match (turn_id, review_thread_id) {
+                    (Some(turn_id), Some(review_thread_id)) => {
+                        Ok((turn_id.to_string(), review_thread_id.to_string()))
+                    }
+                    _ => Err(ReviewStartError::Reason("not-confirmed")),
+                }
+            }
+            ResponsePayload::Err(error) => Err(ReviewStartError::Server(error.message)),
+        },
+        Err(error) => Err(ReviewStartError::Server(error.to_string())),
+    })
+}
+
 pub async fn run_review_start(rest: &[String]) -> i32 {
     let mut thread_id: Option<String> = None;
     let mut target_raw: Option<String> = None;
@@ -891,7 +945,10 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     let invocation_id =
         read_pending_review_invocation(&thread_id).unwrap_or_else(|| review_invocation_id());
     write_pending_review_invocation(&thread_id, &invocation_id);
-    let outcome = deliver_via_codex_review_start(&thread_id, &target, delivery).await;
+    let outcome = match deliver_via_hosted_codex_thread(&thread_id, &target_raw, delivery).await {
+        Some(outcome) => outcome,
+        None => deliver_via_codex_review_start(&thread_id, &target, delivery).await,
+    };
     let failure_reason = outcome.as_ref().err().map(ToString::to_string);
     let receipt = match failure_reason.as_deref() {
         Some(reason) => format!("codex review/start failed: {reason}"),
@@ -950,7 +1007,7 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
 /// Parse a `--target` shorthand into a [`ReviewTarget`]. `baseBranch:main`,
 /// `commit:abc123`, `custom:focus on concurrency`, or the bare
 /// `uncommittedChanges`.
-fn parse_review_target(raw: &str) -> Option<ReviewTarget> {
+pub fn parse_review_target(raw: &str) -> Option<ReviewTarget> {
     if raw == "uncommittedChanges" {
         return Some(ReviewTarget::UncommittedChanges);
     }
