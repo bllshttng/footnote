@@ -201,8 +201,11 @@ For each DISPATCH ROUND, drive off the ready set, not wave order:
 # reads): cross-session done/in_progress task rows then join this session's
 # STATE.md [x] as completions and claims. A failed node read degrades to
 # STATE.md only - proceed, never stall on the richer read.
-READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" \
-    --ready --state .fno/STATE.md ${NODE_ID:+--node "$NODE_ID"})
+READY_ARGS=(--ready --state .fno/STATE.md)
+if [[ -n "${NODE_ID:-}" ]]; then
+    READY_ARGS+=(--node "$NODE_ID")
+fi
+READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" "${READY_ARGS[@]}")
 ```
 
 A task appears under `ready` when its effective blockers are all complete and
