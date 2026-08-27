@@ -791,6 +791,9 @@ fn dispatch_opencode_serve_inner(
         name: name.to_string(),
         short_id: session_id.clone(),
         legacy_provider: String::new(),
+        // x-d285: non-claude harness; the account axis does not apply.
+        launch_account: None,
+        related_session_id: None,
         provider: Some("opencode".to_string()),
         model: model.filter(|m| !m.is_empty()).map(str::to_string),
         model_basis: model

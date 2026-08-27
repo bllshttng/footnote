@@ -625,6 +625,109 @@ def test_the_account_picker_never_fires_on_a_revive(tmp_path, monkeypatch, capsy
     assert "--account" not in str(exc.value), "no refusal about a flag nobody typed"
 
 
+# --- x-d285 task 1.1: the launch account and the related id ride the row -----
+
+
+def test_pane_spawn_with_an_account_records_the_launch_account(tmp_path, monkeypatch) -> None:
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        account_env={"CLAUDE_CONFIG_DIR": "/x/.claude"},
+        launch_account="makers",
+    )
+    row = load_registry()[0]
+    assert row.launch_account == "makers"
+
+
+def test_unaccounted_pane_spawn_records_default_not_absence(tmp_path, monkeypatch) -> None:
+    """A spawn that positively pinned no account says so with "default".
+
+    Absence is reserved for legacy rows: three values (default | account id |
+    unknown), never two."""
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(monkeypatch, tmp_path)
+    assert load_registry()[0].launch_account == "default"
+
+
+def test_routed_zai_row_with_isolated_account_round_trips(tmp_path, monkeypatch) -> None:
+    """The ZAI/GLM + isolated-account shape from the node, round-tripped."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="glm-worker",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                provider="zai",
+                harness_session_id="sess-glm",
+                launch_account="makers",
+                route_settings_path="/tmp/route-settings/glm.json",
+                related_session_id="sess-glm-fork",
+            )
+        ]
+    )
+    row = load_registry()[0]
+    assert row.launch_account == "makers"
+    assert row.related_session_id == "sess-glm-fork"
+
+
+def test_a_legacy_row_without_launch_account_stays_unknown(tmp_path, monkeypatch) -> None:
+    """AC1-ERR: absence is never normalized to "default" on read."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno import paths
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-old",
+            )
+        ]
+    )
+    target = paths.agents_registry_path()
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    del raw["agents"][0]["launch_account"]
+    del raw["agents"][0]["related_session_id"]
+    target.write_text(json.dumps(raw), encoding="utf-8")
+    row = load_registry()[0]
+    assert row.launch_account is None
+    assert row.related_session_id is None
+
+
+def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) -> None:
+    """The v19 bump rationale: asdict emits the keys, so a stale reader must
+    refuse on version, not TypeError on the kwarg."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="rower",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-r",
+            )
+        ]
+    )
+    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    assert json.loads(raw)["schema_version"] >= 19
+    assert '"launch_account"' in raw
+    assert '"related_session_id"' in raw
+
+
 def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
     """A relaunch that changes destination without saying so is the failure this
     path exists to remove; a restore that says nothing is the same silence."""

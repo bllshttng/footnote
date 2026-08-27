@@ -483,6 +483,24 @@ pub struct RegistryEntry {
     /// full session id and stable fno id rather than sharing a mutable row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
+    /// The ACCOUNT axis this worker was launched under (x-d285, v19). Three
+    /// values, never two: `Some("default")` (the spawn positively pinned no
+    /// account), `Some(<account-id>)` (explicit or headroom-picked), `None`
+    /// (legacy row or a mint that cannot know - never readable as default,
+    /// because a silent default is how the wrong bill gets paid). Mirrors
+    /// Python's `AgentEntry.launch_account`; the re-entry resolver reads it to
+    /// rebuild `CLAUDE_CONFIG_DIR` or refuse. Same X3 passthrough as
+    /// `route_settings_path`: without this mirror a daemon read-modify-write
+    /// drops a Python-stamped account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_account: Option<String>,
+    /// The SECOND valid session id an additive fork/background minted on this
+    /// row (x-d285, v19). Both ids stay valid forever and resolve to the same
+    /// row and launch binding; neither replaces the other, and at most ONE
+    /// optional id exists (no list, edge, or lineage graph). Mirrors Python's
+    /// `AgentEntry.related_session_id`; same X3 passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_session_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -741,6 +759,30 @@ pub fn validate_resolvable_handle(entry: &RegistryEntry) -> Result<(), String> {
 pub const HOST_MODE_EXEC: &str = "exec";
 /// `host_mode` value for a long-lived drivable interactive session.
 pub const HOST_MODE_INTERACTIVE: &str = "interactive";
+
+/// The env key the Python spawn seam sets when an account overlay was applied
+/// (x-d285). An `--account` bg spawn execs into this binary with the overlay
+/// in `os.environ`; the account ID itself has no argv carrier, so the seam
+/// publishes it here for the row mint to stamp. Absent on route-bearing and
+/// pane spawns, which never leave Python.
+pub const LAUNCH_ACCOUNT_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT";
+
+/// The launch-account value a Rust mint seam stamps (x-d285). Three-valued,
+/// mirroring Python: an explicit `FNO_LAUNCH_ACCOUNT` wins; else an ambient
+/// `CLAUDE_CONFIG_DIR` means a config namespace is in play this mint cannot
+/// attribute, so the row records unknown (`None`) rather than "default";
+/// neither set proves the true default slot, so `Some("default")`.
+pub fn launch_account_from_env() -> Option<String> {
+    if let Ok(id) = std::env::var(LAUNCH_ACCOUNT_ENV_KEY) {
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    Some("default".to_string())
+}
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
 /// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
 /// from `interactive` (a footnote-SPAWNED PTY worker): an `attached` row's process
@@ -1754,6 +1796,8 @@ mod tests {
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
             name: name.into(),
             short_id: format!("{name}-id"),
             legacy_provider: String::new(),
@@ -2389,6 +2433,67 @@ mod tests {
             back["agents"][0]["route_settings_path"], PATH,
             "the daemon must re-emit a Python-stamped route path, not drop it"
         );
+    }
+
+    #[test]
+    fn launch_account_and_related_id_survive_a_daemon_read_modify_write() {
+        // v19 (x-d285): Python stamps both at the spawn seams and the re-entry
+        // resolver reads them. Same passthrough claim as route_settings_path:
+        // a daemon write-back that dropped either key would strip the account
+        // axis off every row it touched.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("plain"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // An unstamped row omits both keys, so Python's AgentEntry(**row) is
+        // unaffected and the absence reads as unknown, never as "default".
+        assert!(wire["agents"][0].get("launch_account").is_none());
+        assert!(wire["agents"][0].get("related_session_id").is_none());
+
+        wire["agents"][0]["launch_account"] = serde_json::Value::from("makers");
+        wire["agents"][0]["related_session_id"] = serde_json::Value::from("sess-fork");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(reg.entries[0].launch_account.as_deref(), Some("makers"));
+        assert_eq!(reg.entries[0].related_session_id.as_deref(), Some("sess-fork"));
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(back["agents"][0]["launch_account"], "makers");
+        assert_eq!(back["agents"][0]["related_session_id"], "sess-fork");
+    }
+
+    #[test]
+    fn launch_account_from_env_is_three_valued() {
+        // x-d285: the Rust mint's account fact. An explicit seam id wins; an
+        // ambient config dir the mint cannot attribute is unknown; neither
+        // present proves the default slot. Environment mutation is process-
+        // wide, so the test snapshots and restores both keys around its arms.
+        fn restore(launch: Option<std::ffi::OsString>, dir: Option<std::ffi::OsString>) {
+            match launch {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY),
+            }
+            match dir {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+        let saved_launch = std::env::var_os(LAUNCH_ACCOUNT_ENV_KEY);
+        let saved_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "makers");
+        std::env::set_var("CLAUDE_CONFIG_DIR", "/unrelated");
+        let a = launch_account_from_env();
+
+        std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY);
+        let b = launch_account_from_env();
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let c = launch_account_from_env();
+
+        restore(saved_launch, saved_dir);
+
+        assert_eq!(a.as_deref(), Some("makers"), "seam id outranks ambient dir");
+        assert_eq!(b, None, "an ambient config dir is unknown, never default");
+        assert_eq!(c.as_deref(), Some("default"), "neither present proves default");
     }
 
     #[test]

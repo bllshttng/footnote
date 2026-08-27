@@ -1555,6 +1555,7 @@ def _claude_create_path(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    launch_account: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -1848,6 +1849,12 @@ def _claude_create_path(
         # leaves the account behind. Resolved before the launch (above) so its
         # I/O cannot strand a live supervisor.
         route_settings_path=route_settings_path,
+        # x-d285: the account axis, resolved by the caller (explicit > picked >
+        # "default" on a fresh spawn; the source row's value on a revive; None
+        # when the evidence is genuinely absent). Stamped verbatim - this seam
+        # does not guess, because a silent default is how the wrong bill gets
+        # paid.
+        launch_account=launch_account,
         crown_level=crown_level,
         crown_scope=crown_scope,
         crown_grantor=crown_grantor_val,
@@ -2463,12 +2470,16 @@ def _picked_headroom_note(account_id: str) -> str:
     return "headroom unknown"
 
 
-def _pick_account_env(
+def _pick_account_overlay(
     *,
     role: Optional[str] = None,
     route_env: Optional[Mapping[str, str]] = None,
-) -> Optional[Mapping[str, str]]:
+) -> Optional["object"]:
     """Consult the picker for a spawn that named no account, or None.
+
+    Returns the full :class:`AccountOverlay` (env AND account_id), because the
+    spawn seams stamp the picked id on the row's ``launch_account`` (x-d285);
+    the env alone drops the one fact re-entry needs.
 
     Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
@@ -2488,10 +2499,21 @@ def _pick_account_env(
     try:
         from fno.agents.account_env import resolve_account_overlay
 
-        return resolve_account_overlay(picked).env
+        return resolve_account_overlay(picked)
     except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
         print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
         return None
+
+
+def _pick_account_env(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[Mapping[str, str]]:
+    """Env-only view of :func:`_pick_account_overlay` for callers that stamp
+    no row (kept so existing seams need not know the overlay type)."""
+    overlay = _pick_account_overlay(role=role, route_env=route_env)
+    return dict(overlay.env) if overlay is not None else None
 
 
 def pick_account_id(
@@ -2633,6 +2655,7 @@ def dispatch_spawn(
     output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    launch_account: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -2684,8 +2707,14 @@ def dispatch_spawn(
     # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
     # where that uuid does not exist. It also keeps the revive restore below
     # honest - any --account reaching it is one the operator actually typed.
+    # x-d285: a picked overlay names its account id so the minted row records
+    # WHICH account it rides; an explicit launch_account from the caller wins.
+    effective_launch_account = launch_account
     if account_env is None and provider == "claude" and not resume_session_id:
-        account_env = _pick_account_env(role=role, route_env=route_env)
+        picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
+        if picked_overlay is not None:
+            account_env = picked_overlay.env
+            effective_launch_account = picked_overlay.account_id
 
     launch_role = role
     resolved_providers: list[str] = []
@@ -2981,6 +3010,27 @@ def dispatch_spawn(
                     ),
                     None,
                 )
+            # x-d285: the value the minted row carries on its account axis.
+            # A fresh spawn positively knows: explicit id, picked id, or
+            # "default". A revive does not - the transcript lives under the
+            # config dir it was created in, so its account is a fact about the
+            # SOURCE row, resolved by uuid alone (a row can carry an account
+            # with no route). No source evidence means unknown (None), never
+            # "default": stamping default on a revive is the silent
+            # wrong-account re-entry this node exists to end.
+            row_launch_account = effective_launch_account
+            if resume_session_id and row_launch_account is None:
+                account_source = existing if revive else next(
+                    (
+                        e
+                        for e in entries
+                        if getattr(e, "harness_session_id", None) == resume_session_id
+                    ),
+                    None,
+                )
+                row_launch_account = getattr(account_source, "launch_account", None)
+            elif not resume_session_id:
+                row_launch_account = effective_launch_account or "default"
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
@@ -3143,6 +3193,7 @@ def dispatch_spawn(
                         tools=tools,
                         deny_tools=deny_tools,
                         account_env=account_env,
+                        launch_account=row_launch_account,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,

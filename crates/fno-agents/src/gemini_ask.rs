@@ -1069,6 +1069,9 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),
+        // x-d285: non-claude harness; the account axis does not apply.
+        launch_account: None,
+        related_session_id: None,
         provider: None,
         model: None,
         model_basis: None,

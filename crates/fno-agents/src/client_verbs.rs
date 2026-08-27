@@ -1523,6 +1523,10 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // "adopted" says that; it is not a claim that no human is sitting in
         // it, and both watchdog lanes treat it as the non-answer it is.
         origin: Some("adopted".into()),
+        // x-d285: synthesized from an identity that arrived without a row; the
+        // account it rode in on is unobserved, so the axis stays unknown.
+        launch_account: None,
+        related_session_id: None,
         short_id: short,
         legacy_provider: String::new(),
         provider: None,

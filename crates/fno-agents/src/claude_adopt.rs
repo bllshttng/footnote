@@ -78,6 +78,11 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         // retire acts only on "spawn", and reap protects "adopted" the same
         // way it protects a row nothing ever stamped.
         origin: Some("adopted".into()),
+        // x-d285: adopted, not launched here - HOW this session got its
+        // account is unobserved, so the account axis stays unknown (never
+        // "default").
+        launch_account: None,
+        related_session_id: None,
         short_id: short,
         legacy_provider: String::new(),
         provider: Some("anthropic".into()),

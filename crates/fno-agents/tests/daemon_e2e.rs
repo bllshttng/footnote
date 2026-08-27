@@ -358,6 +358,8 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: "stale-ask".into(),
@@ -921,6 +923,8 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: name.into(),
@@ -1073,6 +1077,8 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
             // Fixture: makes no claim about what created the row.
             origin: None,
             name: name.into(),

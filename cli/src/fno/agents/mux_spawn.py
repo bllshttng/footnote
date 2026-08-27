@@ -3138,6 +3138,7 @@ def dispatch_spawn_pane(
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
     passthrough: Optional[Sequence[str]] = None,
+    launch_account: Optional[str] = None,
 ) -> MuxSpawnResult:
     """Spawn ``name`` as a mux-hosted agent pane (AC1-HP).
 
@@ -3178,11 +3179,16 @@ def dispatch_spawn_pane(
     # picker wired only there would cover bg/headless and leave every default
     # interactive spawn on the exhausted account while the option read enabled.
     # Same helper, same rules (explicit account wins, routed spawns are skipped).
+    # x-d285: the picked OVERLAY (not just its env) so the row can stamp the
+    # account id it picked; an explicit launch_account from the caller wins.
+    effective_launch_account = launch_account
     if account_env is None and provider == "claude":
-        from fno.agents.dispatch import _pick_account_env
+        from fno.agents.dispatch import _pick_account_overlay
 
-        picked = _pick_account_env(role=role, route_env=route_env)
-        account_env = dict(picked) if picked is not None else None
+        picked = _pick_account_overlay(role=role, route_env=route_env)
+        if picked is not None:
+            account_env = dict(picked.env)
+            effective_launch_account = picked.account_id
 
     # The monitor contract is judged BEFORE the generic route guard: an
     # explicit --monitor happy refusal names the zai-shaped gap it found, and
@@ -4163,6 +4169,16 @@ def dispatch_spawn_pane(
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
                     route_settings_path=route_settings_path,
+                    # x-d285: this seam positively knows whether an account was
+                    # pinned, so a claude row always carries "default" or the
+                    # account id - never an absence a re-entry would have to
+                    # guess at. Non-claude rows stay None: the account axis is
+                    # claude-only, same boundary as route_settings_path.
+                    launch_account=(
+                        (effective_launch_account or "default")
+                        if provider == "claude"
+                        else None
+                    ),
                     fno_id=stored_session_uuid or name,
                 )
             if entry.crown_level is not None and entry.crown_scope:

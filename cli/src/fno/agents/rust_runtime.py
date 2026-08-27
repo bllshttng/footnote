@@ -832,6 +832,12 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     for var in _account_env.SCRUB_AUTH_VARS:
         os.environ.pop(var, None)
     os.environ.update(overlay.env)
+    # x-d285: the account ID has no argv carrier on the Rust route (the binary
+    # has no --account flag), so publish it on the env for the row mint to
+    # stamp as launch_account. Set at the same seam as the overlay for the
+    # same reason: this is the one edit both runtimes see. An id, never a
+    # credential - the registry row carries it verbatim.
+    os.environ["FNO_LAUNCH_ACCOUNT"] = account
 
 
 #: Verbs whose Rust-client handling launches a harness child that would inherit
