@@ -1624,11 +1624,20 @@ def test_xaecc_cap_files_the_remainder_and_covers_at_the_same_head(monkeypatch, 
     assert "filed at the round cap (3/2)" in note
 
 
-def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatch, tmp_path):
-    """Review finding 3: when the cap arm files the findings but the row is
-    uncovered on the no_local_pass conjunct, the gate keeps the sized
-    attestation refusal (never an emptied sentence) and the filed node rides
-    the note instead of vanishing."""
+def test_xaecc_r3_cap_filed_but_no_local_pass_is_waived_and_named(monkeypatch, tmp_path):
+    """The cap arm files the findings and the row is uncovered on the
+    no_local_pass conjunct: config REQUIRES a code-review attestation and only
+    a peer ever attested.
+
+    This case used to keep a sized refusal. It cannot: past the cap that
+    conjunct is unsatisfiable by construction, because the only way to satisfy
+    it is a code-review round the spent budget will not fund. That is the
+    unpassable-guard shape the round cap exists to end, and the operator's
+    ruling is two rounds maximum whatever the shape.
+
+    So the budget discharges - and the FACT is not lost. The waived conjunct
+    is named in the receipt beside the filed node, so a merge that happened
+    without the required reviewer's attestation stays legible afterward."""
     _specimen_gates(monkeypatch)
     monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: True)
     stamps = ["2026-08-26T18:00:00Z", "2026-08-26T18:30:00Z", "2026-08-26T19:00:00Z"]
@@ -1655,10 +1664,19 @@ def test_xaecc_r3_cap_filed_but_no_local_pass_keeps_its_sized_refusal(monkeypatc
     state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
         42, str(tmp_path), recompute=False
     )
-    assert state == _coverage_gate.REFUSED
-    assert refusal, "never an empty refusal sentence"
-    assert "required code-review has no head-pinned local pass" in refusal
+    assert state == _coverage_gate.COVERED, f"spent budget must discharge: {refusal}"
+    assert not refusal, f"a discharged budget carries no refusal: {refusal}"
+    assert covered_head, "a covered verdict must name the head it covers"
+    # The filed node still rides the note - unchanged from the refusal this
+    # replaces, and the reason the discharge is safe.
     assert "filed at the round cap (3/2)" in note, "the filed node rides the note"
+    # And the waiver is explicit about WHAT it waived, so the missing
+    # required-reviewer attestation is a recorded fact rather than a silence.
+    assert "review budget discharged (3/2 rounds)" in note, note
+    assert "waived at the cap: uncovered" in note, note
+    # The specific fact their sized refusal carried: config demanded a
+    # code-review attestation and none exists. Waived, but on the record.
+    assert "code-review attestation required by config" in note, note
 # --- rounds the attestation chain never saw: the GitHub review axis ---
 # The Python half of the shared corpus. The Rust half lives in
 # crates/fno-agents/tests/coverage_tiling.rs under the same case names, and

@@ -6705,6 +6705,11 @@ pub fn classify_coverage_tiled(
                         head: line_head.to_string(),
                         branch: line_branch.to_string(),
                         reviewed_base: String::new(),
+                        // Both false by construction: this scan admits only
+                        // non-pass lines, and it skips retractions outright
+                        // above rather than recording them as covering.
+                        is_pass: false,
+                        is_retraction: false,
                     });
                 }
             }

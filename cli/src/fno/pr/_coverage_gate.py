@@ -464,10 +464,32 @@ def coverage_verdict(
     # The waiver is NAMED in the note, never silent, so a merge that happened
     # on a spent budget is legible afterward.
     if rounds > max_rounds:
+        # The waiver names what it waived. Past the cap this arm preempts the
+        # sized coverage refusals below - the required-reviewer attestation
+        # conjunct included - and that is deliberate: a conjunct that still
+        # refuses past the cap is unsatisfiable by construction, because the
+        # only way to satisfy it is a round the budget will not fund. Losing
+        # the FACT would be wrong though, so it rides the receipt as a note
+        # instead of a block.
+        # `failed` is covered_conjuncts' own name for the conjunct that
+        # broke: uncovered / no_local_pass / stale_head / reviewer_refused.
+        # A configured code-review requirement is named ALONGSIDE it, never
+        # instead: an uncovered row hides that fact behind the generic name,
+        # and "we merged without the reviewer config demands" is exactly the
+        # fact a later reader needs.
+        unsatisfied = "; ".join(
+            x
+            for x in (
+                failed,
+                "code-review attestation required by config" if code_review_required else "",
+            )
+            if x
+        )
         waiver = (
             f"review budget discharged ({rounds}/{max_rounds} rounds): the "
             "review phase is complete and the remainder is filed; the "
             "operator lever is config.review.max_rounds"
+            + (f" (waived at the cap: {unsatisfied})" if unsatisfied else "")
         )
         return (
             COVERED,
