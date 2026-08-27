@@ -1,8 +1,10 @@
-"""Tests for dispatch-time model/tier resolution (the pareto router read side).
+"""Tests for dispatch-time model/tier resolution (the config-first read side).
 
-Covers the tier resolver's band logic + fallback chain (AC3-HP, AC3-FR), the
-full precedence chain (AC2-EDGE: an explicit --model outranks a tier), the
-static-table fallback when no snapshot exists, and the non-fatal node_model seam.
+The declared inventory is the primary surface: a config-only model resolves
+(AC1), per-field fold keeps unnamed fields (AC2), an uninstalled harness
+refuses by name (AC3), an empty inventory says so (AC4), unknown capacity
+permits (AC10), and the objective key orders candidates. The static tables
+are gone; every test declares rows instead.
 """
 from __future__ import annotations
 
@@ -11,220 +13,491 @@ import pytest
 from fno import route_resolve as rr
 
 
-def _snap(models):
-    return {"fetched_at": "2026-01-01T00:00:00+00:00", "source": "x", "models": models}
+def _inv(rows, objective="cheapest-that-clears", prefer="", snapshot=None):
+    return rr.inventory_from_rows(
+        rows, objective=objective, prefer_harness=prefer, snapshot=snapshot
+    )
 
 
-# --- resolve_tier ---------------------------------------------------------- #
+_FLEET = [
+    {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+    {"name": "sonnet-x", "harness": "claude", "model": "claude-sonnet-5", "band": "medium"},
+    {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+    {"name": "luna-x", "harness": "codex", "model": "gpt-5.6-luna", "band": "medium"},
+    {"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash", "band": "low"},
+]
 
 
-def test_tier_picks_cheapest_that_clears_floor():
-    """AC3-HP: low tier -> cheapest reachable model that clears the floor."""
-    snap = _snap([
-        {"name": "claude-opus-4-8", "coding_percentile": 99},
-        {"name": "glm-4.7", "coding_percentile": 55},
+# --- inventory fold + band derivation -------------------------------------- #
+
+
+def test_config_only_model_resolves_for_its_band():
+    """AC1-HP: a model in no built-in table resolves from the declared row."""
+    inv = _inv([{"name": "qwen", "harness": "opencode", "model": "qwen3:30b", "band": "low"}])
+    candidate, chain = rr.resolve_grid(
+        "low", "p2", {"opencode": "ok"}, inventory=inv
+    )
+    assert candidate == {"harness": "opencode", "model": "qwen3:30b"}
+    assert any("grid candidate opencode/qwen" in step for step in chain)
+
+
+def test_later_row_overrides_per_field_and_keeps_the_rest():
+    """AC2-HP: a same-named later row wins per field; fields it did not name
+    keep the earlier row's value."""
+    inv = _inv([
+        {"name": "qwen", "harness": "opencode", "model": "qwen3:30b", "band": "low"},
+        {"name": "qwen", "model": "qwen3:235b"},
     ])
-    model, chain = rr.resolve_tier("low", snapshot=snap)
-    assert model == "glm-4.7"  # cheapest (lowest pct) that clears floor 50
-    assert any("glm-4.7" in step for step in chain)
+    row = inv.rows["qwen"]
+    assert row.model == "qwen3:235b"
+    assert row.harness == "opencode"  # unnamed field kept
+    assert row.band == "low"  # unnamed field kept
 
 
-def test_tier_high_empty_degrades_and_records_chain():
-    """AC3-FR: no model clears the high floor -> degrade to best available, spawn."""
-    snap = _snap([
-        {"name": "glm-4.7", "coding_percentile": 55},
-        {"name": "glm-5.3[1m]", "coding_percentile": 75},
-    ])
-    model, chain = rr.resolve_tier("high", snapshot=snap)
-    assert model == "glm-5.3[1m]"  # best available below the floor
+def test_band_from_snapshot_percentile_when_row_leaves_it_unset():
+    snap = {"fetched_at": "2026-01-01T00:00:00+00:00", "source": "x", "models": [
+        {"name": "mystery", "coding_percentile": 95},
+        {"name": "weakling", "coding_percentile": 20},
+    ]}
+    inv = _inv([
+        {"name": "mystery", "harness": "claude", "model": "m-1"},
+        {"name": "weakling", "harness": "claude", "model": "w-1"},
+    ], snapshot=snap)
+    assert inv.rows["mystery"].band == "high"
+    assert inv.rows["weakling"].band == ""  # below every floor: unbanded
+
+
+def test_unbanded_row_is_never_a_grid_candidate():
+    inv = _inv([{"name": "mystery", "harness": "claude", "model": "m-1"}])
+    candidate, chain = rr.resolve_grid("low", "p2", {"claude": "ok"}, inventory=inv)
+    assert candidate is None
+    assert chain[-1] == "grid=no-band-candidate"
+
+
+def test_empty_inventory_records_no_inventory_declared():
+    """AC4-EDGE: a virgin install says so; the chain terminal is receiptable."""
+    candidate, chain = rr.resolve_grid("high", "p1", {"claude": "ok"}, inventory=rr.Inventory())
+    assert candidate is None
+    assert chain[-1] == "grid=no-inventory-declared"
+
+
+def test_absent_difficulty_rounds_up_to_the_strong_band():
+    inv = _inv([{"name": "flash-x", "harness": "claude", "model": "f", "band": "low"}])
+    candidate, _ = rr.resolve_grid(None, "p2", {"claude": "ok"}, inventory=inv)
+    assert candidate is None  # the low row does not clear the high floor
+
+
+# --- objective ordering ----------------------------------------------------- #
+
+
+def test_cheapest_that_clears_prefers_declared_cost():
+    rows = [
+        {"name": "pricey", "harness": "claude", "model": "p", "band": "high",
+         "cost_per_mtok_in": 9.9},
+        {"name": "frugal", "harness": "claude", "model": "f", "band": "high",
+         "cost_per_mtok_in": 1.1},
+    ]
+    candidate, _ = rr.resolve_grid("high", "p2", {"claude": "ok"}, inventory=_inv(rows))
+    assert candidate["model"] == "f"
+
+
+def test_best_available_prefers_band_then_percentile():
+    snap = {"fetched_at": "t", "source": "x", "models": [
+        {"name": "sol-x", "coding_percentile": 91},
+        {"name": "opus-x", "coding_percentile": 99},
+    ]}
+    inv = _inv(_FLEET, objective="best-available", snapshot=snap)
+    candidate, _ = rr.resolve_grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    assert candidate["model"] == "claude-opus-5"  # high band, top percentile
+
+
+def test_prefer_harness_breaks_ties_without_lowering_the_band():
+    inv = _inv(_FLEET, objective="prefer-harness", prefer="claude")
+    # medium request: the preferred harness's own >=floor rows come first, so
+    # the claude pick wins without ever dipping below the floor.
+    candidate, _ = rr.resolve_grid("medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    assert candidate["harness"] == "claude"
+    # never lowered: a low-only preferred lane does not win a medium request
+    low_only = _inv(
+        [{"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash", "band": "low"},
+         {"name": "luna-x", "harness": "codex", "model": "gpt-5.6-luna", "band": "medium"}],
+        objective="prefer-harness", prefer="claude",
+    )
+    candidate, _ = rr.resolve_grid(
+        "medium", "p2", {"claude": "ok", "codex": "ok"}, inventory=low_only
+    )
+    assert candidate["model"] == "gpt-5.6-luna"
+    # high band with claude exhausted: crossing harnesses is allowed without
+    # lowering the bar.
+    candidate, _ = rr.resolve_grid("high", "p2", {"claude": "exhausted", "codex": "ok"}, inventory=inv)
+    assert candidate["model"] == "gpt-5.6-sol"
+
+
+# --- capacity --------------------------------------------------------------- #
+
+
+def test_unknown_capacity_permits_and_records_it():
+    """AC10-ERR: all-unknown capacity still returns a candidate."""
+    candidate, chain = rr.resolve_grid(
+        "medium", "p2", {}, inventory=_inv(_FLEET)
+    )
+    assert candidate is not None
+    assert any("capacity=unknown-permitted" in step for step in chain)
+
+
+def test_only_a_positive_exhausted_marker_removes_a_candidate():
+    inv = _inv(_FLEET)
+    candidate, _ = rr.resolve_grid(
+        "high", "p1", {"claude": "exhausted", "codex": "ok"}, inventory=inv
+    )
+    assert candidate["harness"] == "codex"
+    candidate, chain = rr.resolve_grid(
+        "high", "p1", {"claude": "exhausted", "codex": "blocked"}, inventory=inv
+    )
+    assert candidate is None
+    assert chain[-1] == "grid=no-available-candidate"
+
+
+def test_priority_bends_the_band_p0_high_p3_low():
+    inv = _inv(_FLEET)
+    c, _ = rr.resolve_grid("low", "p0", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    assert c["model"] in ("claude-opus-5", "gpt-5.6-sol")  # p0 -> high band
+    c, _ = rr.resolve_grid("high", "p3", {"claude": "ok", "codex": "ok"}, inventory=inv)
+    assert c["model"] == "glm-5.3-flash"  # p3 -> low band
+
+
+def test_grid_does_not_degrade_below_the_requested_band():
+    """Round-up: the grid hands an empty tier to the operator's defaults rather
+    than quietly giving strong work to a weak row (resolve_tier degrades; the
+    grid does not)."""
+    inv = _inv([{"name": "flash-x", "harness": "claude", "model": "glm-5.3-flash", "band": "low"}])
+    candidate, chain = rr.resolve_grid("high", "p2", {"claude": "ok"}, inventory=inv)
+    assert candidate is None
+    assert chain[-1] == "grid=no-band-candidate"
+    # the task-pin tier resolver still degrades rather than blocking
+    model, chain = rr.resolve_tier("high", inventory=inv, provider="claude")
+    assert model == "glm-5.3-flash"
     assert any("degrade" in step for step in chain)
 
 
-def test_tier_no_reachable_falls_to_provider_default():
-    snap = _snap([{"name": "some-unmapped", "coding_percentile": 99}])
-    model, chain = rr.resolve_tier("high", snapshot=snap)
-    assert model is None
-    assert any("provider default" in step for step in chain)
+# --- effort (third coordinate) ---------------------------------------------- #
 
 
-def test_tier_unknown_is_provider_default():
-    model, chain = rr.resolve_tier("turbo", snapshot=_snap([]))
-    assert model is None
-    assert any("unknown-tier" in step for step in chain)
+def test_effort_varies_with_band_within_the_same_inventory():
+    """AC5-HP: high band and low band rows carry different declared effort."""
+    rows = [
+        {"name": "strong-x", "harness": "codex", "model": "s", "band": "high", "effort": "high"},
+        {"name": "cheap-x", "harness": "codex", "model": "c", "band": "low", "effort": "low"},
+    ]
+    inv = _inv(rows)
+    hi, _ = rr.resolve_grid("high", "p2", {"codex": "ok"}, inventory=inv)
+    lo, _ = rr.resolve_grid("low", "p2", {"codex": "ok"}, inventory=inv)
+    assert hi["effort"] == "high"
+    assert lo["effort"] == "low"
 
 
-def test_tier_no_snapshot_uses_static_table():
-    """No snapshot -> the curated static band, still deterministic and reachable."""
-    model, chain = rr.resolve_tier("low", snapshot={})  # empty snapshot -> static
-    assert model == "glm-4.7"  # STATIC_TIERS['low'][0], reachable
-    assert any("static" in step for step in chain)
+def test_no_effort_surface_injects_no_effort_key():
+    """AC6-EDGE: agy has no effort surface - the candidate carries no effort."""
+    inv = _inv([{"name": "agy-x", "harness": "agy", "model": "a", "band": "high", "effort": "high"}])
+    candidate, chain = rr.resolve_grid("high", "p2", {"agy": "ok"}, inventory=inv)
+    assert candidate is not None
+    assert "effort" not in candidate
+    assert any("effort omitted" in step for step in chain)
 
 
-# --- resolve_tier provider scoping (harness-aware) ------------------------- #
+# --- per-axis constraint + filters ------------------------------------------ #
 
 
-def test_tier_static_scoped_to_claude_picks_same_harness():
-    """AC1-HP: medium tier scoped to claude -> claude-sonnet-5, not gpt-5.4."""
-    model, chain = rr.resolve_tier("medium", snapshot={}, provider="claude")
-    assert model == "claude-sonnet-5"  # the medium band's claude entry
-    assert any("provider(claude)" in step for step in chain)
+def test_constrain_harness_picks_within_the_pinned_harness():
+    inv = _inv(_FLEET)
+    candidate, _ = rr.resolve_grid(
+        "high", "p1", {"claude": "ok", "codex": "ok"},
+        constrain_harness="codex", inventory=inv,
+    )
+    assert candidate["harness"] == "codex"
+    assert candidate["model"] == "gpt-5.6-sol"
 
 
-def test_tier_snapshot_scoped_to_claude_skips_codex():
-    """AC2-HP: cheapest floor-clearer is codex-mapped, but claude scope skips it."""
-    snap = _snap([
-        {"name": "gpt-5.4", "coding_percentile": 72},        # cheaper, codex
-        {"name": "claude-sonnet-5", "coding_percentile": 85},  # claude
+def test_substrate_filter_empties_the_set_with_a_named_reason():
+    """AC9-EDGE: a thread substrate no declared row supports records
+    constrained-empty rather than cancelling silently.
+
+    Reads opencode, whose thread bit is False. This test named codex until
+    codex gained a verified thread lane; the edge case is about a harness
+    without one, so it follows the capability rather than the harness name.
+    """
+    inv = _inv([
+        {"name": "oc-x", "harness": "opencode", "model": "oc-big", "band": "high"},
     ])
-    model, _chain = rr.resolve_tier("medium", snapshot=snap, provider="claude")
-    assert model == "claude-sonnet-5"  # cheapest CLAUDE-mapped clearer, not gpt-5.4
+    candidate, chain = rr.resolve_grid(
+        "high", "p1", {"opencode": "ok"}, substrate="thread", inventory=inv
+    )
+    assert candidate is None
+    assert chain[-1] == "grid=constrained-empty"
 
 
-def test_tier_exhausted_harness_degrades_to_default_not_codex():
-    """AC3-ERR: no claude-mapped model in any band -> None, never a codex model."""
-    snap = _snap([{"name": "gpt-5.4", "coding_percentile": 99}])  # codex only
-    model, chain = rr.resolve_tier("high", snapshot=snap, provider="claude")
+def test_uninstalled_harness_refuses_by_name():
+    """AC3-ERR: a declared row on a harness fno cannot drive is refused BY
+    NAME in the chain, not silently skipped."""
+    inv = _inv([{"name": "pi-x", "harness": "pi", "model": "p", "band": "high"}])
+    candidate, chain = rr.resolve_grid("high", "p1", {"pi": "ok"}, inventory=inv)
+    assert candidate is None
+    assert any("refuses pi-x" in step and "not installed" in step for step in chain)
+
+
+# --- role + protected floors ------------------------------------------------ #
+
+
+def test_planning_role_floors_the_band_at_high():
+    inv = _inv(_FLEET)
+    candidate, chain = rr.resolve_grid(
+        "low", "p2", {"claude": "ok", "codex": "ok"}, role="planning", inventory=inv
+    )
+    assert candidate["model"] != "glm-5.3-flash"
+    assert any("role(planning)" in step for step in chain)
+    candidate, _ = rr.resolve_grid(
+        "low", "p2", {"claude": "ok", "codex": "ok"}, role="execution", inventory=inv
+    )
+    assert candidate["model"] == "glm-5.3-flash"
+
+
+def test_protected_role_forces_best_available_and_the_floor():
+    inv = _inv(_FLEET)
+    candidate, chain = rr.resolve_grid(
+        "low", "p2", {"claude": "ok", "codex": "ok"},
+        protected_role="implement", inventory=inv,
+    )
+    assert candidate["model"] != "glm-5.3-flash"  # floored to high
+    assert any("protected-role(implement)" in step for step in chain)
+
+
+# --- runtime_capacity: harness -> accounts -> MAX --------------------------- #
+
+
+def _fake_headroom(monkeypatch, states):
+    """Patch the batch headroom read with a per-account verdict map."""
+    import fno.adapters.providers.runtime_state as rs
+    from fno.adapters.providers.runtime_state import Headroom, HeadroomState
+
+    def _many(provider_ids, **_kw):
+        return {
+            pid: Headroom(
+                getattr(HeadroomState, states.get(pid, "unknown").upper()),
+                None,
+                source="lock",
+            )
+            for pid in provider_ids
+        }
+
+    monkeypatch.setattr(rs, "headrooms", _many)
+    return _many
+
+
+def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
+    """AC11-HP: an exhausted record bound to claude reads claude exhausted only
+    when EVERY claude account is; one healthy account means usable."""
+    inv = _inv([
+        {"name": "opus-x", "harness": "claude", "model": "o", "band": "high",
+         "account": "primary"},
+    ])
+    _fake_headroom(monkeypatch, {"primary": "exhausted"})
+    cap = rr.runtime_capacity(("claude",), inventory=inv)
+    # the harness has one declared account, exhausted -> exhausted
+    assert rr._capacity_state(cap["claude"])[0] == "exhausted"
+    # a second healthy account (registered record) makes the harness usable
+    settings = type("S", (), {"accounts": type("A", (), {"records": [
+        {"id": "primary", "harness": "claude"},
+        {"id": "backup", "harness": "claude"},
+    ]})})()
+    _fake_headroom(monkeypatch, {"primary": "exhausted", "backup": "ok"})
+    cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
+    assert rr._capacity_state(cap["claude"])[0] == "ok"
+    assert cap["claude"]["accounts"] == {"primary": "exhausted", "backup": "ok"}
+    # exhausted + UNKNOWN is NOT exhausted: exhaustion requires every account
+    _fake_headroom(monkeypatch, {"primary": "exhausted"})
+    cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
+    assert rr._capacity_state(cap["claude"])[0] == "unknown"
+
+
+def test_harness_accounts_expands_rows_then_registered_records(monkeypatch):
+    class _Settings:
+        class accounts:
+            records = [{"id": "rec-a", "harness": "claude"}, {"id": "rec-b", "harness": "codex"}]
+    inv = _inv([
+        {"name": "opus-x", "harness": "claude", "model": "o", "route": "zai/glm-5.3"},
+        {"name": "flash-x", "harness": "claude", "model": "f", "account": "paid-lane"},
+    ])
+    # a row's explicit account names its record; a route names a VENDOR, never
+    # an account id, so it contributes nothing (a vendor key could never match
+    # the account-keyed state and would dilute a live lock with its UNKNOWN)
+    assert rr.harness_accounts("claude", settings=_Settings, inventory=inv) == [
+        "paid-lane", "rec-a",
+    ]
+    # no declared row for codex -> every registered record bound to codex
+    assert rr.harness_accounts("codex", settings=_Settings, inventory=inv) == ["rec-b"]
+
+
+def test_same_model_two_access_paths_two_cost_profiles():
+    """Cost belongs to the ACCESS PATH: the same model reached two ways is two
+    rows with two cost profiles, and the cheaper path wins within the band -
+    never an averaged number."""
+    rows = [
+        {"name": "flash-subscription", "harness": "claude",
+         "model": "glm-5.3-flash", "band": "medium",
+         "route": "zai/glm-5.3-flash", "cost_per_mtok_in": 2.3},
+        {"name": "flash-api", "harness": "opencode",
+         "model": "glm-5.3-flash", "band": "medium",
+         "cost_per_mtok_in": 0.075},
+    ]
+    inv = _inv(rows)
+    assert len(inv.rows) == 2  # both rows kept, nothing averaged or merged
+    candidate, chain = rr.resolve_grid(
+        "medium", "p2", {"claude": "ok", "opencode": "ok"}, inventory=inv
+    )
+    assert candidate["model"] == "glm-5.3-flash"
+    assert candidate["harness"] == "opencode"  # the cheaper ACCESS PATH
+    assert any("flash-api" in step for step in chain)
+    # the expensive path still stands when the cheap one is exhausted
+    candidate, _ = rr.resolve_grid(
+        "medium", "p2", {"claude": "ok", "opencode": "exhausted"}, inventory=inv
+    )
+    assert candidate["harness"] == "claude"
+
+
+def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):
+    cap = rr.runtime_capacity(
+        ("claude",), inventory=rr.Inventory()
+    )
+    assert cap["claude"]["window"] == "absent"
+    assert cap["claude"]["state"] == "unknown"
+
+
+# --- resolve_tier / node_model (inventory-backed) --------------------------- #
+
+
+def test_tier_resolves_declared_row_and_scopes_to_harness():
+    inv = _inv(_FLEET)
+    # cheapest-that-clears with no cost/percentile: weakest band that clears
+    assert rr.resolve_tier("medium", inventory=inv, provider="claude")[0] == "claude-sonnet-5"
+    assert rr.resolve_tier("medium", inventory=inv, provider="banana")[0] is None
+    assert rr.resolve_tier("banana", inventory=inv)[0] is None
+
+
+def test_tier_empty_inventory_is_provider_default():
+    model, chain = rr.resolve_tier("low", inventory=rr.Inventory())
     assert model is None
-    assert any("provider default" in step for step in chain)
+    assert any("no declared inventory" in step for step in chain)
 
 
-def test_tier_unknown_provider_matches_nothing():
-    """AC4-EDGE: a garbage provider filters everything -> None, no raise."""
-    model, _chain = rr.resolve_tier("high", snapshot={}, provider="banana")
-    assert model is None
-
-
-def test_tier_none_provider_is_unscoped():
-    """provider=None keeps the old any-harness behavior for direct callers."""
-    snap = _snap([{"name": "gpt-5.6-terra", "coding_percentile": 72}])
-    assert rr.resolve_tier("medium", snapshot=snap)[0] == "gpt-5.6-terra"
-
-
-# --- node_model provider scoping ------------------------------------------- #
-
-
-def test_node_model_difficulty_scoped_to_claude():
-    """AC1-HP at the seam: a medium-band node on the claude lane -> claude model."""
-    node = {"difficulty": "medium"}
-    assert rr.node_model(node, snapshot={}, provider="claude") == "claude-sonnet-5"
-
-
-def test_node_model_pin_bypasses_filter():
-    """AC5-EDGE: a model pin passes through unfiltered (seam guard owns pin policy)."""
-    node = {"model": "gpt-5.4"}
-    assert rr.node_model(node, snapshot={}, provider="claude") == "gpt-5.4"
+def test_node_model_reads_pin_and_band():
+    inv = _inv(_FLEET)
+    assert rr.node_model({"model": "glm-5.2"}, inventory=inv) == "glm-5.2"
+    assert rr.node_model(
+        {"difficulty": "low"}, inventory=inv, provider="claude"
+    ) == "glm-5.3-flash"
+    assert rr.node_model(
+        {"difficulty": "high"}, inventory=inv, provider="claude", resolve_difficulty=False
+    ) is None
 
 
 def test_node_model_none_provider_defaults_to_claude(monkeypatch):
-    """Locked 3 intent: None provider scopes to the bg spawn default (claude), NOT
-    the ambient/invoking harness -- a bg worker is always claude, so a codex
-    ambient must not resolve a codex model for a claude spawn."""
-    # Force a codex ambient; node_model must still scope to claude, not codex.
     monkeypatch.setenv("CODEX_SANDBOX", "1")
-    node = {"difficulty": "medium"}
-    assert rr.node_model(node, snapshot={}) == "claude-sonnet-5"
+    inv = _inv(_FLEET)
+    assert rr.node_model({"difficulty": "medium"}, inventory=inv) == "claude-sonnet-5"
 
 
 def test_node_model_degrades_on_resolver_error(monkeypatch):
-    """Non-fatal: a resolver blow-up degrades to the raw pin, spawn proceeds."""
-
     def _boom(**_kw):
         raise RuntimeError("resolver boom")
 
     monkeypatch.setattr(rr, "resolve_dispatch_model", _boom)
-    assert rr.node_model({"model": "glm-5.2"}, snapshot={}) == "glm-5.2"
-
-
-# --- resolve_dispatch_model (precedence) ----------------------------------- #
-
-
-def test_explicit_outranks_everything():
-    """AC2-EDGE: a dispatch-time --model wins over a task band (and role routing)."""
-    model, source, chain = rr.resolve_dispatch_model(
-        explicit="pinned-x", task_difficulty="high", snapshot=_snap([])
-    )
-    assert (model, source) == ("pinned-x", "explicit")
-
-
-def test_task_pin_outranks_task_difficulty():
-    model, source, _ = rr.resolve_dispatch_model(
-        task_model="task-x", task_difficulty="high", snapshot=_snap([])
-    )
-    assert (model, source) == ("task-x", "task-pin")
-
-
-def test_task_difficulty_resolves_and_labels_source():
-    snap = _snap([{"name": "glm-4.7", "coding_percentile": 55}])
-    model, source, _ = rr.resolve_dispatch_model(task_difficulty="low", snapshot=snap)
-    assert model == "glm-4.7"
-    assert source == "task-difficulty(low)"
-
-
-def test_plan_difficulty_is_lowest_priority_before_default():
-    snap = _snap([{"name": "glm-4.7", "coding_percentile": 55}])
-    model, source, _ = rr.resolve_dispatch_model(plan_difficulty="low", snapshot=snap)
-    assert model == "glm-4.7" and source == "plan-difficulty(low)"
+    assert rr.node_model({"model": "glm-5.2"}, inventory=rr.Inventory()) == "glm-5.2"
 
 
 def test_retired_tier_params_are_gone():
-    """AC4-HP (x-baef): the compat read side died with the field. A caller
-    still spelling task_tier/plan_tier gets a TypeError, not a silent
-    fallback, and a node dict carrying only model_tier resolves nothing."""
     import inspect
 
     params = inspect.signature(rr.resolve_dispatch_model).parameters
     assert "task_tier" not in params and "plan_tier" not in params
     with pytest.raises(TypeError):
         rr.resolve_dispatch_model(task_tier="low")
-    # the negative half of the compat-kill: model_tier-only reads as unset
-    assert rr.node_model({"model_tier": "low"}, snapshot={}, provider="claude") is None
 
 
-def test_nothing_set_is_provider_default():
-    model, source, _ = rr.resolve_dispatch_model()
+def test_precedence_chain_labels_sources():
+    inv = _inv(_FLEET)
+    model, source, _ = rr.resolve_dispatch_model(
+        explicit="pinned-x", task_difficulty="high", inventory=inv
+    )
+    assert (model, source) == ("pinned-x", "explicit")
+    model, source, _ = rr.resolve_dispatch_model(
+        task_model="task-x", task_difficulty="high", inventory=inv
+    )
+    assert (model, source) == ("task-x", "task-pin")
+    model, source, _ = rr.resolve_dispatch_model(
+        task_difficulty="low", inventory=inv, provider="claude"
+    )
+    assert model == "glm-5.3-flash" and source == "task-difficulty(low)"
+    model, source, _ = rr.resolve_dispatch_model(inventory=inv)
     assert model is None and source == "provider-default"
 
 
-# --- node_model (spawn seam) ----------------------------------------------- #
+# --- the built-in fallback (config overrides AND extends it) ---------------- #
 
 
-def test_node_model_reads_pin_and_band():
-    assert rr.node_model({"model": "glm-5.2"}) == "glm-5.2"
-    # band with an (empty) injected snapshot -> deterministic static table; scope
-    # to claude so the pick is env-independent (the low band is all-claude anyway).
-    assert rr.node_model({"difficulty": "low"}, snapshot={}, provider="claude") == "glm-4.7"
-    assert rr.node_model({}) is None
+class _FakeRouting:
+    def __init__(self, models, objective="cheapest-that-clears", prefer=""):
+        self.models = models
+        self.objective = objective
+        self.prefer_harness = prefer
 
 
-def test_node_model_reads_canonical_difficulty():
-    """AC1-HP: dispatch reads the canonical work-difficulty field."""
-    assert rr.node_model({"difficulty": "low"}, snapshot={}, provider="claude") == "glm-4.7"
+class _FakeSettings:
+    def __init__(self, models, **kw):
+        self.routing = _FakeRouting(models, **kw)
 
 
-def test_node_model_can_defer_difficulty_to_capacity_grid():
-    """Automatic dispatch leaves difficulty for spawn-default grid resolution."""
-    assert rr.node_model(
-        {"difficulty": "high"}, snapshot={}, provider="claude", resolve_difficulty=False
-    ) is None
+def _resolved(models):
+    """resolve_inventory against a config declaring exactly ``models``."""
+    return rr.resolve_inventory(settings=_FakeSettings(models), snapshot={})
 
 
-def test_grid_selects_first_available_candidate_for_difficulty_and_priority():
-    """AC3-HP: difficulty x priority joins with current harness capacity."""
+def test_the_builtin_table_answers_when_config_declares_nothing():
+    """The fallback keeps a tier request answerable. Without it, review level
+    names no model and /code-review drops to the provider default on every
+    install that has declared no inventory."""
+    inv = _resolved([])
+    assert inv.rows, "the built-in fallback must seed the inventory"
+    assert inv.declared is False, "seeded rows are not a config declaration"
+    model, _chain = rr.resolve_tier("high", settings=_FakeSettings([]), snapshot={})
+    assert model is not None
+
+
+def test_config_overrides_a_builtin_row_per_field():
+    """A config row REPLACES the built-in of the same name field by field, and
+    the fields it does not name keep the built-in value."""
+    inv = _resolved([{"name": "glm-4.7", "model": "glm-4.7-pinned"}])
+    row = inv.rows["glm-4.7"]
+    assert row.model == "glm-4.7-pinned"
+    assert row.harness == "claude", "an unnamed field keeps the built-in value"
+    assert row.band == "low", "an unnamed field keeps the built-in value"
+    assert inv.declared is True
+
+
+def test_config_extends_the_builtin_table_with_a_new_name():
+    """A name the built-in never carried is ADDED, never swapped in beside a
+    table that then wins: adding a model stays a config edit."""
+    inv = _resolved([
+        {"name": "local-llama", "harness": "claude", "model": "llama-x", "band": "high"},
+    ])
+    assert "local-llama" in inv.rows, "config must extend the table"
+    assert "glm-4.7" in inv.rows, "extending must not drop the built-in rows"
+
+
+def test_the_grid_still_injects_nothing_when_config_declares_nothing():
+    """The fallback seeds rows, so the grid reads `declared` rather than
+    `rows`. A virgin install stays inert and says why."""
     candidate, chain = rr.resolve_grid(
-        "high",
-        "p1",
-        {"claude": "exhausted", "codex": "ok"},
+        "high", "p1", {"claude": "ok"}, inventory=_resolved([])
     )
-    assert candidate == {"harness": "codex", "model": "gpt-5.6-sol"}
-    assert any("grid candidate" in step for step in chain)
-
-
-def test_grid_is_inert_when_capacity_is_unknown():
-    """AC4-EDGE: unknown runtime capacity never invents a route."""
-    candidate, chain = rr.resolve_grid("medium", "p2", {})
     assert candidate is None
-    assert "grid=unknown-capacity" in chain
-
-
-def test_node_model_explicit_override_wins():
-    assert rr.node_model({"difficulty": "low"}, explicit="cli-x", snapshot={}) == "cli-x"
+    assert chain[-1] == "grid=no-inventory-declared"

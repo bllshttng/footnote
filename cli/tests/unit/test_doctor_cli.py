@@ -23,6 +23,7 @@ def test_doctor_advertises_ten_direct_actions() -> None:
         "footprint",
         "lint",
         "observer",
+        "route",
         "skill-diff",
         "test",
         "update",

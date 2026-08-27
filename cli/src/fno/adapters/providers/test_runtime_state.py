@@ -26,6 +26,8 @@ from fno.adapters.providers.runtime_state import (
     ProviderHealth,
     ProviderRuntimeState,
     _compute_exponential_cooldown_ms,
+    HeadroomState,
+    headroom,
     is_in_cooldown,
     read_state,
     reset_provider_health,
@@ -1272,3 +1274,172 @@ class TestALiveLockOutlivesTheHealthTTL:
         update_provider_health("P", ErrorRule(status=429, backoff=True), now=now)
         later = now + PROVIDER_HEALTH_TTL_SECONDS + 60
         assert "P" not in read_state(now=later).provider_health
+
+
+class TestMachineWideStatePath:
+    """Health and usage live in ONE machine-wide file, not one per cwd (M5)."""
+
+    def _machine(self, tmp_path, monkeypatch) -> Path:
+        import fno.paths as paths_mod
+
+        machine = tmp_path / "machine" / "provider-runtime-state.json"
+        monkeypatch.delenv("FNO_RUNTIME_STATE_PATH", raising=False)
+        monkeypatch.setattr(paths_mod, "runtime_state_json", lambda: machine)
+        return machine
+
+    def test_state_written_from_one_cwd_reads_from_another(self, tmp_path, monkeypatch):
+        """AC19-ERR: quota is per-account and machine-wide, so a lock written
+        from cwd A is read from cwd B. Both halves MUST cross a chdir."""
+        self._machine(tmp_path, monkeypatch)
+        now = time.time()
+        cwd_a = tmp_path / "a"
+        cwd_b = tmp_path / "b"
+        cwd_a.mkdir()
+        cwd_b.mkdir()
+        monkeypatch.chdir(cwd_a)
+        update_provider_health(
+            "acct-1", ErrorRule(status=429, backoff=True),
+            now=now, resets_at=now + 3600,
+        )
+        monkeypatch.chdir(cwd_b)
+        assert headroom("acct-1").state is HeadroomState.EXHAUSTED
+
+    def test_lock_written_from_any_cwd_reads_exhausted_everywhere(self, tmp_path, monkeypatch):
+        """AC12-ERR: the writer already works; the read must reach it from a
+        different working directory."""
+        self._machine(tmp_path, monkeypatch)
+        now = time.time()
+        writer_cwd = tmp_path / "w"
+        writer_cwd.mkdir()
+        monkeypatch.chdir(writer_cwd)
+        update_provider_health(
+            "makers", ErrorRule(status=429, backoff=True),
+            now=now, resets_at=now + 600,
+        )
+        monkeypatch.chdir(tmp_path)
+        assert headroom("makers").state is HeadroomState.EXHAUSTED
+
+    def test_legacy_per_cwd_file_folds_into_the_machine_wide_one(self, tmp_path, monkeypatch):
+        """Migration: a pre-change relative-path file folds in per key, newest
+        last_error_at winning, and is left untouched on disk."""
+        machine = self._machine(tmp_path, monkeypatch)
+        now = time.time()
+        legacy_dir = tmp_path / "legacy-cwd"
+        (legacy_dir / ".fno").mkdir(parents=True)
+        legacy = legacy_dir / ".fno" / "provider-runtime-state.json"
+        legacy.write_text(json.dumps({
+            "schema_version": 2,
+            "provider_health": {
+                "old-acct": {
+                    "provider_id": "old-acct", "backoff_level": 2,
+                    "rate_limited_until": None, "last_error_at": now - 5,
+                    "model_locks": {},
+                },
+            },
+            "usage": {
+                "readyrule": {
+                    "probed_at": now - 10, "source": "test",
+                    "windows": [{"label": "weekly", "used_pct": 40.0,
+                                 "resets_at": now + 100000}],
+                },
+            },
+        }), encoding="utf-8")
+        monkeypatch.chdir(legacy_dir)
+        assert headroom("old-acct").state is HeadroomState.UNKNOWN  # forces a resolve
+        assert machine.is_file()
+        merged = json.loads(machine.read_text(encoding="utf-8"))
+        assert "old-acct" in merged["provider_health"]
+        assert "readyrule" in merged["usage"]
+        assert legacy.exists()  # never deleted
+
+    def test_newer_machine_state_wins_the_fold(self, tmp_path, monkeypatch):
+        machine = self._machine(tmp_path, monkeypatch)
+        now = time.time()
+        legacy_dir = tmp_path / "legacy-cwd"
+        (legacy_dir / ".fno").mkdir(parents=True)
+        legacy = legacy_dir / ".fno" / "provider-runtime-state.json"
+        legacy.write_text(json.dumps({
+            "provider_health": {
+                "acct": {"provider_id": "acct", "backoff_level": 1,
+                         "rate_limited_until": None, "last_error_at": now - 9999,
+                         "model_locks": {}},
+            },
+        }), encoding="utf-8")
+        machine.parent.mkdir(parents=True, exist_ok=True)
+        machine.write_text(json.dumps({
+            "schema_version": 2,
+            "provider_health": {
+                "acct": {"provider_id": "acct", "backoff_level": 3,
+                         "rate_limited_until": now + 500, "last_error_at": now,
+                         "model_locks": {}},
+            },
+        }), encoding="utf-8")
+        monkeypatch.chdir(legacy_dir)
+        state = read_state()
+        assert state.provider_health["acct"].backoff_level == 3  # newer wins
+
+
+class TestLockAuthoritativeHeadroom:
+    """The provider lock decides; the usage window only refines ok to low."""
+
+    def _write(self, path: Path, *, lock=None, usage=None) -> None:
+        payload: dict = {"schema_version": 2}
+        if lock is not None:
+            payload["provider_health"] = {
+                "acct": {"provider_id": "acct", "backoff_level": 1,
+                         "rate_limited_until": lock, "last_error_at": lock,
+                         "model_locks": {}},
+            }
+        if usage is not None:
+            probed, windows = usage
+            payload["usage"] = {
+                "acct": {"probed_at": probed, "source": "test", "windows": windows},
+            }
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_stale_window_beside_live_lock_verdict_comes_from_the_lock(self, state_path):
+        """AC18-EDGE: a 30-day-old 100% window is TTL-nulled; the live lock
+        decides EXHAUSTED and the stale window contributes nothing."""
+        now = time.time()
+        self._write(
+            state_path,
+            lock=now + 3600,
+            usage=(now - 30 * 86400,
+                   [{"label": "weekly", "used_pct": 100.0, "resets_at": now + 86400}]),
+        )
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.EXHAUSTED
+        assert verdict.source == "lock"
+
+    def test_absent_window_routes_from_the_lock_alone(self, state_path):
+        """AC20-EDGE: no usage window on disk at all - the lock alone decides."""
+        now = time.time()
+        self._write(state_path, lock=now + 3600)
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.EXHAUSTED
+        assert verdict.resets_at == pytest.approx(now + 3600)
+        assert verdict.source == "lock"
+
+    def test_a_fresh_fully_consumed_window_is_exhausted(self, state_path):
+        """A FRESH window at 100% is a positive marker a probe measured, so it
+        still reads EXHAUSTED and rotation failover keeps skipping the provider.
+        Only a STALE or ABSENT window contributes nothing; sub-100 windows only
+        refine ok to LOW."""
+        now = time.time()
+        self._write(state_path, usage=(now, [
+            {"label": "weekly", "used_pct": 100.0, "resets_at": now + 86400},
+        ]))
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.EXHAUSTED
+        assert verdict.source == "window"
+        self._write(state_path, usage=(now, [
+            {"label": "weekly", "used_pct": 95.0, "resets_at": now + 86400},
+        ]))
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.LOW
+
+    def test_absent_window_and_no_lock_is_unknown_not_ok(self, state_path):
+        now = time.time()
+        self._write(state_path, usage=(now, []))
+        verdict = headroom("acct")
+        assert verdict.state is HeadroomState.UNKNOWN

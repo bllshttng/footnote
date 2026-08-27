@@ -1490,15 +1490,34 @@ def _grid_lane_for(
     try:
         from fno import route_resolve
 
-        capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
+        inventory = route_resolve.resolve_inventory()
+        capacity: dict[str, object] = dict(
+            route_resolve.runtime_capacity(inventory=inventory)
+        )
+        # The same planning/execution role floor the spawn seam applies: an
+        # unplanned node auto-dispatched here bills planning too, or the two
+        # dispatch doors would price one node differently.
+        role: Optional[str] = None
+        if not (node.get("plan_path") or "").strip():
+            role = "planning"
         candidate, _chain = route_resolve.resolve_grid(
             node.get("difficulty"),
             node.get("priority"),
             capacity,
+            role=role,
+            inventory=inventory,
         )
     except Exception:  # noqa: BLE001 - unknown capacity spawns on defaults
         return None, None
     if candidate is None:
+        return None, None
+    # Placement commits a harness-keyed worktree, which unknown capacity must
+    # not buy: the grid's unknown-permitted posture is right for injection
+    # (defaults still compose the argv), wrong for a lane decision with no
+    # data at all. Fall back to the caller's defaults there.
+    state = capacity.get(candidate["harness"])
+    verdict = state.get("state", "unknown") if isinstance(state, dict) else state
+    if str(verdict).lower() not in ("ok", "low", "available"):
         return None, None
     return candidate["harness"], candidate["model"]
 

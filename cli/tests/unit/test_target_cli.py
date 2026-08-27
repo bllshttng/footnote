@@ -780,9 +780,16 @@ def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
     """x-baef round-6: the bash dispatch lane pins --harness in its spawn
     argv, standing the capacity grid down, so resolve-model resolves the band
     itself - the resolution model_tier gave that lane before retirement."""
+    from fno import route_resolve as rr
     from fno.adapters.providers import benchmarks as _bm
 
     monkeypatch.setattr(_bm, "load_snapshot", lambda path=None: None)
+    # Reachability is config-declared now, so the band this test resolves has
+    # to name its own fleet. Nothing built-in answers for it.
+    inv = rr.inventory_from_rows([
+        {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7", "band": "low"},
+    ])
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "low"}

@@ -150,11 +150,35 @@ When a profile has `lanes`, the live-worker count chooses the round-robin start.
 
 The two layers compose by design. The stage table picks the coordinate per verb; `--role`, attached by the dispatch lane, owns the model when it resolves. A field the dispatch pinned explicitly (harness, substrate) is not displaced, which is why a stage table entry can set the model or route without rerouting the fleet's binary.
 
+## The declared inventory and the dispatch grid
+
+`config.routing` declares the model inventory. One `[[routing.models]]` row per model carries `name`, `harness`, `model`, and optional `band`, `effort`, `cost_per_mtok_in`, `context`, `route`, `account`.
+
+A small built-in table sits under this key as a **fallback**, never the authority. Config overrides it and extends it. A row naming an existing model replaces only the fields it names. A new name is added to the set. Adding a model, provider or harness stays a config edit. It is never a Python edit. A stranger's install declares a fleet that outranks every built-in row.
+
+The fallback keeps a tier request answerable where nothing is declared. Review level names a model for every level. Answering nothing drops `/code-review` to the provider default everywhere. The grid is unaffected and stays config-first. A virgin install records `grid=no-inventory-declared` and injects nothing. The grid asks whether config declared a row, not whether any row exists.
+
+`cli/src/fno/routing_sample.toml` ships as a labelled sample inside the package, so an installed wheel finds it too. No routing code path reads it. `fno config routing init` appends it to your config commented out. `fno doctor route` lists every declared row with its resolved band and reachability verdict. A row on an uninstalled harness refuses BY NAME on stderr.
+
+Cost belongs to the ACCESS PATH, not the model. The same model reached two ways is two rows with two cost profiles. One vendor prices a pair 3x cheaper on subscription credits and 18x cheaper on API dollars. The rows are never averaged. Cheap is never read as a proxy for weak: the cheaper row can also carry more context, more throughput, and less latency.
+
+The optional OpenRouter snapshot can supply a percentile for a row whose `band` is unset. It can never make the grid inert.
+
+**The objective is itself a config key.** `routing.objective` is one of three values. `cheapest-that-clears` (the default) orders by declared cost, then by the weakest band that clears. `best-available` orders by band descending, then percentile. `prefer-harness` tries rows on `routing.prefer_harness` first. Tier still wins there, and the band is never lowered to stay on the harness.
+
+**Precedence is per-axis, not per-spawn.** An explicit flag or a profile field occupies the axis it names and nothing more. A profile LANE is atomic and occupies all three axes. A bare profile FIELD does not. `[agents.profiles.target] provider = "codex"` pins the harness. The grid still supplies model and effort within codex. A pinned `-P` or `--route` owns the model axis, and the receipt records `grid=model-axis-occupied`. Pinned `--substrate` and `--permission-mode` FILTER the candidate set instead of cancelling the decision. An empty filtered set records `grid=constrained-empty`.
+
+**The grid joins difficulty, priority, capacity and role.** Priority bends the band: `p0` up, `p3` down. Absent difficulty rounds UP to the strong band. Plan-presence selects the role. A `/target` on an unplanned node does planning work and bills at the planning tier, band floored high. A planned `/target` bills execution at the stamped band. A protected role (`implement`, `review-verdict`) forces `best-available` and the `PROTECTED_ROLE_FLOOR` ceiling. It never refuses, and it names itself in the receipt. Capacity expands a harness to its accounts and aggregates MAX (see [axis-vocabulary.md](axis-vocabulary.md)). Any healthy account means usable. `exhausted` requires every account exhausted. Unknown capacity PERMITS a candidate and records `capacity=unknown-permitted`. Only a positive `exhausted` or `blocked` marker removes one. Every grid path appends its terminal reason to the `from_config` receipt, so an inert grid says why.
+
+**Effort is the third grid coordinate.** The grid injects an atomic harness/model/effort triple. A row whose harness has no effort surface omits it, and nothing is injected. An explicit `--effort` wins.
+
+**A crown spawn gets a profile key.** A seed with no leading slash-verb is every king seed, and it resolves the profile key `crown`. `[agents.profiles.crown]` reaches a crown spawn exactly like every other stage row. The attended/unattended axis is declared this way, never inferred. The response-time instrument was retracted because fno mail is injected as user-shaped text.
+
 `fno config doctor` checks the resolved posture before a worker is launched. It reports a substrate/provider pair the spawn seam cannot honor. It also probes whether THIS session can write the claim store, by writing a real file there and removing it. A hand-started session cannot receive a per-spawn grant, so that probe is the only thing covering it. A spawned worker is covered instead by the computed `--add-dir` set (see [coordination.md](coordination.md)).
 
 ## `fno config route` - legibility + on-the-fly switching
 
-Four verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):
+Six verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):
 
 | Verb | Purpose |
 |------|---------|
@@ -162,6 +186,8 @@ Four verbs over the same machinery (`model_routing.py` stays the single source o
 | `fno config route set <role> <provider/model>` | Route a lane (atomic config write via `fno config set`). Refuses protected names + unknown providers pre-write. |
 | `fno config route unset <role>` | Revert a lane to its built-in default (or unrouted); idempotent no-op if unconfigured. |
 | `fno config route env <role \| provider/model>` | Print an eval-able export block for an interactive session: `eval "$(fno config route env build)" && claude`. Fails closed on a missing key (no partial block). |
+| `fno config route inventory [-J]` (also `fno doctor route`) | Every declared `[[routing.models]]` row with its resolved band and reachability verdict; an uninstalled harness refuses by name on stderr. |
+| `fno config routing init` | Append the shipped routing sample (`fno/routing_sample.toml`), commented out, to your config. |
 
 `route env` is the sanctioned interactive switch - never editing `~/.claude/settings.json` (global, restart-bound, races parallel sessions). The `ccz`-style alias becomes a one-liner over it.
 

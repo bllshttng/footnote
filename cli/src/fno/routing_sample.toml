@@ -1,0 +1,79 @@
+# SAMPLE routing inventory. NO CODE PATH READS THIS FILE.
+# It documents the shape of the [routing] block in your config.toml.
+# Copy rows you want into ~/.fno/config.toml (or .fno/config.toml) and edit them.
+# `fno config routing init` appends this whole sample, commented out, to your global config.
+#
+# Nothing is authoritative until YOU declare it: a fresh install with no [routing]
+# block routes nothing from the grid and records `grid=no-inventory-declared`.
+# Every field a row leaves unset stays unset; the same name may appear twice and
+# the later row overrides per field.
+#
+# COST BELONGS TO THE ACCESS PATH, NOT THE MODEL. The same model reached two
+# ways is TWO rows with two cost profiles, never one averaged number: measured
+# 2026-08-27, one vendor prices a pair 3x cheaper on subscription credits and
+# 18x cheaper on API dollars. And cheap is not a proxy for weak: the cheaper
+# row below also carries more context, more throughput, and less latency.
+
+[routing]
+# One of: cheapest-that-clears (default) | best-available | prefer-harness.
+objective = "cheapest-that-clears"
+# Only read by objective = "prefer-harness": rows on this harness are tried
+# first, and the band is never lowered to stay on it (tier wins, harness breaks ties).
+prefer_harness = "claude"
+
+[[routing.models]]
+# `name` is the key you and the resolver refer to the row by.
+name = "glm-5.3"
+# Which harness CLI invokes it (claude, codex, opencode, agy, ...).
+harness = "claude"
+# The literal --model value passed to that harness.
+model = "glm-5.3"
+# low | medium | high. Omit to let the optional benchmarks snapshot supply a
+# percentile-derived band; a row with neither is UNBANDED and never a candidate.
+band = "medium"
+# Effort is harness-shaped: declare it beside the harness it belongs to.
+# A harness with no effort surface (agy) omits it and the grid injects nothing.
+effort = "high"
+# Optional ordering facts: input cost per million tokens and context window.
+cost_per_mtok_in = 6.9
+context = 1000000
+# Optional quota keying: route ("zai/glm-5.3") or account (a config.accounts
+# record id) names whose quota this row spends. Omitted rows fall back to every
+# registered account bound to the harness.
+
+[[routing.models]]
+# The SAME model as the row above, reached through a different access path:
+# subscription credits on the z.ai lane (route names the vendor).
+name = "flash-subscription"
+harness = "claude"
+model = "glm-5.3-flash"
+route = "zai/glm-5.3-flash"
+band = "medium"
+effort = "high"
+cost_per_mtok_in = 2.3
+context = 1310720
+
+[[routing.models]]
+# The same model again through per-token API dollars. Its own row, its own
+# cost: the two paths differ 6x on the same inference and are never averaged.
+name = "flash-api"
+harness = "opencode"
+model = "glm-5.3-flash"
+band = "medium"
+effort = "high"
+cost_per_mtok_in = 0.075
+context = 1310720
+
+[[routing.models]]
+name = "gpt-5.6-sol"
+harness = "codex"
+model = "gpt-5.6-sol"
+band = "high"
+effort = "high"
+
+[[routing.models]]
+# A local model needs no vendor at all: any harness name works.
+name = "qwen3-coder"
+harness = "opencode"
+model = "qwen3-coder:30b"
+band = "low"

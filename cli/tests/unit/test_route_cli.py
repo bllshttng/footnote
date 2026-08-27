@@ -288,3 +288,67 @@ def test_env_business_role_refusal_is_a_stable_command_error(
 def test_env_malformed_target(monkeypatch: pytest.MonkeyPatch) -> None:
     res = runner.invoke(route_app, ["env", "zai,"])
     assert res.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# inventory (the declared-model reachability read) + routing init
+# ---------------------------------------------------------------------------
+
+
+def _declare(monkeypatch, rows, objective="cheapest-that-clears"):
+    from fno import route_resolve as rr
+
+    inv = rr.inventory_from_rows(rows, objective=objective)
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+
+def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
+    _declare(monkeypatch, [
+        {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
+        {"name": "pi-x", "harness": "pi", "model": "p", "band": "high"},
+        {"name": "mystery", "harness": "claude", "model": "m"},
+    ])
+    res = runner.invoke(route_app, ["inventory"])
+    assert res.exit_code == 0
+    assert "objective=cheapest-that-clears" in res.output
+    assert "glm-5.3" in res.output and "ok" in res.output
+    # AC3-ERR: the uninstalled harness refuses BY NAME on stderr
+    assert "refused: pi-x: harness 'pi' is not installed" in res.output
+    assert "unbanded" in res.output
+
+
+def test_inventory_json_shape(monkeypatch) -> None:
+    _declare(monkeypatch, [
+        {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
+    ])
+    res = runner.invoke(route_app, ["inventory", "--json"])
+    assert res.exit_code == 0
+    payload = json.loads(res.output)
+    assert payload["objective"] == "cheapest-that-clears"
+    assert payload["models"][0]["name"] == "glm-5.3"
+    assert payload["models"][0]["verdict"] == "ok"
+
+
+def test_inventory_says_nothing_is_declared(monkeypatch) -> None:
+    from fno import route_resolve as rr
+
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: rr.Inventory())
+    res = runner.invoke(route_app, ["inventory"])
+    assert res.exit_code == 0
+    assert "no inventory declared" in res.output
+
+
+def test_routing_init_appends_the_sample_commented(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "fno.config.writer._target_path", lambda scope, root: tmp_path / "config.toml"
+    )
+    res = runner.invoke(route_app, ["init"])
+    assert res.exit_code == 0
+    text = (tmp_path / "config.toml").read_text(encoding="utf-8")
+    assert "# [routing]" in text
+    assert "# objective" in text
+    # the appended sample must parse once uncommented is NOT required: it is a
+    # comment block; idempotence is - a second run is a no-op
+    res = runner.invoke(route_app, ["init"])
+    assert res.exit_code == 0
+    assert "already present" in res.output

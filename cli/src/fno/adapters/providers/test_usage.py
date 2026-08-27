@@ -1689,35 +1689,40 @@ def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, m
     assert sig.resets_at == 9e18
 
 
-def test_usage_cache_does_not_bleed_between_repositories(monkeypatch, tmp_path) -> None:
-    """A record id is only unique WITHIN a repository.
+def test_usage_cache_is_machine_wide_across_repositories(monkeypatch, tmp_path) -> None:
+    """Quota follows the ACCOUNT, so one observation serves every repository.
 
-    The runtime-state file is project-local, so a cross-project route decision
-    must read and write the node's repo. Sharing one cache keyed by id alone
-    would let the dispatcher's own project answer for the node's.
+    This test used to assert the opposite - a project-local file, one cache per
+    repo. M5 replaced that: an account rate-limited in one checkout is rate
+    limited everywhere, so a per-cwd file cannot hold the signal and split it
+    in half instead. The newest observation is therefore the one both repos
+    read. What stays repo-scoped is the RECORD SET, which is config, not quota.
     """
     from fno.adapters.providers.runtime_state import read_usage, write_usage_snapshot
 
-    # No env override: exercise the repo_root branch, not the test pin.
-    monkeypatch.delenv("FNO_RUNTIME_STATE_PATH", raising=False)
+    # Pin the state file (the documented test hook). An unpinned run would
+    # resolve the real ~/.fno file, and the point under test is that repo_root
+    # no longer partitions it - not which machine-wide path it lands on.
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "state.json"))
     repo_a, repo_b = tmp_path / "a", tmp_path / "b"
     for r in (repo_a, repo_b):
         (r / ".fno").mkdir(parents=True)
 
-    # Same record id, different observations, one per repository.
+    # Same record id, two observations from two repositories: the second wins.
     assert write_usage_snapshot(
         _snap("shared-id", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
         now=1000.0,
         repo_root=repo_a,
     )
     assert write_usage_snapshot(
-        _snap("shared-id", UsageWindow("5h", 1.0, 9e18), probed_at=1000.0),
-        now=1000.0,
+        _snap("shared-id", UsageWindow("5h", 1.0, 9e18), probed_at=1001.0),
+        now=1001.0,
         repo_root=repo_b,
     )
 
-    a = read_usage("shared-id", now=1000.0, repo_root=repo_a)
-    b = read_usage("shared-id", now=1000.0, repo_root=repo_b)
+    a = read_usage("shared-id", now=1001.0, repo_root=repo_a)
+    b = read_usage("shared-id", now=1001.0, repo_root=repo_b)
     assert a is not None and b is not None
-    assert a.windows[0].used_pct == 100.0
+    # One machine-wide file: the newest observation answers for both repos.
+    assert a.windows[0].used_pct == 1.0
     assert b.windows[0].used_pct == 1.0

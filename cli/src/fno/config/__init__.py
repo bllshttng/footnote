@@ -1772,6 +1772,77 @@ class SpawnProfileBlock(SpawnDefaultsBlock):
     lanes: Any = Field(default_factory=list)
 
 
+class RoutingModelBlock(BaseModel):
+    """One declared model row (nested under 'config.routing.models').
+
+    The row carries the invocation facts a benchmark snapshot cannot: how to
+    reach the model on THIS machine (harness + --model value), which band it
+    runs in, and what effort surface it takes. ``name`` is the join key; the
+    same name may appear more than once and later rows override per field
+    (unset fields keep the earlier row's value), so a base row plus a one-field
+    override is a legal declaration. Cost belongs to the ACCESS PATH, never
+    to the model: the same model reached two ways (subscription credits vs API
+    dollars) is TWO rows with two cost profiles, never one averaged number -
+    the measured ratio between the two paths for one pair is 6x on identical
+    inference. No value validation here: config stays a leaf module (x-7fdd);
+    the spawn seam and the resolver validate.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    harness: str = ""
+    model: str = ""
+    # route names a vendor lane (``zai/glm-5.3``), account names a provider
+    # record id; both identify which ACCOUNT'S quota a row spends, which is how
+    # capacity expands a harness to its accounts.
+    route: str = ""
+    account: str = ""
+    band: str = ""
+    effort: str = ""
+    cost_per_mtok_in: Optional[float] = None
+    context: Optional[int] = None
+
+
+class RoutingBlock(BaseModel):
+    """Config-first model routing inventory (nested under 'config.routing').
+
+    Config is the PRIMARY routing surface. A small built-in table is a
+    FALLBACK under it, never the authority: config OVERRIDES it per model and
+    per field and EXTENDS it with models it never named, so adding a model is
+    a config edit and never a Python edit. A stranger's install can therefore
+    declare its own models (local, ollama, gemini-only) and every one of them
+    outranks the built-in row of the same name.
+
+    The fallback keeps a tier request answerable on an install that declares
+    nothing: review level resolves a model for every level. The GRID stays
+    config-first regardless - a virgin install records
+    ``no-inventory-declared`` and injects nothing, because the grid reads
+    whether config DECLARED a row, not whether any row exists.
+
+    ``fno/routing_sample.toml`` ships as a labelled sample (inside the
+    package, so a wheel finds it) that no code path reads. The objective is
+    itself a config key because users differ (cheapest vs strongest vs
+    stay-in-a-harness).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    objective: str = "cheapest-that-clears"
+    prefer_harness: str = ""
+    models: list[RoutingModelBlock] = Field(default_factory=list)
+
+    @field_validator("objective", mode="before")
+    @classmethod
+    def _coerce_objective(cls, v: object) -> object:
+        """Only the three literals are honored; anything else degrades to the
+        default. Same degrade-toward-safety stance as DispatchBlock: a typo can
+        never select an objective the operator did not name."""
+        return v if v in ("cheapest-that-clears", "best-available", "prefer-harness") else (
+            "cheapest-that-clears"
+        )
+
+
 class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
@@ -3968,6 +4039,7 @@ class ConfigBlock(BaseModel):
         default_factory=ProcessAdmissionBlock
     )
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
+    routing: RoutingBlock = Field(default_factory=RoutingBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)

@@ -2,18 +2,16 @@
 
 ``fno config accounts benchmarks refresh`` caches OpenRouter's coding benchmark scores
 to ``benchmarks.json`` (resolved via :func:`fno.paths.benchmarks_json`); ``show``
-renders it with a staleness warning. The snapshot is the single routing source of
-truth: tier resolution (a separate step) reads it, never the network, so a stale
-or absent snapshot degrades to the static table below rather than blocking a
-dispatch.
-
-A model is only routable if it maps to an installed harness AND a concrete
-``--model`` value; that reachability mapping (and a curated static fallback tier
-table for when no snapshot exists) live here too. Refresh fails LOUD on any
-network/auth error and never leaves a truncated file (temp write + atomic
-rename). Authentication uses the ``OPENROUTER_API_KEY`` env var (OpenRouter's own
-convention) rather than a new config field: a provider record that exports that
-env satisfies it automatically.
+renders it with a staleness warning. The snapshot is OPTIONAL enrichment, never
+the foundation: it may supply a percentile that derives a band for a declared
+row whose ``band`` the operator left unset, and its absence never makes routing
+inert. A percentile cannot say how to invoke a model on anybody's machine, so
+the invocation facts live in the declared inventory (``config.routing.models``)
+and the hardcoded reachability/tier tables are gone - adding a model is a config
+edit, not a source edit. Refresh fails LOUD on any network/auth error and never
+leaves a truncated file (temp write + atomic rename). Authentication uses the
+``OPENROUTER_API_KEY`` env var (OpenRouter's own convention) rather than a new
+config field: a provider record that exports that env satisfies it automatically.
 """
 from __future__ import annotations
 
@@ -38,6 +36,11 @@ class BenchmarkError(RuntimeError):
     """A benchmark refresh/read failed loudly (never a silent/truncated file)."""
 
 
+# FALLBACK TABLE, never the authority. `config.routing.models` overrides any row
+# here per field and extends the set with models it never named, so adding a
+# model is a config edit and not an edit to this file. Kept because a tier
+# request must still resolve on an install that declares nothing.
+#
 # Reachability: benchmark model name -> (provider harness, --model value). A row
 # absent here is invisible to routing (unmapped -> unreachable); name-massaging
 # lives ONLY here, never downstream. GLM routes on the claude harness via the
@@ -86,8 +89,19 @@ STATIC_TIERS: dict[str, list[str]] = {
 
 
 def reachable(name: str) -> Optional[tuple[str, str]]:
-    """Return ``(provider, model)`` for a benchmark model name, or None if unmapped."""
-    return REACHABILITY.get(name)
+    """Return ``(harness, model)`` for a DECLARED inventory row, or None.
+
+    The declared inventory (``config.routing.models``) is the only reachability
+    source: a model nobody declared is invisible to routing, and the surface
+    that answers "what can this installation reach" is ``fno doctor route``.
+    Lazily imports the resolver so this module stays importable from it.
+    """
+    from fno.route_resolve import resolve_inventory
+
+    row = resolve_inventory().rows.get(name)
+    if row is None or not row.harness or not row.model:
+        return None
+    return (row.harness, row.model)
 
 
 def unreachable_tier_ids(
@@ -118,20 +132,30 @@ def unreachable_tier_ids(
 def empty_bands_for_harness(
     harnesses: tuple[str, ...] = ("claude", "codex"),
     tiers: Optional[Mapping[str, list]] = None,
+    reach: Optional[Mapping[str, tuple[str, str]]] = None,
 ) -> dict[str, list[str]]:
     """Bands whose static tier resolves to NOTHING for a harness, per harness.
 
     The doctor-line shape: a band an entire provider cannot serve is a
     routing hole an operator must see, not discover at dispatch.
+
+    Reads the STATIC reachability map, not :func:`reachable`, and takes
+    ``reach`` for the same reason ``unreachable_tier_ids`` does. Both answer
+    one question - does the curated tier table line up with the curated
+    reachability map - and that question is about the static tables alone. Its
+    sibling already read the map directly; this one called ``reachable``, which
+    became inventory-backed and made every band read as a hole wherever no
+    inventory is declared.
     """
     table = tiers if tiers is not None else STATIC_TIERS
+    rows = reach if reach is not None else REACHABILITY
     out: dict[str, list[str]] = {}
     for harness in harnesses:
         empty = [
             band
             for band, names in table.items()
             if not any(
-                (row := reachable(n)) is not None and row[0] == harness
+                (row := rows.get(n)) is not None and row[0] == harness
                 for n in names
             )
         ]

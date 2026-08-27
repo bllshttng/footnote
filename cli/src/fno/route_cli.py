@@ -1,13 +1,15 @@
 """``fno config route``: legible, on-the-fly provider route lanes.
 
-Four verbs over the existing per-spawn model-routing machinery
+Six verbs over the existing per-spawn model-routing machinery
 (``fno.agents.model_routing``), which stays the single source of the z.ai
 env-var contract:
 
-- ``ls``    - the effective merged table (built-ins + config), one row per role.
-- ``set``   - route a lane to ``provider/model`` (atomic config write).
-- ``unset`` - revert a lane (to its built-in default, or unrouted).
-- ``env``   - eval-able ``export`` block for an interactive session.
+- ``ls``        - the effective merged table (built-ins + config), one row per role.
+- ``set``       - route a lane to ``provider/model`` (atomic config write).
+- ``unset``     - revert a lane (to its built-in default, or unrouted).
+- ``env``       - eval-able ``export`` block for an interactive session.
+- ``inventory`` - the declared routing inventory read (also ``fno doctor route``).
+- ``init``      - append the shipped sample, commented out, to config.
 
 ``set``/``unset`` delegate to the existing atomic, file-locked ``fno config
 set``/``unset`` write path - there is no second config writer here. The roles
@@ -18,6 +20,7 @@ file lock; accepted).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import sys
 
@@ -237,6 +240,142 @@ def unset_cmd(
         typer.echo(
             f"route unset {name}; no longer routed (next spawn -> primary model) ({scope})"
         )
+
+
+@route_app.command("init")
+def routing_init_cmd(
+    local: bool = typer.Option(
+        False, "--local/--global", "-l/-g",
+        help="Append to the project-local config.toml instead of the per-user "
+        "global one (default global; routing is operator-level).",
+    ),
+) -> None:
+    """Append the shipped routing inventory sample, commented out, to config.
+
+    The sample documents the ``[routing]`` block shape; nothing is enabled until
+    you uncomment and edit rows. Idempotent: a config already carrying the
+    sample marker is left untouched. The sample lives INSIDE the package
+    (``fno/routing_sample.toml``) so an installed wheel finds it exactly like a
+    checkout does - the events-schema precedent.
+    """
+    import fcntl
+    from pathlib import Path
+
+    from fno.config.writer import _target_path
+
+    sample = Path(__file__).resolve().parent / "routing_sample.toml"
+    if not sample.is_file():
+        typer.echo(f"error: sample not found at {sample}", err=True)
+        raise typer.Exit(1)
+    target = _target_path("project" if local else "global", None)
+    if target.is_symlink():
+        target = Path(os.path.realpath(target))
+    marker = "# SAMPLE routing inventory"
+    commented = "\n".join(
+        ("# " + line.rstrip()) if line.strip() else "#" for line in
+        sample.read_text(encoding="utf-8").splitlines()
+    )
+    # The SAME exclusive lock discipline config.writer._locked_update uses
+    # (sidecar <config>.lock + flock), held across the read and the append, so
+    # a concurrent `fno config set` rename cannot drop the appended block and
+    # this append cannot land on a replaced inode.
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    try:
+        with open(lock_path, "w") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            try:
+                existing = (
+                    target.read_text(encoding="utf-8") if target.is_file() else ""
+                )
+                if marker in existing:
+                    typer.echo(
+                        f"routing sample already present in {target}; nothing to do."
+                    )
+                    raise typer.Exit(0)
+                with open(target, "a", encoding="utf-8") as fh:
+                    fh.write("\n\n" + commented + "\n")
+            finally:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    except OSError as exc:
+        typer.echo(f"error: cannot update {target}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    typer.echo(f"routing sample appended (commented out) to {target}")
+
+
+@route_app.command("inventory")
+def inventory_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the inventory as JSON instead of text."
+    ),
+) -> None:
+    """What can this installation reach: every declared routing row.
+
+    One row per declared model with its resolved band (row band, else a
+    snapshot-derived percentile, else unbanded) and a reachability verdict:
+    ``ok`` (a known harness can invoke it), ``not-installed`` (the named
+    harness is not one fno can drive; the row refuses BY NAME on stderr rather
+    than silently vanishing from routing), ``unbanded`` (never a grid
+    candidate), or ``incomplete`` (no --model value). An empty inventory says
+    so: a virgin install routes nothing from the grid.
+    """
+    from fno.agents.harnesses import READABLE_PROVIDERS
+    from fno.route_resolve import resolve_inventory
+
+    inv = resolve_inventory()
+    rows: list[dict[str, str]] = []
+    refusals: list[str] = []
+    if not inv.rows:
+        note = "no inventory declared (config.routing.models is empty); the grid records no-inventory-declared"
+        if json_output:
+            typer.echo(json.dumps({"objective": inv.objective, "models": [], "note": note}, indent=2))
+        else:
+            typer.echo(note)
+        return
+    for name in sorted(inv.rows):
+        row = inv.rows[name]
+        if not row.harness or not row.model:
+            verdict = "incomplete"
+        elif row.harness not in READABLE_PROVIDERS:
+            verdict = "not-installed"
+            refusals.append(f"{name}: harness {row.harness!r} is not installed (known: {', '.join(READABLE_PROVIDERS)})")
+        elif not row.band:
+            verdict = "unbanded"
+        else:
+            verdict = "ok"
+        pct = "" if row.percentile is None else f"{row.percentile:g}"
+        rows.append({
+            "name": name,
+            "harness": row.harness,
+            "model": row.model,
+            "band": row.band or "unbanded",
+            "percentile": pct,
+            "effort": row.effort,
+            "verdict": verdict,
+        })
+    if json_output:
+        typer.echo(json.dumps({
+            "objective": inv.objective,
+            "prefer_harness": inv.prefer_harness,
+            "models": rows,
+        }, indent=2))
+    else:
+        typer.echo(f"objective={inv.objective}"
+                   + (f" prefer_harness={inv.prefer_harness}" if inv.prefer_harness else ""))
+        cols = ("name", "harness", "model", "band", "percentile", "effort", "verdict")
+        widths = {
+            c: max(len(c), *(len(r[c]) for r in rows)) if rows else len(c)
+            for c in cols
+        }
+
+        def _fmt(r: dict[str, str]) -> str:
+            return "  ".join(r[c].ljust(widths[c]) for c in cols).rstrip()
+
+        typer.echo(_fmt({c: c.upper() for c in cols}))
+        for r in rows:
+            typer.echo(_fmt(r))
+    for line in refusals:
+        typer.echo(f"refused: {line}", err=True)
 
 
 @route_app.command("env")

@@ -107,6 +107,11 @@ def _degraded_max(band: str, model: Optional[str], chain: tuple[str, ...]) -> bo
     path, by a model below the max floor - is a degraded max: the effort axis
     still separates it from `high`, but the model does not, and the record
     must say so.
+
+    The resolver names the source it read in the same entry, so both spellings
+    are matched: `snapshot band(` predates the declared inventory and
+    `inventory band(` is what the config-first resolver writes. Reading only
+    one leaves a degraded max recorded as a clean one.
     """
     if band != "max" or model is None:
         return False
@@ -114,7 +119,7 @@ def _degraded_max(band: str, model: Optional[str], chain: tuple[str, ...]) -> bo
         match = _STATIC_PICK_RE.search(entry)
         if match:
             return match.group(1) != "max"
-        if entry.startswith("snapshot band("):
+        if entry.startswith(("snapshot band(", "inventory band(")):
             return "degrade ->" in entry
     return False
 
@@ -140,9 +145,12 @@ def _prefer_provider_family(
     from fno.adapters.providers import benchmarks as bm
     from fno.route_resolve import _STATIC_FALLTHROUGH
 
+    # Reads the STATIC map, not bm.reachable: this walk is over STATIC_TIERS,
+    # and reachable() answers from the declared inventory. Asking the two
+    # sources one question misses on every install that declares no inventory.
     for cand_band in _STATIC_FALLTHROUGH.get(band, [band]):
         for name in bm.STATIC_TIERS.get(cand_band, []):
-            reach = bm.reachable(name)
+            reach = bm.REACHABILITY.get(name)
             if reach and reach[0] == harness and name.startswith(families):
                 chain.append(f"provider family({route_provider}) static {cand_band} -> {name}")
                 return name

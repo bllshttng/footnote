@@ -398,6 +398,26 @@ def test_protected_roles_constant_is_locked() -> None:
     assert "review-verdict" in mr.PROTECTED_ROLES
 
 
+def test_protected_role_short_circuit_names_itself(monkeypatch) -> None:
+    """AC14-ERR: the guard announces the floor it forces instead of returning
+    None in silence (an absence has three explanations)."""
+    notices: list[str] = []
+    route = mr.resolve_route(
+        "implement",
+        settings=_settings(roles={"implement": "zai,glm-5.2"}),
+        env={"ZAI_API_KEY": "k"},
+        notice=notices.append,
+    )
+    assert route is None
+    assert any(
+        "protected-role(implement) floor=high" in n for n in notices
+    ), notices
+
+
+def test_protected_role_floor_is_exported_and_strong() -> None:
+    assert mr.PROTECTED_ROLE_FLOOR == "high"
+
+
 # ---------------------------------------------------------------------------
 # Item 4: codex-lane (OpenAI-protocol) routing via inline -c config
 # ---------------------------------------------------------------------------

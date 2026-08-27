@@ -1298,15 +1298,27 @@ def test_resolve_model_command_empty_when_no_model(monkeypatch):
     assert result.stdout.strip() == ""
 
 
+def _declare_fleet(monkeypatch):
+    """Declare the two-harness fleet these reachability-guard tests rely on."""
+    from fno import route_resolve as rr
+
+    inv = rr.inventory_from_rows([
+        {"name": "gpt-5.4", "harness": "codex", "model": "gpt-5.4"},
+        {"name": "claude-sonnet-5", "harness": "claude", "model": "claude-sonnet-5"},
+    ])
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+
 def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     """--harness claude drops a tier that resolved to a codex model (bg is claude-only)."""
+    _declare_fleet(monkeypatch)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.6-sol", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.4", "task-pin"),
     )
-    # gpt-5.6-sol maps to the codex harness in the real REACHABILITY table.
+    # gpt-5.4 is declared on the codex harness.
     result = runner.invoke(
         target_app, ["resolve-model", "x-d7a7", "--harness", "claude"]
     )
@@ -1316,6 +1328,7 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
 
 def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
     """--harness claude keeps a claude-reachable tier model."""
+    _declare_fleet(monkeypatch)
     monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
     monkeypatch.setattr(
         target_cli,
@@ -1331,7 +1344,8 @@ def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
 
 def test_model_reachable_by_conservative_on_unknown(monkeypatch):
     """An unknown model is treated as reachable (guard only drops CONFIRMED mismatches)."""
-    assert target_cli._model_reachable_by("gpt-5.6-sol", "claude") is False
+    _declare_fleet(monkeypatch)
+    assert target_cli._model_reachable_by("gpt-5.4", "claude") is False
     assert target_cli._model_reachable_by("claude-sonnet-5", "claude") is True
     assert target_cli._model_reachable_by("some-unmapped-model", "claude") is True
 

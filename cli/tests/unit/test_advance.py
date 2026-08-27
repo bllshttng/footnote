@@ -446,6 +446,18 @@ def test_advance_defers_canonical_difficulty_to_spawn_grid(iso, monkeypatch):
     assert captured["model"] is None
 
 
+def _declare_grid_inventory(monkeypatch):
+    """Declare the two-harness inventory the grid tests resolve against (the
+    built-in candidate tables are gone; rows are config now)."""
+    from fno import route_resolve as rr
+
+    inv = rr.inventory_from_rows([
+        {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+    ])
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+
 def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     """The deferral has a receiving end: an unpinned difficulty node picks its
     harness/model at the spawn seam via the capacity grid, because the spawned
@@ -457,9 +469,10 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
         return _FakeProc(stdout='{"short_id": "sid-grid1"}')
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    _declare_grid_inventory(monkeypatch)
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
     sid = adv._spawn_worker(
         "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
@@ -522,9 +535,10 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     monkeypatch.setattr(
         adv.subprocess, "run", lambda cmd, **k: _FakeProc(stdout='{"short_id": "s"}')
     )
+    _declare_grid_inventory(monkeypatch)
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
@@ -568,7 +582,7 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     monkeypatch.setattr(adv._autobrief, "resolve_dispatch_brief", lambda n: ("", ""))
     monkeypatch.setattr(adv, "_emit", lambda *a, **k: None)
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda: dict(capacity))
+    monkeypatch.setattr("fno.route_resolve.runtime_capacity", lambda **kw: dict(capacity))
 
     receipts = adv.dispatch_lanes(1, events_path=tmp_path / "e.jsonl")
 

@@ -116,10 +116,13 @@ _DEFAULT_KILL_CRITERIA = [
 ]
 
 # The floor band stamped when the difficulty gate would refuse the frontmatter
-# this script is about to write. The mint predates any judgment of the work, so
-# the value is the conservative floor; blueprint's model-routing gate revises
-# it to a judged band during the run and transcribes that to the node.
-_DEFAULT_DIFFICULTY = "low"
+# this script is about to write. The mint predates any judgment of the work, and
+# a mis-tiered cheap run is strictly more expensive than a mis-tiered expensive
+# one: it fails tests, skips todos, and carves out its remainder as new work that
+# comes back to the operator. So the floor rounds UP to the strong band;
+# blueprint's model-routing gate may revise it to a judged band during the run
+# and transcribes that to the node.
+_DEFAULT_DIFFICULTY = "high"
 
 
 def _first_fill_block() -> str:

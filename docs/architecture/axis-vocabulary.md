@@ -15,6 +15,10 @@ This document is the single source for footnote's axis definitions. The code, re
 The CLI flags already name each axis correctly and are out of scope for any rename:
 `-H/--harness`, `-P/--provider`, `-m/--model`, `--effort`, `--account`.
 
+## Site rulings
+
+**`provider_id` in `runtime_state` is the ACCOUNT axis.** The machine-wide runtime-state file keys `provider_health` and `usage` by `config.accounts.records` id. That id is an account alias such as `readyrule`, never a harness. The dispatch grid asks about a HARNESS. The join is an expansion: harness -> its accounts -> aggregate MAX over per-account headroom. It is never a fold of records into harness names. Joining by name across the two axes is the M2 defect. `statuses.get(harness)` on an account-keyed map can only ever miss.
+
 ## Why the axes collide
 
 The axes are orthogonal but not independent.

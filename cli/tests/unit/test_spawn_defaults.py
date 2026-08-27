@@ -98,15 +98,32 @@ def test_all_unset_is_noop():
     assert _inject(["spawn", "--name", "w", "hi"]) == ["spawn", "--name", "w", "hi"]
 
 
+def _declare_inventory(monkeypatch, rows, objective="cheapest-that-clears", prefer=""):
+    """Pin a declared routing inventory for the grid path (no config on disk)."""
+    from fno import route_resolve as rr
+
+    inv = rr.inventory_from_rows(rows, objective=objective, prefer_harness=prefer)
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+    return inv
+
+
+def _two_harness_rows():
+    return [
+        {"name": "opus-x", "harness": "claude", "model": "claude-opus-5", "band": "high"},
+        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol", "band": "high"},
+    ]
+
+
 def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
     """AC3-HP: the grid supplies harness/model below profiles and above defaults."""
+    _declare_inventory(monkeypatch, _two_harness_rows())
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
+        lambda **kw: {"claude": "exhausted", "codex": "ok"},
     )
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "hi"],
@@ -117,46 +134,177 @@ def test_difficulty_grid_precedes_defaults_when_capacity_is_known(monkeypatch):
     assert "default-model" not in result
 
 
-def test_stage_profile_suppresses_difficulty_grid(monkeypatch):
-    """AC3-HP: a pinned stage profile remains authoritative over the grid."""
+def test_stage_profile_model_occupies_model_axis(monkeypatch):
+    """AC3-HP: a profile-sourced model remains authoritative over the grid; the
+    stand-down is a named receipt entry, not a silence."""
+    _declare_inventory(monkeypatch, _two_harness_rows())
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "ok", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
+    err = io.StringIO()
     result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
         profiles={"target": {"model": "profile-model"}},
         model="default-model",
+        err=err,
     )
     assert "profile-model" in result
+    assert "--harness" not in result
+    assert "grid=model-axis-occupied" in err.getvalue()
 
 
-def test_pinned_lane_flags_suppress_difficulty_grid(monkeypatch):
-    """An explicit --substrate or --permission-mode names a lane the grid may
-    not legally rehome (bg is claude+opencode; a mapped permission-mode is
-    claude-only off pane), so the grid stands down rather than build an argv
-    the spawn gate exit-2 refuses."""
+def test_profile_provider_pins_harness_grid_fills_model_and_effort(monkeypatch):
+    """AC8-HP: `[agents.profiles.target] provider = "codex"` names the HARNESS
+    axis only - the grid still supplies model and effort within codex."""
+    rows = _two_harness_rows() + [
+        {"name": "sol-x", "effort": "high"},
+    ]
+    _declare_inventory(monkeypatch, rows)
     monkeypatch.setattr(
         "fno.agents.spawn_defaults._grid_node",
         lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
     )
     monkeypatch.setattr(
         "fno.route_resolve.runtime_capacity",
-        lambda: {"claude": "exhausted", "codex": "ok"},
+        lambda **kw: {"claude": "ok", "codex": "ok"},
     )
-    for argv in (
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1", "/target x"],
+        profiles={"target": {"provider": "codex"}},
+    )
+    assert "--harness" in result and result[result.index("--harness") + 1] == "codex"
+    assert "--model" in result and result[result.index("--model") + 1] == "gpt-5.6-sol"
+    assert "--effort" in result and result[result.index("--effort") + 1] == "high"
+
+
+def test_pinned_substrate_filters_candidates_instead_of_cancelling(monkeypatch):
+    """AC9-EDGE: `--substrate pane` is universal, so the grid still fires; a
+    thread-only substrate narrows to thread-capable harnesses (claude) rather
+    than cancelling the decision."""
+    _declare_inventory(monkeypatch, _two_harness_rows())
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "ok", "codex": "ok"},
+    )
+    # pane: universal -> grid fires exactly as without the flag
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1", "--substrate", "pane", "hi"],
+        model="default-model",
+    )
+    assert "--harness" in result
+    # bg/thread: only claude is thread-capable, so codex is filtered OUT and
+    # claude is picked - the flag narrowed the set, it did not stand the grid down
+    result = _inject(
         ["spawn", "--name", "w", "--node", "x-grid1", "--substrate", "bg", "hi"],
-        ["spawn", "--name", "w", "--node", "x-grid1", "--permission-mode", "bypassPermissions", "hi"],
-    ):
-        result = _inject(argv, model="default-model")
-        assert "--harness" not in result
-        assert "codex" not in result
-        assert "default-model" in result
+        model="default-model",
+    )
+    assert "--harness" in result and result[result.index("--harness") + 1] == "claude"
     assert "gpt-5.6-sol" not in result
+    # a mapped permission-mode is claude-only off pane: codex filtered out
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1",
+         "--permission-mode", "bypassPermissions", "hi"],
+        model="default-model",
+    )
+    assert "--harness" in result and result[result.index("--harness") + 1] == "claude"
+
+
+def test_grid_effort_yields_to_explicit_effort_flag(monkeypatch):
+    """AC7-HP: an explicit --effort wins over the grid's effort coordinate."""
+    rows = [
+        {"name": "sol-x", "harness": "codex", "model": "gpt-5.6-sol",
+         "band": "high", "effort": "high"},
+    ]
+    _declare_inventory(monkeypatch, rows)
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"codex": "ok"},
+    )
+    result = _inject(
+        ["spawn", "--name", "w", "--node", "x-grid1", "--effort", "low", "hi"],
+    )
+    assert result.count("--effort") == 1
+    assert result[result.index("--effort") + 1] == "low"
+    assert "--model" in result and "gpt-5.6-sol" in result
+
+
+def test_inert_grid_says_why_in_the_receipt(monkeypatch):
+    """AC4-EDGE at the seam: no declared inventory -> the receipt carries
+    grid=no-inventory-declared instead of silence."""
+    from fno import route_resolve as rr
+
+    monkeypatch.setattr(
+        rr, "resolve_inventory", lambda **_kw: rr.Inventory()
+    )
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node",
+        lambda *args, **kwargs: {"difficulty": "high", "priority": "p1"},
+    )
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "ok", "codex": "ok"},
+    )
+    err = io.StringIO()
+    _inject(["spawn", "--name", "w", "--node", "x-grid1", "hi"], err=err)
+    assert "grid=no-inventory-declared" in err.getvalue()
+
+
+def test_crown_profile_key_reaches_non_verb_seeds():
+    """AC15-HP: a seed with no leading slash-verb - every king seed - resolves
+    the profile key `crown`, so [agents.profiles.crown] applies to crown spawns."""
+    from fno.agents.spawn_defaults import _profile_key
+
+    assert _profile_key("king: shrink the board") == "crown"
+    assert _profile_key("") == "crown"
+    assert _profile_key("/fno:target x") == "target"
+    assert _profile_key("/absolute/path/to/thing") == "crown"
+
+
+def test_crown_profile_injects_on_a_non_verb_seed():
+    result = _inject(
+        ["spawn", "--name", "k", "king: shrink the board"],
+        profiles={"crown": {"model": "crown-model"}},
+    )
+    assert "crown-model" in result
+
+
+def test_plan_presence_selects_planning_or_execution_band(monkeypatch):
+    """AC13-HP: a /target on an unplanned node bills planning (band floored
+    high); the same node WITH a plan_path bills execution (stamped band)."""
+    rows = [
+        {"name": "cheap-x", "harness": "codex", "model": "gpt-cheap", "band": "low"},
+        {"name": "strong-x", "harness": "codex", "model": "gpt-strong", "band": "high"},
+    ]
+    _declare_inventory(monkeypatch, rows)
+    monkeypatch.setattr(
+        "fno.route_resolve.runtime_capacity",
+        lambda **kw: {"claude": "ok", "codex": "ok"},
+    )
+    node = {"difficulty": "low", "priority": "p2"}
+    planned = {"difficulty": "low", "priority": "p2", "plan_path": "/tmp/plan.md"}
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(node)
+    )
+    out = _inject(["spawn", "--node", "x-1", "/target x-1"])
+    assert "gpt-strong" in out and "gpt-cheap" not in out
+    monkeypatch.setattr(
+        "fno.agents.spawn_defaults._grid_node", lambda *a, **k: dict(planned)
+    )
+    out = _inject(["spawn", "--node", "x-1", "/target x-1"])
+    assert "gpt-cheap" in out and "gpt-strong" not in out
 
 
 def test_ac3_bare_spawn_inherits_provider_and_model():
