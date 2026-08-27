@@ -240,12 +240,12 @@ def test_check_agent_profiles_flags_incompatible_substrate() -> None:
     from fno.setup.doctor import check_agent_profiles
 
     settings = SettingsModel(
-        agents={"profiles": {"target": _lane("codex", substrate="bg", permission_mode="yolo")}}
+        agents={"profiles": {"target": _lane("agy", substrate="bg", permission_mode="yolo")}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
     assert "agents.profiles.target.substrate" in problems[0]
-    assert "bg" in problems[0] and "codex" in problems[0]
+    assert "bg" in problems[0] and "agy" in problems[0]
 
 
 def test_check_agent_profiles_accepts_claude_bg_lane() -> None:
@@ -289,19 +289,18 @@ def test_check_agent_profiles_no_longer_flags_a_bare_codex_lane() -> None:
 
 
 def test_check_agent_profiles_still_flags_an_impossible_substrate() -> None:
-    """The substrate/provider compatibility half stays: bg is claude-only, so a
-    codex lane asking for it cannot launch and doctor should say so."""
+    """The substrate/provider compatibility half stays: bg excludes agy."""
     from fno.config import SettingsModel
     from fno.setup.doctor import check_agent_profiles
 
     settings = SettingsModel(
         agents={"profiles": {"target": {"lanes": [
-            _lane("codex", substrate="bg"),
+            _lane("agy", substrate="bg"),
         ]}}}
     )
     problems = check_agent_profiles(settings)
     assert len(problems) == 1
-    assert "substrate" in problems[0] and "codex" in problems[0]
+    assert "substrate" in problems[0] and "agy" in problems[0]
 
 
 def test_check_worktree_policy_flags_out_of_enum(

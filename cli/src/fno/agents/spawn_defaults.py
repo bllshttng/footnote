@@ -705,7 +705,7 @@ def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
     resolved provider. ``thread`` requires the harness's journey-proven fno
-    driver (claude today); ``pane``/``headless`` are universal.
+    driver (claude and codex today); ``pane``/``headless`` are universal.
     ``bg`` is accepted as a deprecated alias for ``thread``.
     An unknown value (or ``thread`` on a non-thread provider) degrades open (warn, skip) -
     never injected to fail at the spawn parser (both exit 2 there otherwise)."""
@@ -1190,7 +1190,7 @@ def inject_spawn_defaults(
     explicit_route = _flag_present(out[1:], "--route")
     # A pinned substrate or permission-mode constrains which harness the argv
     # can legally carry (thread needs the harness's journey-proven lane,
-    # claude only today; a mapped --permission-mode is claude-only off pane),
+    # claude and codex today; a mapped --permission-mode is claude-only off pane),
     # so a grid pair picked on capacity alone can build an argv the spawn
     # gate exit-2 refuses. The operator named the lane, so the grid stands
     # down and the ordinary defaults apply.
@@ -1510,8 +1510,10 @@ def inject_spawn_defaults(
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
             else:
                 reason = (
-                    f"{prov} has no journey-proven thread lane (claude is the "
-                    "only one today); the spawn falls back to the pane default"
+                    f"{prov} does not support substrate {cfg_substrate!r}; thread "
+                    "requires a journey-proven lane (claude and codex today; "
+                    "opencode remains unearned), so the spawn falls back to the "
+                    "pane default"
                 )
             print(
                 f"fno agents spawn: substrate skipped ({reason}); "
@@ -1529,7 +1531,8 @@ def inject_spawn_defaults(
         # The effective substrate this spawn resolves to: an explicit pin, else a
         # config value injected this run, else the `fno agents spawn` default -
         # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
-        # headless for non-claude and would wrongly skip a pane-mappable mode).
+        # headless for providers without a thread capability and would wrongly
+        # skip a pane-mappable mode).
         eff_substrate = explicit_substrate or injected_substrate or "pane"
         if prov and _permission_mappable(prov, cfg_permission, eff_substrate):
             inject += ["--permission-mode", cfg_permission]
@@ -1854,8 +1857,9 @@ def link_to_spawn_flags(link) -> List[str]:
 
     No new axis vocabulary: harness is ``-H``, the vendor/model route is
     ``--route``, and model, effort, substrate, permission-mode and account keep
-    their own flags. ``--substrate bg`` is claude + opencode in the Rust client
-    (the dispatch resolver refuses the non-claude ones),
+    their own flags. ``--substrate bg`` is the deprecated thread alias; the Rust
+    client supports it for claude and codex, while opencode remains
+    ``thread=false``/unearned and the dispatch resolver refuses it,
     so a codex link that left substrate unset resolves to a pane rather than
     being handed a substrate its harness rejects.
     """

@@ -152,8 +152,59 @@ pub struct RecoveryReport {
     pub archived_orphans: Vec<String>,
     pub reaped_pids: Vec<u32>,
     pub recovered_drives: Vec<String>,
+    /// Codex thread rows selected for resume by harness + full session id.
+    pub recovered_threads: Vec<String>,
     pub recovery_mode: String,
     pub interrupted_write_temps: Vec<String>,
+}
+
+/// Resolve the resume identity for a daemon-hosted Codex thread.
+///
+/// An empty `short_id` is expected for this lane, so it cannot participate in
+/// the old state-directory recovery path. The full harness session id and cwd
+/// are the only durable inputs accepted for a resume.
+fn codex_thread_resume_identity(
+    entry: &RegistryEntry,
+) -> Result<Option<(String, PathBuf)>, String> {
+    if !is_codex_thread_entry(entry) {
+        return Ok(None);
+    }
+    let session_id = entry
+        .harness_session_id
+        .as_deref()
+        .filter(|session_id| !session_id.trim().is_empty())
+        .ok_or_else(|| {
+            format!(
+                "codex thread row '{}' is missing harness_session_id",
+                entry.name
+            )
+        })?;
+    if session_id.len() <= 8 || session_id.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "codex thread row '{}' requires a full harness_session_id, got {:?}",
+            entry.name, session_id
+        ));
+    }
+    if let Some(codex_session_id) = entry.codex_session_id.as_deref() {
+        if codex_session_id != session_id {
+            return Err(format!(
+                "codex thread row '{}' has mismatched harness_session_id and codex_session_id",
+                entry.name
+            ));
+        }
+    }
+    let cwd = entry.cwd.trim();
+    if cwd.is_empty() {
+        return Err(format!("codex thread row '{}' is missing cwd", entry.name));
+    }
+    Ok(Some((session_id.to_string(), PathBuf::from(cwd))))
+}
+
+fn is_codex_thread_entry(entry: &RegistryEntry) -> bool {
+    entry.harness_name() == "codex"
+        && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
+        && entry.short_id.is_empty()
+        && entry.mux.is_none()
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +253,24 @@ fn recover_with_policy(
 
     // Steps 2-5: per registry entry, reconcile its state.json.
     for entry in &registry.entries {
+        match codex_thread_resume_identity(entry) {
+            Ok(Some((_session_id, _cwd))) => {
+                report.recovered_threads.push(entry.name.clone());
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = emitter.emit_fields(
+                    "daemon_recovery_error",
+                    json_obj(&[
+                        ("op", Value::String("resume_codex_thread".into())),
+                        ("name", Value::String(entry.name.clone())),
+                        ("error", Value::String(error)),
+                    ]),
+                );
+                continue;
+            }
+        }
         // Skip rows with no fno-managed per-agent state dir -- probing
         // `state_json` for one would emit a spurious `agent_inconsistent`
         // (Gemini medium, PR #364). Two shapes qualify:
@@ -2694,7 +2763,9 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
         exe_fingerprint,
         pid_start_time,
         pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
+        codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
+    schedule_codex_thread_recovery(Arc::clone(&ctx));
 
     // Active-backlog drain supervisor (node x-c070). Opt-in via
     // config.active_backlog; the supervisor resolves its own enabled targets and
@@ -2982,6 +3053,10 @@ struct Ctx {
     /// flood of pushes for sessions that never register cannot grow without
     /// limit. Highest seq wins per session.
     pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
+    /// Codex app-server children held by this supervisor, keyed by registry
+    /// name. The registry's full `harness_session_id` remains the durable join
+    /// key used to repopulate this map after a daemon restart.
+    codex_threads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CodexThreadHandle>>>,
 }
 
 /// Cap on the early-push buffer (E3.3). A report for a NEW session is dropped
@@ -2989,6 +3064,8 @@ struct Ctx {
 /// session's seq still advances (no new key). 64 covers any realistic burst of
 /// panes registering at once while staying a hard ceiling.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
+
+type CodexThreadHandle = Arc<tokio::sync::Mutex<crate::codex_thread::CodexThread>>;
 
 fn emit_state(emitter: &EventEmitter, state: DaemonState) {
     let _ = emitter.emit("daemon_state", &json!({"state": state.as_str()}));
@@ -3180,6 +3257,7 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
     match Namespace::verb(&req.method) {
         Some("spawn") => handle_spawn(ctx, req).await,
         Some("ask") => handle_ask(ctx, req).await,
+        Some("review-start") => handle_review_start(ctx, req).await,
         Some("switchboard") | Some("switchboard_v2") => handle_switchboard(ctx, req).await,
         Some("stop") => handle_stop(ctx, req).await,
         Some("rm") => handle_rm(ctx, req).await,
@@ -3299,6 +3377,13 @@ async fn handle_spawn(ctx: &Ctx, req: &Request) -> Response {
         .get("resume_id")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
+    let substrate = p
+        .get("substrate")
+        .and_then(|v| v.as_str())
+        .unwrap_or("pane");
+    if provider == "codex" && substrate == "thread" {
+        return spawn_codex_thread_lane(ctx, req, &name, &cwd).await;
+    }
     if host_mode == crate::state::HOST_MODE_INTERACTIVE && provider == "claude" {
         let claude_mode = p
             .get("mode")
@@ -3846,6 +3931,288 @@ async fn spawn_claude_stream_lane(
     )
 }
 
+/// Build the registry row for a Codex app-server thread. Codex has no fno
+/// short id: the full harness session id is both the resume handle and the
+/// canonical registry identity.
+fn build_codex_thread_entry(
+    name: &str,
+    cwd: &Path,
+    driver: &crate::codex_thread::CodexThread,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> RegistryEntry {
+    let cwd_s = cwd.to_string_lossy().into_owned();
+    let session_id = driver.thread_id().to_string();
+    let (parent_session, parent_harness, parent_cwd) = crate::claims::ambient_parent_edge();
+    RegistryEntry {
+        name: name.into(),
+        short_id: String::new(),
+        legacy_provider: String::new(),
+        provider: Some("openai".into()),
+        model: model.map(str::to_string),
+        model_basis: None,
+        effort: effort.map(str::to_string),
+        harness: Some("codex".into()),
+        harness_session_id: Some(session_id.clone()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
+        cwd: cwd_s.clone(),
+        project_root: cwd_s,
+        session_id: None,
+        origin: Some("spawn".into()),
+        spawn_trigger: None,
+        spawned_by_session: parent_session,
+        spawned_by_harness: parent_harness,
+        spawned_by_cwd: parent_cwd,
+        legacy_claude_short_id: None,
+        claude_session_uuid: None,
+        messaging_socket_path: None,
+        codex_session_id: Some(session_id),
+        gemini_session_id: None,
+        mcp_channel_id: None,
+        cc_session_id: None,
+        host_mode: Some(crate::state::HOST_MODE_INTERACTIVE.into()),
+        status: AgentStatus::Live,
+        last_message_at: Some(now_rfc3339_like()),
+        created_at: now_rfc3339_like(),
+        pid: driver.pid(),
+        pid_start_time: driver.pid().and_then(process_start_time),
+        log_path: Some(driver.rollout_path().to_string_lossy().into_owned()),
+        last_reconciled_at: None,
+        inside_leg: None,
+        exited_at: None,
+        mux: None,
+        screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
+        route_settings_path: None,
+        fno_id: None,
+        delivery_policy: None,
+    }
+}
+
+/// Start and register one Codex app-server thread. The seed turn is detached
+/// after registration so spawn returns a live row immediately while the held
+/// process remains available for later `ask` calls.
+async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Path) -> Response {
+    let model = req.params.get("model").and_then(Value::as_str);
+    let yolo = req
+        .params
+        .get("yolo")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let effort = req.params.get("effort").and_then(Value::as_str);
+    let seed = req
+        .params
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let driver = match crate::codex_thread::CodexThread::start(
+        cwd.to_path_buf(),
+        model,
+        yolo,
+        effort,
+    )
+    .await
+    {
+        Ok(driver) => driver,
+        Err(error) => {
+            let _ = ctx.emitter.emit(
+                "agent_spawn_failed",
+                &json!({"name": name, "provider": "codex", "lane": "thread", "reason": error.to_string()}),
+            );
+            return Response::err(req.id, ErrorCode::SpawnFailed, error.to_string());
+        }
+    };
+    let entry = build_codex_thread_entry(name, cwd, &driver, model, effort);
+    let session_id = entry.harness_session_id.clone().unwrap_or_default();
+    let inserted = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+        if registry
+            .entries
+            .iter()
+            .any(|existing| existing.name == entry.name)
+        {
+            return false;
+        }
+        if registry.entries.iter().any(|existing| {
+            existing.harness_name() == "codex"
+                && existing.harness_session_id.as_deref() == entry.harness_session_id.as_deref()
+                && is_non_terminal(existing.status)
+        }) {
+            return false;
+        }
+        registry.entries.push(entry);
+        true
+    })
+    .await;
+    match inserted {
+        Ok(true) => {}
+        Ok(false) => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentExists,
+                format!("agent {name} or Codex thread {session_id} already exists"),
+            )
+        }
+        Err(error) => {
+            return Response::err(
+                req.id,
+                state_error_code(&error),
+                format!("registry write: {error}"),
+            )
+        }
+    }
+    let handle = Arc::new(tokio::sync::Mutex::new(driver));
+    ctx.codex_threads
+        .lock()
+        .await
+        .insert(name.to_string(), Arc::clone(&handle));
+
+    if !seed.trim().is_empty() {
+        let emitter = ctx.emitter.clone();
+        let registry_path = ctx.home.registry_json();
+        let seed_name = name.to_string();
+        tokio::spawn(async move {
+            let mut driver = handle.lock().await;
+            match driver.drive_turn(&seed).await {
+                Ok(turn) => {
+                    let name_for_write = seed_name.clone();
+                    let _ = update_registry_offloaded(registry_path, move |registry| {
+                        if let Some(entry) = registry.find_mut(&name_for_write) {
+                            entry.last_message_at = Some(now_rfc3339_like());
+                        }
+                    })
+                    .await;
+                    let _ = emitter.emit(
+                        "agent_ask_done",
+                        &json!({"name": seed_name, "backend": "codex-thread", "turn_id": turn.turn_id}),
+                    );
+                }
+                Err(error) => {
+                    let _ = emitter.emit(
+                        "daemon_recovery_error",
+                        &json!({"op": "codex_thread_seed", "name": seed_name, "error": error.to_string()}),
+                    );
+                }
+            }
+        });
+    }
+    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
+    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
+    // event without both, which is how a thread worker could lose its only
+    // resume fallback before the row is reaped.
+    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
+    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
+    // event without both, which is how a thread worker could lose its only
+    // resume fallback before the row is reaped.
+    let _ = ctx.emitter.emit(
+        "agent_spawned",
+        &json!({
+            "name": name,
+            "provider": "codex",
+            "harness": "codex",
+            "harness_session_id": session_id,
+            "short_id": "",
+            "status": "live",
+            "lane": "thread",
+            "substrate": "thread",
+            "cwd": cwd.to_string_lossy(),
+        }),
+    );
+    Response::ok(
+        req.id,
+        json!({
+            "short_id": "",
+            "harness": "codex",
+            "harness_session_id": session_id,
+            "session_id": session_id,
+            "status": "live",
+            "lane": "thread",
+        }),
+    )
+}
+
+/// A Codex thread row startup recovery may auto-resume: it needs a full
+/// durable identity AND a status that was non-terminal when the daemon died.
+/// `handle_stop` marks a stopped thread `Exited`; resurrecting that row on the
+/// next daemon start would silently undo `fno agents stop`.
+fn codex_thread_recovery_candidate(entry: &RegistryEntry) -> bool {
+    codex_thread_resume_identity(entry).ok().flatten().is_some() && is_non_terminal(entry.status)
+}
+
+async fn ensure_codex_thread_handle(
+    ctx: &Ctx,
+    entry: &RegistryEntry,
+) -> Result<CodexThreadHandle, String> {
+    if let Some(handle) = ctx.codex_threads.lock().await.get(&entry.name).cloned() {
+        return Ok(handle);
+    }
+    let Some((session_id, cwd)) = codex_thread_resume_identity(entry)? else {
+        return Err(format!("agent '{}' is not a Codex thread", entry.name));
+    };
+    let mut threads = ctx.codex_threads.lock().await;
+    if let Some(handle) = threads.get(&entry.name).cloned() {
+        return Ok(handle);
+    }
+    let driver = crate::codex_thread::CodexThread::resume(
+        cwd,
+        &session_id,
+        entry.model.as_deref(),
+        false,
+        entry.effort.as_deref(),
+    )
+    .await
+    .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
+    let handle = Arc::new(tokio::sync::Mutex::new(driver));
+    threads.insert(entry.name.clone(), Arc::clone(&handle));
+    Ok(handle)
+}
+
+/// Rehydrate Codex thread children after daemon startup. Recovery first
+/// selects rows by durable identity; this asynchronous pass owns the actual
+/// app-server children without delaying the supervisor's accept loop.
+fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
+    tokio::spawn(async move {
+        let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+            Ok(registry) => registry,
+            Err(error) => {
+                let _ = ctx.emitter.emit(
+                    "daemon_recovery_error",
+                    &json!({"op": "resume_codex_thread_registry", "error": error.to_string()}),
+                );
+                return;
+            }
+        };
+        for entry in registry.entries {
+            if !codex_thread_recovery_candidate(&entry) {
+                continue;
+            }
+            match ensure_codex_thread_handle(&ctx, &entry).await {
+                Ok(handle) => {
+                    let pid = handle.lock().await.pid();
+                    let name = entry.name.clone();
+                    let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+                        if let Some(entry) = registry.find_mut(&name) {
+                            entry.pid = pid;
+                            entry.pid_start_time = pid.and_then(process_start_time);
+                            entry.status = AgentStatus::Live;
+                        }
+                    })
+                    .await;
+                }
+                Err(error) => {
+                    let _ = ctx.emitter.emit(
+                        "daemon_recovery_error",
+                        &json!({"op": "resume_codex_thread", "name": entry.name, "error": error}),
+                    );
+                }
+            }
+        }
+    });
+}
+
 /// Map a provider name string to a per-CLI readiness detector.
 ///
 /// NOTE: This is a local match rather than routing through `Box<dyn Provider>`
@@ -3963,6 +4330,71 @@ where
         }
         tokio::time::sleep(poll_interval).await;
     }
+}
+
+async fn handle_review_start(ctx: &Ctx, req: &Request) -> Response {
+    let thread_id = match req.params.get("thread_id").and_then(Value::as_str) {
+        Some(thread_id) if !thread_id.trim().is_empty() => thread_id,
+        _ => return Response::err(req.id, ErrorCode::InvalidParams, "missing `thread_id`"),
+    };
+    let target_raw = match req.params.get("target").and_then(Value::as_str) {
+        Some(target) if !target.trim().is_empty() => target,
+        _ => return Response::err(req.id, ErrorCode::InvalidParams, "missing `target`"),
+    };
+    let target = match crate::codex_inject::parse_review_target(target_raw) {
+        Some(target) => target,
+        None => return Response::err(req.id, ErrorCode::InvalidParams, "invalid review target"),
+    };
+    let delivery = match req.params.get("delivery").and_then(Value::as_str) {
+        Some("detached") => crate::codex_inject::ReviewDelivery::Detached,
+        Some("inline") | None => crate::codex_inject::ReviewDelivery::Inline,
+        Some(_) => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "delivery must be inline or detached",
+            )
+        }
+    };
+    let registry = match load_registry_offloaded(ctx.home.registry_json()).await {
+        Ok(registry) => registry,
+        Err(error) => return registry_read_failed(req.id, error),
+    };
+    let entry = match registry.find_name_or_full_session_id(thread_id) {
+        Some(entry) => entry.clone(),
+        None => {
+            return Response::err(
+                req.id,
+                ErrorCode::AgentNotFound,
+                format!("Codex thread {thread_id} not found"),
+            )
+        }
+    };
+    if entry.harness_name() != "codex"
+        || entry.host_mode_or_default() != crate::state::HOST_MODE_INTERACTIVE
+    {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidStatus,
+            format!("agent {} is not a hosted Codex thread", entry.name),
+        );
+    }
+    let handle = match ensure_codex_thread_handle(ctx, &entry).await {
+        Ok(handle) => handle,
+        Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
+    };
+    let review = match handle.lock().await.review(&target, delivery).await {
+        Ok(review) => review,
+        Err(error) => return Response::err(req.id, ErrorCode::Internal, error.to_string()),
+    };
+    Response::ok(
+        req.id,
+        json!({
+            "turn_id": review.turn_id,
+            "review_thread_id": review.review_thread_id,
+            "harness_session_id": entry.harness_session_id,
+        }),
+    )
 }
 
 async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
@@ -4083,6 +4515,43 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
             req.id,
             ErrorCode::InvalidStatus,
             format!("agent {name} is orphaned; use `fno agents reconcile` or `rm`"),
+        );
+    }
+
+    if entry.harness_name() == "codex"
+        && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
+    {
+        let handle = match ensure_codex_thread_handle(ctx, &entry).await {
+            Ok(handle) => handle,
+            Err(error) => return Response::err(req.id, ErrorCode::InvalidStatus, error),
+        };
+        let turn = match handle.lock().await.drive_turn(&message).await {
+            Ok(turn) => turn,
+            Err(error) => {
+                return Response::err(req.id, ErrorCode::Internal, error.to_string());
+            }
+        };
+        let ask_name = name.clone();
+        let _ = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+            if let Some(entry) = registry.find_mut(&ask_name) {
+                entry.status = AgentStatus::Live;
+                entry.last_message_at = Some(now_rfc3339_like());
+            }
+        })
+        .await;
+        let _ = ctx.emitter.emit(
+            "agent_ask_done",
+            &json!({"name": name, "backend": "codex-thread", "turn_id": turn.turn_id}),
+        );
+        return Response::ok(
+            req.id,
+            json!({
+                "reply": turn.text,
+                "backend": "codex-thread",
+                "turn_id": turn.turn_id,
+                "status": turn.status,
+                "harness_session_id": entry.harness_session_id,
+            }),
         );
     }
 
@@ -5733,6 +6202,31 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     if entry.harness_name() == "claude" {
         return stop_claude(ctx, req, &name, &entry).await;
     }
+    if entry.harness_name() == "codex"
+        && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
+    {
+        ctx.codex_threads.lock().await.remove(&name);
+        let stop_name = name.clone();
+        if let Err(error) = update_registry_offloaded(ctx.home.registry_json(), move |registry| {
+            if let Some(entry) = registry.find_mut(&stop_name) {
+                entry.status = AgentStatus::Exited;
+                entry.exited_at = Some(now_rfc3339_like());
+            }
+        })
+        .await
+        {
+            return Response::err(
+                req.id,
+                state_error_code(&error),
+                format!("codex thread {name} stopped but registry write failed: {error}"),
+            );
+        }
+        let _ = ctx.emitter.emit(
+            "agent_stopped",
+            &json!({"name": name, "backend": "codex-thread"}),
+        );
+        return Response::ok(req.id, json!({"stopped": true, "backend": "codex-thread"}));
+    }
     // A non-PTY row (empty short_id == Python-authored; the daemon's create path
     // always derives a non-empty short_id) for codex/gemini has no daemon worker
     // to stop. Mirror Python `stop_agent`: these providers are "synchronous
@@ -6708,6 +7202,17 @@ where
             changes.push(ReconcileChange {
                 name: entry.name.clone(),
                 new_status,
+            });
+            continue;
+        }
+        // A Codex thread is rehydrated by the daemon's startup resume pass.
+        // Its app-server child may have died with the previous supervisor, so
+        // the stale registry pid must not settle the durable thread to Exited
+        // before recovery gets a chance to resume it.
+        if is_codex_thread_entry(entry) {
+            changes.push(ReconcileChange {
+                name: entry.name.clone(),
+                new_status: None,
             });
             continue;
         }
@@ -11482,6 +11987,67 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     }
 
     #[test]
+    fn recovery_routes_codex_thread_by_full_identity_without_short_id() {
+        let mut row = rentry("codex-thread", AgentStatus::Live, None);
+        row.harness = Some("codex".into());
+        row.legacy_provider.clear();
+        row.short_id.clear();
+        row.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        row.harness_session_id = Some("019f0000-0000-7000-8000-000000000001".into());
+        row.codex_session_id = row.harness_session_id.clone();
+        row.cwd = "/tmp/codex-thread-worktree".into();
+
+        assert_eq!(
+            codex_thread_resume_identity(&row).unwrap(),
+            Some((
+                "019f0000-0000-7000-8000-000000000001".into(),
+                std::path::PathBuf::from("/tmp/codex-thread-worktree"),
+            ))
+        );
+    }
+
+    #[test]
+    fn recovery_refuses_codex_thread_when_identity_is_missing_by_name() {
+        let mut row = rentry("codex-thread-missing", AgentStatus::Live, None);
+        row.harness = Some("codex".into());
+        row.legacy_provider.clear();
+        row.short_id.clear();
+        row.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        row.cwd = "/tmp/codex-thread-worktree".into();
+
+        let error = codex_thread_resume_identity(&row).unwrap_err();
+        assert!(error.contains("harness_session_id"), "error: {error}");
+
+        row.harness_session_id = Some("019f0000-0000-7000-8000-000000000001".into());
+        row.cwd.clear();
+        let error = codex_thread_resume_identity(&row).unwrap_err();
+        assert!(error.contains("cwd"), "error: {error}");
+    }
+
+    #[test]
+    fn recovery_skips_stopped_codex_thread_rows() {
+        let mut row = rentry("codex-thread-stopped", AgentStatus::Exited, None);
+        row.harness = Some("codex".into());
+        row.legacy_provider.clear();
+        row.short_id.clear();
+        row.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.into());
+        row.harness_session_id = Some("019f0000-0000-7000-8000-000000000009".into());
+        row.codex_session_id = row.harness_session_id.clone();
+        row.cwd = "/tmp/codex-thread-worktree".into();
+
+        // The identity is complete, so resume WOULD be possible; the Exited
+        // status from `fno agents stop` is what must veto the resurrection.
+        assert!(codex_thread_resume_identity(&row).ok().flatten().is_some());
+        assert!(!codex_thread_recovery_candidate(&row));
+
+        row.status = AgentStatus::Live;
+        assert!(codex_thread_recovery_candidate(&row));
+
+        row.status = AgentStatus::PermanentDead;
+        assert!(!codex_thread_recovery_candidate(&row));
+    }
+
+    #[test]
     fn recovery_quarantines_and_reports_interrupted_write_temp() {
         let home = tmp_home("recover-interrupted-temp");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
@@ -13176,6 +13742,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
+            codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -13199,6 +13766,7 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             exe_fingerprint: crate::drift::ExeFingerprint::current(),
             pid_start_time: process_start_time(std::process::id()),
             pending_inside_leg: std::sync::Mutex::new(std::collections::HashMap::new()),
+            codex_threads: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

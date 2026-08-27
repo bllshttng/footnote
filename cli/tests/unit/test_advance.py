@@ -464,9 +464,7 @@ def test_spawn_worker_grid_resolves_difficulty_node(monkeypatch):
     sid = adv._spawn_worker(
         "x-grid1", None, "grid-slug", node={"difficulty": "high", "priority": "p1"}
     )
-    # codex has no bg lane: the resolver sends it headless, whose clean exit IS
-    # the launch proof (no short_id receipt to parse).
-    assert sid == "headless"
+    assert sid == "sid-grid1"
     cmd = captured["cmd"]
     i = cmd.index("--harness")
     assert cmd[i + 1] == "codex"
@@ -754,10 +752,8 @@ def test_spawn_worker_verb_routes_command_and_brief_env(monkeypatch):
     assert "explore the retry design" not in cmd[-1]
 
 
-def test_spawn_worker_verb_normalizes_codex_headless(monkeypatch):
-    """AC2-HP: on a codex harness the verb normalizes to $fno:<verb> and the
-    resolver picks substrate=headless (the bg-on-codex block the hardcoded
-    --substrate bg used to cause is exactly what this unblocks)."""
+def test_spawn_worker_verb_normalizes_codex_thread(monkeypatch):
+    """AC2-HP: a codex harness resolves its verb onto the persistent thread lane."""
     captured = {}
 
     def fake_run(cmd, **kw):
@@ -769,26 +765,23 @@ def test_spawn_worker_verb_normalizes_codex_headless(monkeypatch):
         "ab-2222aaaa", "/w", harness="codex", provider="codex-acct", verb="/think"
     )
     cmd = captured["cmd"]
-    assert cmd[cmd.index("--substrate") + 1] == "headless"
+    assert cmd[cmd.index("--substrate") + 1] == "thread"
     assert cmd[cmd.index("--harness") + 1] == "codex-acct"
     assert cmd[-1] == "$fno:think ab-2222aaaa"
 
 
-def test_spawn_worker_headless_no_short_id_returns_sentinel(monkeypatch):
-    """P1#1: a headless (codex) spawn is a one-shot with NO short_id receipt; a
-    clean exit 0 IS the launch proof, so _spawn_worker returns "headless" rather
-    than raising SpawnError (which would release the reservation and redispatch a
-    worker that already ran)."""
+def test_spawn_worker_thread_without_session_id_refuses(monkeypatch):
+    """A Codex thread must return a session identity receipt."""
 
     def fake_run(cmd, **kw):
-        # A headless one-shot streams the model reply, not a JSON short_id receipt.
+        # A thread spawn without a session identity is not a launch receipt.
         return _FakeProc(0, "the model reply text, no json receipt here")
 
     monkeypatch.setattr(adv.subprocess, "run", fake_run)
-    sid = adv._spawn_worker(
-        "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target"
-    )
-    assert sid == "headless"
+    with pytest.raises(adv.SpawnError, match="no short_id receipt"):
+        adv._spawn_worker(
+            "ab-2222aaaa", "/w", harness="codex", provider="codex", verb="/target"
+        )
 
 
 def test_spawn_worker_bg_still_requires_short_id(monkeypatch):

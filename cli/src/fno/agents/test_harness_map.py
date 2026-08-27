@@ -265,11 +265,11 @@ def test_default_harness_is_claude_bg_with_bypass():
     assert out["permission_bypass"] == ["--dangerously-skip-permissions"]
 
 
-def test_codex_defaults_to_headless():
-    """Verify line: --harness codex resolves to the headless substrate."""
+def test_codex_defaults_to_thread():
+    """Codex uses the earned persistent app-server thread substrate."""
     out = _resolve(harness="codex")
-    assert out["substrate"] == "headless"
-    assert out["thread"] is False
+    assert out["substrate"] == "thread"
+    assert out["thread"] is True
     assert out["permission_bypass"] == ["--dangerously-bypass-approvals-and-sandbox"]
 
 
@@ -282,13 +282,18 @@ def test_unknown_harness_fails_loud_naming_the_map():
     assert "fno.agents.harness_map" in msg
 
 
-def test_explicit_bg_on_non_bg_harness_is_rejected():
-    """thread (and its bg alias) is claude-only; an explicit bg on codex or
-    opencode is a hard error -> headless."""
-    with pytest.raises(DispatchResolveError, match="headless"):
-        _resolve(harness="codex", substrate="bg")
+def test_explicit_bg_on_unearned_harness_is_rejected():
+    """thread (and its bg alias) is earned by claude and codex; an explicit
+    bg on opencode is a hard error -> headless."""
     with pytest.raises(DispatchResolveError, match="headless"):
         _resolve(harness="opencode", substrate="bg")
+
+
+def test_explicit_thread_on_codex_is_allowed():
+    """Codex's live six-step journey earns explicit persistent threads."""
+    out = _resolve(harness="codex", substrate="thread")
+    assert out["substrate"] == "thread"
+    assert out["thread"] is True
 
 
 def test_bg_is_a_deprecated_alias_for_thread():
@@ -390,7 +395,8 @@ def test_explicit_command_normalized_per_harness():
     # `_resolve`, not a bare `resolve_dispatch`: this was the one call in the
     # file that read the ambient config, so on a machine whose
     # `[dispatch] substrate = "bg"` it resolved bg on codex and died
-    # ("bg is claude-only") instead of testing the normalization it names.
+    # ("bg is only supported by claude and codex") instead of testing the
+    # normalization it names.
     # Green in CI, red on a configured developer machine.
     out = _resolve(command="/target --no-merge {id}", harness="codex", node_id="x-1")
     assert out["command"] == "$fno:target --no-merge x-1"
@@ -533,10 +539,10 @@ def test_config_already_native_template_not_double_prefixed():
 
 def test_substrate_default_table():
     assert substrate_default("claude") == "thread"
-    # opencode's serve lane is launch-only (ask refuses, no steering), so the
-    # bit reads false like codex/agy until the steering lane + its own
-    # unattended journey test ship; the default falls back to headless.
-    for h in ("codex", "gemini", "agy", "opencode"):
+    assert substrate_default("codex") == "thread"
+    # opencode's serve lane is launch-only (ask refuses, no steering), so its
+    # bit remains false until its steering lane earns an unattended journey.
+    for h in ("gemini", "agy", "opencode"):
         assert substrate_default(h) == "headless"
 
 
@@ -544,10 +550,12 @@ def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
     """The bit is a claim about FNO's lane, never about the harness CLI: every
     harness here has a working resume primitive (agy and opencode both measured
     2026-08-26), but only claude has the driver + journey-proven lane the bit
-    asserts. A launch-only lane reading true routes autonomous spawns onto a
-    session the caller cannot steer, which is worse than refusing."""
+    asserts. Codex earned the bit through its live six-step journey. OpenCode
+    remains launch-only, so a true bit there would route autonomous spawns onto
+    a session the caller cannot steer, which is worse than refusing."""
     assert capabilities("claude")["thread"] is True
-    for h in ("codex", "agy", "opencode"):
+    assert capabilities("codex")["thread"] is True
+    for h in ("agy", "opencode"):
         assert capabilities(h)["thread"] is False
     # the resume primitives themselves are all recorded as working
     for h in ("codex", "agy", "opencode"):

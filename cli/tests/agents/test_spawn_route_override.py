@@ -68,6 +68,102 @@ def test_route_bearing_spawn_detected() -> None:
     assert not _is_route_bearing_spawn("ask", ["ask", "w", "--route", "zai,glm-5.2"])
 
 
+def test_codex_thread_spawn_returns_full_session_receipt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from fno.agents import dispatch
+    from fno import rust_binary
+
+    captured: dict[str, Any] = {}
+    session_id = "019f0000-0000-7000-8000-000000000001"
+
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"harness": "codex", "short_id": "", "harness_session_id": session_id})
+        stderr = ""
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/fno-agents"))
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Completed:
+        captured["argv"] = argv
+        return Completed()
+
+    monkeypatch.setattr(dispatch.subprocess, "run", fake_run)
+    assert dispatch._codex_thread_spawn(
+        name="codex-thread",
+        message="seed",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+    ) == session_id
+    argv = captured["argv"]
+    assert argv[argv.index("--substrate") + 1] == "thread"
+    assert argv[-1] == "seed"
+
+
+def test_codex_thread_spawn_overlays_account_and_route_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The overlays must reach the client subprocess env, not vanish because
+    subprocess.run was called without env=."""
+    from fno.agents import dispatch
+    from fno import rust_binary
+
+    captured: dict[str, Any] = {}
+    session_id = "019f0000-0000-7000-8000-000000000002"
+
+    class Completed:
+        returncode = 0
+        stdout = json.dumps({"harness": "codex", "harness_session_id": session_id})
+        stderr = ""
+
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: Path("/bin/fno-agents"))
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    def fake_run(argv: list[str], **kwargs: Any) -> Completed:
+        captured["env"] = kwargs.get("env")
+        return Completed()
+
+    monkeypatch.setattr(dispatch.subprocess, "run", fake_run)
+    dispatch._codex_thread_spawn(
+        name="codex-thread",
+        message="seed",
+        cwd=tmp_path,
+        from_name="fno",
+        model=None,
+        yolo=False,
+        account_env={"OPENAI_API_KEY": "sk-account"},
+        route_env={"CODEX_DEFAULT_MODEL": "gpt-5.6"},
+    )
+    env = captured["env"]
+    assert env is not None, "env= must be passed so the overlays survive"
+    assert env["OPENAI_API_KEY"] == "sk-account"
+    assert env["CODEX_DEFAULT_MODEL"] == "gpt-5.6"
+    assert env["PATH"] == "/usr/bin:/bin", "ambient env survives underneath the overlays"
+
+
+def test_codex_thread_lane_refuses_resume_instead_of_spawning_fresh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A --resume codex spawn used to drop the id silently and mint a FRESH
+    session; it must refuse and name the durable resume path instead."""
+    from fno.agents import dispatch
+
+    def _never(*args: Any, **kwargs: Any) -> str:
+        raise AssertionError("a resume request must not reach the thread-lane spawn")
+
+    monkeypatch.setattr(dispatch, "_codex_thread_spawn", _never)
+    monkeypatch.setattr(dispatch, "_emit_ev", lambda *a, **k: None)
+    with pytest.raises(dispatch.DispatchAskError) as exc:
+        dispatch.dispatch_spawn(
+            name="codex-thread",
+            message="hi",
+            provider="codex",
+            cwd=tmp_path,
+            resume_session_id="019f0000-0000-7000-8000-000000000003",
+        )
+    assert "not supported on the codex thread lane" in str(exc.value)
+
+
 # ---------------------------------------------------------------------------
 # cmd_spawn: fail CLOSED before the gate (AC3-ERR)
 # ---------------------------------------------------------------------------

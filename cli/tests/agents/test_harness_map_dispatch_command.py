@@ -97,7 +97,7 @@ def test_map_version_bumped_for_dispatch_command():
 # --- autonomous pane capabilities ----------------------------------------- #
 
 
-def test_codex_autonomous_pane_is_capability_allowed_without_changing_default():
+def test_codex_autonomous_pane_is_capability_allowed_with_thread_default():
     explicit = resolve_dispatch(
         harness="codex",
         substrate="pane",
@@ -107,7 +107,7 @@ def test_codex_autonomous_pane_is_capability_allowed_without_changing_default():
 
     assert capabilities("codex")["autonomous_pane"] is True
     assert explicit["substrate"] == "pane"
-    assert resolve_dispatch(harness="codex", node_id="x-abcd")["substrate"] == "headless"
+    assert resolve_dispatch(harness="codex", node_id="x-abcd")["substrate"] == "thread"
 
 
 @pytest.mark.parametrize("harness", ["claude", "agy", "opencode"])
@@ -153,14 +153,26 @@ def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
         )
 
 
-def test_pane_capability_does_not_enable_codex_bg():
+def test_pane_capability_does_not_enable_opencode_bg():
     with pytest.raises(DispatchResolveError, match="journey-proven driver"):
         resolve_dispatch(
-            harness="codex",
+            harness="opencode",
             substrate="bg",
             node_id="x-abcd",
             trigger="autonomous",
         )
+
+
+def test_codex_thread_capability_allows_bg_alias():
+    """Codex's live six-step journey earns the deprecated bg alias."""
+    out = resolve_dispatch(
+        harness="codex",
+        substrate="bg",
+        node_id="x-abcd",
+        trigger="autonomous",
+    )
+    assert out["substrate"] == "thread"
+    assert out["thread"] is True
 
 
 # --- the normalizer (x-a5e4) ------------------------------------------------ #

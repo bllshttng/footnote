@@ -1549,6 +1549,7 @@ pub fn maybe_run_codex_ask(
     let existing_provider = registry
         .find_name_or_full_session_id(name)
         .map(|e| e.harness_name().to_string());
+    let existing_is_thread = is_codex_thread_target(&registry, name);
 
     // Provider mismatch guard (mirrors claude path).
     if let (Some(ep), Some(pp)) = (existing_provider.as_deref(), provider_param) {
@@ -1565,6 +1566,12 @@ pub fn maybe_run_codex_ask(
     let resolved = existing_provider.as_deref().or(provider_param);
     if resolved != Some("codex") {
         return None; // not a codex target; fall through
+    }
+    if existing_is_thread {
+        // A Codex thread is held by the daemon's app-server lane. Let the
+        // daemon receive the follow-up instead of booting a one-shot resume,
+        // which cannot steer, interrupt, or produce reviewThreadId receipts.
+        return None;
     }
 
     let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -1591,4 +1598,13 @@ pub fn maybe_run_codex_ask(
         print!("{}", outcome.stdout);
     }
     Some(outcome.exit_code)
+}
+
+pub fn is_codex_thread_target(registry: &crate::state::Registry, name: &str) -> bool {
+    registry
+        .find_name_or_full_session_id(name)
+        .is_some_and(|entry| {
+            entry.harness_name() == "codex"
+                && entry.host_mode_or_default() == crate::state::HOST_MODE_INTERACTIVE
+        })
 }
