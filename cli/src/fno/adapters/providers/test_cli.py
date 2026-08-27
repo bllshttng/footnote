@@ -258,13 +258,29 @@ class TestListUsageColumn:
 
 
 class TestListDisarmedFooter:
-    def test_footer_prints_when_defer_dispatch_false(self, tmp_path: Path):
+    def test_footer_names_both_flags_when_neither_is_set(self, tmp_path: Path):
+        """Two decisions, two flags, and `observe` is recommended first because
+        it is the reversible half (x-763a)."""
         settings_path = tmp_path / ".fno" / "config.toml"
         _write_settings(settings_path, _two_record_config())
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
-        assert "rotation is DISARMED" in result.output
+        assert "quota observation is OFF" in result.output
+        assert "accounts.quota.observe" in result.output
         assert "accounts.quota.defer_dispatch" in result.output
+
+    def test_footer_says_observing_but_disarmed_when_only_observe_is_set(
+        self, tmp_path: Path
+    ):
+        """The posture that was unavailable: a working meter that holds nothing."""
+        settings_path = tmp_path / ".fno" / "config.toml"
+        config = _two_record_config()
+        config["config"]["providers"]["quota"] = {"observe": True}
+        _write_settings(settings_path, config)
+        result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "observation is ON and rotation is DISARMED" in result.output
+        assert "quota observation is OFF" not in result.output
 
     def test_footer_absent_when_defer_dispatch_true(self, tmp_path: Path):
         settings_path = tmp_path / ".fno" / "config.toml"
@@ -273,14 +289,16 @@ class TestListDisarmedFooter:
         _write_settings(settings_path, config)
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
-        assert "rotation is DISARMED" not in result.output
+        assert "DISARMED" not in result.output
+        assert "quota observation is OFF" not in result.output
 
     def test_footer_absent_on_empty_config(self, tmp_path: Path):
         """The disarmed footer is a `list` addendum, not a fresh-install nag;
         the empty-state branch returns before the footer check."""
         result = _invoke(["list"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0
-        assert "rotation is DISARMED" not in result.output
+        assert "DISARMED" not in result.output
+        assert "quota observation is OFF" not in result.output
 
     def test_footer_absent_from_json_output(self, tmp_path: Path):
         settings_path = tmp_path / ".fno" / "config.toml"
@@ -1458,6 +1476,15 @@ def _pick_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: dict) -> Pat
     _write_settings(tmp_path / ".fno" / "config.toml", cfg)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PWD", str(tmp_path))
+    # `_provider_candidates` layers a REPO-ROOT-anchored config above the
+    # $HOME one, and the repo root is found from the running process rather
+    # than from $PWD. Setting HOME and PWD therefore left these tests reading
+    # the real checkout's accounts: on a developer machine that is the
+    # operator's own records and their absolute config_dir paths, so the suite
+    # failed there while passing on a clean CI box. FNO_CONFIG is the
+    # documented authoritative override and skips every other layer.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / ".fno" / "config.toml"))
     monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
     monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
     return tmp_path

@@ -549,7 +549,9 @@ combos = {}
 # failover = <unset>   # optional; no default
 
 [accounts.quota]
-# Hold dispatch while the active account's quota use sits above the threshold.
+# Probe account quota on the dispatch path and record what it says. Changes no dispatch decision; set defer_dispatch to act on it.
+observe = false
+# Hold dispatch while the active account's quota use sits above the threshold. Implies observe.
 defer_dispatch = false
 # Quota-use percentage at or above which dispatch defers.
 defer_threshold_pct = 90.0

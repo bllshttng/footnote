@@ -217,7 +217,8 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `accounts.active_combo` | str (optional) | _(none)_ | never | Name of the combo currently driving provider rotation. |
 | `accounts.records` | list[dict[str, Any]] | `[]` | never | Account records for rotation: list of {name, provider, model, ...} entries. |
 | `accounts.combos` | dict[str, ComboBlock] | `{}` | never | Named provider combos, each {strategy (fallback or round_robin), sticky_limit, providers}. |
-| `accounts.quota.defer_dispatch` | bool | `false` | never | Hold dispatch while the active account's quota use sits above the threshold. |
+| `accounts.quota.observe` | bool | `false` | never | Probe account quota on the dispatch path and record what it says. Changes no dispatch decision; set defer_dispatch to act on it. |
+| `accounts.quota.defer_dispatch` | bool | `false` | never | Hold dispatch while the active account's quota use sits above the threshold. Implies observe. |
 | `accounts.quota.defer_threshold_pct` | float | `90.0` | never | Quota-use percentage at or above which dispatch defers. |
 | `accounts.quota.probe_ttl_seconds` | int | `300` | never | Seconds a quota probe result stays fresh before re-probing. |
 | `accounts.quota.defer_horizon_minutes` | int | `60` | never | How far ahead a quota-window reset is still worth deferring for. |

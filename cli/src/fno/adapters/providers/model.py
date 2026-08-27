@@ -263,14 +263,21 @@ class FailoverConfig(BaseModel):
 class QuotaConfig(BaseModel):
     """config.providers.quota block (quota-aware dispatch, x-5d3e).
 
-    Probing and display are always on; only the autonomous *deferral* is gated
-    by ``defer_dispatch`` (default off), matching the opt-in posture of
-    ``backlog advance`` and auto-merge. A missing block yields all-defaults via
-    the loader, which is byte-for-byte today's behavior.
+    Two decisions, two flags (x-763a). ``observe`` says fno may LOOK at quota
+    on the dispatch path; ``defer_dispatch`` says it may ACT on what it sees by
+    holding a dispatch. One flag used to decide both, so an operator who wanted
+    a working meter had to accept automatic deferral, and the safe choice was
+    blindness. That is why the sensor stayed dark.
+
+    ``defer_dispatch`` implies ``observe``: deferring requires looking, so the
+    stronger flag subsumes the weaker and no config that works today breaks.
+    Both default off, matching the opt-in posture of ``backlog advance`` and
+    auto-merge, so a fresh install still probes nothing.
     """
 
     model_config = ConfigDict(extra="ignore")
 
+    observe: bool = False
     defer_dispatch: bool = False
     defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
     probe_ttl_seconds: int = Field(default=300, ge=1)

@@ -3833,10 +3833,15 @@ class ContextBlock(BaseModel):
 
 
 class QuotaBlock(BaseModel):
-    """Quota-aware dispatch configuration (nested under 'config.accounts.quota')."""
+    """Quota-aware dispatch configuration (nested under 'config.accounts.quota').
+
+    ``observe`` and ``defer_dispatch`` are two decisions, not one: looking at
+    quota and acting on it (x-763a). ``defer_dispatch`` implies ``observe``.
+    """
 
     model_config = ConfigDict(extra="ignore")
 
+    observe: bool = False
     defer_dispatch: bool = False
     defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
     probe_ttl_seconds: int = Field(default=300, ge=1)

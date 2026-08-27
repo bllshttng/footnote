@@ -83,7 +83,20 @@ jobs:
   test:
     name: cargo test + schema parity
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 40, raised from 25 because 25 was not a budget, it was a coin toss.
+    # Measured 2026-08-27 across four runs of this job: main finished at 24m56s
+    # and 24m47s, and two PR attempts were cancelled at 25m03s and 25m07s. The
+    # cancelled attempts spent LESS time in their steps than the successful main
+    # run (1470s and 1471s against 1490s), so which side of the cap a run lands
+    # on is runner noise, not the diff. A gate that reddens on noise teaches
+    # everyone to re-run rather than to read it.
+    #
+    # This is headroom, not permission to grow. One step owns the cost: the
+    # fno-agents real-process integration suite runs `--test-threads=1` for
+    # 1128s, 76 percent of the whole job; everything else together is about six
+    # minutes. Cut THAT before touching this number again - split those binaries
+    # across two jobs, or find the serialization they actually need.
+    timeout-minutes: 40
 
     steps:
       - name: Checkout

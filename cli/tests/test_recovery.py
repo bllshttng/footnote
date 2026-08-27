@@ -1661,7 +1661,7 @@ class TestRedispatch:
         # one node. Bail to the nudge (no force-release, no spawn) → False.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, stop_rc=1)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         assert self._index_of(calls, ["fno-py", "agents", "claim", "release", "--force"]) is None
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         assert self._index_of(calls, ["backlog", "update", "--locked-by"]) is None
@@ -1696,7 +1696,7 @@ class TestRedispatch:
         # AC1-ERR: force-release non-zero → no spawn, False so the caller nudges.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, force_release_rc=1)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         assert self._index_of(calls, ["fno-py", "agents", "spawn"]) is None
         clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
         assert clear is not None and calls[clear][-1] == "null"
@@ -1705,14 +1705,14 @@ class TestRedispatch:
         # AC1-EDGE: already-done node → no stop/force-release/spawn at all.
         self._patch_resolve(monkeypatch, done=True)
         calls = self._patch_run(monkeypatch)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         assert calls == []
 
     def test_spawn_failure_returns_false(self, monkeypatch):
         # Spawn exit non-zero (existing contract) → False so the caller nudges.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         owner_updates = [c for c in calls if "backlog" in c and "--locked-by" in c]
         assert [c[-1] for c in owner_updates] == ["null"]
         spawn = self._index_of(calls, ["agents", "spawn"])
@@ -1723,7 +1723,7 @@ class TestRedispatch:
         self._patch_resolve(monkeypatch)
         self._patch_run(monkeypatch, spawn_rc=1, clear_rc=1)
 
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         assert "could not clear dead owner for x-370f" in caplog.text
 
     def test_spawn_timeout_after_stop_clears_corpse(self, monkeypatch):
@@ -1735,7 +1735,7 @@ class TestRedispatch:
             spawn_exc=subprocess.TimeoutExpired(cmd="spawn", timeout=60),
         )
 
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         clear = self._index_of(calls, ["backlog", "update", "--locked-by"])
         assert clear is not None and calls[clear][-1] == "null"
 
@@ -1767,7 +1767,7 @@ class TestRedispatch:
         # slot is freed so lane-fill can re-select the node before the TTL.
         self._patch_resolve(monkeypatch)
         calls = self._patch_run(monkeypatch, spawn_rc=1)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         lr = self._index_of(calls, ["fno-py", "agents", "claim", "release", "--lane"])
         assert lr is not None
         assert "x-370f" in calls[lr]
@@ -1784,7 +1784,7 @@ class TestRedispatch:
         # No node id in the worktree manifest → nothing to re-dispatch.
         monkeypatch.setattr(recovery, "_node_id_from_worktree", lambda cwd: None)
         calls = self._patch_run(monkeypatch)
-        assert recovery._redispatch(self._cand()) is False
+        assert not recovery._redispatch(self._cand())
         assert calls == []
 
     def test_pre_spawn_runs_after_stop_release_before_spawn(self, monkeypatch):

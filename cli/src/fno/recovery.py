@@ -95,6 +95,53 @@ FROM_NAME = "fno-recovery"
 REDISPATCH_PARTIAL = "partial"
 
 
+class _Outcome(str):
+    """A failover outcome that also says WHY it gave up.
+
+    Every recorded ``failover_swapped`` on the reference machine read
+    ``redispatched: false``, twenty of twenty, with a single
+    ``failover_exhausted`` beside them. So nineteen rotations reached a branch
+    that emitted nothing, and one boolean stood in for at least six causes -
+    the absence trap, in the one event whose job is to say what happened.
+
+    A ``str`` subclass rather than a tuple, deliberately: every existing
+    ``== "rotated-no-worker"`` comparison, every ``in (...)`` membership test,
+    and every injected ``failover_fn`` that returns a plain string keep working
+    untouched. Read the reason with ``getattr(outcome, "reason", "")``, which
+    answers "" for a plain string and needs no isinstance branch.
+    """
+
+    reason: str
+
+    def __new__(cls, value: str, reason: str = "") -> "_Outcome":
+        obj = super().__new__(cls, value)
+        obj.reason = reason
+        return obj
+
+
+def _gave_up(reason: str) -> _Outcome:
+    """``rotated-no-worker``, named. Every silent give-up becomes one of these."""
+    return _Outcome("rotated-no-worker", reason)
+
+
+class _Failed(int):
+    """A falsy ``_redispatch`` result that says which step missed.
+
+    ``_redispatch`` answers ``True`` / ``REDISPATCH_PARTIAL`` / falsy, and
+    every caller tests it with ``is True`` or a truth check. An ``int``
+    subclass valued 0 keeps all of that exact: it is falsy, it equals
+    ``False``, and it is never ``is True``. The reason rides along so the
+    caller can name the branch instead of reporting a bare no.
+    """
+
+    reason: str
+
+    def __new__(cls, reason: str) -> "_Failed":
+        obj = super().__new__(cls, 0)
+        obj.reason = reason
+        return obj
+
+
 # ---------------------------------------------------------------------------
 # Predicate
 # ---------------------------------------------------------------------------
@@ -326,6 +373,11 @@ def recovery_sweep(
                         if isinstance(_observed, dict) else None
                     ),
                     "resets_at": _err.resets_at,
+                    # True when the epoch is the NAMED window plus the
+                    # observation time rather than a stamp the body resolved.
+                    # A derived epoch is a bound, so a consumer knows a later
+                    # probe supersedes it (x-763a).
+                    "reset_is_derived": _err.reset_is_derived,
                     "reset_stamp_unparsed": _err.reset_stamp_unparsed,
                     "excerpt": _err.body_excerpt,
                 })
@@ -399,9 +451,18 @@ def recovery_sweep(
                     # Honest event: redispatched=True only when a replacement
                     # worker actually started (codex P1 — a swallowed spawn
                     # failure must NOT report a phantom redispatch).
+                    redispatched = outcome in ("swapped", REDISPATCH_PARTIAL)
                     emit("failover_swapped", {
                         "short_id": c.short_id,
-                        "redispatched": outcome in ("swapped", REDISPATCH_PARTIAL),
+                        "redispatched": redispatched,
+                        # An abandonment that does not say which branch it
+                        # took is indistinguishable from every other one.
+                        # "unknown" only when a custom failover_fn returned
+                        # a plain string, never from a branch in this file.
+                        "reason": (
+                            "" if redispatched
+                            else getattr(outcome, "reason", "") or "unknown"
+                        ),
                     })
                     if outcome == REDISPATCH_PARTIAL:
                         emit("failover_blocked", {
@@ -768,7 +829,7 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
     cwd = getattr(candidate, "cwd", None)
     node = _node_id_from_worktree(cwd) if cwd else None
     if not node:
-        return "rotated-no-worker"
+        return _gave_up("node-missing")
 
     from fno import fleet_state
     from fno.agents.spawn_defaults import (
@@ -784,7 +845,7 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         # here rather than in ``_redispatch``: that path is reached on every
         # respawn and must stay free of state-root I/O.
         fleet_state.clear_node(node)
-        return "rotated-no-worker"
+        return _gave_up("node-done")
 
     tried = fleet_state.links_tried(node)
     try:
@@ -804,7 +865,7 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
             "links_tried": ",".join(tried),
             "reason": f"chain-malformed: {exc}"[:400],
         })
-        return "rotated-no-worker"
+        return _gave_up("chain-malformed")
 
     if not chain:
         _emit_recovery_event("failover_exhausted", {
@@ -813,7 +874,7 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
             "links_tried": ",".join(tried),
             "reason": "all-tried" if tried else "chain-empty",
         })
-        return "rotated-no-worker"
+        return _gave_up("all-tried" if tried else "chain-empty")
 
     link = chain[0]
     # Recorded BEFORE the spawn, not after: a link whose spawn dies half-way
@@ -831,7 +892,7 @@ def _chain_redispatch(candidate: "Candidate", *, reason: str) -> str:
         return "swapped"
     if redispatched == REDISPATCH_PARTIAL:
         return REDISPATCH_PARTIAL
-    return "rotated-no-worker"
+    return _gave_up(getattr(redispatched, "reason", "") or "spawn-failed")
 
 
 # spawn_think names a birth pass ``think-<node>-<slug>`` and every other pass
@@ -961,7 +1022,7 @@ def _redispatch(
     *,
     pre_spawn: Optional[Callable[[], bool]] = None,
     flags: Optional[Sequence[str]] = None,
-) -> bool | str:
+) -> "bool | str | _Failed":
     """Stop the rate-limited session and respawn ``/target`` on the now-active
     (swapped) provider, continuing in the SAME worktree (work-so-far lives in the
     branch's atomic commits there). Returns True iff a replacement worker was
@@ -997,13 +1058,13 @@ def _redispatch(
 
     cwd = getattr(candidate, "cwd", None)
     if not cwd:
-        return False
+        return _Failed("cwd-missing")
     node = _node_id_from_worktree(cwd)
     if not node:
-        return False
+        return _Failed("node-missing")
     if _node_is_done(node):
         # Raced to completion: nothing to continue, so do not re-dispatch.
-        return False
+        return _Failed("node-done")
     name = getattr(candidate, "name", None)
     agent = f"failover-{candidate.short_id}"
     old_worker_stopped = False
@@ -1032,13 +1093,13 @@ def _redispatch(
                         cwd=cwd, capture_output=True, timeout=30, check=False,
                     )
                     if killed.returncode != 0:
-                        return False
+                        return _Failed("stop-failed")
                 else:
                     # Stop failed → the worker may still be live. force-releasing its
                     # claim (an admin override that drops it regardless of holder) and
                     # then spawning would put two /target workers on one node. Bail to
                     # the nudge to preserve the at-most-one-worker invariant (codex P2).
-                    return False
+                    return _Failed("stop-failed")
             old_worker_stopped = True
         # Free the dead session's node claim so the respawn can re-claim it.
         # force-release is idempotent (a claim already self-released by a late
@@ -1053,7 +1114,7 @@ def _redispatch(
             # nudges instead of reporting a respawn that cannot start.
             if old_worker_stopped:
                 _clear_dead_owner(node, cwd)
-            return False
+            return _Failed("claim-held")
         # US3 managed auto-switch: materialize the swapped-to account into the
         # shared slot HERE - after the exhausted worker is stopped (so it no
         # longer pins the slot; the live-pin gate would otherwise defer) and its
@@ -1184,14 +1245,59 @@ def _materialize_managed_switch(record_id: str, repo_root: Optional[str] = None)
 def _resolve_session_uuid(short_id: str) -> Optional[str]:
     """Full session UUID for a bg ``short_id`` (the ``--resume`` key), or None.
 
-    Best-effort: a registry-read miss degrades to None so revival falls back to the
-    bounded nudge rather than crashing the sweep."""
+    Two sources, in order. The claude session registry first: a LIVE
+    supervisor's ``sessionId`` is the authoritative resume key. Then the
+    agents-registry row, which merely RECORDS what it was.
+
+    The fallback is what makes this reachable at all when it matters. The
+    session registry reads ``~/.claude/sessions/*.json`` for
+    ``jobId == short_id and kind == "bg"``, and a supervisor's file is removed
+    when it exits - while recovery necessarily runs AFTER it exits. Measured on
+    two workers a provider killed: 13 bg session files present, neither
+    worker's ``jobId`` among them, and both full UUIDs sitting in the agents
+    registry as ``harness_session_id``. The resolve returned None, and
+    ``_revive_bg_thread`` abandoned the work at its first branch without so
+    much as an event.
+
+    Best-effort: a read miss from either source degrades to None so revival
+    falls back to the bounded nudge rather than crashing the sweep."""
     try:
         from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
-        return resolve_session_uuid(short_id)
+        found = resolve_session_uuid(short_id)
+        if found:
+            return found
     except Exception:  # noqa: BLE001 - a resolve miss must never crash the sweep
+        pass
+    return _session_uuid_from_registry(short_id)
+
+
+def _session_uuid_from_registry(short_id: str) -> Optional[str]:
+    """The full UUID the agents-registry row kept for ``short_id``, or None.
+
+    Only a value that is a full UUID AND starts with the short id is accepted,
+    so a row carrying a truncated id, another worker's id, or a non-string can
+    never be handed to ``--resume``.
+    """
+    def _usable(value: object) -> Optional[str]:
+        if not isinstance(value, str) or len(value) < 36:
+            return None
+        if short_id and not value.startswith(short_id):
+            return None
+        return value
+
+    try:
+        from fno.agents.registry import load_registry
+
+        for entry in load_registry() or []:
+            if str(getattr(entry, "short_id", "") or "") != short_id:
+                continue
+            found = _usable(getattr(entry, "harness_session_id", None))
+            if found:
+                return found
+    except Exception:  # noqa: BLE001 - a registry miss must never crash the sweep
         return None
+    return None
 
 
 def _target_projects_dir(provider_id: str, repo_root: Optional[str]) -> Path:
@@ -1320,23 +1426,23 @@ def _revive_bg_thread(
     if not uuid:
         # No resolvable session id: cannot resume OR build a resume command; leave
         # it to the bounded nudge (same fallback a node-bound respawn miss uses).
-        return "rotated-no-worker"
+        return _gave_up("no-session-uuid")
     if managed and not _auto_switch_enabled(repo_root):
         # Disarmed managed swap: the slot is never materialized, so a resume would
         # land on the exhausted account. Behave like the node-bound disarmed path.
-        return "rotated-no-worker"
+        return _gave_up("auto-switch-disarmed")
     projects_dir = _target_projects_dir(snap.id, repo_root)
     if not _transcript_visible(uuid, projects_dir):
         # AC3-FR: never resume against a transcript the new account cannot see.
         _notify_manual_resume(candidate, snap, uuid)
-        return "notified"
+        return _Outcome("notified", "transcript-not-visible")
     pre_spawn = (lambda: _materialize_managed_switch(snap.id, repo_root)) if managed else None
     if _respawn_bg_resume(candidate, uuid, pre_spawn=pre_spawn):
         return "swapped"
     # A stop / materialize / spawn miss after the transcript was visible: don't
     # nudge the exhausted thread; hand the human the resume command instead.
     _notify_manual_resume(candidate, snap, uuid)
-    return "notified"
+    return _Outcome("notified", "resume-spawn-failed")
 
 
 def _default_failover(candidate: "Candidate", error) -> str:
@@ -1393,7 +1499,7 @@ def _default_failover(candidate: "Candidate", error) -> str:
         try:
             snap = read_active_provider_atomic(settings_path=settings_path)
         except Exception:  # noqa: BLE001
-            return "rotated-no-worker"
+            return _gave_up("active-record-unreadable")
         # A non-claude swap cannot bg-redispatch a /target (the Rust client
         # rejects --substrate bg for it), so this used to dead-end here and fall
         # through to the held-by-design no-op - which recovery.py records as a
@@ -1427,7 +1533,7 @@ def _default_failover(candidate: "Candidate", error) -> str:
         # materialization (env-var switch at spawn), so they redispatch as before.
         if managed:
             if not _auto_switch_enabled(repo_root):
-                return "rotated-no-worker"
+                return _gave_up("auto-switch-disarmed")
             redispatched = _redispatch(
                 candidate,
                 pre_spawn=lambda: _materialize_managed_switch(snap.id, repo_root),
@@ -1436,13 +1542,15 @@ def _default_failover(candidate: "Candidate", error) -> str:
                 return "swapped"
             if redispatched == REDISPATCH_PARTIAL:
                 return REDISPATCH_PARTIAL
-            return "rotated-no-worker"
+            return _gave_up(
+                getattr(redispatched, "reason", "") or "spawn-failed"
+            )
         redispatched = _redispatch(candidate)
         if redispatched is True:
             return "swapped"
         if redispatched == REDISPATCH_PARTIAL:
             return REDISPATCH_PARTIAL
-        return "rotated-no-worker"
+        return _gave_up(getattr(redispatched, "reason", "") or "spawn-failed")
     if result.decision is SwapDecision.BLOCKED_THRASH:
         return "blocked-thrash"
     if result.decision is SwapDecision.QUEUE_EXHAUSTED:

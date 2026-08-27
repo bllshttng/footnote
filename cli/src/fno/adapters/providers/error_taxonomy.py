@@ -134,10 +134,20 @@ class NormalizedError:
     be resolved to an epoch - a naive stamp with no configured timezone.
     It exists so a refusal can say "I saw a time and refused to guess it"
     rather than being indistinguishable from a body with no time at all.
+    It stays EVIDENCE and is never an epoch: see
+    :func:`reset_window_seconds_from` for why no reading of it is safe.
 
-    Both fields are optional, following the ``model`` field's precedent:
-    the closed part of this taxonomy is the ErrorClass set, not the
-    dataclass shape.
+    ``reset_is_derived`` says the epoch came from the window NAME plus the
+    observation time rather than from a stamp the body resolved. Such an
+    epoch is a BOUND, never shorter than the real reset, and a later probe
+    that returns an unambiguous endpoint epoch supersedes it. Refusing to
+    record any deadline was the alternative, and 27 recorded refusals took
+    it: they carried ``resets_at: null`` beside a populated
+    ``reset_stamp_unparsed``, leaving the lock nothing to expire on.
+
+    All three fields are optional, following the ``model`` field's
+    precedent: the closed part of this taxonomy is the ErrorClass set, not
+    the dataclass shape.
     """
 
     error_class: ErrorClass
@@ -148,6 +158,7 @@ class NormalizedError:
     model: str | None = None
     resets_at: float | None = None
     reset_stamp_unparsed: str | None = None
+    reset_is_derived: bool = False
 
     def __post_init__(self) -> None:
         expected = self.error_class.value in _SWAP_TRIGGER_CLASSES
@@ -224,6 +235,52 @@ def _parse_reset_stamp(
         return (resolved, None) if resolved is not None else (None, stamp)
     except Exception:  # noqa: BLE001 - a bad tz name refuses like a missing one
         return None, stamp
+
+
+# "Usage limit reached for 5 hour", "rate limit reached for 1 week". The
+# window NAME is the offset-free half of a rate-limit message and the only
+# half that can be read without knowing the vendor's timezone.
+_WINDOW_NAME_RE = re.compile(
+    r"\bfor\s+(?:(\d+)\s+)?(minute|hour|day|week|month)s?\b", re.IGNORECASE
+)
+_WINDOW_UNIT_SECONDS = {
+    "minute": 60.0,
+    "hour": 3600.0,
+    "day": 86400.0,
+    "week": 604800.0,
+    "month": 2592000.0,
+}
+
+
+def reset_window_seconds_from(body: str | None) -> float | None:
+    """The span of the window ``body`` NAMES, in seconds, or None.
+
+    The other half of a rate-limit message, and the trustworthy half. A vendor
+    stamp like ``2026-08-27 21:09:58`` carries no offset, and z.ai emits UTC+8:
+    measured against a 10:00:26Z observation and the five-hour window this same
+    message names, UTC+7, UTC+8 and UTC+9 ALL land inside the window, at
+    +4.16h, +3.16h and +2.16h. The window constraint disambiguates nothing, so
+    every parse of that stamp ships a timezone guess - guess late and a healthy
+    lane stays locked, guess early and a dispatch walks into a live cap.
+
+    The window NAME has no such ambiguity. ``observation time + this span`` is
+    a BOUND: never shorter than the real reset, and superseded the moment a
+    probe returns an unambiguous endpoint epoch. A bound beats no deadline at
+    all, which is what 27 recorded refusals carried.
+
+    Returns None when no window is named. An invented deadline is worse than
+    an absent one.
+    """
+    if not body or not isinstance(body, str):
+        return None
+    m = _WINDOW_NAME_RE.search(body)
+    if m is None:
+        return None
+    count = int(m.group(1)) if m.group(1) else 1
+    if count <= 0:
+        return None
+    span = count * _WINDOW_UNIT_SECONDS[m.group(2).lower()]
+    return span if span <= _MAX_RESET_HORIZON_S else None
 
 
 def reset_epoch_from(body: str | None, tz: str | None = None) -> float | None:
@@ -379,6 +436,7 @@ def normalize(
     parser_failed: bool = False,
     model: str | None = None,
     reset_timezone: str | None = None,
+    now: float | None = None,
 ) -> NormalizedError:
     """Classify a provider call outcome.
 
@@ -404,6 +462,11 @@ def normalize(
             body carries a NAIVE reset stamp; an offset-bearing stamp
             and an epoch never need it. Absent, a naive stamp is
             refused rather than guessed (Locked Decision 6).
+        now: Observation time for a DERIVED reset (the window the body names
+            plus this instant), consulted only when no stamp resolved.
+            Defaults to the wall clock; injected by tests and by a replay
+            over recorded refusals, where the observation time is the
+            event's own.
 
     Returns:
         ``NormalizedError`` with ``error_class`` set per the taxonomy and
@@ -419,6 +482,28 @@ def normalize(
         model[:_MODEL_ID_MAX_LEN] if isinstance(model, str) else model
     )
     resets_at, unparsed = _parse_reset_stamp(body, reset_timezone)
+    derived = False
+    if resets_at is None and error_class is ErrorClass.PROVIDER_4XX_QUOTA:
+        # No stamp resolved, so fall back to the window the message NAMES.
+        # This is the only half of a vendor rate-limit string that can be read
+        # without knowing its timezone, and a bound is worth more than the
+        # null that 27 recorded refusals carried. An unnamed window still
+        # yields None: an invented deadline is worse than an absent one.
+        #
+        # Scoped to the QUOTA class deliberately. `resets_at` is written
+        # straight through as the provider lock (failover.py, via
+        # update_provider_health), replacing the rule's own backoff step, and
+        # `for <n> <unit>` is ordinary English that appears in bodies which
+        # name no rate-limit window at all. Unscoped, an auth body reading
+        # "Sessions are valid for 30 minutes" locked the provider for thirty
+        # minutes, and a 5xx saying "degraded for 2 days" carried a two-day
+        # epoch. Only a quota refusal is making a claim about a window.
+        span = reset_window_seconds_from(body)
+        if span is not None:
+            import time as _time
+
+            resets_at = (_time.time() if now is None else now) + span
+            derived = True
     return NormalizedError(
         error_class=error_class,
         raw_status=http_status,
@@ -428,4 +513,5 @@ def normalize(
         model=clamped_model,
         resets_at=resets_at,
         reset_stamp_unparsed=unparsed,
+        reset_is_derived=derived,
     )

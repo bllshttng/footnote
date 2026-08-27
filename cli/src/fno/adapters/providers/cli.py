@@ -144,11 +144,23 @@ def list_providers(
         line += f"  {_usage_age_col(record.id, ttl=quota.probe_ttl_seconds)}"
         typer.echo(line)
 
-    if not quota.defer_dispatch:
+    # Two flags, two sentences. Recommend `observe` first: it is the reversible
+    # half, it changes no dispatch decision, and an operator who only wanted a
+    # working meter used to have to accept automatic deferral to get one.
+    if not (quota.observe or quota.defer_dispatch):
         typer.echo(
-            "\nrotation is DISARMED: accounts.quota.defer_dispatch = false, so "
-            "nothing probes and headroom stays unknown. Arm it in "
-            "~/.fno/config.toml under [accounts.quota]."
+            "\nquota observation is OFF: accounts.quota.observe = false and "
+            "accounts.quota.defer_dispatch = false, so nothing probes and "
+            "headroom stays unknown. Set accounts.quota.observe = true in "
+            "~/.fno/config.toml under [accounts.quota] for a meter that "
+            "changes no dispatch decision; add defer_dispatch = true to also "
+            "hold a dispatch on a walled account."
+        )
+    elif not quota.defer_dispatch:
+        typer.echo(
+            "\nobservation is ON and rotation is DISARMED: "
+            "accounts.quota.defer_dispatch = false, so headroom is measured "
+            "and recorded but never holds a dispatch."
         )
 
 
@@ -209,8 +221,15 @@ def _usage_age_col(record_id: str, *, ttl: Optional[int] = None) -> str:
     return f"usage={label}"
 
 
-def _fmt_resets_in(resets_at: float, now: float) -> str:
-    """Render a reset epoch as a relative 'in 40m' / 'reset' string."""
+def _fmt_resets_in(resets_at: float | None, now: float) -> str:
+    """Render a reset epoch as a relative 'in 40m' / 'reset' string.
+
+    ``None`` is a window the endpoint reported without a reset. It reads
+    "reset unknown" and never blank: the window is real and it binds on its
+    percentage, and a blank column would read as "nothing to say here".
+    """
+    if resets_at is None:
+        return "reset unknown"
     delta = resets_at - now
     if delta <= 0:
         return "reset"
@@ -277,6 +296,12 @@ def usage_providers(
         entry: dict[str, object] = {
             "source": snap.source,
             "probed_at": snap.probed_at,
+            # Both travel to the surface. A partial reading that renders like a
+            # whole one re-collapses exactly what the marker was added to keep
+            # apart, and a coarse reading that renders like a precise one is
+            # the same mistake in the other axis.
+            "partial": snap.partial,
+            "confidence": snap.confidence,
             "windows": [
                 {"label": w.label, "used_pct": w.used_pct, "resets_at": w.resets_at}
                 for w in snap.windows
@@ -300,10 +325,15 @@ def usage_providers(
         if row.get("state") == "unknown":
             typer.echo(f"{record.id}  [{record.harness}]  unknown ({row['reason']})")
             continue
+        suffix = ""
+        if row.get("confidence") and row["confidence"] != "exact":
+            suffix += f"  ({row['confidence']})"
+        if row.get("partial"):
+            suffix += "  PARTIAL: a window was rejected, treat as a floor"
         for w in row["windows"]:
             typer.echo(
                 f"{record.id}  [{record.harness}]  {w['label']:<8} "
-                f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}"
+                f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}{suffix}"
             )
 
 
