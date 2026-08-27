@@ -426,15 +426,46 @@ bills the wrong vendor, and reports nothing.
 So the relaunch door reads the recorded path and either re-applies the route or
 refuses non-zero naming the file it could not restore.
 
-Which commands are relaunch doors is narrower than it looks, and the distinction
-is load-bearing:
+Which commands are relaunch doors is wider than this page once claimed, and the
+distinction is load-bearing. An earlier version held that `claude attach` opens a
+session that is still running, so attach cannot lose a route and had "nothing to
+do". The operator falsified that on 2026-08-23: every re-entry door shells a
+fresh claude process, and a fresh process re-resolves its account namespace from
+ambient env, so a re-entry launched from the wrong shell lands in the wrong
+config namespace - the transcript store is per-config-dir, so it either misses
+the session (loud) or bills the wrong account (silent). That claim is superseded;
+the table below is the replacement.
 
-| Command | Starts a new process? | Route handling |
+Every door that re-enters or re-launches a Claude session, and what fno does at
+each. fno controls the first six; the last two are Claude-native transitions fno
+cannot block, only observe and record:
+
+| Door | Starts a claude process? | Account + route handling |
 |---|---|---|
-| `fno agents spawn --resume <uuid>` | yes | restore the recorded route, or refuse (exit 2) |
-| `fno agents resume`, dead-row arm (`claude --resume`) | yes | re-apply via `--settings`, or refuse (exit 13) |
-| `fno agents resume`, live arm (`claude attach`) | no | restore + wake + verify, or refuse (exit 2). Rust delegates to the Python implementation |
-| `fno agents attach` | no | nothing to do |
+| `fno agents attach` (inline path) | yes | restore the recorded account namespace and route, or refuse before launch |
+| `fno agents resume`, dead-row arm (`claude --resume`) | yes | re-apply via `--settings` under the recorded account, or refuse (exit 13) |
+| `fno agents resume`, live arm (`claude attach` wake) | yes | restore + wake + verify, or refuse (exit 2). Rust delegates to the Python implementation |
+| mux attach gestures (`AttachAgent`, open-here, split/drop, restore, picker) | yes | resolve through the same re-entry plan; a resolver refusal starts no pane |
+| mux `ResumeAgent` gesture | yes | run the same re-entry plan in the selected pane, never bare provider argv |
+| `fno agents spawn --resume <uuid>` (revive) | yes | restore the recorded route, or refuse (exit 2); the revived row inherits the source row's `launch_account` |
+| native background / left-arrow fork (Claude-owned) | yes, Claude's own | not blockable pre-transition; SessionStart observes and records the second id |
+| explicit `--fork-session` / SessionStart `source=fork` | yes, Claude's own | same: apply the row's binding on any fno re-entry; record the id |
+
+The re-entry doors resolve through one canonical resolver (`fno-agents
+reentry-plan`, `crates/fno-agents/src/reentry.rs`): it consumes the row's
+recorded launch context - harness session id, `launch_account`, the derived
+`CLAUDE_CONFIG_DIR`, `route_settings_path`, cwd, substrate - and returns the
+provider argv plus env, or refuses naming the missing evidence. Account truth
+lives in the Python account store; the resolver reads it through `fno config
+accounts show <id> --print-binding` (identity, lane, config dir - never
+credentials) and never trusts ambient `CLAUDE_CONFIG_DIR`.
+
+The exact fail-closed rule, one statement for every door: a routed or
+non-Anthropic row whose `launch_account` is unknown refuses re-entry, because
+guessing a namespace is the wrong-bill door; a row that positively records
+`launch_account: default` and no route file keeps the historical bare behavior.
+A recorded route file that is missing, unparseable, or carries only the
+auth-scrub floor refuses for the same reason as below.
 
 `fno agents resume` is two arms, and only one of them relaunches in theory. The theory holds that a reachable supervisor gets `claude attach <short_id>`. That opens a session that is still running (`claude attach --help` says the session keeps running either way). So the route already lives in that process, and no attach can lose it.
 
