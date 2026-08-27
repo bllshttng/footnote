@@ -681,7 +681,15 @@ pub fn gemini_create(
         .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
     let argv = build_argv_create_with_sandbox(&full_prompt, None, model, sandbox_tokens);
     // gemini pins sessions to cwd via Popen(cwd=...), so create passes popen_cwd.
-    run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self, None)
+    run_gemini(
+        &argv,
+        output_path,
+        timeout,
+        true,
+        Some(cwd),
+        agent_self,
+        None,
+    )
 }
 
 /// Spawn `gemini --skip-trust -p ... --resume <uuid> ...` from the
@@ -705,7 +713,15 @@ pub fn gemini_resume(
     let sandbox_tokens = sandbox_flag_with_policy(eff, None, policy)
         .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
     let argv = build_argv_resume_with_sandbox(session_id, &full_prompt, sandbox_tokens);
-    run_gemini(&argv, output_path, timeout, false, Some(cwd), None, Some(session_id))
+    run_gemini(
+        &argv,
+        output_path,
+        timeout,
+        false,
+        Some(cwd),
+        None,
+        Some(session_id),
+    )
 }
 
 // ===========================================================================
