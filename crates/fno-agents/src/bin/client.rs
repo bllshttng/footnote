@@ -4850,7 +4850,7 @@ mod tests {
                 "last_reconciled_at": "2026-05-25T00:30:00Z",
                 "log_path": null,
             }],
-            "fields_omitted": ["model"],
+            "fields_omitted": ["model", "model_basis"],
             "filters_applied": {"cwd": null, "provider": null, "status": null},
         });
         let output = format_success("list", "", &result, true, false, false)
