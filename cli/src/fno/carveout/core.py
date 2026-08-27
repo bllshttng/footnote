@@ -339,7 +339,53 @@ def add_carveout(
     except OSError as exc:
         raise CarveoutError(str(exc)) from exc
 
+    if owning_node:
+        _raise_difficulty_on_outcome(owning_node)
+
     return cv, unscoped
+
+
+def _raise_difficulty_on_outcome(node_id: str) -> None:
+    """Record that this node's run carved out: the stamped band was too low.
+
+    The carve-out IS the validation and it is an artifact, not a claim (the
+    run's own self-report is exactly the signal that cannot be trusted here),
+    so no tier is asked to grade itself. Raises the band by one with source
+    ``outcome:carveout``. A bandless node is left bandless: the round-up rule
+    already reads absent difficulty as the strong tier, so writing a band
+    would be a downgrade dressed as a correction. Strictly non-fatal - a
+    graph-write failure must never lose the carve-out row that was just filed.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        from fno.graph import mutate_graph
+        from fno.graph._constants import DIFFICULTY_BANDS, append_difficulty_history
+        from fno.paths import graph_json
+
+        ladder = DIFFICULTY_BANDS  # ("low", "medium", "high"), ascending
+
+        def _mutate(entries: list) -> list:
+            for entry in entries:
+                if not (isinstance(entry, dict) and entry.get("id") == node_id):
+                    continue
+                current = entry.get("difficulty")
+                if current not in ladder:
+                    return entries
+                raised = ladder[min(ladder.index(current) + 1, len(ladder) - 1)]
+                entry["difficulty"] = raised
+                append_difficulty_history(
+                    entry,
+                    raised,
+                    "outcome:carveout",
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                return entries
+            return entries
+
+        mutate_graph(graph_json(), _mutate)
+    except Exception:  # noqa: BLE001 - the outcome writeback never blocks the filing
+        return
 
 
 class CarveoutNotFound(CarveoutError):

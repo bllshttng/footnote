@@ -221,6 +221,14 @@ def test_author_set_band_is_preserved(tmp_path: Path) -> None:
     )
 
 
+def test_undeclared_band_rounds_up_to_the_strong_floor() -> None:
+    """AC16-EDGE: the mint predates any judgment of the work, and a mis-tiered
+    cheap run is strictly more expensive than a mis-tiered expensive one (it
+    fails tests, skips todos, and carves its remainder out as new work), so
+    the floor band is the strong one."""
+    assert _mutate_doc._DEFAULT_DIFFICULTY == "high"
+
+
 def test_typoed_band_is_refused_not_coerced(tmp_path: Path) -> None:
     """A present but out-of-vocabulary band is the author's error to see, not
     a value to silently replace with the floor (review finding on the first
