@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import tomllib
 import pytest
+from typer.testing import CliRunner
 
 from fno.backlog import advance
+from fno.graph import cli as graph_cli
 from fno.claims.lanes import active_lane_count, find_lane_slot
 from fno.config import WORKTREE_LOCAL_KEYS, _worktree_local_override
 
@@ -233,6 +235,28 @@ def test_max_lanes_one_dispatches_a_single_node(tmp_path, monkeypatch):
 def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, [])
     assert advance.dispatch_lanes(3, claims_root=tmp_path / "claims") == []
+
+
+@pytest.mark.parametrize(
+    ("receipts", "exit_code"),
+    [
+        ([{"node_id": "n-a", "status": "skipped", "error": "boom"}], 1),
+        ([], 0),
+        ([
+            {"node_id": "n-a", "status": "skipped", "error": "boom"},
+            {"node_id": "n-b", "status": "dispatched"},
+        ], 0),
+    ],
+)
+def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
+    monkeypatch, receipts, exit_code
+):
+    monkeypatch.setattr(advance, "dispatch_lanes", lambda *_a, **_kw: receipts)
+
+    result = CliRunner().invoke(graph_cli.cli, ["dispatch-lanes", "--max", "2"])
+
+    assert result.exit_code == exit_code
+    assert "n-a" in result.output if receipts else result.output.strip() == "[]"
 
 
 def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monkeypatch):

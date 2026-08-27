@@ -5106,6 +5106,10 @@ def cmd_dispatch_lanes(
 
     receipts = dispatch_lanes(max_lanes, project, mission=mission, model=model, provider=provider)
     typer.echo(json.dumps(receipts, indent=2))
+    if receipts and not any(
+        receipt.get("status") == "dispatched" for receipt in receipts
+    ):
+        raise typer.Exit(code=1)
 
 
 # -- groom --
