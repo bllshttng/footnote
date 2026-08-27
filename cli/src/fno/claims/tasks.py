@@ -12,9 +12,11 @@ first: the backlog ``task update`` sub-typer takes it inside
 pid-anchored (``ttl_ms=None``, the ``reconcile_lane_slot`` shape): a dead
 worker's task frees the instant its process is gone, and ``acquire_claim``'s
 stale-recovery step archives the corpse and retries. The holder is the FULL
-harness session id - a codex UUIDv7 head-8 is a ~65.5s clock bucket, so two
-codex workers spawned in one minute would share a handle and the second would
-re-acquire the first's task as idempotent.
+harness session id, or the roster name ``fno agents spawn`` exports as
+``FNO_WORKER_NAME`` (a spawned worker's provable per-worker identity when a
+session id is shared or absent) - a codex UUIDv7 head-8 is a ~65.5s clock
+bucket, so two codex workers spawned in one minute would share a handle and
+the second would re-acquire the first's task as idempotent.
 """
 from __future__ import annotations
 

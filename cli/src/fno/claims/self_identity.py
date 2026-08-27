@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Callable, Mapping, Optional
+import os
+import re
+from pathlib import Path
+from typing import Callable, Mapping, Optional, Tuple, Union
 
 from fno.harness_identity import (
     parse_canonical_identity,
@@ -76,3 +79,78 @@ def resolve_self_identity(
         prove=prove,
         collide=None if canonical_proven else collide,
     )
+
+
+#: Manifest body/frontmatter fields that carry an identity every fno process
+#: in the worktree can read. Read directly (the regex shape
+#: ``fno.claims.incarnation.resolve_fence_session_uuid`` already uses) rather
+#: than through ``fno.target.manifest`` - claims sits at the bottom of the
+#: stack and must not import the target layer.
+_MANIFEST_IDENTITY_FIELDS = (
+    "harness_session_id",
+    "claude_session_id",
+    "session_id",
+    "fno_id",
+)
+
+#: Dispositions of :class:`fno.harness_identity.OwnedHarnessIdentity` whose
+#: session id is PROVEN by this process's own ancestry. Every other
+#: disposition with an id present is an inherited marker, and an inherited
+#: marker that matches the worktree manifest is a shared anchor, not a self.
+_PROVEN_DISPOSITIONS = frozenset({"canonical", "proven"})
+
+
+def _manifest_identity_values(project_root: Optional[Path]) -> frozenset:
+    manifest = (project_root or Path.cwd()) / ".fno" / "target-state.md"
+    try:
+        text = manifest.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return frozenset()
+    values = []
+    for field in _MANIFEST_IDENTITY_FIELDS:
+        m = re.search(rf"^{field}\s*:\s*(.+)$", text, re.MULTILINE)
+        if m:
+            val = m.group(1).strip().strip("\"'")
+            if val and val != "null":
+                values.append(val)
+    return frozenset(values)
+
+
+def resolve_task_holder(
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    project_root: Optional[Union[str, Path]] = None,
+) -> Tuple[Optional[str], str]:
+    """Resolve the holder for a task-grain claim, or name why it cannot.
+
+    Returns ``(holder, "")`` or ``(None, refusal_reason)``; the caller turns a
+    refusal into an exit-4 identity failure. Two identities are acceptable:
+
+    1. ``FNO_WORKER_NAME``: the roster name ``fno agents spawn`` exports into
+       the worker it launches. A spawned worker can prove the name is its own
+       because its parent minted it specifically for this child, and two
+       siblings in one worktree carry two names - the collapse this resolver
+       exists to break.
+    2. The ambient session id, when this process PROVES it (process-tree
+       ancestry) or the marker is at least not the worktree manifest's shared
+       value. The manifest is read by every fno process in the directory, so
+       an identity that only matches it is a shared anchor: refusing names the
+       fix (``--owner`` or spawn through the roster) instead of attributing a
+       stranger's work.
+    """
+    environ = os.environ if env is None else env
+    name = (environ.get("FNO_WORKER_NAME") or "").strip()
+    if name:
+        return name, ""
+    ident = resolve_self_identity(env)
+    if not ident.session_id or not ident.harness:
+        return None, "no provable session identity"
+    if ident.disposition not in _PROVEN_DISPOSITIONS:
+        root = Path(project_root) if project_root else None
+        if ident.session_id in _manifest_identity_values(root):
+            return None, (
+                "the only provable identity is the worktree manifest's shared "
+                "session id, which every fno process in this directory reads"
+            )
+    return ident.session_id, ""
+
