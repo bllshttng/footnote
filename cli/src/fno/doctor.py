@@ -2259,8 +2259,8 @@ def _emit_human(
     cas = result.get("codex_app_server") or {}
     if not cas.get("present"):
         out(
-            "fno doctor: codex app-server daemon not running (no daemon answering "
-            "its control socket); live mail to codex sessions demotes to durable. "
+            "fno doctor: codex app-server daemon not running (no daemon listening "
+            "on its control socket); live mail to codex sessions demotes to durable. "
             "Start it BEFORE the "
             "codex TUI: `codex app-server daemon start` (or "
             "`codex app-server daemon bootstrap` for durable SSH-driven use). A "
@@ -2573,7 +2573,7 @@ _CODEX_APP_SERVER_PROBE_TIMEOUT_S = 1.0
 
 
 def _codex_app_server_report() -> dict[str, Any]:
-    """Whether a codex app-server daemon answers its control socket.
+    """Whether a codex app-server daemon is listening on its control socket.
 
     The socket file at ``$CODEX_HOME/app-server-control/app-server-control.sock``
     is not proof of a daemon: a unix socket file survives the process that

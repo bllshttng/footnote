@@ -1909,7 +1909,7 @@ def _wake_rung(reachable, wrapped: str) -> tuple[bool, Optional[str], Optional[s
 
 
 def _codex_daemon_socket_absent() -> bool:
-    """True when no codex app-server daemon answers its control socket.
+    """True when no codex app-server daemon is listening on its control socket.
 
     Mirrors ``codex_app_server_socket_path`` in codex_inject.rs. The socket file
     at ``$CODEX_HOME/app-server-control/app-server-control.sock`` survives the

@@ -467,9 +467,9 @@ fn connect_refused_reason(error: &std::io::Error) -> &'static str {
 
 /// Drive a `review/start` over the app-server daemon socket. `Ok((turn_id,
 /// review_thread_id))` on accept; every `Err(reason)` is a clean not-delivered
-/// signal. No daemon answering (the connect refuses or the file is gone) ->
-/// `"no-daemon"`; a pre-send wedge -> `"io-error"`; a lost response after the
-/// request was sent -> `"not-confirmed"`.
+/// signal. No daemon listening on the socket (the connect refuses or the file
+/// is gone) -> `"no-daemon"`; a pre-send wedge -> `"io-error"`; a lost response
+/// after the request was sent -> `"not-confirmed"`.
 pub async fn deliver_via_codex_review_start(
     thread_id: &str,
     target: &ReviewTarget,
@@ -1150,7 +1150,7 @@ pub fn classify_turn_start_response(raw: &str) -> Result<(), ReviewStartError> {
 /// Deliver `text` into codex `thread_id` over the app-server daemon socket.
 /// `Ok(())` == turn accepted (delivered); every `Err` is a clean not-delivered
 /// signal whose `Reason` value is the `mail-inject` JSON `reason` token. No
-/// daemon answering -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
+/// daemon listening -> `Err("no-daemon")`; a wedged socket -> `Err("io-error")`
 /// after [`HANDSHAKE_TIMEOUT`].
 pub async fn deliver_via_codex_daemon(thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
     let sock = codex_app_server_socket_path();
