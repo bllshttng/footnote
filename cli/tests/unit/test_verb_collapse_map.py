@@ -64,10 +64,9 @@ def test_map_covers_current_surface_once():
     # texts conflict while both are individually right. Resolve by COUNTING the
     # merged rows, never by taking either side. `worktree reapable` and
     # `agents orphans` both landed at 323 and the truth is 324.
-    # Counted from the merged file, not taken from either side: main carried
-    # 529 and this branch adds `config routing`, `doctor route`, `route init`
-    # and `route inventory`.
-    assert len(mapped) == 533, (
+    # Counted from the merged file, not taken from either side: the base
+    # carried 533 and this branch adds `agents king manifest-path`.
+    assert len(mapped) == 534, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )
