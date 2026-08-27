@@ -544,7 +544,9 @@ def _followup_path(
     if not short_id:
         raise DispatchAskError(
             f"registry entry {name!r} has no short id on file; cannot follow up. "
-            f"Remove with 'fno agents rm {name}' and recreate.",
+            f"Recover the short id from the harness if it can still name the "
+            f"session; 'fno agents rm {name}' drops the row and its route "
+            f"bindings, so run it to recreate, not to clear this refusal.",
             exit_code=12,
         )
 
@@ -1157,7 +1159,9 @@ def _codex_followup_path(
     if not session_id:
         raise DispatchAskError(
             f"registry entry {name!r} has no harness_session_id; cannot follow up. "
-            f"Remove with 'fno agents rm {name}' and recreate.",
+            f"Recover the id from the harness if it can still name the "
+            f"session; 'fno agents rm {name}' drops the row and its route "
+            f"bindings, so run it to recreate, not to clear this refusal.",
             exit_code=11,
         )
 
@@ -3076,7 +3080,8 @@ def dispatch_spawn(
                     print(
                         f"fno agents spawn: warning: teardown failed for {name!r} "
                         f"({provider}/{session_or_short_id}): {exc}. "
-                        f"Peer leaked -- clean up via 'fno agents rm {name}'",
+                        f"Peer leaked -- the exchange finished, so nothing is "
+                        f"lost; clean up the dead row via 'fno agents rm {name}'",
                         file=sys.stderr,
                     )
 

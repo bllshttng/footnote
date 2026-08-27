@@ -899,8 +899,9 @@ def resume_logic(
                 exit_code=13,
                 stderr=(
                     f"fno agents resume: cwd {cwd!r} for agent {name!r} "
-                    f"is no longer reachable: {exc}. The row is the resume "
-                    "handle; rm deletes it and the session binding with it. "
+                    f"is no longer reachable: {exc}. "
+                    "the row is the resume handle; rm deletes it and the "
+                    "session binding with it. "
                     "rm is for a path that is gone for good - recover the "
                     "path (or rm, then `fno agents adopt <id>` to rebind "
                     "from a live cwd) instead of clearing this refusal.\n"
