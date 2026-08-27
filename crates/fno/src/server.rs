@@ -20244,7 +20244,11 @@ mod tests {
         squad.active_tab = 1;
 
         let (trees, active) = core.stored_tab_trees(sid).unwrap();
-        assert_eq!(trees.len(), 2, "only the two sibling tabs survive the prune");
+        assert_eq!(
+            trees.len(),
+            2,
+            "only the two sibling tabs survive the prune"
+        );
         assert_eq!(
             active, 1,
             "active_tab lands on the surviving tab that followed the pruned one, not index 0"
