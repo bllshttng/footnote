@@ -157,17 +157,29 @@ def test_relative_target_path_rejected():
     assert "absolute" in str(exc.value)
 
 
-def test_misspelled_target_key_warns(caplog):
-    import logging
+def test_misspelled_target_key_is_refused_not_ignored():
+    """A warned-and-ignored typo published every project.
+
+    `scope` defaults to `all`, so a misspelled scope key on a public row used
+    to validate and widen the page to the whole graph. Refuse the row instead;
+    _configured_targets skips a malformed row with a warning, so the blast
+    radius is that one row not rendering.
+    """
+    import pytest
 
     from fno.config import RenderTargetConfig
 
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        row = RenderTargetConfig.model_validate(
-            {"path": "~/v/x.html", "project": "fno", "projectio": "roadmap"}
+    with pytest.raises(Exception) as excinfo:
+        RenderTargetConfig.model_validate(
+            {"path": "~/v/x.html", "scop": "fno", "projection": "roadmap"}
         )
-    assert row.projection == "backlog"
-    assert "projectio" in caplog.text
+    message = str(excinfo.value)
+    assert "'scop'" in message and "publish every project" in message
+
+    ok = RenderTargetConfig.model_validate(
+        {"path": "~/v/x.html", "scope": "fno", "projection": "roadmap"}
+    )
+    assert ok.scope == "fno"
 
 
 def test_state_file_collision_skips_target(_isolate, tmp_path, monkeypatch, capsys):
@@ -554,3 +566,51 @@ def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkey
     assert "leak gate refused" in err
     assert "ab-done0000" in err and "pr-reference" in err
     assert not roadmap_target.exists()
+
+
+def test_config_read_failure_still_renders_the_canonical_board(monkeypatch, capsys):
+    """A broken global config must not freeze the operator's board.
+
+    store.py stopped rendering GRAPH_HTML unconditionally once the board
+    became a configurable row, so returning no rows at all on a config-read
+    failure stopped the board advancing for as long as the config stayed
+    broken. That reads to the operator as a frozen page, which is the exact
+    complaint this work exists to answer.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("global config unreadable")
+
+    monkeypatch.setattr("fno.config_io.read_global_block", _boom)
+    targets = roadmap_public._configured_targets()
+
+    assert [t.path for t in targets] == [str(gc.GRAPH_HTML)]
+    assert targets[0].projection == "local"
+    assert targets[0].scope == "all"
+    assert "render_targets read failed" in capsys.readouterr().err
+
+
+def test_an_explicit_row_for_the_canonical_board_wins_over_the_default(monkeypatch):
+    """GRAPH_HTML is a render target now, not a forbidden state file.
+
+    It used to be refused by the state-file collision check and then written
+    anyway by the hardcoded default insert, so the operator could not scope or
+    re-project their own board. The default row only fills a gap.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                {"path": str(gc.GRAPH_HTML), "scope": "fno", "projection": "local"}
+            ]
+        },
+    )
+    targets = roadmap_public._configured_targets()
+
+    assert [t.path for t in targets] == [str(gc.GRAPH_HTML)]
+    assert targets[0].scope == "fno", "the operator's scope must survive"

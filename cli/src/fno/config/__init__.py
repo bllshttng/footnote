@@ -304,15 +304,14 @@ class RenderTargetConfig(BaseModel):
     def _warn_unknown_keys(cls, data: object) -> object:
         if isinstance(data, dict):
             known = set(cls.model_fields)
-            for key in data:
-                if key not in known:
-                    _LOG.warning(
-                        "config.backlog.render_targets: unknown key %r in row "
-                        "%r - ignoring it (allowed: %s)",
-                        key,
-                        data.get("path"),
-                        ", ".join(sorted(known)),
-                    )
+            unknown = [key for key in data if key not in known]
+            if unknown:
+                raise ValueError(
+                    "backlog.render_targets: unknown key(s) "
+                    f"{', '.join(repr(k) for k in unknown)} in row "
+                    f"{data.get('path')!r} (allowed: {', '.join(sorted(known))}). "
+                    "A misspelled scope would otherwise publish every project."
+                )
         return data
 
     @field_validator("path")
@@ -340,7 +339,7 @@ class RenderTargetConfig(BaseModel):
             return None
         v = v.strip()
         if not v:
-            raise ValueError("backlog.render_targets scope must not be empty")
+            raise ValueError("backlog.render_targets project must not be empty")
         return v
 
     @field_validator("scope")

@@ -117,7 +117,15 @@ def test_project_filter_keeps_rows_in_dom_and_lists_unscoped(tmp_path: Path):
     assert "fno-kanban-project-state" in text
     assert "localStorage.getItem(PROJECT_KEY)" in text
     assert "localStorage.setItem(PROJECT_KEY" in text
-    assert "className = 'row' + (matches(n) ? '' : ' is-hidden')" in text
+    assert "r.el.className = 'row' + (ok ? '' : ' is-hidden')" in text
+    # The group header follows the same rule, over the VISIBLE rows, so a
+    # fully filtered group cannot paint as an empty section claiming a count.
+    assert "sec.el.className = 'group' + (vis.length ? '' : ' is-hidden')" in text
+    assert "sec.count.textContent = vis.length" in text
+    # The board is built once and only toggled after that, so collapsing a
+    # group or opening a row detail survives the next keystroke.
+    assert text.count("board.innerHTML = ''") == 1
+    assert "  build();" in text
 
 
 def test_scoped_render_preserves_cross_project_relationship_context(tmp_path: Path):
@@ -256,7 +264,10 @@ def test_legacy_all_hidden_project_state_remains_an_active_empty_selection():
 def test_dashboard_initially_selects_all_nonterminal_statuses():
     from fno.graph.render_html import _DASHBOARD_JS
 
-    assert "ORDER.filter(function (s) { return s !== 'done' && s !== 'superseded'; })" in _DASHBOARD_JS
+    assert (
+        "ORDER.filter(function (s) { return s !== 'superseded' && "
+        "(s !== 'done' || DATA.initial_done); })"
+    ) in _DASHBOARD_JS
 
 
 def test_dashboard_derives_done_from_completion_fact(tmp_path: Path):
@@ -345,3 +356,56 @@ def test_default_local_path_renders_the_canonical_dashboard(tmp_path: Path, monk
     assert "Default path" in text and "ab-defa0117" in text
     for card_marker in ('class="card"', 'class="lane"', 'id="show-done"'):
         assert card_marker not in text, f"replaced card projection resurfaced: {card_marker}"
+
+
+def test_deselecting_every_project_chip_does_not_blank_the_board():
+    """An empty selection is no filter, matching the status chips one line up.
+
+    Toggling the last chip off used to leave projectFilterActive true over an
+    empty set, so every row failed projectMatch and the board went blank with
+    no chip pressed. saveProjects then persisted that state.
+    """
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "state.projectFilterActive = state.projects.size > 0;" in _DASHBOARD_JS
+    assert (
+        "return !state.projectFilterActive || !state.projects.size "
+        "|| state.projects.has(n.project);"
+    ) in _DASHBOARD_JS
+    # The one remaining unconditional activation is the ?project= override,
+    # where a single named project IS the selection.
+    assert _DASHBOARD_JS.count("state.projectFilterActive = true;") == 1
+    assert "queryProject" in _DASHBOARD_JS
+
+
+def test_unscoped_chip_sorts_last_by_the_real_label(tmp_path: Path):
+    """The sort compared against 'unscoped'; the sentinel is '(unscoped)'.
+
+    Both arms were dead, so the unscoped chip sorted first. Ship the label in
+    the payload instead of repeating a literal that can drift again.
+    """
+    out = tmp_path / "graph.html"
+    render_graph_html([_entry("ab-11111111", project="zeta"),
+                       _entry("ab-22222222", project=None)], out)
+    text = out.read_text()
+    assert f'"unscoped_label":"{UNSCOPED_LABEL}"' in text
+    assert "a === UNSCOPED ? 1 : b === UNSCOPED ? -1" in text
+
+
+def test_roadmap_opens_with_shipped_visible_and_backlog_does_not(tmp_path: Path):
+    """A roadmap exists to show shipped work, so it opens with done pressed.
+
+    Every other surface opens on open work. The flag travels in the payload,
+    so the one status-seed expression serves both.
+    """
+    from fno.graph.roadmap_public import (
+        render_public_backlog_html,
+        render_public_roadmap_html,
+    )
+
+    entry = _entry("ab-33333333", project="fno", title="shipped thing", status="done")
+    assert '"initial_done":true' in render_public_roadmap_html([entry], "fno")
+    assert '"initial_done":false' in render_public_backlog_html([entry], "fno")
+    local_path = tmp_path / "local.html"
+    render_graph_html([entry], local_path)
+    assert '"initial_done":false' in local_path.read_text()

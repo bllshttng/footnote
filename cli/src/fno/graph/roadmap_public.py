@@ -188,7 +188,9 @@ def _state_file_collisions(path: Path) -> list[str]:
         for state_path in (
             gc.GRAPH_JSON,
             gc.GRAPH_MD,
-            gc.GRAPH_HTML,
+            # GRAPH_HTML is deliberately absent: it is a render target now,
+            # not a state file, and an operator row for it must win over the
+            # default row rather than be refused and then overwritten anyway.
             gc.GRAPH_ARCHIVE_JSON,
             gc.LEDGER_JSON,
             # the sha256 sidecar, the corruption-recovery backup, and the
@@ -203,6 +205,22 @@ def _state_file_collisions(path: Path) -> list[str]:
         return hits
     except Exception:
         return []
+
+
+def _default_targets() -> "list[RenderTargetConfig]":
+    """The canonical local board, as an ordinary render-target row.
+
+    Named once and returned from both the success path and the degraded path.
+    store.py stopped rendering GRAPH_HTML unconditionally when the board became
+    a configurable row, so a config-read failure that returned no rows at all
+    would freeze the operator's board for as long as the config stayed broken.
+    """
+    from fno.config import RenderTargetConfig
+    from fno.graph._constants import GRAPH_HTML
+
+    return [
+        RenderTargetConfig(path=str(GRAPH_HTML), scope=ALL_PROJECTS, projection="local")
+    ]
 
 
 def _configured_targets() -> "list[RenderTargetConfig]":
@@ -277,18 +295,14 @@ def _configured_targets() -> "list[RenderTargetConfig]":
             out.append(target)
         _warn_shadowed_local_rows(out)
         from fno.graph._constants import GRAPH_HTML
+
         if not any(
             Path(os.path.expanduser(target.path)).resolve() == Path(GRAPH_HTML).resolve()
             for target in out
         ):
             # The legacy global board is now an ordinary local/all target. Keep
             # it as the default row for installs that have no explicit replacement.
-            out.insert(
-                0,
-                RenderTargetConfig(
-                    path=str(GRAPH_HTML), scope=ALL_PROJECTS, projection="local"
-                ),
-            )
+            out[0:0] = _default_targets()
         return out
     except Exception as exc:
         # Every other degradation in this module warns; a silent [] here would
@@ -298,7 +312,7 @@ def _configured_targets() -> "list[RenderTargetConfig]":
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
-        return []
+        return _default_targets()
 
 
 # The shadow warning repeats on every mutation while misconfigured; dedupe

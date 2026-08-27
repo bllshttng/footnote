@@ -365,7 +365,7 @@ input[type=search] { flex:1 1 230px }
 .rows { border-top:1px solid var(--line) }
 .row { border-bottom:1px solid var(--line) }
 .row:last-child { border-bottom:0 }
-.row.is-hidden { display:none }
+.row.is-hidden, .group.is-hidden { display:none }
 .rmain { width:100%; display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; gap:9px;
          align-items:center; padding:9px 12px; border:0; background:transparent; color:inherit;
          text-align:left; cursor:pointer; font:inherit }
@@ -407,7 +407,7 @@ _DASHBOARD_JS = """\
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
   var ALL = counts(NODES);
-  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', planOnly:false, prOnly:false, open:{} };
+  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', planOnly:false, prOnly:false };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
     try {
@@ -437,11 +437,13 @@ _DASHBOARD_JS = """\
     b.addEventListener('click', function () { if (state.status.has(s)) state.status.delete(s); else state.status.add(s);
       b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); render(); }); statusChips.appendChild(b); });
   var projectNames = []; NODES.forEach(function (n) { if (projectNames.indexOf(n.project) < 0) projectNames.push(n.project); });
-  projectNames.sort(function (a, b) { return a === 'unscoped' ? 1 : b === 'unscoped' ? -1 : a.localeCompare(b); });
+  var UNSCOPED = DATA.unscoped_label;
+  projectNames.sort(function (a, b) { return a === UNSCOPED ? 1 : b === UNSCOPED ? -1 : a.localeCompare(b); });
   var projectChips = document.getElementById('projectChips');
   projectNames.forEach(function (p) { var b = document.createElement('button'); b.className = 'chip project-chip'; b.type = 'button';
     b.dataset.project = p; b.textContent = p; b.setAttribute('aria-pressed', 'false'); b.addEventListener('click', function () {
-      if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p); state.projectFilterActive = true; saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
+      if (state.projects.has(p)) state.projects.delete(p); else state.projects.add(p);
+      state.projectFilterActive = state.projects.size > 0; saveProjects(); syncProjects(); render(); }); projectChips.appendChild(b); });
   var loadedProjects = loadProjects(); state.projects = loadedProjects.selected; state.projectFilterActive = loadedProjects.active;
   var queryProject = new URLSearchParams(window.location.search).get('project');
   if (queryProject && projectNames.indexOf(queryProject) >= 0) { state.projects = new Set([queryProject]); state.projectFilterActive = true; }
@@ -461,9 +463,9 @@ _DASHBOARD_JS = """\
   document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value.toLowerCase().trim(); render(); });
   function buttonFilter(id, key) { var b = document.getElementById(id); b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
   buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
-  var openStatuses = new Set(ORDER.filter(function (s) { return s !== 'done' && s !== 'superseded'; })); openStatuses.forEach(function (s) { state.status.add(s); });
+  var openStatuses = new Set(ORDER.filter(function (s) { return s !== 'superseded' && (s !== 'done' || DATA.initial_done); })); openStatuses.forEach(function (s) { state.status.add(s); });
   ORDER.forEach(function (s) { var b = statusChips.querySelector('[data-s="' + s + '"]'); if (b) b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); });
-  function projectMatch(n) { return !state.projectFilterActive || state.projects.has(n.project); }
+  function projectMatch(n) { return !state.projectFilterActive || !state.projects.size || state.projects.has(n.project); }
   function matches(n) {
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
@@ -484,16 +486,54 @@ _DASHBOARD_JS = """\
     if (LOCAL && n.pr) h += '<div class=\"planrow\">' + (n.pu ? '<a class=\"pbtn primary\" href=\"' + esc(n.pu) + '\">PR #' + esc(n.pr) + '</a>' : '<span class=\"pill\">PR #' + esc(n.pr) + '</span>') + (n.pt ? '<span class=\"plan\">' + esc(n.pt) + '</span>' : '') + '</div>';
     return h;
   }
-  function render() {
-    var visible = NODES.filter(matches); document.getElementById('shown').textContent = visible.length + ' of ' + NODES.length + ' nodes shown';
-    var board = document.getElementById('board'); board.innerHTML = ''; var by = {}; NODES.forEach(function (n) { (by[n.g] = by[n.g] || []).push(n); });
-    Object.keys(by).sort().forEach(function (g) { var rows = by[g], c = counts(rows); var sec = document.createElement('section'); sec.className = 'group';
-      var head = document.createElement('button'); head.className = 'ghead'; head.type = 'button'; head.innerHTML = '<span class=\"caret\">▼</span><h2>' + esc(g) + '</h2><span class=\"tw\">' + ORDER.map(function (s) { return c[s] ? '<i style=\"width:' + (100 * c[s] / rows.length) + '%\"></i>' : ''; }).join('') + '</span><span class=\"gc\">' + rows.length + '</span>';
-      var list = document.createElement('div'); list.className = 'rows'; head.addEventListener('click', function () { list.hidden = !list.hidden; head.querySelector('.caret').textContent = list.hidden ? '▶' : '▼'; }); sec.appendChild(head);
-      rows.forEach(function (n) { var row = document.createElement('div'); row.className = 'row' + (matches(n) ? '' : ' is-hidden'); row.dataset.project = n.project; row.dataset.status = n.s;
+  var sections = [];
+  function build() {
+    var board = document.getElementById('board'); board.innerHTML = '';
+    var by = {}; NODES.forEach(function (n) { (by[n.g] = by[n.g] || []).push(n); });
+    Object.keys(by).sort().forEach(function (g) { var rows = by[g];
+      var sec = document.createElement('section'); sec.className = 'group';
+      var head = document.createElement('button'); head.className = 'ghead'; head.type = 'button';
+      var caret = document.createElement('span'); caret.className = 'caret'; caret.textContent = '\u25bc';
+      var title = document.createElement('h2'); title.textContent = g;
+      var bar = document.createElement('span'); bar.className = 'tw';
+      var count = document.createElement('span'); count.className = 'gc';
+      head.appendChild(caret); head.appendChild(title); head.appendChild(bar); head.appendChild(count);
+      var list = document.createElement('div'); list.className = 'rows';
+      head.addEventListener('click', function () { list.hidden = !list.hidden; caret.textContent = list.hidden ? '\u25b6' : '\u25bc'; });
+      sec.appendChild(head);
+      var built = rows.map(function (n) { var row = document.createElement('div'); row.className = 'row';
+        row.dataset.project = n.project; row.dataset.status = n.s;
         var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button'; main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\"><span class=\"pill\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
-        main.setAttribute('aria-expanded', 'false'); main.addEventListener('click', function () { var old = row.querySelector('.detail'); if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; } var d = document.createElement('div'); d.className = 'detail'; d.innerHTML = detail(n); row.appendChild(d); main.setAttribute('aria-expanded', 'true'); }); row.appendChild(main); list.appendChild(row); }); sec.appendChild(list); board.appendChild(sec); });
+        main.setAttribute('aria-expanded', 'false');
+        main.addEventListener('click', function () { var old = row.querySelector('.detail');
+          if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; }
+          var d = document.createElement('div'); d.className = 'detail'; d.innerHTML = detail(n);
+          row.appendChild(d); main.setAttribute('aria-expanded', 'true'); });
+        row.appendChild(main); list.appendChild(row); return { node:n, el:row }; });
+      sec.appendChild(list); board.appendChild(sec);
+      sections.push({ el:sec, bar:bar, count:count, rows:built });
+    });
   }
+  function render() {
+    var shown = 0;
+    sections.forEach(function (sec) {
+      var vis = [];
+      sec.rows.forEach(function (r) { var ok = matches(r.node);
+        r.el.className = 'row' + (ok ? '' : ' is-hidden'); if (ok) vis.push(r.node); });
+      shown += vis.length;
+      // Header count and stacked bar describe what is VISIBLE. Reading them off
+      // the unfiltered group made thirteen headers claim the whole graph while
+      // the board showed three rows, and painted all-filtered groups as empty
+      // sections. The rows stay in the DOM either way.
+      var c = counts(vis);
+      sec.count.textContent = vis.length;
+      sec.bar.innerHTML = vis.length ? ORDER.map(function (s) {
+        return c[s] ? '<i style=\"width:' + (100 * c[s] / vis.length) + '%\"></i>' : ''; }).join('') : '';
+      sec.el.className = 'group' + (vis.length ? '' : ' is-hidden');
+    });
+    document.getElementById('shown').textContent = shown + ' of ' + NODES.length + ' nodes shown';
+  }
+  build();
   render();
 })();
 """
@@ -679,16 +719,23 @@ def _dashboard_html(
     local: bool,
     vault: str | None = None,
     context_entries: list[dict] | None = None,
+    projection: str = "backlog",
 ) -> str:
     rows = _dashboard_rows(
         entries, local=local, vault=vault, context_entries=context_entries
     )
     json_module = __import__("json")
     payload = json_module.dumps(
-        {"nodes": rows, "status_order": list(_DASHBOARD_STATUS_ORDER)},
+        {
+            "nodes": rows,
+            "status_order": list(_DASHBOARD_STATUS_ORDER),
+            "unscoped_label": UNSCOPED_LABEL,
+            # A roadmap's whole point is the shipped column, so it opens with
+            # done pressed. Every other surface opens on open work.
+            "initial_done": projection == "roadmap",
+        },
         separators=(",", ":"),
     ).replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    config = json_module.dumps({"local": local}, separators=(",", ":"))
     generated = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     static_board = _dashboard_static_html(rows, local=local)
     return (
@@ -708,7 +755,7 @@ def _dashboard_html(
         '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
         f'</div><div id="shown"></div></header><main id="board">{static_board}</main>'
-        f'<footer>rendered {generated}</footer><script id="config" type="application/json">{config}</script>'
+        f'<footer>rendered {generated}</footer>'
         f'<script id="data" type="application/json">{payload}</script><script>{_DASHBOARD_JS}</script></body></html>\n'
     )
 
@@ -758,4 +805,4 @@ def render_public_sections_html(
 ) -> str:
     """Render any public projection with the same canonical dashboard shape."""
     entries = [entry for _label, section in sections for entry in section]
-    return _dashboard_html(entries, title=title, local=False)
+    return _dashboard_html(entries, title=title, local=False, projection=projection)
