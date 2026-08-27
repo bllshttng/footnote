@@ -202,6 +202,25 @@ fn fake_interrupt() -> String {
     )
 }
 
+/// The stacked-bounds wedge: interrupt acks SLOWLY (1s) and the turn never
+/// completes. Against stacked full bounds the settle wait then runs its own
+/// 65s after the ack; against the shared budget it gets only the remainder.
+fn fake_slow_interrupt_ack() -> String {
+    queue_fake(
+        r#"        end = time.time() + 30
+        interrupted = False
+        while time.time() < end:
+            try:
+                m2 = json.loads(q.get(timeout=0.1))
+            except queue.Empty:
+                continue
+            if m2.get("method") == "turn/interrupt" and not interrupted:
+                time.sleep(1.0)
+                send({"id": m2.get("id"), "result": {}})
+                interrupted = True"#,
+    )
+}
+
 /// AC3: a turn that completes 1.5s in - slower than the caller's bounded wait,
 /// fast enough to observe the late receipt. No mid-turn input, so no queue
 /// needed.
@@ -342,6 +361,34 @@ async fn interrupt_mid_turn_resolves_interrupted_and_survives_as_handle() {
             .expect("interrupted receipt");
         assert_eq!(turn.status, "interrupted");
         assert_eq!(actor.current_turn_id(), None);
+        actor.shutdown().await.unwrap();
+    })
+    .await;
+}
+
+/// The RPC ack wait and the settle wait split ONE interrupt budget. A child
+/// that acks slowly must not leave a settle wait that outlives the daemon's
+/// outer stop bound: stacked full bounds (60s ack + 65s settle) once stalled
+/// `shutdown()` on the interrupt tail until past the client's 120s deadline.
+/// The env bound and the fake's 1s ack delay make the stacked behavior fail
+/// here in seconds instead of 66.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupt_settle_shares_one_deadline_with_the_ack_wait() {
+    with_fake_codex(&fake_slow_interrupt_ack(), async {
+        std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
+        let (actor, _keep) = start_actor().await;
+        let _reply = actor.submit("long turn".into()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(actor.current_turn_id().as_deref(), Some("turn-1"));
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), actor.interrupt())
+            .await
+            .expect("interrupt answers inside the shared budget, not the stacked 66s")
+            .unwrap();
+        assert!(
+            matches!(outcome, InterruptOutcome::Timeout),
+            "the settle wait consumed the remaining budget: {outcome:?}"
+        );
+        std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
         actor.shutdown().await.unwrap();
     })
     .await;

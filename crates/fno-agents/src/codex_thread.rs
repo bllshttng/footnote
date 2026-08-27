@@ -50,6 +50,20 @@ const TURN_SETTLE_TIMEOUT: Duration = Duration::from_secs(65);
 pub fn stop_settle_bound() -> Duration {
     Duration::from_secs(115)
 }
+/// Shared bound on the ACTOR side of one interrupt: the RPC ack wait and the
+/// settle wait split one deadline instead of stacking (`REQUEST_TIMEOUT` +
+/// `TURN_SETTLE_TIMEOUT` once totaled 125s, past the daemon's 115s outer
+/// bound, whose expiry left `shutdown()` blocked on the interrupt tail until
+/// after the client's 120s deadline). Under `stop_settle_bound()` so the
+/// actor always answers `Interrupt` before that outer bound can fire, which
+/// is what keeps the shutdown ack fast. Env-overridable for the same reason
+/// as `ask_wait`.
+pub fn interrupt_total_bound() -> Duration {
+    std::env::var("FNO_CODEX_INTERRUPT_BOUND_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map_or(Duration::from_secs(110), Duration::from_millis)
+}
 /// Parked-but-unclaimed turn receipts are telemetry only (the rollout on disk
 /// is the durable record), so the map is capped and overflow drops entries.
 const COMPLETED_PARK_CAP: usize = 8;
@@ -1065,10 +1079,22 @@ impl ActorCtx {
         id: u64,
         frames: &mut mpsc::Receiver<Value>,
     ) -> Result<Value, String> {
+        self.await_response_bounded(id, frames, REQUEST_TIMEOUT)
+            .await
+    }
+
+    /// [`Self::await_response`] under a caller-supplied bound, so one shared
+    /// deadline can span a response wait and the turn settle that follows it.
+    async fn await_response_bounded(
+        &mut self,
+        id: u64,
+        frames: &mut mpsc::Receiver<Value>,
+        bound: Duration,
+    ) -> Result<Value, String> {
         if let Some(value) = self.pending.remove(&id) {
             return Ok(value);
         }
-        let deadline = Instant::now() + REQUEST_TIMEOUT;
+        let deadline = Instant::now() + bound;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1279,17 +1305,22 @@ impl ActorCtx {
         };
         // See the pinned drive_turn invariant: `turn_id` here IS the surviving
         // interrupt handle, also after any caller-side timeout.
+        // The RPC ack wait and the settle wait share one deadline: stacked
+        // full bounds once let the actor outlive the daemon's outer stop
+        // bound, which stalled the shutdown ack past the client's deadline.
+        let deadline = Instant::now() + interrupt_total_bound();
         let sent = self.driver.send_interrupt(&turn_id).await;
         let ack = match sent {
-            Ok(id) => self.await_response(id, frames).await,
+            Ok(id) => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                self.await_response_bounded(id, frames, remaining).await
+            }
             Err(error) => Err(error.to_string()),
         };
         match ack {
             Ok(response) if response.get("error").is_none() => {
-                match self
-                    .await_turn_end(&turn_id, TURN_SETTLE_TIMEOUT, frames)
-                    .await
-                {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                match self.await_turn_end(&turn_id, remaining, frames).await {
                     TurnEnd::Ended => {
                         let receipt = self.completed.remove(&turn_id).unwrap_or(TurnReceipt {
                             turn_id: turn_id.clone(),
