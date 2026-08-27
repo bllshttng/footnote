@@ -208,6 +208,35 @@ pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
     }
 }
 
+/// True when a `crossSessionInbound: "refuse"` is explicitly set in the
+/// project settings under `cwd` (local then shared) or the user settings.
+/// Byte-parity with Python's `is_cross_session_inbound_refused`: any explicit
+/// refuse anywhere means fno never stamps `accept` into a spawn settings file
+/// (x-c995). An unreadable or absent file is not a refuse - only the literal
+/// value is.
+pub fn cross_session_inbound_refused(cwd: Option<&str>) -> bool {
+    fn refused_in(path: std::path::PathBuf) -> bool {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            return false;
+        };
+        v.get("crossSessionInbound").and_then(|x| x.as_str()) == Some("refuse")
+    }
+    if let Some(dir) = cwd {
+        for name in ["settings.local.json", "settings.json"] {
+            if refused_in(std::path::Path::new(dir).join(".claude").join(name)) {
+                return true;
+            }
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    refused_in(home.join(".claude").join("settings.json"))
+}
+
 /// Write a `--settings` JSON flooring `dropped` model vars to "" under the
 /// agents root's `route-settings/` dir and return its path. The Rust-side twin
 /// of Python's `materialize_model_scrub_settings`: a `claude --bg` serving
@@ -216,7 +245,12 @@ pub fn scrub_onto(cmd: &mut std::process::Command, overlay: &[(&str, &str)]) {
 /// does. Content-addressed (blake3 of the payload) and mode 0600, matching the
 /// Python writer's contract; a route overlay present in the env makes
 /// `incoherent_model_env` empty, so this file can only be the unrouted floor.
-pub fn write_scrub_settings(dropped: &[(String, String)]) -> std::io::Result<PathBuf> {
+/// Stamps `crossSessionInbound: "accept"` (x-c995) unless the user or project
+/// settings explicitly set `refuse`.
+pub fn write_scrub_settings(
+    dropped: &[(String, String)],
+    cwd: Option<&str>,
+) -> std::io::Result<PathBuf> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -224,7 +258,15 @@ pub fn write_scrub_settings(dropped: &[(String, String)]) -> std::io::Result<Pat
     for (key, _) in dropped {
         env.insert(key.clone(), serde_json::Value::String(String::new()));
     }
-    let payload = serde_json::to_string(&serde_json::json!({ "env": env }))?;
+    let mut doc = serde_json::Map::new();
+    if !cross_session_inbound_refused(cwd) {
+        doc.insert(
+            "crossSessionInbound".to_string(),
+            serde_json::Value::String("accept".to_string()),
+        );
+    }
+    doc.insert("env".to_string(), serde_json::Value::Object(env));
+    let payload = serde_json::to_string(&serde_json::Value::Object(doc))?;
     let digest = blake3::hash(payload.as_bytes()).to_hex();
     let dir = crate::paths::AgentsHome::from_env()
         .root()
@@ -287,6 +329,10 @@ mod tests {
             line!()
         ));
         std::env::set_var("FNO_AGENTS_HOME", dir.join("agents"));
+        // The accept stamp consults HOME's settings; pin a bare HOME so the
+        // assertion holds on any machine, not just one without a refuse.
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.join("no-settings-home"));
         let dropped = vec![
             ("ANTHROPIC_MODEL".to_string(), "glm-5.2[1m]".to_string()),
             (
@@ -294,15 +340,55 @@ mod tests {
                 "glm-4.5-air".to_string(),
             ),
         ];
-        let path = write_scrub_settings(&dropped).expect("settings floor writes");
+        let path = write_scrub_settings(&dropped, None).expect("settings floor writes");
         let raw = std::fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
         let env = v.get("env").unwrap().as_object().unwrap();
         assert_eq!(env.len(), 2);
         assert_eq!(env["ANTHROPIC_MODEL"], "");
         assert_eq!(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "");
+        assert_eq!(v["crossSessionInbound"], "accept");
         assert!(path.starts_with(dir.join("agents/route-settings")));
-        assert_eq!(write_scrub_settings(&dropped).unwrap(), path);
+        assert_eq!(write_scrub_settings(&dropped, None).unwrap(), path);
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("FNO_AGENTS_HOME");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scrub_settings_never_overrides_a_refuse() {
+        // x-c995: a user (or project) that set `crossSessionInbound: "refuse"`
+        // must not get an `accept` stamped over it. The refuse is read from
+        // HOME's settings, so point HOME at a temp home carrying the refuse.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = std::env::temp_dir().join(format!(
+            "fno-scrub-refuse-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::env::set_var("FNO_AGENTS_HOME", dir.join("agents"));
+        let prev_home = std::env::var_os("HOME");
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(
+            home.join(".claude").join("settings.json"),
+            r#"{"crossSessionInbound": "refuse"}"#,
+        )
+        .unwrap();
+        std::env::set_var("HOME", &home);
+        let path = write_scrub_settings(&[], None).expect("settings floor writes");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert!(v.get("crossSessionInbound").is_none());
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
         std::env::remove_var("FNO_AGENTS_HOME");
         let _ = std::fs::remove_dir_all(&dir);
     }

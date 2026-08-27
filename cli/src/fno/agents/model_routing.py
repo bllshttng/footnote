@@ -59,6 +59,7 @@ from __future__ import annotations
 import os
 from typing import (
     TYPE_CHECKING,
+    Any,
     Callable,
     Mapping,
     MutableMapping,
@@ -1016,7 +1017,7 @@ def resolve_explicit_route(
     return _route_for_target(pname, model.strip(), block, env, notice, ctx=f"peer {pname!r}")
 
 
-def materialize_route_settings(route_env: Mapping[str, str]) -> str:
+def materialize_route_settings(route_env: Mapping[str, str], *, cwd: Optional[str] = None) -> str:
     """Write ``route_env`` as a claude ``--settings`` JSON and return its path.
 
     A ``claude --bg`` session's serving process is forked by the claude daemon
@@ -1039,10 +1040,38 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
 
     env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
     env.update(route_env)
-    return _write_settings_env_file(env)
+    return _write_settings_env_file(env, cwd=cwd)
 
 
-def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
+def is_cross_session_inbound_refused(cwd: Optional[str] = None) -> bool:
+    """Check if crossSessionInbound is explicitly configured as 'refuse' in user/project settings."""
+    import json
+    from pathlib import Path
+
+    if cwd:
+        for name in ("settings.local.json", "settings.json"):
+            p = Path(cwd) / ".claude" / name
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    if isinstance(data, dict) and data.get("crossSessionInbound") == "refuse":
+                        return True
+                except Exception:
+                    pass
+
+    user_settings = Path.home() / ".claude" / "settings.json"
+    if user_settings.exists():
+        try:
+            data = json.loads(user_settings.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data.get("crossSessionInbound") == "refuse":
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
+def materialize_model_scrub_settings(dropped: Sequence[str], *, cwd: Optional[str] = None) -> str:
     """Write a ``--settings`` JSON flooring only ``dropped`` to "" and return
     its path.
 
@@ -1057,16 +1086,24 @@ def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
     a coherent ``ANTHROPIC_API_KEY``/``ANTHROPIC_AUTH_TOKEN`` must not be
     wiped by a spawn that only had a poisoned model tier.
     """
-    return _write_settings_env_file({name: "" for name in dropped})
+    return _write_settings_env_file({name: "" for name in dropped}, cwd=cwd)
 
 
-def _write_settings_env_file(env: Mapping[str, str]) -> str:
-    """Content-addressed ``0600`` write of ``{"env": env}`` under
+def _write_settings_env_file(
+    env: Mapping[str, str],
+    *,
+    cwd: Optional[str] = None,
+) -> str:
+    """Content-addressed ``0600`` write of the ``--settings`` JSON under
     ``paths.state_dir() / "route-settings"``; returns the path.
 
     Shared by :func:`materialize_route_settings` and
     :func:`materialize_model_scrub_settings` so the atomic-write mechanics
-    (content addressing, tmp-then-``os.replace``) exist in one place.
+    (content addressing, tmp-then-``os.replace``) exist in one place. It is
+    also the one chokepoint that stamps ``crossSessionInbound: "accept"``
+    (x-c995): every fno-spawned claude worker takes inbound socket mail as
+    itself, unless the user or project settings explicitly set ``refuse`` -
+    a user who turned inbound off is never overridden.
     """
     import hashlib
     import json
@@ -1074,7 +1111,11 @@ def _write_settings_env_file(env: Mapping[str, str]) -> str:
 
     from fno import paths
 
-    payload = json.dumps({"env": dict(env)}, sort_keys=True)
+    doc: dict[str, Any] = {"env": dict(env)}
+    if not is_cross_session_inbound_refused(cwd):
+        doc["crossSessionInbound"] = "accept"
+
+    payload = json.dumps(doc, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare
     # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and
@@ -1108,6 +1149,7 @@ def route_settings_path_for(
     route_env: Optional[Mapping[str, str]],
     account_env: Optional[Mapping[str, str]] = None,
     env: Optional[Mapping[str, str]] = None,
+    cwd: Optional[str] = None,
 ) -> Optional[str]:
     """The ``--settings`` path a spawn carrying these overlays launches with.
 
@@ -1151,7 +1193,7 @@ def route_settings_path_for(
     # this file already writes never covered the model vars (round 3).
     for key in unrouted_model_keys(env):
         merged.setdefault(key, "")
-    return materialize_route_settings(merged)
+    return materialize_route_settings(merged, cwd=cwd)
 
 
 def read_route_settings(path: str) -> dict[str, str]:

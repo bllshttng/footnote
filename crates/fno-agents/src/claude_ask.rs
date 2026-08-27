@@ -2013,8 +2013,12 @@ pub fn bg_create(
             }
         }
     }
-    if !floor.is_empty() {
-        match crate::model_env_scrub::write_scrub_settings(&floor) {
+    // x-c995: a clean spawn (empty floor) still floats a settings file, so the
+    // `crossSessionInbound: "accept"` stamp reaches the worker - inbound
+    // socket mail delivers as itself. A user who set `refuse` gets no stamp
+    // and no pointless file, mirroring the Python front door.
+    if !floor.is_empty() || !crate::model_env_scrub::cross_session_inbound_refused(cwd.to_str()) {
+        match crate::model_env_scrub::write_scrub_settings(&floor, cwd.to_str()) {
             Ok(path) => {
                 let p = path.display().to_string();
                 argv.splice(4..4, ["--settings".to_string(), p]);
