@@ -2345,7 +2345,9 @@ fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> S
             "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow, or drive it: fno agents attach {name}"
         )
     } else {
-        format!("{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow")
+        format!(
+            "{verb}: {name} hosts no live pane; follow it with: fno agents peek {name} --follow"
+        )
     }
 }
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
@@ -4445,7 +4447,13 @@ pub fn thread(args: &[OsString], env_session: Option<&str>) -> i32 {
     }
     // A paneless row owns no session routing: the operator's ambient session
     // (FNO_SESSION / the default) is the server whose thread pane this drives.
-    let session = resolve_session(session_flag.as_deref().or(env_session).filter(|s| !s.is_empty()), None);
+    let session = resolve_session(
+        session_flag
+            .as_deref()
+            .or(env_session)
+            .filter(|s| !s.is_empty()),
+        None,
+    );
     let sock = match proto::socket_path(&session) {
         Ok(p) => p,
         Err(e) => {
@@ -6414,7 +6422,10 @@ mod tests {
         // row) has no drive route to name: only the peek hint, still not the
         // bare line.
         let follow = paneless_route_hint("fno mux where", &paneless_row("t-codex", None));
-        assert!(follow.contains("fno agents peek t-codex --follow"), "{follow}");
+        assert!(
+            follow.contains("fno agents peek t-codex --follow"),
+            "{follow}"
+        );
         assert!(!follow.contains("fno agents attach"), "{follow}");
         assert!(follow.contains("hosts no live pane"), "{follow}");
     }

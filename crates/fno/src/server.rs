@@ -9885,9 +9885,10 @@ impl Core {
         // server's to view - saying so beats the reach's "no such agent",
         // which would lie about a row the registry knows (the inline attach
         // this verb replaced attached it regardless of hosting session).
-        let hosted = self.agents.iter().find(|a| {
-            (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some()
-        });
+        let hosted = self
+            .agents
+            .iter()
+            .find(|a| (a.name == name || a.attach_id.as_deref() == Some(name)) && a.mux.is_some());
         if let Some(a) = hosted {
             let (sess, pane) = a.mux.as_ref().expect("checked");
             let where_at = if sess == &self.session_name {

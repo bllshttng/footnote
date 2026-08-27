@@ -411,10 +411,11 @@ fn symptom_restore_rebuilds_no_thread_pane() {
         ],
     );
     let mut c = attach_client(&scratch);
-    c.wait_layout(10, "the row surfaces", |l| l
-        .agents
-        .iter()
-        .any(|a| a.attach_id.as_deref() == Some("deadbee2")));
+    c.wait_layout(10, "the row surfaces", |l| {
+        l.agents
+            .iter()
+            .any(|a| a.attach_id.as_deref() == Some("deadbee2"))
+    });
     let live_panes = |c: &FakeClient| {
         c.layout
             .as_ref()
@@ -468,8 +469,7 @@ fn symptom_restore_rebuilds_no_thread_pane() {
         ],
     );
     let mut r_client = attach_client(&scratch);
-    r_client
-        .wait_layout(10, "squads appear", |l| !l.squads.is_empty());
+    r_client.wait_layout(10, "squads appear", |l| !l.squads.is_empty());
     r_client.pump(Duration::from_secs(3));
     let text = std::fs::read_to_string(&marker).unwrap_or_default();
     assert_eq!(
