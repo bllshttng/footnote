@@ -1204,18 +1204,19 @@ def test_review_floor_is_caller_independent_across_env_shapes(
         "---\nharness: gemini\n---\n", encoding="utf-8"
     )
     assert requires_review() == (True, True)
-    # Release needs agreement: the manifest's verbless family must match a
-    # clean single-family ambient read, the shape of the authoring session
-    # merging its own PR.
+    # No release exists any more: the sigma-retirement recharter made every
+    # KNOWN harness self-review-capable (harness_can_self_review is now
+    # unconditionally True), so even a clean single-family gemini ambient
+    # agreeing with a gemini manifest still floors.
     monkeypatch.delenv("CODEX_THREAD_ID")
     monkeypatch.delenv("CODEX_SESSION_ID")
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID")
     monkeypatch.setenv("GEMINI_SESSION_ID", "g1")
-    assert requires_review() == (False, False)
-    # But a verbless manifest that CONTRADICTS a clean verbful ambient read
-    # floors: the manifest is an init-time snapshot that outlives its run,
-    # and a dead run's verbless stamp must not disengage the floor for a
-    # verbful PR merged from that checkout.
+    assert requires_review() == (True, True)
+    # A verbless manifest that CONTRADICTS a clean verbful ambient read
+    # floors too: the manifest is an init-time snapshot that outlives its
+    # run, and a dead run's verbless stamp must not disengage the floor for
+    # a verbful PR merged from that checkout.
     monkeypatch.delenv("GEMINI_SESSION_ID")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "c1")
     assert requires_review() == (True, True)
@@ -1258,10 +1259,14 @@ def test_floor_verbless_set_stays_locked_to_the_rust_twin():
     )
 
 
-def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
+def test_stock_code_floor_covers_a_harness_with_no_native_verb(
     monkeypatch, tmp_path
 ):
-    """Route 3 is deferred, so Gemini must not be given an unsatisfiable floor."""
+    """The owned fno review lane runs as ordinary tool calls on any harness,
+    so a harness with no NATIVE review verb (gemini) is no longer exempt from
+    the floor - the recharter that retired the sigma panel and the
+    per-harness native-verb table made every KNOWN harness self-review-
+    capable (harness_can_self_review is now unconditionally True)."""
     from fno.harness_identity import HARNESS_SESSION_MARKERS
 
     for marker, _harness in HARNESS_SESSION_MARKERS:
@@ -1270,8 +1275,8 @@ def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
     _point_lane_read_at(monkeypatch)
     monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
 
-    assert _merge._review_lane_configured(str(tmp_path), 42) is False
-    assert _merge._code_review_attestation_required(str(tmp_path), 42) is False
+    assert _merge._review_lane_configured(str(tmp_path), 42) is True
+    assert _merge._code_review_attestation_required(str(tmp_path), 42) is True
 
 
 def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
