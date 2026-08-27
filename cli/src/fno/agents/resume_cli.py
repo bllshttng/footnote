@@ -127,10 +127,13 @@ def _build_resume_argv(
         # Attended that is a wrong default a human must catch. Unattended it
         # is the wrong tree, which looks like success.
         #
-        # Placed BEFORE the subcommand, where every other codex lane puts a
-        # global (the -c grant here, `--cd <cwd>` in the spawn lane). Both
-        # positions parse on codex 0.149.1, so this is consistency rather than
-        # a fix, and consistency is what a reader checks against.
+        # Placed BEFORE the subcommand, beside the -c grant, which is the
+        # only global-before-subcommand precedent in this tree. The spawn
+        # lanes are NOT that precedent, whatever the shape suggests: both
+        # spell the same flag `-C`, the headless one puts it AFTER `exec`,
+        # and the pane one runs a bare `codex` with no subcommand at all.
+        # Both positions parse on codex 0.149.1, so this is a choice about
+        # where a reader expects to find a global, not a fix.
         #
         # NO permission bypass rides here, deliberately. A registry row records
         # no sandbox posture, so this lane cannot tell a bounded worker from a

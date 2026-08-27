@@ -1735,9 +1735,12 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
             // that prompt is a hang. Attended it is a wrong default a human
             // must catch.
             //
-            // Spliced BEFORE the subcommand, beside the grant, where every
-            // other codex lane puts a global. Both positions parse on codex
-            // 0.149.1, so this is consistency rather than a fix.
+            // Spliced BEFORE the subcommand, beside the grant, which is the
+            // only global-before-subcommand precedent in this tree. The spawn
+            // lanes are not it: they spell the flag `-C`, after `exec` in the
+            // headless lane and on a bare `codex` in the pane lane. Both
+            // positions parse on codex 0.149.1, so this is a choice about
+            // where a reader expects a global, not a fix.
             //
             // NO permission bypass rides here, deliberately. A registry row
             // records no sandbox posture, so this lane cannot tell a bounded
