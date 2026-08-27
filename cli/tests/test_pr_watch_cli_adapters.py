@@ -384,6 +384,8 @@ def _run_tick_command(monkeypatch, result):
 
 
 def test_watchdog_recovery_roots_include_all_distinct_checkouts(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
     from fno.pr_watch import cli as prcli
 
     first = tmp_path / "first"
@@ -395,7 +397,14 @@ def test_watchdog_recovery_roots_include_all_distinct_checkouts(monkeypatch, tmp
     monkeypatch.setattr(
         "fno.paths.resolve_repo_root", lambda: first, raising=True
     )
-    monkeypatch.setattr(prcli, "_catchup_roots", lambda: [first, second])
+    monkeypatch.setattr(
+        "fno.tracker.sidecar.load_all",
+        lambda: {
+            "a": SimpleNamespace(cwd=str(first)),
+            "b": SimpleNamespace(cwd=str(second)),
+        },
+        raising=True,
+    )
 
     assert prcli._watchdog_recovery_roots() == [first, second]
 

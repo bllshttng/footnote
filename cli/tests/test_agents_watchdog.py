@@ -1976,14 +1976,18 @@ def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
     monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
 
+    # The terminal-row count rides the DIAGNOSTIC table (--only); the default
+    # surface is the unfinished-work report.
     agents_cli.cmd_watchdog(
-        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+        json_out=False, apply=False, apply_all=False, only=LEAVE, mail_to=""
     )
 
     assert "terminal harness rows: 3" in capsys.readouterr().out
 
 
-def test_cli_escalates_stale_rows_before_only_filter(monkeypatch):
+def test_cli_default_report_escalates_findings_not_session_rows(monkeypatch):
+    """The default surface escalates the unfinished-work findings and never
+    builds a durable question out of session verdicts."""
     from fno.agents import cli as agents_cli
     from fno.agents import stale_escalate
 
@@ -2001,42 +2005,65 @@ def test_cli_escalates_stale_rows_before_only_filter(monkeypatch):
         "counts": {STALE: 1, WAKE: 1},
         "warnings": [],
     }
-    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, rows))
+    # The default path never reads the session sweep; pin that by refusing
+    # if it does.
+    monkeypatch.setattr(
+        watchdog,
+        "run_sweep",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("report must not sweep")),
+    )
+    finding = uw.Finding(
+        kind=uw.KIND_STARTED,
+        subject="x-7d02",
+        basis="in_progress, claim free, idle 116h",
+        clear_command="/fno:target x-7d02",
+        node_id="x-7d02",
+    )
+
+    class _Snap:
+        generated_at = "x"
+        findings = (finding,)
+        complete = True
+        warnings = ()
+        dimensions = {
+            dim: uw.DimensionState(uw.MEASURED, 1 if dim == uw.KIND_STARTED else 0, None)
+            for dim in uw.DIMENSIONS
+        }
+
+    monkeypatch.setattr(uw, "build_report", lambda roots, **kw: _Snap())
     monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
-    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
-    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
     monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
     captured = []
     monkeypatch.setattr(
         stale_escalate,
-        "escalate_stale",
-        lambda rows, **kwargs: captured.extend(rows) or ("recorded", "q-stale"),
+        "escalate_unfinished",
+        lambda findings, **kwargs: captured.extend(findings) or ("recorded", "q-uw"),
     )
 
     agents_cli.cmd_watchdog(
-        json_out=False, apply=False, apply_all=False, only=WAKE, mail_to=""
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
     )
 
-    assert [(row.row_id, row.node, row.basis) for row in captured] == [
-        ("stale-row", None, "blocked 14h")
-    ]
+    assert [f.subject for f in captured] == ["x-7d02"]
 
 
 def test_cli_refused_sweep_never_escalates(monkeypatch):
     from fno.agents import cli as agents_cli
-    from fno.agents import stale_escalate
 
     refused = _refused_payload()
     monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (refused, []))
     monkeypatch.setattr(
-        stale_escalate,
-        "escalate_stale",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not escalate")),
+        uw,
+        "build_report",
+        lambda roots, **kw: (_ for _ in ()).throw(AssertionError("must not report")),
     )
 
     with pytest.raises(typer.Exit) as exc:
         agents_cli.cmd_watchdog(
-            json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+            json_out=False, apply=False, apply_all=False, only=LEAVE, mail_to=""
         )
 
     assert exc.value.exit_code == 3
@@ -2376,7 +2403,7 @@ def test_cli_refused_sweep_exits_loud_without_writing(monkeypatch, tmp_path):
 
     try:
         agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
-                                only=None, mail_to=None)
+                                only=LEAVE, mail_to=None)
     except typer.Exit as e:
         assert e.exit_code == 3
     else:
@@ -2740,7 +2767,7 @@ def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
     err = _io.StringIO()
     with contextlib.redirect_stderr(err), pytest.raises(typer.Exit):
         agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
-                                only=None, mail_to=None)
+                                only=LEAVE, mail_to=None)
     assert "timed out after 30.0s" in err.getvalue()
 
 
@@ -3422,3 +3449,849 @@ def test_origin_is_on_the_shared_list_row_contract():
          / "schemas" / "agents-list-row.json").read_text()
     )
     assert "origin" in contract["required"]
+
+
+# ---------------------------------------------------------------------------
+# The unfinished-work report: the operator surface, distinct from the verdict
+# classifier above. The classifier stays the internal recovery engine; the
+# report answers the outcome question (was work started and never finished?)
+# over four dimensions, each row naming the one verb that clears it.
+# ---------------------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from fno.agents import unfinished_work as uw  # noqa: E402
+
+
+def _probe(
+    handle: str = "sess-0001",
+    *,
+    pid_alive=None,
+    transcript_age_s=None,
+    claim_state=None,
+    stored_exited=False,
+):
+    return uw.OwnerProbe(
+        handle=handle,
+        pid_alive=pid_alive,
+        transcript_age_s=transcript_age_s,
+        claim_state=claim_state,
+        stored_exited=stored_exited,
+    )
+
+
+def _node_obs(
+    node_id: str,
+    *,
+    status: str = "in_progress",
+    claim_state: str = "free",
+    touched_epoch=None,
+    worktree=None,
+    ahead=None,
+    probes=(),
+    cwd=None,
+):
+    return uw.NodeObs(
+        node_id=node_id,
+        status=status,
+        touched_at_epoch=touched_epoch,
+        cwd=cwd,
+        worktree_path=worktree,
+        ahead_count=ahead,
+        claim={"state": claim_state} if claim_state is not None else None,
+        owner_probes=tuple(probes),
+    )
+
+
+def _wt_obs(
+    path: str,
+    *,
+    dirty=0,
+    ahead=None,
+    node_id=None,
+    probes=(),
+    repo="/repo",
+):
+    return uw.WorktreeObs(
+        path=path,
+        repo_root=repo,
+        branch=None,
+        dirty_count=dirty,
+        ahead_count=ahead,
+        node_id=node_id,
+        owner_probes=tuple(probes),
+    )
+
+
+def _pr_obs(
+    number: int,
+    *,
+    state="OPEN",
+    opened_epoch=None,
+    node="x-prnode",
+    probes=(),
+    url=None,
+):
+    return uw.PrObs(
+        pr_number=number,
+        pr_url=url or f"https://github.com/o/r/pull/{number}",
+        node_id=node,
+        state=state,
+        opened_at_epoch=opened_epoch,
+        owner_probes=tuple(probes),
+    )
+
+
+def _uw_obs(
+    nodes=(),
+    worktrees=(),
+    prs=(),
+    *,
+    graph_ok=True,
+    claims_ok=True,
+    registry_ok=True,
+    github_ok=True,
+    unscanned_roots=(),
+    warnings=(),
+    now_s=NOW_1840,
+):
+    return uw.Observations(
+        now_epoch=now_s,
+        graph_ok=graph_ok,
+        claims_ok=claims_ok,
+        registry_ok=registry_ok,
+        github_ok=github_ok,
+        nodes=tuple(nodes),
+        worktrees=tuple(worktrees),
+        prs=tuple(prs),
+        unscanned_roots=tuple(unscanned_roots),
+        warnings=tuple(warnings),
+    )
+
+
+# --- AC1: the report answers the outcome question ------------------------
+
+
+def test_ac1_clean_scan_renders_four_measured_zero_dimensions():
+    snap = uw.classify(_uw_obs())
+    payload = uw.snapshot_payload(snap)
+    text = uw.snapshot_digest(snap)
+
+    assert snap.complete is True
+    assert payload["findings"] == []
+    assert payload["counts"] == {dim: 0 for dim in uw.DIMENSIONS}
+    assert text.splitlines()[0] == "unfinished work: 0 finding(s)"
+    for dim in uw.DIMENSIONS:
+        assert f"{dim}=0 measured" in text
+
+
+def test_ac1_session_bookkeeping_never_enters_the_operator_surfaces():
+    """100 registry-absent rollouts and six past-ceiling stale rows produced
+    zero actionable outcomes in the measured sweep; the report must say that
+    with positive measured markers, never by repeating the session rows."""
+    snap = uw.classify(_uw_obs())
+    blob = json.dumps(uw.snapshot_payload(snap)) + uw.snapshot_digest(snap) \
+        + uw.snapshot_signature(snap)
+    assert "recoverable" not in blob
+    assert "stale" not in blob
+    assert "orphaned" not in blob
+
+
+# --- AC2: liveness is read from pid/transcript, never a stored word -------
+
+
+def test_ac2_live_pid_defeats_any_stored_terminal_word():
+    probe = _probe(pid_alive=True, transcript_age_s=99999.0)
+    assert uw.owner_verdict(probe) == "live"
+
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/fix-scoreboard-clock", dirty=82, probes=[probe])])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+def test_ac2_fresh_transcript_defeats_stored_state_too():
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0)) == "live"
+    assert uw.owner_verdict(_probe(transcript_age_s=30.0, claim_state="stale")) == "live"
+
+
+def test_ac2_unreadable_liveness_is_unknown_not_ownerless():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x", dirty=5, probes=[_probe()])])
+    )
+    assert snap.findings == ()
+    dim = snap.dimensions[uw.KIND_DIRTY]
+    assert dim.state == uw.UNKNOWN_DIM
+    assert snap.complete is False
+
+
+def test_ac2_positive_control_genuinely_orphaned_still_ownerless():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x", dirty=5, probes=[_probe(pid_alive=False)])])
+    )
+    assert [f.subject for f in snap.findings] == ["/w/x"]
+
+
+def test_ac2_no_candidates_is_gone_only_when_the_store_read():
+    """A worktree nobody registered on reads ownerless only when the registry
+    read succeeded; a failed read must not manufacture an ownerless verdict."""
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=5)]))
+    assert [f.kind for f in snap.findings] == [uw.KIND_DIRTY]
+
+    snap2 = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=5)], registry_ok=False))
+    assert snap2.findings == ()
+    assert snap2.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+
+
+# --- AC3: started nodes with free claims ---------------------------------
+
+
+def test_ac3_started_free_claim_nodes_carry_target_verbs_and_idle_order():
+    older = _node_obs(
+        "x-7d02", touched_epoch=NOW_1840 - 116 * 3600, worktree="/w/x-7d02", ahead=8
+    )
+    newer = _node_obs(
+        "x-3b05", touched_epoch=NOW_1840 - 10 * 3600, worktree="/w/x-3b05", ahead=6
+    )
+    snap = uw.classify(_uw_obs(nodes=[newer, older]))
+
+    assert [f.subject for f in snap.findings] == ["x-7d02", "x-3b05"]
+    assert all(f.kind == uw.KIND_STARTED for f in snap.findings)
+    assert all(f.clear_command == f"/fno:target {f.subject}" for f in snap.findings)
+    assert snap.findings[0].age_s == pytest.approx(116 * 3600)
+    assert snap.findings[0].ahead_count == 8
+    assert "origin/main" in snap.findings[0].basis
+    assert snap.findings[1].basis.count("origin/main") == 1
+
+
+def test_ac3_non_free_claim_or_live_owner_excludes_the_node():
+    held = _node_obs("x-held", claim_state="live")
+    suspect = _node_obs("x-susp", claim_state="suspect")
+    stale_lease = _node_obs("x-lease", claim_state="stale")
+    corrupted = _node_obs("x-corr", claim_state="corrupted")
+    owned = _node_obs("x-owned", probes=[_probe(pid_alive=True)])
+
+    snap = uw.classify(
+        _uw_obs(nodes=[held, suspect, stale_lease, corrupted, owned])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_STARTED].state == uw.MEASURED
+
+
+# --- AC4: done nodes whose branch never reached main ----------------------
+
+
+def test_ac4_done_ahead_of_main_names_count_and_squash_reading():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[
+                _node_obs("x-aaae", status="done", worktree="/w/x-aaae"),
+            ],
+            worktrees=[_wt_obs("/w/x-aaae", dirty=0, ahead=66, node_id="x-aaae")],
+        )
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DONE_AHEAD
+    assert finding.subject == "x-aaae"
+    assert finding.ahead_count == 66
+    assert "66" in finding.basis
+    assert "squash" in finding.basis
+    assert "stranded" in finding.clear_command
+    assert "/w/x-aaae" in finding.basis
+
+
+def test_ac4_unreadable_ahead_count_marks_dimension_unknown():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[_node_obs("x-aaae", status="done", worktree="/w/x-aaae")],
+            worktrees=[_wt_obs("/w/x-aaae", dirty=0, ahead=None, node_id="x-aaae")],
+        )
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DONE_AHEAD].state == uw.UNKNOWN_DIM
+
+
+def test_ac4_metric_reads_fresh_origin_main_not_the_tracking_ref(tmp_path):
+    """The measured defect: a stale remote-tracking ref inflated the ahead
+    count to 936 against a true 8. The fixture builds a real bare origin,
+    rebases a feature branch onto an origin advance, then rewinds the local
+    remote-tracking ref to the pre-advance commit: the tracking-ref count
+    reads 11, the true origin/main..HEAD count is 8, and only a fresh fetch
+    separates them."""
+    import subprocess as _sp
+
+    def _git(cwd, *argv, check=True):
+        return _sp.run(
+            ["git", "-C", str(cwd), *argv],
+            capture_output=True, text=True, check=check,
+        )
+
+    origin = tmp_path / "origin.git"
+    _sp.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+    clone = tmp_path / "clone"
+    _sp.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    _git(clone, "config", "user.email", "t@t.t")
+    _git(clone, "config", "user.name", "t")
+    _git(clone, "checkout", "-q", "-b", "main")
+    (clone / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(clone, "add", "a.txt")
+    _git(clone, "commit", "-q", "-m", "base")
+    _git(clone, "push", "-q", "-u", "origin", "main")
+    base_sha = _git(clone, "rev-parse", "HEAD").stdout.strip()
+
+    _git(clone, "checkout", "-q", "-b", "feature")
+    for i in range(8):
+        (clone / "a.txt").write_text(f"base\n{i}\n", encoding="utf-8")
+        _git(clone, "add", "a.txt")
+        _git(clone, "commit", "-q", "-m", f"f{i}")
+    _git(clone, "branch", "--set-upstream-to=origin/main", "feature")
+
+    # Advance origin/main from a second clone, rebase onto it, then rewind
+    # the local remote-tracking ref: exactly the stale-ref condition.
+    other = tmp_path / "other"
+    _sp.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git(other, "config", "user.email", "t@t.t")
+    _git(other, "config", "user.name", "t")
+    for i in range(3):
+        (other / "b.txt").write_text(f"{i}\n", encoding="utf-8")
+        _git(other, "add", "b.txt")
+        _git(other, "commit", "-q", "-m", f"m{i}")
+    _git(other, "push", "-q", "origin", "main")
+
+    _git(clone, "fetch", "-q", "origin")
+    _git(clone, "rebase", "-q", "origin/main")
+    _git(clone, "update-ref", "refs/remotes/origin/main", base_sha)
+
+    # The control: against the stale tracking ref the two-dot count lies
+    # (3 main commits + 8 feature commits). This is the 936-equivalent
+    # inflation the metric exists to refuse.
+    inflated = _git(
+        clone, "rev-list", "--count", "feature@{upstream}..feature"
+    ).stdout.strip()
+    assert int(inflated) == 11
+
+    assert uw.fetch_origin_main(clone) is True
+    assert uw.ahead_of_main(clone) == 8
+
+
+def test_ac4_fetch_failure_and_garbage_count_are_unknown_never_a_count():
+    class _FailRun:
+        def __call__(self, argv, **kw):
+            class _P:
+                returncode = 1
+                stdout = ""
+                stderr = "no remote"
+
+            return _P()
+
+    class _GarbageRun:
+        def __call__(self, argv, **kw):
+            class _P:
+                returncode = 0
+                stdout = "not a count\n"
+                stderr = ""
+
+            return _P()
+
+    assert uw.fetch_origin_main(Path("/nope"), runner=_FailRun()) is False
+    assert uw.ahead_of_main(Path("/nope"), runner=_FailRun()) is None
+    assert uw.ahead_of_main(Path("/nope"), runner=_GarbageRun()) is None
+
+
+def test_vanished_cwd_degrades_to_unknown_never_a_crash(tmp_path):
+    """A git call whose cwd vanished (a worktree row deleted mid-scan) is an
+    unreadable read: the metric answers unknown, the report does not die."""
+    gone = tmp_path / "vanished"
+    assert uw.fetch_origin_main(gone) is False
+    assert uw.ahead_of_main(gone) is None
+    assert uw.dirty_path_count(gone) is None
+
+
+# --- AC5: dirty worktrees with no owner -----------------------------------
+
+
+def test_ac5_dirty_ownerless_worktree_is_keyed_by_absolute_path():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/fix-scoreboard-clock", dirty=82)])
+    )
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_DIRTY
+    assert finding.subject == "/w/fix-scoreboard-clock"
+    assert finding.dirty_count == 82
+    assert "/w/fix-scoreboard-clock" in finding.clear_command
+
+
+def test_ac5_dirty_worktree_with_a_node_names_the_target_verb():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/x-46f9", dirty=3, node_id="x-46f9")])
+    )
+    [finding] = snap.findings
+    assert finding.clear_command == "/fno:target x-46f9"
+
+
+def test_ac5_failed_git_status_marks_dimension_unknown():
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=None)]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+
+
+def test_ac5_clean_worktrees_do_not_emit():
+    snap = uw.classify(
+        _uw_obs(worktrees=[_wt_obs("/w/clean", dirty=0, ahead=0, node_id="x-ok")])
+    )
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.MEASURED
+
+
+# --- AC6: ownerless open PRs older than 24h -------------------------------
+
+
+def test_ac6_pr_age_boundary_and_verb():
+    old = _pr_obs(101, opened_epoch=NOW_1840 - 24 * 3600 - 1)
+    exact = _pr_obs(102, opened_epoch=NOW_1840 - 24 * 3600)
+    young = _pr_obs(103, opened_epoch=NOW_1840 - 3600)
+    snap = uw.classify(_uw_obs(prs=[old, exact, young]))
+
+    [finding] = snap.findings
+    assert finding.kind == uw.KIND_PR
+    assert finding.pr_number == 101
+    assert finding.clear_command == "/fno:pr check 101"
+    assert "pull/101" in finding.basis
+    assert finding.age_s == pytest.approx(24 * 3600 + 1)
+
+
+def test_ac6_merged_live_owned_and_unreadable_prs_do_not_emit():
+    merged = _pr_obs(104, state="MERGED", opened_epoch=NOW_1840 - 48 * 3600)
+    live_owned = _pr_obs(
+        105, opened_epoch=NOW_1840 - 48 * 3600, probes=[_probe(pid_alive=True)]
+    )
+    snap = uw.classify(_uw_obs(prs=[merged, live_owned]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_PR].state == uw.MEASURED
+
+    unreadable = _uw_obs(prs=[_pr_obs(106, state=None, opened_epoch=NOW_1840 - 48 * 3600)])
+    snap2 = uw.classify(unreadable)
+    assert snap2.findings == ()
+    assert snap2.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+    snap3 = uw.classify(
+        _uw_obs(
+            prs=[_pr_obs(107, opened_epoch=NOW_1840 - 48 * 3600, probes=[_probe()])],
+        )
+    )
+    assert snap3.findings == ()
+    assert snap3.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+    snap4 = uw.classify(_uw_obs(prs=[_pr_obs(108, opened_epoch=NOW_1840 - 48 * 3600)], github_ok=False))
+    assert snap4.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+# --- AC7: every finding names its clearing verb ---------------------------
+
+
+def test_ac7_every_emitted_finding_carries_subject_basis_and_verb():
+    snap = uw.classify(
+        _uw_obs(
+            nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)],
+            worktrees=[_wt_obs("/w/d", dirty=4)],
+            prs=[_pr_obs(9, opened_epoch=NOW_1840 - 30 * 3600)],
+        )
+    )
+    assert len(snap.findings) == 3
+    for finding in snap.findings:
+        assert finding.subject
+        assert finding.basis
+        assert finding.clear_command
+        assert ":" in uw.finding_identity(finding)
+
+
+def test_ac7_a_finding_without_a_verb_is_not_emitted(monkeypatch):
+    monkeypatch.setattr(uw, "_dirty_clear_command", lambda w: "")
+    snap = uw.classify(_uw_obs(worktrees=[_wt_obs("/w/x", dirty=7)]))
+    assert snap.findings == ()
+    assert any("clearing verb" in w for w in snap.warnings)
+
+
+# --- AC8: a clean dimension is positive evidence --------------------------
+
+
+def test_ac8_any_failed_read_blocks_complete():
+    for kwargs in (
+        {"graph_ok": False},
+        {"claims_ok": False},
+        {"registry_ok": False},
+        {"github_ok": False},
+        {"unscanned_roots": ("/repo/other",)},
+    ):
+        snap = uw.classify(_uw_obs(**kwargs))
+        assert snap.complete is False, kwargs
+        assert any(
+            d.state == uw.UNKNOWN_DIM for d in snap.dimensions.values()
+        ), kwargs
+
+
+def test_ac8_unknown_dimensions_carry_their_warning():
+    snap = uw.classify(_uw_obs(graph_ok=False))
+    dim = snap.dimensions[uw.KIND_STARTED]
+    assert dim.state == uw.UNKNOWN_DIM
+    assert dim.warning
+
+
+def test_ac8_ordering_is_deterministic_severity_then_age_then_subject():
+    a = _node_obs("x-b", touched_epoch=NOW_1840 - 5 * 3600)
+    b = _node_obs("x-a", touched_epoch=NOW_1840 - 5 * 3600)
+    c = _node_obs("x-c", touched_epoch=NOW_1840 - 50 * 3600)
+    snap = uw.classify(_uw_obs(nodes=[a, b, c], worktrees=[_wt_obs("/w/z", dirty=1)]))
+    assert [f.subject for f in snap.findings] == ["x-c", "x-a", "x-b", "/w/z"]
+
+
+# --- the digest and the signature -----------------------------------------
+
+
+def test_digest_is_house_style_blocks_and_names_verbs():
+    snap = uw.classify(
+        _uw_obs(nodes=[_node_obs("x-7d02", touched_epoch=NOW_1840 - 116 * 3600)])
+    )
+    text = uw.snapshot_digest(snap)
+    lines = text.splitlines()
+    assert lines[0] == "unfinished work: 1 finding(s)"
+    assert any(ln.startswith("- ") for ln in lines)
+    assert "/fno:target x-7d02" in text
+    # One physical line per paragraph: exactly one blank separator before
+    # the dimension block, every content line whole.
+    assert lines.count("") == 1
+    assert all(ln.strip() for ln in lines if ln != "")
+
+
+def test_signature_keys_on_outcome_identity_not_rows():
+    s1 = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 99 * 3600)]))
+    s2 = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 1 * 3600)]))
+    assert uw.snapshot_signature(s1) == uw.snapshot_signature(s2)
+
+    s3 = uw.classify(_uw_obs(nodes=[_node_obs("x-2", touched_epoch=NOW_1840 - 99 * 3600)]))
+    assert uw.snapshot_signature(s1) != uw.snapshot_signature(s3)
+
+
+# --- AC9: one producer, two callers; budget refusal ------------------------
+
+_REPO_ROOT_UW = Path(watchdog.__file__).resolve().parents[4]
+
+
+def _source(rel: str) -> str:
+    return (_REPO_ROOT_UW / rel).read_text(encoding="utf-8")
+
+
+def test_ac9_census_both_callers_route_through_one_producer():
+    """Manual verb and scheduled tick consume the same build_report +
+    publish_report pair; neither rebuilds the four predicates itself."""
+    manual = _source("cli/src/fno/agents/cli.py")
+    tick = _source("cli/src/fno/pr_watch/cli.py")
+    assert "uw.build_report" in manual and "uw.publish_report" in manual
+    assert "_uw.build_report" in tick and "_uw.publish_report" in tick
+
+
+def test_ac9_census_no_session_predicates_on_the_report_path():
+    """The retired session-bookkeeping vocabulary cannot reach the report:
+    the escalation module carries no stale marker and no reap instruction,
+    and the report modules own none of the forbidden metric spellings."""
+    escalate = _source("cli/src/fno/agents/stale_escalate.py")
+    assert "watchdog-stale" not in escalate
+    assert "--only stale" not in escalate
+    assert "reap it or resume it" not in escalate
+
+
+def _function_body(src: str, name: str) -> str:
+    start = src.index(f"def {name}(")
+    nxt = src.find("\ndef ", start + 1)
+    return src[start : nxt if nxt != -1 else len(src)]
+
+
+def test_census_the_report_metric_owns_only_the_fresh_ref_spelling():
+    """Positive marker first: origin/main..HEAD appears in the metric's
+    source. Then the absence: none of the three forbidden spellings (the
+    stale-tracking-ref form, its short form, and the remotes-not form) may
+    appear in the metric module or the report-path functions of the
+    watchdog. The reap lane's own worktree check keeps its internal
+    spelling; it is not on this path."""
+    report_src = _source("cli/src/fno/agents/unfinished_work.py")
+    assert "origin/main..HEAD" in report_src
+    wd_src = _source("cli/src/fno/agents/watchdog.py")
+    report_region = (
+        _function_body(wd_src, "write_sweep_file")
+        + _function_body(wd_src, "unfinished_mail_gate")
+    )
+    for forbidden in ("@{upstream}", "@{u}", "HEAD --not --remotes"):
+        assert forbidden not in report_src
+        assert forbidden not in report_region
+
+
+def test_ac9_budget_spent_before_scanning_reads_unknown_never_clean(tmp_path):
+    """The tick's fatal deadline: roots and PR states that did not fit stay
+    unread, their dimensions say unknown, and the snapshot is incomplete, so
+    nothing partial is stamped or mailed as complete."""
+    import time as _time
+
+    snap = uw.build_report(
+        [tmp_path],
+        now_s=NOW_1840,
+        graph_entries=[],
+        registry_rows=({}, True),
+        claim_status_fn=lambda node: {"state": "free"},
+        truth_resolver=lambda handle: None,
+        pr_candidates=[SimpleNamespace(node_id="x-1", pr_number=9, pr_url=None)],
+        deadline_monotonic=_time.monotonic() - 1.0,
+    )
+    assert snap.complete is False
+    assert snap.dimensions[uw.KIND_DIRTY].state == uw.UNKNOWN_DIM
+    assert snap.dimensions[uw.KIND_DONE_AHEAD].state == uw.UNKNOWN_DIM
+    assert snap.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+def test_ac9_manual_and_tick_stamps_agree_for_one_snapshot(tmp_path, monkeypatch):
+    """Publishing the same snapshot from either cadence writes the same
+    unfinished counts, completeness, and signature: only the cadence bookkeeping
+    (source, tick epoch) differs."""
+    import fno.paths as paths_mod
+
+    sweep_file = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "s")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(
+        _se, "escalate_unfinished", lambda findings, **kw: ("none", "")
+    )
+
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+    manual = json.loads(sweep_file.read_text())
+    uw.publish_report(snap, source="tick", now_s=NOW_1840 + 60, mail_to="")
+    tick = json.loads(sweep_file.read_text())
+
+    assert manual["unfinished_counts"] == tick["unfinished_counts"]
+    assert manual["unfinished_work_complete"] == tick["unfinished_work_complete"] is True
+    assert manual["unfinished_signature"] == tick["unfinished_signature"]
+    assert manual["source"] == "manual" and tick["source"] == "tick"
+
+
+def test_report_event_gate_advances_without_a_mail_recipient(tmp_path, monkeypatch):
+    """The event gate is its own stamp: with watchdog_mail_to empty the mail
+    stamp never moves, and a gate chained to it would re-emit every finding
+    event on every cadence. The second publish of an unchanged finding set
+    emits no finding events."""
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    events = []
+    monkeypatch.setattr(watchdog, "emit_event", lambda kind, data: events.append(kind))
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(_se, "escalate_unfinished", lambda f, **kw: ("none", ""))
+
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+    first = [e for e in events if e == "watchdog_unfinished_work_finding"]
+    assert len(first) == 1
+
+    events.clear()
+    uw.publish_report(snap, source="manual", now_s=NOW_1840 + 600, mail_to="")
+    assert not [e for e in events if e == "watchdog_unfinished_work_finding"]
+
+
+def test_report_write_preserves_the_verdict_lanes_stamps(tmp_path, monkeypatch):
+    """The report and the verdict lane share one sweep file. A report write
+    must carry the verdict lane's stamps through untouched, or the next
+    --apply run re-mails an unchanged verdict digest."""
+    import fno.paths as paths_mod
+
+    sweep_file = tmp_path / "watchdog-sweep.json"
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    monkeypatch.setattr(_se, "escalate_unfinished", lambda f, **kw: ("none", ""))
+
+    watchdog.write_sweep_file(
+        "manual", {"wake": 1}, NOW_1840, "row-a:wake", events_signature="row-a:wake",
+        terminal_harness_rows=3,
+    )
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)]))
+    uw.publish_report(snap, source="manual", now_s=NOW_1840, mail_to="")
+
+    after = json.loads(sweep_file.read_text())
+    assert after["counts"] == {"wake": 1}
+    assert after["signature"] == "row-a:wake"
+    assert after["events_signature"] == "row-a:wake"
+    assert after["terminal_harness_rows"] == 3
+    assert after["unfinished_work_complete"] is True
+
+
+def test_graph_failure_marks_the_pr_dimension_unknown():
+    """PR candidates are enumerated from the graph, so an unreadable graph
+    is zero candidates for a reason: the unmeasurable case, never a clean
+    zero."""
+    snap = uw.classify(_uw_obs(graph_ok=False))
+    assert snap.dimensions[uw.KIND_PR].state == uw.UNKNOWN_DIM
+
+
+def test_ask_line_names_the_severity_order_not_the_alphabet():
+    """The question's ask says 'clear the top finding first': top means the
+    digest's severity order, and a dirty-worktree subject that sorts before
+    a started node alphabetically must not win the slot."""
+    from fno.agents import stale_escalate as se
+
+    started = uw.Finding(
+        kind=uw.KIND_STARTED,
+        subject="x-1",
+        basis="in_progress, claim free",
+        clear_command="/fno:target x-1",
+    )
+    dirty = uw.Finding(
+        kind=uw.KIND_DIRTY,
+        subject="/w/aaa",
+        basis="3 dirty path(s)",
+        clear_command="git -C /w/aaa status",
+    )
+    key = se.dedupe_key([f"{f.kind}:{f.subject}" for f in (started, dirty)])
+    text = se.question_text([dirty, started], key)
+    # The listed order is severity order, and the ask line names the first
+    # of that order.
+    assert text.index("started_free_claim x-1") < text.index("dirty_ownerless_worktree /w/aaa")
+    assert se._ask_line([dirty, started]) == "/fno:target x-1"
+
+
+# --- two defects the first live sweep caught -------------------------------
+
+
+def test_pid_probe_answers_with_a_live_process():
+    """Positive control: the pid probe must actually answer. The first live
+    run read every claim-holder pid as unreadable (a wrong arity on the
+    spawn-gate probe raised inside its own try/except), which made every
+    held worktree unknown-liveness."""
+    import os
+
+    assert uw._default_pid_alive(os.getpid()) is True
+    assert uw._default_pid_alive(None) is None
+
+
+def test_clearing_verbs_name_the_main_worktree_not_the_reporting_one(tmp_path):
+    """A report run from inside a linked worktree must still scope its
+    clearing verbs to the repository's MAIN worktree: `git worktree list`
+    from any linked tree lists the main tree first, and that is the root a
+    human or agent should stand in."""
+    import subprocess as _sp
+
+    main = tmp_path / "main"
+    main.mkdir()
+    for argv in (
+        ["init", "-q"],
+        ["config", "user.email", "t@t.t"],
+        ["config", "user.name", "t"],
+    ):
+        _sp.run(["git", "-C", str(main), *argv], check=True)
+    (main / "a.txt").write_text("base\n", encoding="utf-8")
+    _sp.run(["git", "-C", str(main), "add", "a.txt"], check=True)
+    _sp.run(["git", "-C", str(main), "commit", "-q", "-m", "base"], check=True)
+    linked = tmp_path / "linked"
+    _sp.run(
+        ["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "feat"],
+        check=True,
+    )
+
+    obs = uw.collect_observations(
+        [linked],
+        now_s=NOW_1840,
+        graph_entries=[],
+        registry_rows=({}, True),
+        claim_status_fn=lambda node: {"state": "free"},
+        truth_resolver=lambda handle: None,
+        pr_candidates=[],
+    )
+    assert obs.worktrees, "linked worktree must be enumerated"
+    for w in obs.worktrees:
+        if Path(w.path).name == "linked":
+            assert w.repo_root == str(main)
+
+
+# --- review-round fixes: unknown reads and one shared fleet scope ----------
+
+
+def test_claim_view_without_a_state_word_reads_unknown_not_excluded():
+    snap = uw.classify(_uw_obs(nodes=[_node_obs("x-nostate", claim_state=None)]))
+    assert snap.findings == ()
+    assert snap.dimensions[uw.KIND_STARTED].state == uw.UNKNOWN_DIM
+
+
+def test_publish_withholds_the_durable_question_on_an_incomplete_scan(
+    tmp_path, monkeypatch
+):
+    import fno.paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
+    from fno.agents import stale_escalate as _se
+
+    called = []
+    monkeypatch.setattr(
+        _se, "escalate_unfinished", lambda f, **kw: called.append(1) or ("recorded", "q")
+    )
+
+    snap = uw.classify(
+        _uw_obs(graph_ok=False, nodes=[_node_obs("x-1", touched_epoch=NOW_1840 - 3600)])
+    )
+    assert snap.complete is False
+    notes: list[str] = []
+    uw.publish_report(
+        snap, source="manual", now_s=NOW_1840, mail_to="", log=notes.append
+    )
+    assert called == []
+    assert any("incomplete scan" in note for note in notes)
+
+
+def test_manual_report_and_tick_share_one_fleet_scope(monkeypatch):
+    """The manual verb and the tick resolve their roots through one shared
+    resolver, so a hand-run names the same fleet the tick's digest named."""
+    from fno.agents import cli as agents_cli
+    from fno.pr_watch import cli as prcli
+
+    monkeypatch.setattr(uw, "report_roots", lambda: [Path("/fleet/scope")])
+    assert prcli._watchdog_recovery_roots() == [Path("/fleet/scope")]
+
+    class _Snap:
+        generated_at = "x"
+        findings = ()
+        complete = True
+        warnings = ()
+        dimensions = {
+            dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+        }
+
+    captured = {}
+
+    def _fake_build(roots, **kw):
+        captured["roots"] = [str(r) for r in roots]
+        return _Snap()
+
+    monkeypatch.setattr(uw, "build_report", _fake_build)
+    monkeypatch.setattr(
+        uw, "publish_report", lambda s, **kw: {"counts": {}, "findings": [], "warnings": []}
+    )
+    agents_cli.cmd_watchdog(
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+    )
+    assert captured["roots"] == ["/fleet/scope"]

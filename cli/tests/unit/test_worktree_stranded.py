@@ -402,3 +402,27 @@ def test_unpushed_batch_missing_path_reads_unverifiable(tmp_path):
     count, ok, _age = counts[str(ghost)]
     assert ok is False
     assert count == 1
+
+
+# --- the shared resolution seam consumed by the unfinished-work report ----
+
+
+def test_unfinished_work_reuses_this_modules_node_resolution():
+    """One node-resolution implementation, not a second copy: the report
+    joins worktree identity through the same resolve_node_id this module
+    owns, so a fix to resolution fixes both surfaces."""
+    from fno.agents import unfinished_work as uw
+
+    assert uw.resolve_node_id is resolve_node_id
+
+
+def test_unfinished_work_keeps_its_own_ahead_metric():
+    """The report measures origin/main..HEAD with its own fresh-fetch counter
+    and must not lean on this module's unpushed probe: that probe's contract
+    is fail-toward-keep for DESTRUCTIVE cleanup and a different question."""
+    from fno.agents import unfinished_work as uw
+
+    assert callable(uw.fetch_origin_main)
+    assert callable(uw.ahead_of_main)
+    # The destructive-cleanup probe stays owned here, untouched.
+    assert callable(_unpushed_batch)

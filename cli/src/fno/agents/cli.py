@@ -4036,6 +4036,47 @@ def cmd_truth(
         raise typer.Exit(code=13)
 
 
+def _run_unfinished_report(
+    *,
+    now: float,
+    json_out: bool,
+    mail_to: Optional[str] = None,
+) -> None:
+    """The default watchdog surface: build and publish the unfinished-work
+    report. Recovery internals stay behind --apply/--only; this path never
+    renders a session verdict as the operator's answer."""
+    from fno.agents import unfinished_work as uw
+    from fno.paths import resolve_repo_root
+
+    roots = uw.report_roots() or [Path(resolve_repo_root())]
+    snapshot = uw.build_report(roots, now_s=now)
+
+    recipient = mail_to
+    if recipient is None:
+        try:
+            from fno.config import load_settings
+
+            recipient = str(getattr(
+                load_settings().recovery, "watchdog_mail_to", "") or ""
+            )
+        except Exception:  # noqa: BLE001 - config read miss means no mail
+            recipient = ""
+
+    def _note(line: str) -> None:
+        print(line, file=sys.stderr)
+
+    payload = uw.publish_report(
+        snapshot, source="manual", now_s=now, mail_to=recipient or "", log=_note
+    )
+    if json_out:
+        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.flush()
+        return
+    typer.echo(uw.snapshot_digest(snapshot))
+    for warning in payload["warnings"]:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
 @agents_app.command("watchdog")
 def cmd_watchdog(
     json_out: bool = typer.Option(
@@ -4061,8 +4102,9 @@ def cmd_watchdog(
     only: Optional[str] = typer.Option(
         None, "--only",
         help=(
-            "Filter to one verdict: wake|reroute|reap|retire|ghost|stale|leave|"
-            "recoverable."
+            "DIAGNOSTIC: filter the internal session-verdict table to one "
+            "verdict (wake|reroute|reap|retire|ghost|stale|leave|recoverable). "
+            "Recovery internals, not the operator report."
         ),
     ),
     since: str = typer.Option(
@@ -4093,13 +4135,14 @@ def cmd_watchdog(
         ),
     ),
 ) -> None:
-    """Sweep the fleet from transcript truth and decide, per row: wake,
-    reroute, reap, or leave.
+    """Report unfinished work: started nodes nobody holds, done branches
+    ahead of origin/main, dirty ownerless worktrees, and ownerless PRs older
+    than a day. Every finding names the one command that clears it.
 
     The transcript is the truth source (keyed by session id); the registry
-    and claude's agent view are hints. Dry run (default) prints every row
-    with its verdict and the measurement that decided it, and emits one
-    watchdog_verdict event per non-leave row.
+    and claude's agent view are hints. The default output is the
+    unfinished-work report; --apply/--only reach the internal recovery
+    lanes, which stay explicit.
     """
     import time as _time
 
@@ -4245,6 +4288,13 @@ def cmd_watchdog(
             )
         return
 
+    if only is None and not apply and not apply_all:
+        # The default surface: the unfinished-work report. Session verdicts
+        # (and their counts) are recovery internals behind --apply/--only,
+        # never the operator's answer.
+        _run_unfinished_report(now=now, json_out=json_out, mail_to=mail_to)
+        return
+
     payload, rows = wd.run_sweep(now_s=now)
     if payload.get("refused"):
         # x-4c87: a zero-row roster is an unreadable instrument, not an empty
@@ -4257,41 +4307,6 @@ def cmd_watchdog(
         for warning in payload.get("warnings") or []:
             print(f"  {warning}", file=sys.stderr)
         raise typer.Exit(code=3)
-    from fno.agents.stale_escalate import StaleRow, escalate_stale
-    from fno.carveout.core import resolve_carveout_root, resolve_session_id
-    from fno.paths import resolve_repo_root
-
-    stale_rows = [
-        StaleRow(
-            row_id=verdict.row_id,
-            name=verdict.name,
-            state=verdict.state,
-            node=row.node,
-            basis=verdict.basis,
-        )
-        for data, row in zip(payload["verdicts"], rows)
-        if (verdict := wd.Verdict(**data)).verdict == wd.STALE
-    ]
-    try:
-        try:
-            session_id = resolve_session_id(resolve_repo_root())
-        except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
-            session_id = None
-        outcome, qid = escalate_stale(
-            stale_rows,
-            root=resolve_carveout_root(),
-            session_id=session_id,
-            cwd=Path.cwd(),
-        )
-        if outcome == "none":
-            print("watchdog escalation: no stale rows", file=sys.stderr)
-        else:
-            print(
-                f"watchdog escalation: {outcome} {qid} ({len(stale_rows)} stale row(s))",
-                file=sys.stderr,
-            )
-    except Exception as exc:  # noqa: BLE001 - named, never fatal to the sweep
-        print(f"watchdog escalation failed: {exc}", file=sys.stderr)
     pairs = [
         (wd.Verdict(**d), r) for d, r in zip(payload["verdicts"], rows)
     ]

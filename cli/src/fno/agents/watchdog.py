@@ -2093,13 +2093,15 @@ def sweep_path() -> Path:
 
 def write_sweep_file(
     source: str,
-    counts: dict,
+    counts: Optional[dict],
     now_s: float,
-    signature: str = "",
+    signature: Optional[str] = None,
     *,
-    events_signature: str = "",
-    terminal_harness_rows: int = 0,
+    events_signature: Optional[str] = None,
+    terminal_harness_rows: Optional[int] = None,
     recoverable_count: Optional[int] = None,
+    unfinished: Optional[dict] = None,
+    recovery_events_signature: Optional[str] = None,
 ) -> None:
     """Freshness evidence for the done probe: one small state file per sweep,
     best-effort (an unwritable state root must never break a tick). The
@@ -2107,7 +2109,12 @@ def write_sweep_file(
     can skip a digest that says exactly what the last one said;
     ``events_signature`` is the same set as the EVENT lane last emitted, so
     the tick can suppress per-row events that say what the last tick already
-    said (the mail lane speaks on change, and so must the event lane)."""
+    said (the mail lane speaks on change, and so must the event lane).
+
+    ``unfinished`` carries the unfinished-work report stamps (``counts``,
+    ``complete``, ``signature``). ``unfinished_work_complete`` is written on
+    every report run, True only when all four dimensions were measured, so an
+    incomplete read never certifies itself fresh."""
     try:
         path = sweep_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2121,13 +2128,26 @@ def write_sweep_file(
         # "FLEET WATCHDOG STALE, last sweep 0m old" - a line that blames the
         # daemon for the operator having looked.
         last_tick = now_s if source == "tick" else _last_tick_epoch()
+        # The verdict lane's top-level stamps (counts, signature,
+        # events_signature, terminal_harness_rows) belong to the session
+        # verdict cadence. A REPORT write must not speak for that lane: it
+        # carries the previous values through (None means carry), exactly
+        # the protection the tick cadence stamp already gets.
+        if counts is None:
+            counts = previous.get("counts") or {}
+        if signature is None:
+            signature = str(previous.get("signature") or "")
+        if events_signature is None:
+            events_signature = str(previous.get("events_signature") or "")
+        if terminal_harness_rows is None:
+            terminal_harness_rows = int(previous.get("terminal_harness_rows") or 0)
         payload: dict[str, Any] = {
             "source": source,
             "at": datetime.fromtimestamp(now_s, tz=timezone.utc).strftime(
                 "%Y-%m-%dT%H:%M:%SZ"
             ),
             "counts": counts,
-            "terminal_harness_rows": terminal_harness_rows,
+            "terminal_harness_rows": int(terminal_harness_rows),
             "signature": signature,
             "events_signature": events_signature,
         }
@@ -2135,11 +2155,75 @@ def write_sweep_file(
             payload["recoverable_count"] = int(recoverable_count)
         elif isinstance(previous.get("recoverable_count"), int):
             payload["recoverable_count"] = previous["recoverable_count"]
+        if unfinished is not None:
+            payload["unfinished_counts"] = dict(unfinished.get("counts") or {})
+            payload["unfinished_work_complete"] = bool(unfinished.get("complete"))
+            payload["unfinished_signature"] = str(unfinished.get("signature") or "")
+            payload["unfinished_events_signature"] = str(
+                unfinished.get("events_signature") or ""
+            )
+        else:
+            # An apply/diagnostic run must not erase the report's evidence
+            # any more than a hand-run may erase the tick's.
+            for key in (
+                "unfinished_counts",
+                "unfinished_work_complete",
+                "unfinished_signature",
+                "unfinished_events_signature",
+            ):
+                if key in previous:
+                    payload[key] = previous[key]
+        if recovery_events_signature is not None:
+            payload["recovery_events_signature"] = recovery_events_signature
+        elif isinstance(previous.get("recovery_events_signature"), str):
+            payload["recovery_events_signature"] = previous[
+                "recovery_events_signature"
+            ]
         if last_tick is not None:
             payload["last_tick_epoch"] = last_tick
         path.write_text(json.dumps(payload), encoding="utf-8")
     except OSError:
         pass
+
+
+def _last_unfinished_events_signature() -> str:
+    """The report EVENT lane's gate. Keyed on the finding-set identity and
+    advanced by every publish, independent of the mail stamp: with no mail
+    recipient configured the mail gate legitimately never advances, and an
+    event gate chained to it would re-emit every finding every tick."""
+    try:
+        return str(
+            json.loads(sweep_path().read_text(encoding="utf-8")).get(
+                "unfinished_events_signature"
+            )
+            or ""
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+
+
+def _last_recovery_events_signature() -> str:
+    try:
+        return str(
+            json.loads(sweep_path().read_text(encoding="utf-8")).get(
+                "recovery_events_signature"
+            )
+            or ""
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
+
+
+def _last_unfinished_signature() -> str:
+    try:
+        return str(
+            json.loads(sweep_path().read_text(encoding="utf-8")).get(
+                "unfinished_signature"
+            )
+            or ""
+        )
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return ""
 
 
 def _last_signature() -> str:
@@ -2410,6 +2494,30 @@ def mail_gate(
         return False, payload["refused"], _last_signature()
     ok, receipt = mail_digest(payload, to, runner=runner)
     stamp = verdict_signature(payload) if ok else _last_signature()
+    return ok, receipt, stamp
+
+
+def unfinished_mail_gate(
+    snapshot, to: str, *, runner: Callable | None = None
+) -> tuple[bool, str, str]:
+    """``(ok, receipt, unfinished_signature_to_stamp)`` for the report path:
+    the same push-not-pull change gate :func:`mail_gate` gives the verdict
+    path, keyed on finding identity instead of session rows. An incomplete
+    snapshot is never mailed as though it were the news: the gate stays armed
+    against the last digest actually delivered so the next sweep retries."""
+    from fno.agents.unfinished_work import snapshot_digest, snapshot_signature
+
+    if not to:
+        return True, "no recipient", _last_unfinished_signature()
+    signature = snapshot_signature(snapshot)
+    if not snapshot.findings:
+        return True, "no findings, nothing to say", signature
+    if signature == _last_unfinished_signature():
+        return True, "unchanged since the last sweep, not mailed", signature
+    if not snapshot.complete:
+        return False, "incomplete scan, not mailed", _last_unfinished_signature()
+    ok, receipt = _send_machine_report(to, snapshot_digest(snapshot), runner=runner)
+    stamp = signature if ok else _last_unfinished_signature()
     return ok, receipt, stamp
 
 

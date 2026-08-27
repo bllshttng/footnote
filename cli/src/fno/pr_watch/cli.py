@@ -152,20 +152,14 @@ def _catchup_roots() -> list[Path]:
 
 
 def _watchdog_recovery_roots() -> list[Path]:
-    """Resolve every distinct project scope for the launchd watchdog scan."""
-    roots: list[Path] = []
-    try:
-        from fno.paths import resolve_repo_root
+    """Resolve every distinct project scope for the launchd watchdog scan.
 
-        root = resolve_repo_root()
-        if (root / ".git").exists():
-            roots.append(root)
-    except Exception:  # noqa: BLE001 - an unknown scope must not scan `/`
-        pass
-    for root in _catchup_roots():
-        if root not in roots:
-            roots.append(root)
-    return roots
+    One shared resolver with the manual report verb
+    (unfinished_work.report_roots): the tick and a hand-run must name the
+    same fleet, or the two report surfaces disagree on scope."""
+    from fno.agents import unfinished_work as _uw
+
+    return _uw.report_roots()
 
 
 class ClaimAdapter:
@@ -505,11 +499,11 @@ def tick() -> None:
         # harness layer and this module is on the launchd hot path.
         from fno.agents.watchdog import lane_armed as _wd_lane_armed
 
-        # Fleet watchdog, same cadence, same non-fatal wrap: classify
-        # every fleet row from transcript truth and act per
-        # config.recovery.watchdog. "report" emits one watchdog_verdict event per
-        # non-leave row; "wake" additionally applies the wake lane. No tick value
-        # reaps or reroutes - those stop a session and stay behind a manual
+        # Fleet watchdog, same cadence, same non-fatal wrap. The REPORT is
+        # the unfinished-work snapshot (the operator's outcome question);
+        # the internal session classifier runs only in wake mode, where it
+        # may resume a positively stalled session. No tick value reaps or
+        # reroutes - those stop a session and stay behind a manual
         # `fno agents watchdog --apply-all`.
         # getattr with the modeled default: a settings stub or a partially-loaded
         # config must never crash the tick - "off" is the no-op that fails safe.
@@ -517,261 +511,222 @@ def tick() -> None:
             try:
                 import time as _time
 
+                from fno.agents import unfinished_work as _uw
                 from fno.agents import watchdog as _wd
 
                 now = _time.time()
-                # The tick's deadline is the shorter budget and it is fatal:
-                # a roster probe that outlives it exits 75 and kills every
-                # later leg, so this lane spends at most half of what is
-                # left rather than its own standalone budget.
+                # The tick's deadline is fatal and the report honors it by
+                # leaving late roots unscanned: their dimensions read
+                # unknown, never clean, and no partial snapshot is stamped
+                # or mailed as complete.
                 left = deadline - (time.monotonic() - started)
                 budget = left / 2
-                if budget < _ROSTER_FLOOR_S:
-                    # A budget under the probe's measured cost does not buy a
-                    # smaller answer, it buys a guaranteed timeout: zero rows,
-                    # a refusal that blames the instrument, and a sweep file
-                    # withheld. Skipping says the same thing honestly and
-                    # costs the fleet nothing - the next tick sweeps.
-                    raise _WatchdogBudgetSpent(
-                        f"{budget:.1f}s left, under the {_ROSTER_FLOOR_S:.0f}s "
-                        f"a roster probe costs"
-                    )
-                payload, rows = _wd.run_sweep(now_s=now, roster_timeout=budget)
-                recovery_payloads = []
-                recovery_scans = []
-                try:
-                    recovery_roots = _watchdog_recovery_roots()
-                    if not recovery_roots:
-                        raise ValueError(
-                            "Codex recovery scope unresolved; no checkout roots"
-                        )
-                    for recovery_root in recovery_roots:
-                        recovery_payload, recovery_rows, recovery_scan = (
-                            _wd.run_recoverable_sweep(
-                                cwd=recovery_root,
-                                recency_seconds=24 * 3600,
-                                now_s=now,
-                            )
-                        )
-                        if not recovery_scan.complete:
-                            log.warning(
-                                "pr-watch: Codex recovery scan refused for %s: %s",
-                                recovery_root,
-                                "; ".join(recovery_payload.get("warnings") or [])
-                                or "coverage incomplete",
-                            )
-                            continue
-                        recovery_payloads.append(
-                            (recovery_root, recovery_payload, recovery_rows)
-                        )
-                        recovery_scans.append((recovery_root, recovery_scan))
-                    if recovery_payloads and not payload.get("refused"):
-                        recovery_verdicts = [
-                            verdict
-                            for _root, recovery_payload, _root_rows in recovery_payloads
-                            for verdict in recovery_payload["verdicts"]
-                        ]
-                        recovery_count = sum(
-                            recovery_payload["recoverable_count"]
-                            for _root, recovery_payload, _root_rows in recovery_payloads
-                        )
-                        payload = {
-                            **payload,
-                            "verdicts": [
-                                *payload["verdicts"],
-                                *recovery_verdicts,
-                            ],
-                            "counts": {
-                                **payload["counts"],
-                                _wd.RECOVERABLE: recovery_count,
-                            },
-                        }
-                        recovery_rows = [
-                            row
-                            for _root, _recovery_payload, root_rows in recovery_payloads
-                            for row in root_rows
-                        ]
-                        rows = [*rows, *recovery_rows]
-                        if len(recovery_payloads) == len(recovery_roots):
-                            payload["recoverable_count"] = recovery_count
-                except Exception as exc:  # noqa: BLE001 - recovery never breaks the tick
-                    log.warning("pr-watch: Codex recovery scan failed: %s", exc)
-                # Read BEFORE any write and defaulted here: the refused branch
-                # writes nothing, and an unbound read after the if/else crashed
-                # every refused tick into the outer except.
-                prev_events_sig = ""
-                if payload.get("refused"):
-                    # x-4c87: zero rows read is an instrument failure, not an
-                    # empty fleet. No sweep file, no mail, no gate advance - the
-                    # missing write turns into loud staleness within two ticks.
-                    log.warning(
-                        "pr-watch: watchdog sweep refused: %s (%s)",
-                        payload["refused"],
-                        "; ".join(payload.get("warnings") or []) or "no cause given",
-                    )
-                else:
-                    # Mail before the sweep file write: the change gate compares
-                    # against the PREVIOUS sweep's signature (push, not pull), and
-                    # only a delivered digest advances it (mail_gate) so a transient
-                    # send failure retries on the next tick instead of vanishing.
-                    mail_to = str(getattr(
-                        settings.recovery, "watchdog_mail_to", ""
-                    ) or "")
-                    signature = ""
-                    try:
-                        _ok, receipt, signature = _wd.mail_gate(payload, mail_to)
-                        if not _ok:
-                            log.warning("pr-watch: watchdog mail failed: %s", receipt)
-                    except Exception:  # noqa: BLE001 - mail never breaks the tick
-                        log.warning("pr-watch: watchdog mail failed", exc_info=True)
-                    prev_events_sig = _wd._last_events_signature()
-                    _wd.write_sweep_file(
-                        "tick", payload["counts"], now, signature,
-                        events_signature=_wd.verdict_signature(payload),
-                        terminal_harness_rows=payload.get("terminal_harness_rows", 0),
-                        recoverable_count=payload.get("recoverable_count"),
-                    )
-                    try:
-                        from fno.agents.stale_escalate import StaleRow, escalate_stale
-                        from fno.carveout.core import resolve_carveout_root, resolve_session_id
-                        from fno.paths import resolve_repo_root
+                roots = _watchdog_recovery_roots()
+                if not roots:
+                    from fno.paths import resolve_repo_root
 
-                        stale_rows = [
-                            StaleRow(
-                                row_id=verdict.row_id,
-                                name=verdict.name,
-                                state=verdict.state,
-                                node=row.node,
-                                basis=verdict.basis,
-                            )
-                            for data, row in zip(payload["verdicts"], rows)
-                            if (verdict := _wd.Verdict(**data)).verdict == _wd.STALE
-                        ]
-                        try:
-                            session_id = resolve_session_id(resolve_repo_root())
-                        except Exception:  # noqa: BLE001 - launchd normally has no target
-                            session_id = None
-                        escalate_stale(
-                            stale_rows,
-                            root=resolve_carveout_root(),
-                            session_id=session_id,
-                            cwd=Path.cwd(),
-                        )
-                    except Exception:  # noqa: BLE001 - named, never fatal to the tick
-                        log.warning("pr-watch: watchdog escalation failed", exc_info=True)
-                fresh_ids = _wd.fresh_non_leave(payload, prev_events_sig)
+                    roots = [Path(resolve_repo_root())]
+                snapshot = _uw.build_report(
+                    roots,
+                    now_s=now,
+                    deadline_monotonic=time.monotonic() + max(0.0, budget),
+                )
+                mail_to = str(getattr(
+                    settings.recovery, "watchdog_mail_to", ""
+                ) or "")
+                _uw.publish_report(
+                    snapshot,
+                    source="tick",
+                    now_s=now,
+                    mail_to=mail_to,
+                    log=lambda line: log.warning("pr-watch: %s", line),
+                )
+
+                # Internal recovery, wake mode only. Session verdicts drive
+                # nothing here in report mode, and their receipts stay
+                # separate from the report's event stream.
                 acted = 0
                 recoverable_results = []
-                for d, row in zip(payload["verdicts"], rows):
-                    verdict = _wd.Verdict(**d)
-                    if verdict.verdict == _wd.LEAVE:
-                        continue
-                    if verdict.row_id in fresh_ids:
-                        _wd.emit_event(
-                            "watchdog_verdict",
-                            {
-                                "row_id": verdict.row_id,
-                                "name": verdict.name,
-                                "verdict": verdict.verdict,
-                                "basis": verdict.basis,
-                            },
-                        )
-                    if settings.recovery.watchdog == "wake" and verdict.verdict == _wd.WAKE:
-                        # Budgeting only the PROBE left the expensive half
-                        # unbounded: one resume waits up to 180s and the
-                        # confirmation polls after it, so a few stuck rows
-                        # walk past the tick deadline and SIGALRM kills every
-                        # leg behind this one. A row skipped here is not
-                        # lost - the next tick re-classifies it.
-                        if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
-                            log.warning(
-                                "pr-watch: watchdog wake budget spent, "
-                                "%s left for the next tick", verdict.row_id,
-                            )
-                            continue
-                        try:
-                            outcome, detail = _wd.apply_verdict(
-                                verdict, lanes="wake", cwd=row.cwd
-                            )
-                        except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
-                            # The outer except would end the loop, and the
-                            # sweep file already stamped the whole set, so the
-                            # remaining rows' events would be suppressed for
-                            # good.
-                            outcome, detail = "refused", f"wake crashed: {exc!r}"
-                        acted += 1
-                        _wd.emit_event(
-                            "watchdog_applied" if outcome == "applied" else "watchdog_refused",
-                            {
-                                "row_id": verdict.row_id,
-                                "verdict": verdict.verdict,
-                                "detail": detail,
-                            },
-                        )
                 if settings.recovery.watchdog == "wake":
-                    for recovery_root, recovery_scan in recovery_scans:
-                        results = _wd.apply_recoverable(
-                            recovery_scan,
-                            scope_cwd=recovery_root,
-                            should_apply=lambda: (
-                                deadline - (time.monotonic() - started)
-                            ) >= _WAKE_APPLY_FLOOR_S,
+                    # Recompute the budget AFTER the report: budgeting both
+                    # halves off the same pre-report clock lets the wake lane
+                    # spend the whole remaining deadline and SIGALRM every
+                    # later tick leg.
+                    wake_budget = (deadline - (time.monotonic() - started)) / 2
+                    if wake_budget < _ROSTER_FLOOR_S:
+                        # A budget under the probe's measured cost buys a
+                        # guaranteed timeout, not a smaller answer. Skip the
+                        # lane; the next tick re-classifies.
+                        log.warning(
+                            "pr-watch: watchdog wake budget spent (%.1fs left "
+                            "for the next tick)", wake_budget,
                         )
-                        recoverable_results.extend(results)
-                        for result_item in results:
-                            # A refused recovery candidate is refound and
-                            # refused again by every tick until it ages out of
-                            # the recency window; publish it once per verdict
-                            # signature (the gate the scan verdicts already
-                            # use), not once per 600s forever. An applied row
-                            # registered and never recurs, so it always
-                            # publishes.
-                            if result_item["outcome"] == "applied" or (
-                                result_item["outcome"] == "refused"
-                                and result_item["session_id"] in fresh_ids
-                            ):
+                    else:
+                        payload, rows = _wd.run_sweep(
+                            now_s=now, roster_timeout=wake_budget
+                        )
+                        if payload.get("refused"):
+                            # x-4c87: zero rows read is an instrument failure.
+                            # No events, no gates - the refusal reads loud.
+                            log.warning(
+                                "pr-watch: watchdog sweep refused: %s (%s)",
+                                payload["refused"],
+                                "; ".join(payload.get("warnings") or [])
+                                or "no cause given",
+                            )
+                            payload = {"verdicts": [], "counts": {}, "warnings": []}
+                            rows = []
+                        prev_recovery_sig = _wd._last_recovery_events_signature()
+                        fresh_recovery_ids = _wd.fresh_non_leave(
+                            payload, prev_recovery_sig
+                        )
+                        for d, row in zip(payload["verdicts"], rows):
+                            verdict = _wd.Verdict(**d)
+                            if verdict.verdict == _wd.LEAVE:
+                                continue
+                            # fresh_non_leave answers ROW IDS; the gate is on the
+                            # row, not the verdict word.
+                            if verdict.row_id in fresh_recovery_ids:
                                 _wd.emit_event(
-                                    "watchdog_applied"
-                                    if result_item["outcome"] == "applied"
-                                    else "watchdog_refused",
+                                    "watchdog_verdict",
                                     {
-                                        "row_id": result_item["session_id"],
-                                        "verdict": _wd.RECOVERABLE,
-                                        "detail": result_item["detail"],
+                                        "row_id": verdict.row_id,
+                                        "name": verdict.name,
+                                        "verdict": verdict.verdict,
+                                        "basis": verdict.basis,
                                     },
                                 )
-                # A deferred candidate published nothing this tick, but the
-                # sweep signature written above already claims its sid. Strip
-                # deferred sids back out and rewrite the file, or the
-                # freshness gate would suppress that candidate's refusal for
-                # the rest of its recency window.
-                deferred_sids = {
-                    item["session_id"]
-                    for item in recoverable_results
-                    if item["outcome"] == "deferred"
-                }
-                if deferred_sids:
-                    events_sig = _wd.verdict_signature(payload)
-                    stripped_sig = ";".join(
-                        part
-                        for part in events_sig.split(";")
-                        if ":" not in part
-                        or part.split(":", 1)[0] not in deferred_sids
-                    )
-                    if stripped_sig != events_sig:
+                            if verdict.verdict == _wd.WAKE:
+                                # Budgeting only the PROBE left the expensive half
+                                # unbounded: one resume waits up to 180s and the
+                                # confirmation polls after it, so a few stuck rows
+                                # walk past the tick deadline and SIGALRM kills every
+                                # leg behind this one. A row skipped here is not
+                                # lost - the next tick re-classifies it.
+                                if (deadline - (time.monotonic() - started)) < _WAKE_APPLY_FLOOR_S:
+                                    log.warning(
+                                        "pr-watch: watchdog wake budget spent, "
+                                        "%s left for the next tick", verdict.row_id,
+                                    )
+                                    continue
+                                try:
+                                    outcome, detail = _wd.apply_verdict(
+                                        verdict, lanes="wake", cwd=row.cwd
+                                    )
+                                except Exception as exc:  # noqa: BLE001 - one row never aborts the rest
+                                    outcome, detail = "refused", f"wake crashed: {exc!r}"
+                                acted += 1
+                                _wd.emit_event(
+                                    "watchdog_applied" if outcome == "applied" else "watchdog_refused",
+                                    {
+                                        "row_id": verdict.row_id,
+                                        "verdict": verdict.verdict,
+                                        "detail": detail,
+                                    },
+                                )
+                        recovery_scans = []
+                        for recovery_root in roots:
+                            try:
+                                (
+                                    recovery_payload,
+                                    _recovery_rows,
+                                    recovery_scan,
+                                ) = _wd.run_recoverable_sweep(
+                                    cwd=recovery_root,
+                                    recency_seconds=24 * 3600,
+                                    now_s=now,
+                                )
+                            except Exception as exc:  # noqa: BLE001 - never fatal
+                                log.warning(
+                                    "pr-watch: Codex recovery scan failed: %s", exc
+                                )
+                                continue
+                            if not recovery_scan.complete:
+                                log.warning(
+                                    "pr-watch: Codex recovery scan refused for %s",
+                                    recovery_root,
+                                )
+                                continue
+                            recovery_scans.append((recovery_root, recovery_scan))
+                        for recovery_root, recovery_scan in recovery_scans:
+                            results = _wd.apply_recoverable(
+                                recovery_scan,
+                                scope_cwd=recovery_root,
+                                should_apply=lambda: (
+                                    deadline - (time.monotonic() - started)
+                                ) >= _WAKE_APPLY_FLOOR_S,
+                            )
+                            recoverable_results.extend(results)
+                            for result_item in results:
+                                # A refused recovery candidate is refound and
+                                # refused again by every tick until it ages out of
+                                # the recency window; publish it once per recovery
+                                # signature, not once per 600s forever. An applied
+                                # row registered and never recurs.
+                                if result_item["outcome"] == "applied" or (
+                                    result_item["outcome"] == "refused"
+                                    and result_item["session_id"] in fresh_recovery_ids
+                                ):
+                                    _wd.emit_event(
+                                        "watchdog_applied"
+                                        if result_item["outcome"] == "applied"
+                                        else "watchdog_refused",
+                                        {
+                                            "row_id": result_item["session_id"],
+                                            "verdict": _wd.RECOVERABLE,
+                                            "detail": result_item["detail"],
+                                        },
+                                    )
+                        # Stamp the recovery receipt gate: what was published
+                        # plus what was already published, minus deferred sids a
+                        # published-before-apply never actually said.
+                        deferred_sids = {
+                            item["session_id"]
+                            for item in recoverable_results
+                            if item["outcome"] == "deferred"
+                        }
+                        published_sids = {
+                            item["session_id"]
+                            for item in recoverable_results
+                            if item["outcome"] != "deferred"
+                        }
+                        parts = [
+                            part
+                            for part in _wd.union_signature(
+                                prev_recovery_sig,
+                                _wd.verdict_signature(
+                                    {
+                                        **payload,
+                                        "verdicts": [
+                                            d for d in payload["verdicts"]
+                                            if _wd.Verdict(**d).verdict != _wd.LEAVE
+                                        ],
+                                    }
+                                ),
+                            ).split(";")
+                            if part
+                        ]
+                        parts.extend(
+                            f"{sid}:{_wd.RECOVERABLE}"
+                            for sid in sorted(published_sids)
+                        )
+                        recovery_sig = ";".join(
+                            part
+                            for part in parts
+                            if ":" not in part
+                            or part.split(":", 1)[0] not in deferred_sids
+                        )
                         _wd.write_sweep_file(
                             "tick",
-                            payload["counts"],
+                            None,
                             now,
-                            signature,
-                            events_signature=stripped_sig,
-                            terminal_harness_rows=payload.get(
-                                "terminal_harness_rows", 0
-                            ),
-                            recoverable_count=payload.get("recoverable_count"),
+                            None,
+                            recovery_events_signature=recovery_sig,
                         )
                 counts = " ".join(
-                    f"{k}={v}" for k, v in sorted(payload["counts"].items())
+                    f"{k}={v}"
+                    for k, v in _uw.snapshot_payload(snapshot)["counts"].items()
+                    if v is not None
                 )
                 recoverable_applied = sum(
                     item["outcome"] == "applied" for item in recoverable_results
@@ -780,7 +735,7 @@ def tick() -> None:
                     item["outcome"] == "deferred" for item in recoverable_results
                 )
                 typer.echo(
-                    f"watchdog sweep: {counts} acted={acted} "
+                    f"watchdog report: {counts} acted={acted} "
                     f"recoverable_applied={recoverable_applied} "
                     f"recoverable_remaining={recoverable_remaining}"
                 )
