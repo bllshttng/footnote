@@ -49,6 +49,14 @@ PlanStatus = enum.Enum(  # type: ignore[misc]
 #: on-or-after: a plan created ON the gate date predates the gate reaching
 #: its author (the same boundary ``check_consolidation_file`` uses in
 #: skills/blueprint/scripts/validate-plan.sh).
+#:
+#: A strictly-after boundary makes every test fixture that stamps ``created``
+#: at RUNTIME cross this gate the moment the clock does, on a commit nobody
+#: touched. That fired at 2026-08-27T00:00Z and took smoke-rest red on every
+#: open PR. The sweep that dated the other fixtures could not see it, because
+#: a date computed at runtime leaves no literal to grep. Give a new fixture a
+#: band rather than back-dating ``created``, which exempts it forever and
+#: quietly stops exercising the post-gate read.
 DIFFICULTY_REQUIRED_AFTER = date(2026, 8, 26)
 
 

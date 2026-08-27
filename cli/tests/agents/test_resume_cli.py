@@ -68,11 +68,21 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     )
     assert res.exit_code == 0
     assert res.exec_argv[0] == "codex"
-    assert res.exec_argv[-2:] == [
-        "resume",
-        "00000000-1111-2222-3333-444444444444",
-    ]
+    # The subcommand and the full session id come from the capability
+    # contract, in that order. Nothing trails the positional: codex's globals
+    # (the -c grant, --cd) all sit before the subcommand.
+    assert "resume" in res.exec_argv
+    sid = "00000000-1111-2222-3333-444444444444"
+    assert res.exec_argv.index("resume") < res.exec_argv.index(sid)
+    # Assert the tail too, not just the order. Order alone passes with a token
+    # appended after the id, which is exactly what the comment above denies.
+    assert res.exec_argv[-2:] == ["resume", sid]
+    # The -c grant is global, so it must still precede the subcommand.
     assert any("writable_roots=" in arg for arg in res.exec_argv)
+    grant_at = next(
+        i for i, a in enumerate(res.exec_argv) if "writable_roots=" in a
+    )
+    assert grant_at < res.exec_argv.index("resume")
     assert res.exec_cwd == "/path/to/workdir"
 
 
@@ -121,8 +131,12 @@ def test_codex_resume_grants_git_metadata_write_in_a_repo(tmp_path) -> None:
     key, _, value = argv[2].partition("=")
     assert key == "sandbox_workspace_write.writable_roots"
     assert pathlib.Path(json.loads(value)[0]).resolve() == (repo / ".git").resolve()
-    # The grant is global, so it precedes the subcommand.
-    assert argv[3] == "resume"
+    # The grant is global, so it precedes the subcommand. So does --cd, which
+    # is why this checks order rather than a fixed index: pinning argv[3] made
+    # the test fail on a second global that was correctly placed.
+    assert argv.index("-c") < argv.index("resume")
+    assert argv.index("--cd") < argv.index("resume")
+    assert argv[-2:] == ["resume", "00000000-1111-2222-3333-444444444444"]
 
 
 def test_agent_resumed_event_emitted_before_execvp() -> None:
@@ -1446,3 +1460,66 @@ def test_script_wrapped_attach_uses_bsd_form_on_real_bsd_platform_strings(monkey
         monkeypatch.setattr("sys.platform", platform)
         cmd = _script_wrapped_attach("deadbeef")
         assert cmd == "script -q /dev/null claude attach deadbeef", platform
+
+
+def test_codex_resume_argv_places_the_worktree_and_forces_no_bypass() -> None:
+    """A codex resume must land in the row's own tree.
+
+    Codex asks session-directory vs current-directory and defaults to the
+    SESSION directory, the canonical checkout recorded at spawn. That prompt
+    was answered by hand during the 2026-08-25 fleet recovery. Unattended it
+    is a hang, and answered wrong it is the wrong tree, which looks like
+    success.
+
+    WHAT THIS TEST DOES NOT PROVE. It asserts argv shape. It does not observe
+    the modal being suppressed, and no test here does, so do not read a green
+    run as proof the hang is gone. Suppression rests on two things instead.
+    Codex's own reference documents the flag as `--cd, -C` and states that an
+    explicit override takes precedence over the `tui.resume_cwd` config, with
+    the prompt raised only when the process cwd differs from the session's
+    saved directory. And on codex-cli 0.149.1 the flag was probed in both
+    positions: a nonexistent directory fails with `No such file or directory`
+    BEFORE the terminal check, which is a positive marker that the value is
+    read rather than parsed and dropped.
+
+    Neither is the behavior itself. Closing that needs a recorded session
+    resumed against a real tty, which no unit test can host.
+    """
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("codex", "01a03f51-4704-7f33-942a-e4e773d81cfd",
+                              cwd="/tmp/wt/x-04b0")
+    assert argv is not None
+    # The row's own tree, not the session directory codex would otherwise pick.
+    assert "--cd" in argv
+    assert argv[argv.index("--cd") + 1] == "/tmp/wt/x-04b0"
+    # A global belongs before the subcommand, where the -c grant already sits.
+    assert argv.index("--cd") < argv.index("resume")
+    # No permission bypass: the row records no sandbox posture, so this lane
+    # cannot tell a bounded worker from a yolo one.
+    assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert "--dangerously-bypass-hook-trust" not in argv
+    # Identity still comes from the contract.
+    assert argv[0] == "codex"
+    assert "01a03f51-4704-7f33-942a-e4e773d81cfd" in argv
+    assert argv.index("resume") < argv.index("01a03f51-4704-7f33-942a-e4e773d81cfd")
+
+
+def test_codex_resume_argv_omits_cd_when_no_cwd_is_known() -> None:
+    """No cwd means no --cd: a bare flag would fail parsing, and inventing a
+    directory is the wrong-tree failure this lane exists to prevent."""
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("codex", "sid-1")
+    assert argv is not None
+    assert "--cd" not in argv
+    # With no cwd there is no grant either, so the identity render stands alone.
+    assert argv == ["codex", "resume", "sid-1"]
+
+
+def test_non_codex_resume_argv_is_untouched_by_the_codex_modal_flags() -> None:
+    """The additions are codex-specific; no other harness accepts them."""
+    from fno.agents.resume_cli import _build_resume_argv
+
+    argv = _build_resume_argv("opencode", "ses_1", cwd="/tmp/wt/x")
+    assert argv == ["opencode", "--session", "ses_1"]

@@ -1700,7 +1700,13 @@ fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Result<Option<Val
 }
 
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
-/// Returns `None` for unsupported providers.
+/// Returns `None` for an unsupported provider AND for an unreadable capability
+/// contract, but the caller only ever sees the second kind through a narrow
+/// door. `interactive_resume_supported` also reads the packaged contract and
+/// `unwrap_or(false)`s a failure, so an unreadable contract refuses as "not
+/// supported" before this function runs. What actually reaches the caller's
+/// "resume contract is invalid" message is a contract that LOADS and declares
+/// the form, then fails to render it: a malformed token template.
 fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Option<Vec<String>> {
     let mut argv = crate::harness_capabilities::render_session_argv(
         provider,
@@ -1708,15 +1714,49 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
         Some(session_id),
     )
     .ok()?;
-    // codex's bounded sandbox re-resolves from config on `resume` (it accepts
-    // neither `--sandbox` nor `--add-dir`), so the git + plan grants must ride
-    // as `-c` tokens spliced right after the `codex` binary token.
+    // codex's bounded sandbox re-resolves from config on `resume`, so the git +
+    // plan grants ride as `-c` tokens spliced right after the `codex` binary
+    // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
+    // lane that does not. `-c` is kept because one grant builder serves both.)
     if provider == "codex" {
-        if let Some(cwd) = cwd {
+        // `.filter` so an empty cwd is treated as absent, exactly as Python's
+        // `if cwd` does for both the grant and --cd. Without it this splices a
+        // bare `--cd ""`, which codex cannot start on, and the parity test does
+        // not exercise the empty string.
+        if let Some(cwd) = cwd.filter(|c| !c.is_empty()) {
             let grant = crate::provider::codex_writable_config_args(Path::new(cwd));
+            let grant_len = grant.len();
             if !grant.is_empty() {
                 argv.splice(1..1, grant);
             }
+            // Without --cd, codex asks session-directory vs current-directory
+            // and defaults to the SESSION directory: the canonical checkout
+            // recorded at spawn, not the worktree the row works in. Unattended
+            // that prompt is a hang. Attended it is a wrong default a human
+            // must catch.
+            //
+            // Conditional, per codex's own docs: the prompt appears only when
+            // the process cwd differs from the session's saved directory. The
+            // config key `tui.resume_cwd` answers it globally, and --cd
+            // outranks that. This lane wants --cd because it is per
+            // invocation and names the directory outright.
+            //
+            // Spliced BEFORE the subcommand, beside the grant, which is the
+            // only global-before-subcommand precedent in this tree. The spawn
+            // lanes are not it: they spell the flag `-C`, after `exec` in the
+            // headless lane and on a bare `codex` in the pane lane. Both
+            // positions parse on codex 0.149.1, so this is a choice about
+            // where a reader expects a global, not a fix.
+            //
+            // NO permission bypass rides here, deliberately. A registry row
+            // records no sandbox posture, so this lane cannot tell a bounded
+            // worker from a yolo one, and an unconditional bypass would resume
+            // every bounded worker with approvals off. See the Python twin.
+            // Right after the grant, so the token order matches the Python
+            // twin exactly. `test_rust_verb_parity` compares the two argvs
+            // element for element, so "both are globals" is not enough here.
+            let at = (1 + grant_len).min(argv.len());
+            argv.splice(at..at, ["--cd".to_string(), cwd.to_string()]);
         }
     }
     Some(argv)
@@ -4248,6 +4288,11 @@ mod tests {
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
+        // --cd lands the resume in the row's own tree instead of the session
+        // directory codex defaults to. It sits with the -c grant BEFORE the
+        // subcommand, where codex's globals go. Kept byte-identical to Python
+        // `_build_resume_argv`; `test_rust_verb_parity.py` fails on drift, so
+        // token ORDER is load-bearing here, not just membership.
         assert_eq!(
             build_resume_argv("codex", "uuid-1", Some("/path/that/does/not/exist")),
             Some(vec![
@@ -4255,9 +4300,26 @@ mod tests {
                 "-c".into(),
                 "sandbox_workspace_write.writable_roots=[\"/path/that/does/not/exist/.fno/plans\"]"
                     .into(),
+                "--cd".into(),
+                "/path/that/does/not/exist".into(),
                 "resume".into(),
                 "uuid-1".into(),
             ])
+        );
+        // No cwd means no --cd: a bare flag fails parsing, and inventing a
+        // directory is the wrong-tree failure this exists to prevent.
+        assert_eq!(
+            build_resume_argv("codex", "uuid-2", None),
+            Some(vec!["codex".into(), "resume".into(), "uuid-2".into()])
+        );
+        // An EMPTY cwd is absent too, which is what Python's `if cwd` does.
+        // Pinned here because nothing else is: drop the `.filter` and this is
+        // the only assertion that fails, instead of a bare `--cd ""` reaching
+        // codex, which cannot start on it.
+        assert_eq!(
+            build_resume_argv("codex", "uuid-3", Some("")),
+            Some(vec!["codex".into(), "resume".into(), "uuid-3".into()]),
+            "empty cwd must be treated as absent, matching the Python twin"
         );
         assert_eq!(
             build_resume_argv("claude", "abc123", None),

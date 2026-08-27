@@ -774,6 +774,9 @@ def test_resume_heals_an_unregistered_session(_registry_home):
 
     assert result.exit_code == 0
     assert result.exec_argv[0] == "codex"
+    # The unregistered session healed and rendered ITS uuid, as the last two
+    # tokens: codex's globals all precede the subcommand, so the positional
+    # stays at the tail.
     assert result.exec_argv[-2:] == ["resume", CODEX_UUID]
     assert any("writable_roots=" in arg for arg in result.exec_argv)
     assert result.exec_cwd == "/repo/two"

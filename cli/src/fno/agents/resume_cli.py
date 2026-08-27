@@ -111,14 +111,52 @@ def _build_resume_argv(
     if provider == "codex":
         # A bounded codex cannot write git metadata without an explicit grant,
         # and in a linked worktree that metadata sits outside the workspace
-        # entirely. `codex resume` takes no --add-dir, so the grant rides -c,
-        # which is global and must precede the subcommand.
+        # entirely. The grant rides -c, which is global and must precede the
+        # subcommand. (`codex resume` does accept --add-dir; -c is kept here
+        # because it is what the headless lane already renders, so one grant
+        # builder serves both. Do not "fix" this to --add-dir without moving
+        # the headless lane too, which cannot take it.)
         from pathlib import Path
 
         from fno.agents.harnesses.codex import git_writable_config_args
 
         grant = git_writable_config_args(Path(cwd)) if cwd else []
-        return [argv[0], *grant, *argv[1:]]
+        # Without --cd, codex asks session-directory vs current-directory and
+        # defaults to the SESSION directory, which is the canonical checkout
+        # recorded at spawn rather than the worktree the row works in.
+        # Attended that is a wrong default a human must catch. Unattended it
+        # is the wrong tree, which looks like success.
+        #
+        # The prompt is CONDITIONAL: codex raises it only when the process cwd
+        # differs from the session's saved directory. A worker already saved
+        # at its worktree never sees it. There is also a config answer,
+        # `tui.resume_cwd`, set to "current" or "session", which --cd
+        # outranks. --cd is still what this lane wants: it is per invocation
+        # and names the directory outright, where the config is global to the
+        # codex install and only picks a side.
+        #
+        # Placed BEFORE the subcommand, beside the -c grant, which is the
+        # only global-before-subcommand precedent in this tree. The spawn
+        # lanes are NOT that precedent, whatever the shape suggests: both
+        # spell the same flag `-C`, the headless one puts it AFTER `exec`,
+        # and the pane one runs a bare `codex` with no subcommand at all.
+        # Both positions parse on codex 0.149.1, so this is a choice about
+        # where a reader expects to find a global, not a fix.
+        #
+        # NO permission bypass rides here, deliberately. A registry row records
+        # no sandbox posture, so this lane cannot tell a bounded worker from a
+        # yolo one, and applying the bypass unconditionally would resume every
+        # bounded worker with approvals off. That also contradicts the -c grant
+        # spliced beside it, which exists only to widen a sandbox the bypass
+        # would remove. The ASK lane makes this call correctly, in
+        # `sandbox_flag_resume`, because it is handed a known posture. Nothing
+        # calls it from here, and that is the gap, not an oversight to route
+        # around: this lane has no posture to hand it. Clearing the approval
+        # and hook-trust modals needs an operator opt-in this verb does not
+        # have yet, and hook trust additionally needs the installed-version
+        # gate that `mux_spawn` applies.
+        place = ["--cd", cwd] if cwd else []
+        return [argv[0], *grant, *place, *argv[1:]]
     return argv
 
 
