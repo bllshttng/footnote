@@ -491,7 +491,9 @@
 
   // ---- websocket ----
   const token = new URLSearchParams(location.search).get("t") || "";
-  $("backlog-link").href = `/backlog?t=${encodeURIComponent(token)}`;
+  const backlogProject = new URLSearchParams(location.search).get("project");
+  const backlogScope = backlogProject ? `&project=${encodeURIComponent(backlogProject)}` : "";
+  $("backlog-link").href = `/backlog?t=${encodeURIComponent(token)}${backlogScope}`;
   // A pasted per-pane link names its pane (x-b80d): pin the first paint to it
   // instead of whichever frame lands first, then clear the want so the operator
   // can still switch panes by hand afterwards. A want that never paints

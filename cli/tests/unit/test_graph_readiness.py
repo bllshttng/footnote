@@ -251,7 +251,7 @@ def test_board_renders_derived_blocked_status_outside_in_progress(tmp_path: Path
 
 def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
     from fno.graph.render import render_graph_md
-    from fno.graph.render_html import render_graph_html
+    from fno.graph.render_html import _dashboard_rows, render_graph_html
 
     p = _write(
         tmp_path,
@@ -277,7 +277,19 @@ def test_boards_name_status_only_done_blocker_until_completion(tmp_path: Path):
     render_graph_html(entries, html)
     marker = "blocked by: blocker (StatusOnlyDoneBlocker)"
     assert marker in markdown.read_text()
-    assert marker in html.read_text()
+    # Assert the DEPENDENT names its blocker, not that the blocker's own row
+    # exists. `blocker` is itself rendered, so a bare '"id":"blocker"' check
+    # stayed green with the whole dependency block deleted.
+    rows = {
+        row["id"]: row
+        for row in _dashboard_rows(entries, local=True, context_entries=entries)
+    }
+    assert [b["id"] for b in rows["dependent"]["bb"]] == ["blocker"]
+    assert rows["dependent"]["bb"][0]["t"] == "StatusOnlyDoneBlocker"
+    assert rows["blocker"]["su"] == [] or [
+        s["id"] for s in rows["blocker"]["su"]
+    ] == ["dependent"]
+    assert "StatusOnlyDoneBlocker" in html.read_text()
 
 
 # -- children summaries derive through the same overlay --

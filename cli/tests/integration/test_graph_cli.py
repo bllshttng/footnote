@@ -1730,36 +1730,34 @@ def test_legacy_entry_without_additional_prs_loads_with_default(tmp_graph):
     assert data.get("additional_prs") == []
 
 
-def test_render_html_renders_non_http_additional_pr_url_as_plain_text(tmp_path):
-    """REGRESSION (Codex P2 on PR #316): when an additional_prs entry's
-    url is present but not http(s) (e.g. 'github.com/x/y/pull/542' without
-    scheme), the HTML renderer was silently dropping the url and emitting
-    only '#<number>'. Mirror the primary pr_url fallback so the URL stays
-    visible as escaped plain text -- consistent with the markdown renderer
-    and the primary-PR HTML path.
+def test_render_html_renders_non_http_pr_url_as_plain_text(tmp_path):
+    """REGRESSION (Codex P2 on PR #316), carried onto the dashboard renderer.
+
+    A pr_url without a scheme ('github.com/x/y/pull/542') must never become an
+    anchor - it would resolve as a relative link. It must also stay VISIBLE as
+    escaped text; silently dropping it is the original defect.
     """
-    from fno.graph.render_html import _card_html
+    from fno.graph.render_html import render_graph_html
 
     entry = {
         "id": "ab-abcdabcd", "title": "Multi", "priority": "p2",
         "type": "feature", "domain": "code", "parent": None,
-        "plan_path": "x.md", "completed_at": "2026-01-01T00:00:00Z",
-        "pr_number": 540, "pr_url": "https://github.com/x/y/pull/540",
-        "additional_prs": [
-            {"number": 542, "url": "github.com/x/y/pull/542", "note": "no-scheme"},
-        ],
+        "plan_path": "x.md",
+        "pr_number": 542, "pr_url": "github.com/x/y/pull/542",
         "created_at": "2026-01-01T00:00:00Z",
-        "status": "done",
+        # Open, not done: the static half renders only what the chips show on
+        # first paint, so a closed node would exercise the payload alone and
+        # leave the no-JS anchor guard untested.
+        "status": "in_review",
     }
-    html_out = _card_html(entry, {entry["id"]: entry})
-    # The URL must be visible somewhere even though it has no scheme.
+    out = tmp_path / "graph.html"
+    render_graph_html([entry], out)
+    html_out = out.read_text()
     assert "github.com/x/y/pull/542" in html_out, (
-        f"non-http url silently dropped: {html_out!r}"
+        "non-http url silently dropped"
     )
-    # Must NOT be linkified as an anchor (would be a clickability footgun).
-    assert '<a href="github.com/x/y/pull/542"' not in html_out
-    # The note still surfaces.
-    assert "no-scheme" in html_out
+    assert 'href="github.com/x/y/pull/542"' not in html_out
+    assert "PR #542" in html_out
 
 
 def test_render_md_includes_additional_prs_on_done_nodes(tmp_graph):

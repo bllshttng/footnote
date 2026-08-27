@@ -128,6 +128,27 @@ def test_render_target_config_defaults_and_typo():
     assert "roadmap" in str(exc.value)
 
 
+def test_render_target_config_accepts_scope_and_local_projection():
+    from fno.config import RenderTargetConfig
+
+    global_target = RenderTargetConfig.model_validate(
+        {"path": "~/vault/global.html", "scope": "all", "projection": "local"}
+    )
+    project_target = RenderTargetConfig.model_validate(
+        {"path": "~/vault/fno.html", "scope": "fno", "projection": "local"}
+    )
+    assert global_target.scope == "all"
+    assert project_target.scope == "fno"
+    assert global_target.project == "all"
+    assert project_target.project == "fno"
+
+    legacy_literal = RenderTargetConfig.model_validate(
+        {"path": "~/vault/legacy.html", "project": "all"}
+    )
+    assert legacy_literal.project == "all"
+    assert legacy_literal.scope is None
+
+
 def test_relative_target_path_rejected():
     from fno.config import RenderTargetConfig
 
@@ -136,17 +157,43 @@ def test_relative_target_path_rejected():
     assert "absolute" in str(exc.value)
 
 
-def test_misspelled_target_key_warns(caplog):
-    import logging
+def test_misspelled_target_key_refuses_the_row_without_bricking_settings(monkeypatch, capsys):
+    """Both halves. Either alone is the wrong fix.
 
-    from fno.config import RenderTargetConfig
+    Ignoring the typo publishes every project: `scope` defaults to `all`, so a
+    misspelled scope key on a public row silently widens the page to the whole
+    graph. Raising in the settings validator is worse - one typo in one row
+    then takes down every settings-loading fno command. So load_settings warns
+    and keeps working, and the RENDER layer refuses the row.
+    """
+    from fno.config import SettingsModel
+    from fno.graph import roadmap_public
 
-    with caplog.at_level(logging.WARNING, logger="fno.config"):
-        row = RenderTargetConfig.model_validate(
-            {"path": "~/v/x.html", "project": "fno", "projectio": "roadmap"}
-        )
-    assert row.projection == "backlog"
-    assert "projectio" in caplog.text
+    bad_row = {"path": "/tmp/x.html", "scop": "fno", "projection": "roadmap"}
+
+    # Half one: settings still load. Nothing else fno does may break.
+    settings = SettingsModel.model_validate(
+        {"backlog": {"render_targets": [bad_row]}}
+    )
+    assert settings is not None
+
+    # Half two: the row does not render, and the other rows still do.
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                bad_row,
+                {"path": "/tmp/good.html", "scope": "fno", "projection": "roadmap"},
+            ]
+        },
+    )
+    targets = roadmap_public._configured_targets()
+    paths = [t.path for t in targets]
+
+    assert "/tmp/x.html" not in paths, "a misspelled scope must not publish every project"
+    assert "/tmp/good.html" in paths, "one bad row must not take out the others"
+    err = capsys.readouterr().err
+    assert "'scop'" in err and "publish every project" in err
 
 
 def test_state_file_collision_skips_target(_isolate, tmp_path, monkeypatch, capsys):
@@ -295,7 +342,7 @@ def test_configured_target_written_on_mutation(_isolate, tmp_path, monkeypatch, 
     )
     text = _isolate["target"].read_text(encoding="utf-8")
     assert "second title" in text
-    assert "public items" in text
+    assert 'id="stats"' in text
 
 
 def test_target_mtime_advances_within_mutation_call(_isolate, tmp_path, monkeypatch):
@@ -370,7 +417,7 @@ def test_drained_project_writes_valid_empty_projection(_isolate, tmp_path, monke
     )
     text = target.read_text(encoding="utf-8")
     assert "STALE BYTES" not in text
-    assert "0 public items" in text
+    assert '"nodes":[]' in text
     assert "matches no graph entry" not in capsys.readouterr().err
 
 
@@ -438,6 +485,72 @@ def test_roadmap_projection_target(_isolate, tmp_path, monkeypatch):
     assert "shipped work" in text
 
 
+def test_local_targets_support_global_and_project_scopes_without_public_gate(
+    _isolate, tmp_path, monkeypatch, capsys
+):
+    global_target = tmp_path / "out" / "global.html"
+    project_target = tmp_path / "out" / "fno.html"
+    public_target = tmp_path / "out" / "public.html"
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{global_target}"\nscope = "all"\nprojection = "local"\n'
+        f'[[backlog.render_targets]]\npath = "{project_target}"\nscope = "fno"\nprojection = "local"\n'
+        f'[[backlog.render_targets]]\npath = "{public_target}"\nscope = "fno"\nprojection = "backlog"\n',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [
+            _entry(
+                "ab-private0",
+                title="x-1234 private marker",
+                project="fno",
+                plan_path="/Users/me/private-plan.md",
+            ),
+            _entry("ab-other000", title="other project", project="other"),
+        ],
+        "x-1234 private marker",
+    )
+
+    global_text = global_target.read_text(encoding="utf-8")
+    project_text = project_target.read_text(encoding="utf-8")
+    assert "ab-private0" in global_text and "ab-other000" in global_text
+    assert "/Users/me/private-plan.md" in global_text
+    assert "ab-private0" in project_text
+    assert "ab-other000" not in project_text
+    assert "/Users/me/private-plan.md" in project_text
+    assert not public_target.exists()
+    assert "leak gate refused" in capsys.readouterr().err
+
+
+def test_duplicate_target_paths_keep_the_first_projection(_isolate, tmp_path, monkeypatch, capsys):
+    target = tmp_path / "out" / "same.html"
+    _write_config(
+        f'[[backlog.render_targets]]\npath = "{target}"\nproject = "fno"\nprojection = "backlog"\n'
+        f'[[backlog.render_targets]]\npath = "{target}"\nscope = "fno"\nprojection = "local"\n',
+        tmp_path,
+        monkeypatch,
+    )
+    _mutate(
+        _isolate["graph"],
+        [
+            _entry(
+                "duplicate-marker",
+                title="clean public title",
+                project="fno",
+                plan_path="/Users/me/private-plan.md",
+            )
+        ],
+        "clean public title",
+    )
+
+    text = target.read_text(encoding="utf-8")
+    assert "clean public title" in text
+    assert "duplicate-marker" not in text
+    assert "/Users/me/private-plan.md" not in text
+    assert "duplicate render target path" in capsys.readouterr().err
+
+
 def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkeypatch, capsys):
     backlog_target = tmp_path / "out" / "backlog.html"
     roadmap_target = tmp_path / "out" / "roadmap.html"
@@ -467,3 +580,147 @@ def test_gate_is_scoped_to_the_targets_own_render_set(_isolate, tmp_path, monkey
     assert "leak gate refused" in err
     assert "ab-done0000" in err and "pr-reference" in err
     assert not roadmap_target.exists()
+
+
+def test_config_read_failure_still_renders_the_canonical_board(monkeypatch, capsys):
+    """A broken global config must not freeze the operator's board.
+
+    store.py stopped rendering GRAPH_HTML unconditionally once the board
+    became a configurable row, so returning no rows at all on a config-read
+    failure stopped the board advancing for as long as the config stayed
+    broken. That reads to the operator as a frozen page, which is the exact
+    complaint this work exists to answer.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("global config unreadable")
+
+    monkeypatch.setattr("fno.config_io.read_global_block", _boom)
+    targets = roadmap_public._configured_targets()
+
+    assert [t.path for t in targets] == [str(gc.GRAPH_HTML)]
+    assert targets[0].projection == "local"
+    assert targets[0].scope == "all"
+    assert "render_targets read failed" in capsys.readouterr().err
+
+
+def test_an_explicit_row_for_the_canonical_board_wins_over_the_default(monkeypatch):
+    """GRAPH_HTML is a render target now, not a forbidden state file.
+
+    It used to be refused by the state-file collision check and then written
+    anyway by the hardcoded default insert, so the operator could not scope or
+    re-project their own board. The default row only fills a gap.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                {"path": str(gc.GRAPH_HTML), "scope": "fno", "projection": "local"}
+            ]
+        },
+    )
+    targets = roadmap_public._configured_targets()
+
+    assert [t.path for t in targets] == [str(gc.GRAPH_HTML)]
+    assert targets[0].scope == "fno", "the operator's scope must survive"
+
+
+def test_the_canonical_board_is_written_under_the_graph_flock(tmp_path, monkeypatch):
+    """The board must not be the one artifact that lands after the lock drops.
+
+    Before it became a configurable row, store.py rendered it inside the flock
+    beside graph.md. Moving it out let two concurrent mutations land renders
+    out of order, so the operator's board could read older than the graph.json
+    next to it. A stale board is the complaint this work answers.
+
+    Asserts a POSITIVE marker: the file exists and carries the new entry at the
+    moment the lock is still held, observed from inside the mutation itself.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import store
+
+    # Deliberately NOT tmp_path/"graph.html": that is the path the
+    # non-canonical sibling-artifact branch writes, and a collision there
+    # would let this test pass on the wrong writer.
+    board = tmp_path / "board" / "canonical.html"
+    monkeypatch.setattr(gc, "GRAPH_HTML", board)
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
+    )
+
+    seen = {}
+    real_release = store._release_flock
+
+    def _observe(fd):
+        # Read the board BEFORE the lock drops. If the render moved back out
+        # from under the flock, this finds no file and the assertion below
+        # fails rather than passing on a later write.
+        seen["exists"] = board.exists()
+        seen["text"] = board.read_text() if board.exists() else ""
+        return real_release(fd)
+
+    monkeypatch.setattr(store, "_release_flock", _observe)
+
+    graph = tmp_path / "graph.json"
+    graph.write_text('{"entries": []}')
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph)
+
+    def _add(entries):
+        entries.append(
+            {
+                "id": "ab-10ck0001",
+                "title": "UnderTheFlock",
+                "status": "ready",
+                "priority": "p2",
+                "type": "feature",
+                "project": "fno",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        return entries
+
+    store.locked_mutate_graph(graph, _add)
+
+    assert seen.get("exists"), "the canonical board was not written under the flock"
+    assert "UnderTheFlock" in seen["text"], (
+        "the board written under the flock predates this mutation"
+    )
+
+
+def test_backlog_view_honors_the_configured_row_for_the_canonical_path(monkeypatch):
+    """`fno backlog view` used to overwrite the configured projection.
+
+    An operator who scopes their board to one project had it silently widened
+    to the whole graph by every view; one who points a PUBLIC projection at
+    that path had the full-detail private board written to a path the mux
+    /backlog route serves.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                {"path": str(gc.GRAPH_HTML), "scope": "fno", "projection": "backlog"}
+            ]
+        },
+    )
+    row = roadmap_public.canonical_target()
+    assert row is not None
+    assert row.scope == "fno", "the operator's scope must reach `view`"
+    assert row.projection == "backlog", "the operator's projection must reach `view`"
+
+    # Positive control: with no row configured, the default whole-graph local
+    # board still comes back, so the plain case is unchanged.
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
+    )
+    default = roadmap_public.canonical_target()
+    assert default is not None
+    assert default.scope == "all" and default.projection == "local"

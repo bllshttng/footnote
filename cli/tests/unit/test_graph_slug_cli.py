@@ -441,8 +441,9 @@ def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
     result = runner.invoke(app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)])
     assert result.exit_code == 0, result.output
     body = hp.read_text()
-    assert "Shipped &lt;b&gt;X&lt;/b&gt;" in body  # escaped, not raw HTML
-    assert "Shipped" in body  # Done column relabeled
+    assert r"\u003c b\u003eX\u003c/b\u003e" not in body
+    assert r"\u003cb\u003eX\u003c/b\u003e" in body
+    assert "Shipped" in body
 
 
 def test_roadmap_uses_live_epic_priority_and_shared_order(
@@ -484,12 +485,19 @@ def test_roadmap_uses_live_epic_priority_and_shared_order(
     )
     assert result.exit_code == 0, result.output
     body = hp.read_text()
-    html_now = body.split('data-col="Now"', 1)[1].split('data-col="Next"', 1)[0]
-    html_next = body.split('data-col="Next"', 1)[1].split('data-col="Later"', 1)[0]
-    assert html_now.index("Promoted child") < html_now.index("Loose now")
-    assert "Active epic" in html_now
-    assert "Claimed later" in html_now
-    assert "Unpromoted child" in html_next
+    # One document now, so assert POSITION within it. Aliasing two names to the
+    # same body turned the three checks below into presence checks, and the
+    # last one was the only proof a dead-epic child is not promoted.
+    def _at(needle: str) -> int:
+        index = body.find(needle)
+        assert index >= 0, f"{needle!r} missing from the rendered board"
+        return index
+
+    assert _at("Promoted child") < _at("Loose now")
+    assert _at("Active epic") < _at("Unpromoted child"), (
+        "a child of a dead epic must not outrank a live epic"
+    )
+    assert _at("Claimed later") < _at("Unpromoted child")
 
 
 def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
@@ -509,10 +517,14 @@ def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
     assert result.exit_code == 0, result.output
     body = hp.read_text().lower()
     assert "public blocked plan-less" in body  # the node still shows
-    # Check rendered markup, not the shared CSS (which still *defines* the
-    # .flag-* selectors). A leak is a flag badge element or a flag-tagged card.
-    assert '<span class="flag' not in body, "flag badge element leaked"
-    assert 'class="card flag' not in body, "card tagged with internal flag class"
+    # The flag markers this test used to grep for went with the card
+    # projection, so their absence proves nothing now. Assert the live rule
+    # instead: the operator's spec makes title, status, priority, size and
+    # group public, and DERIVED workflow flags public in neither.
+    for derived in ("needs plan", "no plan", "orphan", "stale claim", "over cap"):
+        assert derived not in body, f"derived workflow flag leaked: {derived}"
+    # Positive control, so the absences above cannot pass on an empty page.
+    assert 'class="pill"' in body, "the status pill is public by spec and must render"
 
 
 def test_roadmap_folds_triage_into_later(tmp_graph):

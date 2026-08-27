@@ -963,6 +963,7 @@ console.log("evictedRowCount: 18 cases ok");
     fn page_preserves_the_token_in_the_backlog_link() {
         assert!(PAGE.contains("id=\"backlog-link\""));
         assert!(PAGE.contains("/backlog?t=${encodeURIComponent(token)}"));
+        assert!(PAGE.contains("project=${encodeURIComponent(backlogProject)}"));
     }
 
     #[test]

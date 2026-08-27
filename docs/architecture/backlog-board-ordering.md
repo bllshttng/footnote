@@ -90,22 +90,11 @@ peer-exclusion and the self-anchor guard. Rejections - cross-lane anchor
 node, wrong flag count - all print to stderr and exit non-zero, and the mutator
 raises *before* the locked write so no partial rank is ever persisted.
 
-## HTML board: sub-lanes + WIP cap
+## HTML board: the canonical dashboard
 
-`render_html._board_html` gained two optional behaviors, used only by the master
-board (per-project sections render unchanged):
+`render_html` no longer emits a kanban of cards. One dashboard renderer now authors every backlog surface. Ordering there is the client-side filter's job, not a column bucket's. The sub-lane divider and the per-column WIP-cap `<summary>` went with the card projection they belonged to.
 
-- **Sub-lanes** (`sublanes=True`): a lightweight `<div class="lane">` divider before each project's run of cards, emitted only in multi-project columns.
-  A single-project column stays clean.
-  Cards are pre-sorted by the shared key, so the divider-on-project-change yields contiguous, labeled runs.
-- **WIP cap** (`caps`): each column `<summary>` shows `<count> / <cap>` with an
-  `.over` class when the count exceeds the cap; uncapped columns show the plain
-  count.
-
-`graph.md` headings stay bare (`## Now`, no count) so the Obsidian Kanban plugin
-keeps per-column collapse state across re-renders; the md board labels each card
-`· <project>` (the plugin is column-only, so per-card labels + clustered order
-are the swimlane ceiling there).
+`graph.md` headings stay bare (`## Now`, no count). That keeps the Obsidian Kanban plugin's per-column collapse state across re-renders. The md board labels each card `· <project>` instead. The plugin is column-only, so per-card labels and clustered order are the swimlane ceiling there.
 
 ## Defensive config read
 

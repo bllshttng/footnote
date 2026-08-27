@@ -21,21 +21,39 @@ if TYPE_CHECKING:
 # Public-facing column set + labels. Active work is folded into Now and the
 # internal Triage column is folded into Later; Done is relabeled "Shipped".
 _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done", "Shipped"))
+ALL_PROJECTS = "all"
 
 
-def _public_entries(entries: list[dict], project: str) -> list[dict]:
+def _scope_matches(entry: dict, scope: str, *, all_projects: bool = False) -> bool:
+    return all_projects or _project_key(entry) == scope
+
+
+def _target_scope(target: "RenderTargetConfig") -> tuple[str, bool]:
+    """Resolve new ``scope`` without changing legacy ``project`` semantics."""
+    if target.scope is not None:
+        return target.scope, target.scope == ALL_PROJECTS
+    if target.project is not None:
+        return target.project, False
+    return ALL_PROJECTS, True
+
+
+def _public_entries(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> list[dict]:
     return [
         e for e in entries
         if isinstance(e, dict)
         and e.get("public") is not False
-        and _project_key(e) == project
+        and _scope_matches(e, project, all_projects=all_projects)
     ]
 
 
-def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
+def _columns(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> dict[str, list[dict]]:
     cols: dict[str, list[dict]] = {col: [] for col, _ in _PUBLIC_COLUMNS}
     board_order, column_for = make_kanban_classifiers(entries)
-    for e in _public_entries(entries, project):
+    for e in _public_entries(entries, project, all_projects=all_projects):
         col = column_for(e)
         if col == "In Progress":
             col = "Now"
@@ -88,10 +106,12 @@ def public_projection_entries(entries: list[dict], project: str) -> list[dict]:
     return list(by_id.values())
 
 
-def public_backlog_entries(entries: list[dict], project: str) -> list[dict]:
+def public_backlog_entries(
+    entries: list[dict], project: str, *, all_projects: bool = False
+) -> list[dict]:
     return [
         entry
-        for entry in _public_entries(entries, project)
+        for entry in _public_entries(entries, project, all_projects=all_projects)
         if entry.get("status") in PUBLIC_BACKLOG_STATUSES
     ]
 
@@ -117,11 +137,15 @@ def _backlog_sections(entries: list[dict], project: str) -> list[tuple[str, list
 
 
 def render_public_roadmap_html(
-    entries: list[dict], project: str, cols: dict[str, list[dict]] | None = None
+    entries: list[dict],
+    project: str,
+    cols: dict[str, list[dict]] | None = None,
+    *,
+    all_projects: bool = False,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
     if cols is None:
-        cols = _columns(entries, project)
+        cols = _columns(entries, project, all_projects=all_projects)
     sections = [(label, cols[column]) for column, label in _PUBLIC_COLUMNS]
     return render_public_sections_html(
         sections, title=f"{project} roadmap", projection="roadmap"
@@ -129,12 +153,18 @@ def render_public_roadmap_html(
 
 
 def render_public_backlog_html(
-    entries: list[dict], project: str, backlog_entries: list[dict] | None = None
+    entries: list[dict],
+    project: str,
+    backlog_entries: list[dict] | None = None,
+    *,
+    all_projects: bool = False,
 ) -> str:
     from fno.graph.render_html import render_public_sections_html
 
     if backlog_entries is None:
-        backlog_entries = public_backlog_entries(entries, project)
+        backlog_entries = public_backlog_entries(
+            entries, project, all_projects=all_projects
+        )
     return render_public_sections_html(
         _backlog_sections_for(backlog_entries),
         title=f"{project} backlog",
@@ -158,7 +188,9 @@ def _state_file_collisions(path: Path) -> list[str]:
         for state_path in (
             gc.GRAPH_JSON,
             gc.GRAPH_MD,
-            gc.GRAPH_HTML,
+            # GRAPH_HTML is deliberately absent: it is a render target now,
+            # not a state file, and an operator row for it must win over the
+            # default row rather than be refused and then overwritten anyway.
             gc.GRAPH_ARCHIVE_JSON,
             gc.LEDGER_JSON,
             # the sha256 sidecar, the corruption-recovery backup, and the
@@ -173,6 +205,33 @@ def _state_file_collisions(path: Path) -> list[str]:
         return hits
     except Exception:
         return []
+
+
+def GRAPH_HTML_PATH() -> Path:
+    from fno.graph._constants import GRAPH_HTML
+
+    return Path(GRAPH_HTML)
+
+
+def render_one_target(target: "RenderTargetConfig", entries: list[dict]) -> None:
+    """Render exactly one configured target. Never raises."""
+    render_configured_targets(entries, _only=target)
+
+
+def _default_targets() -> "list[RenderTargetConfig]":
+    """The canonical local board, as an ordinary render-target row.
+
+    Named once and returned from both the success path and the degraded path.
+    store.py stopped rendering GRAPH_HTML unconditionally when the board became
+    a configurable row, so a config-read failure that returned no rows at all
+    would freeze the operator's board for as long as the config stayed broken.
+    """
+    from fno.config import RenderTargetConfig
+    from fno.graph._constants import GRAPH_HTML
+
+    return [
+        RenderTargetConfig(path=str(GRAPH_HTML), scope=ALL_PROJECTS, projection="local")
+    ]
 
 
 def _configured_targets() -> "list[RenderTargetConfig]":
@@ -216,7 +275,27 @@ def _configured_targets() -> "list[RenderTargetConfig]":
         # Per-row validation, not one atomic model_validate: a single bad row
         # (e.g. a relative path) must not stop every OTHER target rendering.
         out: list[RenderTargetConfig] = []
+        seen_paths: set[Path] = set()
         for row in rows:
+            # An unknown key is refused HERE, not in the settings validator: a
+            # raise there bricks every fno command over one typo. `scope`
+            # defaults to `all`, so a misspelled scope key that is merely
+            # ignored publishes every project on a page meant to name one.
+            # Skipping the row costs that one board.
+            unknown = (
+                [key for key in row if key not in RenderTargetConfig.model_fields]
+                if isinstance(row, dict)
+                else []
+            )
+            if unknown:
+                print(
+                    "Warning: skipping backlog.render_targets row "
+                    f"{row.get('path')!r}: unknown key(s) "
+                    f"{', '.join(repr(k) for k in unknown)}; a misspelled scope "
+                    "would otherwise publish every project",
+                    file=sys.stderr,
+                )
+                continue
             try:
                 target = RenderTargetConfig.model_validate(row)
             except Exception as exc:
@@ -234,8 +313,26 @@ def _configured_targets() -> "list[RenderTargetConfig]":
                     file=sys.stderr,
                 )
                 continue
+            resolved = Path(os.path.expanduser(target.path)).resolve()
+            if resolved in seen_paths:
+                print(
+                    f"Warning: skipping duplicate render target path {target.path}: "
+                    "duplicate render target path; first target kept",
+                    file=sys.stderr,
+                )
+                continue
+            seen_paths.add(resolved)
             out.append(target)
         _warn_shadowed_local_rows(out)
+        from fno.graph._constants import GRAPH_HTML
+
+        if not any(
+            Path(os.path.expanduser(target.path)).resolve() == Path(GRAPH_HTML).resolve()
+            for target in out
+        ):
+            # The legacy global board is now an ordinary local/all target. Keep
+            # it as the default row for installs that have no explicit replacement.
+            out[0:0] = _default_targets()
         return out
     except Exception as exc:
         # Every other degradation in this module warns; a silent [] here would
@@ -245,7 +342,7 @@ def _configured_targets() -> "list[RenderTargetConfig]":
             f"{type(exc).__name__}: {exc}",
             file=sys.stderr,
         )
-        return []
+        return _default_targets()
 
 
 # The shadow warning repeats on every mutation while misconfigured; dedupe
@@ -268,7 +365,10 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
         from fno.config import load_settings
 
         def _key(rows: "list[RenderTargetConfig]") -> list[tuple[str, str, str]]:
-            return sorted((r.path, r.project, r.projection) for r in rows)
+            return sorted(
+                (r.path, r.scope or r.project or ALL_PROJECTS, r.projection)
+                for r in rows
+            )
 
         local = _key(load_settings().backlog.render_targets)
         state = (local, _key(honored))
@@ -288,43 +388,99 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
         pass
 
 
-def render_configured_targets(entries: list[dict]) -> None:
-    """Render every configured public projection (x-9415). Called from
+def canonical_target() -> "RenderTargetConfig | None":
+    """The configured row for the canonical board, or the default row.
+
+    Split out so ``locked_mutate_graph`` can write this one INSIDE the graph
+    flock, the way graph.md always was. It is a state-dir path this repo owns,
+    so it carries none of the stall risk that keeps operator-chosen paths
+    outside the lock. Without this the canonical board is the only artifact
+    written after the lock drops, and two concurrent mutations can land their
+    renders out of order, leaving the operator's board older than the
+    graph.json beside it. A stale board is the complaint this work answers.
+    """
+    from fno.graph._constants import GRAPH_HTML
+
+    resolved = Path(GRAPH_HTML).resolve()
+    for target in _configured_targets():
+        if Path(os.path.expanduser(target.path)).resolve() == resolved:
+            return target
+    return None
+
+
+def render_configured_targets(
+    entries: list[dict],
+    *,
+    skip_canonical: bool = False,
+    _only: "RenderTargetConfig | None" = None,
+) -> None:
+    """Render every configured backlog projection (x-9415). Called from
     ``locked_mutate_graph`` AFTER graph.json is written, so it must never
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
-    byte-unchanged and names every offender; it still only skips the target."""
+    byte-unchanged and names every offender; it still only skips the target.
+
+    ``skip_canonical`` omits the canonical board, which the caller has already
+    written under the flock via ``render_one_target``.
+    """
     from fno.graph.render_html import (
         atomic_write_documents,
         leak_offender_lines,
         public_title_leaks,
     )
 
-    for target in _configured_targets():
+    from fno.graph.render_html import render_graph_html
+
+    canonical = GRAPH_HTML_PATH().resolve() if skip_canonical else None
+    for target in ([_only] if _only is not None else _configured_targets()):
         out = Path(os.path.expanduser(target.path))
-        if not any(_project_key(e) == target.project for e in entries):
+        if canonical is not None and out.resolve() == canonical:
+            continue
+        scope, all_projects = _target_scope(target)
+        scoped_entries = [
+            e for e in entries if _scope_matches(e, scope, all_projects=all_projects)
+        ]
+        if not all_projects and not scoped_entries:
             # Zero matching entries is the typo'd-project signature: leave the
             # operator's last good board byte-unchanged rather than replace it
             # with an empty projection. A project whose entries exist but are
             # all done/private still renders its valid empty projection below.
             print(
                 f"Warning: render target {out} matches no graph entry with "
-                f"project {target.project!r}; target left unchanged "
+                f"project {scope!r}; target left unchanged "
                 "(check the project name)",
                 file=sys.stderr,
             )
             continue
         try:
+            if target.projection == "local":
+                # Local is the explicit private projection: it keeps ids,
+                # details, plan paths, and Obsidian links and never enters the
+                # public title gate.
+                render_graph_html(
+                    entries,
+                    out,
+                    project=scope,
+                    all_projects=all_projects,
+                )
+                continue
             if target.projection == "roadmap":
                 # One _columns pass feeds both the gate's render set and the
                 # renderer (the manual verb derives it internally).
-                cols = _columns(entries, target.project)
+                cols = _columns(entries, scope, all_projects=all_projects)
                 render_set = [e for items in cols.values() for e in items]
-                html = render_public_roadmap_html(entries, target.project, cols=cols)
+                html = render_public_roadmap_html(
+                    entries, scope, cols=cols, all_projects=all_projects
+                )
             else:
-                render_set = public_backlog_entries(entries, target.project)
+                render_set = public_backlog_entries(
+                    entries, scope, all_projects=all_projects
+                )
                 html = render_public_backlog_html(
-                    entries, target.project, backlog_entries=render_set
+                    entries,
+                    scope,
+                    backlog_entries=render_set,
+                    all_projects=all_projects,
                 )
             offenders = public_title_leaks(render_set)
             if offenders:
