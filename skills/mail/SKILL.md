@@ -48,6 +48,8 @@ The recipient's own `unread` / `ack` / `drain-self` verbs exist to consume that
 fallback queue, which is why they read like a mailbox. They are the recovery
 path, not the main one.
 
+On claude, `drain-self` posts to the session's own messaging socket. Drained mail arrives as a cross-session message, not a user turn ([mail-socket-drain](../../docs/architecture/mail-socket-drain.md)).
+
 ### A miss is recoverable now - look before you re-send
 
 A durable receipt usually means the session is idle rather than gone, and an idle
