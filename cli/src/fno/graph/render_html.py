@@ -485,8 +485,11 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
   font-family:inherit; color:var(--ink); text-align:left; font-size:14px }
 .rmain:hover { background:var(--surface-2) }
 /* A public board emits an empty .rid, so the fixed id column would be a
-   permanent empty gutter on every row. Collapse it where there are no ids. */
-body[data-local="false"] .rmain { grid-template-columns:0 1fr auto auto }
+   permanent empty gutter on every row. Remove the TRACK, not just its width:
+   a zero-width column still takes the 11px grid gap, leaving a smaller gutter
+   rather than none. */
+body[data-local="false"] .rid { display:none }
+body[data-local="false"] .rmain { grid-template-columns:1fr auto auto }
 /* 104px = 15px padding + the 78px id column + its 11px gap. Collapse the
    column and the indent it was aligned to has to go with it. */
 body[data-local="false"] .detail { padding-left:15px }
@@ -560,8 +563,9 @@ footer { color:var(--muted); font-size:12px; border-top:1px solid var(--line); p
 footer span { font-family:"IBM Plex Mono",ui-monospace,monospace }
 @media (max-width:720px) {
   .rmain { grid-template-columns:66px 1fr; row-gap:5px }
-  body[data-local="false"] .rmain { grid-template-columns:0 1fr }
   .meta, .dot { grid-column:2; white-space:normal }
+  body[data-local="false"] .rmain { grid-template-columns:1fr }
+  body[data-local="false"] .meta, body[data-local="false"] .dot { grid-column:1 }
   .detail { padding-left:15px }
   .ghead .tw { display:none }
   .wrap { padding:16px 12px 64px }

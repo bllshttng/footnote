@@ -771,3 +771,24 @@ def test_the_light_palette_meets_wcag_aa_on_small_text():
         if got < 4.5:
             failures.append(f"{fg} on {bg} = {got:.2f}")
     assert not failures, "below 4.5:1 on small text: " + ", ".join(failures)
+
+
+def test_the_public_board_removes_the_id_track_not_just_its_width():
+    """A zero-width grid column still takes the gap between it and the next.
+
+    Collapsing the id column to 0 left an 11px indent on every public row
+    rather than none, because `gap` applies between all tracks including
+    zero-width ones. The track has to go, not its width.
+    """
+    from fno.graph.render_html import _DASHBOARD_CSS as css
+
+    assert 'body[data-local="false"] .rid { display:none }' in css, (
+        "the empty id span still occupies a grid cell on public boards"
+    )
+    assert 'body[data-local="false"] .rmain { grid-template-columns:1fr auto auto }' in css
+    assert "grid-template-columns:0 1fr" not in css, (
+        "a zero-width track still costs its gap; remove the track instead"
+    )
+    # The narrow layout re-points meta and dot, which would otherwise address
+    # a column that no longer exists on a public board.
+    assert 'body[data-local="false"] .meta, body[data-local="false"] .dot { grid-column:1 }' in css
