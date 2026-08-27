@@ -156,3 +156,11 @@ def test_the_cli_seam_prints_the_resolved_record(tmp_path, monkeypatch):
     assert record["model"] == "gpt-5.6-sol"
     assert record["provider"] == "openai"
     assert record["degraded_max"] is False
+
+
+def test_an_unrecognized_explicit_token_records_the_fallback_not_a_fulfilled_ask():
+    """source=explicit on an unknown token would give the event row false
+    provenance: downstream cannot tell it from a deliberate medium."""
+    out = resolve_review_level("ultra-plus", provider="openai")
+    assert out.level == rl.FALLBACK_LEVEL
+    assert out.level_source == "fallback"

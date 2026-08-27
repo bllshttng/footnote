@@ -173,7 +173,12 @@ def resolve_review_level(
         else:
             level = FALLBACK_LEVEL
             source = "fallback"
-    level = level if level in LEVEL_TO_BAND_EFFORT else FALLBACK_LEVEL
+    if level not in LEVEL_TO_BAND_EFFORT:
+        # An unrecognized token must not read as a request honored: keeping
+        # source="explicit" here would give the event row false provenance
+        # about what was asked, indistinguishable from a deliberate medium.
+        source = "fallback"
+        level = FALLBACK_LEVEL
     band, effort = LEVEL_TO_BAND_EFFORT[level]
 
     route_provider = (provider if provider is not None else _session_provider()) or "unknown"

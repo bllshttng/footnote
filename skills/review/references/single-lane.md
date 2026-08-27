@@ -14,6 +14,12 @@ Run `git diff @{upstream}...HEAD` (or `git diff main...HEAD` / `git diff HEAD~1`
 
 Pin the reviewed head now: `REVIEWED_HEAD=$(git rev-parse HEAD)`. Do not resolve it again after the pass runs.
 
+## Phase 0b - mechanical checks
+
+Reading is not the only instrument, and a diff that breaks the build must never classify pass - this leg is what the retired panel's automated checks carried, and it is mandatory, not optional. Run the repo's own automated checks over the reviewed head and feed their output into the candidate pool like any other finder: the typechecker, the linter, the build, the unit suite, and any journey or integration suite the repo names. Use each surface's documented runner (`fno doctor test`, `cargo test`, `pytest`) and read the real exit code from a file or the runner's own summary, never from a truncated pipe. A failing check, or an error/warning this diff introduces, enters Phase 2 as a candidate with the check's output as its failure scenario - usually CONFIRMED-blocking once verified at `REVIEWED_HEAD`. A pre-existing failure outside the diff is also a finding, marked as live-but-unrelated rather than dropped.
+
+Then one ERROR-class grep sweep per language surface over the changed lines (panic/`unwrap()` on reachable paths, bare `except`/swallowed errors, TODO/FIXME left in shipped code, committed secrets). Every hit is a candidate for Phase 2, not an automatic finding: verify it like everything else, quoting the proving line.
+
 ## Phase 1 - find candidates
 
 Work every angle in this same context, in one pass - do not skip angles for lack of fan-out, and do not spawn subagents. Each angle surfaces candidates with `file`, `line`, a one-line `summary`, and a concrete `failure_scenario`.

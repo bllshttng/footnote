@@ -39,14 +39,14 @@ The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prov
 - **`peer`** -> mode is `peer`. Print `running peer review (cross-model)`. The remaining tokens are peer's own arguments (`[PR#|branch] [codex|gemini]`). Continue to Step 3.
 - **`research`** -> mode is `research`. Print `running research-verify (advisory)`. The remaining tokens, if any, are the brief path. Continue to Step 4.
 - **`declare`** -> mode is `declare`. Print `emitting self-cert attestation (declare)`. Continue to Step 5.
-- **any other non-empty token that is not a number** -> this is an unknown mode. Do NOT default, do NOT guess. Print:
+- **any other non-empty token** -> one test decides between target and mode. If the token is all digits, it is a PR number - a target, not a mode. Else if `git rev-parse --verify --quiet <token>` succeeds, it is a branch target. Else if it contains a `/`, `.`, or ends in a recognized file suffix, treat it as a path target. Anything else is an unknown mode. Do NOT default, do NOT guess. Print:
 
   ```
   unknown review mode: '<token>'
   valid modes: prove-it, cleanup, peer, research, declare (bare = the fno review lane; or lead with a level: low medium high xhigh max)
   ```
 
-  and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default. A bare number is a PR target, not a mode.
+  and stop with a non-zero result (emit no review, dispatch no agents). This is the locked router contract: an unknown non-empty mode never silently falls through to a default. A number, a resolvable ref, or a path-like token is a TARGET, never a mode.
 
 > A level is never inherited from a previous invocation: an explicit token records `explicit`, a bare invocation sizes from the diff, and no run reuses a typed level (that upstream behavior is a hazard, not a feature).
 
@@ -78,7 +78,7 @@ fi
 
 ### 2b. Run the lane
 
-Load [single-lane.md](references/single-lane.md) and execute it in full, in this context, with the resolved level, flags, and target. The lane runs inline as ordinary tool calls: finder angles, dedup, three-state verify, cite-or-drop, carry-forward, then the classified emit. It dispatches ZERO review subagents and fires no native review verb; the panel that used to run here is retired, and the six specialist hunter agents remain individually invocable by their own names.
+Load [single-lane.md](references/single-lane.md) and execute it in full, in this context, with the resolved level, flags, and target. The lane runs inline as ordinary tool calls: mechanical checks, finder angles, dedup, three-state verify, cite-or-drop, carry-forward, then the classified emit. It dispatches ZERO review subagents and fires no native review verb; the panel that used to run here is retired, and the six specialist hunter agents remain individually invocable by their own names.
 
 ## Step 2p: prove-it mode (runtime evidence)
 

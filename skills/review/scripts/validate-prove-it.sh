@@ -21,10 +21,6 @@
 #         no-verdict states passing through untouched.
 set -uo pipefail
 
-script_usage() {
-  sed -n '/^# Modes:/,/^set -euo/p' "$0" | sed '/^set -euo/d; s/^# \{0,1\}//'
-}
-
 SELFTEST=0
 if [[ "${1:-}" == "--selftest" ]]; then
   SELFTEST=1

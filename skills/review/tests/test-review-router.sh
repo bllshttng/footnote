@@ -85,6 +85,18 @@ else
   fail "last-used inheritance prohibition missing"
 fi
 
+echo "== target tokens outrank the mode vocabulary (branch/path args resolve)"
+if has "$ROUTER" 'git rev-parse --verify --quiet'; then
+  pass "a resolvable ref is classified as a target before the unknown-mode refusal"
+else
+  fail "branch targets hit the unknown-mode refusal"
+fi
+if has "$ROUTER" 'never a mode'; then
+  pass "the number/ref/path exclusion from the refusal is stated"
+else
+  fail "target-vs-mode exclusion missing"
+fi
+
 echo "== the retired references are gone and cannot be loaded"
 for gone in references/sigma.md references/agent-selection.md; do
   if [ -e "$REPO_ROOT/skills/review/$gone" ]; then fail "$gone still exists"; else pass "$gone deleted"; fi

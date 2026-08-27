@@ -1276,15 +1276,17 @@ fn harness_can_self_review(harness: Option<&str>) -> bool {
 /// in `cli/src/fno/harness_names.py` minus the verb table in
 /// `cli/src/fno/review_capability.py`; the two are pinned to each other by
 /// `test_floor_verbless_set_stays_locked_to_the_rust_twin`, so a harness lands
-/// on both sides or the suite goes red.
-const KNOWN_VERBLESS_HARNESSES: &[&str] = &["gemini", "agy", "opencode"];
+/// on both sides or the suite goes red. Empty since the owned lane retired
+/// the verb table: the fno review lane runs wherever the plugin runs, so no
+/// KNOWN harness is verbless for review purposes and every attributed run
+/// floors.
+const KNOWN_VERBLESS_HARNESSES: &[&str] = &[];
 
 /// The self-review FLOOR policy on the author harness (x-129b). Distinct from
 /// the capability question above: `None` answers "unattributable", not
-/// "verbless". A KNOWN harness with a native verb floors; a KNOWN verbless
-/// harness (gemini/agy; opencode's verb is recorded but no lane this code
-/// drives can fire it) does not, because the floor would demand an
-/// attestation no native verb there produces. An UNRESOLVED harness (absent
+/// "verbless". With the owned lane as the default reviewer no KNOWN harness
+/// escapes the floor - claude and codex never did, and gemini/agy/opencode
+/// stopped when their release table emptied. An UNRESOLVED harness (absent
 /// or ambiguous ambient markers - a claude session started from a codex
 /// shell) floors, because ambiguity about who authored the run is not
 /// permission to skip its review. The explicit `--author-harness none` pin is
@@ -10435,23 +10437,28 @@ enum ProbeOutcome {
         stderr: String,
         stdout: String,
     },
-    /// The RUNNER could not answer: spawn failure or timeout. Distinct from
-    /// FAIL on purpose - the probe never executed, so its subject is untested,
-    /// not failing.
-    Blocked { why: String },
+    /// The RUNNER could not answer. Distinct from FAIL on purpose - the
+    /// probe never executed, so its subject is untested, not failing. `kind`
+    /// keeps the three causes distinguishable in the event map: a real
+    /// timeout renders as the legacy `timeout` token, spawn and wait
+    /// failures render as `blocked:<kind>` instead of being absorbed into it.
+    Blocked { kind: &'static str, why: String },
 }
 
 impl ProbeOutcome {
-    /// Event rendering: `pass` | `fail:<code>` | `timeout` | `skip`. The
-    /// legacy vocabulary the scoreboard folds join on; `verdict` is the
-    /// four-state contract prove-it reads.
+    /// Event rendering: `pass` | `fail:<code>` | `timeout` | `blocked:<kind>`
+    /// | `skip`. The legacy vocabulary the scoreboard folds join on;
+    /// `verdict` is the four-state contract prove-it reads.
     fn render(&self) -> String {
         match self {
             ProbeOutcome::Pass { .. } => "pass".to_string(),
             ProbeOutcome::Fail { code: Some(c), .. } => format!("fail:{c}"),
             ProbeOutcome::Fail { code: None, .. } => "fail:signal".to_string(),
             ProbeOutcome::Skip => "skip".to_string(),
-            ProbeOutcome::Blocked { .. } => "timeout".to_string(),
+            ProbeOutcome::Blocked {
+                kind: "timeout", ..
+            } => "timeout".to_string(),
+            ProbeOutcome::Blocked { kind, .. } => format!("blocked:{kind}"),
         }
     }
 
@@ -11182,15 +11189,17 @@ fn parse_probes_for(content: &str, key: &str) -> ProbeDecl {
 /// block reason exists to surface. Char-boundary aware because `String::drain`
 /// and `truncate` panic mid-character, and probe stderr regularly carries
 /// arrows, box-drawing, and accented words.
-fn keep_last_on_char_boundary(s: &mut String, cap: usize) {
+fn keep_last_on_char_boundary(s: &mut String, cap: usize) -> Option<usize> {
     if s.len() <= cap {
-        return;
+        return None;
     }
+    let total = s.len();
     let start = s.len() - cap;
     let cut = (start..=s.len())
         .find(|i| s.is_char_boundary(*i))
         .unwrap_or(s.len());
     s.drain(..cut);
+    Some(total)
 }
 
 /// SIGKILL a process group, ignoring "already gone".
@@ -11254,6 +11263,7 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
         Ok(c) => c,
         Err(e) => {
             return ProbeOutcome::Blocked {
+                kind: "spawn",
                 why: format!("probe spawn failed: {e}"),
             }
         }
@@ -11302,6 +11312,7 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
                 if start.elapsed() >= timeout {
                     kill_process_group(&mut child);
                     break ProbeOutcome::Blocked {
+                        kind: "timeout",
                         why: format!("timed out after {}s (killed)", timeout.as_secs()),
                     };
                 }
@@ -11310,6 +11321,7 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
             Err(e) => {
                 kill_process_group(&mut child);
                 break ProbeOutcome::Blocked {
+                    kind: "wait",
                     why: format!("probe wait failed: {e}"),
                 };
             }
@@ -11330,9 +11342,18 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     }
 
     let mut stdout = out_drain.join().unwrap_or_default();
-    keep_last_on_char_boundary(&mut stdout, PROBE_OUTPUT_CAP);
+    let stdout_total = keep_last_on_char_boundary(&mut stdout, PROBE_OUTPUT_CAP);
+    if let Some(total) = stdout_total {
+        // The truncation marker travels IN the captured text: a reader of the
+        // row must be able to tell cut evidence from naturally short output,
+        // which the cap's docstring promises.
+        stdout.insert_str(
+            0,
+            &format!("[fno probe: truncated, last {PROBE_OUTPUT_CAP} of {total} bytes] "),
+        );
+    }
     let mut stderr = err_drain.join().unwrap_or_default();
-    keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
+    let _stderr_total = keep_last_on_char_boundary(&mut stderr, PROBE_STDERR_CAP);
     match outcome {
         ProbeOutcome::Pass { .. } if stdout.trim().is_empty() => ProbeOutcome::Skip,
         ProbeOutcome::Pass { .. } => ProbeOutcome::Pass { stdout },
@@ -11525,7 +11546,7 @@ fn evaluate_done_probes(
             ProbeOutcome::Skip => failures.push(format!(
                 "{source} probe `{cmd}` exited 0 with no output - SKIP, not a pass (a probe must emit its own positive marker)"
             )),
-            ProbeOutcome::Blocked { why } => {
+            ProbeOutcome::Blocked { why, .. } => {
                 failures.push(format!("{source} probe `{cmd}` BLOCKED: {why}"))
             }
             ProbeOutcome::Fail { code, stderr, .. } => {
@@ -13240,7 +13261,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                     "stdout": "",
                 })
             }
-            ProbeOutcome::Blocked { why } => {
+            ProbeOutcome::Blocked { why, .. } => {
                 if failed_reason.is_none() {
                     failed_reason = Some(format!("`{cmd}` BLOCKED: {why}"));
                 }
@@ -21515,6 +21536,53 @@ mod done_probe_tests {
             outcome.verdict(),
             "FAIL",
             "the trap must read FAIL, not PASS"
+        );
+    }
+
+    #[test]
+    fn a_blocked_probe_keeps_the_timeout_token_and_names_other_causes() {
+        // A real timeout renders as the legacy token the scoreboard joins
+        // on; spawn and wait failures must not be absorbed into it, or a
+        // misconfigured probe reads as "too slow" when it never ran.
+        let tmp = tempfile::tempdir().unwrap();
+        let outcome = run_probe("sleep 5", tmp.path(), Duration::from_millis(100));
+        assert!(matches!(
+            &outcome,
+            ProbeOutcome::Blocked {
+                kind: "timeout",
+                ..
+            }
+        ));
+        assert_eq!(outcome.render(), "timeout");
+        assert_eq!(
+            ProbeOutcome::Blocked {
+                kind: "spawn",
+                why: "boom".into()
+            }
+            .render(),
+            "blocked:spawn"
+        );
+    }
+
+    #[test]
+    fn oversized_probe_output_travels_with_its_marker() {
+        // The cap's contract: cut evidence is NAMED, so a short-looking tail
+        // cannot pass as naturally short output.
+        let tmp = tempfile::tempdir().unwrap();
+        let plan = tmp.path().join("p.md");
+        std::fs::write(&plan, fm("done_probes:\n  - \"seq 1 5000\"")).unwrap();
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            plan.to_string_lossy().into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 0);
+        let body: Value = serde_json::from_str(&json).unwrap();
+        let out = body["results"][0]["stdout"].as_str().unwrap();
+        assert!(
+            out.contains("[fno probe: truncated"),
+            "row must name the cut: {out}"
         );
     }
 

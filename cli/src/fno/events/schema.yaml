@@ -2369,9 +2369,9 @@ event_types:
         fires:
           type: integer
           description: "Total stop-hook fires for this session (including this one)."
-        probe_results:
+        done_probes:
           type: object
-          description: "Optional. Per-probe outcome of the done_probes conjunct, keyed by the BARE command string (the scoreboard joins this map by exact command). Values are the legacy render vocabulary: 'pass', 'fail:<code>', 'fail:signal', 'skip', 'timeout'. 'skip' is exit 0 with NO captured output - the vacuous-probe trap held rather than passed. The richer prove-it row shape (verdict PASS|FAIL|BLOCKED|SKIP, an optional claim from a trailing ' # <claim>' on the declaration, bounded captured stdout and stderr truncated with a marker rather than dropped) is carried by the fno-agents probe-run JSON output that the close verbs and /fno:review prove-it consume."
+          description: "Optional. Per-probe outcome of the done_probes conjunct, keyed by the BARE command string (the scoreboard joins this map by exact command). Values are the legacy render vocabulary: 'pass', 'fail:<code>', 'fail:signal', 'skip', 'timeout', plus 'blocked:<spawn>' and 'blocked:<wait>' for a probe whose RUNNER could not answer, which real timeouts ('timeout') no longer absorb. 'skip' is exit 0 with NO captured output - the vacuous-probe trap held rather than passed. The richer prove-it row shape (verdict PASS|FAIL|BLOCKED|SKIP, an optional claim from a trailing ' # <claim>' on the declaration, bounded captured stdout and stderr truncated with a marker rather than dropped) is carried by the fno-agents probe-run JSON output that the close verbs and /fno:review prove-it consume."
         consecutive_unchanged:
           type: integer
           description: "Consecutive OBSERVATIONS of an identical fingerprint (including this one). Not a fire count: fires closer together than the debounce gap (FNO_LOOPCHECK_MIN_FIRE_GAP_SECS, default 300s) collapse into a single observation, so reaching N implies at least (N-1)*gap seconds of unchanged world. A changed fingerprint breaks the streak at any spacing. Reaches N -> backstop."
