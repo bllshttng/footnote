@@ -7110,14 +7110,30 @@ pub(crate) fn apply_session_transition(
             if branch_name.is_empty() || branch_fno_id.is_empty() {
                 return Err("branch needs a distinct name and fno_id".to_string());
             }
-            if registry
+            if let Some(existing) = registry
                 .entries
                 .iter()
-                .any(|entry| entry.name == branch_name)
+                .find(|entry| entry.harness_session_id.as_deref() == Some(successor_session_id))
             {
+                if existing.forked_from_session_id.as_deref() == Some(&predecessor_session_id)
+                    && existing.fno_id.as_deref() == Some(branch_fno_id)
+                {
+                    return Ok(state::SessionTransition::Branch);
+                }
                 return Err(format!(
-                    "branch name {branch_name:?} already has a registry row"
+                    "branch successor session {successor_session_id:?} already has a row"
                 ));
+            }
+            let branch_base = branch_name.to_string();
+            let mut unique_branch_name = branch_base.clone();
+            let mut suffix = 2;
+            while registry
+                .entries
+                .iter()
+                .any(|entry| entry.name == unique_branch_name)
+            {
+                unique_branch_name = format!("{branch_base}-{suffix}");
+                suffix += 1;
             }
             if registry
                 .entries
@@ -7141,7 +7157,7 @@ pub(crate) fn apply_session_transition(
                 return Err("branch fno_id must be distinct from predecessor".to_string());
             }
             let branch = registry.entries[index].fork_for_session(
-                branch_name,
+                &unique_branch_name,
                 successor_session_id,
                 &predecessor_session_id,
                 branch_fno_id,
@@ -11581,6 +11597,25 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         );
         assert_eq!(registry.entries[1].fno_id.as_deref(), Some("thread-c"));
         assert_ne!(registry.entries[0].fno_id, registry.entries[1].fno_id);
+
+        assert_eq!(
+            apply_session_transition(
+                &mut registry,
+                "worker",
+                "session-d",
+                Some(true),
+                "worker-branch",
+                "thread-d",
+            )
+            .unwrap(),
+            state::SessionTransition::Branch
+        );
+        let second_branch = registry
+            .entries
+            .iter()
+            .find(|entry| entry.fno_id.as_deref() == Some("thread-d"))
+            .expect("second branch row");
+        assert_eq!(second_branch.name, "worker-branch-2");
     }
 
     fn probe_err() -> crate::provider::ReachabilityProbeError {
