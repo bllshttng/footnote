@@ -980,3 +980,110 @@ def build_report(
     scheduled tick call this, so their reports cannot diverge."""
     obs = collect_observations(roots, now_s=now_s, **kwargs)
     return classify(obs)
+
+
+def publish_report(
+    snapshot: Snapshot,
+    *,
+    source: str,
+    now_s: float,
+    mail_to: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """The one publish sequence, shared by the manual verb and the tick:
+    mail (change-gated, push not pull), sweep-file stamps (the positive
+    complete marker only on a fully measured scan), the scan event plus
+    fresh finding events, and the deduplicated durable question.
+
+    Returns the payload dict callers render or JSON-emit. ``log`` receives
+    human-status lines (stderr for the CLI, logging for the tick)."""
+    from fno.agents import watchdog as wd
+
+    note = log or (lambda _line: None)
+    payload = snapshot_payload(snapshot)
+    signature = ""
+
+    # Mail before the sweep-file write: the change gate compares against the
+    # PREVIOUS sweep's stamps, and only a settled-ok mail advances them.
+    try:
+        ok, receipt, signature = wd.unfinished_mail_gate(snapshot, mail_to or "")
+        if not ok:
+            note(f"watchdog mail: {receipt}")
+    except Exception as exc:  # noqa: BLE001 - mail never breaks the report
+        note(f"watchdog mail failed: {exc}")
+
+    prev_events_sig = wd._last_unfinished_signature()
+    wd.write_sweep_file(
+        source,
+        dict(payload["counts"]),
+        now_s,
+        signature,
+        events_signature=snapshot_signature(snapshot),
+        unfinished={
+            "counts": payload["counts"],
+            "complete": payload["complete"],
+            "signature": signature,
+        },
+    )
+
+    wd.emit_event(
+        "watchdog_unfinished_work_scan",
+        {
+            "complete": payload["complete"],
+            "finding_count": len(payload["findings"]),
+            **{
+                dim: payload["counts"][dim]
+                for dim in DIMENSIONS
+                if payload["counts"][dim] is not None
+            },
+            "unknown_dimensions": [
+                dim
+                for dim in DIMENSIONS
+                if payload["dimensions"][dim]["state"] == UNKNOWN_DIM
+            ],
+            "warnings": payload["warnings"],
+        },
+    )
+    fresh = fresh_identities(snapshot, prev_events_sig)
+    for finding in snapshot.findings:
+        if finding_identity(finding) in fresh:
+            wd.emit_event(
+                "watchdog_unfinished_work_finding",
+                {
+                    "kind": finding.kind,
+                    "subject": finding.subject,
+                    "basis": finding.basis,
+                    "clear_command": finding.clear_command,
+                    "node": finding.node_id,
+                    "pr_number": finding.pr_number,
+                    "cwd": finding.cwd,
+                    "age_s": None if finding.age_s is None else int(finding.age_s),
+                },
+            )
+
+    try:
+        from fno.agents.stale_escalate import escalate_unfinished
+        from fno.carveout.core import resolve_carveout_root, resolve_session_id
+        from fno.paths import resolve_repo_root
+
+        try:
+            session_id = resolve_session_id(resolve_repo_root())
+        except Exception:  # noqa: BLE001 - an unbound sweep still records the ask
+            session_id = None
+        outcome, qid = escalate_unfinished(
+            list(snapshot.findings),
+            root=resolve_carveout_root(),
+            session_id=session_id,
+            cwd=Path.cwd(),
+        )
+        if outcome == "none":
+            note("watchdog escalation: no unfinished-work findings")
+        else:
+            note(
+                f"watchdog escalation: {outcome} {qid} "
+                f"({len(snapshot.findings)} finding(s))"
+            )
+    except Exception as exc:  # noqa: BLE001 - named, never fatal to the report
+        note(f"watchdog escalation failed: {exc}")
+
+    return payload

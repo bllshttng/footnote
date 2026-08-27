@@ -518,3 +518,86 @@ esac
     assert data["reviewed_count"] >= 1, data
     names = [v["name"] for v in data["verdicts"]]
     assert "code-review" in names, data
+
+
+# --- the unfinished-work report events (schema + producer equivalence) ----
+
+
+def test_unfinished_work_events_build_and_land(tmp_path, monkeypatch):
+    """The report's two event types validate through the real schema builder
+    and land in events.jsonl through the same append path every watchdog
+    event uses, so the report's telemetry cannot silently validate-fail the
+    way a whole lane once did."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from fno import paths as _paths
+    from fno.agents import unfinished_work as uw
+    from fno.agents import watchdog as wd
+
+    events_file = tmp_path / "events.jsonl"
+    monkeypatch.setattr(_paths, "state_dir", lambda: tmp_path)
+
+    now = _dt(2026, 8, 25, 18, 40, 0, tzinfo=_tz.utc).timestamp()
+    obs = uw.Observations(
+        now_epoch=now,
+        graph_ok=True,
+        claims_ok=True,
+        registry_ok=True,
+        github_ok=True,
+        nodes=(
+            uw.NodeObs(
+                node_id="x-7d02",
+                status="in_progress",
+                touched_at_epoch=now - 116 * 3600,
+                claim={"state": "free"},
+            ),
+        ),
+        worktrees=(),
+        prs=(),
+    )
+    snapshot = uw.classify(obs)
+    payload = uw.snapshot_payload(snapshot)
+
+    wd.emit_event(
+        "watchdog_unfinished_work_scan",
+        {
+            "complete": payload["complete"],
+            "finding_count": len(payload["findings"]),
+            **{
+                dim: payload["counts"][dim]
+                for dim in uw.DIMENSIONS
+                if payload["counts"][dim] is not None
+            },
+            "unknown_dimensions": [
+                dim
+                for dim in uw.DIMENSIONS
+                if payload["dimensions"][dim]["state"] == uw.UNKNOWN_DIM
+            ],
+            "warnings": payload["warnings"],
+        },
+    )
+    for finding in payload["findings"]:
+        wd.emit_event(
+            "watchdog_unfinished_work_finding",
+            {
+                "kind": finding["kind"],
+                "subject": finding["subject"],
+                "basis": finding["basis"],
+                "clear_command": finding["clear_command"],
+                "node": finding["node_id"],
+                "pr_number": finding["pr_number"],
+                "cwd": finding["cwd"],
+                "age_s": finding["age_s"],
+            },
+        )
+
+    rows = [json.loads(ln) for ln in events_file.read_text().splitlines() if ln.strip()]
+    types = [r["type"] for r in rows]
+    assert "watchdog_unfinished_work_scan" in types
+    assert "watchdog_unfinished_work_finding" in types
+    scan = next(r for r in rows if r["type"] == "watchdog_unfinished_work_scan")
+    assert scan["data"]["complete"] is True
+    assert scan["data"]["finding_count"] == 1
+    assert scan["data"]["started_free_claim"] == 1
+    finding = next(r for r in rows if r["type"] == "watchdog_unfinished_work_finding")
+    assert finding["data"]["clear_command"] == "/fno:target x-7d02"

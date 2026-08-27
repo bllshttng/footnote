@@ -1976,14 +1976,18 @@ def test_cli_prints_the_terminal_harness_row_count(monkeypatch, capsys):
     monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
 
+    # The terminal-row count rides the DIAGNOSTIC table (--only); the default
+    # surface is the unfinished-work report.
     agents_cli.cmd_watchdog(
-        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+        json_out=False, apply=False, apply_all=False, only=LEAVE, mail_to=""
     )
 
     assert "terminal harness rows: 3" in capsys.readouterr().out
 
 
-def test_cli_escalates_stale_rows_before_only_filter(monkeypatch):
+def test_cli_default_report_escalates_findings_not_session_rows(monkeypatch):
+    """The default surface escalates the unfinished-work findings and never
+    builds a durable question out of session verdicts."""
     from fno.agents import cli as agents_cli
     from fno.agents import stale_escalate
 
@@ -2001,42 +2005,65 @@ def test_cli_escalates_stale_rows_before_only_filter(monkeypatch):
         "counts": {STALE: 1, WAKE: 1},
         "warnings": [],
     }
-    monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, rows))
+    # The default path never reads the session sweep; pin that by refusing
+    # if it does.
+    monkeypatch.setattr(
+        watchdog,
+        "run_sweep",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("report must not sweep")),
+    )
+    finding = uw.Finding(
+        kind=uw.KIND_STARTED,
+        subject="x-7d02",
+        basis="in_progress, claim free, idle 116h",
+        clear_command="/fno:target x-7d02",
+        node_id="x-7d02",
+    )
+
+    class _Snap:
+        generated_at = "x"
+        findings = (finding,)
+        complete = True
+        warnings = ()
+        dimensions = {
+            dim: uw.DimensionState(uw.MEASURED, 1 if dim == uw.KIND_STARTED else 0, None)
+            for dim in uw.DIMENSIONS
+        }
+
+    monkeypatch.setattr(uw, "build_report", lambda roots, **kw: _Snap())
     monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
-    monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
-    monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
     monkeypatch.setattr(watchdog, "emit_event", lambda *a, **k: None)
+    monkeypatch.setattr(
+        watchdog, "unfinished_mail_gate", lambda *a, **k: (True, "no recipient", "")
+    )
     captured = []
     monkeypatch.setattr(
         stale_escalate,
-        "escalate_stale",
-        lambda rows, **kwargs: captured.extend(rows) or ("recorded", "q-stale"),
+        "escalate_unfinished",
+        lambda findings, **kwargs: captured.extend(findings) or ("recorded", "q-uw"),
     )
 
     agents_cli.cmd_watchdog(
-        json_out=False, apply=False, apply_all=False, only=WAKE, mail_to=""
+        json_out=False, apply=False, apply_all=False, only=None, mail_to=""
     )
 
-    assert [(row.row_id, row.node, row.basis) for row in captured] == [
-        ("stale-row", None, "blocked 14h")
-    ]
+    assert [f.subject for f in captured] == ["x-7d02"]
 
 
 def test_cli_refused_sweep_never_escalates(monkeypatch):
     from fno.agents import cli as agents_cli
-    from fno.agents import stale_escalate
 
     refused = _refused_payload()
     monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (refused, []))
     monkeypatch.setattr(
-        stale_escalate,
-        "escalate_stale",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not escalate")),
+        uw,
+        "build_report",
+        lambda roots, **kw: (_ for _ in ()).throw(AssertionError("must not report")),
     )
 
     with pytest.raises(typer.Exit) as exc:
         agents_cli.cmd_watchdog(
-            json_out=False, apply=False, apply_all=False, only=None, mail_to=""
+            json_out=False, apply=False, apply_all=False, only=LEAVE, mail_to=""
         )
 
     assert exc.value.exit_code == 3
@@ -2376,7 +2403,7 @@ def test_cli_refused_sweep_exits_loud_without_writing(monkeypatch, tmp_path):
 
     try:
         agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
-                                only=None, mail_to=None)
+                                only=LEAVE, mail_to=None)
     except typer.Exit as e:
         assert e.exit_code == 3
     else:
@@ -2740,7 +2767,7 @@ def test_the_roster_refusal_carries_its_cause(monkeypatch, tmp_path, capsys):
     err = _io.StringIO()
     with contextlib.redirect_stderr(err), pytest.raises(typer.Exit):
         agents_cli.cmd_watchdog(json_out=False, apply=False, apply_all=False,
-                                only=None, mail_to=None)
+                                only=LEAVE, mail_to=None)
     assert "timed out after 30.0s" in err.getvalue()
 
 

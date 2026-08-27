@@ -2301,12 +2301,17 @@ class TestTickRecordsAndDeadline:
         assert len(ends) == 1
         assert ends[0]["outcome"] == "ok"
 
-    def test_watchdog_tick_escalates_stale_rows(self, monkeypatch, tmp_path):
+    def test_watchdog_tick_publishes_the_unfinished_report(self, monkeypatch, tmp_path):
+        """Report mode: the tick builds the unfinished-work snapshot and
+        publishes it through the shared producer. Session verdicts drive
+        nothing, and the retired stale-session escalation does not exist to
+        be called."""
         import typer
         from typer.testing import CliRunner
         from unittest.mock import MagicMock
 
-        from fno.agents import stale_escalate, watchdog
+        from fno.agents import stale_escalate
+        from fno.agents import unfinished_work as uw
         from fno.pr_watch import cli as prcli
         from fno.pr_watch._dispatch import TickResult
 
@@ -2328,27 +2333,30 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr("fno.recovery.run_recovery_sweep", lambda *a, **k: 0)
         monkeypatch.setattr("fno.agents.sweep.run_sweep", lambda **kw: ([], 0))
         monkeypatch.setattr(prcli, "_emit_event", lambda *a, **k: True)
+        monkeypatch.setattr(prcli, "_watchdog_recovery_roots", lambda: [tmp_path])
 
-        row = watchdog.Row("stale-row", "stale-worker", "blocked", None, "/tmp/stale")
-        verdict = watchdog.Verdict(
-            "stale-row", "stale-worker", "blocked", watchdog.STALE, "blocked 14h", "human"
-        )
-        payload = {
-            "verdicts": [verdict._asdict()],
-            "counts": {watchdog.STALE: 1},
-            "warnings": [],
-        }
-        monkeypatch.setattr(watchdog, "run_sweep", lambda **kw: (payload, [row]))
-        monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
-        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
-        monkeypatch.setattr(watchdog, "write_sweep_file", lambda *a, **k: None)
-        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
-        captured = []
-        monkeypatch.setattr(
-            stale_escalate,
-            "escalate_stale",
-            lambda rows, **kwargs: captured.extend(rows) or ("recorded", "q-stale"),
-        )
+        published = []
+
+        class _Snap:
+            generated_at = "2026-08-27T00:00:00Z"
+            findings = ()
+            complete = True
+            warnings = ()
+            dimensions = {
+                dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+            }
+
+        def _fake_build_report(roots, *, now_s=None, **kw):
+            published.append(("roots", [str(r) for r in roots]))
+            return _Snap()
+
+        def _fake_publish(snapshot, *, source, now_s, mail_to, log=None):
+            published.append(("publish", source, mail_to))
+            return {"counts": {}, "findings": [], "warnings": []}
+
+        monkeypatch.setattr(uw, "build_report", _fake_build_report)
+        monkeypatch.setattr(uw, "publish_report", _fake_publish)
+        assert not hasattr(stale_escalate, "escalate_stale")
         monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
         monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
 
@@ -2357,9 +2365,8 @@ class TestTickRecordsAndDeadline:
         result = CliRunner().invoke(app, [])
 
         assert result.exit_code == 0, result.output
-        assert [(item.row_id, item.node, item.basis) for item in captured] == [
-            ("stale-row", None, "blocked 14h")
-        ]
+        assert ("publish", "tick", "") in published
+        assert ("roots", [str(tmp_path)]) in published
 
     def test_watchdog_tick_publishes_a_refused_recovery_once(self, monkeypatch, tmp_path):
         """An unusable recoverable is refound every tick until it ages out.
@@ -2396,6 +2403,28 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr("fno.worktree_stranded.sweep", lambda **kw: [])
         monkeypatch.setattr("fno.worktree_stranded.apply_sweep", lambda *a, **kw: [])
 
+        from fno.agents import unfinished_work as uw
+
+        class _Snap:
+            generated_at = "2026-08-27T00:00:00Z"
+            findings = ()
+            complete = True
+            warnings = ()
+            dimensions = {
+                dim: uw.DimensionState(uw.MEASURED, 0, None) for dim in uw.DIMENSIONS
+            }
+
+        monkeypatch.setattr(
+            uw, "build_report", lambda roots, *, now_s=None, **kw: _Snap()
+        )
+        monkeypatch.setattr(
+            uw,
+            "publish_report",
+            lambda snapshot, *, source, now_s, mail_to, log=None: {
+                "counts": {}, "findings": [], "warnings": []
+            },
+        )
+
         sweep_payload = {
             "verdicts": [],
             "counts": {},
@@ -2404,18 +2433,14 @@ class TestTickRecordsAndDeadline:
         monkeypatch.setattr(
             watchdog, "run_sweep", lambda **kw: (sweep_payload, [])
         )
-        monkeypatch.setattr(watchdog, "mail_gate", lambda *a, **k: (True, "", ""))
-        monkeypatch.setattr(watchdog, "_last_events_signature", lambda: "")
+        monkeypatch.setattr(watchdog, "_last_recovery_events_signature", lambda: "")
         sweep_writes = []
         monkeypatch.setattr(
             watchdog,
             "write_sweep_file",
-            lambda *a, **k: sweep_writes.append(k.get("events_signature", "")),
-        )
-        monkeypatch.setattr(watchdog, "fresh_non_leave", lambda *a, **k: set())
-        monkeypatch.setattr(
-            "fno.agents.stale_escalate.escalate_stale",
-            lambda rows, **kwargs: ([], "q-none"),
+            lambda *a, **k: sweep_writes.append(k.get("recovery_events_signature"))
+            if "recovery_events_signature" in k
+            else None,
         )
 
         def _recovery_row(sid):
@@ -2490,9 +2515,8 @@ class TestTickRecordsAndDeadline:
         applied = [d for kind, d in watchdog_events if kind == "watchdog_applied"]
         assert [d["row_id"] for d in refusals] == ["sid-fresh"]
         assert [d["row_id"] for d in applied] == ["sid-applied"]
-        # The deferred candidate published nothing, so the rewritten sweep
+        # The deferred candidate published nothing, so the recovery receipt
         # signature must not claim its sid: the next tick sees it fresh.
-        assert any("sid-defer:" in sig for sig in sweep_writes)
         assert "sid-defer:" not in sweep_writes[-1]
         assert "sid-fresh:" in sweep_writes[-1]
 

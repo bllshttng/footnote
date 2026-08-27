@@ -2831,17 +2831,19 @@ class RecoveryBlock(BaseModel):
         tracked separately.
     watchdog:
         The external fleet watchdog lane riding the same tick (x-55c3):
-        ``off`` (default) is a no-op, ``report`` classifies every fleet row
-        from transcript truth and emits one ``watchdog_verdict`` event per
-        non-leave row, ``wake`` additionally applies the wake lane (resume +
-        content-verified message). No tick value ever reaps or reroutes:
-        those stop a session and stay behind an operator running
-        ``fno agents watchdog --apply-all`` by hand.
+        ``off`` (default) is a no-op, ``report`` publishes the
+        unfinished-work report (in_progress nodes with free claims, done
+        branches ahead of ``origin/main``, dirty ownerless worktrees, and
+        ownerless PRs older than 24h; every finding names its clearing
+        verb), ``wake`` additionally resumes positively stalled sessions.
+        No tick value ever reaps or reroutes: those stop a session and stay
+        behind an operator running ``fno agents watchdog --apply-all`` by
+        hand.
     watchdog_mail_to:
-        Mail handle the watchdog digest is pushed to (agent name, short id,
-        or ``project:<slug>``). Empty (default) mails nobody. A digest is
-        sent only when the non-leave verdict set changed since the previous
-        sweep, so a row stuck for a day reads once, not every tick.
+        Mail handle the unfinished-work digest is pushed to (agent name,
+        short id, or ``project:<slug>``). Empty (default) mails nobody. A
+        digest is sent only when the finding set changed since the previous
+        sweep, so a finding stuck for a day reads once, not every tick.
     watchdog_reap:
         Whether ``--apply-all`` may execute the REAP lane (default ``false``).
         Wake, reroute and ghost are recoverable; reap runs ``stop`` then
