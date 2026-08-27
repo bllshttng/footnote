@@ -345,25 +345,24 @@ def classify(
             ahead_clause = (
                 f", {ahead} commits ahead of origin/main" if ahead is not None else ""
             )
-            findings.append(
-                _checked(
-                    Finding(
-                        kind=KIND_STARTED,
-                        subject=node.node_id,
-                        basis=(
-                            f"in_progress, claim free, idle {_hours(idle)}"
-                            f"{ahead_clause}"
-                        ),
-                        clear_command=f"/fno:target {node.node_id}",
-                        node_id=node.node_id,
-                        cwd=(wt.path if wt is not None else node.worktree_path or node.cwd),
-                        age_s=idle,
-                        ahead_count=ahead,
+            finding = _checked(
+                Finding(
+                    kind=KIND_STARTED,
+                    subject=node.node_id,
+                    basis=(
+                        f"in_progress, claim free, idle {_hours(idle)}"
+                        f"{ahead_clause}"
                     ),
-                    warnings,
-                )
+                    clear_command=f"/fno:target {node.node_id}",
+                    node_id=node.node_id,
+                    cwd=(wt.path if wt is not None else node.worktree_path or node.cwd),
+                    age_s=idle,
+                    ahead_count=ahead,
+                ),
+                warnings,
             )
-        findings = [f for f in findings if f]
+            if finding is not None:
+                findings.append(finding)
 
     # Dimension 2: done nodes whose worktree branch never reached main.
     if unknown[KIND_DONE_AHEAD] is None:
@@ -383,28 +382,27 @@ def classify(
                 continue
             if wt.ahead_count <= 0:
                 continue
-            findings.append(
-                _checked(
-                    Finding(
-                        kind=KIND_DONE_AHEAD,
-                        subject=node.node_id,
-                        basis=(
-                            f"done, worktree {wt.path} is {wt.ahead_count} "
-                            f"commits ahead of fresh origin/main; a squash "
-                            f"merge explains it innocently, nothing else does"
-                        ),
-                        clear_command=(
-                            f"cd {wt.repo_root} && fno workspace worktree "
-                            f"stranded --apply"
-                        ),
-                        node_id=node.node_id,
-                        cwd=wt.path,
-                        ahead_count=wt.ahead_count,
+            finding = _checked(
+                Finding(
+                    kind=KIND_DONE_AHEAD,
+                    subject=node.node_id,
+                    basis=(
+                        f"done, worktree {wt.path} is {wt.ahead_count} "
+                        f"commits ahead of fresh origin/main; a squash "
+                        f"merge explains it innocently, nothing else does"
                     ),
-                    warnings,
-                )
+                    clear_command=(
+                        f"cd {wt.repo_root} && fno workspace worktree "
+                        f"stranded --apply"
+                    ),
+                    node_id=node.node_id,
+                    cwd=wt.path,
+                    ahead_count=wt.ahead_count,
+                ),
+                warnings,
             )
-        findings = [f for f in findings if f]
+            if finding is not None:
+                findings.append(finding)
 
     # Dimension 3: dirty worktrees with no authoritative live owner.
     if unknown[KIND_DIRTY] is None:
@@ -420,28 +418,27 @@ def classify(
             if verdict == OWNER_UNKNOWN:
                 _mark_unknown(KIND_DIRTY, f"owner liveness unreadable for {w.path}")
                 continue
-            findings.append(
-                _checked(
-                    Finding(
-                        kind=KIND_DIRTY,
-                        subject=w.path,
-                        basis=(
-                            f"{w.dirty_count} dirty path(s), no live owner, "
-                            + (
-                                f"node {w.node_id}"
-                                if w.node_id
-                                else "no resolved node"
-                            )
-                        ),
-                        clear_command=_dirty_clear_command(w),
-                        node_id=w.node_id,
-                        cwd=w.path,
-                        dirty_count=w.dirty_count,
+            finding = _checked(
+                Finding(
+                    kind=KIND_DIRTY,
+                    subject=w.path,
+                    basis=(
+                        f"{w.dirty_count} dirty path(s), no live owner, "
+                        + (
+                            f"node {w.node_id}"
+                            if w.node_id
+                            else "no resolved node"
+                        )
                     ),
-                    warnings,
-                )
+                    clear_command=_dirty_clear_command(w),
+                    node_id=w.node_id,
+                    cwd=w.path,
+                    dirty_count=w.dirty_count,
+                ),
+                warnings,
             )
-        findings = [f for f in findings if f]
+            if finding is not None:
+                findings.append(finding)
 
     # Dimension 4: ownerless open PRs older than the ceiling.
     if unknown[KIND_PR] is None:
@@ -465,26 +462,25 @@ def classify(
                     KIND_PR, f"owner liveness unreadable for pr {pr.pr_number}"
                 )
                 continue
-            findings.append(
-                _checked(
-                    Finding(
-                        kind=KIND_PR,
-                        subject=f"pr-{pr.pr_number}",
-                        basis=(
-                            f"open {_hours(age)} with no live owner"
-                            + (f", node {pr.node_id}" if pr.node_id else "")
-                            + (f", {pr.pr_url}" if pr.pr_url else "")
-                        ),
-                        clear_command=f"/fno:pr check {pr.pr_number}",
-                        node_id=pr.node_id,
-                        pr_number=pr.pr_number,
-                        pr_url=pr.pr_url,
-                        age_s=age,
+            finding = _checked(
+                Finding(
+                    kind=KIND_PR,
+                    subject=f"pr-{pr.pr_number}",
+                    basis=(
+                        f"open {_hours(age)} with no live owner"
+                        + (f", node {pr.node_id}" if pr.node_id else "")
+                        + (f", {pr.pr_url}" if pr.pr_url else "")
                     ),
-                    warnings,
-                )
+                    clear_command=f"/fno:pr check {pr.pr_number}",
+                    node_id=pr.node_id,
+                    pr_number=pr.pr_number,
+                    pr_url=pr.pr_url,
+                    age_s=age,
+                ),
+                warnings,
             )
-        findings = [f for f in findings if f]
+            if finding is not None:
+                findings.append(finding)
 
     findings.sort(key=lambda f: (_SEVERITY[f.kind], -(f.age_s or 0), f.subject))
 
@@ -835,20 +831,25 @@ def collect_observations(
     # Worktree observations.
     worktrees: list[WorktreeObs] = []
     for path, repo, branch in worktree_rows:
-        node_id, _entry = resolve_node_id(path, branch, entries_by_id) if entries_by_id else (None, None)
+        wt_node_id: Optional[str]
+        _entry: Optional[dict]
+        if entries_by_id:
+            wt_node_id, _entry = resolve_node_id(path, branch, entries_by_id)
+        else:
+            wt_node_id, _entry = None, None
         dirty = dirty_path_count(Path(path), runner=runner)
         ahead = (
             ahead_of_main(Path(path), runner=runner)
             if fetched_ok.get(repo)
             else None
         )
-        claim_view = claim_views.get(node_id) if node_id else None
-        handles = _registry_handles([path])
+        claim_view = claim_views.get(wt_node_id) if wt_node_id else None
+        handles: list[str] = _registry_handles([path])
         if claim_view and claim_view.get("holder") and claim_view.get("state") in (
             "live", "suspect", "stale",
         ):
             holder = claim_view.get("holder")
-            if holder not in handles:
+            if holder and holder not in handles:
                 handles.append(holder)
         probes = tuple(
             p for p in (
@@ -871,7 +872,7 @@ def collect_observations(
                 branch=branch,
                 dirty_count=dirty,
                 ahead_count=ahead,
-                node_id=node_id,
+                node_id=wt_node_id,
                 owner_probes=probes,
             )
         )
@@ -892,13 +893,13 @@ def collect_observations(
         if worktree_path is None and node_cwd and node_cwd in worktree_by_path:
             worktree_path = node_cwd
         candidate_paths = [p for p in (worktree_path, node_cwd) if p]
-        handles = _registry_handles(candidate_paths)
+        node_handles: list[str] = _registry_handles(candidate_paths)
         if claim_view and claim_view.get("holder") and claim_view.get("state") in (
             "live", "suspect", "stale",
         ):
             holder = claim_view.get("holder")
-            if holder not in handles:
-                handles.append(holder)
+            if holder and holder not in node_handles:
+                node_handles.append(holder)
         probes = tuple(
             p for p in (
                 _probe_for(
@@ -909,7 +910,7 @@ def collect_observations(
                         else None
                     ),
                 )
-                for h in handles
+                for h in node_handles
             )
             if p is not None
         )
@@ -947,9 +948,9 @@ def collect_observations(
             # fit before the deadline.
             prs_unscanned = True
             break
-        node_id = getattr(candidate, "node_id", None)
+        pr_node_id = getattr(candidate, "node_id", None)
         number = getattr(candidate, "pr_number", None)
-        state: Optional[str] = None
+        pr_state: Optional[str] = None
         opened_epoch: Optional[float] = None
         try:
             reader = pr_state_reader
@@ -960,7 +961,7 @@ def collect_observations(
                     return read_pr_state(cand, reviewers=reviewers)
 
             observation = reader(candidate, reviewers=[])
-            state = str(getattr(observation, "state", "") or "") or None
+            pr_state = str(getattr(observation, "state", "") or "") or None
             opened_epoch = _parse_iso_epoch(getattr(observation, "opened_at", None))
         except Exception as exc:  # noqa: BLE001 - one failed read degrades the dim
             github_ok = False
@@ -969,10 +970,10 @@ def collect_observations(
             PrObs(
                 pr_number=int(number) if number is not None else 0,
                 pr_url=getattr(candidate, "pr_url", None),
-                node_id=node_id,
-                state=state,
+                node_id=pr_node_id,
+                state=pr_state,
                 opened_at_epoch=opened_epoch,
-                owner_probes=node_probes.get(node_id, ()),
+                owner_probes=node_probes.get(pr_node_id, ()) if pr_node_id else (),
             )
         )
 
