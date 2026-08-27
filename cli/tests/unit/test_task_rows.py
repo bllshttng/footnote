@@ -240,14 +240,17 @@ def test_in_progress_without_session_id_exits_4(
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
-        lambda *a, **k: SimpleNamespace(session_id=None, harness="claude"),
+        lambda *a, **k: SimpleNamespace(
+            session_id=None, harness="claude", disposition="empty"
+        ),
     )
     result = runner.invoke(
         graph_cli.task_app,
         ["update", "x-t1", "1.1", "--status", "in_progress"],
     )
     assert result.exit_code == 4
-    assert "pass --owner <full-session-id>" in result.output
+    assert "set --owner <full-session-id>" in result.output
+    assert "fno agents spawn" in result.output
 
 
 def test_unprovable_pid_refuses_rather_than_degrading(
@@ -807,12 +810,14 @@ def test_done_with_no_provable_identity_stops_instead_of_looking_held(
 
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
-        lambda *a, **k: type("I", (), {"session_id": None, "harness": None})(),
+        lambda *a, **k: type(
+            "I", (), {"session_id": None, "harness": None, "disposition": "empty"}
+        )(),
     )
     refused = _task_update(monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done")
     assert refused.exit_code == 4
     assert refused.exit_code != 3, "3 reads as a peer hold and is retried forever"
-    assert SID_A in refused.output, "the refusal names the owner to pass as --owner"
+    assert "cannot prove a per-worker identity" in refused.output
 
 
 # -- review round 6 --
@@ -821,12 +826,14 @@ def test_done_with_no_provable_identity_stops_instead_of_looking_held(
 def test_owner_cannot_take_a_live_claim(
     tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """`--owner` is the escape this verb's refusals advertise for a holder
-    that is GONE.
+    """A holder id a LIVE other process anchors is shared, not owned.
 
-    release_claim is non-strict, so honoring it against a live claim deletes a
-    running worker's claim and the next in_progress succeeds on an empty key.
-    The pid discriminates: a claim anchored to OUR session pid is ours.
+    release_claim is non-strict, so honoring an identity against a live claim
+    deletes a running worker's claim and the next in_progress succeeds on an
+    empty key. The pid discriminates: a claim anchored to OUR session pid is
+    ours; the same holder name under a different live pid is the shared-anchor
+    refusal (4, an identity failure - not 3, which waves.md 3e reads as a
+    peer hold to retry).
     """
     other = subprocess.Popen(["/bin/sleep", "30"])
     try:
@@ -841,8 +848,9 @@ def test_owner_cannot_take_a_live_claim(
             monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done",
             "--owner", SID_A,
         )
-        assert refused.exit_code == 3
+        assert refused.exit_code == 4
         assert "held LIVE" in refused.output
+        assert "identity is shared" in refused.output
         assert lock.exists(), "a live worker's claim must survive the refusal"
         assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "in_progress"
     finally:
@@ -856,3 +864,214 @@ def test_owner_cannot_take_a_live_claim(
         "positive control: once that holder is gone the same call settles"
     )
     assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
+
+
+# -- per-worker identity: roster name, manifest anchor, --takeover --
+
+
+def test_worker_name_is_the_holder_for_a_spawned_worker(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """FNO_WORKER_NAME is the holder a spawned worker claims under: two
+    workers in one worktree then show two owners in task list."""
+    key = task_key("x-t1", "1.1")
+    monkeypatch.setenv("FNO_WORKER_NAME", "amber-otter")
+    got = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress"
+    )
+    assert got.exit_code == 0, got.output
+    assert "holder=amber-otter" in got.output
+    assert claim_status(key, root=claims_root)["holder"] == "amber-otter"
+    assert _node_row(tmp_graph, "x-t1", "1.1")["owner"] == "amber-otter"
+
+    # A second worker name on the sibling task: distinct owners, no collapse.
+    monkeypatch.setenv("FNO_WORKER_NAME", "blue-heron")
+    second = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "in_progress"
+    )
+    assert second.exit_code == 0, second.output
+    assert claim_status(task_key("x-t1", "1.2"), root=claims_root)["holder"] == (
+        "blue-heron"
+    )
+
+
+def _ident(session_id, harness, disposition):
+    return type(
+        "I", (), {"session_id": session_id, "harness": harness, "disposition": disposition}
+    )()
+
+
+def test_manifest_only_identity_refused_as_a_shared_anchor(
+    tmp_graph: Path,
+    tmp_path: Path,
+    claims_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An identity that only matches the worktree manifest is shared by every
+    fno process in the directory: the verb refuses (exit 4) and names the fix.
+
+    Positive control: the SAME id proven by process ancestry (disposition
+    proven) claims fine through the identical verb and manifest.
+    """
+    manifest_dir = tmp_path / "wt"
+    (manifest_dir / ".fno").mkdir(parents=True)
+    (manifest_dir / ".fno" / "target-state.md").write_text(
+        "---\ntitle: t\n---\n\nharness_session_id: 2782a6e1-aaaa-4bbb-8ccc-00000000m1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(manifest_dir)
+    shared = "2782a6e1-aaaa-4bbb-8ccc-00000000m1"
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident(shared, "claude", "single"),
+    )
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress"
+    )
+    assert refused.exit_code == 4
+    assert "shared" in refused.output
+    assert not claim_path(task_key("x-t1", "1.1"), root=claims_root).exists(), (
+        "a refused shared anchor leaves no lockfile"
+    )
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident(shared, "claude", "proven"),
+    )
+    ok = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress"
+    )
+    # Positive control: a process-proven id passes the same manifest.
+    assert ok.exit_code == 0, ok.output
+
+
+def test_manifest_anchor_is_found_from_a_subdirectory(
+    tmp_graph: Path,
+    tmp_path: Path,
+    claims_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The manifest read walks UP from cwd: a worker in a worktree subdirectory
+    still hits the shared-anchor refusal instead of waving the id through."""
+    manifest_dir = tmp_path / "wt2"
+    (manifest_dir / ".fno").mkdir(parents=True)
+    (manifest_dir / ".fno" / "target-state.md").write_text(
+        "fno_id: shared-fno-id\n", encoding="utf-8"
+    )
+    (manifest_dir / "sub").mkdir()
+    monkeypatch.chdir(manifest_dir / "sub")
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident("shared-fno-id", "claude", "single"),
+    )
+    refused = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress"
+    )
+    assert refused.exit_code == 4
+    assert "shared" in refused.output
+
+    # A stray manifest ABOVE the project must not anchor lookups inside it:
+    # the walk stops at the ``.git`` marker and reads only the project's own.
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "target-state.md").write_text(
+        "fno_id: stray-above-id\n", encoding="utf-8"
+    )
+    (manifest_dir / ".git").write_text("gitdir: elsewhere\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda *a, **k: _ident("stray-above-id", "claude", "single"),
+    )
+    unaffected = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "in_progress"
+    )
+    # The stray id above the repo root must not anchor this lookup.
+    assert unaffected.exit_code == 0, unaffected.output
+
+
+def test_takeover_settles_a_gone_holder_under_the_takers_identity(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """--takeover is the gone-holder escape: a stale claim plus a stale row
+    owner clear, and the taker's own identity (here the roster name) becomes
+    the holder. A live holder is refused exit 3 by the positive control."""
+    key = task_key("x-t1", "1.1")
+    dead = _dead_pid()
+    assert _task_update(
+        monkeypatch, dead, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    ).exit_code == 0
+    assert claim_status(key, root=claims_root)["state"] == "stale"
+
+    monkeypatch.setenv("FNO_WORKER_NAME", "calm-ibex")
+    taken = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--takeover",
+    )
+    assert taken.exit_code == 0, taken.output
+    assert _node_row(tmp_graph, "x-t1", "1.1")["owner"] == "calm-ibex"
+    assert claim_status(key, root=claims_root)["holder"] == "calm-ibex"
+
+    # The taker can settle it: done under the same identity.
+    done = _task_update(monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done")
+    assert done.exit_code == 0, done.output
+    assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
+
+
+def test_owner_and_takeover_together_refuse(
+    tmp_graph: Path, monkeypatch: pytest.MonkeyPatch
+):
+    result = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A, "--takeover",
+    )
+    assert result.exit_code == 2
+    assert "One flag, one meaning" in result.output
+
+
+def test_takeover_done_over_a_gone_owner_row(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """done --takeover clears a stale row owner; a live claim is refused."""
+    dead = _dead_pid()
+    assert _task_update(
+        monkeypatch, dead, "x-t1", "1.1", "--status", "in_progress", "--owner", SID_A,
+    ).exit_code == 0
+
+    monkeypatch.setenv("FNO_WORKER_NAME", "done-taker")
+    done = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "done", "--takeover",
+    )
+    assert done.exit_code == 0, done.output
+    assert _node_row(tmp_graph, "x-t1", "1.1")["status"] == "done"
+
+
+def test_takeover_give_back_over_a_gone_owner_row(
+    tmp_graph: Path, claims_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    dead = _dead_pid()
+    assert _task_update(
+        monkeypatch, dead, "x-t1", "1.2", "--status", "in_progress", "--owner", SID_A,
+    ).exit_code == 0
+
+    monkeypatch.setenv("FNO_WORKER_NAME", "giveback-taker")
+    given = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.2", "--status", "pending", "--takeover",
+    )
+    assert given.exit_code == 0, given.output
+    row = _node_row(tmp_graph, "x-t1", "1.2")
+    assert row["status"] == "pending" and row["owner"] is None
+
+    # Refusal strings advertise the NEW escape, never the old --owner one.
+    assert _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "in_progress",
+        "--owner", SID_A,
+    ).exit_code == 0
+    non_holder = _task_update(
+        monkeypatch, _live_pid(), "x-t1", "1.1", "--status", "pending",
+        "--owner", SID_B,
+    )
+    assert non_holder.exit_code == 3
+    assert "--takeover" in non_holder.output
+    assert "re-run with --owner" not in non_holder.output
+

@@ -2268,6 +2268,18 @@ def cmd_spawn(
             )
         os.environ.pop("TARGET_NO_MERGE", None)
 
+    # Per-worker identity for task claims: the roster name is the only
+    # identity a spawned worker can prove is ITS OWN (a session id inherited
+    # from a shared manifest or a daemon-anchored pid collapses siblings onto
+    # one holder). Overwrite any inherited value - a dispatcher that spawned
+    # this spawn must not leak ITS name into the child. The pane lane
+    # snapshots os.environ into pane_env below, and the bg/thread lanes hand
+    # the detached session this process's environment, so one write covers
+    # both. Registered in prov_prev so the finally restores the caller's env,
+    # the same scoping contract FNO_NODE is pinned to.
+    prov_prev["FNO_WORKER_NAME"] = os.environ.get("FNO_WORKER_NAME")
+    os.environ["FNO_WORKER_NAME"] = name
+
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
     spawn_succeeded = False

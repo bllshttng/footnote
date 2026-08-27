@@ -154,3 +154,41 @@ def test_provenance_keys_are_set_or_cleared_as_a_group(
     import os
 
     assert os.environ["FNO_PLAN"] == "/parent/plan.md"
+
+
+# -- per-worker identity: FNO_WORKER_NAME (task-claim holder) --
+
+
+def test_spawn_exports_the_roster_name_as_worker_name(
+    spawned_env: Dict[str, Any],
+) -> None:
+    """The roster name reaches the worker's environment as FNO_WORKER_NAME.
+
+    The name is the only identity a spawned worker can prove is its own, so
+    the export must carry the SAME name the registry row was minted under -
+    which is what task claims adopt as their holder.
+    """
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg"],
+    )
+    assert result.exit_code == 0, result.output
+    assert spawned_env["env"]["FNO_WORKER_NAME"] == "w1"
+
+
+def test_spawn_overwrites_an_inherited_worker_name(
+    spawned_env: Dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dispatcher that spawned this spawn must not leak ITS name: the child's
+    own roster name is the only provable one, so an inherited value loses."""
+    from fno.agents.cli import agents_app
+
+    monkeypatch.setenv("FNO_WORKER_NAME", "parent-otter")
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w2", "hi", "--harness", "claude", "--substrate", "bg"],
+    )
+    assert result.exit_code == 0, result.output
+    assert spawned_env["env"]["FNO_WORKER_NAME"] == "w2"

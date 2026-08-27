@@ -6681,19 +6681,32 @@ def cmd_task_update(
         None,
         "--owner",
         help=(
-            "Full harness session id of the holder (tests / operators). Default: "
-            "this session's proven id; never a head-8 handle - a codex UUIDv7 "
-            "head-8 is a ~65.5s clock bucket two workers can share."
+            "Names THIS caller as the holder (tests / operators / a "
+            "hand-started session that can prove its own id). The escape for "
+            "a GONE holder is --takeover, not this flag. Never a head-8 "
+            "handle - a codex UUIDv7 head-8 is a ~65.5s clock bucket two "
+            "workers can share."
+        ),
+    ),
+    takeover: bool = typer.Option(
+        False,
+        "--takeover",
+        help=(
+            "Take a task whose holder is GONE: the stale claim and row owner "
+            "clear under MY resolved identity (worker name or session id). A "
+            "live holder is never takeable (exit 3). Mutually exclusive with "
+            "--owner."
         ),
     ),
 ) -> None:
     """Transition one task row; the claim IS the transition.
 
     ``--status in_progress`` takes the ``task:<node>:<task>`` claim FIRST
-    (exit 3 naming the holder when a peer owns it, exit 4 when no session id
-    is provable and none was passed), then writes the row. ``--status done``
-    writes the row and releases the claim. ``--status pending`` is the
-    holder-only give-back for a blocked or failed task.
+    (exit 3 naming the holder when a peer owns it, exit 4 when no per-worker
+    identity is provable and none was passed), then writes the row.
+    ``--status done`` writes the row and releases the claim. ``--status
+    pending`` is the holder-only give-back for a blocked or failed task.
+    ``--takeover`` is the gone-holder escape for all three transitions.
     """
     from pathlib import Path
 
@@ -6702,7 +6715,7 @@ def cmd_task_update(
         ClaimHeldByOther,
         ClaimValidationError,
     )
-    from fno.claims.self_identity import resolve_self_identity
+    from fno.claims.self_identity import resolve_task_holder
     from fno.claims.session_pid import resolve_session_harness, resolve_session_pid
     from fno.claims.tasks import acquire_task, release_task, task_key
     from fno.graph.store import locked_mutate_graph
@@ -6711,6 +6724,14 @@ def cmd_task_update(
     if status not in TASK_STATUSES:
         typer.echo(
             f"invalid --status {status!r}; one of {', '.join(TASK_STATUSES)}", err=True
+        )
+        raise typer.Exit(code=2)
+    if owner and takeover:
+        typer.echo(
+            "--owner names this caller as the holder; --takeover replaces a "
+            "gone holder with the ambient identity. One flag, one meaning - "
+            "pass one, never both",
+            err=True,
         )
         raise typer.Exit(code=2)
     node_id, plan_path = _task_plan_or_exit(node, _graph_path())
@@ -6723,42 +6744,65 @@ def cmd_task_update(
         )
         raise typer.Exit(code=2)
 
-    # The claims layer's identity resolver (the same one self_stamp's
-    # resolve_self_session_id delegates to); the graph layer may not import
-    # fno.agents. Same semantics: no session id unless a harness is proven too.
+    # The claims layer's per-worker holder resolver: a spawned worker's roster
+    # name, else a session id this process can prove (or that at least is not
+    # the worktree manifest's shared value). The graph layer may not import
+    # fno.agents, so the resolver lives in fno.claims.
     if owner:
         holder: Optional[str] = owner
     else:
-        _ident = resolve_self_identity()
-        holder = _ident.session_id if (_ident.session_id and _ident.harness) else None
+        holder, identity_reason = resolve_task_holder()
+        if not holder:
+            typer.echo(
+                f"cannot prove a per-worker identity ({identity_reason}); "
+                "set --owner <full-session-id> or spawn through "
+                "fno agents spawn",
+                err=True,
+            )
+            raise typer.Exit(code=4)
+    # The owner arm assigns a truthy owner; the resolver arm raised on empty.
+    assert holder is not None
     key = task_key(node_id, task_id)
 
-    if owner:
-        # `--owner` is the escape this verb's own refusals advertise for a
-        # holder that is GONE. release_claim is non-strict (it unlinks whenever
-        # the names match), so honoring it against a LIVE claim deletes a
-        # running worker's claim and the next in_progress succeeds on an empty
-        # key: the double-dispatch these verbs exist to close. The pid is the
-        # discriminator, not the name - a claim anchored to OUR session pid is
-        # ours to settle even when identity is otherwise unprovable.
-        from fno.claims.core import claim_status as _live_check
+    # The pid is the discriminator, not the name. A claim whose holder name
+    # equals OURS but whose pid is a different live process proves the
+    # identity is shared (an opencode worker's daemon-anchored pid, a
+    # manifest-inherited session id) - refusing with the fix beats attributing
+    # a stranger's work. release_claim is non-strict, so honoring a takeover
+    # against a LIVE claim would delete a running worker's claim and let the
+    # next in_progress succeed on an empty key: the double-dispatch these verbs
+    # exist to close. A live claim is never takeable, whoever it names; this
+    # guard runs for every transition, so done/pending cannot settle a live
+    # worker's row either.
+    from fno.claims.core import claim_status as _live_check
 
-        try:
-            _st = _live_check(key)
-        except Exception:  # noqa: BLE001 - an unreadable claim blocks nothing
-            _st = {}
-        if (
-            _st.get("state") == "live"
-            and _st.get("holder") == owner
-            and _st.get("pid") != resolve_session_pid()
-        ):
+    try:
+        _st = _live_check(key)
+    except Exception:  # noqa: BLE001 - an unreadable claim blocks nothing
+        _st = {}
+    if _st.get("state") == "live":
+        if takeover:
             typer.echo(
-                f"{key} is held LIVE by {owner} (pid={_st.get('pid')}); "
-                "--owner is the escape for a holder that is gone, not a way "
-                "to take a claim from a running worker",
+                f"{key} is held LIVE by {_st.get('holder')} "
+                f"(pid={_st.get('pid')}); "
+                + (
+                    "--takeover is the escape for a holder that is gone, not "
+                    "a way to take a claim from a running worker"
+                    if _st.get("holder") == holder
+                    else "a running worker is never takeable"
+                ),
                 err=True,
             )
             raise typer.Exit(code=3)
+        if _st.get("holder") == holder and _st.get("pid") != resolve_session_pid():
+            typer.echo(
+                f"{key} is held LIVE by this holder identity under another "
+                f"live process (pid={_st.get('pid')}); the identity is "
+                "shared, not owned. Re-run from the owning session, or spawn "
+                "through fno agents spawn",
+                err=True,
+            )
+            raise typer.Exit(code=4)
 
     def _set_row(mutate) -> Optional[dict]:
         found: list[dict] = []
@@ -6781,26 +6825,12 @@ def cmd_task_update(
         return found[0] if found else None
 
     def _release_claim_or_note() -> None:
-        if holder:
-            release_task(node_id, task_id, holder)
-        else:
-            # done/give-back from a context with no provable session id: the
-            # row write (the record) must not fail on identity. The claim is
-            # pid-liveness anchored, so it frees when its process dies.
-            typer.echo(
-                f"claim {key} not released (no provable holder); "
-                "pid-liveness clears it",
-                err=True,
-            )
+        # Our own claim releases by name. A takeover'd GONE holder's claim file
+        # names the gone holder, so this unlinks nothing there - it reads stale
+        # (its pid is dead) and frees by liveness.
+        release_task(node_id, task_id, holder)
 
     if status == "in_progress":
-        if not holder:
-            typer.echo(
-                "cannot prove a session id for the holder; "
-                "pass --owner <full-session-id>",
-                err=True,
-            )
-            raise typer.Exit(code=4)
         pid = resolve_session_pid()
         if pid is None:
             # An unprovable pid would anchor the claim to this short-lived CLI
@@ -6891,28 +6921,19 @@ def cmd_task_update(
         # The row write is holder-guarded like the give-back: a non-holder
         # marking a live task done leaves the peer working a task the board
         # reports finished. An UNowned row (never claimed) accepts done from
-        # anyone - there is no in-flight worker to contradict.
+        # anyone - there is no in-flight worker to contradict. --takeover
+        # relaxes the owner match for a GONE holder; the live-claim guard
+        # above already proved nothing live is holding it.
         done_refused: list[str] = []
 
         def _done_row(row) -> None:
             owner_now = row.get("owner")
-            if owner_now and owner_now != (holder or ""):
+            if owner_now and owner_now != holder and not takeover:
                 done_refused.append(str(owner_now))
                 return
             row.update({"status": "done"})
 
         row = _set_row(_done_row)
-        if done_refused and not holder:
-            # 4, not 3: the boundary settle passes no --owner, and waves.md 3e
-            # turns a 3 into a peer hold the wave retries forever. This is an
-            # identity failure, which is a stop that names its own fix.
-            typer.echo(
-                f"task {task_id} is owned by {done_refused[0]} and this "
-                "context cannot prove a session id; re-run with "
-                f"--owner {done_refused[0]}",
-                err=True,
-            )
-            raise typer.Exit(code=4)
         if done_refused:
             # The owner check has no liveness test, so a reaped or handed-off
             # holder would wedge the row at in_progress forever. Name the
@@ -6920,7 +6941,7 @@ def cmd_task_update(
             typer.echo(
                 f"task {task_id} held by {done_refused[0]}; only the holder "
                 "can mark it done. If that holder is gone, re-run with "
-                f"--owner {done_refused[0]}",
+                "--takeover",
                 err=True,
             )
             raise typer.Exit(code=3)
@@ -6934,13 +6955,8 @@ def cmd_task_update(
     # pending: the holder-only give-back. The owner check runs INSIDE the
     # locked mutation: a check on a pre-read row could clobber a row a peer
     # claimed between the read and the write, advertising a live task as free.
-    if not holder:
-        typer.echo(
-            "cannot prove a session id for the holder; "
-            "pass --owner <full-session-id>",
-            err=True,
-        )
-        raise typer.Exit(code=4)
+    # --takeover relaxes the owner match for a GONE holder; the live-claim
+    # guard above already proved nothing live is holding it.
     refused_owner: list[str] = []
     giveback_done_refused: list[str] = []
 
@@ -6952,7 +6968,7 @@ def cmd_task_update(
             giveback_done_refused.append(str(row.get("id")))
             return
         owner_now = row.get("owner")
-        if owner_now and owner_now != holder:
+        if owner_now and owner_now != holder and not takeover:
             refused_owner.append(str(owner_now))
             return
         row.update({"status": "pending", "owner": None})
@@ -6969,7 +6985,7 @@ def cmd_task_update(
         typer.echo(
             f"task {task_id} held by {refused_owner[0]}; "
             "only the holder can give it back. If that holder is gone, "
-            f"re-run with --owner {refused_owner[0]}",
+            "re-run with --takeover",
             err=True,
         )
         raise typer.Exit(code=3)
