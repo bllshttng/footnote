@@ -162,8 +162,10 @@ After feature complete:
 # List worktrees
 git worktree list
 
-# Remove completed worktree
-cd /path/to/main/repo
+# Remove completed worktree - prefer the guarded remover, which checks
+# dirty/unpushed/live-session state first (from the main repo):
+#   scripts/setup/archive-worktree.sh .claude/worktrees/sign-in-sheet
+# The plain form below is for a clean, merged worktree (git refuses a dirty one):
 git worktree remove .claude/worktrees/sign-in-sheet
 
 # Delete branch if merged
