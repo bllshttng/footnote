@@ -1781,7 +1781,7 @@ def test_deliver_live_claude_control_lane_delivers_with_envelope(
     assert re.match(r'^<fno_mail from="[0-9a-f]{8}"', framed), framed
     assert framed.rstrip().endswith("</fno_mail>"), framed
     assert "reach me on control" in framed
-    assert "session=" not in framed
+    assert ' session="' not in framed
 
 
 # ---------------------------------------------------------------------------

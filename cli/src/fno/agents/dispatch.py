@@ -53,6 +53,7 @@ from fno.agents.registry import (
     RegistryVersionError,
     TERMINAL_STATUSES,
     load_registry,
+    resolve_agent_in,
     resolve_registered_agent_across_sources,
     update_registry,
 )
@@ -5418,6 +5419,7 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
         model=ctx.model,
         node=ctx.node,
         to=ctx.to,
+        from_session=ctx.from_session,
         origin=ctx.origin,
     )
 
@@ -5893,12 +5895,18 @@ class _MailCtx:
     model: str
     node: Optional[str] = None
     to: Optional[str] = None
+    from_session: Optional[str] = None
     # This message's own bus msg-id (US1). Rendered as the additive `id` attr on
     # both the live inject and the durable fallback so a registered-agent send is
     # reply-correlatable and dedupable like the name-lane path. None on paths that
     # do not carry a minted id (relay hops), keeping the envelope byte-identical.
     id: Optional[str] = None
     origin: Optional[str] = None
+    # The raw sender provider (registry harness) behind `harness`, which is
+    # the one-way wire spelling (harness_for_provider). Carried so a durable
+    # write reusing this ctx stamps the structured provider_from with the
+    # same value the envelope was built from, never a second resolution.
+    provider: Optional[str] = None
 
 
 def _build_mail_ctx(
@@ -5939,6 +5947,62 @@ def _build_mail_ctx(
         model=resolve_self_model(),
         to=to or None,
         id=id or None,
+        from_session=from_session,
+        provider=provider_from,
+    )
+
+
+def _resolve_sender_entry(
+    entries: list[AgentEntry], from_name: str
+) -> Optional[AgentEntry]:
+    """Resolve a fresh-send sender through the spawn-written registry row.
+
+    ``mail send`` passes the sender's canonical handle, while registry labels
+    are friendly names. Resolve all supported address forms and floor misses,
+    ambiguity, and legacy rows without a full session id to unproven values.
+    """
+    try:
+        return resolve_agent_in(entries, from_name).entry
+    except AgentResolutionError:
+        return None
+
+
+def _proven_self_sender(from_name: str) -> tuple[Optional[str], Optional[str]]:
+    """Proven sender identity when ``from_name`` is this session's own handle.
+
+    The auto-stamp puts the caller's head-8 handle in ``from_name``. Under
+    codex UUIDv7 that head is a truncated timestamp bucket, so a registered
+    same-bucket sibling can be the UNIQUE registry hit for it and registry
+    inference alone would stamp a stranger's full session id as
+    ``from_session``. When the ambient identity proves this process owns the
+    handle, its full id is already collision-free and wins - the same rule
+    ``resolve_self_session_id`` documents for the envelope's ``from_session``.
+    """
+    from fno.agents.self_stamp import resolve_self_identity
+
+    ident = resolve_self_identity()
+    session_id = getattr(ident, "session_id", None)
+    harness = getattr(ident, "harness", None)
+    if session_id and harness and canonical_handle(session_id) == from_name:
+        return harness, session_id
+    return None, None
+
+
+def _sender_provenance(
+    sender: Optional[AgentEntry],
+    from_name: str,
+    self_proof: Optional[tuple[Optional[str], Optional[str]]] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    self_harness, self_session = (
+        self_proof if self_proof is not None else _proven_self_sender(from_name)
+    )
+    if self_session is not None:
+        return self_harness, self_session
+    if sender is None:
+        return None, None
+    return (
+        getattr(sender, "harness", None),
+        getattr(sender, "harness_session_id", None),
     )
 
 
@@ -7576,6 +7640,7 @@ def _deliver_live(
             node=mail.node,
             to=mail.to,
             id=mail.id,
+            from_session=mail.from_session,
             origin=mail.origin,
         )
 
@@ -7699,6 +7764,7 @@ def _deliver_live(
                 harness=harness_for_provider(entry.harness),
                 model="unknown",
                 to=mail.from_,
+                from_session=entry.harness_session_id or None,
                 origin="peer",
             )
     if _switchboard_exchange(
@@ -7817,17 +7883,10 @@ def _queue_durable_fallback(
         )
 
     msg_id = msg_id or generate_msg_id()
-    sender_entry = next((e for e in entries if e.name == from_name), None)
-    from_session = provider_from = None
-    if sender_entry is not None:
-        provider_from = sender_entry.harness
-        # Defensive getattr so a partial / future entry that lacks one of
-        # these fields degrades to None rather than crashing the send.
-        from_session = (
-            getattr(sender_entry, "harness_session_id", None)
-            or getattr(sender_entry, "short_id", None)
-        )
     if mail_ctx is None:
+        provider_from, from_session = _sender_provenance(
+            _resolve_sender_entry(entries, from_name), from_name
+        )
         mail_ctx = _build_mail_ctx(
             from_name,
             from_session,
@@ -7838,6 +7897,12 @@ def _queue_durable_fallback(
             id=msg_id,
             origin=origin,
         )
+    else:
+        # Reuse the caller's provenance instead of re-deriving it: the
+        # envelope body and the structured thread row must name the same
+        # sender, and a second resolution walk can only agree or diverge.
+        provider_from = mail_ctx.provider
+        from_session = mail_ctx.from_session
     # `_build_mail_ctx` returns a `_MailCtx`, never None, and the branch above
     # fills one whenever the caller passed none, so the envelope is always
     # wrapped from here on. The guard that used to stand here read as a real
@@ -7850,6 +7915,7 @@ def _queue_durable_fallback(
         node=mail_ctx.node,
         to=mail_ctx.to,
         id=mail_ctx.id,
+        from_session=mail_ctx.from_session,
         origin=mail_ctx.origin,
     )
     from fno import style as _style
@@ -8239,16 +8305,22 @@ def dispatch_send(
             # not fabricate one -- LD11 forward-compat).
             from fno.inbox.store import generate_msg_id
 
-            sender_entry = next((e for e in entries if e.name == from_name), None)
-            from_session = provider_from = None
-            if sender_entry is not None:
-                provider_from = sender_entry.harness
-                # Defensive getattr so a partial / future entry that lacks one of
-                # these fields degrades to None rather than crashing the send.
-                from_session = (
-                    getattr(sender_entry, "harness_session_id", None)
-                    or getattr(sender_entry, "short_id", None)
-                )
+            sender_entry = _resolve_sender_entry(entries, from_name)
+            self_proof = _proven_self_sender(from_name)
+            if self_proof[1] is not None and (
+                sender_entry is None
+                or getattr(sender_entry, "harness_session_id", None) != self_proof[1]
+            ):
+                # The self proof owns from_name but the registry row resolved
+                # against it names a different session (a same-bucket codex
+                # sibling): the envelope keeps the proven self, and the row
+                # must not reach the switchboard lane as from_identity - the
+                # daemon would attribute the stranger. Floor it to unproven,
+                # which is also what the old exact-name lookup left here.
+                sender_entry = None
+            provider_from, from_session = _sender_provenance(
+                sender_entry, from_name, self_proof
+            )
             # A `fno agents mail send <name>` is always directed -> stamp the selected
             # session's canonical handle as the envelope `to`. A transport short
             # id is retained only for hosted delivery when the legacy row has no
@@ -8389,6 +8461,7 @@ def dispatch_send(
                             node=mail_ctx.node,
                             to=mail_ctx.to,
                             id=mail_ctx.id,
+                            from_session=mail_ctx.from_session,
                         )
                         from fno import style as _hstyle
 
@@ -8602,17 +8675,9 @@ def dispatch_send(
                 from fno.inbox.store import generate_msg_id
 
                 msg_id = generate_msg_id()
-                sender_entry = next(
-                    (entry for entry in timeout_entries if entry.name == from_name),
-                    None,
+                provider_from, from_session = _sender_provenance(
+                    _resolve_sender_entry(timeout_entries, from_name), from_name
                 )
-                from_session = provider_from = None
-                if sender_entry is not None:
-                    provider_from = sender_entry.harness
-                    from_session = (
-                        getattr(sender_entry, "harness_session_id", None)
-                        or getattr(sender_entry, "short_id", None)
-                    )
                 timeout_recipient = canonical_handle(
                     timeout_entry.harness_session_id
                 )
