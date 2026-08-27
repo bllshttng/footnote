@@ -33,10 +33,10 @@ def test_tier_high_empty_degrades_and_records_chain():
     """AC3-FR: no model clears the high floor -> degrade to best available, spawn."""
     snap = _snap([
         {"name": "glm-4.7", "coding_percentile": 55},
-        {"name": "glm-5.3", "coding_percentile": 75},
+        {"name": "glm-5.3[1m]", "coding_percentile": 75},
     ])
     model, chain = rr.resolve_tier("high", snapshot=snap)
-    assert model == "glm-5.3"  # best available below the floor
+    assert model == "glm-5.3[1m]"  # best available below the floor
     assert any("degrade" in step for step in chain)
 
 
@@ -96,8 +96,8 @@ def test_tier_unknown_provider_matches_nothing():
 
 def test_tier_none_provider_is_unscoped():
     """provider=None keeps the old any-harness behavior for direct callers."""
-    snap = _snap([{"name": "gpt-5.4", "coding_percentile": 72}])
-    assert rr.resolve_tier("medium", snapshot=snap)[0] == "gpt-5.4"
+    snap = _snap([{"name": "gpt-5.6-terra", "coding_percentile": 72}])
+    assert rr.resolve_tier("medium", snapshot=snap)[0] == "gpt-5.6-terra"
 
 
 # --- node_model provider scoping ------------------------------------------- #
@@ -215,7 +215,7 @@ def test_grid_selects_first_available_candidate_for_difficulty_and_priority():
         "p1",
         {"claude": "exhausted", "codex": "ok"},
     )
-    assert candidate == {"harness": "codex", "model": "gpt-5.5"}
+    assert candidate == {"harness": "codex", "model": "gpt-5.6-sol"}
     assert any("grid candidate" in step for step in chain)
 
 

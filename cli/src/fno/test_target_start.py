@@ -1304,9 +1304,9 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
-        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.4", "task-pin"),
+        lambda nid, explicit=None, provider=None, **_kw: ("gpt-5.6-sol", "task-pin"),
     )
-    # gpt-5.4 maps to the codex harness in the real REACHABILITY table.
+    # gpt-5.6-sol maps to the codex harness in the real REACHABILITY table.
     result = runner.invoke(
         target_app, ["resolve-model", "x-d7a7", "--harness", "claude"]
     )
@@ -1331,7 +1331,7 @@ def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
 
 def test_model_reachable_by_conservative_on_unknown(monkeypatch):
     """An unknown model is treated as reachable (guard only drops CONFIRMED mismatches)."""
-    assert target_cli._model_reachable_by("gpt-5.4", "claude") is False
+    assert target_cli._model_reachable_by("gpt-5.6-sol", "claude") is False
     assert target_cli._model_reachable_by("claude-sonnet-5", "claude") is True
     assert target_cli._model_reachable_by("some-unmapped-model", "claude") is True
 
