@@ -235,9 +235,14 @@ keys = []
 kind = "flag"
 tokens = ["agy"]
 
+# `--conversation <id>` resumes the conversation from any process state,
+# the same primitive the headless_resume row below records. Measured
+# 2026-08-26 on agy 1.1.19 and re-measured 2026-08-26 on 1.1.21: a fresh
+# process quoting a token planted in an earlier turn (num_turns 2), and the
+# help text reads "Resume a previous conversation by ID".
 [harness.agy.resume_strategy.forms.interactive_resume]
-kind = "unsupported"
-tokens = []
+kind = "session_flag"
+tokens = ["agy", "--conversation", "{session_id}"]
 
 [harness.agy.resume_strategy.forms.interactive_attach]
 kind = "unsupported"
@@ -261,7 +266,13 @@ status_pattern = ""
 [harness.opencode]
 permission_bypass = ["--dangerously-skip-permissions"]
 resume = "native-session"
-thread = true
+# The serve lane is launch-only: `ask` refuses (no steering over the HTTP
+# API yet), the x-d9f9 journey test covers spawn + one turn but not the
+# server-kill survival, cold resume, or review steps of the bar in
+# docs/architecture/codex-thread-driver.md. A caller routed onto thread by
+# default got a session it could not talk to. False until the steering
+# lane ships with its own unattended journey test; measured 2026-08-26.
+thread = false
 autonomous_pane = false
 route_on_pane = false
 stop_hook = "native"

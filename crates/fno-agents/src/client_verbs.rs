@@ -4259,7 +4259,14 @@ mod tests {
             build_resume_argv("opencode", "ses_1", None),
             Some(vec!["opencode".into(), "--session".into(), "ses_1".into()])
         );
-        assert_eq!(build_resume_argv("agy", "x", None), None);
+        // The measured primitive (fresh process quoting an earlier turn's
+        // token over `--conversation`, 2026-08-26): the argv renders even
+        // though no spawn lane records a conversation id yet, so `resume`
+        // on an agy row today stops at the missing-session-id refusal.
+        assert_eq!(
+            build_resume_argv("agy", "x", None),
+            Some(vec!["agy".into(), "--conversation".into(), "x".into()])
+        );
     }
 
     #[test]

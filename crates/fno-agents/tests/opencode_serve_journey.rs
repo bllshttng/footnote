@@ -1,17 +1,22 @@
-//! The unattended journey that EARNS opencode's `bg = true` capability bit
-//! (x-d9f9; the rule at harness_map.py:123 - a true value must be backed by an
-//! unattended journey test for THIS harness, never inherited from another).
+//! The unattended journey for opencode's serve lane. It covers the LAUNCH
+//! half: boot the shared serve, dispatch a worker (session mint, permission
+//! grant, registry row, detached `run --attach` writer), wait for the turn to
+//! complete by polling the structured message readback, and assert the
+//! receipt's claims against the server. Cleanup deletes the session and stops
+//! the private serve.
+//!
+//! It does NOT cover the steps the `thread` bit asserts
+//! (docs/architecture/codex-thread-driver.md, "What earns the bit"):
+//! server-kill survival, cold-process resume with a recalled token, the
+//! review lane, viewport selection - and steering (`ask`, mail inject) is
+//! refused until the HTTP steering lane ships. That is why the bit reads
+//! false: this journey proves the launch half only, and extending it to the
+//! full bar is what flips the bit back.
 //!
 //! Opt-in: runs only when `FNO_JOURNEY_OPENCODE=1` AND an `opencode` binary is
 //! on PATH (CI has neither - x-9a96). The live run against opencode 1.14.50 +
 //! the machine's default agent config is the recorded evidence for the flip;
 //! commit-time evidence lives in the x-d9f9 decision record.
-//!
-//! The journey is the whole worker path with no human: boot the shared serve,
-//! dispatch a worker (session mint, permission grant, registry row, detached
-//! `run --attach` writer), wait for the turn to complete by polling the
-//! structured message readback, and assert the receipt's claims against the
-//! server. Cleanup deletes the session and stops the private serve.
 
 use fno_agents::opencode_serve::{
     delete_session, dispatch_opencode_serve, ensure_serve, fetch_messages, fetch_session,

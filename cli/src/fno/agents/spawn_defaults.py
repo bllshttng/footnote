@@ -704,7 +704,8 @@ def _grid_node(toks: Sequence[str], env: Optional[Mapping[str, str]] = None) -> 
 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
     """A config-sourced substrate must be a KNOWN value AND honored by the
-    resolved provider. ``thread`` is claude/opencode-only; ``pane``/``headless`` are universal.
+    resolved provider. ``thread`` requires the harness's journey-proven fno
+    driver (claude today); ``pane``/``headless`` are universal.
     ``bg`` is accepted as a deprecated alias for ``thread``.
     An unknown value (or ``thread`` on a non-thread provider) degrades open (warn, skip) -
     never injected to fail at the spawn parser (both exit 2 there otherwise)."""

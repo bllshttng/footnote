@@ -67,16 +67,16 @@ def test_packaged_contract_is_complete_for_every_known_harness():
         ),
         ("codex", "interactive_resume", "cx-1", ["codex", "resume", "cx-1"]),
         ("codex", "headless_resume", "cx-1", ["codex", "exec", "resume", "cx-1"]),
+        # agy's resume primitive, measured 2026-08-26 on 1.1.19 and 1.1.21:
+        # a fresh process quotes a token planted in an earlier turn
+        # (`agy --conversation <id>`, num_turns 2). The interactive row must
+        # render the same argv the headless_resume row records.
+        ("agy", "interactive_resume", "cv-1", ["agy", "--conversation", "cv-1"]),
         ("opencode", "headless_resume", "ses_1", ["opencode", "run", "--session", "ses_1"]),
     ],
 )
 def test_resume_strategy_renders_identity_skeletons(harness, lane, session_id, expected):
     assert render_session_argv(harness, lane, session_id) == expected
-
-
-def test_unsupported_resume_lane_fails_before_spawn():
-    with pytest.raises(DispatchResolveError, match="agy.*interactive_resume.*unsupported"):
-        render_session_argv("agy", "interactive_resume", "x")
 
 
 def test_claude_attach_uses_only_a_short_id():
@@ -283,9 +283,12 @@ def test_unknown_harness_fails_loud_naming_the_map():
 
 
 def test_explicit_bg_on_non_bg_harness_is_rejected():
-    """bg is claude + opencode; an explicit bg on codex is a hard error -> headless."""
+    """thread (and its bg alias) is claude-only; an explicit bg on codex or
+    opencode is a hard error -> headless."""
     with pytest.raises(DispatchResolveError, match="headless"):
         _resolve(harness="codex", substrate="bg")
+    with pytest.raises(DispatchResolveError, match="headless"):
+        _resolve(harness="opencode", substrate="bg")
 
 
 def test_bg_is_a_deprecated_alias_for_thread():
@@ -407,11 +410,12 @@ def test_codex_normalization_accepts_plugin_qualified_slash_and_native_skill():
 
 def test_opencode_default_dispatch_renders_fno_slash():
     """AC1-HP: a default opencode dispatch renders the plugin-namespaced palette
-    invocation `/fno:target ...` on the bg substrate (the serve-HTTP worker
-    lane, x-d9f9) - no prose brief."""
+    invocation `/fno:target ...` - no prose brief. The serve lane is
+    launch-only, so the substrate falls back to headless rather than riding a
+    session nothing can steer."""
     out = _resolve(harness="opencode", node_id="x-4d85")
     assert out["command"] == "/fno:target --no-merge x-4d85"
-    assert out["substrate"] == "thread"
+    assert out["substrate"] == "headless"
     assert out["command_surface"] == "slash"
 
 
@@ -529,9 +533,34 @@ def test_config_already_native_template_not_double_prefixed():
 
 def test_substrate_default_table():
     assert substrate_default("claude") == "thread"
-    assert substrate_default("opencode") == "thread"
-    for h in ("codex", "gemini", "agy"):
+    # opencode's serve lane is launch-only (ask refuses, no steering), so the
+    # bit reads false like codex/agy until the steering lane + its own
+    # unattended journey test ship; the default falls back to headless.
+    for h in ("codex", "gemini", "agy", "opencode"):
         assert substrate_default(h) == "headless"
+
+
+def test_thread_bit_asserts_fnos_own_driver_not_the_resume_primitive():
+    """The bit is a claim about FNO's lane, never about the harness CLI: every
+    harness here has a working resume primitive (agy and opencode both measured
+    2026-08-26), but only claude has the driver + journey-proven lane the bit
+    asserts. A launch-only lane reading true routes autonomous spawns onto a
+    session the caller cannot steer, which is worse than refusing."""
+    assert capabilities("claude")["thread"] is True
+    for h in ("codex", "agy", "opencode"):
+        assert capabilities(h)["thread"] is False
+    # the resume primitives themselves are all recorded as working
+    for h in ("codex", "agy", "opencode"):
+        assert capabilities(h)["resume_strategy"]["forms"]["interactive_resume"]["kind"] != (
+            "unsupported"
+        )
+
+
+def test_explicit_thread_on_partial_lane_refused_with_the_reason():
+    """An explicit thread request on a launch-only lane is a hard error naming
+    the rule, never a silent ride onto a half-working session."""
+    with pytest.raises(DispatchResolveError, match="journey-proven"):
+        _resolve(harness="opencode", substrate="thread")
 
 
 def test_known_harnesses_covers_readable_set():

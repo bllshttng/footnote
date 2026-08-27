@@ -18,9 +18,10 @@ Verified facts (2026-07-13):
 - permission_bypass tokens mirror the provider adapters (claude.py,
   codex.py, gemini.py) - the flag a headless/bg worker needs so it never wedges
   on an approval prompt (the concrete cause of the manual-approve pain).
-- thread is claude (``claude --bg``) + opencode (a persistent session on a shared
-  ``opencode serve``, x-d9f9); every other harness falls back to ``headless``
-  (Locked Decision 3, HARNESSES.md).
+- thread is claude only (``claude --bg``). opencode's serve lane is launch-only
+  (``ask`` refuses, no steering over the HTTP API), so its bit reads false until
+  the steering lane ships with its own unattended journey test; every false-bit
+  harness falls back to ``headless`` (Locked Decision 3, HARNESSES.md).
 - stop_hook is native for all THREE dispatchable harnesses: the autonomous
   target loop's stop-equivalent hook fires under ``claude -p`` (verified),
   ``codex exec`` (CODEX_THREAD_ID), and ``gemini -p`` natively - so NO dispatch
@@ -119,8 +120,9 @@ def _refused_reason(harness: str) -> str:
 # capability -> per-harness value, keyed by the READABLE_PROVIDERS set. Each
 # harness carries a `command_surface` (x-a5e4): the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
-# harness also carries `slash_prefix` (the plugin namespace). `thread` is claude
-# and opencode (the serve-HTTP worker lane). `bg` remains a one-release input alias.
+# harness also carries `slash_prefix` (the plugin namespace). `thread` asserts
+# fno's OWN driver for that harness (driver + unattended journey test, never a
+# bare resume primitive): claude today. `bg` remains a one-release input alias.
 #
 # Two pane capabilities, both EVIDENCE-GATED and read fail-closed (a missing key
 # reads false), because each one used to be a blanket rule that was true of at
@@ -513,8 +515,9 @@ def permission_response_keys(harness: str, action: str, rule_id: str) -> list[st
 
 
 def substrate_default(harness: str) -> str:
-    """Per-harness default substrate: ``thread`` where supported (claude, opencode),
-    else ``headless``. Pane permission is independent from substrate preference."""
+    """Per-harness default substrate: ``thread`` where fno's own driver is
+    journey-proven (claude), else ``headless``. Pane permission is independent
+    from substrate preference."""
     return "thread" if capabilities(harness)["thread"] else "headless"
 
 
@@ -635,8 +638,9 @@ def resolve_dispatch(
     if chosen_substrate == "thread" and not caps["thread"]:
         raise DispatchResolveError(
             f"substrate 'thread' is unsupported on harness {chosen_harness!r} "
-            f"(thread is claude + opencode; bg is claude + opencode as a deprecated alias); "
-            f"use 'headless'"
+            f"(thread requires fno's own journey-proven driver for the harness; "
+            f"claude has one today, and a launch-only lane like opencode's serve "
+            f"reads false until steering ships); use 'headless'"
         )
     # Only an explicit attended trigger bypasses the autonomy capability check.
     # A missing key is false so newly added or partially specified harnesses stay
