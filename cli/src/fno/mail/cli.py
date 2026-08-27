@@ -1909,13 +1909,14 @@ def _wake_rung(reachable, wrapped: str) -> tuple[bool, Optional[str], Optional[s
 
 
 def _codex_daemon_socket_absent() -> bool:
-    """True when the codex app-server control socket is absent (no daemon).
+    """True when no codex app-server daemon answers its control socket.
 
-    Mirrors ``codex_app_server_socket_path`` in codex_inject.rs: the socket at
-    ``$CODEX_HOME/app-server-control/app-server-control.sock`` exists only while
-    a codex app-server daemon runs (``codex app-server daemon start``). A live
-    mail send to a codex peer demotes to durable when it is absent, so the demote
-    line names the fix rather than only the reason.
+    Mirrors ``codex_app_server_socket_path`` in codex_inject.rs. The socket file
+    at ``$CODEX_HOME/app-server-control/app-server-control.sock`` survives the
+    daemon that created it, so liveness is a connect probe (the doctor report's),
+    never the file's existence. A live mail send to a codex peer demotes to
+    durable when no daemon answers, so the demote line names the fix rather than
+    only the reason.
 
     Delegates to the doctor report so the send-time demote line and `fno doctor`
     can never disagree about where the socket lives (lazy import: doctor is a
