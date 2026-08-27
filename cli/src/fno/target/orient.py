@@ -708,22 +708,6 @@ def _plan_line_from_bound(bound_plan: Optional[str], project_root: Path) -> str:
     return reconcile_plan(bound_plan, project_root).summary()
 
 
-def _plan_line(
-    plan_path: Optional[str], project_root: Path, node_id: Optional[str] = None
-) -> str:
-    """The plan line, read from the binding's truth (x-d401 / x-3ae1).
-
-    The absences carry their basis - "no plan bound" states the graph's own
-    emptiness, and an unreadable graph reads unknown, never as a measured
-    none. `build_report` does NOT call this; it resolves once and renders
-    through `_plan_line_from_bound`."""
-    try:
-        plan_path = _bound_plan_path(plan_path, project_root, node_id)
-    except Exception:  # noqa: BLE001 - never abort the report
-        return _PLAN_UNREADABLE
-    return _plan_line_from_bound(plan_path, project_root)
-
-
 def _render_boundary(verdicts: list) -> str:
     """Collapse per-blocker verdicts to one line. STALE > unknown > reconciled >
     fresh -- a single stale blocker is the actionable signal Step 0 keys on."""
