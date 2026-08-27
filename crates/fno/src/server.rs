@@ -42,7 +42,7 @@ use crate::proto::{
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
     PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, ResolvedPlacement,
     ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
-    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME, Reach,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -8136,6 +8136,13 @@ impl Core {
                                 // one field away: keep it so the client can
                                 // show activity when the badge goes quiet.
                                 pane_activity: pane_entry.map(|e| e.vt.shell_activity()),
+                                // (x-07c2) Decorative on a pane-hosted row (its
+                                // reach focuses the pane); carried so the field
+                                // never lies about the row's capability.
+                                reach: agents_view::thread_reach(
+                                    a.harness.as_deref(),
+                                    a.attach_id.as_deref(),
+                                ),
                             }
                         }
                         None => {
@@ -8187,6 +8194,7 @@ impl Core {
                                 basis: None,
                                 resumable: false,
                                 no_pane_reason: None,
+                                reach: Reach::Locate,
                             }
                         }
                     };
@@ -8259,6 +8267,7 @@ impl Core {
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Dangling dead: the pane is gone, so no vt reading.
                         pane_activity: None,
+                        reach: Reach::Locate,
                     })
                 }
                 None => {
@@ -8315,6 +8324,16 @@ impl Core {
                         no_pane_reason: self.row_no_pane_reason_in_session(a),
                         // Watch-only paneless: no PTY, no vt reading.
                         pane_activity: None,
+                        // (x-07c2) The load-bearing site: a paneless live row's
+                        // reach decides what its gesture opens. The attach_id
+                        // half of the input re-reads the registry row (not the
+                        // wire row's exited-gated copy) because the tier
+                        // describes the SESSION's capability, while the wire's
+                        // attach_id is cleared on exit for gate reasons.
+                        reach: agents_view::thread_reach(
+                            a.harness.as_deref(),
+                            a.attach_id.as_deref(),
+                        ),
                     })
                 }
             }
@@ -8368,6 +8387,7 @@ impl Core {
                     no_pane_reason: None,
                     // A synthesized dead member owns no PTY.
                     pane_activity: None,
+                    reach: Reach::Locate,
                 })
             }
         }
@@ -8450,6 +8470,9 @@ impl Core {
                 no_pane_reason: None,
                 // An external-daemon row owns no PTY of this server.
                 pane_activity: None,
+                // An external-lifecycle tombstone has no capability data here;
+                // a live external row renders through the watch-only arm above.
+                reach: Reach::Locate,
             })
         }
         out

@@ -978,6 +978,26 @@ pub enum AgentNoPaneReason {
     LivenessUnmeasured,
 }
 
+/// (x-07c2) What the dedicated thread pane can do for a row: `Drive` (an
+/// interactive attach form exists; the pane runs it), `Follow` (no attach
+/// form, but a transcript reader answers; the pane tails it), `Locate`
+/// (neither; the pane renders the row's facts and the routes that do reach
+/// it). Computed from harness CAPABILITY, never from a harness name (law
+/// d-dbf83820: thread is an fno-layer construct over each harness's own
+/// resume primitive). The tier's authority is the server (the row set lives
+/// there); the client field is render-and-gesture only, and a stale client
+/// degrades to `Locate` harmlessly - its reach command is tier-blind and the
+/// server re-derives. Like [`AgentNoPaneReason`], this enum is NOT
+/// additive-tolerant: a new variant later bumps `PROTO_VERSION`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Reach {
+    Drive,
+    Follow,
+    #[default]
+    Locate,
+}
+
 /// One sideline agent row inside [`ServerMsg::Layout`] (v5, brief US2). The
 /// server's off-loop registry reader joins registry rows to panes via the
 /// `mux` ref and derives the 3-tier fact-badge lattice: `exited` (pane-exit
@@ -1179,6 +1199,13 @@ pub struct AgentRow {
     /// no-reading, never as idle).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pane_activity: Option<ShellActivity>,
+    /// (x-07c2) The dedicated thread-pane tier for a paneless live row (see
+    /// [`Reach`]); meaningless on a pane-hosted row (its reach focuses the
+    /// pane). `#[serde(default)]` keeps a pre-x-07c2 reader wire-tolerant and
+    /// a stale reader's rows degrade to `Locate`, which still routes the
+    /// reach command - the server re-derives the real tier.
+    #[serde(default)]
+    pub reach: Reach,
 }
 
 /// (v11, x-6f77) One work-queue card for the sideline backlog lane, derived
@@ -4226,6 +4253,7 @@ mod tests {
                 area: (24, 80),
                 agents: vec![
                     AgentRow {
+                        reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
                         squad: Some(1),
@@ -4272,6 +4300,7 @@ mod tests {
                         pane_activity: None,
                     },
                     AgentRow {
+                        reach: Reach::Locate,
                         spawned_by_session: None,
                         harness_session_id: None,
                         squad: None,

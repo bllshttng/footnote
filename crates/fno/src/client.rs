@@ -36,8 +36,8 @@ use crate::proto::{
     self, cell_flags, is_mission_squad, read_msg, write_msg, AgentBadge, AgentNoPaneReason,
     AgentRow, AnswerablePrompt, BacklogCard, BacklogVerb, BlockDir, CardState, Cell, ClientMsg,
     Color, Command, Frame, MouseButton, MouseEvent, MouseKind, PanePlacement, PaneTarget,
-    PlacementFallback, ProtoError, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION, MAX_MAIL_TEXT,
-    MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
+    PlacementFallback, ProtoError, Reach, ServerMsg, SquadMeta, TabMeta, BUILD_VERSION,
+    MAX_MAIL_TEXT, MAX_SQUAD_NAME, MAX_TAB_NAME, PROTO_VERSION,
 };
 use crate::theme::Theme;
 use crate::tree::{Axis, Dir, Rect, TabId};
@@ -16544,6 +16544,7 @@ mod tests {
         // The shared seam (x-653d): a keyboard goto and a mouse click resolve an
         // agent to the SAME ChromeHit. pane > attach > notice.
         let hosted = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16681,6 +16682,7 @@ mod tests {
         // still wins while a claude bg row is live and carries a jobId;
         // resumable takes the dead-and-nameless cases the notice used to eat.
         let row = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16737,6 +16739,7 @@ mod tests {
         // placement picker carrying its owning squad, instead of a hardcoded
         // split/tab - the operator picks the direction in the picker.
         let row = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -16999,6 +17002,7 @@ mod tests {
     // x-df4c US4 helper: an AgentRow in squad 1 with the given tab/badge/exit.
     fn tab_agent(tab: Option<TabId>, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -17526,6 +17530,7 @@ mod tests {
     // An agent row hosting a given pane, under squad 1.
     fn focus_agent(pane: u64) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -19486,6 +19491,7 @@ mod tests {
     // (squad, exited) matter; badge/seen round out a plausible row.
     fn sv_agent(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(squad),
@@ -20164,6 +20170,7 @@ mod tests {
     // tri-state filtering tests below.
     fn view_with_dead_interleaved() -> View {
         let row = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -20354,6 +20361,7 @@ mod tests {
     #[test]
     fn section_header_is_clickable_but_never_selector_selectable() {
         let view = view_with_agents(vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99), // no such squad -> orphan -> `~ elsewhere`
@@ -20670,6 +20678,7 @@ mod tests {
     #[test]
     fn elsewhere_section_live_only_hides_exited_orphans() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99), // no such squad -> orphan
@@ -20727,6 +20736,7 @@ mod tests {
     #[test]
     fn section_header_caret_tracks_all_three_states() {
         let orphan = |name: &str, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(99),
@@ -20842,6 +20852,7 @@ mod tests {
     #[test]
     fn chrome_hit_agent_rows_focus_or_hint() {
         let hosted = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -20874,6 +20885,7 @@ mod tests {
         // A watch-only bg row with a claude jobId: a click opens the placement
         // picker (x-9c5f) so the operator chooses the split direction.
         let bg_attach = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -20905,6 +20917,7 @@ mod tests {
         };
         // A watch-only row with no attach target: a click can only hint.
         let bg_plain = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -20967,6 +20980,7 @@ mod tests {
         // top-K cap, so all 40 render and the list still reaches the bottom.
         let agents: Vec<AgentRow> = (0..40)
             .map(|i| AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -21516,6 +21530,7 @@ mod tests {
         // row gets focus and NO splits (already placed); an exited row gets
         // remove and no stop.
         let mk = |name: &str, pane_id: Option<u64>, attach: Option<&str>, exited: bool| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -22741,6 +22756,7 @@ mod tests {
         // identity (pane_id/attach_id) so Focus acts on the row it was opened on,
         // never the other same-named row.
         let mk = |name: &str, pane_id: Option<u64>| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -24359,6 +24375,7 @@ mod tests {
     /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
     fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -25161,6 +25178,7 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: Some(1),
@@ -25191,6 +25209,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: Some(1),
@@ -25221,6 +25240,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25307,6 +25327,7 @@ mod tests {
         // all-exited squad keeps its ✗ count so dead agents stay discoverable.
         fn ar(squad: u64, name: &str, badge: Option<AgentBadge>, exited: bool) -> AgentRow {
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(squad),
@@ -25720,6 +25741,7 @@ mod tests {
             area: (29, 72),
             agents: vec![
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25750,6 +25772,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25780,6 +25803,7 @@ mod tests {
                     pane_activity: None,
                 },
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -25813,6 +25837,7 @@ mod tests {
                 // load-bearing "attention is never dimmed" branch. The accent
                 // must win over the external DIM modifier.
                 AgentRow {
+                    reach: Reach::Locate,
                     spawned_by_session: None,
                     harness_session_id: None,
                     squad: None,
@@ -26321,6 +26346,7 @@ mod tests {
     /// 10 "~ backlog" · 11 ready card · 12 blocked card · 13 in-flight card.
     fn unified_rows_view() -> View {
         let agent = |squad: Option<u64>, name: &str, pane_id, attach_id: Option<&str>| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad,
@@ -27051,6 +27077,7 @@ mod tests {
     #[test]
     fn peek_overlay_renders_loading_transcript_and_answerable() {
         let row = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: None,
@@ -27490,6 +27517,7 @@ mod tests {
         // AC4-EDGE (client half): x on a tombstone member row sends
         // DismissMember for its squad + attach_id (not a squad remove).
         let tomb = AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -27541,6 +27569,7 @@ mod tests {
     /// A plain (non-tombstone) registry agent row under squad 1, varied by state.
     fn lifecycle_row(name: &str, exited: bool, external: bool) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -28570,6 +28599,7 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -28600,6 +28630,7 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(1),
@@ -28669,6 +28700,7 @@ mod tests {
         // that path is covered by pane_activity_folds_*, this one pins the
         // rollup with a measured idle pane.)
         let row = |name: &str, pane, badge| AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -28742,6 +28774,7 @@ mod tests {
         // so a [blocked] chip leaves only the blocked agent.
         let mut v = two_pane_view();
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(2),
@@ -28866,6 +28899,7 @@ mod tests {
         let mut v = two_pane_view();
         v.layout.agents = vec![
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(2),
@@ -28896,6 +28930,7 @@ mod tests {
                 pane_activity: None,
             },
             AgentRow {
+                reach: Reach::Locate,
                 spawned_by_session: None,
                 harness_session_id: None,
                 squad: Some(2),
@@ -29119,6 +29154,7 @@ mod tests {
         // SelectSquad then FocusPane in order, and closes the navigator.
         let mut v = two_pane_view(); // active squad = 1 (footnote)
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(2),
@@ -29580,6 +29616,7 @@ mod tests {
             },
         ];
         v.layout.agents = vec![AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
@@ -29748,6 +29785,7 @@ mod tests {
 
     fn blocked_row(name: &str, pane: u64, ans: Option<AnswerablePrompt>) -> AgentRow {
         AgentRow {
+            reach: Reach::Locate,
             spawned_by_session: None,
             harness_session_id: None,
             squad: Some(1),
