@@ -18,7 +18,7 @@ import subprocess
 from enum import Enum
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import List, Literal, Optional, Dict
+from typing import Collection, List, Literal, Optional, Dict, Set
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
@@ -384,6 +384,9 @@ class ExecutionStrategy:
     waves: List[Wave]
     scope: str = "single-project"  # 'single-project' | 'cross-project'
     project_tasks: Dict[str, List[str]] = field(default_factory=dict)
+    # Declared per-task edges (task id -> blocked_by list). A task with no
+    # declared entry derives its blockers from the previous wave instead.
+    blocked_by: Dict[str, List[str]] = field(default_factory=dict)
 
 
 def _extract_task_section(phase_file: Path, task_id: str) -> List[str]:
@@ -557,14 +560,61 @@ def get_failed_tasks_from_state(state_path: str) -> List[str]:
 
 
 def get_next_wave(strategy: ExecutionStrategy, completed_tasks: List[str]) -> Optional[Wave]:
-    """Get the next wave to execute based on completed tasks"""
+    """Get the next wave to execute, as the wave holding the first ready task.
+
+    Compatibility shim over ``ready_tasks``: per-task edges may float a later
+    task ahead of an open sibling, so "next wave" is defined by readiness,
+    not by first-wave-not-entirely-complete.
+    """
+    ready = ready_tasks(strategy, completed_tasks, [])
+    if not ready:
+        return None  # All waves complete (or nothing dispatchable)
     for wave in strategy.waves:
-        wave_tasks_complete = all(
-            task in completed_tasks for task in wave.tasks
-        )
-        if not wave_tasks_complete:
+        if ready[0] in wave.tasks:
             return wave
-    return None  # All waves complete
+    return None
+
+
+def effective_blockers(strategy: ExecutionStrategy, task_id: str) -> Set[str]:
+    """The tasks that must complete before ``task_id`` may start.
+
+    A declared non-empty ``blocked_by`` wins outright; otherwise a task
+    inherits every task id in the wave before its own (empty for the first
+    wave), so a plan without per-task edges schedules exactly as the old
+    whole-wave barrier did.
+    """
+    declared = strategy.blocked_by.get(task_id)
+    if declared:
+        return set(declared)
+    for pos, wave in enumerate(strategy.waves):
+        if task_id in wave.tasks:
+            if pos == 0:
+                return set()
+            return set(strategy.waves[pos - 1].tasks)
+    return set()
+
+
+def ready_tasks(
+    strategy: ExecutionStrategy,
+    completed: Collection[str],
+    claimed: Collection[str],
+) -> List[str]:
+    """Tasks dispatchable now, in wave order then declaration order.
+
+    A task is ready when it is neither completed nor claimed and every
+    effective blocker is completed. This is the work-stealing query: list,
+    pick an unowned entry, claim.
+    """
+    done = set(completed)
+    busy = set(claimed)
+    ready: List[str] = []
+    for wave in strategy.waves:
+        for task_id in wave.tasks:
+            if task_id in done or task_id in busy:
+                continue
+            if effective_blockers(strategy, task_id) <= done:
+                ready.append(task_id)
+    return ready
 
 
 def get_pending_tasks_in_wave(wave: Wave, completed_tasks: List[str]) -> List[str]:
@@ -1037,13 +1087,13 @@ def emit_status_event(
     return _shell_fno(argv, f"{event_type} emit")
 
 
-def _shell_fno(argv: List[str], what: str) -> bool:
-    """Run one best-effort ``fno`` subprocess for a boundary side effect.
+def _shell_fno_result(argv: List[str], what: str) -> Optional[subprocess.CompletedProcess]:
+    """Run one best-effort ``fno`` subprocess, returning it or None.
 
     The one runner for every non-fatal boundary shell (the event emit, the
-    task-claim settle): missing fno, a raise, and a non-zero exit each log one
-    stderr note and return False. Never raises, so a boundary side effect can
-    never fail the task or the run.
+    task-claim settle, the --ready task-row read): missing fno, a raise, and
+    a non-zero exit each log one stderr note and return None. Never raises,
+    so a boundary side effect can never fail the task or the run.
     """
     # 15s bounds an append-only event emit. The task-claim settle is a full
     # graph mutation behind the fleet-wide flock (recompute, JSON write,
@@ -1055,18 +1105,23 @@ def _shell_fno(argv: List[str], what: str) -> bool:
         result = subprocess.run(argv, check=False, capture_output=True, timeout=timeout)
     except FileNotFoundError:
         print(f"orchestrator: note: fno unavailable, skipped {what}", file=sys.stderr)
-        return False
+        return None
     except Exception as exc:  # noqa: BLE001 - a boundary side effect never wedges the run
         print(f"orchestrator: note: {what} failed (non-fatal): {exc}", file=sys.stderr)
-        return False
+        return None
     if result.returncode != 0:
         print(
             f"orchestrator: note: {what} rejected (non-fatal): "
             f"{result.stderr.decode('utf-8', 'replace').strip()}",
             file=sys.stderr,
         )
-        return False
-    return True
+        return None
+    return result
+
+
+def _shell_fno(argv: List[str], what: str) -> bool:
+    """Boolean view of :func:`_shell_fno_result` for fire-and-forget callers."""
+    return _shell_fno_result(argv, what) is not None
 
 
 #: Boundary outcomes that release the claim as done.
@@ -1389,6 +1444,7 @@ def load_plan_strategy(
     try:
         from fno.plan.brief import (
             parse_execution_strategy as _brief_parse_strategy,
+            validate_task_edges as _validate_task_edges,
             BriefParseError,
         )
     except ImportError as exc:
@@ -1400,6 +1456,18 @@ def load_plan_strategy(
     except BriefParseError as exc:
         print(
             f"Error: malformed Execution Strategy YAML in {plan_path}: {exc}",
+            file=sys.stderr,
+        )
+        return None
+
+    # Declared per-task edges are validated at plan-load time, beside the
+    # frontmatter schema: an unknown dependency or a cycle refuses the run
+    # loudly instead of deadlocking a wave mid-flight.
+    edge_errors = _validate_task_edges(raw)
+    if edge_errors:
+        print(
+            f"BLOCKED blocked_reason=plan_task_edges_invalid: {plan_path}\n"
+            + "\n".join(edge_errors),
             file=sys.stderr,
         )
         return None
@@ -1438,6 +1506,11 @@ def load_plan_strategy(
         waves=waves,
         scope=str(scope),
         project_tasks=project_tasks,
+        blocked_by={
+            str(t["id"]): [str(d) for d in t.get("blocked_by", [])]
+            for t in raw.get("tasks", [])
+            if isinstance(t, dict) and t.get("id")
+        },
     )
 
 
@@ -1452,7 +1525,8 @@ if __name__ == "__main__":
         print("Commands:")
         print("  orchestrator.py <index>                  Parse and display execution strategy")
         print("  orchestrator.py <index> --next            Show next wave to execute")
-        print("  orchestrator.py <index> --state <state>   Resume from state file")
+        print("  orchestrator.py <index> --ready [--state <state>] [--node <id>]")
+        print("                                            Print dispatchable tasks as JSON")
         print("  orchestrator.py <index> --wave-decision N [--harness codex|--provider codex]")
         print("                                           Show effective execution mode for a wave")
         print("  orchestrator.py --agent <description>     Determine agent for task")
@@ -1572,8 +1646,11 @@ if __name__ == "__main__":
         if state_idx + 1 < len(sys.argv):
             state_path = sys.argv[state_idx + 1]
             completed_tasks = get_completed_tasks_from_state(state_path)
-            print(f"Completed tasks from state: {completed_tasks}")
-            print()
+            # --ready prints one JSON object on stdout; the informational
+            # lines stay on the human-facing verbs only.
+            if "--ready" not in sys.argv:
+                print(f"Completed tasks from state: {completed_tasks}")
+                print()
 
     if "--wave-decision" in sys.argv:
         wave_idx = sys.argv.index("--wave-decision")
@@ -1591,6 +1668,49 @@ if __name__ == "__main__":
             sys.exit(1)
         decision = resolve_wave_execution_mode(wave, index_path, provider)
         print(json.dumps(decision, indent=2))
+    elif "--ready" in sys.argv:
+        # The work-stealing read the waves skill runs before each dispatch
+        # round. `done` rows are cross-session completions beside this
+        # session's STATE.md [x]; a failed task-row read degrades to
+        # STATE.md only (the same non-fatal posture as the boundary settle).
+        node_id = ""
+        if "--node" in sys.argv:
+            node_idx = sys.argv.index("--node")
+            if node_idx + 1 < len(sys.argv):
+                node_id = sys.argv[node_idx + 1]
+            else:
+                print("Error: --node requires a node id", file=sys.stderr)
+                sys.exit(1)
+        completed: List[str] = list(dict.fromkeys(completed_tasks))
+        claimed: List[str] = []
+        if node_id:
+            result = _shell_fno_result(
+                ["fno", "backlog", "task", "list", node_id, "--json"],
+                f"task list read for node {node_id}",
+            )
+            rows: List[dict] = []
+            if result is not None:
+                try:
+                    loaded = json.loads(result.stdout.decode("utf-8", "replace"))
+                    rows = [r for r in loaded.get("tasks", []) if isinstance(r, dict)]
+                except ValueError:
+                    print(
+                        f"orchestrator: note: unreadable task rows for node {node_id}; "
+                        "proceeding with STATE.md only",
+                        file=sys.stderr,
+                    )
+            for row in rows:
+                status = row.get("status")
+                if status == "done":
+                    completed.append(str(row.get("id")))
+                elif status == "in_progress":
+                    claimed.append(str(row.get("id")))
+            completed = list(dict.fromkeys(completed))
+        print(json.dumps({
+            "ready": ready_tasks(strategy, completed, claimed),
+            "completed": completed,
+            "claimed": claimed,
+        }))
     elif "--next" in sys.argv:
         next_wave = get_next_wave(strategy, completed_tasks)
         if next_wave:
