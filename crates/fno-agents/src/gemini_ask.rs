@@ -423,6 +423,7 @@ fn run_gemini(
     expect_session: bool,
     popen_cwd: Option<&Path>,
     agent_self: Option<&str>,
+    bound_session_id: Option<&str>,
 ) -> Result<GeminiResult, GeminiAskError> {
     use std::process::{Command, Stdio};
 
@@ -444,7 +445,7 @@ fn run_gemini(
     if let Some(cwd) = popen_cwd {
         cmd.current_dir(cwd);
     }
-    crate::claims::stamp_command_env(&mut cmd, agent_self, "gemini", None);
+    crate::claims::stamp_command_env(&mut cmd, agent_self, "gemini", bound_session_id);
     // Own process group so SIGTERM/SIGKILL/SIGINT reach gemini's subshells.
     unsafe {
         cmd.pre_exec(|| {
@@ -680,7 +681,7 @@ pub fn gemini_create(
         .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
     let argv = build_argv_create_with_sandbox(&full_prompt, None, model, sandbox_tokens);
     // gemini pins sessions to cwd via Popen(cwd=...), so create passes popen_cwd.
-    run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self)
+    run_gemini(&argv, output_path, timeout, true, Some(cwd), agent_self, None)
 }
 
 /// Spawn `gemini --skip-trust -p ... --resume <uuid> ...` from the
@@ -704,7 +705,7 @@ pub fn gemini_resume(
     let sandbox_tokens = sandbox_flag_with_policy(eff, None, policy)
         .map_err(|message| GeminiAskError::SandboxUnavailable { message })?;
     let argv = build_argv_resume_with_sandbox(session_id, &full_prompt, sandbox_tokens);
-    run_gemini(&argv, output_path, timeout, false, Some(cwd), None)
+    run_gemini(&argv, output_path, timeout, false, Some(cwd), None, Some(session_id))
 }
 
 // ===========================================================================
