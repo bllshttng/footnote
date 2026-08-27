@@ -7008,7 +7008,23 @@ def cmd_view() -> None:
     except Exception as exc:
         typer.echo(f"Error: canonical graph read failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    render_graph_html(entries, GRAPH_HTML)
+    # Honor the configured row for this path rather than overwriting it with
+    # the whole-graph private board. An operator who scopes their board to one
+    # project got it silently widened by every `view`; one who points a PUBLIC
+    # projection here got the full-detail board written to a path the mux
+    # /backlog route serves. canonical_target() returns the default
+    # whole-graph local row when nothing else claims the path, so the plain
+    # case is unchanged.
+    try:
+        from fno.graph.roadmap_public import canonical_target, render_one_target
+
+        row = canonical_target()
+    except Exception:
+        row = None
+    if row is not None:
+        render_one_target(row, entries)
+    else:
+        render_graph_html(entries, GRAPH_HTML)
     typer.echo(str(GRAPH_HTML))
 
     if os.environ.get("FNO_NO_OPEN") == "1":

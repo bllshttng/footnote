@@ -628,3 +628,99 @@ def test_an_explicit_row_for_the_canonical_board_wins_over_the_default(monkeypat
 
     assert [t.path for t in targets] == [str(gc.GRAPH_HTML)]
     assert targets[0].scope == "fno", "the operator's scope must survive"
+
+
+def test_the_canonical_board_is_written_under_the_graph_flock(tmp_path, monkeypatch):
+    """The board must not be the one artifact that lands after the lock drops.
+
+    Before it became a configurable row, store.py rendered it inside the flock
+    beside graph.md. Moving it out let two concurrent mutations land renders
+    out of order, so the operator's board could read older than the graph.json
+    next to it. A stale board is the complaint this work answers.
+
+    Asserts a POSITIVE marker: the file exists and carries the new entry at the
+    moment the lock is still held, observed from inside the mutation itself.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import store
+
+    # Deliberately NOT tmp_path/"graph.html": that is the path the
+    # non-canonical sibling-artifact branch writes, and a collision there
+    # would let this test pass on the wrong writer.
+    board = tmp_path / "board" / "canonical.html"
+    monkeypatch.setattr(gc, "GRAPH_HTML", board)
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
+    )
+
+    seen = {}
+    real_release = store._release_flock
+
+    def _observe(fd):
+        # Read the board BEFORE the lock drops. If the render moved back out
+        # from under the flock, this finds no file and the assertion below
+        # fails rather than passing on a later write.
+        seen["exists"] = board.exists()
+        seen["text"] = board.read_text() if board.exists() else ""
+        return real_release(fd)
+
+    monkeypatch.setattr(store, "_release_flock", _observe)
+
+    graph = tmp_path / "graph.json"
+    graph.write_text('{"entries": []}')
+    monkeypatch.setattr(gc, "GRAPH_JSON", graph)
+
+    def _add(entries):
+        entries.append(
+            {
+                "id": "ab-10ck0001",
+                "title": "UnderTheFlock",
+                "status": "ready",
+                "priority": "p2",
+                "type": "feature",
+                "project": "fno",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        )
+        return entries
+
+    store.locked_mutate_graph(graph, _add)
+
+    assert seen.get("exists"), "the canonical board was not written under the flock"
+    assert "UnderTheFlock" in seen["text"], (
+        "the board written under the flock predates this mutation"
+    )
+
+
+def test_backlog_view_honors_the_configured_row_for_the_canonical_path(monkeypatch):
+    """`fno backlog view` used to overwrite the configured projection.
+
+    An operator who scopes their board to one project had it silently widened
+    to the whole graph by every view; one who points a PUBLIC projection at
+    that path had the full-detail private board written to a path the mux
+    /backlog route serves.
+    """
+    from fno.graph import _constants as gc
+    from fno.graph import roadmap_public
+
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block",
+        lambda *_a, **_k: {
+            "render_targets": [
+                {"path": str(gc.GRAPH_HTML), "scope": "fno", "projection": "backlog"}
+            ]
+        },
+    )
+    row = roadmap_public.canonical_target()
+    assert row is not None
+    assert row.scope == "fno", "the operator's scope must reach `view`"
+    assert row.projection == "backlog", "the operator's projection must reach `view`"
+
+    # Positive control: with no row configured, the default whole-graph local
+    # board still comes back, so the plain case is unchanged.
+    monkeypatch.setattr(
+        "fno.config_io.read_global_block", lambda *_a, **_k: {"render_targets": []}
+    )
+    default = roadmap_public.canonical_target()
+    assert default is not None
+    assert default.scope == "all" and default.projection == "local"

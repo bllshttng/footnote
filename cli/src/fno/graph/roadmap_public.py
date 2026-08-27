@@ -207,6 +207,17 @@ def _state_file_collisions(path: Path) -> list[str]:
         return []
 
 
+def GRAPH_HTML_PATH() -> Path:
+    from fno.graph._constants import GRAPH_HTML
+
+    return Path(GRAPH_HTML)
+
+
+def render_one_target(target: "RenderTargetConfig", entries: list[dict]) -> None:
+    """Render exactly one configured target. Never raises."""
+    render_configured_targets(entries, _only=target)
+
+
 def _default_targets() -> "list[RenderTargetConfig]":
     """The canonical local board, as an ordinary render-target row.
 
@@ -377,12 +388,41 @@ def _warn_shadowed_local_rows(honored: "list[RenderTargetConfig]") -> None:
         pass
 
 
-def render_configured_targets(entries: list[dict]) -> None:
+def canonical_target() -> "RenderTargetConfig | None":
+    """The configured row for the canonical board, or the default row.
+
+    Split out so ``locked_mutate_graph`` can write this one INSIDE the graph
+    flock, the way graph.md always was. It is a state-dir path this repo owns,
+    so it carries none of the stall risk that keeps operator-chosen paths
+    outside the lock. Without this the canonical board is the only artifact
+    written after the lock drops, and two concurrent mutations can land their
+    renders out of order, leaving the operator's board older than the
+    graph.json beside it. A stale board is the complaint this work answers.
+    """
+    from fno.graph._constants import GRAPH_HTML
+
+    resolved = Path(GRAPH_HTML).resolve()
+    for target in _configured_targets():
+        if Path(os.path.expanduser(target.path)).resolve() == resolved:
+            return target
+    return None
+
+
+def render_configured_targets(
+    entries: list[dict],
+    *,
+    skip_canonical: bool = False,
+    _only: "RenderTargetConfig | None" = None,
+) -> None:
     """Render every configured backlog projection (x-9415). Called from
     ``locked_mutate_graph`` AFTER graph.json is written, so it must never
     raise: a failing operator target warns and is skipped, never wedging the
     mutation. The leak gate stays fail-closed - a refusal leaves the target
-    byte-unchanged and names every offender; it still only skips the target."""
+    byte-unchanged and names every offender; it still only skips the target.
+
+    ``skip_canonical`` omits the canonical board, which the caller has already
+    written under the flock via ``render_one_target``.
+    """
     from fno.graph.render_html import (
         atomic_write_documents,
         leak_offender_lines,
@@ -391,8 +431,11 @@ def render_configured_targets(entries: list[dict]) -> None:
 
     from fno.graph.render_html import render_graph_html
 
-    for target in _configured_targets():
+    canonical = GRAPH_HTML_PATH().resolve() if skip_canonical else None
+    for target in ([_only] if _only is not None else _configured_targets()):
         out = Path(os.path.expanduser(target.path))
+        if canonical is not None and out.resolve() == canonical:
+            continue
         scope, all_projects = _target_scope(target)
         scoped_entries = [
             e for e in entries if _scope_matches(e, scope, all_projects=all_projects)

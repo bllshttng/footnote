@@ -1072,6 +1072,25 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
             # instead of silently producing a stale graph.md.
             print(f"Warning: graph.md render failed: {e}", file=sys.stderr)
         _archived = entries_with_archive(entries)
+        if is_canonical:
+            # The canonical board renders INSIDE the flock, like graph.md above
+            # and like it did before it became a configurable row. It is a
+            # state-dir path this repo owns, so it carries none of the stall
+            # risk that keeps operator-chosen paths outside the lock. Written
+            # after the lock drops, it was the one artifact two concurrent
+            # mutations could land out of order, leaving the operator's board
+            # older than the graph.json beside it.
+            try:
+                from fno.graph.roadmap_public import (
+                    canonical_target,
+                    render_one_target,
+                )
+
+                _canonical_row = canonical_target()
+                if _canonical_row is not None:
+                    render_one_target(_canonical_row, _archived)
+            except Exception as e:
+                print(f"Warning: canonical board render failed: {e}", file=sys.stderr)
         if not is_canonical:
             # Test and temporary graphs retain a sibling HTML artifact without
             # ever touching the operator's configured targets.
@@ -1101,15 +1120,18 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
     # Runs AFTER the flock drops, unlike the state_dir Markdown render above:
     # these paths are operator-chosen, and a stalled (not erroring) target
     # filesystem - a cloud-synced vault - must never hold the graph lock every
-    # backlog verb in the fleet waits on. Tradeoff: two concurrent mutations
-    # can land their renders out of order, leaving the board one mutation
-    # stale until the next one; bytes are never partial (atomic replaces).
+    # backlog verb in the fleet waits on. Tradeoff, scoped to those chosen
+    # paths only: two concurrent mutations can land their renders out of order,
+    # leaving one of them a mutation stale until the next; bytes are never
+    # partial (atomic replaces). The canonical board is exempt - it is written
+    # under the flock above.
     # Fail-open: graph.json is already written; render_configured_targets
     # itself never raises.
     if is_canonical:
         try:
             from fno.graph.roadmap_public import render_configured_targets
-            render_configured_targets(_archived)
+            # The canonical board is already written, under the flock above.
+            render_configured_targets(_archived, skip_canonical=True)
         except Exception as e:
             print(f"Warning: configured render targets failed: {e}", file=sys.stderr)
     return result
