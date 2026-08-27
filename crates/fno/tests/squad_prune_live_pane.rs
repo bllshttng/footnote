@@ -74,7 +74,12 @@ fn prune(scratch: &Scratch) -> (serde_json::Value, String) {
 /// attached session takes, not a synthesized cwd list.
 fn attach_pane_at(scratch: &Scratch, cwd: &str) -> (common::ServerProc, FakeClient) {
     let sock = scratch.main_sock();
-    let server = spawn_server(&sock, &[]);
+    // Pin the shell. `pristine_idle_shell` needs OSC 133 markers, and the
+    // integration only knows zsh and bash, so an inherited `SHELL` of `/bin/sh`
+    // (or none) leaves every pane `Unmeasured`. The tab arm cannot fold what it
+    // has not measured, so the `tabs_closed` assertions below would hold for the
+    // wrong reason - a green that means "the instrument never ran".
+    let server = spawn_server(&sock, &[("SHELL", "/bin/bash")]);
     let mut client = FakeClient::attach(&sock, 24, 80, cwd);
     // Attaching only opens the socket. Without waiting for a pane to exist, a
     // prune that ran first would see none and this would turn on a race.
