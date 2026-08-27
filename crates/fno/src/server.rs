@@ -2244,6 +2244,9 @@ fn restore_worker_refusal_reason(
     let Some(harness) = member.harness.as_deref() else {
         return "harness is unknown".into();
     };
+    if Core::resume_form(harness).is_none() {
+        return format!("{harness} has no resume form; session {session_id} is not resumable");
+    }
     format!("spawn receipt is missing for {harness} session {session_id}")
 }
 
@@ -5660,6 +5663,26 @@ impl Core {
         })
     }
 
+    /// Resume facts from the persisted squad member itself, the identity of
+    /// last resort after both the registry row and its spawn receipt are gone
+    /// (a reaped row purges its receipt with it). Only a harness with a resume
+    /// form qualifies: building facts for anything else would hand
+    /// `resume_worker_into` a pane it cannot spawn.
+    fn member_resume_facts(
+        member: &crate::squad_store::StoredMember,
+        worker_name: &str,
+    ) -> Option<HeldWorker> {
+        let harness = member.harness.as_deref()?;
+        Self::resume_form(harness)?;
+        let harness_session_id = member.harness_session_id.as_deref()?;
+        Some(HeldWorker {
+            name: worker_name.to_string(),
+            harness: harness.to_string(),
+            harness_session_id: harness_session_id.to_string(),
+            cwd: member.cwd.clone().unwrap_or_default(),
+        })
+    }
+
     fn write_restore_message(&mut self, pid: u64, message: &str) {
         let Some(entry) = self.panes.get_mut(&pid) else {
             return;
@@ -6829,6 +6852,16 @@ impl Core {
                                         facts.name = worker_name.to_string();
                                         facts
                                     })
+                            })
+                            // A reaped row purges its spawn receipt with it, so
+                            // a worker that died and was reaped arrives here
+                            // with neither. The persisted member itself is the
+                            // remaining durable identity (harness + full session
+                            // id + cwd); resume from it rather than refuse.
+                            .or_else(|| {
+                                row.is_none()
+                                    .then(|| Self::member_resume_facts(m, worker_name))
+                                    .flatten()
                             });
                         let pane = if let Some(facts) = held {
                             self.hold_worker_pane(facts, rows, cols, &cwd0)
@@ -18314,6 +18347,37 @@ mod tests {
         right.harness_session_id = Some("old-session".into());
         assert!(!worker_registry_match(&member, &wrong, "reused-name"));
         assert!(worker_registry_match(&member, &right, "reused-name"));
+    }
+
+    #[test]
+    fn member_resume_facts_survive_reaped_row_and_purged_receipt() {
+        let member = crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: Some("/Users/wt/worker".into()),
+            worker: Some("t-worker".into()),
+            harness: Some("codex".into()),
+            harness_session_id: Some("01a04191-07ec-7080-aa78-843eb56996e5".into()),
+        };
+        let facts = Core::member_resume_facts(&member, "t-worker").expect("durable member");
+        assert_eq!(facts.harness, "codex");
+        assert_eq!(
+            facts.harness_session_id,
+            "01a04191-07ec-7080-aa78-843eb56996e5"
+        );
+        assert_eq!(facts.cwd, "/Users/wt/worker");
+        assert_eq!(facts.name, "t-worker");
+
+        // A member with no harness resume form must not mint facts: the pane
+        // it would feed has no resume command to run.
+        let mut agy = member.clone();
+        agy.harness = Some("agy".into());
+        assert!(Core::member_resume_facts(&agy, "t-worker").is_none());
+
+        let mut no_id = member;
+        no_id.harness_session_id = None;
+        assert!(Core::member_resume_facts(&no_id, "t-worker").is_none());
     }
 
     #[test]

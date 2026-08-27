@@ -4103,6 +4103,10 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
     // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
     // event without both, which is how a thread worker could lose its only
     // resume fallback before the row is reaped.
+    // `substrate` and `cwd` are load-bearing: the mux restore receipt parser
+    // (crates/fno/src/server.rs parse_spawn_receipts) drops any agent_spawned
+    // event without both, which is how a thread worker could lose its only
+    // resume fallback before the row is reaped.
     let _ = ctx.emitter.emit(
         "agent_spawned",
         &json!({
@@ -4113,6 +4117,8 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
             "short_id": "",
             "status": "live",
             "lane": "thread",
+            "substrate": "thread",
+            "cwd": cwd.to_string_lossy(),
         }),
     );
     Response::ok(
