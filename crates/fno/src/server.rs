@@ -1615,9 +1615,21 @@ fn receipt_for_member<'a>(
     receipts: &'a HashMap<(String, String), HeldWorker>,
     member: &crate::squad_store::StoredMember,
 ) -> Option<&'a HeldWorker> {
-    let harness = member.harness.as_deref()?;
     let session_id = member.harness_session_id.as_deref()?;
-    receipts.get(&(harness.to_string(), session_id.to_string()))
+    if let Some(harness) = member.harness.as_deref() {
+        return receipts.get(&(harness.to_string(), session_id.to_string()));
+    }
+    let mut match_ = None;
+    for receipt in receipts
+        .values()
+        .filter(|receipt| receipt.harness_session_id == session_id)
+    {
+        if match_.is_some() {
+            return None;
+        }
+        match_ = Some(receipt);
+    }
+    match_
 }
 
 struct Core {
@@ -2048,19 +2060,23 @@ fn restore_worker_refusal_reason(
     {
         return reason.to_string();
     }
-    let Some(harness) = member.harness.as_deref() else {
-        return "harness is unknown".into();
-    };
     let Some(session_id) = member.harness_session_id.as_deref() else {
         return "session id is missing".into();
     };
     if let Some(error) = receipt_store_error {
         return error.to_string();
     }
-    if receipt_for_member(receipts, member).is_none() {
-        return format!("spawn receipt is missing for {harness} session {session_id}");
+    if let Some(receipt) = receipt_for_member(receipts, member) {
+        let harness = member
+            .harness
+            .as_deref()
+            .unwrap_or(receipt.harness.as_str());
+        return format!("{harness} session {session_id} is not resumable");
     }
-    format!("{harness} session {session_id} is not resumable")
+    let Some(harness) = member.harness.as_deref() else {
+        return "harness is unknown".into();
+    };
+    format!("spawn receipt is missing for {harness} session {session_id}")
 }
 
 fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
@@ -17592,7 +17608,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_refuses_a_receipt_when_the_stored_harness_is_unknown() {
+    fn restore_legacy_member_uses_unique_receipt_harness() {
         let member = crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
@@ -17611,9 +17627,11 @@ mod tests {
                 cwd: "/repo".into(),
             },
         )]);
+        let receipt = receipt_for_member(&receipts, &member).expect("unique receipt");
+        assert_eq!(receipt.harness, "codex");
         assert_eq!(
             restore_worker_refusal_reason(&member, None, None, &receipts),
-            "harness is unknown"
+            "codex session full-session is not resumable"
         );
     }
 
