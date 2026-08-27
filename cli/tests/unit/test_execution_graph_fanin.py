@@ -108,9 +108,78 @@ def test_classify_maps_canonical_statuses():
     assert pairs == [("a", "completed"), ("b", "completed"), ("c", "failed"), ("d", "failed")]
 
 
-def test_null_and_empty_output_are_malformed():
+def test_null_and_empty_output_are_explicit_kinds():
+    # x-1862: (None, None) is never returned. Empty output says "nothing was
+    # observed" (the instrument never ran, or the pipeline lost it); non-empty
+    # unparseable output says "it ran, and this partial text is not an answer".
     pairs = _classify_many(["", "no contract here", '{"result":"NONSENSE","task":"x"}'])
-    assert pairs == [(None, None), (None, None), (None, None)]
+    assert pairs == [(None, "no_output"), (None, "unknown_terminal"), (None, "unknown_terminal")]
+
+
+def test_runtime_death_downgrades_claimed_success():
+    # The runtime watched the process die; a self-reported SUCCESS cannot
+    # certify it. The observation outranks the claim.
+    orch = _load_orch()
+    pair = orch.classify_worker_return(
+        '```json\n{"result":"SUCCESS","task":"a"}\n```', runtime_terminal="signal"
+    )
+    assert pair == ("a", "failed")
+
+
+def test_runtime_completed_never_flips_a_failed_claim():
+    orch = _load_orch()
+    assert orch.classify_worker_return(
+        '```json\n{"result":"FAILED","task":"a"}\n```', runtime_terminal="completed"
+    ) == ("a", "failed")
+    assert orch.classify_worker_return(
+        '```json\n{"result":"SUCCESS","task":"a"}\n```', runtime_terminal="completed"
+    ) == ("a", "completed")
+    # No observation at all: the claim stands alone (today's behavior).
+    assert orch.classify_worker_return(
+        '```json\n{"result":"SUCCESS","task":"a"}\n```'
+    ) == ("a", "completed")
+
+
+def test_runtime_death_with_garbage_output_is_runtime_failed():
+    orch = _load_orch()
+    assert orch.classify_worker_return("Traceback ...", runtime_terminal="signal") == (
+        None,
+        "runtime_failed",
+    )
+    assert orch.classify_worker_return("", runtime_terminal="error") == (None, "runtime_failed")
+
+
+def test_unrecognized_runtime_terminal_is_failure_class():
+    # Unknown terminal reason is a failure, never partial output as success.
+    orch = _load_orch()
+    assert orch.classify_worker_return(
+        '```json\n{"result":"SUCCESS","task":"a"}\n```', runtime_terminal="something_new"
+    ) == ("a", "failed")
+    assert orch.classify_worker_return("partial text", runtime_terminal="something_new") == (
+        None,
+        "runtime_failed",
+    )
+
+
+def test_each_runtime_failure_class_is_observed_failure():
+    orch = _load_orch()
+    for terminal in ("error", "signal", "context_limit", "refusal"):
+        assert orch.classify_worker_return(
+            '```json\n{"result":"SUCCESS","task":"a"}\n```', runtime_terminal=terminal
+        ) == ("a", "failed"), terminal
+
+
+def test_tally_counts_runtime_failed_and_blocks():
+    t = tally_fan_in(["a"], [(None, "runtime_failed")])
+    assert t.runtime_failed == 1 and t.malformed == 0 and t.missing == 1
+    assert t.complete is False
+
+
+def test_tally_runtime_failed_field_defaults_zero():
+    # Backward-compatible construction without the new field.
+    t = tally_fan_in(["a"], [("a", "completed")])
+    assert t.runtime_failed == 0 and t.complete is True
+    assert t.to_dict()["runtime_failed"] == 0
 
 
 def test_end_to_end_mixed_bag_blocks_synthesis():
@@ -118,7 +187,7 @@ def test_end_to_end_mixed_bag_blocks_synthesis():
         '```json\n{"result":"SUCCESS","task":"a"}\n```',   # completed
         '```json\n{"result":"SUCCESS","task":"a"}\n```',   # duplicate
         '```json\n{"result":"FAILED","task":"b"}\n```',    # failed
-        "garbage output",                                     # malformed
+        "garbage output",                                     # malformed (unknown_terminal)
         # expected id "c" never returns                       -> missing
     ]
     observed = _classify_many(outputs)
@@ -127,6 +196,22 @@ def test_end_to_end_mixed_bag_blocks_synthesis():
     assert t.completed == 1
     assert t.failed == 1
     assert t.duplicate == 1
+    assert t.malformed == 1
+    assert t.missing == 1
+    assert t.complete is False
+
+
+def test_end_to_end_runtime_death_names_the_cause():
+    # A crashed worker and a garbage-emitting worker are distinguishable: the
+    # crash lands in runtime_failed, the garbage in malformed.
+    orch = _load_orch()
+    observed = [
+        ("a", "completed"),
+        orch.classify_worker_return("killed mid-run", runtime_terminal="signal"),
+        orch.classify_worker_return("random prose"),
+    ]
+    t = tally_fan_in(["a", "b"], observed)
+    assert t.runtime_failed == 1
     assert t.malformed == 1
     assert t.missing == 1
     assert t.complete is False

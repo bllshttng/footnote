@@ -9567,9 +9567,8 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // live CI-waiting session (x-b57a). probe_block.is_none() keeps
                 // the never-passing-probe escape above intact; a suppressed
                 // backstop keeps blocking and degrades to budget/claim-expiry.
-                let sole_blocker_is_pending_ci = pr_open
-                    && probe_block.is_none()
-                    && matches!(observed_async_wait, Some("ci"));
+                let sole_blocker_is_pending_ci =
+                    pr_open && probe_block.is_none() && matches!(observed_async_wait, Some("ci"));
                 // `probe_block.is_some()` keeps a probe that can never pass in
                 // this environment on the NoProgress escape rather than looping
                 // to the budget ceiling: PR+CI+review all hold, so without it

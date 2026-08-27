@@ -914,24 +914,60 @@ def parse_task_result(output: str) -> Optional[TaskResult]:
 # through this (task_id, kind) tuple, NOT a cross-package import - orchestrator
 # stays free of `fno.*` imports so `python skills/execute/orchestrator.py --help`
 # runs under the ambient python that lacks the fno package.
-#   kind "completed" -> SUCCESS | DONE_WITH_CONCERNS
-#   kind "failed"    -> FAILED | BLOCKED (unresolved; the barrier must not release)
-#   (None, None)     -> unparseable/malformed; attributed to no node
+#   kind "completed"       -> SUCCESS | DONE_WITH_CONCERNS
+#   kind "failed"          -> FAILED | BLOCKED (unresolved; the barrier must not release)
+#   kind "runtime_failed"  -> runtime-observed death (signal/error/context-limit/
+#                             refusal), no usable claim to attribute
+#   kind "unknown_terminal"-> ran and emitted retained partial output that must
+#                             never surface as an answer
+#   kind "no_output"       -> nothing observed (the instrument never ran, or the
+#                             pipeline lost it)
 _COMPLETED_STATUSES = frozenset({"SUCCESS", "DONE_WITH_CONCERNS"})
 
+# Runtime-observed worker terminal vocabulary (x-1862): the process-level half
+# of a worker return, independent of anything the worker wrote about itself.
+# The dispatcher already encodes these (a signal death arrives as 128+N); this
+# is where that observation stops being discarded. None means "no observation
+# available" and never fabricates a verdict; an unrecognized non-None value is
+# failure-class (an unknown terminal reason is a failure, never partial output
+# as success - deepseek-harness stopReasonError precedent).
+_RUNTIME_TERMINALS = frozenset({"completed", "error", "signal", "context_limit", "refusal"})
+_RUNTIME_FAILURE_TERMINALS = frozenset({"error", "signal", "context_limit", "refusal"})
 
-def classify_worker_return(output: str) -> tuple[Optional[str], Optional[str]]:
+
+def classify_worker_return(
+    output: str,
+    runtime_terminal: Optional[str] = None,
+) -> tuple[Optional[str], Optional[str]]:
     """Validate a worker return against the canonical contract and classify it.
+
+    Two independent inputs, kept separate on purpose (x-1862): ``output`` is
+    the worker's self-report (the CLAIM); ``runtime_terminal`` is what the
+    runtime OBSERVED about the process (``"completed"``, ``"error"``,
+    ``"signal"`` for a 128+N death, ``"context_limit"``, ``"refusal"``). A
+    failure-class observation outranks a completing claim - a self-report
+    cannot certify a process the runtime watched die - and an unrecognized
+    observation reads as failure, never success. ``None`` (default) means no
+    observation was available and the claim is graded alone.
 
     Reuses ``parse_task_result`` (the single source of the status enum) so a
     malformed or invalid-status return can never pose as complete. Returns a
-    ``(task_id, kind)`` pair for ``tally_fan_in``; ``(None, None)`` when the
-    return does not parse - the fan-in count treats that as malformed and
-    refuses synthesis rather than silently dropping an unresolved node.
+    ``(task_id, kind)`` pair for ``tally_fan_in``. ``(None, None)`` is never
+    returned: a shapeless answer is exactly the absence-versus-outcome
+    ambiguity this classifier exists to refuse.
     """
+    observed_failure = runtime_terminal in _RUNTIME_FAILURE_TERMINALS or (
+        runtime_terminal is not None and runtime_terminal not in _RUNTIME_TERMINALS
+    )
     result = parse_task_result(output)
     if result is None:
-        return None, None
+        if observed_failure:
+            return None, "runtime_failed"
+        if not output or not output.strip():
+            return None, "no_output"
+        return None, "unknown_terminal"
+    if observed_failure and result.status in _COMPLETED_STATUSES:
+        return result.task_id, "failed"
     kind = "completed" if result.status in _COMPLETED_STATUSES else "failed"
     return result.task_id, kind
 
