@@ -275,11 +275,24 @@ def test_done_when_no_review_gate(monkeypatch) -> None:
     assert "PR + CI only" in line and "hand off" not in line
 
 
+def _plan_line_value(tmp_path, **kw) -> str:
+    """The plan line of a full report. Coverage runs through the production
+    renderer (`build_report`) because the `_plan_line` shortcut it once
+    duplicated is gone."""
+    return next(
+        ln.value
+        for ln in orient.build_report(tmp_path, manifest_raw={}, **kw)
+        if ln.label == "plan"
+    )
+
+
 def test_plan_line(tmp_path) -> None:
-    assert "none" in orient._plan_line(None, tmp_path)
+    assert "none" in _plan_line_value(tmp_path, node_id=None, plan_path=None)
     plan = tmp_path / "p.md"
     plan.write_text("edits `a/b.py`\n", encoding="utf-8")
-    assert "stale-reference" in orient._plan_line(str(plan), tmp_path)
+    assert "stale-reference" in _plan_line_value(
+        tmp_path, node_id=None, plan_path=str(plan)
+    )
 
 
 def test_plan_line_reads_the_nodes_bound_plan_when_the_manifest_carries_none(
@@ -293,7 +306,7 @@ def test_plan_line_reads_the_nodes_bound_plan_when_the_manifest_carries_none(
     monkeypatch.setattr(
         orient, "_graph_entry", lambda node_id, root: {"plan_path": str(plan)}
     )
-    line = orient._plan_line(None, tmp_path, node_id="x-1")
+    line = _plan_line_value(tmp_path, node_id="x-1", plan_path=None)
     assert "stale-reference" in line, "the bound plan was actually read"
 
 
@@ -301,13 +314,13 @@ def test_plan_line_absence_carries_its_basis(monkeypatch, tmp_path) -> None:
     """AC6-EDGE: no plan anywhere reads as an absence with a basis, and an
     unreadable graph reads as unknown - never as a measured none."""
     monkeypatch.setattr(orient, "_graph_entry", lambda node_id, root: {})
-    assert "no plan bound" in orient._plan_line(None, tmp_path, node_id="x-1")
+    assert "no plan bound" in _plan_line_value(tmp_path, node_id="x-1", plan_path=None)
 
     def boom(*_args):
         raise RuntimeError("graph blew up")
 
     monkeypatch.setattr(orient, "_graph_entry", boom)
-    assert "unknown" in orient._plan_line(None, tmp_path, node_id="x-1")
+    assert "unknown" in _plan_line_value(tmp_path, node_id="x-1", plan_path=None)
 
 
 def test_build_report_is_read_only_eight_lines(monkeypatch, tmp_path) -> None:

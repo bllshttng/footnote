@@ -105,7 +105,7 @@ def test_list_agents_empty_registry_json_shape(tmp_path, monkeypatch, _patch_cla
             "status": None,
             "progress": None,
         },
-        "fields_omitted": ["model"],
+        "fields_omitted": ["model", "model_basis"],
         "schema_version": 4,
     }
     assert result.exit_code == 0
@@ -525,6 +525,40 @@ def test_a_dead_pid_outvotes_a_stale_working_supervisor_status(
     )
     assert row["live_status_basis"] == "contradicted-by-process-gone", (
         "the disagreement between the two sources stays visible"
+    )
+
+
+def test_an_unrecognized_passthrough_status_is_still_marked_superseded(
+    tmp_path, monkeypatch, _patch_claude_agents_json
+):
+    """A claude status outside the known vocabulary passes through the parser
+    unchanged, and the gate admits it: anything outside {idle, done} claims
+    enough to be beaten. Its replacement by the truth reading is a real
+    supersession, so the marker may not deny it because the word is missing
+    from its own vocabulary."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            _claude(
+                name="target-x-e909-passthrough",
+                pid=4194321,  # realistically never alive
+                short_id="abc12345",
+            )
+        ]
+    )
+    _patch_claude_agents_json(
+        {"abc12345": {"sessionId": "abc12345-1-2-3-4", "live_status": "Waiting"}}
+    )
+    from fno.agents import truth_status
+
+    monkeypatch.setattr(truth_status, "resolve_truth_status", lambda *_a, **_k: {"state": "stalled"})
+
+    row = json.loads(list_agents(json_out=True, tty=True).output)["agents"][0]
+    assert row["live_status"] == "Stalled (claim stale)", (
+        "the truth reading replaces the unrecognized supervisor word"
+    )
+    assert row["live_status_basis"] == "contradicted-by-process-gone", (
+        "the supersession is marked even though no marker-side word list knows it"
     )
 
 

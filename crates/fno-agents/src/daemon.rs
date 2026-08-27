@@ -5363,14 +5363,15 @@ fn apply_row_contradiction(row: &mut Map<String, Value>, now: chrono::DateTime<c
     // (x-d401, x-d4a6) A superseded supervisor claim beside the falsifier
     // that beat it: `superseded_live_status` is a caller-injected input (like
     // `pid`), popped here; only the basis key survives, null when no
-    // supersession happened. Mirrors `_supervisor_contradicted` in Python.
+    // supersession happened. PRESENCE is the caller's assertion that a
+    // supersession happened; which words claim nothing lives in the gate
+    // that stamps this input (read.py's {idle, done} admission set) - a
+    // second word list here once denied a supersession the gate had stamped.
+    // Mirrors `_supervisor_contradicted` in Python.
     let superseded = row
         .get("superseded_live_status")
         .and_then(Value::as_str)
-        .is_some_and(|word| {
-            let lower = word.to_ascii_lowercase();
-            lower == "working" || lower == "needs input"
-        });
+        .is_some_and(|word| !word.is_empty());
     let contradicted = superseded
         && row.get("reachability").and_then(Value::as_str) == Some("unreachable")
         && !incoming_basis.is_empty();
@@ -5588,7 +5589,7 @@ fn attention_sort_key(row: &Value) -> (u8, std::cmp::Reverse<u64>, String) {
 /// `agent.list`, with the truth probe injected as a BATCH seam: one call for
 /// the whole filtered page, keyed by handle. The per-row seam it replaced spent
 /// one Python interpreter cold start per row per list.
-const LIST_PROJECTION_OMISSIONS: [&str; 1] = ["model"];
+const LIST_PROJECTION_OMISSIONS: [&str; 2] = ["model", "model_basis"];
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
@@ -13933,7 +13934,7 @@ done
         let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
         assert_eq!(
             contract["projection_omissions"],
-            json!(["model"]),
+            json!(["model", "model_basis"]),
             "projection omissions must stay canonical and sorted"
         );
         let mut expected: std::collections::BTreeSet<String> = contract["required"]

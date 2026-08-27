@@ -4137,7 +4137,7 @@ def dispatch_spawn_pane(
                     harness=provider,
                     provider=resolved_lane_provider,
                     model=actual_model,
-                    model_basis="requested" if actual_model is not None else None,
+                    model_basis="requested" if actual_model else None,
                     effort=effort,
                     cwd=str(cwd),
                     # Written in the SAME registry transaction as the status, so
