@@ -59,6 +59,46 @@ def test_render_tasks_md_pr_number_explicit_none():
     assert "#None" not in md
 
 
+def test_accumulate_entry_separates_fno_mail():
+    """fno_mail user turns must increment mail_messages, not user_messages."""
+    metrics = session_cost.SessionMetrics(session_id="test-session")
+
+    # Regular human operator message
+    operator_entry = {
+        "type": "user",
+        "message": {"role": "user", "content": "Please implement feature X"},
+    }
+    session_cost._accumulate_entry(operator_entry, metrics)
+    assert metrics.user_messages == 1
+    assert metrics.mail_messages == 0
+
+    # Peer mail message carrying <fno_mail> tag
+    mail_entry = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": '<fno_mail from="cc-12345678" harness="claude">here is the status</fno_mail>',
+        },
+    }
+    session_cost._accumulate_entry(mail_entry, metrics)
+    assert metrics.user_messages == 1
+    assert metrics.mail_messages == 1
+
+    # Block content shape
+    block_mail_entry = {
+        "type": "user",
+        "message": {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": '<fno_mail from="cc-87654321">peer update</fno_mail>'}
+            ],
+        },
+    }
+    session_cost._accumulate_entry(block_mail_entry, metrics)
+    assert metrics.user_messages == 1
+    assert metrics.mail_messages == 2
+
+
 def _run_standalone() -> int:
     failed = 0
     for name, fn in list(globals().items()):

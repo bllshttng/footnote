@@ -294,8 +294,10 @@ def resolve_session_truth(
 
     # Classify the LAST turn, not the last assistant turn: a trailing user turn
     # must clear a stale assistant promise/question (see classify_tail).
+    # Peer mail turns (role == "peer") do not clear operator/assistant state.
     last = records[-1]
-    state = classify_tail(last.role, last.text, age, stalled_after_s=stalled_after_s)
+    last_actor = next((r for r in reversed(records) if r.role != "peer"), last)
+    state = classify_tail(last_actor.role, last_actor.text, age, stalled_after_s=stalled_after_s)
     try:
         last_event_at = (
             None

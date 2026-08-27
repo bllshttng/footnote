@@ -1046,3 +1046,23 @@ def test_truth_batch_reads_the_registry_once_for_every_handle(monkeypatch):
         "bbbb": "gone:beta",
         "nobody": None,
     }
+
+
+def test_resolve_session_truth_peer_mail_does_not_clear_question(tmp_path):
+    """Trailing peer mail turns must not clear assistant question/help state."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/tmp/proj"
+    sid = "sess-truth-peer"
+    turns = [
+        ("user", "Start working"),
+        ("assistant", "Should I use postgres or sqlite?"),
+        ("user", '<fno_mail from="cc-peer001" harness="claude">here is a status update</fno_mail>'),
+    ]
+    _write_claude_transcript(tmp_path, cwd, sid, turns)
+    sess = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, transcript_path=None)
+
+    truth = resolve_session_truth("w1", resolve=lambda h: (sess, []), projects_root=tmp_path, now_s=None)
+    assert truth["state"] == "your-move"
+    assert "<fno_mail" in truth["last_message"]
+

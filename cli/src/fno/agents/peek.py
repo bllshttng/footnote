@@ -107,7 +107,11 @@ def _parse_claude_record(rec: dict) -> Optional[Record]:
     text = _extract_text(msg.get("content"))
     if not text:
         return None
-    return Record(role=str(msg.get("role") or rec.get("type")), text=text)
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    raw_role = str(msg.get("role") or rec.get("type"))
+    role = "peer" if raw_role == "user" and contains_fno_mail_tag(text) else raw_role
+    return Record(role=role, text=text)
 
 
 def _parse_codex_record(rec: dict) -> Optional[Record]:
@@ -120,9 +124,13 @@ def _parse_codex_record(rec: dict) -> Optional[Record]:
     text = _extract_text(payload.get("content"))
     if not text:
         return None
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    raw_role = str(payload.get("role") or "?")
+    role = "peer" if raw_role == "user" and contains_fno_mail_tag(text) else raw_role
     timestamp = rec.get("timestamp")
     return Record(
-        role=str(payload.get("role") or "?"),
+        role=role,
         text=text,
         timestamp=timestamp if isinstance(timestamp, str) else None,
     )
@@ -278,8 +286,12 @@ def _parse_opencode_record(msg: dict, part_root: Path) -> Optional[Record]:
     text = _opencode_part_text(part_root / mid)
     if not text:
         return None
-    role = msg.get("role")
-    return Record(role=role if isinstance(role, str) and role else "?", text=text)
+    from fno.mail.envelope import contains_fno_mail_tag
+
+    raw_role = msg.get("role")
+    role_str = raw_role if isinstance(raw_role, str) and raw_role else "?"
+    role = "peer" if role_str == "user" and contains_fno_mail_tag(text) else role_str
+    return Record(role=role, text=text)
 
 
 def _opencode_records_db(
@@ -295,6 +307,7 @@ def _opencode_records_db(
     import sqlite3
 
     from fno.agents.discover import default_opencode_db_path, opencode_connect
+    from fno.mail.envelope import contains_fno_mail_tag
 
     if n is not None and n <= 0:
         return []
@@ -337,9 +350,11 @@ def _opencode_records_db(
             text = _opencode_join_parts(blocks)
             if not text:
                 continue
-            role = msg.get("role")
+            raw_role = msg.get("role")
+            role_str = raw_role if isinstance(raw_role, str) and raw_role else "?"
+            role = "peer" if role_str == "user" and contains_fno_mail_tag(text) else role_str
             records.append(
-                Record(role=role if isinstance(role, str) and role else "?", text=text)
+                Record(role=role, text=text)
             )
             if n is not None and len(records) >= n:
                 break
