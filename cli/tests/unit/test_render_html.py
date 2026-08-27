@@ -257,3 +257,21 @@ def test_legacy_all_hidden_project_state_remains_an_active_empty_selection():
     assert "projectFilterActive" in _DASHBOARD_JS
     assert "saved[p] === true" in _DASHBOARD_JS
     assert "state.projectFilterActive" in _DASHBOARD_JS
+
+
+def test_dashboard_initially_selects_all_nonterminal_statuses():
+    from fno.graph.render_html import _DASHBOARD_JS
+
+    assert "ORDER.filter(function (s) { return s !== 'done' && s !== 'superseded'; })" in _DASHBOARD_JS
+
+
+def test_dashboard_derives_done_from_completion_fact(tmp_path: Path):
+    out = tmp_path / "graph.html"
+    render_graph_html(
+        [_entry("completed-marker", status="ready", completed_at="2026-08-27T00:00:00Z")],
+        out,
+    )
+
+    text = out.read_text()
+    assert '"s":"done"' in text
+    assert '"s":"ready"' not in text

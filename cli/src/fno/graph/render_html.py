@@ -1239,7 +1239,7 @@ _DASHBOARD_JS = """\
   document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value.toLowerCase().trim(); render(); });
   function buttonFilter(id, key) { var b = document.getElementById(id); b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
   buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
-  var openStatuses = new Set(['in_progress', 'in_review', 'ready', 'blocked']); openStatuses.forEach(function (s) { if (ORDER.indexOf(s) >= 0) state.status.add(s); });
+  var openStatuses = new Set(ORDER.filter(function (s) { return s !== 'done' && s !== 'superseded'; })); openStatuses.forEach(function (s) { state.status.add(s); });
   ORDER.forEach(function (s) { var b = statusChips.querySelector('[data-s="' + s + '"]'); if (b) b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); });
   function projectMatch(n) { return !state.projectFilterActive || state.projects.has(n.project); }
   function matches(n) {
@@ -1289,7 +1289,7 @@ def _dashboard_rows(
     index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
     rows: list[dict] = []
     for entry in entries:
-        status = str(entry.get("status") or "unknown")
+        status = "done" if entry.get("completed_at") else str(entry.get("status") or "unknown")
         row: dict[str, object] = {
             "s": status,
             "t": str(entry.get("title") or "(untitled)").replace("\n", " ").strip(),
