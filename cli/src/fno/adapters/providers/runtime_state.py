@@ -173,20 +173,94 @@ class ProviderRuntimeState:
 def _resolve_state_path(repo_root: Path | None = None) -> Path:
     """Return the active runtime-state path, honoring env override.
 
-    The path is project-local by design, so it resolves against ``repo_root``
-    when the caller knows which repository the operation concerns. Cross-project
-    dispatch needs that: the record set and the cached snapshot for a node must
-    come from the SAME repository, or a same-id record in the dispatcher's own
-    project would answer for the node's. The env override still wins (it is how
-    tests pin a state file) and an omitted root keeps the process cwd, which is
-    correct for every operation that concerns the caller's own repo.
+    Machine-wide by design (M5): quota is a property of an ACCOUNT at a vendor,
+    so the same account rate-limited in one repo is rate-limited everywhere and
+    a per-cwd file cannot hold it. Provider health and usage follow the resolved
+    state root (``~/.fno`` by default) via :func:`fno.paths.runtime_state_json`.
+    The RECORD SET stays resolved per repo - it is config - which is the split
+    the old project-local docstring conflated. ``repo_root`` no longer moves the
+    file and survives only for signature compatibility. The env override still
+    wins (it is how tests pin a state file). A first resolve folds any legacy
+    per-cwd file into the machine-wide one.
     """
     override = os.environ.get("FNO_RUNTIME_STATE_PATH")
     if override:
         return Path(override)
-    if repo_root is not None:
-        return Path(repo_root) / RUNTIME_STATE_PATH
-    return Path(RUNTIME_STATE_PATH)
+    _fold_legacy_state_files()
+    from fno.paths import runtime_state_json
+
+    return runtime_state_json()
+
+
+def _fold_legacy_state_files() -> None:
+    """Fold a legacy per-cwd state file into the machine-wide one. Newest wins.
+
+    ``_resolve_state_path`` used to return the RELATIVE ``RUNTIME_STATE_PATH``,
+    so every distinct process cwd kept its own state file and the two halves of
+    the signal sat in different ones (measured 2026-08-27: a live provider lock
+    in ``~/.fno`` beside a usage row in the repo). Merge per key -
+    provider_health by newest ``last_error_at``, usage by newest ``probed_at`` -
+    and leave the legacy file untouched rather than deleting it, so a rolled-back
+    binary loses nothing. Steady state pays two stats (the fold is skipped once
+    the machine-wide file is at least as new) and never runs under the env
+    override, which names one explicit file.
+    """
+    try:
+        from fno.paths import runtime_state_json
+
+        target = runtime_state_json()
+    except Exception:  # noqa: BLE001 - a path failure degrades to "no legacy"
+        return
+    legacy = Path.cwd() / RUNTIME_STATE_PATH
+    try:
+        if not legacy.is_file():
+            return
+        if legacy.resolve() == target.resolve():
+            return
+        if target.is_file() and target.stat().st_mtime >= legacy.stat().st_mtime:
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.FileLock(str(_lock_path(target)), timeout=LOCK_TIMEOUT_SECONDS):
+            # Re-check under the lock: a racing process may have folded already.
+            if target.is_file() and target.stat().st_mtime >= legacy.stat().st_mtime:
+                return
+            dst = _read_disk_payload(target) or {}
+            src = _read_disk_payload(legacy) or {}
+            health = _parse_state_payload(dst)
+            for pid, entry in _parse_state_payload(src).items():
+                prior = health.get(pid)
+                if prior is None or _ts(entry.last_error_at) > _ts(prior.last_error_at):
+                    health[pid] = entry
+            usage = _parse_usage_payload(dst)
+            for pid, entry in _parse_usage_payload(src).items():
+                prior = usage.get(pid)
+                if prior is None or _ts(entry.probed_at) > _ts(prior.probed_at):
+                    usage[pid] = entry
+            now = time.time()
+            health, _dropped = _drop_stale(health, now)
+            _write_state_atomic(
+                target,
+                _serialize_state(
+                    ProviderRuntimeState(
+                        provider_health=health,
+                        combo_cursors=_parse_cursors_payload(dst),
+                        usage=usage,
+                        windows_opened=_parse_windows_opened(dst),
+                        schema_version=int(dst.get("schema_version", SCHEMA_VERSION)),
+                    )
+                ),
+            )
+    except (filelock.Timeout, OSError):
+        logger.warning(
+            "runtime_state: legacy per-cwd fold skipped (lock/IO); "
+            "both files left as-is",
+            exc_info=True,
+        )
+
+
+def _ts(value: float | None) -> float:
+    """None-safe timestamp compare key (absent reads as oldest)."""
+    return value if value is not None else 0.0
 
 
 def _lock_path(state_path: Path) -> Path:
@@ -1296,11 +1370,16 @@ class Headroom:
 
     ``resets_at`` is the reset time of the window (or provider-level lock) that
     drove the verdict, or None when nothing binds (OK / UNKNOWN). Consumers use
-    it for the ``retry_after`` hint and the defer-horizon check.
+    it for the ``retry_after`` hint and the defer-horizon check. ``source``
+    names which half of the signal drove it: ``lock`` (the authoritative
+    provider-level ``rate_limited_until``), ``window`` (usage enrichment),
+    ``stale``/``absent``/``empty`` (nothing usable), or ``""`` for callers that
+    construct a bare verdict.
     """
 
     state: HeadroomState
     resets_at: float | None = None
+    source: str = ""
 
 
 def headroom(
@@ -1313,10 +1392,15 @@ def headroom(
 ) -> Headroom:
     """Compute the headroom verdict for ``provider_id`` from cached usage.
 
-    - EXHAUSTED: any future-binding window at >=100%, or an active
-      provider-level ``rate_limited_until``. ``resets_at`` = soonest such reset.
-    - LOW: worst future-binding window at >= ``threshold_pct``.
-    - UNKNOWN: no fresh snapshot, or a snapshot with an empty windows tuple.
+    The provider lock is AUTHORITATIVE and the usage window is optional
+    enrichment (M6): the lock is fresh, not TTL-gated, and written by the real
+    failure path on every 429, while the window sits behind a TTL with no
+    refresher on the dispatch path. So:
+
+    - EXHAUSTED: an active provider-level ``rate_limited_until`` only.
+    - LOW: a fresh window at >= ``threshold_pct`` (the window may only REFINE
+      an ok verdict to low; it never produces exhausted on its own).
+    - UNKNOWN: no fresh usable window and no lock.
     - OK: a fresh snapshot whose binding windows are all below threshold (a
       window already reset never binds, so a stale 100% that has since reset
       reads OK - AC1-EDGE).
@@ -1337,10 +1421,14 @@ def headroom(
     if health is not None and health.rate_limited_until is not None:
         rlu = health.rate_limited_until if health.rate_limited_until > now else None
     snap = _parse_usage_payload(raw).get(provider_id) if raw else None
-    if snap is not None and snap.probed_at < now - ttl_seconds:
+    window = "fresh"
+    if snap is None:
+        window = "absent"
+    elif snap.probed_at < now - ttl_seconds:
+        window = "stale"
         snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
-    return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct)
+    return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct, window=window)
 
 
 def _headroom_from(
@@ -1349,6 +1437,7 @@ def _headroom_from(
     *,
     now: float,
     threshold_pct: float,
+    window: str = "fresh",
 ) -> Headroom:
     """The pure verdict, given an already-resolved snapshot and provider lock.
 
@@ -1356,7 +1445,8 @@ def _headroom_from(
     the same verdict without a second disk read. That matters because a probe
     whose persist lost a lock race would otherwise read back as UNKNOWN, and
     UNKNOWN proceeds - turning a successful "this provider is exhausted"
-    observation into a launch onto the walled provider.
+    observation into a launch onto the walled provider. ``window`` carries the
+    absent/stale note from the reader so the receipt can name which half spoke.
     """
     # A window with no reset can never be "already reset", so the check that
     # exempts a stale window cannot exempt it: it always binds, on percentage
@@ -1375,26 +1465,36 @@ def _headroom_from(
         resets = [w.resets_at for w in exhausted if w.resets_at is not None]
         if rlu is not None:
             resets.append(rlu)
-        return Headroom(HeadroomState.EXHAUSTED, min(resets) if resets else None)
-    if snap is None or not snap.windows:
-        # No data at all, or a snapshot that reported no windows: UNKNOWN,
-        # never OK (empty windows must not read as headroom).
-        return Headroom(HeadroomState.UNKNOWN, None)
+        return Headroom(
+            HeadroomState.EXHAUSTED,
+            min(resets) if resets else None,
+            source="lock" if rlu is not None else "window",
+        )
+    if snap is None:
+        # An absent or stale window contributes nothing (M6/AC18): UNKNOWN,
+        # with the note naming which, never a verdict of its own.
+        return Headroom(HeadroomState.UNKNOWN, None, source=window or "absent")
+    if not snap.windows:
+        # A snapshot that reported no windows: UNKNOWN, never OK (empty
+        # windows must not read as headroom).
+        return Headroom(HeadroomState.UNKNOWN, None, source="empty")
     if snap.partial:
         # The probe could not read the response whole, so some window it was
         # meant to see is missing. Round toward strength: floor at LOW and
         # never answer OK from a reading with a hole in it. The reset offered
         # is the soonest one actually observed, or None when nothing binds.
         soonest = [w.resets_at for w in binding if w.resets_at is not None]
-        return Headroom(HeadroomState.LOW, min(soonest) if soonest else None)
+        return Headroom(
+            HeadroomState.LOW, min(soonest) if soonest else None, source="window"
+        )
     if not binding:
-        # Snapshot has windows but every one has already reset: the limits are
-        # fresh, so there is headroom.
-        return Headroom(HeadroomState.OK, None)
+        # Every window has already reset: the limits are fresh, so there is
+        # headroom.
+        return Headroom(HeadroomState.OK, None, source="window")
     worst = max(binding, key=lambda w: w.used_pct)
     if worst.used_pct >= threshold_pct:
-        return Headroom(HeadroomState.LOW, worst.resets_at)
-    return Headroom(HeadroomState.OK, None)
+        return Headroom(HeadroomState.LOW, worst.resets_at, source="window")
+    return Headroom(HeadroomState.OK, None, source="window")
 
 
 @dataclasses.dataclass(frozen=True)

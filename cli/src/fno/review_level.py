@@ -107,6 +107,11 @@ def _degraded_max(band: str, model: Optional[str], chain: tuple[str, ...]) -> bo
     path, by a model below the max floor - is a degraded max: the effort axis
     still separates it from `high`, but the model does not, and the record
     must say so.
+
+    The resolver names the source it read in the same entry, so both spellings
+    are matched: `snapshot band(` predates the declared inventory and
+    `inventory band(` is what the config-first resolver writes. Reading only
+    one leaves a degraded max recorded as a clean one.
     """
     if band != "max" or model is None:
         return False
@@ -114,7 +119,7 @@ def _degraded_max(band: str, model: Optional[str], chain: tuple[str, ...]) -> bo
         match = _STATIC_PICK_RE.search(entry)
         if match:
             return match.group(1) != "max"
-        if entry.startswith("snapshot band("):
+        if entry.startswith(("snapshot band(", "inventory band(")):
             return "degrade ->" in entry
     return False
 

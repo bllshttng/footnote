@@ -42,6 +42,14 @@ _LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] 
         "Provider route lanes: ls / set / unset / env (GLM build lane).",
         {"hidden": True},
     ),
+    # The routing-inventory surface under its plan-named spelling: same app as
+    # `route`, so `fno config routing init` and `fno config route init` both
+    # resolve. Hidden like its sibling.
+    "routing": (
+        "fno.route_cli:route_app",
+        "Declared model-routing inventory: init (sample) / inventory (reach).",
+        {"hidden": True},
+    ),
     # x-6233 (d-344fe242): `project init` gives a checkout its own fno state
     # root, which is state-root configuration - config's territory. Same
     # lazy+hidden treatment as its siblings above.

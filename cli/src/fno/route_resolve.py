@@ -1,21 +1,26 @@
-"""Dispatch-time model resolution: the pareto router's read side.
+"""Dispatch-time model resolution: the config-first router's read side.
 
-A task or node may pin an exact model (``model``) or a work-difficulty band
-(``difficulty: high|medium|low``). At dispatch this resolves a band to the
-cheapest reachable mapped model that clears the band's floor, per the cached
-benchmark snapshot -- and degrades, never blocks: an empty band falls through to
-a lower band and finally to the provider default, recording the fallback chain so
-the choice is auditable. It NEVER touches the network; a missing snapshot uses the
-static table in :mod:`fno.adapters.providers.benchmarks`.
+The declared inventory (``config.routing.models``) is the PRIMARY routing
+surface: nothing built-in is authoritative, so adding a model, a provider or a
+harness is a config edit, and a stranger's install never inherits this
+machine's fleet. The OpenRouter snapshot is OPTIONAL enrichment: it may supply
+a percentile that derives a band for a row whose ``band`` the operator left
+unset, and it can never make the grid inert. A virgin install declares no
+inventory; the grid records ``grid=no-inventory-declared`` and injects
+nothing, byte-identical to today's behaviour minus the silence.
 
-Full precedence (Locked Decision 1):
+Full precedence (Locked Decision 1), now per AXIS rather than per spawn: an
+explicit flag or a profile field occupies the axis it names and nothing more,
+so ``[agents.profiles.target] provider = "codex"`` pins the harness and the
+grid still chooses model and effort within codex.
     dispatch --model > task ``model:`` > task ``difficulty:`` > plan ``model:`` >
     plan ``difficulty:`` > provider default (``--role`` routing / provider-rotation
     combos live downstream and only fire when nothing above resolves a model).
 """
 from __future__ import annotations
 
-from typing import Optional
+import dataclasses
+from typing import Any, Mapping, Optional, Sequence
 
 from fno.adapters.providers import benchmarks as bm
 
@@ -44,48 +49,384 @@ _GRID_CANDIDATES = {
     "medium": ["claude-sonnet-5", "glm-5.3[1m]", "gpt-5.6-terra"],
     "low": ["glm-4.7", "claude-haiku-4-5", "gpt-5.6-luna"],
 }
+# Strong end of the band vocabulary; the round-up ruling resolves absent or
+# uncertain difficulty here, never to the cheap end. `max` ranks above `high`
+# so the band vocabulary here is the SAME one `_BAND_FLOOR` admits: a declared
+# max row must not fall through to rank -1.
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2, "max": 3}
+_STRONG_BAND = "high"
+_OBJECTIVES = ("cheapest-that-clears", "best-available", "prefer-harness")
+_PLANNING_BAND = "high"
+
+# Aggregation order for a harness's accounts: MAX over headroom. ok > low >
+# unknown > exhausted. Unknown outranks exhausted because exhaustion is only
+# true when EVERY account says so (M2/t2.1): one silent account never walls a
+# harness another account can still serve.
+_CAPACITY_RANK = {"ok": 3, "available": 3, "low": 2, "unknown": 1, "exhausted": 0, "blocked": 0}
+
+
+@dataclasses.dataclass(frozen=True)
+class InventoryRow:
+    """One resolved inventory row. ``band`` is "" when unbanded."""
+
+    name: str
+    harness: str
+    model: str
+    route: str = ""
+    account: str = ""
+    band: str = ""
+    percentile: Optional[float] = None
+    effort: str = ""
+    cost_per_mtok_in: Optional[float] = None
+    context: Optional[int] = None
+
+    @property
+    def rank(self) -> int:
+        return _BAND_RANK.get(self.band, -1)
+
+    def accounts(self) -> list[str]:
+        """The account record id(s) whose quota this row spends."""
+        if self.account:
+            return [self.account]
+        if self.route:
+            vendor = self.route.split("/", 1)[0].strip()
+            return [vendor] if vendor else []
+        return []
+
+
+@dataclasses.dataclass(frozen=True)
+class Inventory:
+    """The declared inventory plus its objective (both config-owned)."""
+
+    rows: dict[str, InventoryRow] = dataclasses.field(default_factory=dict)
+    objective: str = _OBJECTIVES[0]
+    prefer_harness: str = ""
+
+
+def _field(source: Mapping[str, Any] | object, name: str, default: Any = "") -> Any:
+    if isinstance(source, Mapping):
+        value = source.get(name, default)
+    else:
+        value = getattr(source, name, default)
+    return default if value is None else value
+
+
+def _band_from_percentile(pct: Optional[float]) -> str:
+    if pct is None:
+        return ""
+    if pct >= _BAND_FLOOR["high"]:
+        return "high"
+    if pct >= _BAND_FLOOR["medium"]:
+        return "medium"
+    if pct >= _BAND_FLOOR["low"]:
+        return "low"
+    return ""
+
+
+def inventory_from_rows(
+    rows: Sequence[Mapping[str, Any] | object],
+    *,
+    objective: str = _OBJECTIVES[0],
+    prefer_harness: str = "",
+    snapshot: Optional[dict] = None,
+) -> Inventory:
+    """Fold declared rows into an :class:`Inventory`.
+
+    Rows are keyed by ``name``; a later row of the same name overrides per
+    field and the fields it did not name keep the earlier row's value (the
+    merge precedent from ``model_routing._DEFAULT_PROVIDERS``). Band
+    resolution per row: the row's own ``band``, else a snapshot percentile
+    against ``_BAND_FLOOR``, else unbanded. An unbanded row is never a grid
+    candidate and is named by ``fno doctor route`` when asked for.
+    """
+    folded: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        name = str(_field(row, "name", "") or "").strip()
+        if not name:
+            continue
+        if name not in folded:
+            folded[name] = {}
+            order.append(name)
+        for key in (
+            "name", "harness", "model", "route", "account", "band", "effort",
+            "cost_per_mtok_in", "context",
+        ):
+            value = _field(row, key, None)
+            if value not in (None, ""):
+                folded[name][key] = value
+    snap_pct: dict[str, float] = {}
+    if snapshot:
+        for entry in snapshot.get("models", []):
+            if isinstance(entry, dict) and entry.get("name") is not None:
+                pct = entry.get("coding_percentile")
+                if pct is None:
+                    continue
+                try:
+                    snap_pct[str(entry["name"])] = float(pct)
+                except (TypeError, ValueError):
+                    continue
+    out: dict[str, InventoryRow] = {}
+    for name in order:
+        merged = folded[name]
+        pct = snap_pct.get(name)
+        band = str(merged.get("band", "") or "").strip().lower()
+        if band not in _BAND_FLOOR:
+            band = _band_from_percentile(pct)
+        out[name] = InventoryRow(
+            name=name,
+            harness=str(merged.get("harness", "") or "").strip(),
+            model=str(merged.get("model", "") or "").strip(),
+            route=str(merged.get("route", "") or "").strip(),
+            account=str(merged.get("account", "") or "").strip(),
+            band=band,
+            percentile=pct,
+            effort=str(merged.get("effort", "") or "").strip(),
+            cost_per_mtok_in=merged.get("cost_per_mtok_in"),
+            context=merged.get("context"),
+        )
+    obj = objective if objective in _OBJECTIVES else _OBJECTIVES[0]
+    return Inventory(rows=out, objective=obj, prefer_harness=prefer_harness or "")
+
+
+def resolve_inventory(
+    *,
+    settings: object = None,
+    snapshot: Optional[dict] = None,
+) -> Inventory:
+    """Read the declared inventory from config (empty when nothing is declared).
+
+    Never raises on a config problem: an unloadable config is an EMPTY
+    inventory (the grid records ``no-inventory-declared``), not a dead spawn.
+    """
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        routing = getattr(settings, "routing", None)
+        if snapshot is None:
+            snapshot = bm.load_snapshot()
+        return inventory_from_rows(
+            list(getattr(routing, "models", []) or []),
+            objective=str(getattr(routing, "objective", "") or ""),
+            prefer_harness=str(getattr(routing, "prefer_harness", "") or ""),
+            snapshot=snapshot,
+        )
+    except Exception:  # noqa: BLE001 - a routing read never breaks a spawn
+        return Inventory()
+
+
+def _order_candidates(
+    candidates: list[InventoryRow], inventory: Inventory
+) -> list[InventoryRow]:
+    """Order candidates by the declared objective. Never lowers the band: the
+    band admission already happened before this runs."""
+    objective = inventory.objective
+    if objective == "best-available":
+        return sorted(candidates, key=lambda r: (-r.rank, -(r.percentile or -1.0), r.name))
+    if objective == "prefer-harness":
+        preferred = inventory.prefer_harness
+        # Tier wins, harness is a tiebreaker within a tier: stable partition by
+        # the preferred harness, band-descending inside each partition.
+        return sorted(
+            candidates,
+            key=lambda r: (
+                0 if r.harness == preferred else 1,
+                -r.rank,
+                -(r.percentile or -1.0),
+                r.name,
+            ),
+        )
+    # cheapest-that-clears: declared cost first (by cost), then the percentile
+    # proxy for rows that declare none (the snapshot carries no cost column);
+    # a row with neither signal is cheapest at the WEAKEST band that still
+    # clears, never the strongest (that is best-available's job).
+    def _cheapest_key(r: InventoryRow) -> tuple:
+        if r.cost_per_mtok_in is not None:
+            return (0, r.cost_per_mtok_in, r.rank, r.name)
+        if r.percentile is not None:
+            return (1, r.percentile, r.rank, r.name)
+        return (2, 0, r.rank, r.name)
+
+    return sorted(candidates, key=_cheapest_key)
+
+
+def _candidate_supported(
+    harness: str, substrate: Optional[str], permission_mode: Optional[str]
+) -> bool:
+    """Whether a pinned substrate / permission mode can legally ride ``harness``.
+
+    Posture flags FILTER the candidate set (t3.2); they never cancel the
+    routing decision. Mirrors the spawn parser's own gates: thread needs the
+    harness's journey-proven lane (claude today), a mapped permission mode is
+    claude's on every substrate and a non-claude harness's only on the pane
+    lane. An unknown harness degrades open (kept) so the spawn's own gate,
+    which names the value, stays the authority on refusal.
+    """
+    sub = (substrate or "").strip()
+    if sub == "bg":
+        sub = "thread"
+    if sub == "thread":
+        try:
+            from fno.agents.harness_map import capabilities
+
+            if not capabilities(harness)["thread"]:
+                return False
+        except Exception:  # noqa: BLE001 - unknown harness keeps the candidate
+            pass
+    mode = (permission_mode or "").strip()
+    if mode:
+        if harness != "claude" and sub != "pane":
+            return False
+    return True
+
+
+def _harness_installed(harness: str) -> bool:
+    """Whether a harness fno can drive is named. Degrades open (True) on an
+    unreadable roster so the spawn's own gate, which names the value, keeps the
+    authority to refuse."""
+    try:
+        from fno.agents.harnesses import READABLE_PROVIDERS
+
+        return harness in READABLE_PROVIDERS
+    except Exception:  # noqa: BLE001 - degrade open
+        return True
+
+
+def _capacity_state(value: object) -> tuple[str, str]:
+    """(state, window-note) from a capacity entry: a bare state string, or the
+    detailed mapping ``runtime_capacity`` produces."""
+    if isinstance(value, Mapping):
+        state = str(value.get("state", "") or "unknown").lower()
+        return state, str(value.get("window", "") or "")
+    return str(value or "unknown").lower(), ""
 
 
 def resolve_grid(
     difficulty: Optional[str],
     priority: Optional[str],
-    capacity: Optional[dict[str, object]],
+    capacity: Optional[Mapping[str, object]],
+    *,
+    constrain_harness: Optional[str] = None,
+    substrate: Optional[str] = None,
+    permission_mode: Optional[str] = None,
+    role: Optional[str] = None,
+    protected_role: Optional[str] = None,
+    inventory: Optional[Inventory] = None,
+    settings: object = None,
+    snapshot: Optional[dict] = None,
 ) -> tuple[Optional[dict[str, str]], list[str]]:
     """Join intrinsic difficulty and priority with a live capacity snapshot.
 
-    The grid is a default route only. ``capacity`` is deliberately supplied by
-    the runtime seam so this pure resolver never reads accounts or the network.
-    Unknown capacity is inert and returns no candidate.
+    The grid is a default route only. ``capacity`` is supplied by the runtime
+    seam so this resolver never reads accounts or the network; an explicit
+    flag or profile field occupies its axis and the grid fills the rest
+    (``constrain_harness`` = the harness axis is taken; it still picks model
+    and effort within it). Unknown capacity PERMITS a candidate and records
+    ``capacity=unknown-permitted``; only a positive ``exhausted``/``blocked``
+    marker removes one. Returns ``(candidate|None, chain)``; the chain's last
+    element is the terminal reason the caller receipts on every path.
     """
+    inv = inventory if inventory is not None else resolve_inventory(
+        settings=settings, snapshot=snapshot
+    )
     band = (difficulty or "").strip().lower()
     prio = (priority or "p2").strip().lower()
+    # Round up under uncertainty: an absent or unmapped difficulty resolves to
+    # the strong band, never the cheap one (the failure is asymmetric).
+    band = band if band in _BAND_FLOOR else _STRONG_BAND
     chain = [f"grid difficulty({band}) priority({prio})"]
-    if band not in _GRID_CANDIDATES or prio not in {"p0", "p1", "p2", "p3"}:
+    if prio not in {"p0", "p1", "p2", "p3"}:
         chain.append("grid=invalid-input")
         return None, chain
-    if not capacity:
-        chain.append("grid=unknown-capacity")
+    if not inv.rows:
+        chain.append("grid=no-inventory-declared")
         return None, chain
 
-    # p0 gets the high-urgency candidate order, while p3 intentionally prefers
-    # the low-cost band. p1/p2 preserve the filer's intrinsic difficulty.
+    # p0 gets the high-urgency band, p3 intentionally prefers the low-cost
+    # band; p1/p2 preserve the filer's intrinsic difficulty. The planning role
+    # floors at the strong end: a session that will blueprint first bills at
+    # the planning tier, and a plan is what earns the cheap execution tier.
     candidate_band = "high" if prio == "p0" else "low" if prio == "p3" else band
-    statuses = {str(k): str(v).lower() for k, v in capacity.items()}
+    if (role or "").strip().lower() == "planning":
+        candidate_band = _max_band(candidate_band, _PLANNING_BAND)
+        chain.append(f"grid role(planning) floors band({_PLANNING_BAND})")
+    if protected_role:
+        from fno.agents.model_routing import PROTECTED_ROLE_FLOOR
+
+        floor = PROTECTED_ROLE_FLOOR
+        candidate_band = _max_band(candidate_band, floor)
+        inv = dataclasses.replace(inv, objective="best-available")
+        chain.append(f"grid protected-role({protected_role}) floor={floor}")
+
+    rows = list(inv.rows.values())
+    if constrain_harness:
+        rows = [r for r in rows if r.harness == constrain_harness]
+        chain.append(f"grid constrained to harness({constrain_harness})")
+    before_filters = len(rows)
+    rows = [
+        r for r in rows
+        if _candidate_supported(r.harness, substrate, permission_mode)
+    ]
+    if substrate or permission_mode:
+        if not rows and before_filters:
+            chain.append("grid=constrained-empty")
+            return None, chain
+        chain.append(
+            f"grid filtered by substrate({substrate or '-'}) permission({permission_mode or '-'})"
+        )
+
+    # A declared row whose harness fno cannot drive REFUSES by name (AC3-ERR):
+    # an uninstalled harness is a fact the receipt must carry, not an absence
+    # silently skipped from the candidate list.
+    installed: list[InventoryRow] = []
+    for r in rows:
+        if not r.harness or not r.model or _harness_installed(r.harness):
+            installed.append(r)
+        else:
+            chain.append(f"grid refuses {r.name}: harness {r.harness!r} not installed")
+    rows = installed
+
+    # Tier wins: a row is a candidate when its band meets or exceeds the
+    # requested floor. UNBANDED rows never qualify (no declared band, no
+    # snapshot percentile) and are named when asked for via doctor route. No
+    # degrade below the floor here, unlike resolve_tier: the grid's round-up
+    # ruling would be undone by quietly handing strong work to a weak row, so
+    # an empty tier falls through to the operator's own defaults instead.
+    floor_rank = _BAND_RANK[candidate_band]
+    clearing = [r for r in rows if r.rank >= floor_rank and r.harness and r.model]
+    if not clearing:
+        chain.append("grid=no-band-candidate")
+        return None, chain
+
     saw_unknown = False
-    for model in _GRID_CANDIDATES[candidate_band]:
-        reachable = bm.reachable(model)
-        if reachable is None:
-            continue
-        harness = reachable[0]
-        state = statuses.get(harness)
-        if state in (None, "unknown", "stale", "none"):
-            saw_unknown = True
-            continue
+    for row in _order_candidates(clearing, inv):
+        state, window = _capacity_state((capacity or {}).get(row.harness, "unknown"))
         if state in ("exhausted", "blocked"):
+            chain.append(f"grid skip {row.harness}/{row.name} capacity={state}")
             continue
-        if state in ("ok", "low", "available"):
-            chain.append(f"grid candidate {harness}/{model} capacity={state}")
-            return {"harness": harness, "model": model}, chain
+        if state not in ("ok", "low", "available"):
+            saw_unknown = True
+            state = "unknown-permitted"
+        chain.append(
+            f"grid candidate {row.harness}/{row.name} capacity={state}"
+            + (f" window={window}" if window else "")
+        )
+        out = {"harness": row.harness, "model": row.model}
+        effort = row.effort
+        if effort:
+            try:
+                from fno.agents.mux_spawn import effort_tokens
+
+                effort_tokens(row.harness, effort)
+            except Exception:  # noqa: BLE001 - no effort surface: inject nothing
+                chain.append(f"grid effort omitted (no surface on {row.harness})")
+                effort = ""
+        if effort:
+            out["effort"] = effort
+            chain.append(f"grid effort({effort})")
+        return out, chain
     if saw_unknown:
         chain.append("grid=unknown-capacity")
     else:
@@ -93,46 +434,97 @@ def resolve_grid(
     return None, chain
 
 
+def _max_band(a: str, b: str) -> str:
+    return a if _BAND_RANK.get(a, -1) >= _BAND_RANK.get(b, -1) else b
+
+
+def harness_accounts(
+    harness: str, *, settings: object = None, inventory: Optional[Inventory] = None
+) -> list[str]:
+    """Expand a harness to the ACCOUNT record ids reachable through it.
+
+    Quota is a property of an ACCOUNT at a vendor; a harness is a client that
+    can speak for several accounts. The direction is deliberate (M2): expand
+    the harness to its accounts and aggregate, never fold records to harnesses.
+    The account set is a UNION: every registered ``config.accounts.records``
+    entry bound to the harness is reachable through it (one healthy account
+    means the harness is usable), plus any inventory row ``account`` / ``route``
+    vendor the records list does not already name.
+    """
+    inv = inventory if inventory is not None else resolve_inventory(settings=settings)
+    accounts: list[str] = []
+    for row in inv.rows.values():
+        if row.harness != harness:
+            continue
+        accounts.extend(row.accounts())
+    try:
+        if settings is None:
+            from fno.config import load_settings
+
+            settings = load_settings()
+        records = getattr(getattr(settings, "accounts", None), "records", None) or []
+    except Exception:  # noqa: BLE001 - no config read is a dead spawn
+        records = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            continue
+        rid = record.get("id")
+        bound = record.get("harness") or record.get("cli")
+        if rid and bound == harness:
+            accounts.append(str(rid))
+    return list(dict.fromkeys(accounts))
+
+
 def runtime_capacity(
     providers: tuple[str, ...] = ("claude", "codex", "gemini", "opencode"),
-) -> dict[str, str]:
-    """Read cached provider headroom without probing or consulting accounts."""
+    *,
+    settings: object = None,
+    inventory: Optional[Inventory] = None,
+) -> dict[str, object]:
+    """Cached harness capacity: expand each harness to its accounts, read each
+    account's headroom, aggregate MAX.
+
+    A harness is ``ok`` if ANY account reachable through it is ok, ``exhausted``
+    only if EVERY account is exhausted, ``unknown`` when no account answers.
+    The value is a detail mapping ``{state, window, accounts}``; bare state
+    strings (the old shape) still resolve via :func:`_capacity_state`. Never
+    probes, never touches the network.
+    """
     try:
         from fno.adapters.providers.runtime_state import headroom
 
-        return {provider: headroom(provider).state.value for provider in providers}
-    except Exception:  # noqa: BLE001 - unknown capacity keeps the grid inert
+        inv = inventory if inventory is not None else resolve_inventory(settings=settings)
+        out: dict[str, object] = {}
+        for harness in providers:
+            accounts = harness_accounts(harness, settings=settings, inventory=inv)
+            detail: dict[str, str] = {}
+            best: Optional[str] = None
+            window = "absent"
+            for account in accounts:
+                verdict = headroom(account)
+                state = verdict.state.value
+                detail[account] = state
+                if best is None or _CAPACITY_RANK.get(state, 1) > _CAPACITY_RANK.get(best, 1):
+                    best = state
+                    window = verdict.source or "unknown"
+            out[harness] = {
+                "state": best or "unknown",
+                "window": window,
+                "accounts": detail,
+            }
+        return out
+    except Exception:  # noqa: BLE001 - unknown capacity never breaks dispatch
         return {}
 
 
-def _harness_ok(name: str, provider: Optional[str]) -> bool:
-    """True if ``name`` maps to a harness AND (``provider`` is None or matches it).
-
-    ``provider=None`` = no scoping (any reachable harness); a concrete provider
-    keeps only same-harness candidates so a tier never picks a cross-harness model
-    (Locked Decision 1/2). An unknown provider matches nothing -> all bands empty
-    -> provider default.
-    """
-    reach = bm.reachable(name)
-    return reach is not None and (provider is None or reach[0] == provider)
-
-
-def _reachable_models_with_pct(
-    snapshot: dict, provider: Optional[str] = None
-) -> list[tuple[str, float]]:
-    """(name, coding_percentile) for snapshot rows reachable by ``provider``."""
-    out: list[tuple[str, float]] = []
-    for row in snapshot.get("models", []):
-        if not isinstance(row, dict):
-            continue
-        name = row.get("name")
-        pct = row.get("coding_percentile")
-        if name and _harness_ok(str(name), provider) and pct is not None:
-            try:
-                out.append((str(name), float(pct)))
-            except (TypeError, ValueError):
-                continue
-    return out
+def _scoped_rows(
+    inventory: Inventory, provider: Optional[str]
+) -> list[InventoryRow]:
+    """Inventory rows a tier may pick from, scoped to one harness when asked."""
+    return [
+        r for r in inventory.rows.values()
+        if r.harness and r.model and (provider is None or r.harness == provider)
+    ]
 
 
 def resolve_tier(
@@ -140,15 +532,15 @@ def resolve_tier(
     *,
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
+    inventory: Optional[Inventory] = None,
+    settings: object = None,
 ) -> tuple[Optional[str], list[str]]:
-    """Resolve a tier to a concrete reachable model. Returns ``(model, chain)``.
+    """Resolve a tier to a concrete declared model. Returns ``(model, chain)``.
 
     ``provider`` scopes the candidate set to one harness (Locked Decision 1): a
     band left empty by the filter falls through the remaining bands within the
-    same harness, then to None (provider default) -- never a foreign-harness
-    model. ``provider=None`` is unscoped (the dispatch seam resolves the default
-    provider before calling; direct/primitive callers get the old any-harness
-    behavior). ``model`` is None when nothing resolves (the caller uses the
+    same harness, then to None (provider default) - never a foreign-harness
+    model. ``model`` is None when nothing resolves (the caller uses the
     provider default). ``chain`` records each step so the receipt shows how the
     choice (or fallback) was reached. Never raises, never hits the network.
     """
@@ -159,52 +551,27 @@ def resolve_tier(
     if band not in _BAND_FLOOR:
         chain.append("unknown-tier -> provider default")
         return None, chain
-
-    if snapshot is None:
-        snapshot = bm.load_snapshot()
-
-    if snapshot and snapshot.get("models"):
-        models = _reachable_models_with_pct(snapshot, provider)
-        floor = _BAND_FLOOR[band]
-        if band == "max":
-            # The inversion the max band exists for: strongest reachable, not
-            # cheapest that clears. A strongest pick below the floor degrades
-            # LOUDLY in the chain (review_level reads it as degraded_max).
-            if models:
-                name, pct = max(models, key=lambda t: (t[1], t[0]))
-                if pct >= floor:
-                    chain.append(f"snapshot band(>={floor}) -> {name}")
-                else:
-                    chain.append(
-                        f"snapshot band(>={floor}) degrade -> {name} (best {pct} < {floor})"
-                    )
-                return name, chain
-            chain.append("snapshot has no reachable model -> provider default")
-            return None, chain
-        clearing = [(n, p) for (n, p) in models if p >= floor]
-        if clearing:
-            # cheapest that clears the floor = lowest percentile (a
-            # cheapest-that-clears proxy: the snapshot carries no cost column
-            # yet; swap in real cost when it does).
-            name = min(clearing, key=lambda t: (t[1], t[0]))[0]
-            chain.append(f"snapshot band(>={floor}) -> {name}")
-            return name, chain
-        below = [(n, p) for (n, p) in models if p < floor]
-        if below:
-            name = max(below, key=lambda t: (t[1], t[0]))[0]
-            chain.append(f"snapshot band(>={floor}) empty -> degrade -> {name}")
-            return name, chain
-        chain.append("snapshot has no reachable model -> provider default")
+    inv = inventory if inventory is not None else resolve_inventory(
+        settings=settings, snapshot=snapshot
+    )
+    if not inv.rows:
+        chain.append("no declared inventory -> provider default")
         return None, chain
 
-    # No snapshot: walk the curated static bands in fall-through order.
-    chain.append("no snapshot -> static table")
-    for cand_band in _STATIC_FALLTHROUGH[band]:
-        for name in bm.STATIC_TIERS.get(cand_band, []):
-            if _harness_ok(name, provider):
-                chain.append(f"static {cand_band} -> {name}")
-                return name, chain
-    chain.append("static table exhausted -> provider default")
+    rows = _scoped_rows(inv, provider)
+    floor_rank = _BAND_RANK[band]
+    clearing = [r for r in rows if r.rank >= floor_rank]
+    if clearing:
+        row = _order_candidates(clearing, inv)[0]
+        chain.append(f"inventory band(>={band}) -> {row.name}")
+        return row.model, chain
+    below = [r for r in rows if 0 <= r.rank < floor_rank]
+    if below:
+        # Degrade, never block: fall to the best available below the floor.
+        best = max(below, key=lambda r: (r.rank, r.percentile or -1.0))
+        chain.append(f"inventory band(>={band}) empty -> degrade -> {best.name}")
+        return best.model, chain
+    chain.append("inventory has no reachable model -> provider default")
     return None, chain
 
 
@@ -217,6 +584,7 @@ def resolve_dispatch_model(
     plan_difficulty: Optional[str] = None,
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
+    inventory: Optional[Inventory] = None,
 ) -> tuple[Optional[str], str, list[str]]:
     """Apply the full precedence chain. Returns ``(model, decision_source, chain)``.
 
@@ -225,19 +593,23 @@ def resolve_dispatch_model(
     (``explicit`` / ``task-pin`` / ``task-difficulty(<band>)`` / ``plan-default`` /
     ``plan-difficulty(<band>)`` / ``provider-default``). ``provider`` scopes band
     resolution to one harness; pins (``explicit`` / ``task_model`` / ``plan_model``)
-    bypass the filter -- operator authority outranks routing (Locked Decision 4).
+    bypass the filter - operator authority outranks routing (Locked Decision 4).
     """
     if explicit:
         return explicit, "explicit", ["explicit"]
     if task_model:
         return task_model, "task-pin", ["task-pin"]
     if task_difficulty:
-        model, chain = resolve_tier(task_difficulty, snapshot=snapshot, provider=provider)
+        model, chain = resolve_tier(
+            task_difficulty, snapshot=snapshot, provider=provider, inventory=inventory
+        )
         return model, f"task-difficulty({task_difficulty.strip().lower()})", chain
     if plan_model:
         return plan_model, "plan-default", ["plan-default"]
     if plan_difficulty:
-        model, chain = resolve_tier(plan_difficulty, snapshot=snapshot, provider=provider)
+        model, chain = resolve_tier(
+            plan_difficulty, snapshot=snapshot, provider=provider, inventory=inventory
+        )
         return model, f"plan-difficulty({plan_difficulty.strip().lower()})", chain
     return None, "provider-default", ["provider-default"]
 
@@ -249,16 +621,16 @@ def node_model(
     snapshot: Optional[dict] = None,
     provider: Optional[str] = None,
     resolve_difficulty: bool = True,
+    inventory: Optional[Inventory] = None,
 ) -> Optional[str]:
     """Concrete ``--model`` for a node/task at the spawn seam, or None for default.
 
     Reads the node's own ``model`` pin and ``difficulty`` band and applies
     the precedence with an optional dispatch-time ``explicit`` override.
     ``provider`` scopes band resolution to the spawn harness so a band never
-    yields a cross-harness ``<provider> --model <foreign>`` pick. When
-    ``provider`` is
-    None it defaults to ``claude`` -- the bg substrate's own spawn default (see
-    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``), NOT the
+    yields a cross-harness ``<provider> --model <foreign>`` pick. When ``provider`` is
+    None it defaults to ``claude`` - the bg substrate's own spawn default (see
+    ``advance._spawn_worker``: ``(provider or "").strip() or "claude"``, NOT the
     ambient/invoking harness. A bg worker is always claude regardless of which
     harness dispatched it, so scoping by the invoking harness would resolve a
     codex model for a claude spawn (Locked Decision 3 intent: scope the incident
@@ -273,6 +645,7 @@ def node_model(
             task_difficulty=node.get("difficulty") if resolve_difficulty else None,
             snapshot=snapshot,
             provider=provider or "claude",
+            inventory=inventory,
         )
         return model
     except Exception:  # noqa: BLE001 - routing degrades, never blocks a spawn

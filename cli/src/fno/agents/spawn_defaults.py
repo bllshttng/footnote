@@ -610,19 +610,26 @@ def _profile_key(seed: Optional[str]) -> Optional[str]:
     """Derive the profile key from a seed's first token by a pure string rule:
     must start with ``/`` and contain no further ``/`` (an absolute path never
     matches); strip the ``/`` and an optional ``fno:`` namespace; the remainder
-    must be lowercase ``^[a-z0-9][a-z0-9_-]*$``. No key -> no profile layer."""
+    must be lowercase ``^[a-z0-9][a-z0-9_-]*$``.
+
+    A seed with no leading slash-verb - every king seed, and a seedless spawn -
+    resolves to the literal key ``crown`` instead of None, so
+    ``[agents.profiles.crown]`` reaches a crown spawn exactly like every other
+    stage row. The attended/unattended axis is DECLARED, never inferred (the
+    response-time instrument was retracted: fno mail is injected as user-shaped
+    text, so no measurement can tell operator chatter from fleet chatter)."""
     if not seed:
-        return None
+        return "crown"
     parts = seed.split()
     if not parts:
-        return None
+        return "crown"
     tok = parts[0]
     if not tok.startswith("/") or "/" in tok[1:]:
-        return None
+        return "crown"
     rest = tok[1:]
     if rest.startswith("fno:"):
         rest = rest[len("fno:"):]
-    return _VERB_ALIASES.get(rest, rest) if _PROFILE_KEY_RE.match(rest) else None
+    return _VERB_ALIASES.get(rest, rest) if _PROFILE_KEY_RE.match(rest) else "crown"
 
 
 def _has_permission_mode(toks: Sequence[str]) -> bool:
@@ -1188,52 +1195,100 @@ def inject_spawn_defaults(
     explicit_vendor = _flag_value(out[1:], "--provider", "-P")
     explicit_vendor_present = explicit_vendor is not None
     explicit_route = _flag_present(out[1:], "--route")
+    role = _role_of(out[1:])
+    # Per-axis occupancy (Q1): an explicit flag or a profile field occupies the
+    # axis it names and NOTHING more. A profile LANE is atomic (a complete
+    # coordinate by design, _LANE_EXCLUSIVE) and occupies all three; a bare
+    # profile FIELD does not - `[agents.profiles.target] provider = "codex"`
+    # pins the harness axis and the grid still chooses model and effort within
+    # codex. A pinned vendor (-P) or route owns the model axis (the route
+    # carries vendor/model), so the grid stands down there with a named reason
+    # instead of silently. The grid sits BELOW a profile and ABOVE
+    # agents.defaults, so only a profile-sourced field (rung above defaults)
+    # occupies - a defaults-rung model is something the grid may override.
+    lane_selected = lane is not None
+
+    def _above_defaults(rung: Optional[str]) -> bool:
+        return bool(rung) and rung != "agents.defaults"
+
+    model_occupied = bool(
+        has_model
+        or explicit_vendor_present
+        or explicit_route
+        or _above_defaults(model_rung)
+        or _above_defaults(route_rung)
+        or lane_selected
+    )
+    effort_occupied = bool(has_effort or _above_defaults(effort_rung) or lane_selected)
     # A pinned substrate or permission-mode constrains which harness the argv
     # can legally carry (thread needs the harness's journey-proven lane,
-    # claude and codex today; a mapped --permission-mode is claude-only off pane),
-    # so a grid pair picked on capacity alone can build an argv the spawn
-    # gate exit-2 refuses. The operator named the lane, so the grid stands
-    # down and the ordinary defaults apply.
-    explicit_substrate_present = _flag_present(out[1:], "--substrate")
-    explicit_permission_present = _flag_present(out[1:], "--permission-mode")
-    profile_routing_pinned = bool(
-        profile is not None
-        and (
-            _lane_value(lane, "provider")
-            or _lane_value(lane, "model")
-            or _lane_value(lane, "route")
-            or _lane_value(profile, "provider")
-            or _lane_value(profile, "model")
-            or _lane_value(profile, "route")
-        )
+    # claude only today; a mapped --permission-mode is claude-only off pane),
+    # so they FILTER the grid's candidate set rather than cancelling the
+    # decision: a flag on an unrelated axis never silently stands routing down.
+    explicit_substrate = _has_explicit_substrate(out[1:])
+    explicit_permission_value = _flag_value(out[1:], "--permission-mode")
+    node_id_present = (
+        _flag_value(out[1:], "--node") is not None or bool((env or {}).get("FNO_NODE"))
     )
     grid_candidate: Optional[dict[str, str]] = None
-    if (
-        not has_model
-        and not has_provider
-        and not explicit_vendor_present
-        and not explicit_route
-        and not explicit_substrate_present
-        and not explicit_permission_present
-        and not profile_routing_pinned
-    ):
+    _grid_chain: List[str] = []
+    grid_node_entry: Optional[dict] = None
+    if not model_occupied:
         try:
             from fno import route_resolve
 
-            node = _grid_node(out[1:], env)
-            if node:
+            grid_node_entry = _grid_node(out[1:], env)
+            if grid_node_entry:
                 capacity: dict[str, object] = dict(route_resolve.runtime_capacity())
+                # The planning/execution role comes from plan-presence, never
+                # plan quality: a /target on an unplanned node does planning
+                # work and bills at the planning tier (grill-3).
+                seed_verb = _profile_key(_seed_of(out[1:]))
+                grid_role: Optional[str] = None
+                if seed_verb in ("blueprint", "think"):
+                    grid_role = "planning"
+                elif seed_verb == "target":
+                    grid_role = (
+                        "execution" if (grid_node_entry.get("plan_path") or "").strip()
+                        else "planning"
+                    )
+                protected_name: Optional[str] = None
+                try:
+                    from fno.agents.model_routing import PROTECTED_ROLES as _PROTECTED
+
+                    if role and role.strip().lower() in _PROTECTED:
+                        protected_name = role.strip().lower()
+                except Exception:  # noqa: BLE001 - the floor is advisory, never fatal
+                    protected_name = None
                 grid_candidate, _grid_chain = route_resolve.resolve_grid(
-                    node.get("difficulty"),
-                    node.get("priority"),
+                    grid_node_entry.get("difficulty"),
+                    grid_node_entry.get("priority"),
                     capacity,
+                    constrain_harness=(
+                        explicit_provider
+                        or (cfg_provider if _above_defaults(provider_rung) else "")
+                        or ""
+                    ).strip() or None,
+                    substrate=explicit_substrate,
+                    permission_mode=explicit_permission_value,
+                    role=grid_role,
+                    protected_role=protected_name,
                 )
         except Exception:  # noqa: BLE001 - unknown capacity leaves defaults intact
             grid_candidate = None
+            _grid_chain = []
+    if grid_node_entry is not None or (model_occupied and node_id_present):
+        # The grid SPEAKS on every path (t1.3): a candidate fires loudly, and
+        # an inert grid says why - no-inventory-declared, constrained-empty,
+        # model-axis-occupied - so an absence never reads as an answer.
+        terminal = _grid_chain[-1] if _grid_chain else "grid=unavailable"
+        if model_occupied:
+            terminal = "grid=model-axis-occupied"
+        from_config.append(("grid", terminal, "routing"))
     if not (
         cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
-    ) and grid_candidate is None:
+    ) and grid_candidate is None and not from_config:
         # No config field resolved at all, so any --model here was typed.
         _check_model_vendor_mismatch(out, err, env)
         return out
@@ -1243,15 +1298,20 @@ def inject_spawn_defaults(
     # --model sourced here would collide with it. This is the five-opus-workers
     # defect - a worker believed cheap and billed expensive - so the model
     # branch below skips injection when resolve_route returns a real route.
-    role = _role_of(out[1:])
 
-    # A grid candidate is an atomic harness/model pair. Mark both coordinates
-    # occupied so lower default rungs cannot split or overwrite the decision.
+    # A grid candidate is an atomic harness/model/effort TRIPLE. Mark the
+    # occupied coordinates so lower default rungs cannot split or overwrite
+    # the decision; effort joins the pair only when its axis was free and the
+    # row's harness has an effort surface (the resolver omitted it otherwise).
     if grid_candidate is not None:
         inject += ["--harness", grid_candidate["harness"], "--model", grid_candidate["model"]]
         from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", "difficulty-grid"))
         has_provider = True
         has_model = True
+        if grid_candidate.get("effort") and not effort_occupied:
+            inject += ["--effort", grid_candidate["effort"]]
+            from_config.append(("effort", grid_candidate["effort"], "difficulty-grid"))
+            has_effort = True
         _resolved["v"] = grid_candidate["harness"]
 
     # Lazy resolved-target provider for the substrate/permission compatibility

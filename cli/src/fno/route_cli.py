@@ -239,6 +239,123 @@ def unset_cmd(
         )
 
 
+@route_app.command("init")
+def routing_init_cmd(
+    local: bool = typer.Option(
+        False, "--local/--global", "-l/-g",
+        help="Append to the project-local config.toml instead of the per-user "
+        "global one (default global; routing is operator-level).",
+    ),
+) -> None:
+    """Append the shipped routing inventory sample, commented out, to config.
+
+    The sample documents the ``[routing]`` block shape; nothing is enabled until
+    you uncomment and edit rows. Idempotent: a config already carrying the
+    sample marker is left untouched.
+    """
+    from pathlib import Path
+
+    from fno.config.writer import _target_path
+
+    sample = Path(__file__).resolve().parents[3] / "examples" / "routing.toml"
+    if not sample.is_file():
+        typer.echo(f"error: sample not found at {sample}", err=True)
+        raise typer.Exit(1)
+    target = _target_path("project" if local else "global", None)
+    marker = "# SAMPLE routing inventory"
+    try:
+        existing = target.read_text(encoding="utf-8") if target.is_file() else ""
+    except OSError as exc:
+        typer.echo(f"error: cannot read {target}: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if marker in existing:
+        typer.echo(f"routing sample already present in {target}; nothing to do.")
+        raise typer.Exit(0)
+    commented = "\n".join(
+        ("# " + line.rstrip()) if line.strip() else "#" for line in
+        sample.read_text(encoding="utf-8").splitlines()
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "a", encoding="utf-8") as fh:
+        fh.write("\n\n" + commented + "\n")
+    typer.echo(f"routing sample appended (commented out) to {target}")
+
+
+@route_app.command("inventory")
+def inventory_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the inventory as JSON instead of text."
+    ),
+) -> None:
+    """What can this installation reach: every declared routing row.
+
+    One row per declared model with its resolved band (row band, else a
+    snapshot-derived percentile, else unbanded) and a reachability verdict:
+    ``ok`` (a known harness can invoke it), ``not-installed`` (the named
+    harness is not one fno can drive; the row refuses BY NAME on stderr rather
+    than silently vanishing from routing), ``unbanded`` (never a grid
+    candidate), or ``incomplete`` (no --model value). An empty inventory says
+    so: a virgin install routes nothing from the grid.
+    """
+    from fno.agents.harnesses import READABLE_PROVIDERS
+    from fno.route_resolve import resolve_inventory
+
+    inv = resolve_inventory()
+    rows: list[dict[str, str]] = []
+    refusals: list[str] = []
+    if not inv.rows:
+        note = "no inventory declared (config.routing.models is empty); the grid records no-inventory-declared"
+        if json_output:
+            typer.echo(json.dumps({"objective": inv.objective, "models": [], "note": note}, indent=2))
+        else:
+            typer.echo(note)
+        return
+    for name in sorted(inv.rows):
+        row = inv.rows[name]
+        if not row.harness or not row.model:
+            verdict = "incomplete"
+        elif row.harness not in READABLE_PROVIDERS:
+            verdict = "not-installed"
+            refusals.append(f"{name}: harness {row.harness!r} is not installed (known: {', '.join(READABLE_PROVIDERS)})")
+        elif not row.band:
+            verdict = "unbanded"
+        else:
+            verdict = "ok"
+        pct = "" if row.percentile is None else f"{row.percentile:g}"
+        rows.append({
+            "name": name,
+            "harness": row.harness,
+            "model": row.model,
+            "band": row.band or "unbanded",
+            "percentile": pct,
+            "effort": row.effort,
+            "verdict": verdict,
+        })
+    if json_output:
+        typer.echo(json.dumps({
+            "objective": inv.objective,
+            "prefer_harness": inv.prefer_harness,
+            "models": rows,
+        }, indent=2))
+    else:
+        typer.echo(f"objective={inv.objective}"
+                   + (f" prefer_harness={inv.prefer_harness}" if inv.prefer_harness else ""))
+        cols = ("name", "harness", "model", "band", "percentile", "effort", "verdict")
+        widths = {
+            c: max(len(c), *(len(r[c]) for r in rows)) if rows else len(c)
+            for c in cols
+        }
+
+        def _fmt(r: dict[str, str]) -> str:
+            return "  ".join(r[c].ljust(widths[c]) for c in cols).rstrip()
+
+        typer.echo(_fmt({c: c.upper() for c in cols}))
+        for r in rows:
+            typer.echo(_fmt(r))
+    for line in refusals:
+        typer.echo(f"refused: {line}", err=True)
+
+
 @route_app.command("env")
 def env_cmd(
     spec: str = typer.Argument(

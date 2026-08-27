@@ -2,18 +2,16 @@
 
 ``fno config accounts benchmarks refresh`` caches OpenRouter's coding benchmark scores
 to ``benchmarks.json`` (resolved via :func:`fno.paths.benchmarks_json`); ``show``
-renders it with a staleness warning. The snapshot is the single routing source of
-truth: tier resolution (a separate step) reads it, never the network, so a stale
-or absent snapshot degrades to the static table below rather than blocking a
-dispatch.
-
-A model is only routable if it maps to an installed harness AND a concrete
-``--model`` value; that reachability mapping (and a curated static fallback tier
-table for when no snapshot exists) live here too. Refresh fails LOUD on any
-network/auth error and never leaves a truncated file (temp write + atomic
-rename). Authentication uses the ``OPENROUTER_API_KEY`` env var (OpenRouter's own
-convention) rather than a new config field: a provider record that exports that
-env satisfies it automatically.
+renders it with a staleness warning. The snapshot is OPTIONAL enrichment, never
+the foundation: it may supply a percentile that derives a band for a declared
+row whose ``band`` the operator left unset, and its absence never makes routing
+inert. A percentile cannot say how to invoke a model on anybody's machine, so
+the invocation facts live in the declared inventory (``config.routing.models``)
+and the hardcoded reachability/tier tables are gone - adding a model is a config
+edit, not a source edit. Refresh fails LOUD on any network/auth error and never
+leaves a truncated file (temp write + atomic rename). Authentication uses the
+``OPENROUTER_API_KEY`` env var (OpenRouter's own convention) rather than a new
+config field: a provider record that exports that env satisfies it automatically.
 """
 from __future__ import annotations
 
@@ -86,8 +84,19 @@ STATIC_TIERS: dict[str, list[str]] = {
 
 
 def reachable(name: str) -> Optional[tuple[str, str]]:
-    """Return ``(provider, model)`` for a benchmark model name, or None if unmapped."""
-    return REACHABILITY.get(name)
+    """Return ``(harness, model)`` for a DECLARED inventory row, or None.
+
+    The declared inventory (``config.routing.models``) is the only reachability
+    source: a model nobody declared is invisible to routing, and the surface
+    that answers "what can this installation reach" is ``fno doctor route``.
+    Lazily imports the resolver so this module stays importable from it.
+    """
+    from fno.route_resolve import resolve_inventory
+
+    row = resolve_inventory().rows.get(name)
+    if row is None or not row.harness or not row.model:
+        return None
+    return (row.harness, row.model)
 
 
 def unreachable_tier_ids(

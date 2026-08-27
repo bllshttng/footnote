@@ -112,20 +112,24 @@ def test_staleness_and_is_stale(tmp_path):
     assert bm.staleness_seconds(snap, now=20 * day) == pytest.approx(20 * day)
 
 
-def test_reachable_maps_known_and_rejects_unknown():
-    assert bm.reachable("claude-opus-5") == ("claude", "claude-opus-5")
+def _declare(monkeypatch, rows):
+    """Pin a declared routing inventory (reachability is inventory-backed)."""
+    from fno import route_resolve as rr
+
+    inv = rr.inventory_from_rows(rows)
+    monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
+
+
+def test_reachable_reads_the_declared_inventory(monkeypatch):
+    _declare(monkeypatch, [
+        {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7"},
+        {"name": "gpt-5.4", "harness": "codex", "model": "gpt-5.4"},
+    ])
     assert bm.reachable("glm-4.7") == ("claude", "glm-4.7")
-    # codex flagships route on the codex harness
-    assert bm.reachable("gpt-5.6-sol") == ("codex", "gpt-5.6-sol")
-    assert bm.reachable("gpt-5.6-terra") == ("codex", "gpt-5.6-terra")
+    assert bm.reachable("gpt-5.4") == ("codex", "gpt-5.4")
+    # an undeclared model is unmapped: nothing built-in is authoritative
+    assert bm.reachable("claude-opus-4-8") is None
     assert bm.reachable("some-unmapped-model") is None
-
-
-def test_static_tiers_are_reachable():
-    """Every curated static-tier name must be routable (else it is dead weight)."""
-    for band, names in bm.STATIC_TIERS.items():
-        for name in names:
-            assert bm.reachable(name) is not None, f"{band} tier {name} is unmapped"
 
 
 # --- CLI glue -------------------------------------------------------------- #
@@ -159,6 +163,9 @@ def test_cli_show_stale_warns(monkeypatch):
     stale = {"fetched_at": "1970-01-01T00:00:00+00:00", "source": "x",
              "models": [{"name": "glm-4.7", "coding_percentile": 71}]}
     monkeypatch.setattr(bm, "load_snapshot", lambda path=None: stale)
+    _declare(monkeypatch, [
+        {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7"},
+    ])
     runner, cli = _runner()
     r = runner.invoke(cli, ["benchmarks", "show"])
     assert r.exit_code == 0

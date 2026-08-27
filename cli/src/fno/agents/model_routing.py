@@ -140,6 +140,12 @@ DEFAULT_ROUTED_ROLES = ("coordinate", "tidy", "orient", "consolidate", "post-mer
 # correctness verdict). Hard guard, enforced before any config is read.
 PROTECTED_ROLES = frozenset({"implement", "review-verdict"})
 
+# The band floor a protected role forces on the dispatch grid: the ceiling of
+# {stamped band, this floor}, with objective forced to best-available. The
+# guard is a floor and never a refusal - refusing would drop the spawn to
+# agents.defaults, a silent downgrade by a different door.
+PROTECTED_ROLE_FLOOR = "high"
+
 
 class RouteCompositionError(ValueError):
     """A secondary route cannot compose atomically with the active provider."""
@@ -877,8 +883,15 @@ def resolve_route(
 
     # A protected role never routes, even if config or a business manifest
     # asks it to. Discovery still runs first so a malformed manifest cannot
-    # masquerade as ordinary protected-role fallback.
+    # masquerade as ordinary protected-role fallback. The guard announces
+    # itself: a silent None is an absence with three explanations, and the
+    # floor it forces on the grid is the one fact the receipt should carry.
     if name in PROTECTED_ROLES:
+        _emit(
+            notice,
+            f"protected-role({name}) floor={PROTECTED_ROLE_FLOOR}; never routed "
+            "to a secondary provider",
+        )
         return None
 
     if env is None:
@@ -1261,6 +1274,11 @@ def resolve_codex_route(
 
     business_role = _resolve_business_role(requested_role, business_lookup)
     if name in PROTECTED_ROLES:
+        _emit(
+            notice,
+            f"protected-role({name}) floor={PROTECTED_ROLE_FLOOR}; never routed "
+            "to a secondary provider",
+        )
         return None
 
     if env is None:

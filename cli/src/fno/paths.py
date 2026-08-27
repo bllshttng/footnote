@@ -706,6 +706,23 @@ def benchmarks_json() -> Path:
     return _resolve("~/.fno/") / "benchmarks.json"
 
 
+def runtime_state_json() -> Path:
+    """Return the machine-wide provider runtime-state path.
+
+    Provider health and usage quota are per-ACCOUNT facts, so the same account
+    rate-limited from one repo is rate-limited everywhere: the state file must
+    be one per machine, not one per process cwd (the relative-path defect M5
+    measured as two disjoint files). Follows an absolute ``config.state_dir``
+    exactly like :func:`benchmarks_json`. Tests pin an explicit file via the
+    ``FNO_RUNTIME_STATE_PATH`` env override instead of a config key.
+    """
+    settings = _settings()
+    raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
+    if os.path.isabs(raw):
+        return state_dir() / "provider-runtime-state.json"
+    return _resolve("~/.fno/") / "provider-runtime-state.json"
+
+
 def loops_paused_json() -> Path:
     """Return the path to the global loops pause-all sentinel.
 

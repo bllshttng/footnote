@@ -1772,6 +1772,63 @@ class SpawnProfileBlock(SpawnDefaultsBlock):
     lanes: Any = Field(default_factory=list)
 
 
+class RoutingModelBlock(BaseModel):
+    """One declared model row (nested under 'config.routing.models').
+
+    The row carries the invocation facts a benchmark snapshot cannot: how to
+    reach the model on THIS machine (harness + --model value), which band it
+    runs in, and what effort surface it takes. ``name`` is the join key; the
+    same name may appear more than once and later rows override per field
+    (unset fields keep the earlier row's value), so a base row plus a one-field
+    override is a legal declaration. No value validation here: config stays a
+    leaf module (x-7fdd); the spawn seam and the resolver validate.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    name: str = ""
+    harness: str = ""
+    model: str = ""
+    # route names a vendor lane (``zai/glm-5.3``), account names a provider
+    # record id; both identify which ACCOUNT'S quota a row spends, which is how
+    # capacity expands a harness to its accounts.
+    route: str = ""
+    account: str = ""
+    band: str = ""
+    effort: str = ""
+    cost_per_mtok_in: Optional[float] = None
+    context: Optional[int] = None
+
+
+class RoutingBlock(BaseModel):
+    """Config-first model routing inventory (nested under 'config.routing').
+
+    The declared inventory is the PRIMARY routing surface: nothing built-in is
+    authoritative, so a stranger's install declares its own models (local,
+    ollama, gemini-only) and never inherits this machine's fleet. A virgin
+    install declares nothing; the grid records ``no-inventory-declared`` and
+    injects nothing. ``examples/routing.toml`` ships as a labelled sample that
+    no code path reads. The objective is itself a config key because users
+    differ (cheapest vs strongest vs stay-in-a-harness).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    objective: str = "cheapest-that-clears"
+    prefer_harness: str = ""
+    models: list[RoutingModelBlock] = Field(default_factory=list)
+
+    @field_validator("objective", mode="before")
+    @classmethod
+    def _coerce_objective(cls, v: object) -> object:
+        """Only the three literals are honored; anything else degrades to the
+        default. Same degrade-toward-safety stance as DispatchBlock: a typo can
+        never select an objective the operator did not name."""
+        return v if v in ("cheapest-that-clears", "best-available", "prefer-harness") else (
+            "cheapest-that-clears"
+        )
+
+
 class DispatchBlock(BaseModel):
     """Autonomous-dispatch profile (nested under 'config.dispatch').
 
@@ -3968,6 +4025,7 @@ class ConfigBlock(BaseModel):
         default_factory=ProcessAdmissionBlock
     )
     dispatch: DispatchBlock = Field(default_factory=DispatchBlock)
+    routing: RoutingBlock = Field(default_factory=RoutingBlock)
     autonomy: AutonomyBlock = Field(default_factory=AutonomyBlock)
     auto_continue: AutoContinueBlock = Field(default_factory=AutoContinueBlock)
     keep_going: KeepGoingBlock = Field(default_factory=KeepGoingBlock)
