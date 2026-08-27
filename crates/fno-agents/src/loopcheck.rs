@@ -9762,6 +9762,16 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 // terminal above already ran (a terminal always beats an idle),
                 // and this sits BEFORE the NoProgress backstop so a long watched
                 // wait degrades to budget/claim-expiry, never a spurious kill.
+                //
+                // The observation is hoisted out of the intent arm on purpose
+                // (x-cd97): async_wait_class reads external truth (PR open,
+                // head shipped, no findings, the wait class) and the backstop
+                // below needs the same truth. The idle-allow only rescues a
+                // session whose lease renewal succeeds and whose harness can
+                // idle; a fall-through there must not reach a terminal built
+                // from absence.
+                let observed_async_wait =
+                    async_wait_class(&pr_info, open_findings.is_empty(), head_shipped);
                 let watching_refusal = if let Intent::Watching {
                     ref reason,
                     ref timeout,
@@ -9775,11 +9785,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // behavior until their daemon-consumer waker ships (AC1-EDGE).
                     let is_loop_run_child = std::env::var("FNO_DRIVER_LIB").is_ok();
                     let can_idle = harness_can_idle(author_harness.as_deref(), is_loop_run_child);
-                    let blocker = if can_idle {
-                        async_wait_class(&pr_info, open_findings.is_empty(), head_shipped)
-                    } else {
-                        None
-                    };
+                    let blocker = if can_idle { observed_async_wait } else { None };
                     if let Some(blocker) = blocker {
                         // Extend the node claim to cover the watch window BEFORE
                         // idling, or the idle opens a dispatcher-stampede gap.
@@ -9879,6 +9885,29 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         .bot_nudges
                         .iter()
                         .any(|n| n.class == NudgeClass::Awaiting);
+                // x-cd97: the observation guard for BOTH async-wait classes. CI
+                // still pending, or an outstanding bot in an idlable nudge state,
+                // is a runtime-OBSERVED wait (PR open, head shipped, no
+                // findings) - external truth that work is in flight. NoProgress
+                // asserts the opposite, so the backstop must not fire on it,
+                // regardless of whether the idle-allow engaged: its
+                // preconditions (lease renewal, harness idling) fail for reasons
+                // unrelated to liveness, and the fall-through is what wrote a
+                // terminal for a live CI-waiting session (x-b57a). The
+                // same-model-peer sentinel is the deliberate exception: nothing
+                // can EVER satisfy that wait (the configured peer is the
+                // author's own model), so NoProgress is then true rather than a
+                // lie, and the reviewers-gate arm keeps the backstop reaping it.
+                // probe_block.is_none() keeps the never-passing-probe escape
+                // above intact; a suppressed backstop keeps blocking and
+                // degrades to budget/claim-expiry.
+                let sole_blocker_is_observed_wait = pr_open
+                    && probe_block.is_none()
+                    && observed_async_wait.is_some()
+                    && !pr_info
+                        .missing_bots
+                        .iter()
+                        .any(|b| b == SAME_MODEL_PEER_SENTINEL);
                 // `probe_block.is_some()` keeps a probe that can never pass in
                 // this environment on the NoProgress escape rather than looping
                 // to the budget ceiling: PR+CI+review all hold, so without it
@@ -9886,6 +9915,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 if backstop_tripped
                     && (!pr_open || !ci_ok || !pr_info.reviewed || probe_block.is_some())
                     && !sole_blocker_is_awaiting
+                    && !sole_blocker_is_observed_wait
                 {
                     // Backstop tripped + done() false -> NoProgress. x-b167 AC13:
                     // when a nudged bot never answered, the operator's question is

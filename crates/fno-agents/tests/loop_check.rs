@@ -5243,6 +5243,258 @@ fn nudge_awaiting_defers_the_backstop() {
     );
 }
 
+/// x-cd97: an OBSERVED CI-pending wait must never burn to NoProgress. The
+/// watching idle-allow only rescues a session whose lease renewal succeeds and
+/// whose harness can idle; any fall-through used to land in the generic
+/// fingerprint backstop, which read "CI still pending" (nothing changed) as
+/// "no progress" and wrote a terminal for a live, waiting session. The
+/// observation guard mirrors sole_blocker_is_awaiting: async_wait_class
+/// reading Some("ci") is external truth that work is in flight.
+#[test]
+fn ci_pending_wait_defers_the_backstop() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    // Unattended -> backstop N=3. A promise transcript (not watching), so the
+    // idle-allow branch never engages: this is the fall-through path that
+    // produced the measured wrong terminal on x-b57a.
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-ci-wait", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::ci_pending();
+
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    let (_c1, d1) = fire(&args);
+    assert_eq!(d1.decision, "block", "fire 1: {}", d1.message);
+    let (_c2, d2) = fire(&args);
+    assert_eq!(d2.decision, "block", "fire 2: {}", d2.message);
+    let (_c3, d3) = fire(&args);
+    // Without the guard this trips NoProgress on fire 3; an observed pending
+    // CI is a live wait, not dead work. It must keep blocking (still working)
+    // and degrade to budget/claim-expiry, never a spurious terminal.
+    assert_eq!(
+        d3.decision, "block",
+        "a CI-pending wait must defer the backstop: {}",
+        d3.message
+    );
+    assert!(
+        d3.termination_reason.is_none(),
+        "got: {:?}",
+        d3.termination_reason
+    );
+    assert!(
+        d3.message.contains("CI still running on PR #17"),
+        "the named blocker must remain: {}",
+        d3.message
+    );
+}
+
+/// x-cd97 other half: a PR with SETTLED-red CI and no pending work is genuine
+/// no-progress, and the backstop terminal must still fire. The observation
+/// guard must not swallow the case it exists to catch.
+#[test]
+fn settled_stuck_pr_still_burns_no_progress() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-stuck-red", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::ci_red();
+
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    let (_, d1) = fire(&args);
+    assert_eq!(d1.decision, "block");
+    let (_, d2) = fire(&args);
+    assert_eq!(d2.decision, "block");
+    let (_, d3) = fire(&args);
+    assert_eq!(d3.decision, "allow");
+    assert_eq!(d3.termination_reason.as_deref(), Some("NoProgress"));
+}
+
+/// x-cd97, review class: a missing bot footnote cannot nudge (NotNudgeable, a
+/// real login that reviews on push but has no nudge profile) is still a live
+/// async wait. The fall-through backstop must not reap it as NoProgress - the
+/// same lie as the CI class, one arm over.
+#[test]
+fn not_nudgeable_review_wait_defers_the_backstop() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    // A required bot with NO nudge profile classifies NotNudgeable (idlable,
+    // status quo), so async_wait_class reads Some("review") on green CI.
+    fs::write(
+        cwd.join(".fno/config.toml"),
+        "[review]\nrequired_bots = [\"some-real-bot\"]\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-review-wait", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // Open PR #1, CI success, no reviews, no comments -> the bot is missing.
+    let mock = nudge_mock("[]", 0, None);
+
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    let (_c1, d1) = fire(&args);
+    assert_eq!(d1.decision, "block", "fire 1: {}", d1.message);
+    let (_c2, d2) = fire(&args);
+    assert_eq!(d2.decision, "block", "fire 2: {}", d2.message);
+    let (_c3, d3) = fire(&args);
+    assert_eq!(
+        d3.decision, "block",
+        "a NotNudgeable review wait must defer the backstop: {}",
+        d3.message
+    );
+    assert!(
+        d3.termination_reason.is_none(),
+        "got: {:?}",
+        d3.termination_reason
+    );
+}
+
+/// x-cd97, the deliberate exception: the same-model-peer sentinel wait is
+/// unsatisfiable by construction (the configured peer is the author's own
+/// model), so NoProgress is TRUE there, not a lie - the backstop must keep
+/// reaping it. Pins that the observation guard does not swallow the sentinel.
+#[test]
+fn same_model_sentinel_wait_still_burns_no_progress() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+    // codex author + peers [codex] -> the peer login is replaced by the
+    // sentinel, which nothing can ever satisfy.
+    fs::write(
+        cwd.join(".fno/config.toml"),
+        "[review]\nrequired_bots = []\ngithub_apps = []\npeers = [{ provider = \"codex\" }]\npeer_identity = \"fno-peer-bot\"\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-sentinel", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // Open PR #1, CI success, no reviews. The git stub reports an EMPTY
+    // diff so the payload classifies as docs and the self-review floor (which
+    // a codex author would otherwise raise, disqualifying the review wait and
+    // passing this test for the wrong reason) stays down. The MockBins value
+    // stays bound: it owns the TempDir that keeps the gh script on disk.
+    let mock = nudge_mock("[]", 0, None);
+    let dir = TempDir::new().unwrap();
+    let git = make_script(
+        dir.path(),
+        "git",
+        r#"case "$*" in
+  *--name-only*) exit 0 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000001" ;;
+esac"#,
+    );
+
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--author-harness",
+        "codex",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    let (_, d1) = fire(&args);
+    assert_eq!(d1.decision, "block", "fire 1: {:?}", d1);
+    let (_, d2) = fire(&args);
+    assert_eq!(d2.decision, "block");
+    let (_, d3) = fire(&args);
+    assert_eq!(d3.decision, "allow");
+    assert_eq!(d3.termination_reason.as_deref(), Some("NoProgress"));
+}
+
 // ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
 
 use fno_agents::loopcheck::{

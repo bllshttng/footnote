@@ -131,14 +131,26 @@ def verify_child_promise(
 # synthesis proceed. Kept OUTSIDE any model-generated summary: a summary that
 # claims "all done" is not evidence; this tally is. It is contract-agnostic on
 # purpose - the caller classifies each worker return (via the canonical
-# ``parse_task_result``) into ``completed`` / ``failed`` / malformed and hands
-# the classified pairs here, so the single source of the status enum stays in
-# ``skills/execute/orchestrator.py`` and this module does pure set math.
+# ``classify_worker_return``) into ``completed`` / ``failed`` / the explicit
+# blocking kinds and hands the classified pairs here, so the single source of
+# the status enum stays in ``skills/execute/orchestrator.py`` and this module
+# does pure set math.
 
-FanInKind: TypeAlias = Literal["completed", "failed"]
+FanInKind: TypeAlias = Literal[
+    "completed",
+    "failed",
+    "runtime_failed",
+    "unknown_terminal",
+    "no_output",
+]
 
-# One observed worker return: (node_id, kind). A ``None`` node_id OR a ``None``
-# kind means the return could not be attributed/classified - i.e. malformed.
+# One observed worker return: (node_id, kind). A ``None`` KIND means the
+# return could not be classified at all - i.e. malformed. A ``None`` node_id
+# with a NAMED kind is unattributed but classified: the explicit kinds that
+# carry no verdict ("runtime_failed" from an unparseable claim,
+# "unknown_terminal", "no_output") keep their name through the tally as their
+# own counters, so an observed death is counted as itself and a could-not-tell
+# says so rather than wearing a shapeless ``malformed``.
 Observation: TypeAlias = tuple[Optional[str], Optional[FanInKind]]
 
 
@@ -152,9 +164,22 @@ class FanInTally:
     duplicate: int
     malformed: int
     missing: int
+    runtime_failed: int = 0
+    unknown_terminal: int = 0
+    no_output: int = 0
 
     def __post_init__(self) -> None:
-        for name in ("expected", "completed", "failed", "duplicate", "malformed", "missing"):
+        for name in (
+            "expected",
+            "completed",
+            "failed",
+            "duplicate",
+            "malformed",
+            "missing",
+            "runtime_failed",
+            "unknown_terminal",
+            "no_output",
+        ):
             v = getattr(self, name)
             if isinstance(v, bool) or not isinstance(v, int) or v < 0:
                 raise ValueError(f"FanInTally.{name} must be a non-negative int, got {v!r}")
@@ -163,13 +188,17 @@ class FanInTally:
     def complete(self) -> bool:
         """True only when every expected node completed with nothing unresolved.
 
-        Refuses on ANY missing, failed, or malformed return: a barrier that
+        Refuses on ANY missing, failed, malformed, or named blocking return
+        (runtime-observed death, unknown terminal, no output): a barrier that
         released on a partial fan-in is the exact bug this count prevents.
         """
         return (
             self.missing == 0
             and self.failed == 0
             and self.malformed == 0
+            and self.runtime_failed == 0
+            and self.unknown_terminal == 0
+            and self.no_output == 0
             and self.completed == self.expected
         )
 
@@ -181,6 +210,9 @@ class FanInTally:
             "duplicate": self.duplicate,
             "malformed": self.malformed,
             "missing": self.missing,
+            "runtime_failed": self.runtime_failed,
+            "unknown_terminal": self.unknown_terminal,
+            "no_output": self.no_output,
             "complete": self.complete,
         }
 
@@ -194,17 +226,26 @@ def tally_fan_in(
     Args:
         expected: node ids that MUST resolve for the barrier to release.
         observed: ``(node_id, kind)`` pairs, one per worker return. ``kind`` is
-            ``"completed"`` (SUCCESS/DONE_WITH_CONCERNS) or ``"failed"``
-            (FAILED/BLOCKED). A ``None`` node_id or ``None``/unknown kind is
-            counted as ``malformed`` and attributed to no id.
+            ``"completed"`` (SUCCESS/DONE_WITH_CONCERNS), ``"failed"``
+            (FAILED/BLOCKED or a runtime-observed death that downgraded a
+            claim), ``"runtime_failed"`` (runtime-observed death with no usable
+            claim), ``"unknown_terminal"`` / ``"no_output"`` (could not tell),
+            or ``None`` (legacy unclassified). Everything except ``completed``
+            and attributed ``failed`` blocks the barrier.
 
-    Counting rules (all scoped to ``expected`` - a return for an id outside the
-    expected set is ignored, since it belongs to no barrier this tally gates):
+    Counting rules: attribution-scoped kinds (``duplicate``, ``missing``,
+    ``completed``, ``failed``) count only ids inside ``expected`` - a return
+    for an id outside the expected set is ignored, since it belongs to no
+    barrier this tally gates. The unattributed kinds are UNSCOPED by
+    construction - they carry no id to scope - so a sibling barrier's crash
+    landing in a shared observed list counts here too:
         * ``duplicate``  - a second+ observation for an expected id already seen.
         * ``missing``    - an expected id with no attributed observation.
         * ``completed``  - distinct expected ids observed completing.
         * ``failed``     - attributed expected returns in a non-success state.
-        * ``malformed``  - returns that could not be parsed/attributed at all.
+        * ``runtime_failed`` - returns whose process the runtime watched die.
+        * ``unknown_terminal`` / ``no_output`` - could-not-tell returns, named.
+        * ``malformed``  - shapeless returns (``None`` id/kind, unknown kinds).
     """
     expected_set = {e for e in expected if e}
     seen: set[str] = set()
@@ -212,8 +253,20 @@ def tally_fan_in(
     failed = 0
     duplicate = 0
     malformed = 0
+    runtime_failed = 0
+    unknown_terminal = 0
+    no_output = 0
 
     for node_id, kind in observed:
+        if kind == "runtime_failed":
+            runtime_failed += 1
+            continue
+        if kind == "unknown_terminal":
+            unknown_terminal += 1
+            continue
+        if kind == "no_output":
+            no_output += 1
+            continue
         if not node_id or kind not in ("completed", "failed"):
             malformed += 1
             continue
@@ -239,4 +292,7 @@ def tally_fan_in(
         duplicate=duplicate,
         malformed=malformed,
         missing=len(expected_set - seen),
+        runtime_failed=runtime_failed,
+        unknown_terminal=unknown_terminal,
+        no_output=no_output,
     )
