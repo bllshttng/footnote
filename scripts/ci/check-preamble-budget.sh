@@ -60,13 +60,24 @@ set -euo pipefail
 #
 # Zero spare is the point: the next preamble byte of any kind fails this gate
 # and has to fund itself. Do not read this number as room.
-CEILING_BYTES=36824
+#
+# RAISED AGAIN to 37181, same zero-spare rule, funding a correction the
+# operator ordered onto both preamble surfaces. Two shipped lines called a
+# thread "persistent" and never called it interactive, so a coordinator
+# reading them concluded a bg session has no UI and hand-rolled a pane run
+# instead of `fno agents attach`. The fix has to live where the misreading
+# happens, and that is the preamble both harnesses load at session start.
+# Compression ran first and recovered 247 of the 604 bytes. The remaining
+# 357 each carry one of the four claims: pane and thread are both
+# interactive, a thread hosts no pane until one is made, headless is the
+# only non-interactive substrate, and bg names the same substrate as thread.
+CEILING_BYTES=37181
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
 #
 # Set the ceiling at measured + band/2, so both directions get the same room.
-# EXCEPTION, and it is the current state: 36824 is measured EXACTLY, with zero
+# EXCEPTION, and it is the current state: 37181 is measured EXACTLY, with zero
 # spare, because the fund-by-trading lever it assumes is exhausted (see the
 # ceiling comment above and the refusal text below). Do not "restore" this to
 # measured + band/2 as a tidy-up; that silently undoes the zero-spare intent
