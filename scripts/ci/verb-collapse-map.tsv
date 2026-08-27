@@ -26,6 +26,7 @@ agents kill-check	T1	agents kill-check	4
 agents king done	T1	agents king done	5
 agents king escalate	T1	agents king escalate	1
 agents king init	T1	agents king init	7
+agents king manifest-path	T1	agents king manifest-path	3
 agents list	KEEP	agents list	81	deliberate readability slack for a high-traffic distinct operation
 agents logs	KEEP	agents logs	73	deliberate readability slack for a high-traffic distinct operation
 agents loop	KEEP	agents loop	61	deliberate readability slack for a high-traffic distinct operation
