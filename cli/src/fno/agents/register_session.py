@@ -106,16 +106,22 @@ def _predecessor_observation(
     return entry.harness_session_id, None
 
 
-def _restamp(agent_self: str, harness: str, session_id: str) -> int:
-    """Re-point a SPAWNED worker's own row at its live session id, then stop.
+def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -> int:
+    """Bind a SPAWNED worker's SessionStart id observation to its own row.
 
     Split from registration because the two answer different questions. A
-    spawned worker already HAS a row; the only thing that can be wrong is which
-    session id it records, and a harness that re-minted the id we passed at
-    spawn leaves the row addressing nothing. Registration keys on that same
-    re-mintable id, so routing a re-minted worker through it appends a SECOND
-    row for one worker instead of fixing the first -- which is why this returns
-    rather than falling through.
+    spawned worker already HAS a row; the only open question is which session
+    id or ids it records.
+
+    For a claude row the observation is ADDITIVE (one row, at most one
+    optional related id, no lineage): an empty primary fills, a second
+    different id fills the related slot without touching the primary, and a
+    third distinct id refuses the write while naming the two recorded ids.
+    The hook stays fail-soft - the refusal is a visible event, never a
+    blocked session - while the registry mutation itself fails closed.
+
+    Other harnesses keep the lineage-aware restamp: this contract is
+    claude-only, and their rows carry no related slot.
 
     RETRIES on a missing row, briefly. The spawner creates the row AFTER
     ``mux pane run`` returns (it needs the pane id, and a half-created row is
@@ -156,18 +162,32 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
             # True can only mean the row predates this restamp, so a None beside
             # it really is "already current".
             existed = _row_exists(agent_self, harness)
-            expected_predecessor_session_id, predecessor_reachable = (
-                _predecessor_observation(agent_self, harness)
-            )
-            entry = restamp_harness_session_id(
-                name=agent_self,
-                harness=harness,
-                session_id=session_id,
-                predecessor_reachable=predecessor_reachable,
-                expected_predecessor_session_id=expected_predecessor_session_id,
-            )
-            if entry is not None or existed:
-                break
+            if harness == "claude":
+                from fno.agents.registry import record_session_observation
+
+                entry, outcome = record_session_observation(
+                    name=agent_self,
+                    harness=harness,
+                    session_id=session_id,
+                )
+                if outcome != "no-row" or existed:
+                    _report_observation(
+                        agent_self, harness, session_id, source, entry, outcome
+                    )
+                    return 0
+            else:
+                expected_predecessor_session_id, predecessor_reachable = (
+                    _predecessor_observation(agent_self, harness)
+                )
+                entry = restamp_harness_session_id(
+                    name=agent_self,
+                    harness=harness,
+                    session_id=session_id,
+                    predecessor_reachable=predecessor_reachable,
+                    expected_predecessor_session_id=expected_predecessor_session_id,
+                )
+                if entry is not None or existed:
+                    break
             if time.monotonic() >= deadline:
                 break
             time.sleep(_RESTAMP_ROW_POLL_S)
@@ -198,6 +218,57 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     return 0
 
 
+def _report_observation(
+    agent_self: str,
+    harness: str,
+    session_id: str,
+    source: str,
+    entry: object,
+    outcome: str,
+) -> None:
+    """Surface one claude SessionStart observation's outcome, by name.
+
+    The registry mutation already failed closed inside the recorder; this is
+    the visible half. The cap refusal carries both recorded ids - the
+    operator's next action is choosing between them, so they are the payload.
+    A no-op stays silent on both channels (the common case: every subsequent
+    SessionStart of a healthy worker).
+    """
+    name = getattr(entry, "name", agent_self)
+    if outcome in ("no-op", "no-row"):
+        return
+    if outcome == "refused-cap":
+        primary = getattr(entry, "harness_session_id", "") or "-"
+        related = getattr(entry, "related_session_id", "") or "-"
+        events.emit(
+            "session_id_record_refused",
+            provider=harness,
+            name=name,
+            session_id=session_id,
+            recorded_ids=f"{primary},{related}",
+            source=source or None,
+        )
+        print(
+            f"register_session: warning: {name} already records two session "
+            f"ids ({primary}, {related}); not recording a third "
+            f"({session_id})",
+            file=sys.stderr,
+        )
+        return
+    events.emit(
+        "session_id_recorded",
+        provider=harness,
+        name=name,
+        session_id=session_id,
+        outcome=outcome,
+        source=source or None,
+    )
+    print(
+        f"register_session: recorded {name} {outcome} id {session_id}",
+        file=sys.stderr,
+    )
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="register_session")
     # --harness is canonical; --provider is the axis-rename alias (x-bab1), kept
@@ -207,6 +278,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--provider", dest="harness", help=argparse.SUPPRESS)
     parser.add_argument("--session-id", required=True)
     parser.add_argument("--cwd", required=True)
+    parser.add_argument(
+        "--source",
+        default="",
+        help="The harness SessionStart flavor (claude: startup | resume | clear), "
+        "threaded into the observation events for observability.",
+    )
     parser.add_argument("--name", default=None)
     parser.add_argument("--log-path", default="")
     parser.add_argument(
@@ -227,7 +304,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0
 
     if args.agent_self:
-        return _restamp(args.agent_self, args.harness, args.session_id)
+        return _restamp(
+            args.agent_self, args.harness, args.session_id, source=args.source
+        )
 
     try:
         vendor = resolve_lane_vendor([args.harness], env=os.environ, harness=args.harness)

@@ -180,14 +180,15 @@ impl Registry {
     }
 
     /// Find an entry by agent name or its canonical full harness session id.
+    /// The one optional related id resolves at the same tier: a fork's full
+    /// uuid addresses its row too (both ids stay valid forever).
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|entry| {
             entry.name == token
-                || entry
-                    .harness_session_id
-                    .as_deref()
-                    .and_then(|session_id| session_handle_tier(token, session_id))
-                    == Some(0)
+                || [entry.harness_session_id.as_deref(), entry.related_session_id.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .any(|session_id| session_handle_tier(token, session_id) == Some(0))
         })
     }
 
@@ -2458,6 +2459,28 @@ mod tests {
         let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
         assert_eq!(back["agents"][0]["launch_account"], "makers");
         assert_eq!(back["agents"][0]["related_session_id"], "sess-fork");
+    }
+
+    #[test]
+    fn related_session_id_resolves_the_row_at_full_tier() {
+        // x-d285: a fork's full uuid addresses its row through the related
+        // slot at the same tier as the primary - "both ids stay valid
+        // forever" means addressable, not merely stored. The name and the
+        // primary id keep resolving unchanged.
+        let mut reg = Registry::default();
+        let mut row = sample_entry("forked");
+        row.harness_session_id = Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into());
+        row.related_session_id = Some("02b118cf-aa11-4d55-9bc2-7f33a1e99110".into());
+        reg.entries.push(row);
+
+        assert!(reg.find_name_or_full_session_id("forked").is_some());
+        assert!(reg
+            .find_name_or_full_session_id("01a027ad-fe00-7c12-a116-9ee37c6bdfec")
+            .is_some());
+        assert!(reg
+            .find_name_or_full_session_id("02b118cf-aa11-4d55-9bc2-7f33a1e99110")
+            .is_some(), "the related id resolves the row");
+        assert!(reg.find_name_or_full_session_id("nosuch").is_none());
     }
 
     #[test]

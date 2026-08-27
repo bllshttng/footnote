@@ -620,9 +620,21 @@ class ResolvedAgent:
 
 
 def _session_tier(entry: object, token: str) -> Optional[int]:
-    """Delegate generated and legacy address comparison to the identity owner."""
+    """Delegate generated and legacy address comparison to the identity owner.
+
+    The one optional related id addresses the row at the same tiers as the
+    primary: a fork's full uuid and its canonical handle both resolve, which
+    is what "both ids stay valid forever" means for addressing.
+    """
     hsid = getattr(entry, "harness_session_id", None)
-    return session_handle_tier(token, hsid) if hsid else None
+    if hsid:
+        tier = session_handle_tier(token, hsid)
+        if tier is not None:
+            return tier
+    related = getattr(entry, "related_session_id", None)
+    if related:
+        return session_handle_tier(token, related)
+    return None
 
 
 def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
@@ -1842,6 +1854,112 @@ def restamp_harness_session_id(
 
     update_registry(_updater, path=registry_path)
     return restamped[0] if restamped else None
+
+
+#: Outcome of one SessionStart id observation (see
+#: :func:`record_session_observation`).
+SESSION_OBSERVATION_OUTCOMES = (
+    "primary",  # an empty primary field accepted its first id
+    "no-op",  # the id already occupies a field: no write, no event
+    "related",  # a second valid id filled the one optional related slot
+    "refused-cap",  # a third distinct id: nothing written, ids named
+    "no-row",  # no row under that name for this harness
+)
+
+
+def record_session_observation(
+    *,
+    name: str,
+    harness: str,
+    session_id: str,
+    registry_path: Optional[Path] = None,
+) -> tuple[Optional[AgentEntry], str]:
+    """Record ONE SessionStart id observation additively.
+
+    A fork (a transcript carried across under a new id) is ADDITIVE here:
+    both ids stay valid forever on one row, with no lineage graph and no
+    successor protocol. Exactly three cases write or refuse:
+
+    - an empty primary field accepts the first id it sees (and promotes a
+      ``spawning`` row to ``live`` - the worker has named itself);
+    - an id already recorded (primary or the related slot) is a no-op;
+    - a second, different id fills the ONE optional ``related_session_id``
+      slot while the primary stays untouched - arrival order decides which
+      id is primary, and reversing it stores the same two ids;
+    - a third distinct id, with both slots already occupied by different
+      ids, refuses the write and names the two recorded ids. The mutation
+    fails closed; the caller decides how loudly to say so.
+
+    Returns ``(entry, outcome)``; ``entry`` is the row after the write for
+    the writing outcomes and ``None`` otherwise. An unreadable registry
+    propagates (the caller's fail-soft boundary), which is the other
+    fails-closed half: no observed state, no write.
+    """
+    if not name or not session_id or not harness:
+        return None, "no-row"
+
+    # Decide from a pre-read so a no-op or a refusal never rewrites the file:
+    # the cap refusal must change nothing, byte for byte. The updater below
+    # re-decides under the lock, so a concurrent second observation cannot
+    # double-write a slot: whoever lands second reads the first's write and
+    # answers no-op. An unreadable registry propagates from the load - the
+    # other fails-closed half: no observed state, no write.
+    current = load_registry(path=registry_path)
+    row = next(
+        (
+            candidate
+            for candidate in current
+            if candidate.harness == harness
+            and (candidate.name == name or name in (candidate.aliases or []))
+        ),
+        None,
+    )
+    if row is None:
+        return None, "no-row"
+    primary = row.harness_session_id or ""
+    related = getattr(row, "related_session_id", None) or ""
+    if session_id in (primary, related):
+        return row, "no-op"
+    if primary and related:
+        return row, "refused-cap"
+
+    observed: list[AgentEntry] = []
+
+    def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        for entry in entries:
+            if (entry.name != name and name not in entry.aliases) or entry.harness != harness:
+                continue
+            entry_primary = entry.harness_session_id or ""
+            entry_related = getattr(entry, "related_session_id", None) or ""
+            if session_id in (entry_primary, entry_related):
+                return entries  # a concurrent observation won the slot
+            if not entry_primary:
+                entry.harness_session_id = session_id
+                if entry.status == "spawning":
+                    entry.status = "live"
+                # The claude 8-hex transport key derives from the session
+                # uuid's leading segment; fill it exactly when the row has
+                # none of its own (the restamp rule, read-only here).
+                if harness == "claude" and entry.mux is None:
+                    lead = session_id.split("-", 1)[0].lower()
+                    if _DERIVED_SHORT_RE.match(lead) and not entry.short_id:
+                        entry.short_id = lead
+                observed.append(entry)
+                return entries
+            entry.related_session_id = session_id
+            observed.append(entry)
+            return entries
+        return entries
+
+    update_registry(_updater, path=registry_path)
+    if not observed:
+        # A concurrent observation won the slot between the pre-read and the
+        # lock: nothing was written, and the honest outcome is the no-op.
+        return row, "no-op"
+    outcome = (
+        "primary" if observed[0].harness_session_id == session_id else "related"
+    )
+    return observed[0], outcome
 
 
 def update_registry(

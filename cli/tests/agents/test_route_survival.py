@@ -745,8 +745,8 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
 #   spawn --resume       dispatch_spawn revive         route: x-ae2d, account: 1.1
 #   bg fresh spawn       dispatch_spawn picker         2.3
 #   loop dispatch        fno/dispatch launch_account   2.3 (test_dispatch_one)
-#   background observe   SessionStart restamp          3.1
-#   fork observe         SessionStart restamp          3.1
+#   background observe   record_session_observation    3.1
+#   fork observe         record_session_observation    3.1
 #
 # Every Python row runs the same two fixtures: a routed GLM worker with an
 # isolated account, and a default-Anthropic control. The contract per door:
@@ -755,12 +755,12 @@ def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) ->
 # ``claude attach``/``--resume`` observed on a routed row is exactly the
 # defect the row exists to catch.
 #
-# Rows whose door is wired in a later wave carry STRICT xfail markers: when
-# the wiring lands the marker flips to XPASS, which fails this suite until
-# the marker is removed in the same change - the failing-first contract stays
-# mechanical, not aspirational.
+# Every door is wired as of x-d285 task 3.1; the strict-xfail scaffolding
+# that held later-wave rows is gone. A NEW door starts xfail(strict=True)
+# the same way: when its wiring lands the marker flips to XPASS, which
+# fails this suite until the marker is removed in the same change.
 
-_WAVE2 = pytest.mark.xfail(strict=True, reason="door wired in x-d285 wave 2")
+_WAVE_LATER = pytest.mark.xfail(strict=True, reason="door wired in a later wave")
 
 
 def _routed_glm_row(tmp_path, monkeypatch, *, launch_account="makers"):
@@ -1104,27 +1104,25 @@ def test_matrix_spawn_resume_default_control_inherits_default(
     )
 
 
-@_WAVE2
 def test_matrix_background_observe_records_the_second_id(tmp_path, monkeypatch) -> None:
     """Door: native background observation. A SessionStart reporting a
     different id fills related_session_id without replacing the primary."""
-    from fno.agents.registry import restamp_harness_session_id, load_registry
+    from fno.agents.registry import load_registry, record_session_observation
 
     _routed_glm_row(tmp_path, monkeypatch)
-    entry = restamp_harness_session_id(
+    entry, outcome = record_session_observation(
         name="router", harness="claude", session_id="sess-fork"
     )
-    assert entry is not None
+    assert outcome == "related"
     row = load_registry()[0]
     assert row.harness_session_id == "sess-1", "the primary is never replaced"
     assert row.related_session_id == "sess-fork"
 
 
-@_WAVE2
 def test_matrix_fork_observation_is_arrival_order_independent(tmp_path, monkeypatch) -> None:
     """Door: explicit fork. Reversing SessionStart arrival order stores the
     same two ids - no last-writer replacement either direction."""
-    from fno.agents.registry import load_registry, restamp_harness_session_id, write_registry, AgentEntry
+    from fno.agents.registry import load_registry, record_session_observation, write_registry, AgentEntry
 
     use_tmpdir(monkeypatch, tmp_path)
     write_registry(
@@ -1140,7 +1138,7 @@ def test_matrix_fork_observation_is_arrival_order_independent(tmp_path, monkeypa
             )
         ]
     )
-    restamp_harness_session_id(name="forked", harness="claude", session_id="sess-orig")
+    record_session_observation(name="forked", harness="claude", session_id="sess-orig")
     row = load_registry()[0]
     assert {row.harness_session_id, row.related_session_id} == {
         "sess-orig",
