@@ -10,6 +10,7 @@ uncapped fan-out read as a pass on the night this node was filed.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -34,7 +35,7 @@ def _budget(**kwargs) -> tuple[int | None, int | None]:
 
 
 def _session(**kwargs) -> SessionCapability:
-    base = {"harness": "claude", "substrate": "interactive", "attended": True}
+    base: dict[str, Any] = {"harness": "claude", "substrate": "interactive", "attended": True}
     base.update(kwargs)
     return SessionCapability(**base)
 

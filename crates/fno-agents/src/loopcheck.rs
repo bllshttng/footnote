@@ -11275,7 +11275,9 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
                 // its own output, the positive marker. A silent success is
                 // SKIP - held, never counted.
                 break if status.success() {
-                    ProbeOutcome::Pass { stdout: String::new() }
+                    ProbeOutcome::Pass {
+                        stdout: String::new(),
+                    }
                 } else {
                     ProbeOutcome::Fail {
                         code: status.code(),
@@ -11322,7 +11324,11 @@ fn run_probe(cmd: &str, cwd: &Path, timeout: std::time::Duration) -> ProbeOutcom
     match outcome {
         ProbeOutcome::Pass { .. } if stdout.trim().is_empty() => ProbeOutcome::Skip,
         ProbeOutcome::Pass { .. } => ProbeOutcome::Pass { stdout },
-        ProbeOutcome::Fail { code, .. } => ProbeOutcome::Fail { code, stderr, stdout },
+        ProbeOutcome::Fail { code, .. } => ProbeOutcome::Fail {
+            code,
+            stderr,
+            stdout,
+        },
         other => other,
     }
 }
@@ -13233,7 +13239,11 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
                     "why": why,
                 })
             }
-            ProbeOutcome::Fail { code, stderr, stdout } => {
+            ProbeOutcome::Fail {
+                code,
+                stderr,
+                stdout,
+            } => {
                 let c = code
                     .map(|n| n.to_string())
                     .unwrap_or_else(|| "signal".to_string());
@@ -21468,7 +21478,10 @@ mod done_probe_tests {
         let t = Duration::from_secs(10);
         assert_eq!(run_probe("echo marker", tmp.path(), t).verdict(), "PASS");
         assert_eq!(run_probe("exit 0", tmp.path(), t).verdict(), "SKIP");
-        assert_eq!(run_probe("echo out; exit 4", tmp.path(), t).verdict(), "FAIL");
+        assert_eq!(
+            run_probe("echo out; exit 4", tmp.path(), t).verdict(),
+            "FAIL"
+        );
         assert_eq!(
             run_probe("sleep 30", tmp.path(), Duration::from_millis(150)).verdict(),
             "BLOCKED",
@@ -21486,7 +21499,11 @@ mod done_probe_tests {
             tmp.path(),
             Duration::from_secs(10),
         );
-        assert_eq!(outcome.verdict(), "FAIL", "the trap must read FAIL, not PASS");
+        assert_eq!(
+            outcome.verdict(),
+            "FAIL",
+            "the trap must read FAIL, not PASS"
+        );
     }
 
     #[test]
@@ -21760,7 +21777,11 @@ mod done_probe_tests {
         // plan_path is repo-relative in practice; resolving against the process
         // cwd would read nothing and silently drop the gate.
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - echo probe-ok")).unwrap();
+        std::fs::write(
+            tmp.path().join("plan.md"),
+            fm("done_probes:\n  - echo probe-ok"),
+        )
+        .unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21858,7 +21879,11 @@ mod done_probe_tests {
         // `plans/p.md#wave-1` must resolve to plans/p.md, not a literal filename
         // containing the fragment (which would read nothing -> silent Absent).
         let tmp = tempfile::tempdir().unwrap();
-        std::fs::write(tmp.path().join("plan.md"), fm("done_probes:\n  - echo probe-ok")).unwrap();
+        std::fs::write(
+            tmp.path().join("plan.md"),
+            fm("done_probes:\n  - echo probe-ok"),
+        )
+        .unwrap();
         let events = tmp.path().join("events.jsonl");
         assert!(
             matches!(
@@ -21882,7 +21907,11 @@ mod done_probe_tests {
         // timeout loop is already over and only the group kill bounds the join.
         let tmp = tempfile::tempdir().unwrap();
         let start = std::time::Instant::now();
-        let outcome = run_probe("sleep 300 & echo probe-ok", tmp.path(), Duration::from_secs(30));
+        let outcome = run_probe(
+            "sleep 300 & echo probe-ok",
+            tmp.path(),
+            Duration::from_secs(30),
+        );
         assert_eq!(outcome.render(), "pass");
         assert!(
             start.elapsed() < Duration::from_secs(10),
