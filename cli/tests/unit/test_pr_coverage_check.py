@@ -1758,10 +1758,42 @@ def test_round_budget_counts_rounds_that_only_github_review_objects_saw():
     assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
 
 
-def test_round_budget_pass_resets_the_github_axis_too():
-    """A clean pass at 12:00 resets both axes: the connector review at 11:00
-    is a spent round, the two reviews after the pass are fresh rounds. The
-    answer is 2, never 3."""
+def test_round_budget_counts_every_verdict_across_the_pr_life():
+    """The operator's ruling (x-2219): max_rounds is a per-PR TOTAL. A pass
+    is a round like any verdict and refunds nothing - four attested rounds
+    are four, not the reset answer 1."""
+    chain = [
+        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "fail", "ts": "2026-08-26T11:00:00Z"},
+        {"verdict": "pass", "ts": "2026-08-26T12:00:00Z"},
+        {"verdict": "fail", "ts": "2026-08-26T13:00:00Z"},
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain) == 4
+    # Drop the pass from the chain: still three rounds.
+    no_pass = [chain[0], chain[1], {"verdict": "fail", "ts": "2026-08-26T12:00:00Z"}]
+    assert _coverage_gate.rounds_since_last_pass(no_pass) == 3
+
+
+def test_round_budget_pass_no_longer_refunds_the_budget():
+    """AC6: the chain pass, round, round is THREE rounds. The pass used to
+    zero the counter; a self-signed pass refreshed the whole budget on
+    demand (measured on PR #1225: one emit, 0/2 read back, three more
+    rounds ran)."""
+    chain = [
+        {"verdict": "pass", "ts": "2026-08-26T10:00:00Z"},
+        {"verdict": "fail", "ts": "2026-08-26T11:00:00Z"},
+        {"verdict": "fail", "ts": "2026-08-26T12:00:00Z"},
+    ]
+    assert (
+        _coverage_gate.rounds_since_last_pass(chain) == 3
+    ), "pass, round, round is three rounds: the pass counts and refunds nothing"
+
+
+def test_round_budget_pass_does_not_truncate_the_github_axis():
+    """A pass at 12:00 no longer truncates the reviews axis: the connector
+    round at 11:00 was a real round and stays counted. Two attested rounds
+    plus three reviewed commits answer 3 (the max of the axes), never the
+    refund answer 2."""
     chain = [
         {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
         {"verdict": "pass", "ts": "2026-08-26T12:00:00Z"},
@@ -1771,16 +1803,27 @@ def test_round_budget_pass_resets_the_github_axis_too():
         _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T13:00:00Z"),
         _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T15:00:00Z"),
     ]
-    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
 
 
-def test_round_budget_drops_the_github_axis_when_the_pass_has_no_ts():
-    """A pass with no readable ts leaves nothing to filter the reviews axis
-    by. Counting the whole review history there would fire the cap on a
-    budget this very pass just defused: the three pre-pass reviews below
-    would read as 3 spent rounds when the pass reset them to 0. The answer
-    is the events-only 0, and the positive marker is that exact number - an
-    unfiltered read would answer 3."""
+def test_rounds_submitted_before_the_pass_still_count_on_the_reviews_axis():
+    """AC7: the no-refund ruling on the reviews axis alone. The pass
+    carries a readable ts, and every review object predates it - the old
+    last_pass_ts filter dropped all three and answered 0, a fixture that
+    failed SEPARATELY from the events-axis reset. The answer is 3."""
+    chain = [{"verdict": "pass", "ts": "2026-08-26T12:00:00Z"}]
+    reviews = [
+        _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T09:00:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T09:30:00Z"),
+        _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T09:45:00Z"),
+    ]
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
+
+
+def test_round_budget_pass_without_a_ts_still_counts_the_github_axis():
+    """The pass_ts_unreadable guard is gone with the reset it served: a
+    pass with no readable ts leaves the reviews axis whole. Fail plus a
+    ts-less pass is two attested rounds, three reviewed commits - 3."""
     chain = [
         {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
         {"verdict": "pass"},
@@ -1790,14 +1833,7 @@ def test_round_budget_drops_the_github_axis_when_the_pass_has_no_ts():
         _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T09:30:00Z"),
         _review_object(_CONNECTOR, "COMMENTED", "c3", "2026-08-26T09:45:00Z"),
     ]
-    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
-    # The same chain with a readable pass ts still counts the axis, so the
-    # guard above is narrow: it drops the axis, never the whole counter.
-    dated = [
-        {"verdict": "fail", "ts": "2026-08-26T10:00:00Z"},
-        {"verdict": "pass", "ts": "2026-08-26T08:00:00Z"},
-    ]
-    assert _coverage_gate.rounds_since_last_pass(dated, reviews=reviews) == 3
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 3
 
 
 def test_round_budget_counts_review_objects_posted_under_the_pr_author_login():
@@ -1836,18 +1872,19 @@ def test_round_budget_no_reviews_evidence_keeps_the_events_only_answer():
 
 
 def test_round_budget_naive_pass_timestamp_never_crashes_the_gate():
-    """A pass row whose ts carries no offset, compared against a Z-suffixed
-    review submittedAt, used to raise TypeError out of rounds_since_last_pass
-    and crash the whole coverage verdict. The comparison must answer False
-    (not after), matching the Rust mirror's unparseable-ts answer."""
+    """A pass row whose ts carries no offset, set against Z-suffixed review
+    submittedAt values, used to raise TypeError out of rounds_since_last_pass
+    and crash the whole coverage verdict. The x-2219 no-refund ruling removed
+    the comparison entirely - no timestamp is read on either axis - so a
+    naive ts is inert: the pass is one round, the two distinct reviewed
+    commits are the other axis, and the gate answers 2 rather than
+    raising."""
     chain = [{"verdict": "pass", "ts": "2026-08-26T12:00:00"}]
     reviews = [
         _review_object(_CONNECTOR, "COMMENTED", "c1", "2026-08-26T13:00:00Z"),
         _review_object(_CONNECTOR, "COMMENTED", "c2", "2026-08-26T15:00:00Z"),
     ]
-    # The pass's ts cannot be ordered against either review, so neither is
-    # "after" it: the axis answers 0 rather than raising.
-    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 0
+    assert _coverage_gate.rounds_since_last_pass(chain, reviews=reviews) == 2
 
 
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):

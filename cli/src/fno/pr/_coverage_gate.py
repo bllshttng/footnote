@@ -856,69 +856,47 @@ IMPOSSIBLE_REMEDIES = (
 )
 
 
-def _ts_after(a: str, b: str) -> bool:
-    """True iff ``a`` is strictly after ``b``, both RFC3339. Unparseable
-    input answers False, matching the Rust-side ``ts_after``: a round is
-    never counted on a timestamp that cannot be read. TypeError is caught
-    too: comparing an offset-naive timestamp against an offset-aware one
-    raises instead of answering, and the crash would take the whole
-    coverage verdict down with it."""
-    try:
-        from datetime import datetime
-
-        return datetime.fromisoformat(a) > datetime.fromisoformat(b)
-    except (ValueError, TypeError):
-        return False
-
-
 def rounds_since_last_pass(
     chain: list[dict],
     reviews: Optional[list[dict]] = None,
 ) -> int:
-    """Review rounds since the last pass, oldest-first.
+    """The PR's review-round total, oldest-first.
 
-    A round is a review COMPLETION since the last pass, whatever its
-    verdict, on two evidence axes; a pass resets both. The chain axis
-    counts attestation verdicts (the declared ``review_round`` wins when
-    present, the running max since the reset; events from before the field
-    existed fall back to counting verdicts). The reviews axis, when a
-    payload is supplied, counts DISTINCT reviewed commits submitted
-    strictly after the newest pass - a GitHub-App reviewer's rounds leave
+    The operator's ruling (x-2219, 2026-08-27) made this a PER-PR TOTAL:
+    ``max_rounds`` counts rounds across the whole life of the PR, and a
+    ``verdict: pass`` refunds nothing - it is one round like any verdict,
+    and its coverage role lives in the coverage classify, never here. The
+    name survives from the reset semantics it used to implement; this
+    docstring, not the name, is the contract. The chain axis counts
+    attestation verdicts (the declared ``review_round`` wins when present,
+    as the running max; events from before the field existed fall back to
+    counting verdicts). The reviews axis, when a payload is supplied,
+    counts DISTINCT reviewed commits - a GitHub-App reviewer's rounds leave
     no attestation row anywhere, so they exist only as review objects, and
     every fix moves the head, making one reviewed commit one round. No
-    author filter: the codex cloud connector posts its review objects
-    under the PR author's own login (measured live - 116 of 117 objects on
-    the spinning specimen), so an author exclusion deletes the round trace
-    on exactly that lane. Known bound, accepted: reply volume at ONE
-    commit is neutral, but replies landed on distinct never-reviewed heads
-    each count as a round. No discriminator exists in the review-object
-    data, and over-counting fires the cap on a worker already
-    push-replying without re-review, where the old under-count spun
-    forever. The answer is the MAX of the two axes, never the sum: a
-    healthy lane leaves both traces per round. The Rust-side mirror is
-    ``loopcheck::rounds_since_last_pass``; the two are held equal by the
-    shared corpus.
+    timestamp filter on this axis either: a pass that truncated the reviews
+    older than itself would refund rounds only GitHub saw. No author
+    filter: the codex cloud connector posts its review objects under the PR
+    author's own login (measured live - 116 of 117 objects on the spinning
+    specimen), so an author exclusion deletes the round trace on exactly
+    that lane. Known bound, accepted: reply volume at ONE commit is
+    neutral, but replies landed on distinct never-reviewed heads each count
+    as a round. No discriminator exists in the review-object data, and
+    over-counting fires the cap on a worker already push-replying without
+    re-review, where the old under-count spun forever. The answer is the
+    MAX of the two axes, never the sum: a healthy lane leaves both traces
+    per round. The Rust-side mirror is ``loopcheck::rounds_since_last_pass``;
+    the two are held equal by the shared corpus.
     """
     rounds = 0
-    last_pass_ts = ""
-    pass_ts_unreadable = False
     for event in chain:
-        if event.get("verdict") == "pass":
-            rounds = 0
-            last_pass_ts = str(event.get("ts") or "")
-            # A pass with no readable ts leaves nothing to filter the reviews
-            # axis by. Counting the whole review history there would fire the
-            # cap on a budget this very pass just defused, so the axis is
-            # dropped instead - the same bias as the read-failure arm below.
-            pass_ts_unreadable = not last_pass_ts
-            continue
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
             rounds = max(rounds, declared)
         else:
             rounds += 1
     events_rounds = rounds
-    if reviews is None or pass_ts_unreadable:
+    if reviews is None:
         return events_rounds
     counted: set[str] = set()
     for review in reviews:
@@ -928,11 +906,6 @@ def rounds_since_last_pass(
         commit = review.get("commit")
         oid = commit.get("oid") if isinstance(commit, dict) else None
         if not isinstance(oid, str) or not oid:
-            continue
-        submitted = review.get("submittedAt")
-        if not isinstance(submitted, str):
-            submitted = ""
-        if last_pass_ts and not _ts_after(submitted, last_pass_ts):
             continue
         counted.add(oid)
     return max(events_rounds, len(counted))
