@@ -70,6 +70,10 @@ def test_notify_impl_darwin_dispatches_osascript(monkeypatch):
 
     monkeypatch.setattr(_impl.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(_impl.subprocess, "run", _stub_run)
+    # This test asserts that a dispatch HAPPENS, so it opts out of the
+    # hermetic suppression the whole suite runs under - `fno.hermetic` stamps
+    # FNO_TEST_HERMETIC=1 to keep every other test off the operator's screen.
+    monkeypatch.delenv("FNO_TEST_HERMETIC", raising=False)
     code, err = _impl.send_notification("T", "M")
     assert code == 0
     assert err == ""
