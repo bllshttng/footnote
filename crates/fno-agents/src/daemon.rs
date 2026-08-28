@@ -16034,6 +16034,33 @@ done
         }
     }
 
+    /// Block until an `agent_ask_done` is on disk, then return every event.
+    ///
+    /// The two callers slept a fixed 400ms or 1300ms and then counted. That is
+    /// a bet that the fake's turn finished AND its emit reached the file inside
+    /// the window. CI lost it: `switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn`
+    /// read ZERO done events on a loaded runner while passing on every local
+    /// run. A completion is an observable marker, so wait for the marker.
+    ///
+    /// Counting `== 1` right after the first one lands is still sound: both
+    /// callers make exactly two submits and have already asserted upstream
+    /// that the two shared one turn id, so nothing can start a second turn
+    /// after this returns.
+    async fn await_ask_done(home: &AgentsHome) -> Vec<Value> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let events = read_events(home);
+            if events.iter().any(|e| e["type"] == "agent_ask_done") {
+                return events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no agent_ask_done ever landed: {events:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
     /// Spawn a codex thread worker through the real handle_spawn and return
     /// its response.
     async fn spawn_codex_thread_for_test(ctx: &Ctx, home: &AgentsHome, seed: &str) -> Response {
@@ -16079,8 +16106,7 @@ done
 
             // Exactly ONE completed turn: the seed and the steered ask share
             // it, so exactly one agent_ask_done event fires.
-            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-            let events = read_events(&home);
+            let events = await_ask_done(&home).await;
             let done = events
                 .iter()
                 .filter(|e| e["type"] == "agent_ask_done")
@@ -16325,13 +16351,16 @@ done
 
             // The body reached the thread: the steered turn carries it, so the
             // completion event names the same single turn.
-            tokio::time::sleep(std::time::Duration::from_millis(1300)).await;
-            let events = read_events(&home);
+            let events = await_ask_done(&home).await;
             let done: Vec<_> = events
                 .iter()
                 .filter(|e| e["type"] == "agent_ask_done")
                 .collect();
             assert_eq!(done.len(), 1, "one shared turn: {events:?}");
+            assert_eq!(
+                done[0]["data"]["turn_id"], "turn-1",
+                "the completion must name the turn both submits shared: {events:?}"
+            );
             let injected = events.iter().any(|e| {
                 e["type"] == "agent_deliver_injected"
                     && e["data"]["transport"] == "switchboard"
