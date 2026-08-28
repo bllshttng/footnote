@@ -380,6 +380,25 @@ fn symptom_restore_rebuilds_no_thread_pane() {
     )
     .unwrap();
     std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The reach resolves through the canonical re-entry plan, so the server
+    // shells an `fno-agents` binary. None sits beside this TEST binary, so the
+    // resolver falls to PATH: this stub answers with the bare resolved plan
+    // this row's shape produces (claude, no route, no account), and the real
+    // spawn still goes through the claude stub above.
+    std::fs::write(
+        bin.join("fno-agents"),
+        concat!(
+            "#!/bin/sh\n",
+            "echo '{\"resolved\":true,\"argv\":[\"claude\",\"attach\",\"deadbee2\"],",
+            "\"env\":{},\"claude_config_dir\":null}'\n",
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        bin.join("fno-agents"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     let marker = scratch.0.join("marker");
     let _ = std::fs::remove_file(&marker);
     let path_with_stub = format!(
