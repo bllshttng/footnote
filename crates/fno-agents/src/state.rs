@@ -143,6 +143,25 @@ pub enum StateError {
     UnsupportedSchemaVersion { found: u32, max: u32 },
     #[error("registry invariant violation: {0}")]
     InvariantViolation(String),
+    /// The mirror of Python's `_refuse_source_ahead_schema_bump`. Typed rather
+    /// than folded into `InvariantViolation` so `state_error_code` can hand the
+    /// daemon client a distinguishable code: this is the caller's own binary
+    /// being ahead of the deployment, not a corrupt file.
+    #[error(
+        "refusing to raise the shared registry at {path} from schema_version={found} \
+         to schema_version={current}: this fno is running from source at {source_root}, \
+         not from the deployed install, so the bump exists only on this branch and \
+         every deployed reader on the machine would degrade until it merges. Either \
+         deploy this schema (fno doctor update), or point this checkout at its own \
+         registry (FNO_AGENTS_HOME, or config.paths.agents_registry_path for the \
+         Python side)."
+    )]
+    SourceAheadSchemaBump {
+        path: String,
+        found: u32,
+        current: u32,
+        source_root: String,
+    },
     /// The blocking-pool task reading the registry was cancelled by daemon
     /// shutdown before it ran, not by a failure in the read itself.
     #[error("cancelled during shutdown: {0}")]
@@ -1424,6 +1443,70 @@ fn read_registry_tolerant(path: &Path, mut file: &File) -> Result<(Registry, usi
     Ok((reg, raw_rows))
 }
 
+/// The repo root when `exe` is a binary built inside a source checkout, else
+/// `None`. Pure over the path so it is testable without a real install.
+///
+/// `home` stops the walk: a cargo-installed `~/.cargo/bin/fno-agents` reaches
+/// `$HOME` in three steps, and plenty of people keep a dotfiles repo there, so
+/// walking past it would read every deployed binary on such a machine as
+/// source-run. The Python half needs no such stop, because a wheel module sits
+/// six or more levels below `$HOME` and its bounded walk cannot reach it.
+fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    for parent in exe.ancestors().skip(1).take(6) {
+        if home == Some(parent) {
+            return None;
+        }
+        // A linked worktree's `.git` is a FILE, so this tests existence.
+        if parent.join(".git").exists() {
+            return Some(parent.to_path_buf());
+        }
+    }
+    None
+}
+
+/// Refuse to RAISE the shared registry's schema from a source-built binary.
+///
+/// The Rust half of x-665d, and the exact mirror of Python's
+/// `_refuse_source_ahead_schema_bump`. `registry.json` has writers in two
+/// languages: a guard on one leaves the daemon, mux, and every client verb
+/// still able to poison the file, which is the lesson x-d07d recorded when its
+/// own read fix had to land on four readers rather than one.
+///
+/// Fires only when all three hold: the target IS the process-global registry
+/// (`FNO_AGENTS_HOME`, else `$HOME/.fno/agents/registry.json`), this binary was
+/// built inside a checkout and the target lies outside it, and the on-disk
+/// version is strictly below this one. A missing file reads as
+/// `Registry::default()`, whose version equals this one, so an absent registry
+/// never fires.
+fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
+    if found >= REGISTRY_SCHEMA_VERSION {
+        return Ok(());
+    }
+    let shared = crate::paths::AgentsHome::from_env().registry_json();
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let shared = shared.canonicalize().unwrap_or(shared);
+    if resolved != shared {
+        return Ok(());
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(());
+    };
+    let exe = exe.canonicalize().unwrap_or(exe);
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let Some(root) = source_root_for_exe(&exe, home.as_deref()) else {
+        return Ok(());
+    };
+    if resolved.starts_with(&root) {
+        return Ok(());
+    }
+    Err(StateError::SourceAheadSchemaBump {
+        path: path.display().to_string(),
+        found,
+        current: REGISTRY_SCHEMA_VERSION,
+        source_root: root.display().to_string(),
+    })
+}
+
 /// Read-modify-write the registry under an exclusive lock, publishing the
 /// result atomically (tempfile + rename). The lock is held across the whole
 /// read-modify-write so two daemons (or a daemon and a Python `fno`) never
@@ -1450,6 +1533,13 @@ where
             max: REGISTRY_SCHEMA_VERSION,
         });
     }
+    // The other direction of the same comparison (x-665d). The check above stops
+    // a stale writer erasing fields it cannot see; this one stops a SOURCE-run
+    // writer creating those stale readers, by refusing the bump at line
+    // `registry.schema_version = REGISTRY_SCHEMA_VERSION` below. Inside the lock
+    // and before `write_json_atomic`, for the reason the comment above already
+    // argues: a racing writer must not slip past.
+    refuse_source_ahead_schema_bump(path, registry.schema_version)?;
     let before = registry
         .entries
         .iter()
@@ -3150,6 +3240,120 @@ mod tests {
             "registry row 'ghost' carries no resolvable handle: needs one of \
              (pid + pid_start_time), log_path, or (harness + harness_session_id)"
         );
+    }
+
+    // ── x-665d: refuse a source-ahead bump of the SHARED registry ───────────
+
+    #[test]
+    fn source_root_for_exe_finds_the_checkout_above_a_target_build() {
+        let root = tmpdir("src-root-target");
+        let exe = root.join("target").join("debug").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        assert_eq!(source_root_for_exe(&exe, None), Some(root.clone()));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn source_root_for_exe_counts_a_linked_worktrees_git_file() {
+        // A linked worktree's `.git` is a FILE. `is_dir()` would miss every
+        // worktree, which is the only place a source-ahead build ever runs.
+        let root = tmpdir("src-root-worktree");
+        let exe = root.join("target").join("debug").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(root.join(".git"), b"gitdir: /elsewhere\n").unwrap();
+
+        assert_eq!(source_root_for_exe(&exe, None), Some(root.clone()));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn source_root_for_exe_returns_none_for_a_deployed_binary() {
+        let root = tmpdir("src-root-deployed");
+        let exe = root.join("cargo").join("bin").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+
+        assert_eq!(source_root_for_exe(&exe, None), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn source_root_for_exe_stops_at_home_so_a_dotfiles_repo_is_not_a_checkout() {
+        // `~/.cargo/bin/fno-agents` reaches `$HOME` in three steps. Plenty of
+        // people keep a dotfiles repo there; without the stop, every deployed
+        // binary on such a machine would read as source-run and refuse writes
+        // it must be allowed to make.
+        let home = tmpdir("src-root-home");
+        let exe = home.join(".cargo").join("bin").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+
+        assert_eq!(source_root_for_exe(&exe, Some(&home)), None);
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn update_registry_refuses_a_source_ahead_bump_of_the_shared_registry() {
+        // AC8-CON: `registry.json` has writers in two languages, so a guard on
+        // one leaves the daemon, mux, and every client verb still able to
+        // poison the file. This test binary genuinely runs from
+        // `<checkout>/target/...`, so it IS the source-run case; pointing
+        // FNO_AGENTS_HOME at a tmp dir outside the checkout makes that dir the
+        // process-global registry the guard protects.
+        let _guard = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = tmpdir("source-ahead-shared");
+        let saved = std::env::var_os("FNO_AGENTS_HOME");
+        std::env::set_var("FNO_AGENTS_HOME", &home);
+        let path = crate::paths::AgentsHome::from_env().registry_json();
+        let older = REGISTRY_SCHEMA_VERSION - 1;
+        let body = format!(r#"{{"schema_version":{older},"agents":[]}}"#);
+        std::fs::write(&path, &body).unwrap();
+
+        let result = update_registry(&path, |reg| reg.entries.clear());
+
+        match saved {
+            Some(v) => std::env::set_var("FNO_AGENTS_HOME", v),
+            None => std::env::remove_var("FNO_AGENTS_HOME"),
+        }
+        match result {
+            Err(StateError::SourceAheadSchemaBump { found, current, .. }) => {
+                assert_eq!(found, older);
+                assert_eq!(current, REGISTRY_SCHEMA_VERSION);
+            }
+            other => panic!("expected SourceAheadSchemaBump, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            body,
+            "the refused write must leave the file byte-identical"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn update_registry_bumps_a_named_store_that_is_not_the_shared_one() {
+        // AC3-HP, the escape hatch: it works by moving the target, never by
+        // silencing the check. `update_registry_upgrades_schema_version_on_write`
+        // covers the same ground for the ordinary older-store upgrade; this one
+        // states the guard's own condition.
+        let dir = tmpdir("named-store-bump");
+        let path = dir.join("registry.json");
+        let older = REGISTRY_SCHEMA_VERSION - 1;
+        std::fs::write(
+            &path,
+            format!(r#"{{"schema_version":{older},"agents":[]}}"#),
+        )
+        .unwrap();
+
+        update_registry(&path, |r| r.entries.push(sample_entry("w"))).unwrap();
+
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(on_disk["schema_version"], REGISTRY_SCHEMA_VERSION);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

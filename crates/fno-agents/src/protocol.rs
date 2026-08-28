@@ -235,6 +235,12 @@ pub enum ErrorCode {
     SpawnFailed,
     /// channel.* against an unknown cc_session_id / channel id.
     ChannelUnknown,
+    /// The caller's own binary disagrees with the shared registry's schema, so
+    /// a write was refused. Distinct from [`Internal`](Self::Internal) because
+    /// the repair is a deploy or a redirect, not a daemon fault: a client that
+    /// reads this can name the cause instead of reporting a lock or permission
+    /// problem, which is how the 2026-08-28 outage was misdiagnosed twice.
+    SchemaMismatch,
     /// Catch-all internal fault; daemon stays up, surfaces this.
     Internal,
     /// A blocking-pool task was cancelled because the daemon is shutting
