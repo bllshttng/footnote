@@ -20,6 +20,8 @@ surface a test can reach the operator through.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fno.events import HermeticEscapeError, _build, append_event
@@ -98,7 +100,10 @@ def test_append_event_refuses_a_write_outside_the_sandbox(monkeypatch, tmp_path)
     with pytest.raises(HermeticEscapeError) as exc:
         append_event(_event(), outside)
     assert str(outside) in str(exc.value)
-    # Refused before the mkdir, so a blocked write leaves no .fno/ behind.
+    # append_event itself refuses before its mkdir. Scoped deliberately to this
+    # function: gate_escape's failure log lands beside the journal and used to
+    # recreate the directory a refusal had just prevented. That leg carries its
+    # own guard now, covered by the gate_escape test below.
     assert not outside.parent.exists()
 
 
@@ -185,6 +190,68 @@ def test_home_is_not_an_allowed_root(monkeypatch, tmp_path):
     with pytest.raises(HermeticEscapeError):
         append_event(_event(), live)
     assert not live.parent.exists()
+
+
+def test_relative_pin_is_not_an_allowed_root(monkeypatch, tmp_path):
+    """A relative ``FNO_EVENTS_PATH`` must not promote the cwd to a root.
+
+    ``Path("events.jsonl").parent`` is ``.``, whose realpath is the process cwd.
+    Under a bare ``pytest`` that IS the checkout, so a relative pin turned the
+    guard off for the whole repository. Neither ``scripts/lib/events.sh`` nor
+    ``hooks/review-hold.sh`` validates the pin before passing it on, so a good
+    value cannot be assumed here.
+    """
+    from fno.events import _hermetic_allowed_roots
+
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
+    monkeypatch.setenv("TMPDIR", str(sandbox))
+    monkeypatch.setenv("FNO_EVENTS_PATH", "events.jsonl")
+    monkeypatch.chdir(tmp_path)
+
+    assert Path(".") not in _hermetic_allowed_roots()
+    with pytest.raises(HermeticEscapeError):
+        append_event(_event(), tmp_path / "checkout" / ".fno" / "events.jsonl")
+
+
+def test_gate_escape_failure_log_respects_the_sandbox(monkeypatch, tmp_path):
+    """A refused journal must not be followed by its failure log recreating the
+    directory. Measured before the fix: events.jsonl absent, and
+    ``<outside>/.fno/gate_escape_emit_failures.jsonl`` present."""
+    from fno.events.gate_escape import failure_log_path, record_emit_failure
+
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
+    monkeypatch.setenv("TMPDIR", str(sandbox))
+    monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
+
+    outside = tmp_path / "checkout" / ".fno" / "events.jsonl"
+    record_emit_failure(
+        failure_log_path(outside), "n-1", "reason", HermeticEscapeError("refused")
+    )
+    assert not outside.parent.exists()
+
+
+def test_events_log_emit_default_resolves_rather_than_using_the_cwd(monkeypatch, tmp_path):
+    """``events/log.py`` writes under its own filelock and never meets the
+    guard, so its default path is the only protection it has. It carried the
+    same cwd-relative literal spawn_think did."""
+    import inspect
+
+    from fno.events import log as evlog
+    from fno.paths import project_events_json
+
+    pinned = tmp_path / "sandbox" / "events.jsonl"
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(pinned))
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    monkeypatch.chdir(decoy)
+
+    src = inspect.getsource(evlog.emit_event)
+    assert 'Path(".fno/events.jsonl")' not in src
+    assert project_events_json() == pinned
 
 
 # ---------------------------------------------------------------------------

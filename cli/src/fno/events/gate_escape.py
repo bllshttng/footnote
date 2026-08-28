@@ -119,6 +119,20 @@ def record_emit_failure(
     )
     if log_path is None:
         return
+    # The durable log lands BESIDE the journal, so a refused journal write used
+    # to be followed by this function recreating the very `.fno/` directory the
+    # refusal prevented, and writing a fixture-shaped row into it. Measured:
+    # events.jsonl absent, `<outside>/.fno/gate_escape_emit_failures.jsonl`
+    # present. Refuse here on the same terms; a dropped failure log in a test is
+    # not a loss, because the refusal already printed above.
+    try:
+        from fno.events import HermeticEscapeError, _refuse_hermetic_escape
+
+        _refuse_hermetic_escape(Path(log_path))
+    except HermeticEscapeError:
+        return
+    except Exception:  # noqa: BLE001 - never raise from the telemetry path
+        pass
     try:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(

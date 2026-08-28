@@ -959,7 +959,16 @@ def resolve_attester_identity(
         # which can only degrade the witness, never forge one.
         try:
             argv: list = getattr(proc, "cmdline", lambda: [])() or []
-            exe_name = (argv[0] if argv else proc.name()).lower()
+            # BASENAME, which is what the paragraph above already claims. argv[0]
+            # is a full path, and `family_token in <full path>` matches any
+            # DIRECTORY carrying the token - so every process launched from a
+            # worktree under `.claude/worktrees/` read as a claude-family
+            # carrier, which is this repository's default worktree location.
+            # Measured: `test_attestation_attester_session_from_env_marker`
+            # passes on a checkout at /tmp and fails on the same checkout moved
+            # under a `.claude` path, because the emitter sees a family ancestor
+            # that is really pytest.
+            exe_name = os.path.basename(argv[0] if argv else proc.name()).lower()
         except psutil.Error:
             exe_name = ""
         carrier_is_family.append(family_token in exe_name)

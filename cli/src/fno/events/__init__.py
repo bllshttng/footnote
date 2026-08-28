@@ -1468,7 +1468,13 @@ def _hermetic_allowed_roots() -> list[Path]:
         os.environ.get("TMPDIR") or "/tmp",
     ]
     pin = os.environ.get("FNO_EVENTS_PATH")
-    if pin:
+    # ABSOLUTE pins only. `Path("events.jsonl").parent` is `.`, and its realpath
+    # is the process cwd - which under a bare `pytest` IS the checkout, so a
+    # relative pin promoted the whole repository to an allowed root and turned
+    # the guard off. `scripts/lib/events.sh` and `hooks/review-hold.sh` both
+    # pass the pin through unvalidated, so this cannot assume a good value.
+    # A relative pin is simply not a root; the write is judged on TMPDIR alone.
+    if pin and Path(pin).is_absolute():
         candidates.append(str(Path(pin).parent))
     for raw in candidates:
         if not raw:
@@ -1486,9 +1492,9 @@ def _refuse_hermetic_escape(path: Path) -> None:
     ``FNO_TEST_HERMETIC`` was a receipt nothing read. This is its first
     consumer, and it closes the class rather than one caller: a module that
     builds its own ``<root>/.fno/events.jsonl`` by hand consults neither
-    ``FNO_EVENTS_PATH`` nor ``FNO_REPO_ROOT``, so no pin can reach it. Every
-    event write in the Python tree funnels through :func:`append_event`, so
-    the check belongs here - one guard, not one per path builder.
+    ``FNO_EVENTS_PATH`` nor ``FNO_REPO_ROOT``, so no pin can reach it. Almost
+    every event write in the tree funnels through :func:`append_event`, so the
+    check belongs here - one guard, not one per path builder.
 
     ``spawn_think`` was the specimen: it wrote ``think_offered`` rows for the
     fixture node ``x-2222aaaa`` into the developer's live journal, and from
@@ -1496,9 +1502,10 @@ def _refuse_hermetic_escape(path: Path) -> None:
     is a symlink to the canonical journal, so a worker's test run reached the
     operator's file from a directory nobody thought of as production.
 
-    Known limit: on a CI runner the checkout sits under ``HOME``, so this
-    permits an ephemeral in-checkout write there. It protects a developer's
-    machine, which is where the journal is load-bearing.
+    Scope, stated so the next reader does not overclaim it: this guards
+    :func:`append_event` only. ``events/log.py`` and ``agents/events.py`` write
+    journals through their own file handles and do not pass here, so the doc
+    must not say every Python event write funnels through this function.
     """
     if os.environ.get("FNO_TEST_HERMETIC") != "1":
         return
@@ -1550,6 +1557,12 @@ def append_event(
         # while this writer waits on the old mutex. Re-resolve after acquiring
         # and retry whenever the leaf changed during that handoff.
         resolved_path = requested_path.resolve()
+        # Re-judge the RESOLVED leaf, not just the requested one. The check
+        # above raced: the loop exists precisely because a local journal can be
+        # swapped for a canonical-journal symlink mid-write, and that swap is
+        # the escape this guard targets. Judging only before the resolve leaves
+        # the window the retry loop was written to acknowledge.
+        _refuse_hermetic_escape(resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
         lock_dir = resolved_path.parent / (resolved_path.name + ".lock.d")
         token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)
