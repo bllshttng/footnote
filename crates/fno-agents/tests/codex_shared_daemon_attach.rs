@@ -115,3 +115,55 @@ async fn shared_daemon_owns_the_thread_after_its_client_disconnects() {
         loaded.iter().map(|t| &t.session_id).collect::<Vec<_>>()
     );
 }
+
+/// (x-6678) One declaration, two doors, and they must render the same argv.
+///
+/// `fno` (the mux viewport) cannot link `fno-agents`, so each has its own
+/// reader of `harness_capabilities.toml`: `fno::agents_view::attach_form` for
+/// the Drive tier's pane, and `render_session_argv_with_ids` for
+/// `fno agents attach`. Two readers is a drift hazard, so it is pinned rather
+/// than hoped: every harness declaring a form must render byte-identically
+/// through both. Rust checked against Rust proves nothing about the TOML, so
+/// the harness list comes from the contract itself.
+#[test]
+fn attach_argv_matches_the_mux_renderer() {
+    let contract = fno_agents::harness_capabilities::HarnessContract::packaged()
+        .expect("the packaged contract parses");
+    let mut checked = 0;
+    for (harness, caps) in &contract.harness {
+        let form = match caps.resume_strategy.forms.get("interactive_attach") {
+            Some(form) if form.kind != "unsupported" => form,
+            _ => {
+                assert!(
+                    fno::agents_view::attach_form(harness).is_none(),
+                    "{harness} declares no attach form, so the viewport must find none"
+                );
+                continue;
+            }
+        };
+        let takes_short = form.tokens.iter().any(|t| t == "{short_id}");
+        let id = if takes_short {
+            "abcd1234"
+        } else {
+            "01a046d0-bbee-7030-bb35-74ef79fa4f2b"
+        };
+        let (session, short) = if takes_short {
+            (None, Some(id))
+        } else {
+            (Some(id), None)
+        };
+        let cli = fno_agents::harness_capabilities::render_session_argv_with_ids(
+            harness,
+            "interactive_attach",
+            session,
+            short,
+        )
+        .unwrap_or_else(|e| panic!("{harness} renders through the CLI door: {e}"));
+        let viewport = fno::agents_view::attach_form(harness)
+            .unwrap_or_else(|| panic!("{harness} declares a form the viewport cannot read"))
+            .render(id);
+        assert_eq!(cli, viewport, "{harness}'s two attach doors drifted");
+        checked += 1;
+    }
+    assert!(checked >= 2, "claude and codex both declare a form");
+}

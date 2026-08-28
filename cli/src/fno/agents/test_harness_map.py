@@ -89,22 +89,56 @@ def test_claude_attach_uses_only_a_short_id():
         render_session_argv("claude", "interactive_attach", short_id="")
 
 
-def test_unsupported_attach_lane_fails_closed_for_every_other_harness():
-    for harness in ("codex", "gemini", "agy", "opencode"):
+def test_unsupported_attach_lane_fails_closed_for_every_harness_without_one():
+    """A harness that declares no attach form refuses by name, as before.
+
+    codex left this list when it gained a form (x-6678); the refusal itself is
+    unchanged, which is the point - a harness added to the roster still
+    inherits it rather than falling through to some other harness's command.
+    """
+    for harness in ("gemini", "agy", "opencode"):
         with pytest.raises(DispatchResolveError, match=f"{harness}.*interactive_attach.*unsupported"):
             render_session_argv(harness, "interactive_attach", short_id="deadbeef")
 
 
-def test_contract_rejects_attach_form_without_short_id_placeholder():
+def test_codex_attach_takes_the_full_session_id_and_starts_its_daemon():
+    session = "01a046d0-bbee-7030-bb35-74ef79fa4f2b"
+    assert render_session_argv("codex", "interactive_attach", session) == [
+        "codex", "resume", session, "--remote", "unix://"
+    ]
+    # A head-8 is a ~65.5s clock bucket for codex, so the short spelling that
+    # addresses a claude session cannot address this one.
+    with pytest.raises(DispatchResolveError):
+        render_session_argv("codex", "interactive_attach", short_id="01a046d0")
+    assert capabilities("codex")["resume_strategy"]["forms"]["interactive_attach"][
+        "pre_exec"
+    ] == ["codex", "app-server", "daemon", "start"]
+
+
+def test_contract_rejects_attach_form_without_any_id_placeholder():
+    """An attach form must name the id its harness's own attach command takes.
+
+    Either spelling is legal: claude's short jobId, or a full session id where
+    a short one would collide (a codex UUIDv7 head-8 is a ~65.5s clock bucket,
+    so siblings spawned in one minute share it). A form naming NEITHER cannot
+    address a session at all, and is what stays refused.
+    """
     from importlib.resources import files
 
     text = files("fno.agents").joinpath("harness_capabilities.toml").read_text()
-    bad = text.replace(
+    swapped = text.replace(
         'tokens = ["claude", "attach", "{short_id}"]',
         'tokens = ["claude", "attach", "{session_id}"]',
         1,
     )
-    with pytest.raises(DispatchResolveError, match="interactive_attach.*short id"):
+    parse_capability_contract(swapped)  # a session id is a legal attach id
+
+    bad = text.replace(
+        'tokens = ["claude", "attach", "{short_id}"]',
+        'tokens = ["claude", "attach", "--last"]',
+        1,
+    )
+    with pytest.raises(DispatchResolveError, match="interactive_attach.*attach id"):
         parse_capability_contract(bad)
 
 

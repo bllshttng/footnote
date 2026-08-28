@@ -4157,7 +4157,20 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
     // purpose (nobody waits); the on-done hook still emits the event, and a
     // first follow-up ask STEERS into the seed turn instead of blocking
     // behind it (the daemon.rs:4077 mutex shape this replaces).
-    if !seed.trim().is_empty() {
+    //
+    // A seedless spawn takes WARMUP_SEED rather than no turn at all (x-6678).
+    // `thread/start` records a thread id but writes no rollout, and a harness
+    // resolves a session to attach BY that rollout, so a worker with no turn
+    // is a worker the operator cannot open: `codex resume` answers "no rollout
+    // found for thread id <id>" (measured 2026-08-28, codex-cli 0.149.1).
+    // One cheap turn buys attachability from the first second of a worker's
+    // life, which is the window in which someone is most likely to look.
+    let seed = if seed.trim().is_empty() {
+        WARMUP_SEED.to_string()
+    } else {
+        seed.to_string()
+    };
+    {
         let seed_name = name.to_string();
         let submitted = handle.submit(seed).await;
         if submitted.is_err() {
@@ -4201,6 +4214,12 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
         }),
     )
 }
+
+/// (x-6678) The turn a seedless codex thread spawn takes so a rollout exists
+/// and the worker is attachable immediately. Deliberately trivial: it must
+/// cost one small turn and leave a transcript line an operator reads as
+/// startup rather than as work someone asked for.
+const WARMUP_SEED: &str = "Reply with the single word: ready.";
 
 /// A Codex thread row startup recovery may auto-resume: it needs a full
 /// durable identity AND a status that was non-terminal when the daemon died.

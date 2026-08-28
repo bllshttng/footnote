@@ -446,13 +446,11 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
         [{"name": "cx", "provider": "codex", "cwd": "/tmp/x", "log_path": "/x/l", "short_id": "cx", "project_root": "/x", "status": "live", "created_at": "t"}],
     )
     rust = _run_rust(["attach", "cx"], agents)
-    # Mirrors dispatch.attach_agent's one-shot refusal message + exit 13.
-    expected = (
-        "codex agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs cx --follow' for live output. Cross-provider "
-        "attach is planned for the Phase 6 supervisor.\n"
-    )
-    assert rust.stderr == expected
+    # (x-6678) codex now DECLARES an interactive_attach form, so this row no
+    # longer takes the one-shot refusal. With no session id on file it refuses
+    # for the honest reason instead: there is no rollout to resume.
+    assert "no session id on file yet" in rust.stderr
+    assert "fno agents peek cx --follow" in rust.stderr
     assert rust.returncode == 13
 
 
@@ -627,7 +625,10 @@ def test_rust_reads_real_python_written_registry(tmp_path) -> None:
     # id is the LAST token: codex's globals (-c, --cd) all sit before the
     # subcommand, so nothing trails the positional.
     assert rust.stdout.strip().endswith(" resume uuid-9")
-    # attach refuses codex (agent FOUND -> the refusal message, not "not found").
+    # (x-6678) attach RESOLVES codex now (agent FOUND, and it declares an
+    # attach form), so the refusal is about this call site rather than about
+    # the harness: a TUI needs a terminal and a test harness has none.
     att = _run_rust(["attach", "cx"], agents)
     assert att.returncode == 13
-    assert "one-shot" in att.stderr
+    assert "attach needs a terminal" in att.stderr
+    assert "fno agents peek cx --follow" in att.stderr

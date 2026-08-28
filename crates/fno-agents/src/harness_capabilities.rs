@@ -89,6 +89,19 @@ pub struct ResumeStrategy {
 pub struct ResumeForm {
     pub kind: String,
     pub tokens: Vec<String>,
+    /// (x-6678) A command to run BEFORE `tokens`, for a harness whose attach
+    /// needs a service up first. Declarative rather than fno-specific: codex
+    /// names its own `codex app-server daemon start`, which its help defines
+    /// as a no-op when the daemon is already running, so it is safe to run on
+    /// every attach. Empty for a harness that needs nothing.
+    ///
+    /// This is the ACTION half of a pair. `tokens` carries the ASSERTION that
+    /// the action took - codex's `--remote unix://` fails by name against a
+    /// daemon that is not there, where a bare resume would silently fall back
+    /// to an in-process app-server and hand back a private session that looks
+    /// correct.
+    #[serde(default)]
+    pub pre_exec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -376,7 +389,7 @@ impl HarnessContract {
             };
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(tokens);
+            return Ok(with_pre_exec(form, tokens));
         }
         if short_id.is_some_and(|id| !id.is_empty()) {
             return Err(field_error(
@@ -386,12 +399,12 @@ impl HarnessContract {
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
-            return Ok(form.tokens.clone());
+            return Ok(with_pre_exec(form, form.tokens.clone()));
         };
         if let Some(id) = session_id.filter(|id| !id.is_empty()) {
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(tokens);
+            return Ok(with_pre_exec(form, tokens));
         }
         if lane.ends_with("create") {
             let start = index
@@ -409,6 +422,38 @@ impl HarnessContract {
         ))
     }
 
+}
+
+/// (x-6678) Compose a form's `pre_exec` with its rendered argv:
+/// `sh -c '<pre_exec>; exec <argv>'`.
+///
+/// The shape is load-bearing three ways. `exec` replaces the shell, so the
+/// pane's child is the harness itself and no fno process sits between the
+/// terminal and it - the exec-versus-proxy property this lane is measured on.
+/// `;` rather than `&&` lets a failed pre-exec still run the attach, which
+/// produces the more specific of the two errors. And both errors surface where
+/// the operator is already looking.
+///
+/// MIRRORED in `fno::agents_view::AttachForm::render` (the mux viewport's
+/// door). `fno` cannot link this crate, so the two are pinned by
+/// `attach_argv_matches_the_mux_renderer` rather than shared.
+fn with_pre_exec(form: &ResumeForm, argv: Vec<String>) -> Vec<String> {
+    if form.pre_exec.is_empty() {
+        return argv;
+    }
+    let script = format!("{}; exec {}", sh_join(&form.pre_exec), sh_join(&argv));
+    vec!["sh".to_string(), "-c".to_string(), script]
+}
+
+fn sh_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+impl HarnessContract {
     pub fn permission_response_keys(
         &self,
         harness: &str,

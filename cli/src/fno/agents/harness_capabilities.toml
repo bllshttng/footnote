@@ -114,16 +114,26 @@ tokens = ["codex"]
 kind = "subcommand"
 tokens = ["codex", "resume", "{session_id}"]
 
-# `codex resume <id> --remote unix://` execs codex's OWN TUI against the shared
-# app-server daemon, which is where a thread worker's session lives. Bare
-# `unix://` on purpose: codex resolves the control socket from its own
-# CODEX_HOME, so fno never builds that path and therefore cannot hardcode
-# `~/.codex` (verified 2026-08-28 against codex-cli 0.149.1, both the default
-# and an overridden CODEX_HOME). `{session_id}`, never `{short_id}`: a codex
-# UUIDv7 head-8 is a ~65.5s clock bucket, so siblings spawned in one minute
-# collide and a short id would attach the wrong worker.
+# `codex resume <id>` execs codex's OWN TUI on a thread the shared app-server
+# daemon holds. fno renders nothing.
+#
+# `pre_exec` starts the daemon and `--remote unix://` asserts that it did.
+# Measured 2026-08-28 against codex-cli 0.149.1: with the daemon up, a BARE
+# `codex resume <id>` auto-attaches to it - proven by the only marker that can
+# prove it, a session absent from `thread/loaded/list` before the resume and
+# present after. So the flag is not what reaches the daemon. What it does is
+# make the daemon-down case LOUD: a bare resume silently runs its own
+# in-process app-server against a copy of the rollout and hands back a private
+# session that looks correct, which is the exact defect this lane exists to
+# delete. `daemon start` is a documented no-op when one is already running, so
+# the pair is cheap on every attach.
+#
+# `{session_id}`, never `{short_id}`: a codex UUIDv7 head-8 is a ~65.5s clock
+# bucket, so siblings spawned in one minute collide and a short id would
+# attach the wrong worker.
 [harness.codex.resume_strategy.forms.interactive_attach]
 kind = "subcommand"
+pre_exec = ["codex", "app-server", "daemon", "start"]
 tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
 
 [harness.codex.resume_strategy.forms.headless_create]

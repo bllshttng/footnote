@@ -2757,6 +2757,110 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     1
 }
 
+
+/// (x-6678) Attach through the harness's OWN declared `interactive_attach`
+/// form, or `None` when it declares none (the caller then keeps its refusal).
+///
+/// EXEC, never proxy: this replaces the process, so the terminal's child is
+/// the harness's own TUI and fno renders nothing. The same argv the mux
+/// viewport spawns into its thread pane - one declaration, two doors.
+fn attach_via_declared_form(
+    harness: &str,
+    entry: &Value,
+    name: &str,
+    events_path: &Path,
+) -> Option<i32> {
+    let session_id = entry
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("codex_session_id").and_then(Value::as_str))
+        .unwrap_or_default();
+    let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
+    let render = |session: Option<&str>, short: Option<&str>| {
+        crate::harness_capabilities::render_session_argv_with_ids(
+            harness,
+            "interactive_attach",
+            session,
+            short,
+        )
+    };
+    // A form takes EXACTLY ONE id, and the renderer refuses the other spelling
+    // rather than ignoring it - so probe with a placeholder to learn whether
+    // this harness declares a form at all, before the row's real (possibly
+    // empty) ids can turn "declares none" and "declares one I cannot fill"
+    // into the same answer.
+    let declares = render(Some("probe-session"), None).is_ok()
+        || render(None, Some("probeid")).is_ok();
+    if !declares {
+        return None;
+    }
+    let argv = match render(Some(session_id), None)
+        .or_else(|_| render(None, Some(short_id)))
+    {
+        Ok(argv) => argv,
+        Err(_) => {
+            // A thread with no turns yet has no session id recorded, and a
+            // harness resolves a session by the rollout its first turn
+            // writes. Name that rather than handing the operator the
+            // vendor's "no rollout found for thread id" (measured 2026-08-28,
+            // codex-cli 0.149.1).
+            eprintln!(
+                "{harness} worker {} has no session id on file yet; nothing to attach to. \
+                 Follow it instead: fno agents peek {} --follow",
+                py_repr_str(name),
+                name
+            );
+            append_agents_event(
+                events_path,
+                "agent_attach_refused",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String(harness.to_string())),
+                    ("reason", Value::String("no-session-id-yet".to_string())),
+                ],
+            );
+            return Some(13);
+        }
+    };
+    if !which_on_path(&argv[0]) {
+        eprintln!("{} not on PATH", argv[0]);
+        return Some(14);
+    }
+    // A TUI needs a terminal. Without this the exec still happens and the
+    // operator gets the vendor's bare "stdin is not a terminal" with no clue
+    // which command produced it or what to do instead.
+    // SAFETY: isatty performs no I/O and only reads the descriptor's mode.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
+        eprintln!(
+            "attach needs a terminal ({harness} draws its own interface, and fno never renders one). \
+             From a script, read instead: fno agents peek {name} --follow"
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String(harness.to_string())),
+                ("reason", Value::String("no-tty".to_string())),
+            ],
+        );
+        return Some(13);
+    }
+    append_agents_event(
+        events_path,
+        "agent_attach_exec",
+        &[
+            ("name", Value::String(name.to_string())),
+            ("provider", Value::String(harness.to_string())),
+            ("session_id", Value::String(session_id.to_string())),
+        ],
+    );
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
+    Some(1)
+}
+
 // ---------------------------------------------------------------------------
 // adopt
 // ---------------------------------------------------------------------------
@@ -2984,13 +3088,16 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         .unwrap_or("");
     let events_path = trace_events_path(home);
 
-    // Every non-claude harness refuses attach (claude is the only harness
-    // with a persistent `--bg` session to attach to). `!= "claude"` instead of
-    // an allowlist so a provider added to the roster inherits the refusal
-    // rather than falling through to a claude-shaped attach (x-51f6 US1).
+    // (x-6678) A harness that DECLARES an interactive_attach form execs it.
+    // Every other harness keeps the refusal below verbatim, so one added to
+    // the roster still inherits it rather than falling through to a
+    // claude-shaped attach (x-51f6 US1).
     if harness != "claude" {
+        if let Some(code) = attach_via_declared_form(harness, entry, &name, &events_path) {
+            return code;
+        }
         eprintln!(
-            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-provider attach is planned for the Phase 6 supervisor."
+            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output."
         );
         append_agents_event(
             &events_path,

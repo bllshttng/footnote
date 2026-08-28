@@ -142,6 +142,10 @@ pub struct AttachForm {
     /// `IdKind::Session` for `{session_id}`. The contract requires exactly one
     /// of them on a supported form.
     pub id_kind: IdKind,
+    /// A command to run before the attach, for a harness whose attach needs a
+    /// service up first (codex: `codex app-server daemon start`). Empty for a
+    /// harness that needs nothing.
+    pub pre_exec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,12 +156,22 @@ pub enum IdKind {
 
 impl AttachForm {
     /// The form's tokens with its id placeholder filled.
+    ///
+    /// With a `pre_exec`, the result is `sh -c '<pre_exec>; exec <attach>'`.
+    /// Three properties that shape matters for: the `exec` replaces the shell,
+    /// so the pane's child is the harness itself and no fno process sits
+    /// between the terminal and it; a `;` rather than `&&` means a failed
+    /// pre-exec still lets the attach run and produce its OWN named error,
+    /// which is the more specific of the two; and both errors land in the pane
+    /// the operator is already looking at. Same `sh -c ... exec` idiom
+    /// [`crate::server::locate_argv`] already uses.
     pub fn render(&self, id: &str) -> Vec<String> {
         let placeholder = match self.id_kind {
             IdKind::Short => "{short_id}",
             IdKind::Session => "{session_id}",
         };
-        self.tokens
+        let attach: Vec<String> = self
+            .tokens
             .iter()
             .map(|token| {
                 if token == placeholder {
@@ -166,36 +180,168 @@ impl AttachForm {
                     token.clone()
                 }
             })
-            .collect()
+            .collect();
+        if self.pre_exec.is_empty() {
+            return attach;
+        }
+        let script = format!(
+            "{}; exec {}",
+            shell_join(&self.pre_exec),
+            shell_join(&attach)
+        );
+        vec!["sh".to_string(), "-c".to_string(), script]
     }
+}
+
+/// Single-quote each token for `sh -c`. Every token here comes from the
+/// capability contract or a session id, but quoting is the property that keeps
+/// that true of a contract someone edits later.
+fn shell_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The bundled capability contract. `fno` does not link `fno-agents` (it shells
 /// the binary), so the table is embedded rather than called for.
 const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
 
-/// The attach form `harness` declares, or `None` when it declares none. An
-/// unknown harness, an `unsupported` form, and a malformed one all read as
+/// The attach form `harness` declares, or `None` when it declares none.
+///
+/// Two sources, config first: `[harness.<name>.attach]` in
+/// `$PWD/.fno/config.toml`, else the global `config.toml`, else the bundled
+/// capability contract. That order is the point - it is what lets an operator
+/// teach fno a harness, or CORRECT a bundled form that is wrong, without a
+/// release. The bundled table is measured facts, and measured facts go stale
+/// when a vendor ships (x-244c records two places where it already understates
+/// agy's real CLI with nobody able to fix it).
+///
+/// ```toml
+/// [harness.openclaw.attach]
+/// tokens   = ["openclaw", "resume", "{session_id}"]
+/// pre_exec = ["openclaw", "daemon", "start"]   # optional
+/// ```
+///
+/// An unknown harness, an `unsupported` form, and a malformed one all read as
 /// "cannot attach" - a row that cannot be driven falls to Follow or Locate,
-/// which is the safe direction.
+/// which is the safe direction. Read once per process: a config edit takes
+/// effect at the next mux server start.
 pub fn attach_form(harness: &str) -> Option<AttachForm> {
     static FORMS: std::sync::OnceLock<std::collections::HashMap<String, AttachForm>> =
         std::sync::OnceLock::new();
     FORMS
         .get_or_init(|| {
-            let mut out = std::collections::HashMap::new();
-            let Ok(caps) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
-                return out;
+            let mut out = bundled_attach_forms();
+            for (name, form) in config_attach_forms() {
+                out.insert(name, form);
+            }
+            out
+        })
+        .get(harness)
+        .cloned()
+}
+
+/// `[harness.<name>.attach]` blocks from the config files, project-local first.
+/// Fail-open: an unreadable or malformed config yields no overrides rather than
+/// removing the bundled forms, so a typo cannot un-attach a working harness.
+fn config_attach_forms() -> Vec<(String, AttachForm)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for path in config_toml_candidates() {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(cfg) = toml::from_str::<toml::Value>(&body) else {
+            continue;
+        };
+        let Some(table) = cfg.get("harness").and_then(|h| h.as_table()) else {
+            continue;
+        };
+        for (name, node) in table {
+            let Some(form) = node.get("attach") else {
+                continue;
             };
-            let Some(table) = caps.get("harness").and_then(|h| h.as_table()) else {
-                return out;
+            let Some(parsed) = parse_attach_form(form) else {
+                continue;
             };
-            for (name, node) in table {
-                let mut cursor = Some(node);
-                for key in ["resume_strategy", "forms", "interactive_attach"] {
-                    cursor = cursor.and_then(|n| n.get(key));
-                }
-                let Some(form) = cursor else { continue };
+            if seen.insert(name.clone()) {
+                out.push((name.clone(), parsed));
+            }
+        }
+    }
+    out
+}
+
+/// The config files, in the precedence every other reader here uses:
+/// project-local `$PWD/.fno/config.toml`, then the global override
+/// (`$FNO_GLOBAL_SETTINGS_PATH` sibling) else `~/.fno/config.toml`.
+fn config_toml_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(pwd) = std::env::var_os("PWD")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        candidates.push(pwd.join(".fno").join("config.toml"));
+    }
+    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(|v| PathBuf::from(v).with_file_name("config.toml"))
+        .or_else(|| {
+            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fno").join("config.toml"))
+        });
+    if let Some(g) = global {
+        candidates.push(g);
+    }
+    candidates
+}
+
+/// One `tokens` / `pre_exec` pair into an [`AttachForm`], or `None` when it
+/// names no id placeholder - a form that cannot address a session is not one.
+fn parse_attach_form(form: &toml::Value) -> Option<AttachForm> {
+    if form.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
+        return None;
+    }
+    let string_list = |key: &str| -> Vec<String> {
+        form.get(key)
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let tokens = string_list("tokens");
+    let id_kind = if tokens.iter().any(|t| t == "{short_id}") {
+        IdKind::Short
+    } else if tokens.iter().any(|t| t == "{session_id}") {
+        IdKind::Session
+    } else {
+        return None;
+    };
+    Some(AttachForm {
+        tokens,
+        id_kind,
+        pre_exec: string_list("pre_exec"),
+    })
+}
+
+fn bundled_attach_forms() -> std::collections::HashMap<String, AttachForm> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(caps) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
+        return out;
+    };
+    let Some(table) = caps.get("harness").and_then(|h| h.as_table()) else {
+        return out;
+    };
+    for (name, node) in table {
+        let mut cursor = Some(node);
+        for key in ["resume_strategy", "forms", "interactive_attach"] {
+            cursor = cursor.and_then(|n| n.get(key));
+        }
+        let Some(form) = cursor else { continue };
                 if form.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
                     continue;
                 }
@@ -215,12 +361,25 @@ pub fn attach_form(harness: &str) -> Option<AttachForm> {
                 } else {
                     continue;
                 };
-                out.insert(name.clone(), AttachForm { tokens, id_kind });
-            }
-            out
-        })
-        .get(harness)
-        .cloned()
+                let pre_exec: Vec<String> = form
+                    .get("pre_exec")
+                    .and_then(|t| t.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+        out.insert(
+            name.clone(),
+            AttachForm {
+                tokens,
+                id_kind,
+                pre_exec,
+            },
+        );
+    }
+    out
 }
 
 /// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
@@ -4245,6 +4404,54 @@ config_dir = "~/.claude-alt"
         );
     }
 
+    /// (x-6678) A harness fno has never heard of becomes attachable from
+    /// config alone: no release, no Rust. This is the half of the override
+    /// layer that is pure, so it is tested here; the file read above it is
+    /// std, and the merge is one `insert`.
+    #[test]
+    fn a_config_declared_harness_parses_into_an_attach_form() {
+        let declared: toml::Value = toml::from_str(
+            r#"
+            tokens   = ["openclaw", "resume", "{session_id}"]
+            pre_exec = ["openclaw", "daemon", "start"]
+        "#,
+        )
+        .unwrap();
+        let form = parse_attach_form(&declared).expect("a config form parses");
+        assert_eq!(form.id_kind, IdKind::Session);
+        assert_eq!(form.pre_exec, ["openclaw", "daemon", "start"]);
+        let rendered = form.render("sess-1");
+        assert_eq!(rendered.first().map(String::as_str), Some("sh"));
+        assert!(rendered.join(" ").contains("; exec 'openclaw' 'resume' 'sess-1'"));
+
+        // No pre_exec: the argv is the bare command, no shell in the way.
+        let bare: toml::Value =
+            toml::from_str(r#"tokens = ["openclaw", "attach", "{short_id}"]"#).unwrap();
+        let form = parse_attach_form(&bare).unwrap();
+        assert_eq!(form.render("ab12"), ["openclaw", "attach", "ab12"]);
+
+        // A form that names no id cannot address a session, so it is not one.
+        let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
+        assert!(parse_attach_form(&idless).is_none());
+        let unsupported: toml::Value =
+            toml::from_str(r#"kind = "unsupported"
+tokens = []"#).unwrap();
+        assert!(parse_attach_form(&unsupported).is_none());
+    }
+
+    /// Project-local config outranks the global one, the same precedence every
+    /// other config reader in this file uses.
+    #[test]
+    fn config_candidates_put_the_project_local_file_first() {
+        let candidates = config_toml_candidates();
+        assert!(
+            candidates.len() >= 2,
+            "a project-local and a global candidate: {candidates:?}"
+        );
+        assert!(candidates[0].ends_with(".fno/config.toml"));
+        assert!(candidates[0] != candidates[1]);
+    }
+
     /// (x-6678) Every attach-capable harness in the contract reaches Drive.
     ///
     /// This inverts the guard it replaces, which asserted the attach-capable
@@ -4289,14 +4496,27 @@ config_dir = "~/.claude-alt"
             let form = attach_form(name)
                 .unwrap_or_else(|| panic!("{name} declares an attach form the reader cannot parse"));
             let rendered = form.render("ID-UNDER-TEST");
+            let flat = rendered.join(" ");
             assert!(
-                rendered.iter().any(|token| token == "ID-UNDER-TEST"),
+                flat.contains("ID-UNDER-TEST"),
                 "{name}'s attach argv must substitute its id: {rendered:?}"
             );
             assert!(
-                !rendered.iter().any(|t| t.contains('{')),
+                !flat.contains('{'),
                 "{name}'s attach argv left a placeholder unrendered: {rendered:?}"
             );
+            // EXEC, never proxy. A pre_exec form wraps in `sh -c`, and the
+            // attach must be `exec`d so the pane's child is the harness
+            // itself with no fno process between the terminal and it. A shape
+            // that merely RUNS the attach after the pre-exec would leave the
+            // shell as the pane's child and is refused here.
+            if !form.pre_exec.is_empty() {
+                assert_eq!(rendered.first().map(String::as_str), Some("sh"));
+                assert!(
+                    flat.contains("; exec "),
+                    "{name}'s pre_exec form must exec the attach: {rendered:?}"
+                );
+            }
 
             // A live row on this harness, carrying the id its form takes,
             // must arrive at Drive.

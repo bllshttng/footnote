@@ -5242,12 +5242,15 @@ def attach_agent(name: str) -> AttachResult:
             exit_code=landed.returncode,
         )
 
-    if existing.harness in ("codex", "gemini"):
+    # (x-6678) codex left this list when it gained a declared attach form: the
+    # Rust verb execs `codex resume <id>` against the shared app-server daemon.
+    # The sentence about a "Phase 6 supervisor" went with it - the supervisor
+    # it was waiting for is the vendor's own daemon, and it is already running.
+    if existing.harness in ("gemini",):
         sys.stderr.write(
             f"{existing.harness} agents are one-shot; no persistent "
             "session to attach to. Use 'fno agents logs "
-            f"{name} --follow' for live output. Cross-provider attach is "
-            "planned for the Phase 6 supervisor.\n"
+            f"{name} --follow' for live output.\n"
         )
         # Forensic event so an `events.jsonl` audit can correlate
         # "why did this attach attempt fail" against operator activity.
