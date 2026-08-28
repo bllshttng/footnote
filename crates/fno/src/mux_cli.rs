@@ -1991,12 +1991,17 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
     out
 }
 
-/// `fno mux workspace prune [--dry-run] [--include-named] [--json]`: remove squads
+/// `fno mux workspace prune [--dry-run] [--include-named] [--tabs-only]
+/// [--dead-only] [--json]`: remove squads
 /// whose every recorded origin is gone and which host no live member or pane
 /// (x-a572). Named squads require `--include-named`. The predicate is
 /// re-evaluated under the store lock against fresh fs state, and the receipt is
 /// built from the locked closure's actual removals - never the pre-lock
-/// candidate list (AC1-UI). `--dry-run` writes nothing.
+/// candidate list (AC1-UI). `--dry-run` writes nothing. `--tabs-only` runs the
+/// tab fold alone and leaves every squad row and member record untouched;
+/// `--dead-only` reaps dead members alone and removes no squad row; together
+/// they run exactly those two halves, so the sweep modal's "both" can never
+/// remove a squad row the modal never offered to remove.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
@@ -2008,11 +2013,15 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let mut dry_run = false;
     let mut include_named = false;
     let mut json = false;
+    let mut tabs_only = false;
+    let mut dead_only = false;
     for a in args {
         match a.to_str() {
             Some("--dry-run") => dry_run = true,
             Some("--include-named") => include_named = true,
             Some("--json") => json = true,
+            Some("--tabs-only") => tabs_only = true,
+            Some("--dead-only") => dead_only = true,
             Some(other) => {
                 eprintln!("fno mux workspace prune: unknown argument {other:?}");
                 return EXIT_USAGE;
@@ -2026,7 +2035,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
 
     let evidence = member_evidence();
     let (tabs, live_cwds, server_reachable) = live_tabs();
-    let tab_outcome = if server_reachable {
+    let tab_outcome = if server_reachable && !dead_only {
         prune_live_tabs(&tabs, include_named, dry_run)
     } else {
         TabPruneOutcome {
@@ -2037,7 +2046,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
     let origin_exists = |p: &str| std::path::Path::new(p).exists();
 
     let now = crate::squad_store::now_epoch_secs();
-    let decide = |sq: &crate::squad_store::StoredSquad| {
+    let base_decide = |sq: &crate::squad_store::StoredSquad| {
         crate::squad_store::prune_decision_with_evidence(
             sq,
             include_named,
@@ -2046,6 +2055,19 @@ fn squad_prune(args: &[OsString]) -> i32 {
             &origin_exists,
             now,
         )
+    };
+    // `--dead-only` keeps every squad row a Prune verdict would have removed
+    // and reaps their dead members like any survivor's: one wrapped verdict,
+    // so the locked pass needs no second shape.
+    let decide = |sq: &crate::squad_store::StoredSquad| {
+        if dead_only {
+            match base_decide(sq) {
+                crate::squad_store::PruneDecision::Prune => crate::squad_store::PruneDecision::Keep,
+                other => other,
+            }
+        } else {
+            base_decide(sq)
+        }
     };
 
     // Both paths produce the same receipt type. Dry-run builds it from a
@@ -2080,6 +2102,12 @@ fn squad_prune(args: &[OsString]) -> i32 {
             false,
             Some(detail),
         )
+    } else if tabs_only && !dead_only {
+        // The tab arm above ran alone; the store pass is the half this scope
+        // leaves out, so its counters read zero rather than stale. With both
+        // flags the combined scope falls through to the store pass below,
+        // where `dead_only` wraps the verdict so no squad row is removed.
+        (Vec::new(), 0, 0, 0, 0, 0, 0, !dry_run, None)
     } else if dry_run {
         let loaded = crate::squad_store::load();
         let mut removed: Vec<crate::squad_store::PrunedSquad> = Vec::new();
@@ -2169,7 +2197,10 @@ fn squad_prune(args: &[OsString]) -> i32 {
                 removed.len()
             );
         }
-        if applied && removed.is_empty() {
+        // A no-op headline only when NOTHING happened: a run that closed tabs
+        // or reaped members acted, and calling it "nothing to prune" reads as
+        // a failed run to whoever ran it.
+        if applied && removed.is_empty() && tab_outcome.closed == 0 && members_reaped == 0 {
             println!("nothing to prune");
         } else if !applied {
             println!("dry-run: no changes written");
@@ -2222,9 +2253,17 @@ fn print_prune_summary(
     server_reachable: bool,
 ) {
     let mut parts = vec![format!("{verb} {n} squad(s)")];
+    // The acted-on count carries its mood in the verb: an apply run says
+    // `closed`, a dry-run says `would close`. Never both numbers at once - the
+    // apply reading `tabs 1 (would close 0, ...)` put the closed count beside
+    // a zero and read as a no-op.
+    let (tabs_word, tabs_n) = if verb == "pruned" {
+        ("closed", tabs_closed)
+    } else {
+        ("would close", tabs_would_close)
+    };
     parts.push(format!(
-        "tabs {} (would close {tabs_would_close}, skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {server_reachable})",
-        if verb == "pruned" { tabs_closed } else { tabs_would_close }
+        "tabs {tabs_word} {tabs_n} (skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {server_reachable})"
     ));
     if kept_protected > 0 {
         parts.push(format!("kept {kept_protected} (live/origin)"));
@@ -3267,7 +3306,7 @@ pub fn tab(args: &[OsString], env_session: Option<&str>) -> i32 {
         }
         "close" => {
             let Some(tab) = tab_sel else {
-                eprintln!("fno mux tab close: needs --tab <sel>");
+                eprintln!("fno mux tab close: needs --tab <sel> (bulk close: {PRUNE_REMEDY})");
                 return EXIT_USAGE;
             };
             ControlVerb::TabClose {

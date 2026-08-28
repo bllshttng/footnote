@@ -937,8 +937,6 @@ struct View {
     /// (sessions cannot rename), so the row can never go stale.
     session: String,
     layout: LayoutView,
-    /// Server-authoritative count from the shared dead-member classifier.
-    sweep_dead_count: usize,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
@@ -1326,6 +1324,36 @@ struct View {
     /// An update-readiness probe is in flight; bounds concurrent
     /// probes to one, mirroring `conn_inflight`.
     update_probe_inflight: bool,
+    /// A pending sweep verb (counts probe or scoped apply) for the run
+    /// loop to spawn off the UI thread, mirroring `conn_action`.
+    sweep_action: Option<SweepAction>,
+    /// A sweep verb is in flight; one at a time, so a second tap queues
+    /// nothing and is told so.
+    sweep_inflight: bool,
+}
+
+/// Which half of `mux workspace prune` a sweep action runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepScope {
+    Tabs,
+    Dead,
+    Both,
+}
+
+/// A sweep verb the run loop should spawn: a counts probe for the choice
+/// modal, or an apply of one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepAction {
+    Counts,
+    Apply(SweepScope),
+}
+
+/// What a finished sweep verb reports back to the UI loop.
+#[derive(Debug, Clone)]
+enum SweepMsg {
+    Counts { tabs: usize, dead: usize },
+    Applied { closed: usize, reaped: usize },
+    Failed(String),
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -1374,10 +1402,6 @@ enum ConfirmKind {
         squad: Option<u64>,
         dead: usize,
     },
-    /// Sweep the current dead-member set across the sideline stores. The
-    /// server re-folds candidates on Enter; `dead` only names the count shown
-    /// in the centered prompt.
-    SweepDead { dead: usize },
     /// Close one tab (the tab menu's destructive item). The captured stable
     /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
     /// VIEWED tab server-side, so Enter first selects the captured tab then
@@ -2197,7 +2221,15 @@ enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
-    SweepDead,
+    /// Probe `mux workspace prune --dry-run` once and open the centered
+    /// sweep-threads choice modal from its counts. Both halves of the prune
+    /// (surplus pristine tabs, dead member rows) live behind this one entry.
+    OpenSweep,
+    /// Apply the prune with one scope. Each choice is the confirmation: the
+    /// modal named the counts, the tap picked the half.
+    SweepTabs,
+    SweepDeadAgents,
+    SweepBoth,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -2356,16 +2388,7 @@ async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
-#[cfg(test)]
 fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
-    build_sideline_menu_with_count(anchor, update, 0)
-}
-
-fn build_sideline_menu_with_count(
-    anchor: Anchor,
-    update: Option<&UpdateOutcome>,
-    dead_count: usize,
-) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -2395,12 +2418,12 @@ fn build_sideline_menu_with_count(
         }
         _ => {}
     }
-    rows.push(entry("♺", &format!("Sweep dead ({dead_count})")));
+    rows.push(entry("♺", "sweep threads"));
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
-    actions.push(AuxAction::SweepDead);
+    actions.push(AuxAction::OpenSweep);
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);
@@ -2448,6 +2471,151 @@ fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
     }
 }
 
+/// Build the centered sweep-threads choice modal from one
+/// `mux workspace prune --dry-run` reading: close the surplus pristine
+/// tabs, reap the dead member rows, or both. A zero count greys its entry
+/// out (0 targets, so arrows skip it and a click is swallowed); with both
+/// counts zero there is nothing to choose, and the header says so.
+fn build_sweep_modal(tabs: usize, dead: usize) -> AuxPopup {
+    let choice = |label: String, hint: &str, enabled: bool| PopupRow::Entry {
+        glyph: "♺".into(),
+        label,
+        hint: hint.into(),
+        enabled,
+    };
+    let mut rows = vec![PopupRow::Header("sweep threads".into()), PopupRow::Rule];
+    let mut actions: Vec<AuxAction> = Vec::new();
+    rows.push(choice(
+        format!("tabs ({tabs})"),
+        "close surplus shell tabs",
+        tabs > 0,
+    ));
+    if tabs > 0 {
+        actions.push(AuxAction::SweepTabs);
+    }
+    rows.push(choice(
+        format!("dead agents ({dead})"),
+        "reap dead member rows",
+        dead > 0,
+    ));
+    if dead > 0 {
+        actions.push(AuxAction::SweepDeadAgents);
+    }
+    rows.push(choice(
+        "both".into(),
+        "tabs and dead agents",
+        tabs > 0 || dead > 0,
+    ));
+    if tabs > 0 || dead > 0 {
+        actions.push(AuxAction::SweepBoth);
+    }
+    if actions.is_empty() {
+        rows.push(PopupRow::Header("nothing to sweep".into()));
+    }
+    AuxPopup {
+        popup: Popup::new(rows, Anchor::Center)
+            .title("sweep threads")
+            .footer("esc close"),
+        actions,
+    }
+}
+
+/// The operator tapped a choice: the modal named the counts, so the tap IS
+/// the confirmation. Queue the apply for the run loop (or say why not).
+fn begin_sweep_apply(view: &mut View, scope: SweepScope) {
+    view.aux = None;
+    if view.sweep_inflight {
+        view.set_notice("a sweep is already running".into());
+    } else {
+        view.sweep_action = Some(SweepAction::Apply(scope));
+    }
+}
+
+/// Run one `mux workspace prune` verb off the UI thread: a `--dry-run --json`
+/// probe for the choice modal's counts, or a scoped apply whose JSON receipt
+/// becomes the notice. Bounded so a wedged server cannot hold the UI loop's
+/// sweep slot forever; the counts parse fails loud rather than opening a
+/// modal with fabricated zeros.
+async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    let mut args = vec![
+        "mux".to_string(),
+        "workspace".to_string(),
+        "prune".to_string(),
+        "--json".to_string(),
+    ];
+    let apply_secs = match action {
+        SweepAction::Counts => {
+            args.push("--dry-run".to_string());
+            10
+        }
+        SweepAction::Apply(scope) => {
+            match scope {
+                SweepScope::Tabs => args.push("--tabs-only".to_string()),
+                SweepScope::Dead => args.push("--dead-only".to_string()),
+                // Both halves, and nothing else: bare prune would also remove
+                // stale squad rows, which the modal never offered to remove.
+                SweepScope::Both => {
+                    args.push("--tabs-only".to_string());
+                    args.push("--dead-only".to_string());
+                }
+            }
+            // Each folded tab is one control roundtrip; a big workspace
+            // sweep legitimately outlasts a modal probe.
+            60
+        }
+    };
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    let output = match tokio::time::timeout(Duration::from_secs(apply_secs), fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return SweepMsg::Failed(format!("prune spawn failed: {e}")),
+        Err(_) => return SweepMsg::Failed("prune timed out".into()),
+    };
+    if !output.status.success() {
+        return SweepMsg::Failed(format!(
+            "prune exited {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(e) => return SweepMsg::Failed(format!("prune output unparseable ({e})")),
+    };
+    match action {
+        SweepAction::Counts => {
+            // A missing field means the two processes disagree about the JSON
+            // shape (a stale deployed binary): fail the probe rather than open
+            // a modal with fabricated zeros.
+            let (Some(tabs), Some(dead)) = (
+                parsed["tabs_would_close"].as_u64().map(|v| v as usize),
+                parsed["members_reaped"].as_u64().map(|v| v as usize),
+            ) else {
+                return SweepMsg::Failed("prune output missing count fields".into());
+            };
+            if let Some(notice) = parsed["notice"].as_str() {
+                if !notice.is_empty() {
+                    return SweepMsg::Failed(notice.to_string());
+                }
+            }
+            SweepMsg::Counts { tabs, dead }
+        }
+        SweepAction::Apply(_) => {
+            let (Some(closed), Some(reaped)) = (
+                parsed["tabs_closed"].as_u64().map(|v| v as usize),
+                parsed["members_reaped"].as_u64().map(|v| v as usize),
+            ) else {
+                return SweepMsg::Failed("prune output missing count fields".into());
+            };
+            SweepMsg::Applied { closed, reaped }
+        }
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Persisted per-section state wins (x-975a); pruned to the squads this
@@ -2480,7 +2648,6 @@ impl View {
             term,
             session,
             layout,
-            sweep_dead_count: 0,
             frames: HashMap::new(),
             panel_on: true,
             density,
@@ -2580,6 +2747,8 @@ impl View {
             update_outcome: None,
             update_probe_want: false,
             update_probe_inflight: false,
+            sweep_action: None,
+            sweep_inflight: false,
         }
     }
 
@@ -3663,19 +3832,9 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu_with_count(
-            anchor,
-            self.update_outcome.as_ref(),
-            self.dead_sweep_count(),
-        ));
+        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
         self.aux_esc.clear();
         self.update_probe_want = true;
-    }
-
-    /// Read the server's positive-dead count from the same classifier the
-    /// confirmed sweep invokes. Unknown and live rows are excluded.
-    fn dead_sweep_count(&self) -> usize {
-        self.sweep_dead_count
     }
 
     /// Rebuild an already-open sideline MENU so a landing update probe shows
@@ -3693,11 +3852,7 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu_with_count(
-            anchor,
-            self.update_outcome.as_ref(),
-            self.dead_sweep_count(),
-        );
+        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
@@ -3850,13 +4005,24 @@ impl View {
                 Some("empty resets to auto"),
             ));
         }
-        self.recruit.as_ref().map(|name| {
-            self.name_modal_layout(
+        if let Some(name) = &self.recruit {
+            return Some(self.name_modal_layout(
                 &format!("recruit {} into", self.marks.len()),
                 name,
                 Some("create-if-absent"),
-            )
-        })
+            ));
+        }
+        // The two Full-chrome overlays below draw through the same
+        // layout_lines_overlay pair (draw arm + this hit-test layout), so the
+        // footer's esc close words resolve to the glyph they paint. Order
+        // mirrors the draw chain: connections paints above peek.
+        if let Some(conn) = &self.connections {
+            return Some(self.connections_overlay_layout(rows, conn));
+        }
+        if let Some(peek) = &self.peek {
+            return Some(self.peek_overlay_layout(rows, peek));
+        }
+        None
     }
 
     fn cancel_active_overlay(&mut self) {
@@ -3873,6 +4039,13 @@ impl View {
         }
         if self.recruit.take().is_some() {
             self.recruit_esc.clear();
+            return;
+        }
+        if self.connections.take().is_some() {
+            return;
+        }
+        if self.peek.is_some() {
+            self.clear_peek();
         }
     }
 
@@ -6911,9 +7084,6 @@ impl View {
             ConfirmKind::ClearDead { dead, .. } => {
                 format!("clear {dead} dead row(s) in {label}?")
             }
-            ConfirmKind::SweepDead { dead } => {
-                format!("sweep {dead} dead sideline row(s)?")
-            }
             // A tab close is a GROUP close on the wire: the server reaps every
             // leaf in the tab, not the focused pane. Say the count when there is
             // more than one, so the prompt names what the Enter destroys. Read
@@ -6936,10 +7106,7 @@ impl View {
             .footer("enter confirm · esc cancel")
             .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
         let lines = [self.confirm_text(action)];
-        let anchor = if matches!(
-            &action.action,
-            ConfirmKind::CloseTab { .. } | ConfirmKind::SweepDead { .. }
-        ) {
+        let anchor = if matches!(&action.action, ConfirmKind::CloseTab { .. }) {
             OverlayAnchor::Center
         } else {
             OverlayAnchor::At {
@@ -6948,6 +7115,49 @@ impl View {
             }
         };
         layout_lines_overlay(origin, dims, &chrome, &lines, None, anchor)
+    }
+
+    /// The Connections modal's hit-test layout: the draw arm and this build
+    /// the SAME `layout_lines_overlay` block from the same chrome and body,
+    /// so a click resolves to the cell the operator sees (AC: the footer's
+    /// esc close words are a target, not a label).
+    fn connections_overlay_layout(
+        &self,
+        _rows: usize,
+        conn: &crate::connections_view::ConnectionsView,
+    ) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let chrome = chrome::Chrome::new("connections", Anchor::Center).footer("esc close");
+        layout_lines_overlay(
+            origin,
+            dims,
+            &chrome,
+            &conn.render(),
+            None,
+            OverlayAnchor::Center,
+        )
+    }
+
+    /// The peek overlay's hit-test layout, rebuilt from the same LIVE inputs
+    /// the draw arm reads (layout rows, reply buffer, wall clock). A second
+    /// tick between draw and click can move a width by a character; the hit
+    /// spans are wide enough that this never unclicks the footer.
+    fn peek_overlay_layout(&self, _rows: usize, peek: &PeekView) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let drows = self.display_rows();
+        let agent = drows.get(peek.cursor).and_then(|r| match r {
+            DisplayRow::Agent(a) => Some(*a),
+            _ => None,
+        });
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let reply = self.peek_input.as_ref().map(|(_, buf)| buf.as_str());
+        let lines = peek_overlay_lines(agent, peek, reply, now_secs);
+        let title = agent.map(|a| a.name.as_str()).unwrap_or("peek");
+        let chrome = chrome::Chrome::new(title, Anchor::Center).footer("esc close");
+        layout_lines_overlay(origin, dims, &chrome, &lines, None, OverlayAnchor::Center)
     }
 
     fn draw_confirm_line(
@@ -10588,7 +10798,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
-                sweep_dead_count,
+                ..
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -10602,7 +10812,6 @@ async fn attach_and_run(
                     backlog_lanes,
                     backlog_stale,
                 });
-                view.sweep_dead_count = sweep_dead_count;
                 break;
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
@@ -10778,6 +10987,11 @@ async fn attach_and_run(
         bool, // is_login: keep the pending notice on success, no acting flip
     )>();
 
+    // The sweep verbs (counts probe, scoped apply) run off the UI loop and
+    // report back here. The in-flight flag bounds them to one at a time;
+    // the message carries what the tap asked for.
+    let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel::<SweepMsg>();
+
     // The update-readiness probe runs off the UI loop and reports back
     // here. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
@@ -10902,6 +11116,17 @@ async fn attach_and_run(
                 let _ = tx.send(outcome);
             });
         }
+        // Kick a wanted sweep verb off the UI loop, at most one in flight.
+        if let Some(action) = view.sweep_action.take() {
+            if !view.sweep_inflight {
+                view.sweep_inflight = true;
+                let tx = sweep_tx.clone();
+                tokio::spawn(async move {
+                    let msg = run_sweep_verb(action).await;
+                    let _ = tx.send(msg);
+                });
+            }
+        }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
         // (x-e10f fix) The held global-chord candidate's quiet-window flush
@@ -10996,9 +11221,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, sweep_dead_count }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
-                    view.sweep_dead_count = sweep_dead_count;
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -11383,6 +11607,40 @@ async fn attach_and_run(
                     break Err(format!("draw: {e}"));
                 }
             }
+            Some(msg) = sweep_rx.recv() => {
+                // The tap asked for this outcome: counts open the centered
+                // choice modal, an apply speaks in a notice. A popup opened
+                // after the tap is the operator's newer intent and is never
+                // stomped by a landing probe.
+                view.sweep_inflight = false;
+                match msg {
+                    SweepMsg::Counts { tabs, dead } => {
+                        // A popup opened after the tap is the operator's
+                        // NEWER intent; it is never stomped by a landing
+                        // probe. The tap is answered with a notice instead
+                        // of silently dropped.
+                        if view.aux.is_none() {
+                            view.aux = Some(build_sweep_modal(tabs, dead));
+                            view.aux_esc.clear();
+                        } else {
+                            view.set_notice(format!(
+                                "sweep ready: tabs {tabs}, dead agents {dead} - reopen the menu"
+                            ));
+                        }
+                    }
+                    SweepMsg::Applied { closed, reaped } => {
+                        view.set_notice(format!(
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s)"
+                        ));
+                    }
+                    SweepMsg::Failed(reason) => {
+                        view.set_notice(format!("sweep failed: {reason}"));
+                    }
+                }
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
             _ = winch.recv() => {
                 if let Ok((cols, rows)) = terminal::size() {
                     view.term = (rows, cols);
@@ -11627,9 +11885,13 @@ fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
 
 /// Family-B name and confirmation overlays own every pointer event while open.
 /// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
-/// cannot dismiss the modal or reach a pane underneath it.
+/// cannot dismiss the modal or reach a pane underneath it. The Connections
+/// modal joins them. Peek does NOT: it is deliberately click-through (a
+/// right-press under it still opens the row's menu), so only its footer's
+/// close words are intercepted and every other event falls through.
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
-    if consume_modal_close_gesture(view, rep.kind) {
+    let peek_open = view.peek.is_some();
+    if !peek_open && consume_modal_close_gesture(view, rep.kind) {
         return true;
     }
     let Some(layout) = view.active_overlay_layout() else {
@@ -11640,6 +11902,10 @@ fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
     {
         view.cancel_active_overlay();
         view.modal_release_swallow = true;
+        return true;
+    }
+    if peek_open {
+        return false;
     }
     true
 }
@@ -12774,7 +13040,6 @@ async fn confirm_keys(
         }
         // Most confirms are one command; clear-dead (x-f300) fans out to one
         // Remove per exited row, so the commit path speaks in a list.
-        let is_sweep = matches!(&action.action, ConfirmKind::SweepDead { .. });
         let cmds = match action.action {
             ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
@@ -12815,16 +13080,8 @@ async fn confirm_keys(
                 }
                 picked
             }
-            ConfirmKind::SweepDead { dead } => {
-                if dead > 0 && view.dead_sweep_count() == 0 {
-                    view.set_notice("swept 0; state changed before confirmation".into());
-                    Vec::new()
-                } else {
-                    vec![Command::SweepDead]
-                }
-            }
         };
-        if cmds.is_empty() && !is_sweep {
+        if cmds.is_empty() {
             view.set_notice("nothing left to clear".into());
         }
         for cmd in cmds {
@@ -13818,14 +14075,17 @@ async fn execute_aux_action(
         AuxAction::OpenUpdate => {
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
         }
-        AuxAction::SweepDead => {
-            let dead = view.dead_sweep_count();
+        AuxAction::OpenSweep => {
             view.aux = None;
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::SweepDead { dead },
-                label: "sideline".into(),
-            });
+            if view.sweep_inflight {
+                view.set_notice("a sweep is already running".into());
+            } else {
+                view.sweep_action = Some(SweepAction::Counts);
+            }
         }
+        AuxAction::SweepTabs => begin_sweep_apply(view, SweepScope::Tabs),
+        AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
+        AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
@@ -24793,14 +25053,14 @@ mod tests {
             })
             .collect();
         assert_eq!(labels[0], "update ready");
-        assert_eq!(labels[1], "Sweep dead (0)");
+        assert_eq!(labels[1], "sweep threads");
         assert_eq!(labels[2], "keybinds");
         assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
     }
 
     #[test]
-    fn sideline_menu_shows_counted_bmp_recycle_sweep() {
-        let menu = build_sideline_menu_with_count(Anchor::Center, None, 7);
+    fn sideline_menu_names_the_sweep_entry_off_dead() {
+        let menu = build_sideline_menu(Anchor::Center, None);
         let i = menu
             .popup
             .rows
@@ -24809,10 +25069,10 @@ mod tests {
                 matches!(
                     row,
                     PopupRow::Entry { glyph, label, .. }
-                        if glyph == "♺" && label == "Sweep dead (7)"
+                        if glyph == "♺" && label == "sweep threads"
                 )
             })
-            .expect("counted sweep entry");
+            .expect("sweep threads entry");
         let action_i = menu
             .popup
             .rows
@@ -24821,7 +25081,7 @@ mod tests {
             .filter(|row| matches!(row, PopupRow::Entry { .. }))
             .count()
             - 1;
-        assert_eq!(menu.actions[action_i], AuxAction::SweepDead);
+        assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
         assert!(crate::popup::menu_glyph_is_bmp("♺"));
         assert!(!crate::popup::menu_glyph_is_bmp("📄"));
         assert_eq!(
@@ -24834,44 +25094,224 @@ mod tests {
         );
     }
 
+    /// The choice modal is centered (not anchored to the menu cell), offers
+    /// the three choices with live counts, and a zero count greys its entry
+    /// out rather than offering a lie.
+    #[test]
+    fn sweep_modal_is_centered_with_live_counts_and_inert_zeroes() {
+        let modal = build_sweep_modal(3, 7);
+        assert_eq!(modal.popup.anchor, Anchor::Center);
+        assert_eq!(modal.popup.targets().len(), 3, "{:?}", modal.popup.rows);
+        assert_eq!(
+            modal.actions,
+            vec![
+                AuxAction::SweepTabs,
+                AuxAction::SweepDeadAgents,
+                AuxAction::SweepBoth
+            ]
+        );
+        let labels: Vec<(String, bool)> = modal
+            .popup
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                PopupRow::Entry { label, enabled, .. } => Some((label.clone(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&("tabs (3)".into(), true)), "{labels:?}");
+        assert!(
+            labels.contains(&("dead agents (7)".into(), true)),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&("both".into(), true)), "{labels:?}");
+
+        let half = build_sweep_modal(0, 2);
+        assert_eq!(
+            half.popup.targets().len(),
+            2,
+            "a zero tab count greys its entry out"
+        );
+        assert_eq!(
+            half.actions,
+            vec![AuxAction::SweepDeadAgents, AuxAction::SweepBoth]
+        );
+
+        let empty = build_sweep_modal(0, 0);
+        assert_eq!(empty.popup.targets().len(), 0, "{:?}", empty.popup.rows);
+        assert!(empty
+            .popup
+            .rows
+            .iter()
+            .any(|row| matches!(row, PopupRow::Header(text) if text == "nothing to sweep")));
+    }
+
     #[tokio::test]
-    async fn sideline_sweep_confirm_reuses_centered_action_and_rechecks_count() {
+    async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {
         let mut v = view_with_agents(vec![lifecycle_row("dead", true, false)]);
         v.term = (30, 100);
-        v.sweep_dead_count = 1;
-        assert_eq!(v.dead_sweep_count(), 1);
-        v.open_sideline_menu(Anchor::Center);
-        let sweep = v
-            .aux
-            .as_ref()
-            .unwrap()
-            .actions
-            .iter()
-            .position(|action| *action == AuxAction::SweepDead)
-            .unwrap();
-        v.aux.as_mut().unwrap().popup.sel = sweep;
         let mut buf = Vec::new();
-        aux_execute_selected(&mut v, &mut buf).await.unwrap();
-        assert!(matches!(
-            v.confirm.as_ref().map(|action| &action.action),
-            Some(ConfirmKind::SweepDead { dead: 1 })
-        ));
-        let overlay = v.confirm_overlay_layout(30, v.confirm.as_ref().unwrap());
-        assert!(overlay
-            .framed
-            .lines
-            .first()
-            .is_some_and(|line| line.text.starts_with('┌')));
+        execute_aux_action(&mut v, AuxAction::OpenSweep, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.sweep_action, Some(SweepAction::Counts));
+        assert!(
+            v.aux.is_none(),
+            "the menu closes; the modal opens on landing"
+        );
 
-        v.layout.agents.clear();
-        v.sweep_dead_count = 0;
-        assert_eq!(v.dead_sweep_count(), 0);
-        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "zero candidates sends no stale sweep");
+        // A second tap while a verb runs says so instead of queueing: the
+        // pending counts probe stays exactly as the first tap left it.
+        v.sweep_inflight = true;
+        execute_aux_action(&mut v, AuxAction::OpenSweep, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.sweep_action, Some(SweepAction::Counts));
         assert!(v
             .notice
             .as_ref()
-            .is_some_and(|(notice, _)| notice.contains("swept 0")));
+            .is_some_and(|(notice, _)| notice.contains("already running")));
+
+        v.sweep_inflight = false;
+        for (action, scope) in [
+            (AuxAction::SweepTabs, SweepScope::Tabs),
+            (AuxAction::SweepDeadAgents, SweepScope::Dead),
+            (AuxAction::SweepBoth, SweepScope::Both),
+        ] {
+            execute_aux_action(&mut v, action, &mut buf).await.unwrap();
+            assert_eq!(v.sweep_action, Some(SweepAction::Apply(scope)));
+            v.sweep_action = None;
+        }
+    }
+
+    /// The screen cell carrying an overlay's `esc close` words, taken from
+    /// the same framed block the click router hit-tests against.
+    fn overlay_footer_cell(layout: &OverlayLayout) -> (u16, u16) {
+        for (li, line) in layout.framed.lines.iter().enumerate() {
+            if let Some(&(_t, off, len)) = line
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+            {
+                return (
+                    (layout.origin.0 + li) as u16,
+                    (layout.origin.1 + off + len / 2) as u16,
+                );
+            }
+        }
+        panic!("no esc close hit span anywhere in the overlay frame");
+    }
+
+    fn left_click(row: u16, col: u16) -> crate::mouse::MouseReport {
+        crate::mouse::MouseReport {
+            row,
+            col,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        }
+    }
+
+    /// The update modal's footer words are a target, not a label: a left
+    /// click on them closes the popup.
+    #[tokio::test]
+    async fn update_modal_footer_esc_close_click_closes() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (30, 100);
+        v.aux = Some(build_update_modal(None));
+        let r = v.aux.as_ref().unwrap().popup.render(v.term);
+        let footer = overlay_footer_cell(&OverlayLayout {
+            origin: r.origin,
+            framed: chrome::Framed {
+                lines: r
+                    .lines
+                    .iter()
+                    .map(|l| chrome::FramedLine {
+                        text: l.text.clone(),
+                        roles: l.roles.clone(),
+                        hits: l.hits.clone(),
+                    })
+                    .collect(),
+                width: r.width,
+            },
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.aux.is_none(), "the footer's close words closed the modal");
+    }
+
+    /// The Connections modal's footer words close it; any other click is
+    /// swallowed rather than reaching the pane underneath.
+    #[tokio::test]
+    async fn connections_modal_footer_esc_close_click_closes() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (30, 100);
+        v.connections = Some(crate::connections_view::ConnectionsView::new());
+        let layout = v.active_overlay_layout().expect("connections hit layout");
+        let footer = overlay_footer_cell(&layout);
+        assert!(
+            modal_mouse(&mut v, left_click(footer.0, footer.1)),
+            "the modal owns the pointer"
+        );
+        assert!(
+            v.connections.is_none(),
+            "the footer's close words closed the modal"
+        );
+
+        // A click that is not on the close words is swallowed, not forwarded.
+        v.connections = Some(crate::connections_view::ConnectionsView::new());
+        let layout = v.active_overlay_layout().unwrap();
+        let inside = (layout.origin.0 as u16 + 1, layout.origin.1 as u16 + 1);
+        assert!(modal_mouse(&mut v, left_click(inside.0, inside.1)));
+        assert!(
+            v.connections.is_some(),
+            "an in-body click neither dismisses nor falls through"
+        );
+    }
+
+    /// Peek's footer words close it, and everything else keeps falling
+    /// through - the x7683 click-through contract only excepts the close
+    /// words themselves.
+    #[tokio::test]
+    async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.term = (30, 100);
+        v.peek = Some(PeekView {
+            cursor: agent_row_at(&v, |a| a.name == "w"),
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+            refresh_pending: false,
+            squad: None,
+        });
+        let layout = v.active_overlay_layout().expect("peek hit layout");
+        let footer = overlay_footer_cell(&layout);
+        assert!(modal_mouse(&mut v, left_click(footer.0, footer.1)));
+        assert!(v.peek.is_none(), "the footer's close words closed the peek");
+
+        // A non-close event falls through: modal_mouse returns false, so the
+        // router keeps the x7683 right-press and pane-forward behavior.
+        v.peek = Some(PeekView {
+            cursor: agent_row_at(&v, |a| a.name == "w"),
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+            refresh_pending: false,
+            squad: None,
+        });
+        let layout = v.active_overlay_layout().unwrap();
+        let inside = (layout.origin.0 as u16 + 1, layout.origin.1 as u16 + 1);
+        assert!(
+            !modal_mouse(&mut v, left_click(inside.0, inside.1)),
+            "peek stays click-through off the close words"
+        );
+        assert!(
+            v.peek.is_some(),
+            "a fall-through click does not dismiss peek"
+        );
     }
 
     /// AC3-HP mirrored client-side: not-ready builds the menu with no row.

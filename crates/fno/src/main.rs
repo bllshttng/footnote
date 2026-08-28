@@ -326,7 +326,7 @@ fn main() {
                  | fno mux view <selector> [--url] [--fzf] [--json] \
                    (a tab ordinal/id/name resolves as a location; qualify \
                    with --workspace when it repeats) \
-                 | fno mux workspace prune [--dry-run] [--include-named] [--json]"
+                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] [--json]"
             );
             std::process::exit(2);
         }
