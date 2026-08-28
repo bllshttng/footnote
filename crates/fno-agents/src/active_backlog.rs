@@ -814,10 +814,7 @@ fn journal_for(cwd: &Path) -> Journal {
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     let global_events = home.join(".fno").join("events.jsonl");
-    Journal::new(
-        project_events,
-        GlobalJournalPath(global_events),
-    )
+    Journal::new(project_events, GlobalJournalPath(global_events))
 }
 
 /// Resolve a [`DrainConfig`] for a mission target, or `None` if the target

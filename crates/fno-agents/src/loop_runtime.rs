@@ -71,7 +71,10 @@ impl ProjectJournalPath {
     /// that put six fixture `think_offered` rows in the operator's needs panel
     /// on 2026-08-27 through the Python half of this class.
     pub fn for_repo(repo_root: &Path) -> Self {
-        Self(Self::resolve(repo_root, std::env::var("FNO_EVENTS_PATH").ok().as_deref()))
+        Self(Self::resolve(
+            repo_root,
+            std::env::var("FNO_EVENTS_PATH").ok().as_deref(),
+        ))
     }
 
     /// The pure core of [`Self::for_repo`], taking the pin as an argument.
@@ -1051,7 +1054,6 @@ mod bg_guard_tests {
             Some("running as a background agent")
         ));
     }
-
 }
 
 #[cfg(test)]
