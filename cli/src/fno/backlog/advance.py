@@ -46,6 +46,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1968,7 +1969,8 @@ class JoinRefuse(Exception):
     """A join precondition failed; ``code`` is the CLI exit code.
 
     2 = no live node claim (nothing to join), 3 = width 1 (a second worker
-    has nothing to pull), 4 = no usable bound plan.
+    has nothing to pull), 4 = no usable bound plan, 5 = already joined
+    (live ``j-<node>-*`` workers exist).
     """
 
     def __init__(self, code: int, message: str) -> None:
@@ -2072,27 +2074,164 @@ def _plan_parallel_width(plan_path: Path) -> int:
     return width
 
 
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2}
+
+# Terminal states of the claude harness store (`claude agents --json --all`);
+# anything else (working, blocked, a future spelling) reads as alive.
+_HARNESS_TERMINAL_STATES = {"done", "stopped", "failed"}
+
+# A joiner transcript untouched this long reads idle-dead even when the
+# harness store has no row for it yet (registration can lag the spawn).
+_JOINER_IDLE_WINDOW = 30 * 60
+
+
+def _claude_harness_session_states() -> dict[str, str]:
+    """``{sessionId: state}`` from the claude harness store, else ``{}``.
+
+    Read-only; a missing CLI or an unreadable answer means "unknown" and the
+    caller falls through to the transcript probe.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "agents", "--json", "--all"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+        rows = data if isinstance(data, list) else data.get("agents", [])
+        return {
+            str(r["sessionId"]): str(r.get("state", ""))
+            for r in rows
+            if isinstance(r, dict) and r.get("sessionId")
+        }
+    except (TypeError, ValueError, KeyError):
+        return {}
+
+
+def _transcript_recently_active(session_id: str) -> bool:
+    """Whether this claude session's transcript moved inside the idle window.
+
+    The transcript is the last truth that outlives a dead daemon (liveness
+    probes and stored status fields have both lied). No transcript at all is
+    activity-nothing; an unreadable glob is activity-UNKNOWN and reads False
+    here, so the caller treats it as dead only when the harness store also
+    went quiet - the transcript is the second probe, never the only one.
+    """
+    if not session_id:
+        return False
+    projects = Path.home() / ".claude" / "projects"
+    try:
+        for transcript in projects.glob(f"*/{session_id}.jsonl"):
+            age = time.time() - transcript.stat().st_mtime
+            if age <= _JOINER_IDLE_WINDOW:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _live_joiner_names(node_id: str) -> list[str]:
+    """Live roster names ``j-<node>-*``, probed - not the stored field.
+
+    A second join into the same node rewrites the join brief (dropping the
+    first join's band table) and then dies on the already-taken lead name -
+    after nearly spawning duplicate workers. The live proof hit this when a
+    JOINER itself re-ran join on its own node. But the registry's
+    ``status: live`` is a stored field: a crashed daemon leaves it behind and
+    a bare read would lock every later join out of the node. So a row counts
+    only when something still answers: the claude harness store lists its
+    session non-terminally, or its transcript moved inside the idle window.
+    Join spawns are claude-only (the thread substrate), so the claude probes
+    cover every row this guard can collide with.
+    """
+    from fno.paths import agents_registry_path
+
+    try:
+        reg = json.loads(Path(agents_registry_path()).read_text())
+    except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
+        return []
+    prefix = f"j-{node_id}-"
+    candidates = [
+        (str(row.get("name")), str(row.get("harness_session_id") or ""))
+        for row in reg.get("agents", [])
+        if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
+    ]
+    if not candidates:
+        return []
+    harness_states = _claude_harness_session_states()
+    live = []
+    for name, session_id in candidates:
+        state = harness_states.get(session_id)
+        if state is not None and state not in _HARNESS_TERMINAL_STATES:
+            live.append(name)
+        elif state is None and _transcript_recently_active(session_id):
+            live.append(name)
+    return sorted(live)
+
+
+def _plan_wave_bands(plan_path: Path) -> list[str]:
+    """The plan's distinct wave bands, highest first (x-dadc).
+
+    The band is the axis the plan carries; the lane (harness + model)
+    resolves in config against live capacity, never here. Only legal bands
+    survive; an illegal wave spelling reads as unbanded and takes the
+    frontmatter fallback, the same rule the orchestrator's ``_wave_band``
+    applies when it reports ``bands``. A plan with no band anywhere returns
+    ``[]`` and the join degrades to joiner 2's shapeless spawn.
+    """
+    from fno.plan._doc import load_plan
+    from fno.plan.brief import parse_execution_strategy
+
+    doc = load_plan(plan_path)
+    body = doc.get_section("Execution Strategy")
+    if body is None:
+        return []
+    raw = parse_execution_strategy(body)
+    fallback = str(doc.frontmatter.get("difficulty") or "").strip().lower()
+    fallback = fallback if fallback in _BAND_RANK else ""
+    bands: set[str] = set()
+    for wave_data in raw.get("waves", []):
+        if not isinstance(wave_data, dict):
+            continue
+        band = str(wave_data.get("difficulty") or "").strip().lower()
+        if band not in _BAND_RANK:
+            band = fallback
+        if band:
+            bands.add(band)
+    return sorted(bands, key=lambda b: -_BAND_RANK[b])
+
+
 def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
     Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
     manifest snapshot), computes the bound plan's ready-graph width, and
-    spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>`` workers
-    there via ``fno agents spawn --substrate thread``. Joiner 1 is the lead
-    and mail hub (Locked Decision 3). The brief rides TWO channels: the file
+    spawns ``/fno:execute waves <plan>`` workers there via ``fno agents spawn
+    --substrate thread`` - one per distinct wave band when the plan carries
+    bands (highest band first, the lead; each lane resolved per band by
+    ``_grid_lane_for``), else ``min(workers, width - 1)`` shapeless workers
+    (joiner 2). Either way the width rule caps the count: the node holder is
+    one of the width workers. The brief rides TWO channels: the file
     ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
     which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
-    that inherit the spawner's env, e.g. panes). The spawned process exports
+    that inherit the spawner's env, e.g. panes); a banded brief also carries
+    the per-worker band table, the band's durable channel beside the
+    best-effort ``FNO_WORKER_BAND`` env export. The spawned process exports
     FNO_WORKER_NAME from ``--name``, so each joiner's task-claim holder is
     its own roster name (the joiner 1 contract; where the env export cannot
     reach, resolve_task_holder reads the roster binding). ``model`` rides as
     an explicit ``--model``: a typed model with no vendor implication
     overrides a config-injected default whose lane would refuse.
 
-    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead"}``.
-    Raises JoinRefuse (exit 2/3/4) on a precondition failure and SpawnError
-    when the lead spawn itself fails; a non-lead spawn failure warns to
-    stderr and shrinks ``spawned`` instead of aborting the join.
+    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead",
+    "lanes"}`` - ``lanes`` maps each spawned name to its ``band``/``harness``/
+    ``model`` (plus ``"grid": "declined"`` when the grid declined that band
+    and the joiner rides the caller's default lane). Raises JoinRefuse (exit
+    2/3/4/5) on a precondition failure and SpawnError when the lead spawn
+    itself fails; a non-lead spawn failure warns to stderr and shrinks
+    ``spawned`` instead of aborting the join.
     """
     from fno.claims.core import claim_status
     from fno.graph.collision import resolve_plan_path
@@ -2123,9 +2262,18 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             2,
             f"holder worktree for {node_id} is gone ({worktree}); nothing to join",
         )
+    live = _live_joiner_names(node_id)
+    if live:
+        raise JoinRefuse(
+            5,
+            f"{node_id} is already joined by {', '.join(live)}; join is not "
+            "idempotent - a second run rewrites the brief and races the "
+            "first join's spawns",
+        )
     try:
         plan_path = resolve_plan_path(str(plan_raw))
         width = _plan_parallel_width(plan_path)
+        bands = _plan_wave_bands(plan_path)
     except ValueError as exc:
         raise JoinRefuse(4, f"{node_id} plan task graph unsolvable: {str(exc)[:140]}") from exc
     except Exception as exc:  # noqa: BLE001 - an unreadable plan is no plan to join
@@ -2134,19 +2282,48 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             3, f"width {width}: a second worker has nothing to pull"
         )
-    count = min(max(1, workers), width - 1)
+    # One worker per band present, highest first (x-dadc); an unbanded plan
+    # keeps joiner 2's shapeless count. The width rule still caps: the node
+    # holder is one of the width workers, so joiners stay under it.
+    if bands:
+        count = min(max(1, workers), len(bands), width - 1)
+        worker_bands = bands[:count]
+    else:
+        count = min(max(1, workers), width - 1)
+        worker_bands = [""] * count
 
     lead = f"j-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
-    # waves.md's joiner posture reads this file before dispatching.
+    # waves.md's joiner posture reads this file before dispatching - the band
+    # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
         brief_dir.mkdir(parents=True, exist_ok=True)
+        band_table = ""
+        if bands:
+            rows = "\n".join(
+                f"| j-{node_id}-{k} | {band} |"
+                for k, band in enumerate(worker_bands, start=1)
+            )
+            band_table = (
+                "\nband table (your band is your row's; the lead is the "
+                "highest band):\n\n"
+                "| worker | band |\n"
+                "|--------|------|\n"
+                f"{rows}\n\n"
+                "For every dispatch round: run the --ready query with "
+                "`--band <your row's band>` and take only the FIRST entry of "
+                "`ready` - claim it, work it to done, then re-query. Entries "
+                "under `above_band` are not yours. Never dispatch the whole "
+                "set; a joined worker that races the whole set undoes the "
+                "partition this table encodes.\n"
+            )
         (brief_dir / f"{node_id}.md").write_text(
             f"# Joiner brief: {node_id}\n\n"
-            f"lead and mail hub: {lead}\n\n"
+            f"lead and mail hub: {lead}\n"
+            f"{band_table}\n"
             f"Before dispatching any worker, claim ONE ready task via "
             f"`fno backlog task update {node_id} <task> --status in_progress` "
             f"(the waves.md 3e step; your roster name binds the holder).\n"
@@ -2154,17 +2331,44 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     except OSError as exc:
         raise SpawnError(f"join cannot write the joiner brief: {str(exc)[:160]}") from exc
     spawned: list[str] = []
-    for k in range(1, count + 1):
+    lanes: dict[str, dict] = {}
+    for k, band in enumerate(worker_bands, start=1):
         name = f"j-{node_id}-{k}"
         brief = (
             f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (
+            f"; your band is {band}"
+            if band
+            else ""
+        ) + (
             f". Before dispatching any worker, claim ONE ready task via "
             f"fno backlog task update {node_id} <task> --status in_progress "
             f"(the waves.md 3e step; your roster name binds the holder)"
         )
+        # The grid picks this band's lane, not the node's: the joiner pulls
+        # the waves its band can carry, so its lane must match the band.
+        # An unbanded joiner (or an explicit --model) skips the grid and
+        # rides the caller's default lane. The thread substrate is
+        # claude-only (hard error on any other harness), so a grid lane
+        # naming another harness reads as declined - taking only its model
+        # would put a foreign-vendor model on the claude lane, the exact
+        # mismatch the spawn refuses.
+        lane_h: Optional[str] = None
+        lane_m: Optional[str] = None
+        if band:
+            grid_h, grid_m = _grid_lane_for(
+                {
+                    "difficulty": band,
+                    "plan_path": str(plan_path),
+                    "priority": entry.get("priority"),
+                },
+                model=model,
+                provider=None,
+            )
+            if grid_h in (None, "claude"):
+                lane_h, lane_m = grid_h, grid_m
         cmd = [
             *_subprocess_util.fno_py_cmd(),
             "agents", "spawn", "--substrate", "thread",
@@ -2172,15 +2376,20 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             # untagged spawn leaves the lane unresolved, and this machine's
             # codex-scoped agents.defaults.model then injects onto it and
             # trips the vendor-mismatch refusal (live proof, 2026-08-27).
-            "--harness", "claude",
+            "--harness", lane_h or "claude",
             # x-571f shape: an explicit model rides as a spawn flag.
-            *(("--model", model) if model else ()),
+            *(("--model", lane_m or model) if (lane_m or model) else ()),
             "--cwd", worktree, "--name", name,
             f"/fno:execute waves {plan_path}",
         ]
+        spawn_env = {**os.environ, "TARGET_BRIEF": brief}
+        if band:
+            # Best-effort channel: reaches panes, not daemon-forked threads;
+            # the brief's band table is the durable one (x-6de8).
+            spawn_env["FNO_WORKER_BAND"] = band
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
-            env={**os.environ, "TARGET_BRIEF": brief},
+            env=spawn_env,
         )
         identity = ""
         if proc.returncode == 0:
@@ -2192,12 +2401,16 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             print(f"join: spawn {name} failed: {detail}", file=sys.stderr)
             continue
         spawned.append(name)
+        lanes[name] = {"band": band, "harness": lane_h, "model": lane_m}
+        if band and lane_h is None:
+            lanes[name]["grid"] = "declined"
     return {
         "node": node_id,
         "worktree": worktree,
         "width": width,
         "spawned": spawned,
         "lead": lead,
+        "lanes": lanes,
     }
 
 

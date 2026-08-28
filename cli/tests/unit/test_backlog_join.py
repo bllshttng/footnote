@@ -10,6 +10,8 @@ recorded, never run.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fno.backlog import advance
@@ -76,6 +78,51 @@ tasks:
 """
 
 
+# Four single-task waves banded high / medium / medium / low; the later
+# waves declare explicit empty blockers so the whole graph is ready at once
+# (width 4). Distinct bands: three lanes.
+BANDED_PLAN = """---
+title: banded
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: sequential
+    difficulty: high
+    tasks: ['1.1']
+  - wave: 2
+    mode: sequential
+    difficulty: medium
+    tasks: ['1.2']
+  - wave: 3
+    mode: sequential
+    difficulty: medium
+    tasks: ['1.3']
+  - wave: 4
+    mode: sequential
+    difficulty: low
+    tasks: ['1.4']
+tasks:
+  - id: '1.1'
+    title: a
+  - id: '1.2'
+    title: b
+    blocked_by: []
+  - id: '1.3'
+    title: c
+    blocked_by: []
+  - id: '1.4'
+    title: d
+    blocked_by: []
+```
+"""
+
+
 def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True):
     """Mock join's seams; returns the recorded spawn calls."""
     calls: list[dict] = []
@@ -98,6 +145,19 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
     monkeypatch.setattr(
         "fno.graph.collision.resolve_plan_path", lambda p: tmp_path / "plan.md"
     )
+    # The already-joined guard reads the registry; point it at an absent file
+    # so the suite never depends on this machine's live roster rows. Its
+    # liveness probes stay dark for the same reason: no harness store read,
+    # no transcript walk.
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "registry-absent.json"
+    )
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states", lambda: {}
+    )
+    monkeypatch.setattr(
+        advance, "_transcript_recently_active", lambda sid: False
+    )
 
     class _Proc:
         returncode = 0
@@ -115,12 +175,19 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
     """AC1-HP: three disjoint parallel tasks -> two joiners, first is lead."""
     calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
     receipt = join_node("x-8d1d", 3)
+    shapeless = {"band": "", "harness": None, "model": None}
     assert receipt == {
         "node": "x-8d1d",
         "worktree": str(tmp_path / "wt"),
         "width": 3,
         "spawned": ["j-x-8d1d-1", "j-x-8d1d-2"],
         "lead": "j-x-8d1d-1",
+        # An unbanded plan degrades to joiner 2's shapeless spawn: no grid
+        # call, the caller's default lane.
+        "lanes": {
+            "j-x-8d1d-1": shapeless,
+            "j-x-8d1d-2": shapeless,
+        },
     }
     assert len(calls) == 2
     for call, name in zip(calls, receipt["spawned"]):
@@ -132,6 +199,8 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
         assert cmd[cmd.index("--cwd") + 1] == str(tmp_path / "wt")
         assert cmd[cmd.index("--name") + 1] == name
         assert cmd[-1] == f"/fno:execute waves {tmp_path / 'plan.md'}"
+        # Unbanded: no band rides the spawn env.
+        assert "FNO_WORKER_BAND" not in call_env(call, "FNO_WORKER_BAND")
     # Joiner 1 is the mail hub; joiner 2's brief NAMES the hub (LD 3). Both
     # briefs carry the claim-before-dispatch instruction (waves.md 3e).
     assert "lead joiner" in call_env(calls[0], "TARGET_BRIEF")
@@ -258,6 +327,75 @@ def test_unknown_node_refuses_exit_2(tmp_path, monkeypatch):
     assert excinfo.value.code == 2
 
 
+def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
+    """Exit 5: live j-<node>-* workers make join non-idempotent. The live
+    proof hit this when a JOINER re-ran join on its own node - the rewrite
+    truncated the brief and nearly duplicated the spawns. A row counts only
+    when the harness store still answers non-terminally for its session."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-1", "status": "live"},
+        {"name": "j-x-8d1d-2", "harness_session_id": "s-2", "status": "stopped"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states",
+        lambda: {"s-1": "working", "s-2": "failed"},
+    )
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 5)
+    assert excinfo.value.code == 5
+    assert "already joined by j-x-8d1d-1" in excinfo.value.message
+    assert not calls  # refused before any spawn, brief untouched
+
+
+def test_crashed_joiner_does_not_lock_the_node(tmp_path, monkeypatch):
+    """A registry row can stay ``live`` after its daemon dies (a stored field
+    is not liveness). The guard must probe: harness store terminal or a stale
+    transcript reads dead, and the re-join proceeds."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-dead", "status": "live"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states",
+        lambda: {"s-dead": "failed"},
+    )
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
+    # The transcript probe is the second rung: harness store has no row at
+    # all, but the transcript moved inside the window -> still live.
+    monkeypatch.setattr(advance, "_claude_harness_session_states", lambda: {})
+    monkeypatch.setattr(
+        advance, "_transcript_recently_active", lambda sid: sid == "s-dead"
+    )
+    calls.clear()
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 5)
+    assert excinfo.value.code == 5
+
+
+def test_join_allowed_when_no_live_joiner_rows(tmp_path, monkeypatch):
+    """Stopped rows do not block a re-join; an unreadable registry neither."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-1", "status": "stopped"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "absent.json"
+    )
+    calls.clear()
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
+
+
 def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
     """A thread spawn with exit 0 but no receipt is not a join: the lead
     refusal fails the call instead of reporting a phantom worker."""
@@ -275,6 +413,113 @@ def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
     with pytest.raises(SpawnError):
         join_node("x-8d1d", 3)
     assert calls  # the spawn was attempted, its receipt just proved nothing
+
+
+# ---------------------------------------------------------------------------
+# Per-band lanes (x-dadc): one worker per band present, the grid resolves
+# each band's lane, the band rides both env and the brief's table.
+# ---------------------------------------------------------------------------
+
+
+def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
+    """AC2-HP: waves banded high/medium/medium/low -> three workers (high,
+    medium, low), each on the lane the grid picks for ITS band. A non-claude
+    grid harness cannot ride the claude-only thread substrate, so that lane
+    reads as declined instead of stranding the spawn on a hard error."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    picked: list[str] = []
+
+    def _grid(node, *, model, provider):
+        band = node["difficulty"]
+        picked.append(band)
+        return {"high": ("claude", "glm-x"), "medium": ("codex", "gpt-x"),
+                "low": ("claude", "glm-sm")}[band]
+
+    monkeypatch.setattr(advance, "_grid_lane_for", _grid)
+    receipt = join_node("x-8d1d", 5)
+    assert receipt["spawned"] == ["j-x-8d1d-1", "j-x-8d1d-2", "j-x-8d1d-3"]
+    # Highest band first; the lead carries it.
+    assert receipt["lead"] == "j-x-8d1d-1"
+    assert picked == ["high", "medium", "low"]
+    assert receipt["lanes"] == {
+        "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x"},
+        "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+                       "grid": "declined"},
+        "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm"},
+    }
+    for call, name in zip(calls, receipt["spawned"]):
+        cmd = call["cmd"]
+        lane = receipt["lanes"][name]
+        # The thread substrate is claude-only; every spawn rides it.
+        assert cmd[cmd.index("--harness") + 1] == "claude"
+        if lane["model"]:
+            assert cmd[cmd.index("--model") + 1] == lane["model"]
+        else:
+            assert "--model" not in cmd  # declined: the caller's default lane
+        assert call_env(call, "FNO_WORKER_BAND") == lane["band"]
+        assert f"your band is {lane['band']}" in call_env(call, "TARGET_BRIEF")
+
+
+def test_band_count_capped_by_width_rule(tmp_path, monkeypatch):
+    """Three bands on a width-3 plan: the holder is one of the three workers,
+    so only the two highest bands get a joiner."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN.replace(
+        "title: d\n    blocked_by: []", "title: d\n    blocked_by: ['1.1']",
+    ))
+    monkeypatch.setattr(
+        advance, "_grid_lane_for", lambda *_a, **_k: ("claude", "glm-x")
+    )
+    receipt = join_node("x-8d1d", 3)
+    assert receipt["width"] == 3
+    assert receipt["spawned"] == ["j-x-8d1d-1", "j-x-8d1d-2"]
+    assert [lane["band"] for lane in receipt["lanes"].values()] == ["high", "medium"]
+    assert len(calls) == 2
+
+
+def test_grid_declined_spawns_default_lane_and_records_it(tmp_path, monkeypatch):
+    """AC2-ERR: a (None, None) grid answer is a decline, not a failure: the
+    worker rides the caller's default lane and the receipt says so."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None))
+    receipt = join_node("x-8d1d", 5)
+    assert len(calls) == 3
+    for call in calls:
+        assert call["cmd"][call["cmd"].index("--harness") + 1] == "claude"
+        assert "--model" not in call["cmd"]
+    assert receipt["lanes"] == {
+        "j-x-8d1d-1": {"band": "high", "harness": None, "model": None,
+                       "grid": "declined"},
+        "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+                       "grid": "declined"},
+        "j-x-8d1d-3": {"band": "low", "harness": None, "model": None,
+                       "grid": "declined"},
+    }
+
+
+def test_banded_brief_carries_the_band_table(tmp_path, monkeypatch):
+    """The band's durable channel is the brief file: a daemon-forked worker
+    never sees the env export (x-6de8), so waves.md reads the table."""
+    _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    join_node("x-8d1d", 5)
+    brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
+    assert "| j-x-8d1d-1 | high |" in brief
+    assert "| j-x-8d1d-2 | medium |" in brief
+    assert "| j-x-8d1d-3 | low |" in brief
+
+
+def test_explicit_model_skips_the_band_grid(tmp_path, monkeypatch):
+    """An operator-typed model is authority over the grid: the real resolver
+    declines unpinned work when a model is pinned, so the joiners ride the
+    caller's default lane and the model rides every spawn."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    receipt = join_node("x-8d1d", 5, model="my-model")
+    assert len(calls) == 3
+    for call in calls:
+        assert call["cmd"][call["cmd"].index("--model") + 1] == "my-model"
+        assert call["cmd"][call["cmd"].index("--harness") + 1] == "claude"
+        assert call_env(call, "FNO_WORKER_BAND") in ("high", "medium", "low")
+    assert all(lane["harness"] is None for lane in receipt["lanes"].values())
+    assert all(lane.get("grid") == "declined" for lane in receipt["lanes"].values())
 
 
 # ---------------------------------------------------------------------------
