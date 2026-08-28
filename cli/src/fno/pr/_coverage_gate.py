@@ -210,7 +210,29 @@ def covered_conjuncts(
     return True, ""
 
 
-def rests_on_self_attestation_alone(cov: dict) -> bool:
+def _resolved_github_approval_satisfies(repo: str) -> bool:
+    """The resolved ``config.review.github_approval_satisfies``. True is BOTH
+    the config default and the unreadable-config direction, mirroring the Rust
+    fail-closed settings parse (None -> true): the two surfaces must not split
+    on the same unreadable config."""
+    try:
+        from fno.config import load_settings_for_repo
+
+        root = Path(_merge._repo_state_dir(repo)).parent
+        return bool(
+            getattr(
+                load_settings_for_repo(root).review,
+                "github_approval_satisfies",
+                True,
+            )
+        )
+    except Exception:  # noqa: BLE001 - mirror of the Rust None -> true default
+        return True
+
+
+def rests_on_self_attestation_alone(
+    cov: dict, github_approval_satisfies: bool = False
+) -> bool:
     """Whether a covered coverage row's whole count is the author's own
     (self_attested) local attestation - the same predicate the Rust gate's
     ``CoverageReport::rests_on_self_attestation_alone`` applies, read from the
@@ -218,6 +240,16 @@ def rests_on_self_attestation_alone(cov: dict) -> bool:
     pre-field rows. Unmeasured authorship (no self_attested_count, no origins)
     is NOT self-attestation alone: it is not proof of corroboration, but it is
     not proof of its absence either.
+
+    ``github_approval_satisfies`` is the resolved config flag, and it reaches
+    the verdicts fallback through ``_reviews._human_approval_counts`` - the
+    same helper ``_derive_review_state`` and the Rust ``human_approval_counts``
+    apply. It was hardcoded to the flag-off branch here, which made this a
+    THIRD implementation of one counting rule: under the flag a non-author
+    GitHub approval corroborated on the other two paths and not on this one,
+    while the gate's own refusal advertises that approval as a remedy. The
+    default is False so a caller with no repo to resolve against (the
+    doctor's read-only display) keeps today's answer.
     """
     reviewed = cov.get("reviewed_count")
     self_attested = cov.get("self_attested_count")
@@ -231,12 +263,14 @@ def rests_on_self_attestation_alone(cov: dict) -> bool:
         return isinstance(self_attested, int) and self_attested > 0
     if isinstance(self_attested, int):
         return self_attested == reviewed
+    from fno.pr._reviews import _human_approval_counts
+
     counted = [
         v
         for v in (cov.get("verdicts") or [])
         if isinstance(v, dict)
         and v.get("verdict") == "reviewed"
-        and not v.get("human_approval")
+        and _human_approval_counts(v, github_approval_satisfies)
     ]
     return bool(counted) and all(
         v.get("producer") == "local_attestation"
@@ -266,7 +300,9 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
     except Exception:  # noqa: BLE001 - an unreadable config never tightens a gate
         return None
 
-    if not rests_on_self_attestation_alone(cov):
+    if not rests_on_self_attestation_alone(
+        cov, _resolved_github_approval_satisfies(repo)
+    ):
         return None
     return (
         "coverage rests on the author's own attestation alone "
@@ -782,7 +818,12 @@ def disposition_refusal(
     # Corroboration for declines: the coverage row's existing predicate, read
     # independent of config.review.require_corroboration (Locked Decision 2 -
     # a disposition pass can be gamed by declining, a clean review cannot).
-    corroborated = not (cov is not None and rests_on_self_attestation_alone(cov))
+    corroborated = not (
+        cov is not None
+        and rests_on_self_attestation_alone(
+            cov, _resolved_github_approval_satisfies(repo)
+        )
+    )
 
     nonterminal: list[str] = []
     uncorroborated: list[str] = []
@@ -902,12 +943,26 @@ def rounds_since_last_pass(
     the two are held equal by the shared corpus.
     """
     rounds = 0
+    counted_heads: set[str] = set()
     for event in chain:
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+            # A declared round number is already the round's identity, so the
+            # running max cannot double-count and needs no head collapse.
             rounds = max(rounds, declared)
-        else:
-            rounds += 1
+            continue
+        # One reviewed head is ONE round, the same unit the reviews axis uses
+        # (it counts DISTINCT commit.oid). Without this the two axes measure
+        # different things and max() over them is not a budget: a producer
+        # that emits a corrective second verdict at an unchanged head spends
+        # two rounds for zero code change. A row carrying no head is counted,
+        # fail-closed: an unreadable head never buys a free round.
+        event_head = event.get("head_sha")
+        if isinstance(event_head, str) and event_head:
+            if event_head in counted_heads:
+                continue
+            counted_heads.add(event_head)
+        rounds += 1
     events_rounds = rounds
     if reviews is None:
         return events_rounds

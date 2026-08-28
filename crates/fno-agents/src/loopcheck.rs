@@ -311,10 +311,11 @@ pub(crate) struct Settings {
     github_approval_satisfies: Option<bool>,
     /// config.review.max_rounds (default 2, clamped at least 1 at read): the
     /// review-round budget before the gate reports IMPOSSIBLE. More rounds
-    /// than this on the branch since the last pass, with blocking findings
-    /// still non-terminal, means re-reviewing cannot clear it. A round is a
-    /// review VERDICT since the last pass; CI failures, lint failures and
-    /// rebases are not rounds, and a pass resets the counter.
+    /// than this across the whole life of the PR, with blocking findings
+    /// still non-terminal, means re-reviewing cannot clear it. A round is one
+    /// reviewed HEAD, so two verdicts at one unchanged head are one round.
+    /// CI failures, lint failures and rebases are not rounds, and a pass
+    /// refunds nothing: it is one round like any other verdict.
     max_rounds: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
@@ -5568,8 +5569,8 @@ pub struct RangeTiling {
     /// A local attestation whose head is in this list counts as Reviewed
     /// when the whole chain tiles, whatever its single-sha freshness says.
     pub chain_heads: Vec<String>,
-    /// Review rounds since the last pass on this branch (see
-    /// [`rounds_since_last_pass`]). Carried on the chain analysis because it
+    /// Review rounds across the whole life of the PR, one per reviewed head
+    /// (see [`rounds_since_last_pass`]). Carried on the chain analysis because it
     /// reads the same events with the same scoping; computed even on the
     /// git-failure paths, which answer tiling fail-closed but rounds honestly.
     pub rounds_used: i64,
@@ -5869,15 +5870,7 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
             .collect(),
     )
 }
-/// Review rounds since the last pass on this branch. A round is a review
-/// COMPLETION since the last pass, whatever its verdict - CI failures, lint
-/// failures and rebases are not rounds - and a pass resets the counter. Two
-/// evidence axes, because the lane that spun never emits an attestation:
-/// its rounds exist only as GitHub review objects. The events axis counts
-/// in-scope `review_attestation` rows (the declared `review_round` wins
-/// when present, the running max since the last reset; events from before
-/// the field existed fall back to counting verdicts). The reviews axis,
-/// when a payload is supplied, counts DISTINCT reviewed commits submitted
+
 /// The PR's review-round total, on two evidence axes. The operator's ruling
 /// (x-2219, 2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
 /// across the whole life of the PR, and a `verdict: pass` refunds nothing -
@@ -5886,9 +5879,17 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
 /// reset semantics it used to implement; the docstring, not the name, is
 /// the contract.
 ///
-/// The chain axis counts in-scope attestation verdicts (the declared
-/// `review_round` wins when present, as the running max; events from before
-/// the field existed fall back to counting verdicts). The reviews axis, when
+/// One reviewed HEAD is one round, on both axes. The chain axis counts
+/// DISTINCT `head_sha` among the in-scope attestation rows (the declared
+/// `review_round` wins when present, as the running max, and needs no
+/// collapse because the declared number is already the round's identity;
+/// rows from before the field existed collapse by head). A row with no
+/// readable head is dropped before scoping here, as it always was: this
+/// axis cannot place it in the branch's lineage. The Python mirror admits
+/// it on a branch match and counts it, which is the one measured
+/// divergence between the two. Two verdicts at one
+/// unchanged head are therefore ONE round: a cap whose size depends on how
+/// a reviewer batches its output is not a cap. The reviews axis, when
 /// a payload is supplied, counts DISTINCT reviewed commits - a GitHub-App
 /// reviewer's rounds leave no attestation row anywhere, so they exist only
 /// as review objects, and every fix moves the head, making one reviewed
@@ -5916,6 +5917,7 @@ pub fn rounds_since_last_pass(
     reviews: Option<&[Value]>,
 ) -> i64 {
     let mut rounds: i64 = 0;
+    let mut counted_heads: Vec<String> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5937,8 +5939,21 @@ pub fn rounds_since_last_pass(
             continue;
         }
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
+            // A declared round number is already the round's identity, so the
+            // running max cannot double-count and needs no head collapse.
             Some(n) if n >= 0 => rounds = rounds.max(n),
-            _ => rounds += 1,
+            // One reviewed head is ONE round, the same unit the reviews axis
+            // uses (DISTINCT commit.oid). Without this the two axes measure
+            // different things and max() over them is not a budget: a
+            // producer that emits a corrective second verdict at an unchanged
+            // head spends two rounds for zero code change.
+            _ => {
+                if counted_heads.iter().any(|h| h == line_head) {
+                    continue;
+                }
+                counted_heads.push(line_head.to_string());
+                rounds += 1;
+            }
         }
     }
     let events_rounds = rounds;

@@ -1107,12 +1107,13 @@ class ReviewBlock(BaseModel):
     # per human - a second account with its own token can still self-approve.
     github_approval_satisfies: bool = True
     # The review-round budget before the gate reports IMPOSSIBLE: with more
-    # review rounds than this on the branch since the last pass AND blocking
+    # review rounds than this across the whole life of the PR AND blocking
     # findings still non-terminal, re-reviewing cannot clear the gate, and
     # the refusal says so instead of teaching one more round (the PR-1170
-    # eleven-round shape). A round is a review VERDICT since the last pass;
-    # CI failures, lint failures and rebases are not rounds, and a pass
-    # resets the counter. Validated at parse: at least 1.
+    # eleven-round shape). A round is one reviewed HEAD, so two verdicts at
+    # one unchanged head are one round. CI failures, lint failures and
+    # rebases are not rounds, and a pass refunds nothing: it is one round
+    # like any other verdict. Validated at parse: at least 1.
     max_rounds: int = Field(default=2, ge=1)
     # Categories a CONFIRMED-free finding may carry and still be non-blocking.
     # A configured list EXTENDS the shipped default rather than replacing it,

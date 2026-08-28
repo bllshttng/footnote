@@ -1960,8 +1960,8 @@ def test_attestation_chain_dedupes_the_global_mirror_on_invocation_id(
     )
     assert len(chain) == 1, "identical legacy payloads still dedup"
 
-    # Negative control: two distinct invocations are two rounds, so the key
-    # is not so wide it collapses real rounds.
+    # Negative control: two distinct invocations stay two chain entries, so
+    # the dedup key is not so wide it collapses real attestations.
     project.write_text(_row(base_data), encoding="utf-8")
     second = {**base_data, "invocation_id": "ri-2"}
     global_log.write_text(
@@ -1972,8 +1972,11 @@ def test_attestation_chain_dedupes_the_global_mirror_on_invocation_id(
     chain = _coverage_gate.attestation_chain(
         str(tmp_path), head_branch="feature/x-8439", head=head
     )
-    assert len(chain) == 2, "two distinct invocations are two rounds"
-    assert _coverage_gate.rounds_since_last_pass(chain) == 2
+    assert len(chain) == 2, "two distinct invocations are two chain entries"
+    # Both entries pin the SAME head, so they are ONE round: the unit is a
+    # reviewed head, not a verdict row. The dedup key and the round unit are
+    # orthogonal, which is exactly what this pair of assertions pins.
+    assert _coverage_gate.rounds_since_last_pass(chain) == 1
 
 
 def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
