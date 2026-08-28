@@ -3308,9 +3308,91 @@ fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<
     }
 }
 
-/// `fno-agents attach <name>` -- interactive attach to a running claude agent
-/// or a codex thread (every other harness is refused). Mirrors Python
-/// `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
+/// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
+/// session id, in the row's own cwd.
+///
+/// `None` means this is not a pi thread row and the caller should fall through
+/// to its refusal. `Some(code)` means this function owned the outcome.
+///
+/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
+/// same command. Neither renders anything.
+///
+/// **This is a JOIN, and the cwd is what makes it one.** pi's session store is
+/// cwd-scoped, so the TUI finds the rpc lane's live session only when it runs
+/// in the same directory. Run elsewhere, the same argv CREATES a second
+/// session under one id and says nothing, which is the silent half of this
+/// harness. So the cwd is read off the row and the child is placed in it; a
+/// row with no cwd recorded is refused rather than defaulting to this
+/// process's own directory.
+fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
+    if !is_codex_thread_row(entry) {
+        // Same predicate, and deliberately the shared one: an interactive host
+        // with no claude short id and no pane of its own. A pi PANE row keeps
+        // navigating to the tab where its process already lives.
+        return None;
+    }
+    let session_id = entry
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    let cwd = entry
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty());
+    let Some(cwd) = cwd else {
+        eprintln!(
+            "fno agents attach: registry row {name:?} records no cwd, and a pi session is the              pair (cwd, session id). Attaching from the wrong directory would CREATE a second              session under this id rather than joining the live one, so this is refused."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-row-has-no-cwd".to_string())),
+            ],
+        );
+        return Some(13);
+    };
+    if !which_on_path("pi") {
+        eprintln!("pi CLI not on PATH");
+        return Some(14);
+    }
+
+    let argv = crate::pi::pi_attach_argv(session_id);
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.current_dir(cwd);
+    // Inherit stdio so pi's TUI takes over this terminal; mirror its exit code.
+    match command.status() {
+        Ok(status) => {
+            let exit_code = status.code().unwrap_or(1);
+            append_agents_event(
+                events_path,
+                "agent_attached",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String("pi".to_string())),
+                    ("session_id", Value::String(session_id.to_string())),
+                    ("pi_exit", Value::from(exit_code)),
+                ],
+            );
+            Some(exit_code)
+        }
+        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("pi CLI not on PATH");
+            Some(14)
+        }
+        Err(exc) => {
+            eprintln!("fno agents attach: pi session attach failed: {exc}");
+            Some(1)
+        }
+    }
+}
+
+/// `fno-agents attach <name>` -- interactive attach to a running claude agent,
+/// a codex thread, or a pi session (every other harness is refused). Mirrors
+/// Python `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
 pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     let mut name: Option<String> = None;
     for a in rest {
@@ -3371,6 +3453,14 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     // app-server daemon, the same argv the mux viewport runs.
     if harness == "codex" {
         if let Some(code) = attach_codex_thread(entry, &name, &events_path) {
+            return code;
+        }
+    }
+
+    // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
+    // the session its rpc lane is driving.
+    if harness == "pi" {
+        if let Some(code) = attach_pi_session(entry, &name, &events_path) {
             return code;
         }
     }

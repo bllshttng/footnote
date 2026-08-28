@@ -1344,6 +1344,161 @@ impl ProviderWithPty for OpencodeProvider {
     }
 }
 
+// ---------------------------------------------------------------------------
+// pi — DUAL-LANE: `--mode rpc` drives, the plain TUI watches (x-c198).
+// ---------------------------------------------------------------------------
+
+/// pi (`@earendil-works/pi-coding-agent`) provider.
+///
+/// pi is the first harness on this roster whose driving lane is neither a
+/// shellout nor a keystroke PTY. `pi --mode rpc` speaks strict JSONL over
+/// stdin and stdout: commands in, typed events out, LF the only record
+/// delimiter, an `id` correlating request to response, and native mid-turn
+/// injection (`steer`). That lane lives in Python
+/// (`fno.agents.harnesses.pi`), which owns the create serialisation and the
+/// long-lived stdin the protocol requires.
+///
+/// What lives HERE is the headless one-shot argv and the reachability read.
+/// [`as_pty`](Provider::as_pty) returns `None`, like claude's: there is no
+/// screen to scrape on the lane fno drives, and the pane lane's TUI is hosted
+/// by the Python `build_pane_argv` seam.
+///
+/// Two traps are encoded in the argv below and neither is optional.
+///
+/// 1. `--provider openai-codex` WITHOUT `--model` does not resolve to gpt-5.5.
+///    It falls through to a Bedrock model and fails with "Token is expired. To
+///    refresh this SSO session run 'aws sso login'", naming AWS and
+///    misdirecting completely. Both flags, always.
+/// 2. rpc mode EXITS ON STDIN EOF, mid-turn, with status 0. That trap belongs
+///    to the rpc driver rather than to this argv, but it is the reason nothing
+///    on this harness may read a clean exit as proof a turn completed.
+pub struct PiProvider;
+
+impl Provider for PiProvider {
+    fn name(&self) -> &'static str {
+        "pi"
+    }
+
+    fn create_argv(&self, ctx: &CreateContext) -> Vec<String> {
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "pi",
+            "headless_create",
+            ctx.session_id.as_deref(),
+        )
+        .expect("embedded pi headless-create capability");
+        argv.extend(pi_run_tail(&ctx.message));
+        argv
+    }
+
+    fn resume_argv(&self, ctx: &ResumeContext) -> Vec<String> {
+        // Create and resume are the SAME flag on pi: `--session-id` adopts an
+        // existing session and creates one when absent. The flag cannot tell a
+        // caller which it did, which is why the create decision is serialised
+        // by the spawn lane rather than inferred from an argv or an exit code.
+        let mut argv = crate::harness_capabilities::render_session_argv(
+            "pi",
+            "headless_resume",
+            Some(&ctx.session_id),
+        )
+        .expect("embedded pi headless-resume capability");
+        argv.extend(pi_run_tail(&ctx.message));
+        argv
+    }
+
+    fn parse_stream_event(&self, chunk: &str) -> ParsedEvent {
+        // The headless `-p` lane prints plain text, so a chunk is reply text.
+        // The rpc lane's typed events (`agent_settled` and friends) are parsed
+        // in the Python driver that owns that transport; this arm never sees
+        // them.
+        if chunk.trim().is_empty() {
+            ParsedEvent::Unknown {
+                raw: chunk.to_string(),
+            }
+        } else {
+            ParsedEvent::ReplyComplete {
+                text: chunk.to_string(),
+                duration_ms: 0,
+            }
+        }
+    }
+
+    fn reachability(
+        &self,
+        entry: &AgentEntry,
+        _timeout: Duration,
+    ) -> Result<bool, ReachabilityProbeError> {
+        pi_reachable(entry)
+    }
+}
+
+/// The tail of a headless pi argv: the pinned provider and model, then the
+/// prompt.
+///
+/// argv-fence: exempt. Probed on pi 0.84.2: `pi -- --version` PRINTS the
+/// version, so `--` is not an end-of-options marker here and a fence would be
+/// decoration. `--print` is a boolean flag and the message is a positional, so
+/// there is no equal-form either. A leading-flag seed would be misparsed, and
+/// the honest mitigation is that fno's driving lane never uses this argv: the
+/// rpc lane carries the message as a JSON string field, where no parser sees
+/// it as a flag.
+fn pi_run_tail(message: &str) -> Vec<String> {
+    vec![
+        "--provider".to_string(),
+        crate::pi::pi_provider(),
+        "--model".to_string(),
+        crate::pi::pi_model(),
+        "--print".to_string(),
+        message.to_string(),
+    ]
+}
+
+/// pi reachability: does this session exist in pi's own cwd-scoped store?
+///
+/// Tri-state, and the inconclusive arm is the load-bearing one. pi writes a
+/// session file at the FIRST TURN ATTEMPT, not at create, so a live session
+/// that has been handed no prompt leaves an EMPTY directory. Reading that
+/// emptiness as `Ok(false)` would false-orphan a live worker during exactly
+/// the window fno spawns into. So an empty-but-readable directory answers
+/// `Err` (inconclusive), and only an unreadable store or a missing id in a
+/// directory that DOES hold other sessions for this cwd can ever be definitive.
+///
+/// A DUPLICATE is inconclusive too, deliberately. More than one file on one id
+/// is the silent create race, and this probe must not launder it into a
+/// cheerful `Ok(true)`: the refusal that names every session belongs at resume,
+/// where a human reads it, not in a liveness sweep.
+fn pi_reachable(entry: &AgentEntry) -> Result<bool, ReachabilityProbeError> {
+    let sid = entry
+        .session_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ReachabilityProbeError::new("pi", "no session id in entry"))?;
+    // A pi session is the pair (cwd, session_id); the id alone addresses
+    // nothing, because the store is cwd-scoped and the same id in two
+    // worktrees is two different sessions.
+    let cwd = &entry.cwd;
+    match crate::pi::lookup_sessions(cwd, sid) {
+        crate::pi::SessionLookup::One { .. } => Ok(true),
+        crate::pi::SessionLookup::Duplicate { files } => Err(ReachabilityProbeError::new(
+            "pi",
+            format!(
+                "session id {sid:?} resolves to {} sessions in {}; resume refuses to pick and \
+                 so does this probe",
+                files.len(),
+                cwd.display()
+            ),
+        )),
+        crate::pi::SessionLookup::Unknown { dir, reason } => Err(ReachabilityProbeError::new(
+            "pi",
+            format!("session store {} unreadable: {reason}", dir.display()),
+        )),
+        crate::pi::SessionLookup::None => Err(ReachabilityProbeError::new(
+            "pi",
+            "no session file for this id yet; pi writes one at the first turn ATTEMPT, so an \
+             empty store is a session that has not been prompted, never a session that is gone",
+        )),
+    }
+}
+
 /// Parse gemini's single JSON document. Gemini emits one blob at EOF (the
 /// structural cleavage from codex), so this expects the COMPLETE document;
 /// partial input parses as [`ParsedEvent::Unknown`].
@@ -1436,9 +1591,9 @@ pub fn gemini_session_id_from_blob(blob: &str) -> Option<String> {
 /// now shape-checks identity, so an alien harness reads without bricking; this
 /// list gates only spawn/`for_name`. Every name here MUST have a [`for_name`]
 /// arm (test-enforced).
-pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy", "opencode"];
+pub const KNOWN_PROVIDERS: &[&str] = &["claude", "codex", "gemini", "agy", "opencode", "pi"];
 
-/// The roster joined for error messages ("claude, codex, gemini, agy, opencode").
+/// The roster joined for error messages ("claude, codex, gemini, agy, opencode, pi").
 pub fn known_providers_csv() -> String {
     KNOWN_PROVIDERS.join(", ")
 }
@@ -1455,6 +1610,7 @@ pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {
         "gemini" => Some(Box::new(GeminiProvider)),
         "agy" => Some(Box::new(AgyProvider)),
         "opencode" => Some(Box::new(OpencodeProvider)),
+        "pi" => Some(Box::new(PiProvider)),
         _ => None,
     }
 }

@@ -364,7 +364,12 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
             raise _contract_error(harness, "session_binding", "malformed strategy")
         if binding["strategy"] not in {
             "preassigned-or-session-start", "rollout-fd-or-daemon",
-            "preassigned", "store-lookup", "unsupported",
+            # caller-assigned-cwd-scoped: the caller mints the id AND the
+            # harness scopes its lookup by cwd, so the identity is the PAIR and
+            # the id alone addresses nothing. Distinct from "preassigned",
+            # where the id is the whole handle.
+            "preassigned", "caller-assigned-cwd-scoped",
+            "store-lookup", "unsupported",
         }:
             raise _contract_error(harness, "session_binding", "unknown strategy")
         if not isinstance(binding["required"], bool) or not isinstance(binding["timeout_ms"], int):
