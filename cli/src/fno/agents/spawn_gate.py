@@ -1179,6 +1179,15 @@ def run_gate(
         _admission_token=_PROVIDER_ADMISSION_TOKEN,
     )
 
+    # Ahead of the force branch and outside the queue loop, deliberately.
+    # `--force` means "I know the machine is busy", and a schema mismatch is not
+    # resource pressure: it is a worker that can neither claim its node nor stamp
+    # its mail, which is the failure this check exists to name. Forcing past it
+    # would reproduce that failure with the diagnosis suppressed. Running it here
+    # also reads the file once per spawn rather than once per queue tick, and
+    # nothing is held yet, so a refusal needs no `guard.release()`.
+    _check_registry_schema()
+
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also
         # bypasses the king share here, which _check_king_share's own refusal
@@ -1286,11 +1295,6 @@ def run_gate(
                 _warn(w)
             slots = c.slot_count
             if slots < cap:
-                try:
-                    _check_registry_schema()
-                except GateRefused:
-                    guard.release()
-                    raise
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:

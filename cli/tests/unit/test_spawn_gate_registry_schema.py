@@ -81,6 +81,27 @@ def test_the_refusal_leaves_a_machine_readable_trail(
     assert rows[0]["understood"] == reg.SCHEMA_VERSION
 
 
+def test_force_does_not_bypass_the_schema_check(
+    shared: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--force` means "I know the machine is busy". A schema mismatch is not
+    resource pressure: it is a worker that can neither claim its node nor stamp
+    its mail. Forcing past it reproduces the 2026-08-28 failure with the
+    diagnosis suppressed, and the force warning does not even name it."""
+    _write(shared, reg.SCHEMA_VERSION + 1)
+    # conftest disables the gate suite-wide; this test exercises run_gate itself,
+    # so it re-arms the gate the way test_spawn_gate.py's own fixture does.
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(
+        spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+    )
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("forced", "bg", force=True)
+
+    assert excinfo.value.code == spawn_gate.EXIT_REGISTRY_SCHEMA
+
+
 @pytest.mark.parametrize("delta", [0, -1])
 def test_a_registry_at_or_below_this_fno_passes(shared: Path, delta: int) -> None:
     _write(shared, reg.SCHEMA_VERSION + delta)

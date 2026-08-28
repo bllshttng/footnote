@@ -1248,6 +1248,12 @@ def _plan_registry_schema_repair(
             )
         raw_name = row.get("name")
         name = raw_name if isinstance(raw_name, str) else f"<row {index}>"
+        # A poisoned file can carry duplicate names, and the report is keyed by
+        # name: without this, the second row's keys would overwrite the first's
+        # and the preview would name one row where two are dropping data. The
+        # write below still visits every row, so only the report was at risk.
+        if name in dropped:
+            name = f"{name} (row {index})"
         unknown = [k for k in row if k not in _INIT_FIELD_NAMES]
         if not unknown:
             continue

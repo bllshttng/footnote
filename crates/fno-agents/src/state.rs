@@ -1498,7 +1498,16 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
         return Ok(());
     };
     let exe = exe.canonicalize().unwrap_or(exe);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // Canonicalize HOME the same way the exe is. Comparing a canonical path
+    // against a raw `$HOME` never matches when the home path contains a symlink
+    // or a trailing slash, and then the walk runs PAST home: a dotfiles repo at
+    // `$HOME` would make a cargo-installed `~/.cargo/bin/fno-agents` read as
+    // source-run, so a deployed binary would refuse every legitimate upgrade of
+    // the shared registry. That is this guard inverted into the outage it exists
+    // to prevent.
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|h| h.canonicalize().unwrap_or(h));
     let Some(root) = source_root_for_exe(&exe, home.as_deref()) else {
         return Ok(());
     };
@@ -3297,6 +3306,32 @@ mod tests {
 
         assert_eq!(source_root_for_exe(&exe, Some(&home)), None);
         std::fs::remove_dir_all(&home).ok();
+    }
+
+    #[test]
+    fn source_root_for_exe_stops_at_a_symlinked_home_too() {
+        // The caller canonicalizes the exe, so it must canonicalize home as
+        // well. A raw `$HOME` that resolves through a symlink never equals the
+        // canonical ancestor, the walk runs past home, and a dotfiles repo
+        // there turns a deployed binary into a source-run one.
+        // Canonicalize the base first: on macOS `/var` is itself a symlink to
+        // `/private/var`, so a raw temp path would add a second layer and
+        // measure that instead of the one this test is about.
+        let real = tmpdir("src-root-symlink-home").canonicalize().unwrap();
+        let exe = real.join(".cargo").join("bin").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(real.join(".git")).unwrap();
+        let link = real.with_extension("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        // The raw (symlinked) spelling does not match the canonical ancestor.
+        assert_eq!(source_root_for_exe(&exe, Some(&link)), Some(real.clone()));
+        // Canonicalized, as the caller now does, it stops the walk.
+        let canonical = link.canonicalize().unwrap();
+        assert_eq!(source_root_for_exe(&exe, Some(&canonical)), None);
+
+        std::fs::remove_file(&link).ok();
+        std::fs::remove_dir_all(&real).ok();
     }
 
     #[test]

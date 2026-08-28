@@ -124,6 +124,31 @@ def test_a_row_carrying_real_newer_schema_data_refuses(tmp_path: Path) -> None:
     assert list(tmp_path.glob("*.bak.*")) == []
 
 
+def test_duplicate_row_names_each_get_their_own_report_line(tmp_path: Path) -> None:
+    """A poisoned file can carry duplicate names. Keyed by name alone, the
+    second row's keys overwrite the first's and the preview names one row where
+    two are dropping data."""
+    path = tmp_path / "registry.json"
+    _poisoned(
+        path,
+        reg.SCHEMA_VERSION + 1,
+        [
+            _row("twin", a_field_from_the_future=None),
+            _row("twin", another_future_field=""),
+        ],
+    )
+
+    plan = reg.repair_registry_schema(reg.SCHEMA_VERSION, path=path, apply=True)
+
+    assert plan.dropped == {
+        "twin": ["a_field_from_the_future"],
+        "twin (row 1)": ["another_future_field"],
+    }
+    data = json.loads(path.read_text())
+    assert len(data["agents"]) == 2
+    assert all(len(a) == len(_row("twin")) for a in data["agents"])
+
+
 @pytest.mark.parametrize("value", [0, False, [1], {"k": "v"}])
 def test_a_falsy_but_real_value_is_still_data(tmp_path: Path, value) -> None:
     """``0`` and ``False`` are values a newer schema meant to store. Only
