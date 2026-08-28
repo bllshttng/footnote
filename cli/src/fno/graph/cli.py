@@ -5104,6 +5104,16 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
+            from fno.agents.dispatch import (
+                DispatchAskError,
+                _check_spawn_harness,
+            )
+
+            try:
+                _check_spawn_harness(harness)
+            except DispatchAskError as exc:
+                typer.echo(f"dispatch-lanes: {exc}", err=True)
+                raise typer.Exit(code=exc.exit_code) from exc
         if provider is not None:
             provider = provider.strip()
             if not provider:

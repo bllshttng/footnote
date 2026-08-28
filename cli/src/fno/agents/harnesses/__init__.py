@@ -17,6 +17,10 @@ package fixed the container; the field is a separate, ruled-out surface.
 # refused only where a dispatchable provider is actually required.
 KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 
+# Harnesses the thread/headless spawn seam accepts. Pane-only harnesses remain
+# in READABLE_PROVIDERS below.
+SPAWN_HARNESSES: tuple[str, ...] = KNOWN_PROVIDERS + ("opencode",)
+
 # The spawn/pane read-tolerance roster: harnesses a pane can HOST even without a
 # Python ask adapter. `agy` (Antigravity) and `opencode` (x-51f6) land pane rows
 # via Rust spawn paths / the mux pane back half. NOTE (x-8dfc): this is no longer

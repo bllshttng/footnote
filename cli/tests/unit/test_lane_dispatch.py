@@ -342,6 +342,26 @@ def test_dispatch_lanes_refuses_harness_name_on_vendor_axis(monkeypatch):
     assert called is False
 
 
+def test_dispatch_lanes_refuses_pane_only_harness_before_selection(monkeypatch):
+    called = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
+
+    result = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--harness", "gemini", "--max", "1"]
+    )
+
+    assert result.exit_code == 2
+    assert "accepted here: claude, codex, opencode" in result.output
+    assert "agy and gemini launch on --substrate pane only" in result.output
+    assert called is False
+
+
 def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monkeypatch):
     """A concurrent sequential advance holds dispatch:<id>; the lane path (which
     the sequential path can't see via node:/dispatch:) must not double-launch."""
