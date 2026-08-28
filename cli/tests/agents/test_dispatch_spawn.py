@@ -502,10 +502,14 @@ def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
         ],
     )
 
+    from fno.harness_names import SPAWN_HARNESSES
+
     assert result.exit_code == 2
+    # The accept set is rendered, never spelled out here: a harness added to
+    # SPAWN_HARNESSES must not fail a test that is checking the message SHAPE.
     assert (
         "unknown harness 'zai' on the thread substrate (--harness names the "
-        "CLI BINARY); accepted here: claude, codex, opencode."
+        f"CLI BINARY); accepted here: {', '.join(SPAWN_HARNESSES)}."
     ) in result.output
     assert "agy and gemini launch on --substrate pane only." in result.output
     assert "If you meant a model VENDOR, that is -P/--provider." in result.output
@@ -522,7 +526,9 @@ def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
     with pytest.raises(dispatch.DispatchAskError) as caught:
         dispatch._check_spawn_harness("zai")
 
-    assert "accepted here: claude, codex, opencode, future" in str(caught.value)
+    expected = ", ".join((*dispatch.SPAWN_HARNESSES,))
+    assert f"accepted here: {expected}" in str(caught.value)
+    assert expected.endswith("future"), "the monkeypatched name must be rendered"
 
 
 # ---------------------------------------------------------------------------
