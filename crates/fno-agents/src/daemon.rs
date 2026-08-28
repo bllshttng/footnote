@@ -15245,12 +15245,20 @@ done
 
     /// Start a real stream worker (fake emitter child) on `home.worker_sock(id)`
     /// via the PUBLIC `stream_worker::run`; wait for its socket to appear.
+    ///
+    /// `/bin/bash` absolutely, never a bare `bash`. PATH is process-global and
+    /// a sibling test REPLACES it with a tempdir under `PATH_TEST_MUTEX`
+    /// (client_verbs.rs). This helper cannot take that mutex - it holds a
+    /// worker live across the caller's whole test - so under a full-suite run
+    /// it spawned into a PATH with no shell in it and failed with
+    /// `No such file or directory (os error 2)`. Not consulting PATH is the
+    /// fix that needs no coordination.
     async fn start_stream_worker(home: &AgentsHome, short_id: &str, script: &str) -> PathBuf {
         let cfg = crate::stream_worker::StreamWorkerConfig::new(
             short_id,
             home.root().to_path_buf(),
             std::env::temp_dir(),
-            vec!["bash".into(), "-c".into(), script.into()],
+            vec!["/bin/bash".into(), "-c".into(), script.into()],
         );
         let short_id_dbg = short_id.to_string();
         std::thread::spawn(move || {
