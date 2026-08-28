@@ -2126,6 +2126,7 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     try:
         plan_path = resolve_plan_path(str(plan_raw))
         width = _plan_parallel_width(plan_path)
+        bands = _plan_wave_bands(plan_path)
     except ValueError as exc:
         raise JoinRefuse(4, f"{node_id} plan task graph unsolvable: {str(exc)[:140]}") from exc
     except Exception as exc:  # noqa: BLE001 - an unreadable plan is no plan to join
@@ -2134,7 +2135,6 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             3, f"width {width}: a second worker has nothing to pull"
         )
-    bands = _plan_wave_bands(plan_path)
     # One worker per band present, highest first (x-dadc); an unbanded plan
     # keeps joiner 2's shapeless count. The width rule still caps: the node
     # holder is one of the width workers, so joiners stay under it.
@@ -2203,11 +2203,15 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         # The grid picks this band's lane, not the node's: the joiner pulls
         # the waves its band can carry, so its lane must match the band.
         # An unbanded joiner (or an explicit --model) skips the grid and
-        # rides the caller's default lane.
+        # rides the caller's default lane. The thread substrate is
+        # claude-only (hard error on any other harness), so a grid lane
+        # naming another harness reads as declined - taking only its model
+        # would put a foreign-vendor model on the claude lane, the exact
+        # mismatch the spawn refuses.
         lane_h: Optional[str] = None
         lane_m: Optional[str] = None
         if band:
-            lane_h, lane_m = _grid_lane_for(
+            grid_h, grid_m = _grid_lane_for(
                 {
                     "difficulty": band,
                     "plan_path": str(plan_path),
@@ -2216,6 +2220,8 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
                 model=model,
                 provider=None,
             )
+            if grid_h in (None, "claude"):
+                lane_h, lane_m = grid_h, grid_m
         cmd = [
             *_subprocess_util.fno_py_cmd(),
             "agents", "spawn", "--substrate", "thread",

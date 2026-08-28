@@ -382,7 +382,9 @@ def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
 
 def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     """AC2-HP: waves banded high/medium/medium/low -> three workers (high,
-    medium, low), each on the lane the grid picks for ITS band."""
+    medium, low), each on the lane the grid picks for ITS band. A non-claude
+    grid harness cannot ride the claude-only thread substrate, so that lane
+    reads as declined instead of stranding the spawn on a hard error."""
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     picked: list[str] = []
 
@@ -400,14 +402,19 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     assert picked == ["high", "medium", "low"]
     assert receipt["lanes"] == {
         "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x"},
-        "j-x-8d1d-2": {"band": "medium", "harness": "codex", "model": "gpt-x"},
+        "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+                       "grid": "declined"},
         "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm"},
     }
     for call, name in zip(calls, receipt["spawned"]):
         cmd = call["cmd"]
         lane = receipt["lanes"][name]
-        assert cmd[cmd.index("--harness") + 1] == lane["harness"]
-        assert cmd[cmd.index("--model") + 1] == lane["model"]
+        # The thread substrate is claude-only; every spawn rides it.
+        assert cmd[cmd.index("--harness") + 1] == "claude"
+        if lane["model"]:
+            assert cmd[cmd.index("--model") + 1] == lane["model"]
+        else:
+            assert "--model" not in cmd  # declined: the caller's default lane
         assert call_env(call, "FNO_WORKER_BAND") == lane["band"]
         assert f"your band is {lane['band']}" in call_env(call, "TARGET_BRIEF")
 
