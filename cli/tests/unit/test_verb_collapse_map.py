@@ -69,7 +69,9 @@ def test_map_covers_current_surface_once():
     # and `route inventory`; this branch adds `agents recover` from the
     # re-entry work, and main independently added `agents king manifest-path`
     # and `backlog join` (the held-worktree joiner spawner, x-8d1d).
-    assert len(mapped) == 536, (
+    # x-665d adds `agents registry-repair`, the hidden recovery verb for a
+    # registry a source-ahead process already poisoned: 536 -> 537.
+    assert len(mapped) == 537, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

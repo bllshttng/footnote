@@ -3264,6 +3264,53 @@ def cmd_registry_json() -> None:
     sys.stdout.write(_json.dumps({"agents": rows}))
 
 
+@agents_app.command("registry-repair", hidden=True)
+def cmd_registry_repair(
+    to: int = typer.Option(
+        ..., "--to", help="Schema version to roll the file back DOWN to."
+    ),
+    path: str = typer.Option(
+        None, "--path", help="Registry file. Defaults to the process-global one."
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="Perform the repair. Omit to preview it."
+    ),
+) -> None:
+    """Internal: roll a poisoned registry's schema_version back down.
+
+    Holds the registry lock, refuses unless the on-disk version is strictly
+    above ``--to``, refuses if any row carries a newer-schema field with a real
+    value, backs the file up, then drops the empty unknown keys and replaces
+    atomically. Dry run by default, matching `fno agents watchdog` and
+    `fno backlog maintain`.
+    """
+    from pathlib import Path as _Path
+
+    from fno.agents.registry import RegistryRepairRefused, repair_registry_schema
+
+    try:
+        plan = repair_registry_schema(
+            to, path=_Path(path) if path else None, apply=apply
+        )
+    except RegistryRepairRefused as exc:
+        sys.stderr.write(f"{exc}\n")
+        raise typer.Exit(1) from exc
+
+    verb = "repaired" if apply else "would repair"
+    sys.stdout.write(
+        f"{verb} {plan.path}: schema_version {plan.on_disk} -> {plan.to_version}\n"
+    )
+    for name in sorted(plan.dropped):
+        keys = ", ".join(plan.dropped[name])
+        sys.stdout.write(f"  {name}: drop {keys} (empty)\n")
+    if not plan.dropped:
+        sys.stdout.write("  no rows carry keys this fno does not know\n")
+    if plan.backup is not None:
+        sys.stdout.write(f"  backup: {plan.backup}\n")
+    if not apply:
+        sys.stdout.write("  dry run; pass --apply to perform it\n")
+
+
 #: `heal-token` exit codes. 13 mirrors the lifecycle verbs' not-found code; the
 #: ambiguity code is distinct from BOTH that and typer's internal-error 1 so the
 #: Rust caller can tell "refuse loudly with these candidates" from "degrade to

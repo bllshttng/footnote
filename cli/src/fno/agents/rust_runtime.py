@@ -328,6 +328,13 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # `fno agents list`, which lazy-starts the daemon a Stop hook must never wait
     # on. No Rust client port, so it must never auto-route to the daemon.
     "registry-json",
+    # x-665d: the poisoned-registry repair verb (`fno agents registry-repair`).
+    # Pure Python (fno.agents.registry holds the lock, asserts no row carries a
+    # newer-schema field, backs up, and replaces atomically). No Rust client
+    # port, so it must never auto-route. Routing it would also be backwards:
+    # the file it repairs is the one the daemon reads, and it is a hand-run
+    # recovery verb, not a daemon operation.
+    "registry-repair",
     # The orphan sweep (`fno agents orphans`). Pure Python: it plants its own
     # probe processes and reads the machine through psutil, and the SessionStart
     # hook calls it synchronously. Routing it to the daemon would make a sweep

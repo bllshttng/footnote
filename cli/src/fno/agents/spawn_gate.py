@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NoReturn, Optional
+from typing import Any, Literal, NoReturn, Optional
 from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
@@ -40,6 +40,7 @@ EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
+EXIT_REGISTRY_SCHEMA = 81
 
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
@@ -868,6 +869,89 @@ def _refuse_provider_cap(
     raise GateRefused(EXIT_PROVIDER_CAP, receipt)
 
 
+def _emit_gate_event(kind: str, **data: Any) -> None:
+    """Best-effort agents-log event. Never raises, never blocks a spawn."""
+    try:
+        from fno.agents import events
+
+        events.emit(kind, **data)
+    except Exception:  # noqa: BLE001 - telemetry never changes a gate outcome
+        pass
+
+
+def _check_registry_schema() -> None:
+    """Refuse a spawn into a fleet whose shared registry this fno cannot write.
+
+    Claiming a node and stamping mail are both WRITES, so while the shared
+    registry sits ahead of this fno the whole spawn path is refused. On
+    2026-08-28 that produced a worker that reported "Claim store is not writable
+    for this Codex session", attributed it to a sandbox permission profile, and
+    was believed. Nothing in that chain named the registry.
+
+    So this refuses rather than warns, and the message carries both integers,
+    the file, and the repair verb. Same contract as :func:`_check_ram_floor` and
+    :func:`_check_load_ceiling` on the edges: an unreadable file skips, because
+    a spawn is not the place to adjudicate a torn registry and refusing there
+    would make the repair verb itself unspawnable.
+
+    The event is the other half. Every degraded READ prints a banner, but a
+    refused WRITE returns an error to one caller who reports it in its own words
+    to a king who is not watching; nothing collects those into "the fleet cannot
+    write". Emission is best-effort and never blocks the refusal.
+    """
+    from fno.agents.registry import (
+        SCHEMA_VERSION,
+        _read_raw_registry,
+        _registry_path,
+    )
+
+    try:
+        target = _registry_path(None)
+        raw = _read_raw_registry(target)
+    except Exception as exc:  # noqa: BLE001 - resolving the path needs settings,
+        # and an unreadable config is not a fleet condition: no spawn is blocked
+        # because a path could not be resolved (the module contract that global
+        # guards fail OPEN on read errors).
+        #
+        # The skip leaves a trace, but NOT on stderr. `_check_ram_floor` and
+        # `_check_load_ceiling` warn on their equivalent skips, and this one
+        # cannot: the gate's own `test_under_cap_passes_silently` pins an empty
+        # stderr on the pass path, and this branch fires there. A silent skip is
+        # still unobservable, so it emits instead - the same aggregation argument
+        # the refusal below already makes, applied to the absence of a check.
+        _emit_gate_event("registry_schema_check_skipped", reason=repr(exc))
+        return
+    if raw is None:
+        return
+    on_disk = raw.get("schema_version")
+    if not isinstance(on_disk, int) or on_disk <= SCHEMA_VERSION:
+        return
+    _warn(
+        f"spawn-gate: the shared agent registry at {target} is "
+        f"schema_version={on_disk}, ahead of the schema_version={SCHEMA_VERSION} "
+        "this fno understands, so this worker could neither claim its node nor "
+        "stamp its mail; refusing to spawn. Upgrade this fno (fno doctor "
+        f"update), or repair the file (fno agents registry-repair --to "
+        f"{SCHEMA_VERSION} --apply)."
+    )
+    _emit_gate_event(
+        "registry_schema_ahead",
+        registry_path=str(target),
+        on_disk=on_disk,
+        understood=SCHEMA_VERSION,
+    )
+    raise GateRefused(
+        EXIT_REGISTRY_SCHEMA,
+        {
+            "status": "refused",
+            "reason": "registry_schema",
+            "registry_path": str(target),
+            "on_disk": on_disk,
+            "understood": SCHEMA_VERSION,
+        },
+    )
+
+
 def _check_ram_floor(floor_gb: float) -> None:
     """Refuse (never queue) below the floor; <= 0 disables; unreadable skips."""
     if floor_gb <= 0:
@@ -1108,6 +1192,16 @@ def run_gate(
         _admission_token=_PROVIDER_ADMISSION_TOKEN,
     )
 
+    # Ahead of the force branch, deliberately. `--force` means "I know the
+    # machine is busy", and a schema mismatch is not resource pressure: it is a
+    # worker that can neither claim its node nor stamp its mail, which is the
+    # failure this check exists to name. Forcing past it would reproduce that
+    # failure with the diagnosis suppressed. Nothing is held yet, so a refusal
+    # here needs no `guard.release()`. The dequeue path re-checks, the way the
+    # RAM floor does, because the queue window is long enough for the shared
+    # schema to move underneath a waiting spawn.
+    _check_registry_schema()
+
     if force and provider_cap is None:
         # Byte-twin with the Rust gate (check-reachable-paths); force also
         # bypasses the king share here, which _check_king_share's own refusal
@@ -1215,6 +1309,16 @@ def run_gate(
                 _warn(w)
             slots = c.slot_count
             if slots < cap:
+                try:
+                    # Re-checked on dequeue for the same reason the RAM floor is
+                    # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
+                    # up to QUEUE_TIMEOUT_S, and another process can raise the
+                    # shared schema inside that window. The entry check above owns
+                    # the force path; this one owns the queue window.
+                    _check_registry_schema()
+                except GateRefused:
+                    guard.release()
+                    raise
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:

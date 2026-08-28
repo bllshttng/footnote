@@ -3265,6 +3265,11 @@ async fn load_registry_offloaded(path: PathBuf) -> Result<state::Registry, state
 fn state_error_code(e: &state::StateError) -> ErrorCode {
     match e {
         state::StateError::Cancelled(_) => ErrorCode::ShuttingDown,
+        // Both halves of the schema comparison answer the same way: the write
+        // was refused because two fno builds disagree about the schema, which a
+        // client must be able to tell apart from an internal daemon fault.
+        state::StateError::UnsupportedSchemaVersion { .. }
+        | state::StateError::SourceAheadSchemaBump { .. } => ErrorCode::SchemaMismatch,
         _ => ErrorCode::Internal,
     }
 }
