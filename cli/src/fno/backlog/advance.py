@@ -1894,7 +1894,8 @@ class JoinRefuse(Exception):
     """A join precondition failed; ``code`` is the CLI exit code.
 
     2 = no live node claim (nothing to join), 3 = width 1 (a second worker
-    has nothing to pull), 4 = no usable bound plan.
+    has nothing to pull), 4 = no usable bound plan, 5 = already joined
+    (live ``j-<node>-*`` workers exist).
     """
 
     def __init__(self, code: int, message: str) -> None:
@@ -2001,6 +2002,28 @@ def _plan_parallel_width(plan_path: Path) -> int:
 _BAND_RANK = {"low": 0, "medium": 1, "high": 2}
 
 
+def _live_joiner_names(node_id: str) -> list[str]:
+    """Live roster names ``j-<node>-*`` in the agents registry.
+
+    A second join into the same node rewrites the join brief (dropping the
+    first join's band table) and then dies on the already-taken lead name -
+    after nearly spawning duplicate workers. The x-dadc live proof hit this
+    when a JOINER itself re-ran join on its own node.
+    """
+    from fno.paths import agents_registry_path
+
+    try:
+        reg = json.loads(Path(agents_registry_path()).read_text())
+    except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
+        return []
+    prefix = f"j-{node_id}-"
+    return sorted(
+        str(row.get("name"))
+        for row in reg.get("agents", [])
+        if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
+    )
+
+
 def _plan_wave_bands(plan_path: Path) -> list[str]:
     """The plan's distinct wave bands, highest first (x-dadc).
 
@@ -2059,7 +2082,7 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     "lanes"}`` - ``lanes`` maps each spawned name to its ``band``/``harness``/
     ``model`` (plus ``"grid": "declined"`` when the grid declined that band
     and the joiner rides the caller's default lane). Raises JoinRefuse (exit
-    2/3/4) on a precondition failure and SpawnError when the lead spawn
+    2/3/4/5) on a precondition failure and SpawnError when the lead spawn
     itself fails; a non-lead spawn failure warns to stderr and shrinks
     ``spawned`` instead of aborting the join.
     """
@@ -2091,6 +2114,14 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             2,
             f"holder worktree for {node_id} is gone ({worktree}); nothing to join",
+        )
+    live = _live_joiner_names(node_id)
+    if live:
+        raise JoinRefuse(
+            5,
+            f"{node_id} is already joined by {', '.join(live)}; join is not "
+            "idempotent - a second run rewrites the brief and races the "
+            "first join's spawns",
         )
     try:
         plan_path = resolve_plan_path(str(plan_raw))

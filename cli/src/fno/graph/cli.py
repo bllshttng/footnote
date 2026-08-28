@@ -5137,7 +5137,7 @@ def cmd_join(
     ``{"node", "worktree", "width", "spawned", "lead", "lanes"}``.
 
     Refusals: exit 2 nothing to join (no live claim), exit 3 width 1, exit 4
-    no usable bound plan.
+    no usable bound plan, exit 5 already joined (live j-<node>-* workers).
     """
     from fno.backlog.advance import JoinRefuse, join_node
     from fno.graph.fuzzy import resolve_node

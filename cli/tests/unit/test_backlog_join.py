@@ -10,6 +10,8 @@ recorded, never run.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fno.backlog import advance
@@ -142,6 +144,11 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
     # recorded spawn calls carry ONLY join's own spawns.
     monkeypatch.setattr(
         "fno.graph.collision.resolve_plan_path", lambda p: tmp_path / "plan.md"
+    )
+    # The already-joined guard reads the registry; point it at an absent file
+    # so the suite never depends on this machine's live roster rows.
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "registry-absent.json"
     )
 
     class _Proc:
@@ -310,6 +317,42 @@ def test_unknown_node_refuses_exit_2(tmp_path, monkeypatch):
     with pytest.raises(JoinRefuse) as excinfo:
         join_node("x-9999", 3)
     assert excinfo.value.code == 2
+
+
+def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
+    """Exit 5: live j-<node>-* workers make join non-idempotent. The live
+    proof hit this when a JOINER re-ran join on its own node - the rewrite
+    truncated the brief and nearly duplicated the spawns."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-1", "status": "live"},
+        {"name": "j-x-8d1d-2", "harness_session_id": "s-2", "status": "stopped"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 5)
+    assert excinfo.value.code == 5
+    assert "already joined by j-x-8d1d-1" in excinfo.value.message
+    assert not calls  # refused before any spawn, brief untouched
+
+
+def test_join_allowed_when_no_live_joiner_rows(tmp_path, monkeypatch):
+    """Stopped rows do not block a re-join; an unreadable registry neither."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-1", "status": "stopped"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
+    monkeypatch.setattr(
+        "fno.paths.agents_registry_path", lambda: tmp_path / "absent.json"
+    )
+    calls.clear()
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
 
 
 def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
