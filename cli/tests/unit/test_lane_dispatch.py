@@ -14,6 +14,7 @@ monkeypatched (no real git / spawn).
 
 from __future__ import annotations
 
+import json
 import tomllib
 import pytest
 from typer.testing import CliRunner
@@ -261,12 +262,73 @@ def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):
 def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
     monkeypatch, receipts, exit_code
 ):
-    monkeypatch.setattr(advance, "dispatch_lanes", lambda *_a, **_kw: receipts)
+    def fake_dispatch(*_args, report=None, **_kwargs):
+        if report is not None:
+            report.update({
+                "requested": 2,
+                "filled": len(receipts),
+                "stop": "filled" if len(receipts) == 2 else "no-candidate",
+                "excluded": [],
+            })
+        return receipts
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
 
     result = CliRunner().invoke(graph_cli.cli, ["dispatch-lanes", "--max", "2"])
 
     assert result.exit_code == exit_code
-    assert "n-a" in result.output if receipts else result.output.strip() == "[]"
+    payload = json.loads(result.output)
+    assert payload["lanes"] == receipts
+    assert payload["fill"]["selected"] == len(receipts)
+    assert payload["fill"]["dispatched"] == sum(
+        receipt.get("status") == "dispatched" for receipt in receipts
+    )
+    assert payload["fill"]["skipped"] == sum(
+        receipt.get("status") == "skipped" for receipt in receipts
+    )
+
+
+def test_dispatch_report_explains_cap_full_after_one_selection(tmp_path, monkeypatch):
+    from fno.claims.lanes import acquire_lane_slot
+
+    ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "code"))
+    _wire(monkeypatch, tmp_path, ready)
+    root = tmp_path / "claims"
+    assert acquire_lane_slot(3, "peer-a", root=root) is not None
+    assert acquire_lane_slot(3, "peer-b", root=root) is not None
+    report = {}
+
+    receipts = advance.dispatch_lanes(3, claims_root=root, report=report)
+
+    assert len(receipts) == 1
+    assert report["requested"] == 3
+    assert report["filled"] == 1
+    assert report["stop"] == "cap-full"
+    assert report["dispatched"] == 1
+    assert report["skipped"] == 0
+
+
+def test_lane_fill_report_preserves_classifier_exclusion(tmp_path, monkeypatch):
+    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
+    _wire(monkeypatch, tmp_path, ready)
+    monkeypatch.setattr(
+        advance,
+        "_classify_lane_candidate",
+        lambda node, **_kwargs: "high-collision:plan" if node["id"] == "n-a" else None,
+    )
+    report = {}
+
+    selected = advance.select_lane_fill(
+        1, claim=False, claims_root=tmp_path / "claims", report=report
+    )
+
+    assert [node["id"] for node in selected] == ["n-b"]
+    assert report == {
+        "requested": 1,
+        "filled": 1,
+        "stop": "filled",
+        "excluded": [{"id": "n-a", "reason": "high-collision:plan"}],
+    }
 
 
 def test_dispatch_lanes_forwards_vendor_and_model_on_claude_harness(

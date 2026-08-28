@@ -635,6 +635,7 @@ def select_lane_fill(
     mission: Optional[str] = None,
     claim: bool = True,
     claims_root: Optional[Path] = None,
+    report: Optional[dict] = None,
 ) -> list[dict]:
     """Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
@@ -680,6 +681,15 @@ def select_lane_fill(
     """
     from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
+    if report is not None:
+        report.clear()
+        report.update({
+            "requested": max_lanes,
+            "filled": 0,
+            "stop": "no-candidate",
+            "excluded": [],
+        })
+
     if max_lanes < 1:
         return []
 
@@ -720,6 +730,7 @@ def select_lane_fill(
             # and refresh only the claim-state. The fresh query is what makes
             # distinctness "recomputed after each claim" not snapshot-stale.
             candidate = None
+            pick_excluded: list[dict] = []
             for node in _ready_nodes(project, mission):
                 nid = node["id"]
                 if nid in picked_ids:
@@ -736,6 +747,8 @@ def select_lane_fill(
                 if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
+                    if report is not None and len(pick_excluded) < 5:
+                        pick_excluded.append({"id": nid, "reason": reason})
                     continue  # leave it ready; reversible, retried next round
                 if reason is not None and (
                     inflight
@@ -772,6 +785,8 @@ def select_lane_fill(
                 candidate = (node, node.get("domain") or _DOMAIN_UNSET)
                 break
             if candidate is None:
+                if report is not None:
+                    report["excluded"].extend(pick_excluded)
                 break  # no selectable, unclaimed node left
 
             node, domain = candidate
@@ -783,8 +798,14 @@ def select_lane_fill(
                     root=claims_root,
                 )
                 if slot is None:
+                    if report is not None:
+                        report["excluded"].extend(pick_excluded)
+                        report["stop"] = "cap-full"
                     break  # cap full: every slot held by a live peer lane
             selected.append(node)
+            if report is not None:
+                report["excluded"].extend(pick_excluded)
+                report["filled"] = len(selected)
             used_domains.add(domain)
             picked_ids.add(node["id"])
             if node.get("plan_path"):
@@ -807,6 +828,11 @@ def select_lane_fill(
                 except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
         raise
+
+    if report is not None and len(selected) >= max_lanes:
+        report["stop"] = "filled"
+    elif report is not None and report.get("stop") != "cap-full":
+        report["stop"] = "no-candidate"
 
     return selected
 
@@ -1724,6 +1750,7 @@ def dispatch_lanes(
     model: Optional[str] = None,
     harness: Optional[str] = None,
     vendor: Optional[str] = None,
+    report: Optional[dict] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
 
@@ -1751,9 +1778,17 @@ def dispatch_lanes(
     from fno.claims.lanes import release_lane_slot
 
     selected = select_lane_fill(
-        max_lanes, project, mission=mission, claim=True, claims_root=claims_root
+        max_lanes,
+        project,
+        mission=mission,
+        claim=True,
+        claims_root=claims_root,
+        report=report,
     )
     if not selected:
+        if report is not None:
+            report["dispatched"] = 0
+            report["skipped"] = 0
         return []
 
     canonical = _canonical_root()
@@ -1892,6 +1927,13 @@ def dispatch_lanes(
                 "short_id": short_id,
                 "worktree": str(worktree),
             }
+        )
+    if report is not None:
+        report["dispatched"] = sum(
+            receipt.get("status") == "dispatched" for receipt in receipts
+        )
+        report["skipped"] = sum(
+            receipt.get("status") == "skipped" for receipt in receipts
         )
     return receipts
 

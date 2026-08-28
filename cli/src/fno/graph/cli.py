@@ -5134,6 +5134,7 @@ def cmd_dispatch_lanes(
 
         max_lanes = load_settings().parallel.max_lanes
 
+    fill: dict = {}
     receipts = dispatch_lanes(
         max_lanes,
         project,
@@ -5141,8 +5142,20 @@ def cmd_dispatch_lanes(
         model=model,
         harness=harness,
         vendor=provider,
+        report=fill,
     )
-    typer.echo(json.dumps(receipts, indent=2))
+    fill.setdefault("requested", max_lanes)
+    fill.setdefault("selected", fill.get("filled", len(receipts)))
+    fill["selected"] = fill.get("filled", len(receipts))
+    fill.setdefault("dispatched", sum(
+        receipt.get("status") == "dispatched" for receipt in receipts
+    ))
+    fill.setdefault("skipped", sum(
+        receipt.get("status") == "skipped" for receipt in receipts
+    ))
+    fill.setdefault("stop", "no-candidate")
+    fill.setdefault("excluded", [])
+    typer.echo(json.dumps({"lanes": receipts, "fill": fill}, indent=2))
     if receipts and not any(
         receipt.get("status") == "dispatched" for receipt in receipts
     ):
