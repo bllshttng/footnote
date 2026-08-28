@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -170,59 +171,63 @@ def resolve_node_id(
 
 
 def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
-    """path -> (unpushed_count, ok, age). Shells to the shared
-    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh) rather than a
-    second implementation of its fail-toward-keep contract. All paths run in
-    one bash process so the script's own per-process fetch cache (exported
-    ``_WT_REMOTE_REFS_FRESH``/``_STALE``) verifies the remote exactly once
-    for the whole batch, not once per worktree - and the last-commit age
-    rides the same loop iteration rather than a second subprocess per path.
-
-    The script is resolved via ``paths.resolve_plugin_script``: env hint,
-    then a fixed offset from this package validated as the plugin root, then
-    the persisted pointer, and only then ambient-cwd repo discovery. Never a
-    bare ``parents[N]`` offset: an installed wheel has no ``scripts/`` tree,
-    and such an expression either crashes or silently disables this leg
-    outside a source checkout. A resolved-but-absent script returns {} and
-    every path then reads UNKNOWN (``read failed: git``) per the module's
-    fail-open contract - the sweep reports the miss, it never guesses."""
+    """path -> (unpushed_count, ok, age), via the packaged port of
+    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh; the bash
+    original remains for its shell callers). The port exists so this module
+    never shells out to a clone-only script: an installed wheel carries no
+    ``scripts/`` tree, and rooting that call at the package parent either
+    crashed or silently disabled this leg. The remote-refs refresh is
+    verified once per process (module flags below), the same one-fetch-per-
+    sweep contract the exported bash cache gave."""
     if not paths:
         return {}
-    from fno import paths as _paths
+    results: dict[str, tuple[int, bool, str]] = {}
+    for p in paths:
+        count, ok = _wt_unpushed_count(p)
+        age_p = subprocess.run(
+            ["git", "-C", p, "log", "-1", "--format=%cr"],
+            capture_output=True,
+            text=True,
+        )
+        results[p] = (count, ok, age_p.stdout.strip() or "unknown")
+    return results
 
-    script = _paths.resolve_plugin_script("scripts/lib/worktree-unpushed.sh")
-    if not script.is_file():
-        return {}
-    driver = (
-        'source "$1"; shift\n'
-        'for p in "$@"; do\n'
-        '  err="$(mktemp)"\n'
-        '  out="$(wt_unpushed_count "$p" 2>"$err")"\n'
-        '  errtext="$(cat "$err")"; rm -f "$err"\n'
-        '  ok=1\n'
-        '  case "$errtext" in *"not verifiable"*) ok=0 ;; esac\n'
-        '  age="$(git -C "$p" log -1 --format=%cr 2>/dev/null)"\n'
-        "  printf '%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$p\" \"$out\" \"$ok\" \"$age\"\n"
-        "done\n"
-    )
-    proc = subprocess.run(
-        ["bash", "-c", driver, "bash", str(script), *paths],
+
+# Port of scripts/lib/worktree-unpushed.sh. FAIL TOWARD KEEP: only a literal
+# count of 0 from git says "nothing unique"; a missing path, a git error, an
+# unverifiable remote, or any non-numeric answer reads as (1, not-ok). The
+# count is only truthful against CURRENT remote refs, so it is taken after a
+# verified `fetch --all --prune`; a refresh that cannot verify (no network,
+# dead remote) answers "might hold unique commits" - and a FAILED fetch
+# caches too, so a sweep pays one connect timeout, not one per worktree.
+_remote_refs_fresh = False
+_remote_refs_stale = False
+
+
+def _wt_unpushed_count(path: str) -> tuple[int, bool]:
+    """(count, ok); ok False means the read itself is untrustworthy."""
+    global _remote_refs_fresh, _remote_refs_stale
+    if not path or not os.path.isdir(path):
+        return 1, False
+    if not _remote_refs_fresh:
+        if _remote_refs_stale:
+            return 1, False
+        fetch_p = subprocess.run(
+            ["git", "-C", path, "fetch", "--all", "--prune"], capture_output=True
+        )
+        if fetch_p.returncode != 0:
+            _remote_refs_stale = True
+            return 1, False
+        _remote_refs_fresh = True
+    rev_p = subprocess.run(
+        ["git", "-C", path, "rev-list", "--count", "HEAD", "--not", "--remotes"],
         capture_output=True,
         text=True,
     )
-    results: dict[str, tuple[int, bool, str]] = {}
-    for line in (proc.stdout or "").splitlines():
-        parts = line.split("\x1f")
-        if len(parts) != 4:
-            continue
-        p, count_s, ok_s, age = parts
-        count = int(count_s) if count_s.isdigit() else 1
-        results[p] = (count, ok_s == "1", age or "unknown")
-    # A path the driver never reported (bash itself failed) fails toward
-    # "unpushed and unverifiable", the same posture wt_unpushed_count takes.
-    for p in paths:
-        results.setdefault(p, (1, False, "unknown"))
-    return results
+    out = rev_p.stdout.strip()
+    if rev_p.returncode != 0 or not out.isdigit():
+        return 1, False
+    return int(out), True
 
 
 # --- fleet input ---------------------------------------------------------
@@ -252,13 +257,10 @@ def sweep(repo: Path) -> list[Row]:
     """Classify every worktree registered to ``repo``.
 
     ``repo`` resolution is the caller's job, not this module's: a module
-    that calls the shared ``resolve_repo_root()`` itself would drag every
-    ``scripts/``-relative path in this file (the ``_unpushed_batch`` lookup,
-    deliberately package-relative via ``Path(__file__)`` rather than that
-    same resolver - see its docstring) into `fno lint shellout-drift`'s scan
-    scope for no reason;
-    that guard flags a module on the mere co-occurrence of a bash-exec and
-    a resolver call, not on which one actually roots the script path.
+    that calls the shared ``resolve_repo_root()`` itself would drag any
+    ``scripts/``-relative path in this file into `fno lint shellout-drift`'s
+    scan scope. This module shells out to no repo-root script at all - the
+    unpushed count is a packaged port - so the guard has nothing to flag.
     """
     worktrees = _worktrees(repo)
     paths = [p for _b, p in worktrees]
