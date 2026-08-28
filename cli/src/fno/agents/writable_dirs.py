@@ -170,26 +170,35 @@ def _state_roots() -> list[Path]:
     except Exception:
         pass
     try:
-        from fno.paths import inbox_agents_root
-
-        # The mail bus, and it is NOT always under the state root. On a vault
-        # setup it resolves to `<vault>/internal/agents`, so a worker granted
-        # `~/.fno` and nothing else still cannot write a durable envelope.
-        # Measured 2026-08-28 on a bounded codex thread worker that had the
-        # state root and answered: `durable envelope write failed: [Errno 1]
-        # Operation not permitted: <vault>/internal/agents/<handle>`.
-        #
-        # That is the whole defect this grant exists to close. A worker that
-        # cannot mail cannot tell you it cannot mail, and the claim store alone
-        # buys a worker that holds its node and still reports nothing.
-        #
-        # The agents subdirectory, never the vault root: the same narrowness
-        # `_plan_dir` argues for. Off a vault this already sits inside the
-        # state root and dedups away.
-        out.append(inbox_agents_root())
+        out.append(_mail_bus_root())
     except Exception:
         pass
     return out
+
+
+def _mail_bus_root() -> "Path":
+    """The directory holding every project's inbox.
+
+    Resolved through the same override `inbox_root_for` honors, not through
+    `inbox_agents_root()` alone: that one is only the FALLBACK, so a configured
+    `config.paths.inbox_dir` left the real mail bus ungranted while the grant
+    reported success.
+
+    A worker mails arbitrary handles, so the grant has to cover the parent that
+    holds all of them rather than one project's inbox. The sentinel finds it:
+    resolve for a name nothing else uses, then take the parent of the component
+    that name landed in.
+    """
+    from fno.paths import inbox_root_for
+
+    sentinel = "fnoprobeproject"
+    resolved = inbox_root_for(sentinel)
+    for parent in [resolved, *resolved.parents]:
+        if parent.name == sentinel:
+            return parent.parent
+    # No `{project}` component in the configured path: every project shares one
+    # directory, so that directory IS the root.
+    return resolved
 
 
 def _plan_dir(cwd: Path, plan_path: Optional[Path]) -> Optional[Path]:

@@ -244,37 +244,77 @@ def atomic_create_exclusive(path: Path, content: str) -> None:
             except OSError:
                 pass
 
+    # One mapper for every failure, on BOTH the first attempt and the retry.
+    # An earlier version mapped denials only on the first attempt, so the case
+    # this feature exists for - a sandboxed worker whose `.fno/claims` does not
+    # exist yet - escaped as a raw PermissionError from `mkdir` inside the
+    # except block, with no named refusal and no breadcrumb.
+    def _map(exc: OSError) -> BaseException:
+        if isinstance(exc, FileExistsError) or exc.errno == errno.EEXIST:
+            return ClaimAlreadyHeld(str(path))
+        if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS):
+            return _state_root_denied(path)
+        return exc
+
     try:
         _attempt()
-    except FileExistsError as exc:
-        raise ClaimAlreadyHeld(str(path)) from exc
     except FileNotFoundError:
-        # Parent directory missing. Create it once and retry.
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Parent directory missing. Create it once and retry. The mkdir is
+        # INSIDE the mapper's reach because on a denied state root it is the
+        # first call that fails, before any claim file is attempted.
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             _attempt()
-        except FileExistsError as exc:
-            raise ClaimAlreadyHeld(str(path)) from exc
-        # ENOSPC etc. propagate to the caller.
+        except OSError as exc:
+            raise _map(exc) from exc
     except OSError as exc:
-        if exc.errno == errno.EEXIST:
-            raise ClaimAlreadyHeld(str(path)) from exc
-        if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS):
-            raise _state_root_denied(path) from exc
-        raise
+        raise _map(exc) from exc
     # Reached only when the claim file was actually created, by either the
     # first attempt or the post-mkdir retry. A successful claim write is proof
     # the grant is present now, so any breadcrumb from an earlier denial is
     # stale and would otherwise read as a live problem forever.
-    _clear_denial_breadcrumb()
+    _clear_denial_breadcrumb(_denied_root(path))
 
 
-def _clear_denial_breadcrumb() -> None:
-    """Remove ``<repo>/.fno/state-root-denied.json``. Never raises."""
+def _breadcrumb_path() -> Path:
+    """``<repo>/.fno/state-root-denied.json`` for the CURRENT worktree.
+
+    The current worktree, never the canonical checkout. A sandboxed worker runs
+    in a linked worktree and is granted THAT directory; the main worktree is
+    outside its sandbox, so a breadcrumb aimed there is silently dropped by the
+    very failure it is reporting.
+    """
+    from fno.paths import resolve_repo_root
+
+    return resolve_repo_root() / ".fno" / "state-root-denied.json"
+
+
+def _clear_denial_breadcrumb(granted_root: str) -> None:
+    """Clear the breadcrumb when it names the root we just wrote under.
+
+    Root-matched on purpose. A worker can hold claims under more than one root
+    (the global store and a repo-local one), so an unconditional clear lets a
+    success under one root erase a live denial of another - the report
+    disappears while the problem stands.
+
+    Cheap on the hot path: this runs on EVERY successful claim create, so it
+    must not resolve a repo root (which shells out to git) unless a breadcrumb
+    is actually there. The common case is one `exists()` on a cached path.
+    """
     try:
-        from fno.paths import resolve_repo_root
+        target = _breadcrumb_path()
+        if not target.exists():
+            return
+        import json
 
-        (resolve_repo_root() / ".fno" / "state-root-denied.json").unlink(missing_ok=True)
+        try:
+            recorded = json.loads(target.read_text()).get("denied_root")
+        except Exception:
+            recorded = None
+        # An unreadable breadcrumb is cleared: it names no root to protect, and
+        # leaving a corrupt file behind reports a problem nobody can act on.
+        if recorded is None or recorded == granted_root:
+            target.unlink(missing_ok=True)
     except Exception:
         pass
 
@@ -341,9 +381,7 @@ def _write_denial_breadcrumb(denied_root: str) -> None:
         import json
         from datetime import datetime, timezone
 
-        from fno.paths import resolve_repo_root
-
-        target = resolve_repo_root() / ".fno" / "state-root-denied.json"
+        target = _breadcrumb_path()
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "denied_root": denied_root,

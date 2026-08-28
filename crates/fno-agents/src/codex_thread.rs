@@ -204,6 +204,15 @@ pub fn turn_start_request_json_with_effort(
 /// `writableRoots: []` and can still write its own cwd - so naming the state
 /// root does not take the worktree away.
 ///
+/// A measured LIMIT, stated rather than left for a reader to discover: the
+/// probe established that `writableRoots` is honored here, and it did not
+/// establish what a per-turn policy does to the SIBLING fields of the thread's
+/// posture. The turn sends a whole `workspaceWrite` object, so a field omitted
+/// here takes whatever default the server applies rather than inheriting the
+/// thread's value. `networkAccess` is left off because the scalar posture this
+/// replaces measured `networkAccess: false`, which is also the default, so
+/// both paths agree today on the measured configuration.
+///
 /// Empty `state_dirs` builds today's frame byte-for-byte.
 pub fn turn_start_request_json_full(
     id: u64,

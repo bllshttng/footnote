@@ -33,7 +33,8 @@ use crate::AgentStatus;
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 pub const EXIT_RAM_REFUSED: i32 = 77;
-/// The lane declares no carrier for the fno state root (epic rule R3).
+/// The lane declares nothing about how it stands toward the fno state root
+/// (epic rule R3). NOT "declares no carrier": an unsandboxed lane needs none.
 pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
 
@@ -429,7 +430,7 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
             return Err(EXIT_STATE_ROOT_UNGRANTED);
         }
     };
-    if contract.state_root_carrier(harness, substrate).is_some() {
+    if contract.state_root_stance(harness, substrate).is_some() {
         return Ok(());
     }
     // R3: name the root. A refusal that says "denied" without saying WHICH
@@ -1022,7 +1023,7 @@ mod tests {
         for (name, caps) in &contract.harness {
             for substrate in ["pane", "thread", "headless"] {
                 assert!(
-                    caps.state_root_carrier(substrate).is_some(),
+                    caps.state_root_stance(substrate).is_some(),
                     "{name}/{substrate} declares no stance toward the state root"
                 );
             }

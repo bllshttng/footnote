@@ -664,8 +664,19 @@ async fn run(args: Vec<String>) -> i32 {
     // evaluation per spawn, and the first spawn's row is counted before the
     // second is evaluated. Other verbs skip this entirely. Read before
     // `method`/`params` move into the request.
+    //
+    // The provider default MUST match the daemon's, which is `codex` when the
+    // param is absent (`handle_spawn`). A predicate requiring an explicit
+    // "codex" here reads false for a spawn with no `-H`, while the daemon still
+    // routes it to the codex thread lane - so the grant was never attached and
+    // the gate below never ran, on the exact lane this node exists to fix.
+    // Green gate, mute worker. Keep the two defaults identical.
     let daemon_bound_thread_spawn = method == "agent.spawn"
-        && params.get("provider").and_then(|v| v.as_str()) == Some("codex")
+        && params
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("codex")
+            == "codex"
         && params.get("substrate").and_then(|v| v.as_str()) == Some("thread");
     // Hop 1 of the state-root grant (x-f22f). The client inherits
     // FNO_WORKER_ADD_DIRS from the Python seam across `os.execv`, so it reads
@@ -1062,7 +1073,12 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // local `substrate` above has already been mapped to the historical `bg`
     // selector, so map it back rather than adding a second spelling to the
     // table.
-    if substrate != "pane" {
+    //
+    // Skipped for a provider this binary does not know: the dispatch arms below
+    // already refuse an unknown provider with exit 2 and the supported list,
+    // which is the message that reader needs. Refusing first with grant advice
+    // would shadow it with a diagnosis of the wrong problem.
+    if substrate != "pane" && KNOWN_PROVIDERS.contains(&provider) {
         let declared_substrate = if substrate == "bg" {
             "thread"
         } else {

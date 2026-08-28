@@ -50,11 +50,11 @@ pub struct HarnessCapabilities {
     pub stop_strategy: String,
     pub remove_strategy: String,
     pub session_binding: SessionBinding,
-    /// Which carrier this harness uses to hand a worker the fno state root,
-    /// keyed by substrate. An absent key means NO carrier, which the spawn gate
-    /// reads as a refusal rather than as a default (epic rule R3). `default`
-    /// keeps an older packaged copy parseable; it does not soften the refusal,
-    /// because an empty map declares nothing for every substrate.
+    /// How this harness stands toward the fno state root, keyed by substrate.
+    /// The value is a carrier name, `unsandboxed` for a lane measured to need
+    /// none, or `unmeasured`. An ABSENT key means the lane declares nothing,
+    /// which the spawn gate refuses (epic rule R3). `default` keeps an older
+    /// packaged copy parseable.
     #[serde(default)]
     pub state_root_grant: BTreeMap<String, String>,
     pub permission_response: BTreeMap<String, PermissionResponse>,
@@ -109,13 +109,13 @@ pub struct ModelSwitchStrategy {
 }
 
 impl HarnessCapabilities {
-    /// The carrier this harness uses to hand a worker the state root on
-    /// `substrate`, or `None` when it declares none.
+    /// How this harness stands toward the state root on `substrate`, or `None`
+    /// when it declares nothing.
     ///
-    /// `None` is a REFUSAL, never a default. A lane with no carrier produces a
-    /// worker that runs, edits code, and cannot claim, mail, or spawn - the
-    /// failure this table exists to make loud.
-    pub fn state_root_carrier(&self, substrate: &str) -> Option<&str> {
+    /// Deliberately NOT named `carrier`: the value can be `unsandboxed` or
+    /// `unmeasured`, and a caller that read either as a carrier name would try
+    /// to spend a stance. `None` is the refusal case.
+    pub fn state_root_stance(&self, substrate: &str) -> Option<&str> {
         self.state_root_grant.get(substrate).map(String::as_str)
     }
 }
@@ -125,10 +125,10 @@ impl HarnessContract {
         Self::parse(CAPABILITY_TOML)
     }
 
-    /// [`HarnessCapabilities::state_root_carrier`] for an unknown-harness name.
+    /// [`HarnessCapabilities::state_root_stance`] for an unknown-harness name.
     /// An unknown harness declares nothing, so it too is refused.
-    pub fn state_root_carrier(&self, harness: &str, substrate: &str) -> Option<&str> {
-        self.harness.get(harness)?.state_root_carrier(substrate)
+    pub fn state_root_stance(&self, harness: &str, substrate: &str) -> Option<&str> {
+        self.harness.get(harness)?.state_root_stance(substrate)
     }
 
     pub fn parse(text: &str) -> Result<Self, ContractError> {

@@ -4280,10 +4280,14 @@ async fn ensure_codex_thread_handle(
     // from its rollout. That worker is then mute again, so it gets an event
     // instead of silence. The durable fix is a granted-roots receipt on the
     // registry row, which belongs to the sibling node that owns that schema.
-    let _ = ctx.emitter.emit(
-        "codex_thread_resumed_without_state_grant",
-        &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
-    );
+    //
+    // Emitted only for a thread that COULD have lost something. A yolo thread
+    // is `danger-full-access` and needs no grant, and a resume that succeeds
+    // says nothing on its own, so the event fires after the resume and only
+    // for a bounded thread. An unconditional emit on every cache miss reports
+    // a loss that never happened, which is the kind of telemetry an operator
+    // learns to ignore.
+    let bounded = !entry_posture_is_full_access(entry);
     let driver = crate::codex_thread::CodexThread::resume(
         cwd,
         &session_id,
@@ -4293,6 +4297,12 @@ async fn ensure_codex_thread_handle(
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
+    if bounded {
+        let _ = ctx.emitter.emit(
+            "codex_thread_resumed_without_state_grant",
+            &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
+        );
+    }
     let mut threads = ctx.codex_threads.lock().await;
     // A concurrent caller may have won the race while we were connecting.
     // Theirs is already published, so keep it and drop ours: dropping a

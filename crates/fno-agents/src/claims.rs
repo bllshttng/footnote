@@ -637,7 +637,7 @@ fn atomic_create_exclusive(path: &Path, content: &str) -> Result<(), CreateError
     };
     match create_via_link(parent, path, content) {
         Ok(()) => {
-            clear_state_root_breadcrumb();
+            clear_state_root_breadcrumb(&denied_state_root(path));
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CreateError::AlreadyHeld),
@@ -645,7 +645,7 @@ fn atomic_create_exclusive(path: &Path, content: &str) -> Result<(), CreateError
             std::fs::create_dir_all(parent).map_err(|e| map_create_io_error(path, e))?;
             match create_via_link(parent, path, content) {
                 Ok(()) => {
-                    clear_state_root_breadcrumb();
+                    clear_state_root_breadcrumb(&denied_state_root(path));
                     Ok(())
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -677,12 +677,19 @@ fn map_create_io_error(path: &Path, error: std::io::Error) -> CreateError {
     }
     let root = denied_state_root(path);
     write_state_root_breadcrumb(&root);
-    CreateError::Io(format!(
+    CreateError::Io(state_root_denied_message(&root, &error))
+}
+
+/// The refusal text, with no side effect. Split from [`map_create_io_error`]
+/// so a test can pin the wording without dropping a breadcrumb into whatever
+/// repo the test runner happens to be standing in.
+fn state_root_denied_message(root: &str, error: &std::io::Error) -> String {
+    format!(
         "claim write denied by the sandbox: {root} is not writable for this session. \
          This is a missing state-root grant, NOT lock contention: no other holder exists \
          and waiting will not clear it. A worker here cannot claim, mail, or spawn. \
          Dispatch on a lane that declares state_root_grant for this substrate. ({error})"
-    ))
+    )
 }
 
 /// The state root a denied claim file sits under. The grant is a DIRECTORY
@@ -701,12 +708,30 @@ fn denied_state_root(path: &Path) -> String {
 ///
 /// `<repo>/.fno/` is chosen because it is the ONE place a denied worker can
 /// still write: the sandbox that took the state root left the repo writable.
-/// Everything else it would normally speak through - the claim store, the mail
-/// bus, the spawn mutex - lives under the root it just lost.
-fn state_root_breadcrumb_path() -> Option<PathBuf> {
-    let cwd = std::env::current_dir().ok()?;
-    let repo = crate::paths::canonical_repo_root(&cwd).unwrap_or(cwd);
-    Some(repo.join(".fno").join("state-root-denied.json"))
+/// Everything else it normally speaks through - the claim store, the mail bus,
+/// the spawn mutex - lives under the root it just lost.
+///
+/// THIS WORKTREE, never the canonical checkout. A sandboxed worker runs in a
+/// linked worktree and is granted THAT directory; `canonical_repo_root` names
+/// the main worktree, which is outside the worker's sandbox, so a breadcrumb
+/// aimed there is dropped by the very failure it is reporting. It also has to
+/// match the Python twin, which resolves the current worktree; two different
+/// paths means two files and neither clearing the other.
+///
+/// Cached: `clear_state_root_breadcrumb` runs on EVERY successful claim
+/// create, including inside `recover_stale_locked` while that holds a
+/// cross-process mutex. Resolving a repo root there forks `git` each time.
+fn state_root_breadcrumb_path() -> Option<&'static Path> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| {
+        let cwd = std::env::current_dir().ok()?;
+        Some(
+            crate::paths::worktree_repo_root(&cwd)
+                .join(".fno")
+                .join("state-root-denied.json"),
+        )
+    })
+    .as_deref()
 }
 
 /// Best effort, and deliberately silent on failure: the caller is already
@@ -719,9 +744,19 @@ fn write_state_root_breadcrumb(denied_root: &str) {
     if let Some(parent) = target.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let session_id = std::env::var("CODEX_COMPANION_SESSION_ID")
-        .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
-        .or_else(|_| std::env::var("FNO_AGENT_SELF"))
+    // The marker table in this same file, not a hand-written list of variable
+    // names. A second list drifts, and `stamp_command_env` scrubs the
+    // per-harness markers on a launched worker, so a list that omitted
+    // FNO_HARNESS_SESSION_ID fell through to FNO_AGENT_SELF - an agent NAME in
+    // a field labelled session_id.
+    let session_id = std::iter::once(FNO_HARNESS_SESSION_ID)
+        .chain(HARNESS_SESSION_MARKERS.iter().map(|(marker, _)| *marker))
+        .chain(
+            LEGACY_HARNESS_SESSION_MARKERS
+                .iter()
+                .map(|(marker, _)| *marker),
+        )
+        .find_map(|marker| std::env::var(marker).ok().filter(|v| !v.is_empty()))
         .unwrap_or_default();
     let payload = serde_json::json!({
         "denied_root": denied_root,
@@ -733,9 +768,38 @@ fn write_state_root_breadcrumb(denied_root: &str) {
 
 /// A successful claim write proves the grant is present now, so a breadcrumb
 /// from an earlier denial is stale and would otherwise read as a live problem.
-fn clear_state_root_breadcrumb() {
-    if let Some(target) = state_root_breadcrumb_path() {
-        let _ = std::fs::remove_file(target);
+///
+/// Root-matched. A worker holds claims under more than one root (the global
+/// store and a repo-local one), so an unconditional clear lets a success under
+/// one root erase a live denial of another: the report vanishes while the
+/// problem stands.
+///
+/// This runs on EVERY successful claim create, including inside
+/// `recover_stale_locked` while it holds a cross-process mutex, so the common
+/// case must stay one `exists()` against a cached path.
+fn clear_state_root_breadcrumb(granted_root: &str) {
+    let Some(target) = state_root_breadcrumb_path() else {
+        return;
+    };
+    if !target.exists() {
+        return;
+    }
+    let recorded = std::fs::read_to_string(target)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|value| {
+            value
+                .get("denied_root")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    // An unreadable breadcrumb is cleared: it names no root to protect, and a
+    // corrupt file reports a problem nobody can act on.
+    match recorded {
+        Some(root) if root != granted_root => {}
+        _ => {
+            let _ = std::fs::remove_file(target);
+        }
     }
 }
 
@@ -2233,10 +2297,12 @@ mod tests {
             std::io::ErrorKind::PermissionDenied,
             "Operation not permitted",
         );
+        // The pure message builder, NOT `map_create_io_error`: that one writes
+        // a breadcrumb, and a unit test must not drop a file into whatever
+        // repo the test runner is standing in. The mapper's routing is covered
+        // by `other_io_errors_are_left_alone` below.
         let path = Path::new("/Users/x/.fno/claims/node%3Aab-1.lock");
-        let CreateError::Io(message) = map_create_io_error(path, denied) else {
-            panic!("a permission denial must not be reported as AlreadyHeld");
-        };
+        let message = state_root_denied_message(&denied_state_root(path), &denied);
         assert!(message.contains("/Users/x/.fno"), "{message}");
         assert!(
             !message.contains("/claims/"),
