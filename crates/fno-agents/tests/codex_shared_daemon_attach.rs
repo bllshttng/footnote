@@ -24,6 +24,7 @@ use futures_util::{SinkExt, StreamExt};
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -46,10 +47,25 @@ fn the_driver_error_set_carries_no_child_spawn_variant() {
     assert_eq!(classify(&ThreadDriverError::Timeout), "timeout");
 }
 
+/// Serializes every test that READS OR WRITES `CODEX_HOME`.
+///
+/// The variable is process-global and cargo runs a binary's tests on parallel
+/// threads, so a relocating test moves the socket out from under a concurrent
+/// reader. Observed: `a_relocated_codex_home_moves_the_attach_socket` and the
+/// argv tests raced, and the failure moved between runs.
+static CODEX_HOME_LOCK: Mutex<()> = Mutex::new(());
+
+fn codex_home_guard() -> std::sync::MutexGuard<'static, ()> {
+    CODEX_HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// AC14 / AC16: the attach argv is codex's own resume verb pointed at the
 /// shared control socket, and the socket path honours `CODEX_HOME`.
 #[test]
 fn the_attach_argv_execs_codex_resume_against_the_control_socket() {
+    let _guard = codex_home_guard();
     let argv = codex_attach_argv("01a04546-28b2-7a41-ae4c-892bbeb8e295");
     assert_eq!(argv[0], "codex");
     assert_eq!(argv[1], "resume");
@@ -72,6 +88,7 @@ fn the_attach_argv_execs_codex_resume_against_the_control_socket() {
 /// two drifting until a codex row opens the wrong thing from one door.
 #[test]
 fn the_attach_argv_is_identical_in_both_crates() {
+    let _guard = codex_home_guard();
     let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
     assert_eq!(
         codex_attach_argv(uuid),
@@ -86,11 +103,13 @@ fn the_attach_argv_is_identical_in_both_crates() {
 /// AC16: a non-default `CODEX_HOME` moves the socket, so the argv moves with
 /// it rather than hardcoding `~/.codex`.
 ///
-/// `CODEX_HOME` is process-global, so this test owns it for its duration and
-/// runs alone in its own binary section (the two argv tests never overlap
-/// because this one restores the variable before it returns).
+/// `CODEX_HOME` is process-global, so this test holds [`CODEX_HOME_LOCK`] for
+/// its whole duration. Restoring the variable before returning is NOT enough
+/// on its own: the other tests run on parallel threads and read it while this
+/// one has it moved.
 #[test]
 fn a_relocated_codex_home_moves_the_attach_socket() {
+    let _guard = codex_home_guard();
     let previous = std::env::var_os("CODEX_HOME");
     std::env::set_var("CODEX_HOME", "/tmp/x6678-codex-home");
     let argv = codex_attach_argv("t");
@@ -104,6 +123,9 @@ fn a_relocated_codex_home_moves_the_attach_socket() {
     );
 }
 
+/// A live control socket, or `None` with a printed skip line. The caller must
+/// already hold [`CODEX_HOME_LOCK`]: the path it resolves depends on that
+/// variable.
 fn live_socket() -> Option<PathBuf> {
     let path = codex_app_server_socket_path();
     if path.exists() {
@@ -121,6 +143,7 @@ fn live_socket() -> Option<PathBuf> {
 /// between the private-child transport and this one.
 #[test]
 fn raw_ndjson_without_a_websocket_upgrade_is_refused() {
+    let _guard = codex_home_guard();
     let Some(path) = live_socket() else { return };
     let mut conn = UnixStream::connect(&path).expect("connect to the control socket");
     conn.set_read_timeout(Some(Duration::from_secs(5))).ok();
@@ -171,6 +194,7 @@ async fn a_missing_control_socket_fails_the_same_way_for_both_callers() {
 /// driver's own socket.
 #[tokio::test]
 async fn a_driver_thread_is_registered_on_the_shared_daemon() {
+    let _guard = codex_home_guard();
     let Some(socket) = live_socket() else { return };
     let driver = match CodexThread::start(std::env::temp_dir(), None, false, None).await {
         Ok(driver) => driver,
