@@ -1,10 +1,12 @@
-# Codex thread driver: the measured protocol surface
+# Codex thread driver: a client of the shared app-server daemon
 
-Why codex has no thread lane today, what a driver must speak, and what earns the capability bit. Measured against `codex-cli 0.149.1` on 2026-08-26. The fleet table below carries the same reading for the other four harnesses.
+What the codex thread lane speaks, which process owns a thread, and how a viewer reaches one. Measured against `codex-cli 0.149.1` on 2026-08-26, then again on 2026-08-28, after the driver moved onto the shared daemon. The fleet table below carries the same reading for the other four harnesses.
 
-A `thread` is an fno-layer construct. fno invents it and implements it over each harness's own resume primitive. No harness ships one. `bg` was only ever a claude subcommand. So this page does not ask whether codex has a thread feature. It answers what fno must build to own a codex thread lifecycle with no PTY.
+**One rule holds this page up. The viewport EXECS the harness's own attach command, and fno renders nothing.** Everything else here is detail under that.
 
-Read this before you conclude that codex cannot have a thread lane. It can. Nothing has built one.
+A `thread` is an fno-layer construct. fno invents it and implements it over each harness's own resume primitive. No harness ships one. `bg` was only ever a claude subcommand. So this page does not ask whether codex has a thread feature. It answers which process owns a codex thread's lifecycle, and the answer is codex's own shared app-server daemon rather than anything fno runs.
+
+Read this before you give fno that process to own. fno tried, and the cost is recorded under *Transport* below.
 
 ## The fleet, measured
 
@@ -14,7 +16,7 @@ The bit is per-harness, so the state of the other four is part of reading this p
 |---|---|---|---|---|
 | claude | `true` | `~/.claude/jobs`, 82 sessions over 92 days | `claude --resume <uuid>` | shipped. A supervisor daemon forks detached children and reconnects from a roster at startup |
 | opencode | `true` | session store behind `opencode serve` | `opencode --session <id>` | launch only. See the audit note below |
-| codex | `false` | 2,745 rollouts back to 2025-10-16 | `codex resume <uuid>`, plus the 95-RPC app-server | none. The whole of this page |
+| codex | `true` | 2,745 rollouts back to 2025-10-16 | `codex resume <uuid>`, plus the 95-RPC app-server | shipped. A WebSocket client of the shared `codex app-server daemon`, which owns the thread |
 | agy | `false` | 63 conversation DBs at `~/.gemini/antigravity-cli/conversations/<uuid>.db` | `agy --conversation <uuid>` | none |
 | gemini | `false` | n/a | `gemini --resume <id>` | the CLI is deprecated upstream. agy is the successor |
 
@@ -72,11 +74,13 @@ What the protocol adds over `codex exec resume` is narrower than a feature list 
 
 Pick by the question being asked. A human coming back to a session wants `codex resume`. A worker taking one more turn wants `codex exec resume`. A worker that must be steered and reviewed unattended wants the protocol.
 
-## The bit stays false, and that is not a formality
+## The bit is true, and what it now promises
 
-`cli/src/fno/agents/harness_capabilities.toml` holds `thread = false` for codex. The bit is evidence of a working driver with its own unattended journey test. It is never an aspiration. `harness_map.py`'s rule is that it is never inherited.
+`harness_capabilities.toml` holds `thread = true` for codex. The bit is evidence of a working driver, never an aspiration, and `harness_map.py`'s rule is that it is never inherited.
 
-Everything below is protocol that exists. None of it is a lane fno ships. Do not flip the bit against this page. Flip it against a driver and the journey test at the foot of it.
+The claim it carries was measured wrong in both directions before the shared-daemon move. The bit was flipped to make a codex thread survive mux death, and a private app-server did survive that. It was a child of `fno-agents-daemon`, so it did not obviously survive THAT daemon's death, and the durability was narrower than advertised. Against the shared daemon the thread survives both, because neither process owns it.
+
+That is now a promise the implementation keeps rather than one it overstates.
 
 ## The two durable halves already exist
 
@@ -84,17 +88,32 @@ Codex persists every conversation as a rollout at `~/.codex/sessions/YYYY/MM/DD/
 
 The transcript half and the resume half are both on disk. What is missing is an fno-side driver that owns the lifecycle.
 
-## Transport: no daemon required
+## Transport: a WebSocket client of the shared daemon
 
-`codex app-server` speaks JSON-RPC 2.0. The `"jsonrpc":"2.0"` header is omitted on the wire. Its default transport is newline-delimited JSON on stdin and stdout. A plain pipe child speaks the whole protocol. No PTY, no WebSocket and no daemon are involved.
+`codex app-server` speaks JSON-RPC 2.0. The `"jsonrpc":"2.0"` header is omitted on the wire. There are two ways to reach one, and the choice of which decides far more than a dependency.
 
-That matters for a driver's dependency surface. The detached `codex app-server --remote-control` daemon is a second way in. It listens at `$CODEX_HOME/app-server-control/app-server-control.sock` over a WebSocket, using the standard HTTP Upgrade handshake. `crates/fno-agents/src/codex_inject.rs` binds to it. A driver does not need it.
+A private `codex app-server` child speaks newline-delimited JSON on stdin and stdout. The shared `codex app-server daemon` listens at `$CODEX_HOME/app-server-control/app-server-control.sock` and carries the same frames as WebSocket text, using the standard HTTP Upgrade handshake at `ws://localhost/rpc`. A bare NDJSON write to that socket, with no upgrade, closes the connection: transport, not protocol, is the whole difference between the two lanes.
 
-Two transport traps are recorded here so nobody re-discovers them.
+**The driver takes the shared daemon, and the reason is not durability.** `crates/fno-agents/src/codex_thread.rs` calls `ensure_codex_daemon()`, connects through `codex_inject::connect_app_server`, and holds no child process. It used to fork a private app-server per worker as a child of `fno-agents-daemon`. On 2026-08-28 that left eight `codex app-server` processes parented to `fno-agents-daemon` beside one shared daemon holding the socket.
 
-**The control socket file outlives the process that bound it.** Unless a process cleans up on exit, its unix socket inode stays. So an `exists()` probe reads healthy against a daemon dead for a day. Read the pid from `~/.codex/app-server-daemon/app-server.pid` instead. Probe that pid. Use its `processStartTime` as an incarnation token. Require the `initialize` handshake to return.
+A private app-server owns no control socket. `codex agents`, `codex resume`, `codex fork`, `codex queue`, `codex archive` and Remote Control are all scoped to the shared one. `codex agents --help` says so in its own words: "Browse all agent sessions on the shared local app-server daemon." So a private child forfeits every vendor verb at once, including every verb the vendor ships next. The only symptom is that a thing the operator expects to work does not.
 
-**`codex app-server proxy --sock <path>` is unreliable.** It accepted frames and returned nothing against a confirmed-live daemon, twice, with no stderr. The WebSocket lane to that same socket worked in the same session. Prefer stdio, or the existing WS client.
+### Exec, never proxy
+
+Viewing a thread is `codex resume <thread-id> --remote unix://<control-socket>`, EXEC'd in a pane. The frames the driver reads drive turns. They never paint a screen. Read that as a hard boundary rather than a preference. A screenshot cannot tell an exec from a proxy, and the process tree can:
+
+- No `codex app-server` has `fno-agents-daemon` as its parent. Read every hit's parent positively. Never count app-servers: a count of one is also what a broken daemon plus one orphan looks like.
+- No `fno` process READS OR WRITES the bytes between a viewer terminal and `codex`. In the mux viewport the pane's own process is `codex`, with no children. From `fno agents attach` the verb stays as a waiting parent with stdio inherited. That is the shape the claude attach has always had. Measured 2026-08-28: pane 3181 `fno-agents attach`, child 3190 `codex resume <id> --remote unix://...`. A waiting parent is not a proxy. A parent that copies frames is.
+
+A change that reads frames here to draw something has rebuilt the rendering layer this lane deleted, merely relocated into a pane. `crates/fno/src/agents_view.rs` and `crates/fno-agents/src/client_verbs.rs` build that argv independently, because `fno` never links `fno-agents`. The test `the_attach_argv_is_identical_in_both_crates` links both and pins them byte-for-byte.
+
+### The daemon is ensured at every use, not once at spawn
+
+The control socket FILE outlives the process that bound it, so an `exists()` probe reads healthy against a daemon dead for a day. Read the pid from `~/.codex/app-server-daemon/app-server.pid`, probe that pid, use its `processStartTime` as an incarnation token, and require the `initialize` handshake to return. `codex_inject::probe_codex_app_server` does exactly that.
+
+Spawn-time health does not survive to attach time either. A shared daemon measured up at 00:46 on 2026-08-27 was gone by 15:48 while a private child spawned at 15:10 still ran. So `ensure_codex_daemon()` runs before the driver connects AND before an attach execs. A daemon that will not boot is a refusal naming the boot error, never a silent fallback to a rendered transcript.
+
+**`codex app-server proxy --sock <path>` is unreliable.** It accepted frames and returned nothing against a confirmed-live daemon, twice, with no stderr. Do not build a transport on it. The WebSocket lane to that same socket answered on the first try.
 
 ## What the protocol offers a driver
 
@@ -137,16 +156,13 @@ The consequence is an integrity hazard, not a capability gap. `review/start` nam
 
 A driver-hosted thread closes this by construction. It appears in `thread/loaded/list`, and `review/start` against it returns a receipt.
 
-## The fno-side gap is one lane
+## What the fno side holds now
 
-`crates/fno-agents/src/daemon.rs` is already the supervisor. It already has a startup recovery hook. Two facts about it:
+`crates/fno-agents/src/daemon.rs` is the supervisor, and `ctx.codex_threads` holds one entry per codex thread worker. Read those entries as SOCKETS, not children. The supervisor owns no app-server process, so losing one loses a connection while the thread keeps running. `recover_codex_threads` reopens them at startup from the registry's durable `harness_session_id`.
 
-- `recover()` skips a row whose `short_id` is empty. Codex rows carry no `short_id`, so every one is skipped.
-- Recovery is a reconcile-and-GC pass. Its whole output is `RecoveryReport { inconsistent, archived_orphans, reaped_pids, recovered_drives }`. There is no resume branch for any harness.
+One actor task per thread owns its connection exclusively. That reasoning is about handle types, so it survived the transport change untouched. `drive_turn` used to hold a mutex guard for a whole turn, so every follow-up ask queued behind it and the steer RPC was unreachable. Consumers now send commands and never touch the driver.
 
-The precedent to copy sits in the same file. `spawn_claude_stream_lane` holds an idle claude session as a stream thread over `claude -p --resume <uuid>`. Chat, switchboard and ask drive it. Codex needs that lane's counterpart. The app-server protocol is the better substrate for it, because it returns a turn id.
-
-`crates/fno-agents/src/opencode_serve.rs` is the second worked example. It is a persistent server hosting sessions. A detached per-turn writer returns immediately. Structured capture reads the server's own message store rather than scraping a pane. An unattended permission posture is written into a generated config, because an unanswered approval prompt is a hang and a worker has no human.
+Stopping a worker interrupts its in-flight turn and closes its connection. It does not kill an app-server. Killing that one takes every other codex session on the machine with it. A turn that survives the bounded settle keeps running on the daemon, and `stop` reports `timeout-turn-still-running` rather than claiming a kill it cannot perform.
 
 ## The alternative lane, and why it is a fallback
 
@@ -161,16 +177,18 @@ Its ceiling is structural, not a matter of polish.
 
 It stays the right shape for a one-shot. It is not a thread lane.
 
-## What earns the bit
+## The bar the bit is held to
 
-An unattended journey test, in the shape `opencode_serve.rs` established. Until it passes, `thread` stays `false` for codex.
+The journey shape `opencode_serve.rs` established, kept here as the standing bar rather than a checklist that was ticked once.
 
 1. Spawn a codex worker with `--substrate thread`. Assert the registry row carries `harness=codex`, a full `harness_session_id`, and `substrate=thread`. When either identity field is missing, refuse by name.
 2. Drive one real turn that writes a file in the worker's own worktree, not the canonical checkout. Assert the file lands on the correct branch.
-3. Kill the mux server. Assert the row survives and the thread is still resumable. This is the step that matters. Nothing in the tree performs it today.
+3. Kill the mux server. Assert the row survives and the thread is still resumable. Against the shared daemon this holds by construction, and so does killing `fno-agents-daemon`.
 4. Resume from a cold process. Assert a second turn quotes a fact introduced in the first. A recalled token is the positive marker. A non-empty reply is not.
 5. Assert `review/start` on that thread returns a `reviewThreadId`. The worker is then reviewable and cannot fall through to self-attestation.
 6. Assert that selection materialises a viewport inside a stated budget.
+
+**Assert a positive marker, never an absence.** The thread's id is PRESENT in `thread/loaded/list` read over a SEPARATE connection. Only a daemon that owns the thread answers that way, so the read cannot come back green for the wrong reason. Never count `codex app-server` processes. That count reads the same whether the daemon is healthy or dead with one orphan left behind. The no-child claim is pinned at the type level instead. An exhaustive match over `ThreadDriverError` carries no spawn arm, so it fails to COMPILE while the driver forks.
 
 ## Identity
 
