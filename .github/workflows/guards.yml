@@ -289,6 +289,15 @@ jobs:
           bash scripts/ci/check-reachable-paths.sh --self-test
           bash scripts/ci/check-reachable-paths.sh
 
+      # From the x-3b05 installed-tree import crash: parents[N]/scripts joins
+      # in cli/src/fno escape the package root and the wheel never ships them.
+      - name: Package-root path escapes + self-test
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: |
+          bash scripts/ci/check-package-path-escapes.sh --self-test
+          bash scripts/ci/check-package-path-escapes.sh
+
       # From skill-local-evals.yml.
       - name: No skills/<name>/evals/ dead convention
         if: ${{ !cancelled() }}
