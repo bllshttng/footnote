@@ -241,6 +241,17 @@ if (act) {
     const row = rows.find((r) => r.id === arg);
     if (row) row.querySelector(".rid").fire("click");
   }
+  // The keyboard route to the same id copy: expand, then press the real button.
+  // Records the tag, because a span with a click handler would satisfy a copy
+  // assertion while still being unreachable by tab.
+  if (kind === "copyIdDetail") {
+    const row = rows.find((r) => r.id === arg);
+    if (row) {
+      row.querySelector(".rmain").click();
+      const btn = row.descendants.filter((n) => n.attrs["data-copy"] === "id")[0];
+      if (btn) { api.copyIdTag = btn.tagName; btn.fire("click"); }
+    }
+  }
   if (kind === "copyPath") {
     const row = rows.find((r) => r.id === arg);
     if (row) {

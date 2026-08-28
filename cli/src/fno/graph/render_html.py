@@ -536,6 +536,8 @@ body[data-local="false"] .detail { padding-left:15px }
 .detail .kv { display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12px; color:var(--muted) }
 .detail .kv span { font-family:"IBM Plex Mono",ui-monospace,monospace }
 .detail .kv b { color:var(--ink-2); font-weight:500 }
+/* The kv line is 12px text, so the shared .pbtn padding would tower over it. */
+.detail .kv .pbtn { padding:1px 6px; font-size:11px }
 .blk { border:1px solid var(--blocked); background:var(--blocked-bg); border-radius:7px;
   padding:9px 11px; display:flex; flex-direction:column; gap:6px }
 .blk.kin { border-color:var(--line); background:var(--surface) }
@@ -755,7 +757,10 @@ _DASHBOARD_JS = """\
   }
   function detail(n) {
     var h = '<div class=\"kv\">';
-    if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + '</span>';
+    // The row's .rid copy is mouse-only by construction: it is a span inside
+    // .rmain's button, and a button cannot nest one. So the keyboard path to
+    // the same copy is this button, reached by expanding the row.
+    if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
@@ -798,7 +803,9 @@ _DASHBOARD_JS = """\
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
         // not a button, because .rmain is already a button and nesting one is
-        // invalid; stopPropagation keeps the copy from toggling the row.
+        // invalid; stopPropagation keeps the copy from toggling the row. A span
+        // cannot take focus, so keyboard users copy the id from the detail's
+        // Copy button instead; this is the pointer shortcut to it.
         if (LOCAL && n.id) { var rid = main.querySelector('.rid');
           if (rid) { rid.title = 'Copy node id';
             rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }

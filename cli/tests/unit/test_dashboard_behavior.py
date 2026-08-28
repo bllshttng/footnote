@@ -373,3 +373,19 @@ def test_a_public_board_offers_no_id_copy(tmp_path: Path):
     assert "Copy path" not in body
     assert "ab-16000003" not in body
     assert 'class="rid"></span>' in body, "the public row still emits an empty id cell"
+
+
+def test_the_node_id_is_copyable_from_the_keyboard(tmp_path: Path):
+    """The row's .rid is a span inside .rmain's button, so tab never reaches it
+    and Enter expands the row instead of copying. The detail carries a real
+    button for the same copy, which is the route a keyboard user has."""
+    out = _run(
+        tmp_path,
+        [_entry("ab-16000004", title="Copy me by keyboard")],
+        BOARD_ACTION="copyIdDetail:ab-16000004",
+    )
+    assert out.get("copyIdTag") == "BUTTON", (
+        "the detail's id copy control must be a focusable button, got "
+        f"{out.get('copyIdTag')!r}"
+    )
+    assert out["after"]["copied"] == ["ab-16000004"], out["after"]["copied"]
