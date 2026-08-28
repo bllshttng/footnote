@@ -1,24 +1,41 @@
-//! Stdio app-server driver for persistent Codex threads.
+//! Shared-app-server driver for persistent Codex threads.
 //!
-//! Codex's app-server is a newline-delimited JSON protocol on stdin/stdout.
-//! This module owns one app-server child, keeps its full thread id, and turns
-//! `turn/completed` notifications into structured turn receipts. The daemon
-//! holds the driver; no pane or daemon-owned WebSocket is involved.
+//! The driver is a CLIENT of codex's own `app-server` daemon, never the owner
+//! of one. It connects to `$CODEX_HOME/app-server-control/app-server-control.sock`
+//! over the WebSocket lane [`crate::codex_inject::connect_shared_app_server`]
+//! already speaks, keeps its full thread id, and turns `turn/completed`
+//! notifications into structured turn receipts.
+//!
+//! # Why a client and not a child
+//!
+//! An earlier shape forked a private `codex app-server` per worker. It drove
+//! turns correctly and cost the entire vendor surface: `codex agents`,
+//! `resume`, `fork`, `queue`, `archive` and Remote Control are all scoped to
+//! the SHARED daemon, so a thread on a private app-server is invisible to
+//! every one of them, and to any codex verb shipped next. There is also no
+//! socket for a codex TUI to attach to, so the operator's viewport could only
+//! ever re-render the rollout as flat text.
+//!
+//! Registering with the shared daemon buys both halves at once: the thread
+//! outlives this process (the daemon owns it), and `codex resume <id> --remote
+//! unix://<sock>` draws codex's real interface on it with fno rendering
+//! nothing. See `docs/architecture/codex-thread-driver.md`.
 
 use crate::codex_inject::{
+    codex_app_server_socket_path, connect_shared_app_server, ensure_codex_daemon,
     initialize_request_json, initialized_notification_json, parse_review_start_response,
-    review_start_request_json, ReviewDelivery, ReviewTarget,
+    review_start_request_json, CodexAppServerSink, CodexAppServerStream, ReviewDelivery,
+    ReviewTarget,
 };
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::sync::{mpsc, oneshot};
+use tokio_tungstenite::tungstenite::Message;
 
 /// Total budget for one id-matched request/response exchange (handshake,
 /// turn/start, steer, interrupt, review). Frames unrelated to the id arrive
@@ -46,7 +63,7 @@ pub fn ask_wait() -> Duration {
 const TURN_SETTLE_TIMEOUT: Duration = Duration::from_secs(65);
 /// Outer bound around the daemon's WHOLE stop exchange (interrupt RPC + turn
 /// settle), kept just under the client's 120s `RESPONSE_DEADLINE` so a wedged
-/// child yields `timeout-child-killed`, not a dead socket.
+/// child yields `timeout-detached`, not a dead socket.
 pub fn stop_settle_bound() -> Duration {
     Duration::from_secs(115)
 }
@@ -90,8 +107,8 @@ impl std::error::Error for ThreadStartError {}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ThreadDriverError {
-    #[error("codex app-server spawn failed: {0}")]
-    Spawn(#[source] io::Error),
+    #[error("codex app-server daemon unavailable: {0}")]
+    Daemon(String),
     #[error("codex app-server I/O failed: {0}")]
     Io(#[source] io::Error),
     #[error("codex app-server response timed out")]
@@ -295,11 +312,11 @@ pub fn parse_turn_completed_value(value: &Value) -> Option<TurnResult> {
 }
 
 pub struct CodexThread {
-    child: Child,
-    stdin: ChildStdin,
-    /// `None` once [`CodexThread::into_actor`] moved stdout into the actor's
-    /// read pump; the legacy read paths below then refuse rather than spin.
-    stdout: Option<BufReader<ChildStdout>>,
+    sink: CodexAppServerSink,
+    /// `None` once [`CodexThread::into_actor`] moved the read half into the
+    /// actor's read pump; the legacy read paths below then refuse rather than
+    /// spin.
+    stream: Option<CodexAppServerStream>,
     pending: VecDeque<Value>,
     /// `turn/completed` notifications parsed once at push, keyed by turn id
     /// (Change 10: `take_completed` used to re-serialize every parked entry on
@@ -385,28 +402,32 @@ impl CodexThread {
         Ok(driver)
     }
 
+    /// Connect to the shared daemon. `cwd` is NOT a process attribute here -
+    /// it rides `thread/start` / `thread/resume` as a param, which is where it
+    /// already was - so it is only carried for the accessor.
     async fn launch(cwd: PathBuf) -> Result<Self, ThreadDriverError> {
-        let mut child = Command::new("codex")
-            .arg("app-server")
-            .current_dir(&cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(ThreadDriverError::Spawn)?;
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| ThreadDriverError::Protocol("app-server stdin missing".into()))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ThreadDriverError::Protocol("app-server stdout missing".into()))?;
+        // Connect first: a completed handshake IS the daemon's health proof,
+        // so a live socket costs one connect rather than a state-file lock
+        // plus a probe. Only a refusal is a boot opportunity - and it is a
+        // real one, because the daemon has been measured dead while a worker
+        // spawned 38 minutes earlier was still running. Ensure belongs on
+        // every connect, not once at spawn.
+        let socket = codex_app_server_socket_path();
+        let (sink, stream) = match connect_shared_app_server(&socket).await {
+            Ok(connection) => connection,
+            Err(first) => {
+                tokio::task::spawn_blocking(ensure_codex_daemon)
+                    .await
+                    .map_err(|error| ThreadDriverError::Daemon(error.to_string()))?
+                    .map_err(|boot| ThreadDriverError::Daemon(format!("{first}; {boot}")))?;
+                connect_shared_app_server(&socket)
+                    .await
+                    .map_err(|reason| ThreadDriverError::Daemon(reason.to_string()))?
+            }
+        };
         Ok(Self {
-            child,
-            stdin,
-            stdout: Some(BufReader::new(stdout)),
+            sink,
+            stream: Some(stream),
             pending: VecDeque::new(),
             completed_turns: HashMap::new(),
             next_id: 2,
@@ -418,19 +439,14 @@ impl CodexThread {
         })
     }
 
+    /// A no-op on the shared lane: [`connect_shared_app_server`] completes the
+    /// `initialize` / `initialized` exchange before it hands the connection
+    /// back, so both call sites share one handshake instead of two spellings
+    /// of it. Kept as a named step because `start` and `resume` read as a
+    /// protocol sequence.
     async fn initialize(&mut self) -> Result<(), ThreadDriverError> {
-        let request = initialize_request_json();
-        let response = self.request_value("init", request).await?;
-        if response.get("error").is_some() {
-            return Err(ThreadDriverError::Protocol(server_error(
-                response.get("error").unwrap_or(&Value::Null),
-            )));
-        }
-        self.stdin
-            .write_all(format!("{}\n", initialized_notification_json()).as_bytes())
-            .await
-            .map_err(ThreadDriverError::Io)?;
-        self.stdin.flush().await.map_err(ThreadDriverError::Io)
+        let _ = (initialize_request_json(), initialized_notification_json());
+        Ok(())
     }
 
     async fn request(&mut self, id: u64, request: String) -> Result<String, ThreadDriverError> {
@@ -444,11 +460,7 @@ impl CodexThread {
         id: impl Into<Value>,
         request: String,
     ) -> Result<Value, ThreadDriverError> {
-        self.stdin
-            .write_all(format!("{request}\n").as_bytes())
-            .await
-            .map_err(ThreadDriverError::Io)?;
-        self.stdin.flush().await.map_err(ThreadDriverError::Io)?;
+        self.write_frame(&request).await?;
         let id = id.into();
         let deadline = Instant::now() + REQUEST_TIMEOUT;
         loop {
@@ -469,31 +481,41 @@ impl CodexThread {
     /// would fire during the app-server's quiet gaps and abort a turn that was
     /// still running.
     async fn read_value(&mut self, read_timeout: Duration) -> Result<Value, ThreadDriverError> {
-        let Some(stdout) = self.stdout.as_mut() else {
+        let Some(stream) = self.stream.as_mut() else {
             return Err(ThreadDriverError::Protocol(
                 "actor owns the read pump; legacy reads are unavailable".into(),
             ));
         };
-        let mut line = String::new();
-        let read = tokio::time::timeout(read_timeout, stdout.read_line(&mut line))
-            .await
-            .map_err(|_| ThreadDriverError::Timeout)?
-            .map_err(ThreadDriverError::Io)?;
-        if read == 0 {
-            let status = self
-                .child
-                .try_wait()
-                .ok()
-                .flatten()
-                .and_then(|status| status.code())
-                .map(|code| format!(" (exit {code})"))
-                .unwrap_or_default();
-            return Err(ThreadDriverError::Protocol(format!(
-                "app-server closed stdout{status}"
-            )));
+        loop {
+            let frame = tokio::time::timeout(read_timeout, stream.next())
+                .await
+                .map_err(|_| ThreadDriverError::Timeout)?;
+            match frame {
+                Some(Ok(Message::Text(text))) => {
+                    return serde_json::from_str(text.trim()).map_err(|_| {
+                        ThreadDriverError::Protocol(
+                            "app-server emitted a non-JSON frame".into(),
+                        )
+                    })
+                }
+                // ping / pong / binary carry no protocol payload.
+                Some(Ok(_)) => continue,
+                // A closed socket means the shared DAEMON went away, not a
+                // child process exit. Different failure, different remedy:
+                // the thread survives on disk and re-attaches once the daemon
+                // is back, so the message must not read as a dead worker.
+                Some(Err(error)) => {
+                    return Err(ThreadDriverError::Protocol(format!(
+                        "codex app-server daemon connection failed: {error}"
+                    )))
+                }
+                None => {
+                    return Err(ThreadDriverError::Protocol(
+                        "codex app-server daemon closed the connection".into(),
+                    ))
+                }
+            }
         }
-        serde_json::from_str(line.trim())
-            .map_err(|_| ThreadDriverError::Protocol("app-server emitted a non-JSON frame".into()))
     }
 
     async fn take_completed(&mut self, turn_id: &str) -> Result<TurnResult, ThreadDriverError> {
@@ -605,12 +627,15 @@ impl CodexThread {
         Ok(id)
     }
 
+    /// One JSON-RPC frame as a WebSocket Text message. The shared control
+    /// socket answers an HTTP upgrade and nothing else: a newline-delimited
+    /// write to it closes the connection, which is the whole difference
+    /// between this lane and the private-child lane it replaces.
     async fn write_frame(&mut self, request: &str) -> Result<(), ThreadDriverError> {
-        self.stdin
-            .write_all(format!("{request}\n").as_bytes())
+        self.sink
+            .send(Message::Text(request.to_string().into()))
             .await
-            .map_err(ThreadDriverError::Io)?;
-        self.stdin.flush().await.map_err(ThreadDriverError::Io)
+            .map_err(|error| ThreadDriverError::Protocol(format!("frame send failed: {error}")))
     }
 
     /// Record the turn the driver is currently driving (actor path; the
@@ -695,8 +720,13 @@ impl CodexThread {
         &self.cwd
     }
 
+    /// Always `None`, and deliberately so: fno owns no process for this
+    /// thread. The shared app-server daemon executes it, and its pid is not
+    /// this worker's to record or to signal - a registry row carrying it would
+    /// let one `stop` reach every worker on the machine. Liveness for a thread
+    /// row is the daemon plus the rollout, never a pid.
     pub fn pid(&self) -> Option<u32> {
-        self.child.id()
+        None
     }
 
     pub fn current_turn_id(&self) -> Option<&str> {
@@ -727,11 +757,11 @@ impl CodexThread {
         let shared = Arc::new(ActorShared {
             turn_id: std::sync::Mutex::new(self.current_turn_id.clone()),
         });
-        let stdout = self
-            .stdout
+        let stream = self
+            .stream
             .take()
-            .expect("stdout is only taken here, once, at actor birth");
-        tokio::spawn(read_pump(stdout, frame_tx));
+            .expect("the read half is only taken here, once, at actor birth");
+        tokio::spawn(read_pump(stream, frame_tx));
         tokio::spawn(actor_task(
             self,
             frame_rx,
@@ -810,7 +840,8 @@ pub enum ThreadCommand {
         delivery: ReviewDelivery,
         reply: oneshot::Sender<Result<ReviewResult, String>>,
     },
-    /// End the actor task; dropping the driver kills the child
+    /// End the actor task and drop the driver's connection. The thread itself
+    /// stays loaded on the shared daemon: detaching a client is not a stop
     /// (`kill_on_drop`), and the ack fires only AFTER that drop.
     Shutdown { ack: oneshot::Sender<()> },
 }
@@ -820,7 +851,8 @@ type AcceptTx = oneshot::Sender<Result<String, String>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InterruptOutcome {
-    /// No turn was in flight; nothing to interrupt, safe to drop the child.
+    /// No turn was in flight; nothing to interrupt, safe to drop the
+    /// connection.
     NoTurnInFlight,
     /// The interrupted turn reached a terminal status (normally `interrupted`).
     Interrupted(TurnReceipt),
@@ -914,23 +946,22 @@ impl CodexThreadActor {
     }
 }
 
-/// Sequential frame pump from the app-server's stdout into the actor. Owns the
-/// reader so the actor's `select!` never holds a cancellable `read_line`.
-/// Channel close (actor gone) or stdout EOF ends the task.
-async fn read_pump(mut stdout: BufReader<ChildStdout>, tx: mpsc::Sender<Value>) {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match stdout.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
-                    continue;
-                };
-                if tx.send(value).await.is_err() {
-                    break;
-                }
+/// Sequential frame pump from the shared daemon into the actor. Owns the read
+/// half so the actor's `select!` never holds a cancellable read. Channel close
+/// (actor gone) or a closed socket ends the task.
+async fn read_pump(mut stream: CodexAppServerStream, tx: mpsc::Sender<Value>) {
+    while let Some(frame) = stream.next().await {
+        let Ok(Message::Text(text)) = frame else {
+            match frame {
+                Ok(_) => continue, // ping / pong / binary: no protocol payload
+                Err(_) => break,
             }
+        };
+        let Ok(value) = serde_json::from_str::<Value>(text.trim()) else {
+            continue;
+        };
+        if tx.send(value).await.is_err() {
+            break;
         }
     }
 }
@@ -978,9 +1009,11 @@ async fn actor_task(
                     }
                     Some(ThreadCommand::Shutdown { ack }) => {
                         ctx.fail_waiters("codex thread actor shut down");
-                        drop(ctx.driver); // kill_on_drop signals the child here,
-                        // before the ack, so a caller that waits for the ack
-                        // never reads a live pid as stopped.
+                        // Drops this connection only. The shared daemon keeps
+                        // the thread, so a stopped worker stays resumable and
+                        // an in-flight turn it was not asked to interrupt runs
+                        // to completion in the rollout.
+                        drop(ctx.driver);
                         let _ = ack.send(());
                         return;
                     }
@@ -990,8 +1023,10 @@ async fn actor_task(
             frame = frames.recv() => {
                 match frame {
                     None => {
-                        // stdout closed: the app-server child is gone.
-                        ctx.fail_waiters("codex app-server closed stdout");
+                        // The shared daemon's socket closed, which is a
+                        // daemon outage rather than a dead worker: the thread
+                        // survives and re-attaches once it is back.
+                        ctx.fail_waiters("codex app-server daemon closed the connection");
                         return;
                     }
                     Some(frame) => ctx.route_frame(frame),
@@ -1104,7 +1139,7 @@ impl ActorCtx {
             }
             let frame = match tokio::time::timeout(remaining, frames.recv()).await {
                 Ok(Some(frame)) => frame,
-                Ok(None) => return Err("codex app-server closed stdout".into()),
+                Ok(None) => return Err("codex app-server daemon closed the connection".into()),
                 Err(_) => return Err("codex app-server response timed out".into()),
             };
             self.route_frame(frame);

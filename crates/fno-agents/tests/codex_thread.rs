@@ -76,37 +76,7 @@ async fn turn_survives_more_frames_and_a_longer_gap_than_the_old_bounds() {
 // in one binary share the process environment, so per-test env would race).
 // ---------------------------------------------------------------------------
 
-/// Serializes every PATH mutation in this binary: `set_var`/`remove_var` race
-/// when two fake-codex tests run concurrently and one restores PATH under the
-/// other's feet, resolving `codex` to the REAL binary mid-test.
-static PATH_LOCK: Mutex<()> = Mutex::new(());
-
-async fn with_fake_codex(script: &str, body: impl std::future::Future<Output = ()>) {
-    let _guard = PATH_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let bin_dir = tempfile::tempdir().unwrap();
-    let fake = bin_dir.path().join("codex");
-    std::fs::write(&fake, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let saved_path = std::env::var_os("PATH");
-    let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
-    prefixed.push(":");
-    if let Some(rest) = saved_path.as_ref() {
-        prefixed.push(rest);
-    }
-    std::env::set_var("PATH", &prefixed);
-    body.await;
-    if let Some(path) = saved_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-}
+use fno_agents::codex_test_daemon::with_fake_codex_daemon as with_fake_codex;
 
 /// Shared fake skeleton: a reader thread queues stdin lines so a turn's sleep
 /// can answer steer/interrupt MID-TURN (a sequential `for line in sys.stdin`
@@ -470,36 +440,38 @@ async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
     .await;
 }
 
-/// AC5 (pid half): shutdown acks only AFTER the driver dropped, so
-/// `kill_on_drop` has already signaled the app-server child - a caller that
-/// waits for the ack never reads a live pid as stopped.
+/// AC4: the driver holds no process. `pid()` is `None` by construction, not
+/// by a runtime process count, and shutdown detaches rather than killing:
+/// the thread stays on the shared daemon and stays resumable.
+///
+/// This inverts the invariant it replaces (`shutdown_kills_the_child_before_acking`).
+/// The old lane forked a private app-server per worker and `kill_on_drop`
+/// ended it at shutdown, so a registry row carried that child's pid. There is
+/// no child now, and the shared daemon's pid is not this worker's to record -
+/// one `stop` that signaled it would reach every codex worker on the machine.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_kills_the_child_before_acking() {
+async fn shutdown_detaches_and_the_driver_owns_no_process() {
     with_fake_codex(&fake_interrupt(), async {
         let (actor, _keep) = start_actor().await;
-        let pid = actor.pid().expect("fake app-server pid");
+        assert_eq!(
+            actor.pid(),
+            None,
+            "fno owns no process for a thread the shared daemon executes"
+        );
         let _reply = actor.submit("long turn".into()).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         actor.shutdown().await.unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            // `kill -0` probes existence without signaling; success = alive.
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "app-server child {pid} outlived the shutdown ack"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+
+        // The thread survives its client: a FRESH connection to the same fake
+        // daemon still completes the handshake and starts a thread. A dead
+        // daemon refuses the connect outright, so this is a positive marker,
+        // never an absence.
+        let socket = fno_agents::codex_inject::codex_app_server_socket_path();
+        let reconnected = fno_agents::codex_inject::connect_shared_app_server(&socket).await;
+        assert!(
+            reconnected.is_ok(),
+            "shutdown detached one client; the daemon must still serve others"
+        );
     })
     .await;
 }

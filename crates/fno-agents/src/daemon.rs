@@ -3066,9 +3066,12 @@ struct Ctx {
     /// flood of pushes for sessions that never register cannot grow without
     /// limit. Highest seq wins per session.
     pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
-    /// Codex app-server children held by this supervisor, keyed by registry
-    /// name. The registry's full `harness_session_id` remains the durable join
-    /// key used to repopulate this map after a daemon restart.
+    /// Live CLIENTS of codex's shared app-server daemon, one per codex thread
+    /// worker, keyed by registry name. This supervisor holds no app-server
+    /// process: codex's own daemon executes the threads, which is what keeps
+    /// them visible to `codex agents`, `resume`, `fork` and Remote Control.
+    /// The registry's full `harness_session_id` remains the durable join key
+    /// used to repopulate this map after a daemon restart.
     codex_threads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CodexThreadHandle>>>,
 }
 
@@ -3078,7 +3081,8 @@ struct Ctx {
 /// panes registering at once while staying a hard ceiling.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-/// One actor task per thread owns the app-server child exclusively (x-de10).
+/// One actor task per thread owns that thread's daemon connection
+/// exclusively (x-de10).
 /// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
 /// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
 /// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
@@ -6438,12 +6442,12 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         return stop_claude(ctx, req, &name, &entry).await;
     }
     if is_codex_thread_entry(&entry) {
-        // Stop means INTERRUPT the in-flight turn, then DROP the actor (its
-        // driver's kill_on_drop kills the app-server child), and only then
-        // stamp Exited. The old shape removed the handle and stamped Exited
-        // without interrupting: a driving turn still held an Arc clone, the
-        // child stayed alive until the turn ended, and the verb reported a
-        // stop it did not perform.
+        // Stop means INTERRUPT the in-flight turn, then DROP the actor (which
+        // closes this worker's connection to the shared daemon), and only then
+        // stamp Exited. The interrupt is the whole of the stop: dropping a
+        // client of someone else's daemon ends no work by itself, so a stop
+        // that skipped it would report a stop it did not perform - which is
+        // exactly what the pre-interrupt shape did.
         let handle = ctx.codex_threads.lock().await.get(&name).cloned();
         let mut interrupt_report = "no-turn".to_string();
         if let Some(handle) = handle.as_ref() {
@@ -6455,13 +6459,14 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
             {
                 Ok(Ok(InterruptOutcome::NoTurnInFlight)) => "no-turn".to_string(),
                 Ok(Ok(InterruptOutcome::Interrupted(receipt))) => receipt.status,
-                Ok(Ok(InterruptOutcome::Timeout)) => "timeout-child-killed".to_string(),
-                Ok(Err(error)) => format!("interrupt-failed-child-killed: {error}"),
-                Err(_) => "interrupt-failed-child-killed: stop exchange timed out".to_string(),
+                Ok(Ok(InterruptOutcome::Timeout)) => "timeout-detached".to_string(),
+                Ok(Err(error)) => format!("interrupt-failed-detached: {error}"),
+                Err(_) => "interrupt-failed-detached: stop exchange timed out".to_string(),
             };
             interrupt_report = outcome;
-            // Shutdown acks only after the driver dropped, so kill_on_drop
-            // has already signaled the child before the row reads Exited.
+            // Shutdown acks only after the driver dropped, so this worker's
+            // connection is closed before the row reads Exited. The thread
+            // itself stays loaded on the shared daemon and stays resumable.
             let _ = handle.shutdown().await;
         }
         ctx.codex_threads.lock().await.remove(&name);
@@ -16026,33 +16031,7 @@ while True:
             send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
 "#;
 
-    /// Install a fake `codex` on PATH for the duration of `body`.
-    async fn with_fake_codex_daemon(script: &str, body: impl std::future::Future<Output = ()>) {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let bin_dir = tempfile::tempdir().unwrap();
-        let fake = bin_dir.path().join("codex");
-        std::fs::write(&fake, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let saved_path = std::env::var_os("PATH");
-        let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
-        prefixed.push(":");
-        if let Some(rest) = saved_path.as_ref() {
-            prefixed.push(rest);
-        }
-        std::env::set_var("PATH", &prefixed);
-        body.await;
-        if let Some(path) = saved_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
-    }
+    use crate::codex_test_daemon::with_fake_codex_daemon;
 
     /// Spawn a codex thread worker through the real handle_spawn and return
     /// its response.
@@ -16112,13 +16091,15 @@ while True:
         .await;
     }
 
-    /// AC5 + AC6 make-it-fail probe: stop INTERRUPTS the in-flight turn before
-    /// reporting stopped, kills the child, and names the interrupt outcome in
-    /// the response. Old shape: no `interrupt` key (remove-and-stamp while the
-    /// turn task still held an Arc clone and the child lived on), so the
-    /// `interrupt == "interrupted"` assert fails there.
+    /// Stop INTERRUPTS the in-flight turn before reporting stopped, names the
+    /// interrupt outcome in the response, and stamps the row Exited.
+    ///
+    /// The row records NO pid: the shared app-server daemon executes the
+    /// thread, and its pid is not this worker's to record. A row carrying it
+    /// would let one `stop` signal every codex worker on the machine, which is
+    /// why the pid assertion here is inverted rather than deleted.
     #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_stop_interrupts_then_kills_child_and_stamps_exited() {
+    async fn codex_thread_stop_interrupts_and_stamps_exited_with_no_pid() {
         with_fake_codex_daemon(CODEX_FAKE_LONG, async {
             let home = tmp_home("codex-stop");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
@@ -16127,10 +16108,11 @@ while True:
             let registry = load_registry_offloaded(home.registry_json())
                 .await
                 .expect("registry");
-            let pid = registry
-                .find("t")
-                .and_then(|entry| entry.pid)
-                .expect("row carries the child pid");
+            assert_eq!(
+                registry.find("t").and_then(|entry| entry.pid),
+                None,
+                "a thread row must record no pid: fno owns no process for it"
+            );
 
             // Let the seed turn reach driving, then stop mid-turn.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -16151,25 +16133,16 @@ while True:
                 Some(AgentStatus::Exited)
             );
 
-            // The child must be gone by the time the response said stopped.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let alive = std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "app-server child {pid} outlived a reported stop"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
+            // Stop detaches; it does not kill. The daemon still serves a
+            // fresh client, which is the positive marker that the thread
+            // survived its driver rather than an absence of processes.
+            let socket = crate::codex_inject::codex_app_server_socket_path();
+            assert!(
+                crate::codex_inject::connect_shared_app_server(&socket)
+                    .await
+                    .is_ok(),
+                "a stopped worker detaches one client; the daemon serves on"
+            );
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
         })

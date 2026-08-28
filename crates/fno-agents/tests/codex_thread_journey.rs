@@ -376,7 +376,7 @@ fn codex_thread_stop_mid_turn_interrupts() {
     assert!(stop.status.success(), "stop: {:?}", stop);
     let stdout = String::from_utf8_lossy(&stop.stdout).into_owned();
     assert!(
-        stdout.contains("interrupted") || stdout.contains("timeout-child-killed"),
+        stdout.contains("interrupted") || stdout.contains("timeout-detached"),
         "stop must name the interrupt outcome: {stdout:?}"
     );
     let row = registry_row(&home, name);

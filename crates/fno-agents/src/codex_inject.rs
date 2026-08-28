@@ -272,21 +272,44 @@ async fn codex_initialize_handshake_with_timeout(
 }
 
 async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
+    connect_shared_app_server(socket_path).await.map(|_| ())
+}
+
+/// The write half of a connection to the shared codex app-server daemon.
+pub type CodexAppServerSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<UnixStream>,
+    Message,
+>;
+/// The read half of a connection to the shared codex app-server daemon.
+pub type CodexAppServerStream =
+    futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<UnixStream>>;
+
+/// Connect to the shared codex app-server control socket and complete the
+/// `initialize` / `initialized` handshake, returning the split connection.
+///
+/// The ONE client every caller shares: the health probe, the mail injector,
+/// loaded-thread discovery, and the persistent thread driver. The transport is
+/// the whole reason it must be shared - a raw NDJSON write to this socket, with
+/// no WebSocket upgrade, closes the connection, so a second hand-written client
+/// is a second chance to get the upgrade wrong.
+pub async fn connect_shared_app_server(
+    socket_path: &Path,
+) -> Result<(CodexAppServerSink, CodexAppServerStream), &'static str> {
     let conn = UnixStream::connect(socket_path)
         .await
-        .map_err(|_| "connect-failed")?;
-    let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
+        .map_err(|error| connect_refused_reason(&error))?;
+    let (ws, _response) = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
         .await
         .map_err(|_| "handshake-failed")?;
-    let (mut sink, mut stream) = ws.0.split();
+    let (mut sink, mut stream) = ws.split();
     sink.send(Message::Text(initialize_request_json().into()))
         .await
-        .map_err(|_| "send-failed")?;
+        .map_err(|_| "io-error")?;
     read_until_id(&mut stream, &serde_json::json!("init")).await?;
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
-        .map_err(|_| "send-failed")?;
-    Ok(())
+        .map_err(|_| "io-error")?;
+    Ok((sink, stream))
 }
 
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the
@@ -1191,23 +1214,9 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
-    let conn = UnixStream::connect(sock)
+    let (mut sink, mut stream) = connect_shared_app_server(sock)
         .await
-        .map_err(|e| ReviewStartError::Reason(connect_refused_reason(&e)))?;
-    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
-        Ok((ws, _resp)) => ws,
-        Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
-    };
-    let (mut sink, mut stream) = ws.split();
-
-    sink.send(Message::Text(initialize_request_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
-
-    sink.send(Message::Text(initialized_notification_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
+        .map_err(ReviewStartError::Reason)?;
 
     sink.send(Message::Text(
         turn_start_request_json(thread_id, text).into(),
@@ -1219,22 +1228,7 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewSt
 }
 
 async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
-    let conn = UnixStream::connect(sock)
-        .await
-        .map_err(|e| connect_refused_reason(&e))?;
-    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
-        Ok((ws, _resp)) => ws,
-        Err(_) => return Err("handshake-failed"),
-    };
-    let (mut sink, mut stream) = ws.split();
-
-    sink.send(Message::Text(initialize_request_json().into()))
-        .await
-        .map_err(|_| "io-error")?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
-    sink.send(Message::Text(initialized_notification_json().into()))
-        .await
-        .map_err(|_| "io-error")?;
+    let (mut sink, mut stream) = connect_shared_app_server(sock).await?;
 
     let mut ids = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -1289,7 +1283,7 @@ async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
 /// Read Text frames until one whose `id` equals `want`, returning its raw text.
 /// Skips notifications (no `id`) and frames for other ids; ignores non-Text
 /// frames. Bounded by [`MAX_FRAMES`]; a read error / closed stream is `"io-error"`.
-async fn read_until_id<S>(stream: &mut S, want: &serde_json::Value) -> Result<String, &'static str>
+pub(crate) async fn read_until_id<S>(stream: &mut S, want: &serde_json::Value) -> Result<String, &'static str>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {
