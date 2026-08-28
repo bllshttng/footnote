@@ -459,6 +459,38 @@ def test_lane_receipt_preserves_family2_refusal_reason(tmp_path, monkeypatch, re
     assert calls["spawns"] == []
 
 
+def test_lane_preflight_error_returns_receipts_and_releases_slots(
+    tmp_path, monkeypatch
+):
+    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    def fail_preflight(*_args):
+        raise OSError("claim observation failed")
+
+    monkeypatch.setattr(advance, "_node_dispatch_block_reason", fail_preflight)
+
+    receipts = advance.dispatch_lanes(
+        2, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert receipts == [
+        {
+            "node_id": "n-a",
+            "status": "skipped",
+            "error": "preflight-error: claim observation failed",
+        },
+        {
+            "node_id": "n-b",
+            "status": "skipped",
+            "error": "preflight-error: claim observation failed",
+        },
+    ]
+    assert calls["spawns"] == []
+    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
+    assert find_lane_slot("n-b", root=tmp_path / "claims") is None
+
+
 def test_seed_heals_symlinked_fno_before_writing(tmp_path):
     """A reused worktree's whole-dir `.fno` symlink must not route the seed into
     the canonical file (which would make every lane share one project.id)."""

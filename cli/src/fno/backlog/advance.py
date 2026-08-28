@@ -1816,23 +1816,24 @@ def dispatch_lanes(
 
         try:
             root = _node_repo_root(node)
+            # The lane slot (parallel-lane:<id>) is invisible to the sequential
+            # advance()/dispatch-node.sh path, which dedups on node:<id> +
+            # dispatch:<id>. Guard with the same dispatch:<id> reservation.
+            block_reason = _node_dispatch_block_reason(node_id, str(root))
+            dispatch_key = f"dispatch:{node_id}"
+            dispatch_holder = f"advance:{os.getpid()}"
+            dispatch_root = _claims_root_for(dispatch_key)
         except LaneRootError as exc:
             _skip(f"lane-root: {exc}")
             continue
+        except Exception as exc:  # noqa: BLE001 - one lane cannot abort its peers
+            _LOG.warning("dispatch_lanes: lane %s preflight failed: %s", node_id, exc)
+            _skip(f"preflight-error: {str(exc)[:180]}")
+            continue
 
-        # The lane slot (parallel-lane:<id>) is invisible to the sequential
-        # advance()/dispatch-node.sh path, which dedups on node:<id> + dispatch:<id>.
-        # During the boot window before this lane's worker owns node:<id>, that
-        # path would see the node as ready+unclaimed and double-launch it. Guard
-        # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
-        # TTL bridge) so the two dispatchers dedup against each other.
-        block_reason = _node_dispatch_block_reason(node_id, str(root))
         if block_reason:
             _skip(block_reason)
             continue
-        dispatch_key = f"dispatch:{node_id}"
-        dispatch_holder = f"advance:{os.getpid()}"
-        dispatch_root = _claims_root_for(dispatch_key)
         try:
             acquire_claim(
                 dispatch_key,
