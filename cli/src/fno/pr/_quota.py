@@ -132,14 +132,23 @@ def resolve_real_gh() -> Optional[str]:
     return None
 
 
-#: The read shapes the coverage reserve funds. Each entry is one known read,
-#: and the cost bound is the SHAPE, never the field count: `gh pr view --json`
-#: is one GraphQL query whatever it selects, so asking for fewer fields is
-#: never the expensive direction.
+#: The read shapes the coverage reserve funds, as ``(required, shape)``.
+#:
+#: ``shape`` is the widest selection the read ever makes. ``required`` is the
+#: field that MAKES it that read: a selection may narrow the shape, but it
+#: must still be the read the reserve was set aside for. Without the required
+#: half, subset alone funds `--json comments` and `--json headRefOid` on the
+#: coverage purpose, which skips the remaining-budget check - a wider reserve
+#: than the exact-match rule ever granted, rather than a corrected one.
+#:
+#: The cost bound is the SHAPE, never the field count. `gh pr view --json` is
+#: one GraphQL query whatever it selects, so asking for fewer fields is never
+#: the expensive direction. The reserve also bounds the NUMBER of calls, which
+#: is what the required field keeps honest.
 _COVERAGE_READ_SHAPES = (
-    frozenset({"reviews", "comments", "headRefOid", "baseRefName"}),
-    frozenset({"commits"}),
-    frozenset({"labels"}),
+    (frozenset({"reviews"}), frozenset({"reviews", "comments", "headRefOid", "baseRefName"})),
+    (frozenset({"commits"}), frozenset({"commits"})),
+    (frozenset({"labels"}), frozenset({"labels"})),
 )
 
 
@@ -157,6 +166,12 @@ def _coverage_read(args: Sequence[str]) -> bool:
     Subset is tested against each shape individually rather than their union: a
     union test would fund combinations no caller makes (``commits`` beside
     ``labels``), which widens the reserve instead of correcting it.
+
+    Each shape also carries the field that MAKES it that read. A narrowing
+    still has to be the read the reserve was set aside for, so ``reviews``
+    alone is funded while ``comments`` alone is not. Subset without that half
+    funds every stray field in the shape and grants a wider reserve than the
+    exact-match rule ever did.
     """
     if len(args) < 4 or list(args[:2]) != ["pr", "view"]:
         return False
@@ -171,7 +186,9 @@ def _coverage_read(args: Sequence[str]) -> bool:
         # An empty selection is not a narrower read, it is a malformed one, and
         # it is a subset of everything. Refuse rather than fund it.
         return False
-    return any(fields <= shape for shape in _COVERAGE_READ_SHAPES)
+    return any(
+        required <= fields <= shape for required, shape in _COVERAGE_READ_SHAPES
+    )
 
 
 def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:

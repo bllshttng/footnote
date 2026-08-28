@@ -464,7 +464,7 @@ def review_coverage_for_gate(
     mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
     overtaken = _uncovered_row_overtaken(data, raw_ts, cwd, head)
-    pinned = _pinned_note(raw, raw_ts)
+    pinned = _pinned_note(data, raw_ts)
     if raw is None or mismatch or unusable or overtaken:
         ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
         if ran:
@@ -474,7 +474,7 @@ def review_coverage_for_gate(
                 note = "recomputed"
                 if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
-                pinned = _pinned_note(fresh, fresh_ts)
+                pinned = _pinned_note(data, fresh_ts)
             else:
                 note = "recompute produced no row"
                 pinned = ""
@@ -1035,18 +1035,32 @@ def review_coverage_for_head(
     )
 
 
-def coverage_pin_note(pr_number: int, cwd: Optional[str] = None) -> str:
-    """The pinned-input clause for the NO-recompute surface.
+def review_coverage_for_head_row(
+    pr_number: int, cwd: Optional[str], head: Optional[str]
+) -> tuple[Optional[dict], str]:
+    """``(shaped_row, pin_note)`` for the NO-recompute surface, in ONE scan.
 
     The pin describes the stored ROW, not the recompute that may or may not
-    have run, so both gate surfaces have to carry it or they refuse with two
-    different sentences for one row - which is the divergence the shared
-    predicate exists to remove.
+    have run, so both gate surfaces carry it or they refuse with two different
+    sentences for one row - the divergence the shared predicate exists to
+    remove.
+
+    One scan, not two. These logs reach tens of MB and this path is the
+    pre-push git-protection hook, so reading them twice for a note the first
+    read already has is I/O nobody asked for.
+
+    The pin is keyed on the SHAPED row. `_shape_review_coverage` rewrites a
+    covered row to uncovered when its verdicts are stale or malformed, and
+    that is precisely the stored answer whose reason expired - the case the
+    pin exists to explain. Keying on the raw row leaves it unpinned.
     """
     raw, raw_ts = latest_review_coverage_row(pr_number, cwd)
-    if raw is None:
-        return ""
-    return _pinned_note(raw, raw_ts)
+    data = (
+        _shape_review_coverage(raw, head, cwd, pr_number)
+        if raw is not None
+        else None
+    )
+    return data, _pinned_note(data, raw_ts)
 
 
 def read_review_coverage(

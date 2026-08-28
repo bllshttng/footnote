@@ -473,7 +473,22 @@ def test_a_subset_of_one_shape_is_funded_but_a_union_across_shapes_is_not(
     assert _quota._coverage_read(["pr", "view", "1", "--json", "commits"])
     assert _quota._coverage_read(["pr", "view", "1", "--json", "labels"])
     assert not _quota._coverage_read(["pr", "view", "1", "--json", "commits,labels"])
+    assert not _quota._coverage_read(["pr", "view", "1", "--json", "reviews,labels"])
     assert not _quota._coverage_read(["pr", "view", "1", "--json", "files"])
+
+
+def test_a_narrowing_must_still_be_the_read_the_reserve_funds(tmp_path):
+    """Subset alone would widen the reserve, not correct it.
+
+    `purpose=coverage` skips the remaining-budget check, so every field set it
+    accepts can spend reserved points with the GraphQL quota exhausted. A bare
+    `comments` or `headRefOid` read is a subset of the reviews shape without
+    being the reviews read, and the exact-match rule refused it. It still is
+    refused: a narrowing has to keep the field that makes it that read.
+    """
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "reviews,headRefOid"])
+    for stray in ("comments", "headRefOid", "baseRefName"):
+        assert not _quota._coverage_read(["pr", "view", "1", "--json", stray]), stray
 
 
 def test_an_empty_field_selection_is_refused(tmp_path):

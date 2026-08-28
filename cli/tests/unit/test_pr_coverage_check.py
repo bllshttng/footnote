@@ -266,7 +266,10 @@ def test_raised_read_is_unanswered_not_absence(
     def boom(*a, **k):
         raise OSError("log unreadable")
 
-    monkeypatch.setattr(_reviews, "latest_review_coverage", boom)
+    # Patch the reader ACTUALLY on the no-recompute path. `latest_review_coverage`
+    # is a thin wrapper the gate no longer calls, so patching it raises nothing
+    # and the assertion below would pass on a read that quietly succeeded.
+    monkeypatch.setattr(_reviews, "latest_review_coverage_row", boom)
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     note = capsys.readouterr().err.strip()
     assert rc == 4

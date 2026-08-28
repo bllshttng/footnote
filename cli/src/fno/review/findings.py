@@ -255,6 +255,23 @@ SUMMARY_MAX = 240
 SUMMARY_ELLIPSIS = "..."
 
 
+def shrink_summary(value: Optional[str], limit: int) -> Optional[str]:
+    """Re-cap an already-bounded summary to ``limit``, or drop it at 0.
+
+    The byte-budget escape hatch. A summary is DETAIL; a finding is a gate
+    input, and the gate treats a truncated findings array as a blocking
+    remainder whose key no disposition can ever clear. So detail is shed first
+    and findings are dropped only after every summary is gone.
+    """
+    if value is None:
+        return None
+    if limit <= 0:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - len(SUMMARY_ELLIPSIS))] + SUMMARY_ELLIPSIS
+
+
 def _bounded_summary(value: Any) -> Optional[str]:
     """The record's own summary, stripped and capped.
 

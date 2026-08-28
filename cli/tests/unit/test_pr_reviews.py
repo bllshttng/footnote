@@ -302,3 +302,50 @@ class TestCachedNegativeNamesItsInput:
         _write_log(tmp_path, _covered_row("2026-08-28T07:15:38Z"))
         _data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
         assert note == ""
+
+    def test_a_covered_row_that_shapes_to_uncovered_still_carries_the_pin(
+        self, monkeypatch, tmp_path
+    ):
+        """The pin keys on the SHAPED row, not the raw one.
+
+        `_shape_review_coverage` rewrites a covered row to uncovered when its
+        verdicts are stale or malformed. That is exactly a stored answer whose
+        reason expired - the case the pin exists to explain - and keying on the
+        raw row leaves it unpinned, because the raw row still says covered.
+        """
+        _isolate_logs(monkeypatch, tmp_path)
+        row = _covered_row("2026-08-28T07:15:38Z")
+        row["data"]["verdicts"] = []  # covered with no verdict proof
+        _write_log(tmp_path, row)
+        monkeypatch.setattr(
+            _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "no binary")
+        )
+        data, note = _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+
+        assert data["coverage"] == "uncovered", "fixture drifted: shaping did not fire"
+        assert "coverage row pinned to 74106361b at 2026-08-28T07:15:38Z" in note, note
+
+    def test_the_no_recompute_surface_reads_the_log_once(
+        self, monkeypatch, tmp_path
+    ):
+        """The row and its pin come from ONE scan.
+
+        These logs reach tens of MB and this path is the pre-push hook, so a
+        second scan for a note the first read already has is I/O nobody asked
+        for. Counted, not assumed.
+        """
+        _isolate_logs(monkeypatch, tmp_path)
+        _write_log(tmp_path, _uncovered_row("2026-08-28T07:15:38Z"))
+        scans = []
+        real = _reviews.latest_review_coverage_row
+
+        def counting(pr_number, cwd=None, project_events=None):
+            scans.append(pr_number)
+            return real(pr_number, cwd, project_events)
+
+        monkeypatch.setattr(_reviews, "latest_review_coverage_row", counting)
+        data, note = _reviews.review_coverage_for_head_row(1242, str(tmp_path), _H)
+
+        assert len(scans) == 1, scans
+        assert data["coverage"] == "uncovered"
+        assert "coverage row pinned to 74106361b" in note, note
