@@ -399,10 +399,12 @@ def coverage_verdict(
         reviews_payload, reviews_unread = _pr_reviews(pr_number, repo)
     else:
         reviews_payload, reviews_unread = None, ""
-    rounds, events_rounds, reviews_rounds = rounds_axes(chain, reviews=reviews_payload)
-    # Corollary 6: the count travels with the instrument that produced it, so
-    # a zero from a failed read is never byte-identical to a measured zero.
-    axes = rounds_provenance(events_rounds, reviews_rounds, reviews_unread)
+    rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
+    # A failed reviews read still says so. The budget keeps its answer either
+    # way (a cap that fired on a broken read would waive a remainder it may not
+    # have spent), but a zero an instrument never contributed to must not read
+    # as one it measured.
+    unread_note = f"reviews read unavailable: {reviews_unread}" if reviews_unread else ""
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -416,9 +418,7 @@ def coverage_verdict(
         if disposition_hard:
             return (
                 IMPOSSIBLE,
-                _impossible_refusal(
-                    rounds, max_rounds, ", ".join(disposition_hard), axes
-                ),
+                _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
                 "",
                 "",
             )
@@ -446,17 +446,17 @@ def coverage_verdict(
 
     if covered and corroboration:
         return REFUSED, corroboration, "", "; ".join(
-            x for x in (recompute_note, filed_note) if x
+            x for x in (recompute_note, unread_note, filed_note) if x
         )
     if covered:
         if disposition_text:
             # Rounds remain (the exhausted case returned above), so the
             # refusal teaches the fix-delta remedy AND shows the budget the
             # next round spends - AC7-HP's "how many rounds remain".
-            remaining = _rounds_remaining_note(rounds, max_rounds, axes)
-            note = "; ".join(x for x in (recompute_note, remaining) if x)
+            remaining = _rounds_remaining_note(rounds, max_rounds)
+            note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
             return REFUSED, disposition_text, "", note
-        notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
+        notes = [n for n in (recompute_note, unread_note, disposition_note, filed_note) if n]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
     # x-aecc: a fail attestation answers this head, so an uncovered row in
     # that shape is uncovered BECAUSE of the non-terminal findings. Name them
@@ -473,8 +473,8 @@ def coverage_verdict(
         and disposition_named
         and any(e.get("verdict") != "pass" for e in chain)
     ):
-        remaining = _rounds_remaining_note(rounds, max_rounds, axes)
-        note = "; ".join(x for x in (recompute_note, remaining) if x)
+        remaining = _rounds_remaining_note(rounds, max_rounds)
+        note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
     # The spent budget DISCHARGES the review obligation. It does not fail it.
@@ -542,7 +542,7 @@ def coverage_verdict(
             COVERED,
             "",
             head or "",
-            "; ".join(n for n in (recompute_note, filed_note, waiver) if n),
+            "; ".join(n for n in (recompute_note, unread_note, filed_note, waiver) if n),
         )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
@@ -555,7 +555,7 @@ def coverage_verdict(
         # recompute_note plus the filed node ids when the cap arm fired on the
         # way here (same receipt contract as the returns above and below).
         return REFUSED, corroboration, "", "; ".join(
-            x for x in (recompute_note, filed_note) if x
+            x for x in (recompute_note, unread_note, filed_note) if x
         )
 
     # Same branch order run_merge has always used: the attestation refusal is
@@ -600,7 +600,9 @@ def coverage_verdict(
     # The cap arm may already have FILED findings on the way here (the row
     # stayed uncovered on another conjunct): that side effect must ride the
     # receipt, never vanish behind the refusal it did not soften.
-    return REFUSED, refusal, "", "; ".join(x for x in (recompute_note, filed_note) if x)
+    return REFUSED, refusal, "", "; ".join(
+        x for x in (recompute_note, unread_note, filed_note) if x
+    )
 
 
 def refusal_line(refusal: str, note: str) -> str:
@@ -948,22 +950,6 @@ def rounds_since_last_pass(
     per round. The Rust-side mirror is ``loopcheck::rounds_since_last_pass``;
     the two are held equal by the shared corpus.
     """
-    return rounds_axes(chain, reviews)[0]
-
-
-def rounds_axes(
-    chain: list[dict],
-    reviews: Optional[list[dict]] = None,
-) -> Tuple[int, int, Optional[int]]:
-    """``(total, events_rounds, reviews_rounds)`` - the count and its provenance.
-
-    One counting rule, read three ways. The total is what the budget spends;
-    the two figures beside it are which instrument produced it, so a reader
-    can tell a measured zero from a zero the reviews read never contributed
-    to. ``reviews_rounds`` is None when no payload was supplied, which is the
-    honest answer for an axis that did not run - distinct from 0, which means
-    it ran and counted nothing.
-    """
     rounds = 0
     counted_heads: set[str] = set()
     for event in chain:
@@ -987,7 +973,7 @@ def rounds_axes(
         rounds += 1
     events_rounds = rounds
     if reviews is None:
-        return events_rounds, events_rounds, None
+        return events_rounds
     counted: set[str] = set()
     for review in reviews:
         state = review.get("state")
@@ -998,32 +984,7 @@ def rounds_axes(
         if not isinstance(oid, str) or not oid:
             continue
         counted.add(oid)
-    return max(events_rounds, len(counted)), events_rounds, len(counted)
-
-
-def rounds_provenance(
-    events_rounds: int, reviews_rounds: Optional[int], reviews_unread: str
-) -> str:
-    """Which instrument produced the round count, as text.
-
-    Corollary 6 of the refusal contract. An absence has three explanations -
-    the real outcome, an instrument that never ran, or a pipeline that ate the
-    output - and a count printed bare cannot distinguish them. Measured: one
-    PR read ``rounds_used 0`` while an honest count read 2, and the SAME cause
-    produced the opposite symptom elsewhere, 12 uncounted rounds past a cap of
-    2. One PR escaped the budget entirely; the other was locked out by it.
-
-    A read that FAILED is named as unread rather than rendered as a zero,
-    because a zero from an instrument that never ran must not be
-    byte-identical to a measured zero.
-    """
-    if reviews_unread:
-        return f"attestations {events_rounds}, reviews axis unread: {reviews_unread}"
-    if reviews_rounds is None:
-        return f"attestations {events_rounds}, reviews axis not read"
-    return (
-        f"attestations {events_rounds}, distinct reviewed commits {reviews_rounds}"
-    )
+    return max(events_rounds, len(counted))
 
 
 def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
@@ -1190,25 +1151,19 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
 
 
 def _impossible_refusal(
-    rounds: int, max_rounds: int, disposition_refusal_text: str, axes: str = ""
+    rounds: int, max_rounds: int, disposition_refusal_text: str
 ) -> str:
     """The IMPOSSIBLE sentence: rounds spent, findings non-terminal, both
-    remedies, and no instruction that asks for another review.
-
-    ``axes`` names which instrument produced the round count. A reader deciding
-    whether a cap is real needs it: the same defect that under-counted one PR
-    to a stuck zero let another run twelve rounds past a budget of two."""
-    provenance = f" [{axes}]" if axes else ""
+    remedies, and no instruction that asks for another review."""
     return (
         f"review coverage is impossible to satisfy by further review: {rounds} "
-        f"review rounds used (max {max_rounds}){provenance} with blocking "
-        f"finding(s) still non-terminal ({disposition_refusal_text}); this "
-        f"cannot be cleared by re-reviewing - the two acts that clear it are "
-        f"{IMPOSSIBLE_REMEDIES}"
+        f"review rounds used (max {max_rounds}) with blocking finding(s) still "
+        f"non-terminal ({disposition_refusal_text}); this cannot be cleared by "
+        f"re-reviewing - the two acts that clear it are {IMPOSSIBLE_REMEDIES}"
     )
 
 
-def _rounds_remaining_note(rounds: int, max_rounds: int, axes: str = "") -> str:
+def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
     """The REFUSED-side note AC7-HP demands: the budget a worker can see
     before the next round reports impossible. Zero remaining is still worth
     saying - the next round is the one that trips, and a worker who cannot
@@ -1216,16 +1171,15 @@ def _rounds_remaining_note(rounds: int, max_rounds: int, axes: str = "") -> str:
     # One less than the raw difference: at rounds = max_rounds - 1 the NEXT
     # round is the last the budget funds, so zero remain after it.
     remaining = max_rounds - rounds - 1
-    provenance = f" [{axes}]" if axes else ""
     if remaining <= 0:
         return (
-            f"{rounds}/{max_rounds} review rounds used{provenance}; the next "
-            "round is the last the budget funds"
+            f"{rounds}/{max_rounds} review rounds used; the next round "
+            "is the last the budget funds"
         )
     plural = "" if remaining == 1 else "s"
     return (
-        f"{rounds}/{max_rounds} review rounds used{provenance}; {remaining} "
-        f"round{plural} remain before the gate reports impossible"
+        f"{rounds}/{max_rounds} review rounds used; {remaining} round{plural} "
+        "remain before the gate reports impossible"
     )
 
 

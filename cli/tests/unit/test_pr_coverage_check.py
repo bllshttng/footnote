@@ -2343,16 +2343,18 @@ def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
 def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
     monkeypatch, tmp_path
 ):
-    """Corollary 6. The same shape, but the reviews read FAILS. The budget
-    keeps its events-only answer - that fail-open is deliberate, a cap that
-    fired on a broken read would waive a remainder the budget may not have
-    spent - but the refusal must say the axis went unread rather than present
-    0 as something an instrument measured.
+    """The reviews read FAILS and the gate says so.
 
-    This is the discriminator the old bare None destroyed: a zero from an
-    instrument that never ran was byte-identical to a measured zero, and the
-    same cause produced opposite symptoms on two PRs - one escaping the cap
-    entirely, the other locked out by it.
+    The budget keeps its answer either way - that fail-open is deliberate, a
+    cap that fired on a broken read would waive a remainder it may not have
+    spent - but a zero an instrument never contributed to must not read as one
+    it measured. That discriminator is what the old bare None destroyed: the
+    same cause produced opposite symptoms on two PRs, one escaping the cap
+    entirely and the other locked out by it.
+
+    Round counting itself is ONE axis (attestations), per the operator ruling
+    that retired the two-axis provenance rendering, so this asserts the read
+    failure is named and nothing more.
     """
     _specimen_gates(monkeypatch)
     (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
@@ -2369,5 +2371,4 @@ def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
         1252, str(tmp_path), recompute=False
     )
     rendered = f"{refusal} {note}"
-    assert "reviews axis unread: gh: 403 secondary rate limit" in rendered, rendered
-    assert "attestations 1" in rendered, rendered
+    assert "reviews read unavailable: gh: 403 secondary rate limit" in rendered, rendered
