@@ -118,13 +118,42 @@ def test_the_capability_row_records_the_create_hazard_in_words():
     not (LIVE and PI_ON_PATH),
     reason="live pi journey spends subscription tokens; set FNO_PI_LIVE=1 to run",
 )
-def test_AC10_HP_live_a_stopped_pi_session_resumes_by_id_and_cwd(tmp_path):
+def test_AC10_HP_live_a_stopped_pi_session_resumes_by_id_and_cwd(tmp_path, monkeypatch):
     """The unfakeable half, re-run on demand: two processes, one session.
 
     Asserting the second process exits 0 would prove nothing (a forked session
     exits 0 too), so this asserts the file count for the id stays at ONE and
     that the second process recalls the first's codeword.
+
+    Two things this test needs that the hermetic suite deliberately takes away,
+    and both are why it is opt-in rather than merely slow:
+
+    * ``FNO_PI_LIVE`` survives the ``FNO_*`` prefix sweep only because
+      ``hermetic._RUNNER_PASSTHROUGH`` names it. Without that keep the flag is
+      cleared before this module reads it and the test SKIPS for someone who
+      set it, which is an acceptance nobody can run. Note that a DEPLOYED
+      ``fno doctor test`` scrubs the flag in its own ``_child_env`` before
+      pytest starts, so until that binary carries this change the live run is
+      ``FNO_PI_LIVE=1 pytest cli/tests/agents/test_pi_journey.py``.
+    * The real HOME, because pi's credential lives under it and the sandboxed
+      one has none: pi answers "No API key found for openai-codex" and exits 1.
+      Restoring it is the same move ``test_provider_usage_live.py`` makes for
+      the same reason. The cwd stays a ``tmp_path``, so the session directory
+      this creates is unique to the run and cannot touch real sessions.
     """
+    user = os.environ.get("USER", "")
+    real_home = next(
+        (
+            candidate
+            for candidate in (Path("/Users") / user, Path("/home") / user, Path("/root"))
+            if candidate.is_dir()
+        ),
+        None,
+    )
+    assert real_home is not None, "the live pi journey could not locate the real HOME"
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("USERPROFILE", str(real_home))
+
     cwd = tmp_path
     session_id = f"fno-journey-{uuid.uuid4().hex[:8]}"
     base = [

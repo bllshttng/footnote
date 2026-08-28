@@ -385,6 +385,15 @@ resume = "native-session"
 thread = true
 autonomous_pane = false
 route_on_pane = false
+# UNVERIFIED FOR pi, and said so rather than inherited. This field has held one
+# value for every harness that ever carried it, which means it was declared
+# once and copied since; x-2fac is the node that replaces it with a
+# loop-participation declaration answering the question callers actually have.
+# pi is where the inheritance is least defensible: it ships NO shell hook
+# surface at all. Its extension points are TypeScript extensions under
+# ~/.pi/agent/extensions, and whether the autonomous loop can be driven through
+# one is unmeasured. Nothing reads this field today, so the value is inert;
+# when x-2fac lands, pi's answer comes from a measurement rather than from here.
 stop_hook = "native"
 command_surface = "slash"
 slash_prefix = ""

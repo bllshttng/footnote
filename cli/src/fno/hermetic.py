@@ -69,6 +69,11 @@ _AMBIENT_PREFIXES = ("FNO_", "TARGET_")
 # is already derived from HARNESS_SESSION_MARKERS because a hand-maintained copy
 # had already lost CLAUDE_SESSION_ID once.
 _AMBIENT_NAMES: tuple[str, ...] = (
+    # pi's session store root. It relocates the (cwd, session_id) lookup
+    # wholesale, which is exactly the state a test must not read from a
+    # developer's machine: unscrubbed, a duplicate-refusal test would see real
+    # sessions. Scrubbed, the lookup falls back to the sandboxed HOME.
+    "PI_HOME",
     *AMBIENT_IDENTITY_ENV,
     # Harness config roots. resolve_plugin_script takes the plugin roots as
     # authoritative, so a suite run inside a live session resolves the
@@ -175,6 +180,12 @@ _RUNNER_PASSTHROUGH = (
     "FNO_REAL_CODEX_PLUGIN_TEST",  # .github/workflows/cli-ci.yml
     "FNO_RUST_FRONT",  # .github/workflows/cli-ci.yml, via $GITHUB_ENV
     "FNO_LIVE_PROVIDER_USAGE",  # opt-in integration gate; test restores real HOME
+    # opt-in live pi journey (cli/tests/agents/test_pi_journey.py). Without
+    # this keep the FNO_* prefix sweep clears the flag before the module reads
+    # it, so the test SKIPS for someone who set it - an acceptance nobody can
+    # run. It needs no real HOME: pi is a subprocess and inherits the sandboxed
+    # one, so it writes its sessions where the assertion reads them.
+    "FNO_PI_LIVE",
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which
