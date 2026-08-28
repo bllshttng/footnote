@@ -291,7 +291,7 @@ def _identity(monkeypatch, tmp_path, session_id):
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
         {"name": "j-x-9734-2", "harness_session_id": session_id, "status": "live"},
     ]}))
-    monkeypatch.setattr("fno.agents.registry._registry_path", lambda path=None: reg)
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
         lambda env, **_k: SimpleNamespace(
@@ -331,7 +331,7 @@ def test_task_holder_ambiguous_registry_falls_back(tmp_path, monkeypatch):
         {"name": "row-b", "harness_session_id": sid},
     ]}))
     monkeypatch.setattr(
-        "fno.agents.registry._registry_path", lambda path=None: reg
+        "fno.paths.agents_registry_path", lambda: reg
     )
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",
@@ -351,7 +351,7 @@ def test_task_holder_missing_registry_keeps_session_id(tmp_path, monkeypatch):
     sid = "bbbb0000-0000-0000-0000-000000000000"
     reg = tmp_path / "absent.json"
     monkeypatch.setattr(
-        "fno.agents.registry._registry_path", lambda path=None: reg
+        "fno.paths.agents_registry_path", lambda: reg
     )
     monkeypatch.setattr(
         "fno.claims.self_identity.resolve_self_identity",

@@ -192,17 +192,26 @@ def _roster_name_for_session(session_id: str) -> str:
     that fork. Best-effort by design: an unreadable registry, a missing row,
     or an ambiguous session id (two names) answers "" and the caller keeps
     the previous resolution unchanged.
+
+    The registry FILE is read directly (paths -> json) rather than through
+    ``fno.agents.registry``: that module is L5 runtime and this resolver is
+    L1 core, a new edge the boundary gate refuses. The coupled shape is the
+    documented store layout - ``{"schema_version": N, "agents": [row]}`` with
+    the session-id fields per row - and the read degrades to "" on anything
+    else, so an L5-side schema change cannot crash identity resolution.
     """
     sid = (session_id or "").strip()
     if not sid:
         return ""
     try:
-        from fno.agents.registry import _read_raw_registry, _registry_path
+        import json
 
-        raw = _read_raw_registry(_registry_path(None))
+        from fno.paths import agents_registry_path
+
+        raw = json.loads(agents_registry_path().read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 - identity must degrade, never crash
         return ""
-    rows = (raw or {}).get("agents")
+    rows = raw.get("agents") if isinstance(raw, dict) else None
     if not isinstance(rows, list):
         return ""
     names = {
