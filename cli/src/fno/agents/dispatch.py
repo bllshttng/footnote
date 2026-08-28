@@ -5391,11 +5391,16 @@ def attach_agent(name: str) -> AttachResult:
         )
 
     if existing.harness in ("codex", "gemini"):
+        # (x-6678) A codex THREAD is attachable now: it lives on the shared
+        # app-server daemon and `codex resume --remote` opens the real TUI on
+        # it. That path is the Rust verb's (client_verbs.rs), which is what
+        # `fno agents attach` routes to. This fallback runs only when the Rust
+        # binary is unavailable, and in that world no codex thread exists to
+        # attach to, because the Rust daemon is what spawns one.
         sys.stderr.write(
             f"{existing.harness} agents are one-shot; no persistent "
             "session to attach to. Use 'fno agents logs "
-            f"{name} --follow' for live output. Cross-provider attach is "
-            "planned for the Phase 6 supervisor.\n"
+            f"{name} --follow' for live output.\n"
         )
         # Forensic event so an `events.jsonl` audit can correlate
         # "why did this attach attempt fail" against operator activity.

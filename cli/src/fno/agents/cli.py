@@ -4681,17 +4681,21 @@ def cmd_attach(
     """Attach to a running agent session interactively.
 
     With a live mux server: drives the one dedicated thread pane, which
-    routes every harness by capability (claude drives, codex follows,
-    gemini locates) instead of the codex/gemini refusal below.
+    routes every harness by capability (claude and a codex thread drive,
+    a codex pane navigates to its tab, gemini locates).
 
     With no mux server, claude path: shells out to ``claude attach
     <short_id>`` with inherited stdin/stdout/stderr - the claude TUI
     takes over until you detach. fno's exit code mirrors claude's on
     detach.
 
-    Codex / gemini: refused with exit 13 and a hint pointing at Phase 6
-    (the fno-owned supervisor) as the planned landing for cross-provider
-    attach.
+    With no mux server, codex thread path: shells out to ``codex resume
+    <thread-id> --remote unix://<control-socket>``, which opens codex's
+    own TUI on the thread the shared app-server daemon owns. fno draws
+    nothing either way; each harness renders its own interface.
+
+    Every other harness: refused with exit 13, because it has no
+    persistent session to attach to.
     """
     from fno.agents.dispatch import DispatchAskError, attach_agent
 

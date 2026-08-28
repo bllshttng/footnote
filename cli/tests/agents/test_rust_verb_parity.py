@@ -462,10 +462,11 @@ def test_attach_refuses_codex_parity(tmp_path) -> None:
     )
     rust = _run_rust(["attach", "cx"], agents)
     # Mirrors dispatch.attach_agent's one-shot refusal message + exit 13.
+    # The seeded row carries a short_id and no interactive host mode, so it is
+    # not a codex THREAD (x-6678) and keeps the refusal.
     expected = (
         "codex agents are one-shot; no persistent session to attach to. "
-        "Use 'fno agents logs cx --follow' for live output. Cross-provider "
-        "attach is planned for the Phase 6 supervisor.\n"
+        "Use 'fno agents logs cx --follow' for live output.\n"
     )
     assert rust.stderr == expected
     assert rust.returncode == 13

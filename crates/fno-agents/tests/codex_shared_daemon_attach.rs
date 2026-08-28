@@ -62,6 +62,24 @@ fn the_attach_argv_execs_codex_resume_against_the_control_socket() {
     assert_eq!(argv.len(), 5, "the argv is the exec target, nothing more");
 }
 
+/// One argv, two crates.
+///
+/// `fno` never links `fno-agents` (it shells the binary at runtime), so the
+/// mux viewport's builder and the CLI verb's builder are two functions. This
+/// test links both and pins them byte-for-byte, the way `daemon.rs` already
+/// feeds a printed `fno mux pane kill` command to the real parser rather than
+/// to a copy of its grammar. Change one and this fails here, rather than the
+/// two drifting until a codex row opens the wrong thing from one door.
+#[test]
+fn the_attach_argv_is_identical_in_both_crates() {
+    let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
+    assert_eq!(codex_attach_argv(uuid), fno::agents_view::codex_attach_argv(uuid));
+    assert_eq!(
+        codex_app_server_socket_path(),
+        fno::agents_view::codex_app_server_socket_path()
+    );
+}
+
 /// AC16: a non-default `CODEX_HOME` moves the socket, so the argv moves with
 /// it rather than hardcoding `~/.codex`.
 ///

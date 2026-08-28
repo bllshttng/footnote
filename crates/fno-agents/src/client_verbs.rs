@@ -3206,9 +3206,103 @@ fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
     Ok(())
 }
 
+/// (x-6678) Is this registry row a codex THREAD? Mirrors
+/// `is_codex_thread_entry` in the daemon: an interactive host with no claude
+/// short id and no pane of its own. A codex PANE row answers false and keeps
+/// the refusal, because its process already has a place and `fno mux` is how
+/// you reach it.
+fn is_codex_thread_row(entry: &Value) -> bool {
+    entry
+        .get("host_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("exec")
+        == "interactive"
+        && entry
+            .get("short_id")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .is_empty()
+        && entry.get("mux").is_none_or(Value::is_null)
+}
+
+/// (x-6678) Attach to a codex thread by EXEC'ing codex's own TUI against the
+/// shared app-server daemon.
+///
+/// `None` means this is not a codex thread row and the caller should fall
+/// through to its refusal. `Some(code)` means this function owned the outcome.
+///
+/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
+/// same command. Neither renders anything.
+fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
+    if !is_codex_thread_row(entry) {
+        return None;
+    }
+    let thread_id = entry
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+
+    // The daemon can be gone by attach time even though it was up at spawn
+    // time (the socket FILE outlives the process that served it), so ensure
+    // it here rather than trusting spawn-time health. A daemon that will not
+    // boot is a refusal naming the boot error, never a silent fallback to the
+    // rendered peek this lane exists to stop using.
+    if let Err(error) = crate::codex_inject::ensure_codex_daemon() {
+        eprintln!(
+            "fno agents attach: codex app-server daemon unavailable, so there is nothing to \
+             attach to: {error}"
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("codex".to_string())),
+                ("reason", Value::String("codex-daemon-unavailable".to_string())),
+                ("detail", Value::String(error)),
+            ],
+        );
+        return Some(13);
+    }
+    if !which_on_path("codex") {
+        eprintln!("codex CLI not on PATH");
+        return Some(14);
+    }
+
+    let argv = crate::codex_inject::codex_attach_argv(thread_id);
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    // Inherit stdio so the codex TUI takes over this terminal; mirror its
+    // exit code.
+    match command.status() {
+        Ok(status) => {
+            let exit_code = status.code().unwrap_or(1);
+            append_agents_event(
+                events_path,
+                "agent_attached",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String("codex".to_string())),
+                    ("thread_id", Value::String(thread_id.to_string())),
+                    ("codex_exit", Value::from(exit_code)),
+                ],
+            );
+            Some(exit_code)
+        }
+        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("codex CLI not on PATH");
+            Some(14)
+        }
+        Err(exc) => {
+            eprintln!("fno agents attach: codex resume failed: {exc}");
+            Some(1)
+        }
+    }
+}
+
 /// `fno-agents attach <name>` -- interactive attach to a running claude agent
-/// (codex/gemini are refused). Mirrors Python `dispatch.attach_agent` + the
-/// `cmd_attach` Typer wrapper.
+/// or a codex thread (every other harness is refused). Mirrors Python
+/// `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
 pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     let mut name: Option<String> = None;
     for a in rest {
@@ -3265,13 +3359,22 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         .unwrap_or("");
     let events_path = trace_events_path(home);
 
-    // Every non-claude harness refuses attach (claude is the only harness
-    // with a persistent `--bg` session to attach to). `!= "claude"` instead of
-    // an allowlist so a provider added to the roster inherits the refusal
-    // rather than falling through to a claude-shaped attach (x-51f6 US1).
+    // (x-6678) A codex THREAD row execs codex's own interface on the shared
+    // app-server daemon, the same argv the mux viewport runs.
+    if harness == "codex" {
+        if let Some(code) = attach_codex_thread(entry, &name, &events_path) {
+            return code;
+        }
+    }
+
+    // Every other non-claude harness refuses attach (claude and a codex
+    // thread are the only rows with a persistent session to attach to).
+    // `!= "claude"` instead of an allowlist so a provider added to the roster
+    // inherits the refusal rather than falling through to a claude-shaped
+    // attach (x-51f6 US1).
     if harness != "claude" {
         eprintln!(
-            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output. Cross-provider attach is planned for the Phase 6 supervisor."
+            "{harness} agents are one-shot; no persistent session to attach to. Use 'fno agents logs {name} --follow' for live output."
         );
         append_agents_event(
             &events_path,
@@ -3286,14 +3389,6 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
             ],
         );
         return 13;
-    }
-
-    if harness != "claude" {
-        eprintln!(
-            "attach for harness {} is not implemented",
-            py_repr_str(harness)
-        );
-        return 2;
     }
 
     let short_id = entry.get("short_id").and_then(Value::as_str).unwrap_or("");
@@ -4139,6 +4234,103 @@ fn claim_sweep_payload(dir: &Path) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // --- attach: which rows are codex THREADS (x-6678) -----------------------
+
+    /// AC17 / AC18 (row-selection half): exactly the codex rows that are
+    /// threads take the exec path, and every other row falls through to the
+    /// refusal it has today.
+    ///
+    /// This is the pure decision, split out from the exec so it is testable
+    /// without launching a TUI: the exec itself replaces this terminal, which
+    /// no unit test can host. The exec argv is pinned separately, in both
+    /// crates, by `the_attach_argv_is_identical_in_both_crates`.
+    #[test]
+    fn only_a_paneless_interactive_codex_row_is_a_thread() {
+        let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
+        let thread = json!({
+            "name": "cx", "harness": "codex", "cwd": "/w",
+            "host_mode": "interactive", "short_id": "", "harness_session_id": uuid,
+        });
+        assert!(is_codex_thread_row(&thread));
+
+        // A pane-hosted row: its process already has a place, and selecting it
+        // navigates to that tab rather than opening a second view.
+        let mut paned = thread.clone();
+        paned["mux"] = json!({"session": "s", "pane_id": 4});
+        assert!(!is_codex_thread_row(&paned));
+
+        // A one-shot exec row has no persistent session at all.
+        let mut exec = thread.clone();
+        exec["host_mode"] = json!("exec");
+        assert!(!is_codex_thread_row(&exec));
+
+        // An absent host_mode reads as exec, never as interactive: a missing
+        // field must not promote a row into a tier it never earned.
+        let mut unset = thread.clone();
+        unset.as_object_mut().unwrap().remove("host_mode");
+        assert!(!is_codex_thread_row(&unset));
+
+        // A claude short id on the row means the claude path owns it.
+        let mut shorted = thread.clone();
+        shorted["short_id"] = json!("deadbeef");
+        assert!(!is_codex_thread_row(&shorted));
+
+        // An explicit null mux is the same as no mux (registry rows write
+        // both spellings).
+        let mut nulled = thread.clone();
+        nulled["mux"] = Value::Null;
+        assert!(is_codex_thread_row(&nulled));
+    }
+
+    /// AC19-ERR: a codex thread row whose daemon will not boot REFUSES with
+    /// the boot error. It never falls back to the rendered peek, which is the
+    /// path this lane exists to stop using, and it never returns `None` (the
+    /// "not a thread, use the refusal" answer), because that would print a
+    /// message saying codex has no persistent session when it has one.
+    #[test]
+    fn a_codex_thread_with_an_unbootable_daemon_refuses_rather_than_falling_back() {
+        let _guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // A CODEX_HOME with no daemon state and no `codex` reachable to boot
+        // one: ensure_codex_daemon cannot succeed.
+        let home = std::env::temp_dir().join(format!("fno-x6678-noboot-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let saved_home = std::env::var_os("CODEX_HOME");
+        let saved_path = std::env::var_os("PATH");
+        std::env::set_var("CODEX_HOME", &home);
+        std::env::set_var("PATH", "/nonexistent-x6678");
+
+        let events = home.join("events.jsonl");
+        let entry = json!({
+            "name": "cx", "harness": "codex", "cwd": "/w",
+            "host_mode": "interactive", "short_id": "",
+            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
+        });
+        let outcome = attach_codex_thread(&entry, "cx", &events);
+
+        match saved_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+        match saved_path {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(
+            outcome,
+            Some(13),
+            "an unbootable daemon is a refusal owned by this path, never a fall-through"
+        );
+        let log = std::fs::read_to_string(&events).unwrap_or_default();
+        assert!(
+            log.contains("codex-daemon-unavailable"),
+            "the refusal must name its own reason in the event log: {log}"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
 
     // --- find_agent_entry (x-1b1e): parity with Python resolve_agent ----------
 
