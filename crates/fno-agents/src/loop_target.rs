@@ -572,15 +572,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     install_sigint_handler();
 
     // ── build journal ─────────────────────────────────────────────────────────
-    let project_events = crate::paths::worktree_repo_root(&cwd)
-        .join(".fno")
-        .join("events.jsonl");
+    let project_events = ProjectJournalPath::for_repo(&crate::paths::worktree_repo_root(&cwd));
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     let global_events = home_dir.join(".fno").join("events.jsonl");
     let journal = Journal::new(
-        ProjectJournalPath(project_events),
+        project_events,
         GlobalJournalPath(global_events),
     );
 

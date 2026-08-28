@@ -28,6 +28,7 @@ import datetime as _dt
 import hashlib as _hashlib
 import json as _json
 import math as _math
+import os
 import re as _re
 import secrets as _secrets
 import sys as _sys
@@ -1440,6 +1441,71 @@ def worktree_overlap_observed(
     return _build("worktree_overlap_observed", source, data)
 
 
+class HermeticEscapeError(RuntimeError):
+    """A test process tried to append to a journal outside its sandbox."""
+
+
+def _hermetic_allowed_roots() -> list[Path]:
+    """Roots a hermetic test process may legitimately write a journal into.
+
+    ``fno.hermetic.neutralise`` pins ``HOME`` to a throwaway sandbox and
+    ``FNO_EVENTS_PATH`` to a journal inside it; every test that names its own
+    file names one under ``tmp_path``, which lives under ``TMPDIR``. Both raw
+    and resolved forms are kept because macOS reports ``TMPDIR`` as
+    ``/var/folders/...`` while ``Path.resolve()`` yields ``/private/var/...``.
+    """
+    roots: list[Path] = []
+    candidates = [
+        os.environ.get("HOME"),
+        os.environ.get("TMPDIR") or "/tmp",
+    ]
+    pin = os.environ.get("FNO_EVENTS_PATH")
+    if pin:
+        candidates.append(str(Path(pin).parent))
+    for raw in candidates:
+        if not raw:
+            continue
+        base = Path(raw)
+        for form in (base, Path(os.path.realpath(raw))):
+            if form not in roots:
+                roots.append(form)
+    return roots
+
+
+def _refuse_hermetic_escape(path: Path) -> None:
+    """Refuse a journal write that would leave a test's sandbox.
+
+    ``FNO_TEST_HERMETIC`` was a receipt nothing read. This is its first
+    consumer, and it closes the class rather than one caller: a module that
+    builds its own ``<root>/.fno/events.jsonl`` by hand consults neither
+    ``FNO_EVENTS_PATH`` nor ``FNO_REPO_ROOT``, so no pin can reach it. Every
+    event write in the Python tree funnels through :func:`append_event`, so
+    the check belongs here - one guard, not one per path builder.
+
+    ``spawn_think`` was the specimen: it wrote ``think_offered`` rows for the
+    fixture node ``x-2222aaaa`` into the developer's live journal, and from
+    there into the operator's needs panel. A worktree's ``.fno/events.jsonl``
+    is a symlink to the canonical journal, so a worker's test run reached the
+    operator's file from a directory nobody thought of as production.
+
+    Known limit: on a CI runner the checkout sits under ``HOME``, so this
+    permits an ephemeral in-checkout write there. It protects a developer's
+    machine, which is where the journal is load-bearing.
+    """
+    if os.environ.get("FNO_TEST_HERMETIC") != "1":
+        return
+    roots = _hermetic_allowed_roots()
+    for form in (path, Path(os.path.realpath(path))):
+        if any(form == root or root in form.parents for root in roots):
+            return
+    raise HermeticEscapeError(
+        f"append_event refused a journal write outside the test sandbox: {path}. "
+        "A hermetic run must not touch a live events.jsonl. Pass an explicit "
+        "events_path= under tmp_path, or resolve the journal with "
+        "fno.paths.project_events_json() so FNO_EVENTS_PATH applies."
+    )
+
+
 def append_event(
     event: dict[str, Any],
     events_path: Path | None = None,
@@ -1461,6 +1527,8 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
+    # Before the mkdir: a refused write must not leave a .fno/ behind either.
+    _refuse_hermetic_escape(requested_path)
     requested_path.parent.mkdir(parents=True, exist_ok=True)
     while True:
         # Setup can replace a local journal with a canonical-journal symlink
