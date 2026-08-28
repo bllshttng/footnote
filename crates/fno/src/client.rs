@@ -3989,13 +3989,24 @@ impl View {
                 Some("empty resets to auto"),
             ));
         }
-        self.recruit.as_ref().map(|name| {
-            self.name_modal_layout(
+        if let Some(name) = &self.recruit {
+            return Some(self.name_modal_layout(
                 &format!("recruit {} into", self.marks.len()),
                 name,
                 Some("create-if-absent"),
-            )
-        })
+            ));
+        }
+        // The two Full-chrome overlays below draw through the same
+        // layout_lines_overlay pair (draw arm + this hit-test layout), so the
+        // footer's esc close words resolve to the glyph they paint. Order
+        // mirrors the draw chain: connections paints above peek.
+        if let Some(conn) = &self.connections {
+            return Some(self.connections_overlay_layout(rows, conn));
+        }
+        if let Some(peek) = &self.peek {
+            return Some(self.peek_overlay_layout(rows, peek));
+        }
+        None
     }
 
     fn cancel_active_overlay(&mut self) {
@@ -4012,6 +4023,13 @@ impl View {
         }
         if self.recruit.take().is_some() {
             self.recruit_esc.clear();
+            return;
+        }
+        if self.connections.take().is_some() {
+            return;
+        }
+        if self.peek.is_some() {
+            self.clear_peek();
         }
     }
 
@@ -7081,6 +7099,49 @@ impl View {
             }
         };
         layout_lines_overlay(origin, dims, &chrome, &lines, None, anchor)
+    }
+
+    /// The Connections modal's hit-test layout: the draw arm and this build
+    /// the SAME `layout_lines_overlay` block from the same chrome and body,
+    /// so a click resolves to the cell the operator sees (AC: the footer's
+    /// esc close words are a target, not a label).
+    fn connections_overlay_layout(
+        &self,
+        _rows: usize,
+        conn: &crate::connections_view::ConnectionsView,
+    ) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let chrome = chrome::Chrome::new("connections", Anchor::Center).footer("esc close");
+        layout_lines_overlay(
+            origin,
+            dims,
+            &chrome,
+            &conn.render(),
+            None,
+            OverlayAnchor::Center,
+        )
+    }
+
+    /// The peek overlay's hit-test layout, rebuilt from the same LIVE inputs
+    /// the draw arm reads (layout rows, reply buffer, wall clock). A second
+    /// tick between draw and click can move a width by a character; the hit
+    /// spans are wide enough that this never unclicks the footer.
+    fn peek_overlay_layout(&self, _rows: usize, peek: &PeekView) -> OverlayLayout {
+        let (origin, dims) = self.overlay_viewport();
+        let drows = self.display_rows();
+        let agent = drows.get(peek.cursor).and_then(|r| match r {
+            DisplayRow::Agent(a) => Some(*a),
+            _ => None,
+        });
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let reply = self.peek_input.as_ref().map(|(_, buf)| buf.as_str());
+        let lines = peek_overlay_lines(agent, peek, reply, now_secs);
+        let title = agent.map(|a| a.name.as_str()).unwrap_or("peek");
+        let chrome = chrome::Chrome::new(title, Anchor::Center).footer("esc close");
+        layout_lines_overlay(origin, dims, &chrome, &lines, None, OverlayAnchor::Center)
     }
 
     fn draw_confirm_line(
@@ -11798,9 +11859,13 @@ fn consume_modal_close_gesture(view: &mut View, kind: MouseKind) -> bool {
 
 /// Family-B name and confirmation overlays own every pointer event while open.
 /// Only the shared Chrome esc hit cancels; outside clicks are swallowed so they
-/// cannot dismiss the modal or reach a pane underneath it.
+/// cannot dismiss the modal or reach a pane underneath it. The Connections
+/// modal joins them. Peek does NOT: it is deliberately click-through (a
+/// right-press under it still opens the row's menu), so only its footer's
+/// close words are intercepted and every other event falls through.
 fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
-    if consume_modal_close_gesture(view, rep.kind) {
+    let peek_open = view.peek.is_some();
+    if !peek_open && consume_modal_close_gesture(view, rep.kind) {
         return true;
     }
     let Some(layout) = view.active_overlay_layout() else {
@@ -11811,6 +11876,10 @@ fn modal_mouse(view: &mut View, rep: crate::mouse::MouseReport) -> bool {
     {
         view.cancel_active_overlay();
         view.modal_release_swallow = true;
+        return true;
+    }
+    if peek_open {
+        return false;
     }
     true
 }
@@ -25087,6 +25156,136 @@ mod tests {
             assert_eq!(v.sweep_action, Some(SweepAction::Apply(scope)));
             v.sweep_action = None;
         }
+    }
+
+    /// The screen cell carrying an overlay's `esc close` words, taken from
+    /// the same framed block the click router hit-tests against.
+    fn overlay_footer_cell(layout: &OverlayLayout) -> (u16, u16) {
+        for (li, line) in layout.framed.lines.iter().enumerate() {
+            if let Some(&(t, off, len)) = line
+                .hits
+                .iter()
+                .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
+            {
+                return (
+                    (layout.origin.0 + li) as u16,
+                    (layout.origin.1 + off + len / 2) as u16,
+                );
+            }
+        }
+        panic!("no esc close hit span anywhere in the overlay frame");
+    }
+
+    fn left_click(row: u16, col: u16) -> crate::mouse::MouseReport {
+        crate::mouse::MouseReport {
+            row,
+            col,
+            kind: MouseKind::Press(MouseButton::Left),
+            shift: false,
+        }
+    }
+
+    /// The update modal's footer words are a target, not a label: a left
+    /// click on them closes the popup.
+    #[tokio::test]
+    async fn update_modal_footer_esc_close_click_closes() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (30, 100);
+        v.aux = Some(build_update_modal(None));
+        let r = v.aux.as_ref().unwrap().popup.render(v.term);
+        let footer = overlay_footer_cell(&OverlayLayout {
+            origin: r.origin,
+            framed: chrome::Framed {
+                lines: r
+                    .lines
+                    .iter()
+                    .map(|l| chrome::FramedLine {
+                        text: l.text.clone(),
+                        roles: l.roles.clone(),
+                        hits: l.hits.clone(),
+                    })
+                    .collect(),
+                width: r.width,
+            },
+        });
+        let mut buf: Vec<u8> = Vec::new();
+        aux_mouse(&mut v, left_click(footer.0, footer.1), &mut buf)
+            .await
+            .unwrap();
+        assert!(v.aux.is_none(), "the footer's close words closed the modal");
+    }
+
+    /// The Connections modal's footer words close it; any other click is
+    /// swallowed rather than reaching the pane underneath.
+    #[tokio::test]
+    async fn connections_modal_footer_esc_close_click_closes() {
+        let mut v = view_with_agents(vec![]);
+        v.term = (30, 100);
+        v.connections = Some(crate::connections_view::ConnectionsView::new());
+        let layout = v.active_overlay_layout().expect("connections hit layout");
+        let footer = overlay_footer_cell(&layout);
+        assert!(
+            modal_mouse(&mut v, left_click(footer.0, footer.1)),
+            "the modal owns the pointer"
+        );
+        assert!(
+            v.connections.is_none(),
+            "the footer's close words closed the modal"
+        );
+
+        // A click that is not on the close words is swallowed, not forwarded.
+        v.connections = Some(crate::connections_view::ConnectionsView::new());
+        let layout = v.active_overlay_layout().unwrap();
+        let inside = (layout.origin.0 as u16 + 1, layout.origin.1 as u16 + 1);
+        assert!(modal_mouse(&mut v, left_click(inside.0, inside.1)));
+        assert!(
+            v.connections.is_some(),
+            "an in-body click neither dismisses nor falls through"
+        );
+    }
+
+    /// Peek's footer words close it, and everything else keeps falling
+    /// through - the x7683 click-through contract only excepts the close
+    /// words themselves.
+    #[tokio::test]
+    async fn peek_footer_esc_close_click_closes_and_the_rest_falls_through() {
+        let mut v = view_with_agents(vec![agent_row("w", 10, Some(AgentBadge::Working), false)]);
+        v.term = (30, 100);
+        v.peek = Some(PeekView {
+            cursor: agent_row_at(&v, |a| a.name == "w"),
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+            refresh_pending: false,
+            squad: None,
+        });
+        let layout = v.active_overlay_layout().expect("peek hit layout");
+        let footer = overlay_footer_cell(&layout);
+        assert!(modal_mouse(&mut v, left_click(footer.0, footer.1)));
+        assert!(v.peek.is_none(), "the footer's close words closed the peek");
+
+        // A non-close event falls through: modal_mouse returns false, so the
+        // router keeps the x7683 right-press and pane-forward behavior.
+        v.peek = Some(PeekView {
+            cursor: agent_row_at(&v, |a| a.name == "w"),
+            seq: 1,
+            body: None,
+            name: "w".into(),
+            last_fetch: Instant::now(),
+            refresh_pending: false,
+            squad: None,
+        });
+        let layout = v.active_overlay_layout().unwrap();
+        let inside = (layout.origin.0 as u16 + 1, layout.origin.1 as u16 + 1);
+        assert!(
+            !modal_mouse(&mut v, left_click(inside.0, inside.1)),
+            "peek stays click-through off the close words"
+        );
+        assert!(
+            v.peek.is_some(),
+            "a fall-through click does not dismiss peek"
+        );
     }
 
     /// AC3-HP mirrored client-side: not-ready builds the menu with no row.
