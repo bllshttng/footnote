@@ -2588,8 +2588,15 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
     };
     match action {
         SweepAction::Counts => {
-            let tabs = parsed["tabs_would_close"].as_u64().unwrap_or(0) as usize;
-            let dead = parsed["members_reaped"].as_u64().unwrap_or(0) as usize;
+            // A missing field means the two processes disagree about the JSON
+            // shape (a stale deployed binary): fail the probe rather than open
+            // a modal with fabricated zeros.
+            let (Some(tabs), Some(dead)) = (
+                parsed["tabs_would_close"].as_u64().map(|v| v as usize),
+                parsed["members_reaped"].as_u64().map(|v| v as usize),
+            ) else {
+                return SweepMsg::Failed("prune output missing count fields".into());
+            };
             if let Some(notice) = parsed["notice"].as_str() {
                 if !notice.is_empty() {
                     return SweepMsg::Failed(notice.to_string());
@@ -2597,10 +2604,15 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
             }
             SweepMsg::Counts { tabs, dead }
         }
-        SweepAction::Apply(_) => SweepMsg::Applied {
-            closed: parsed["tabs_closed"].as_u64().unwrap_or(0) as usize,
-            reaped: parsed["members_reaped"].as_u64().unwrap_or(0) as usize,
-        },
+        SweepAction::Apply(_) => {
+            let (Some(closed), Some(reaped)) = (
+                parsed["tabs_closed"].as_u64().map(|v| v as usize),
+                parsed["members_reaped"].as_u64().map(|v| v as usize),
+            ) else {
+                return SweepMsg::Failed("prune output missing count fields".into());
+            };
+            SweepMsg::Applied { closed, reaped }
+        }
     }
 }
 
@@ -11597,9 +11609,9 @@ async fn attach_and_run(
             }
             Some(msg) = sweep_rx.recv() => {
                 // The tap asked for this outcome: counts open the centered
-                // choice modal, an apply speaks in a notice. A modal that
-                // opened meanwhile is the operator's most recent expressed
-                // intent winning - same stomp semantics as the theme apply.
+                // choice modal, an apply speaks in a notice. A popup opened
+                // after the tap is the operator's newer intent and is never
+                // stomped by a landing probe.
                 view.sweep_inflight = false;
                 match msg {
                     SweepMsg::Counts { tabs, dead } => {
