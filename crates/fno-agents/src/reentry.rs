@@ -199,6 +199,7 @@ pub fn resolve_reentry_with(
     transition: ReentryTransition,
     select_session: Option<&str>,
     account_binding: &AccountBinding,
+    cwd_override: Option<&str>,
 ) -> Result<ReentryPlan, String> {
     if name.trim().is_empty() {
         return Err("no agent named".to_string());
@@ -308,6 +309,18 @@ pub fn resolve_reentry_with(
         }
         None | Some("default") => None,
         Some(id) => match account_binding(id) {
+            // An account that resolves to NO config dir is an api-key lane:
+            // its credential lives in env the secret-free binding never
+            // carries, so a plan built here would launch WITHOUT the account's
+            // key - the silent wrong-bill shape this module exists to close.
+            // Refuse and name the remedy; the plan never guesses an overlay.
+            Ok(None) => {
+                return Err(format!(
+                    "launch account {id:?} on row {name:?} rides an api-key lane with no config dir; \
+                     its credential cannot ride a re-entry plan - re-enter under a config-dir lane \
+                     or re-spawn the worker"
+                ))
+            }
             Ok(dir) => dir,
             Err(reason) => {
                 return Err(format!(
@@ -318,11 +331,16 @@ pub fn resolve_reentry_with(
     };
 
     // cwd: a relaunch needs a working directory that exists; an attach does
-    // too (claude resolves the session against its project dir).
-    if !Path::new(&entry.cwd).is_dir() {
+    // too (claude resolves the session against its project dir). An explicit
+    // --cwd replacement (the operator re-homing a row whose worktree moved)
+    // outranks the recorded value for both the check and the plan.
+    let cwd = cwd_override
+        .filter(|c| !c.is_empty())
+        .unwrap_or(entry.cwd.as_str());
+    if !Path::new(cwd).is_dir() {
         return Err(format!(
             "row {name:?} cwd {:?} is unreachable; re-entry would launch somewhere that does not exist",
-            entry.cwd
+            cwd
         ));
     }
 
@@ -362,7 +380,7 @@ pub fn resolve_reentry_with(
         launch_account: launch_account.unwrap_or_else(|| "unknown".to_string()),
         claude_config_dir,
         route_settings_path: entry.route_settings_path.clone().filter(|p| !p.is_empty()),
-        cwd: entry.cwd.clone(),
+        cwd: cwd.to_string(),
         substrate: substrate_of(entry).to_string(),
         mux: entry.mux.clone(),
         argv,
@@ -378,6 +396,7 @@ pub fn resolve_reentry(
     name: &str,
     transition: ReentryTransition,
     select_session: Option<&str>,
+    cwd_override: Option<&str>,
 ) -> Result<ReentryPlan, String> {
     let registry = load_registry(registry_path)
         .map_err(|e| format!("registry unreadable at {}: {e}", registry_path.display()))?;
@@ -387,6 +406,7 @@ pub fn resolve_reentry(
         transition,
         select_session,
         &shell_account_binding,
+        cwd_override,
     )
 }
 
@@ -435,6 +455,7 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
         name,
         transition,
         select_session.as_deref(),
+        None,
     ) {
         Ok(plan) => {
             match serde_json::to_string_pretty(&plan) {
@@ -562,6 +583,7 @@ mod tests {
             ReentryTransition::Resume,
             None,
             &binding_ok,
+            None,
         )
         .unwrap();
         assert!(plan.resolved);
@@ -606,6 +628,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("no launch account"), "{err}");
@@ -626,6 +649,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("unreadable"), "{err}");
@@ -647,6 +671,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("scrub floor"), "{err}");
@@ -665,6 +690,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("unreachable"), "{err}");
@@ -680,6 +706,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("no harness session id"), "{err}");
@@ -697,6 +724,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap();
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
@@ -717,6 +745,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap();
         assert_eq!(plan.argv, vec!["claude", "attach", "aaaaaaaa"]);
@@ -732,8 +761,15 @@ mod tests {
         e.launch_account = Some("default".into());
         let r = &reg(vec![e]);
 
-        let err = resolve_reentry_with(r, "forked", ReentryTransition::Recover, None, &binding_ok)
-            .unwrap_err();
+        let err = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Recover,
+            None,
+            &binding_ok,
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("two valid session ids"), "{err}");
 
         // An unrecorded id is refused naming BOTH recorded ids.
@@ -743,6 +779,7 @@ mod tests {
             ReentryTransition::Recover,
             Some("99999999-9999-9999-9999-999999999999"),
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("aaaaaaaa-bbbb"), "{err}");
@@ -759,20 +796,35 @@ mod tests {
                 ReentryTransition::Recover,
                 Some(id),
                 &binding_ok,
+                None,
             )
             .unwrap();
             assert_eq!(plan.session_id, id);
         }
 
         // Attach needs no selection: it targets the row's own transport key.
-        let plan = resolve_reentry_with(r, "forked", ReentryTransition::Attach, None, &binding_ok)
-            .unwrap();
+        let plan = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Attach,
+            None,
+            &binding_ok,
+            None,
+        )
+        .unwrap();
         assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
 
         // A smart resume also needs no selection: it continues the primary
         // (the canonical address delivery follows) and never demands one.
-        let plan = resolve_reentry_with(r, "forked", ReentryTransition::Resume, None, &binding_ok)
-            .unwrap();
+        let plan = resolve_reentry_with(
+            r,
+            "forked",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            None,
+        )
+        .unwrap();
         assert_eq!(plan.session_id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
     }
 
@@ -788,12 +840,66 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(
             err.contains("removed-acct") && err.contains("no longer resolves"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn reentry_plan_refuses_an_api_key_lane_account_it_cannot_restore() {
+        // The binding resolves the id but carries no config dir: an api-key
+        // lane whose credential the secret-free plan never carries. Launching
+        // bare would silently drop the account's key - refuse instead.
+        let api_key_lane = |id: &str| -> Result<Option<String>, String> {
+            if id == "keyacct" {
+                Ok(None)
+            } else {
+                Err(format!("account {id:?} is not registered"))
+            }
+        };
+        let mut e = row("keyed");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("keyacct".into());
+        let err = resolve_reentry_with(
+            &reg(vec![e]),
+            "keyed",
+            ReentryTransition::Resume,
+            None,
+            &api_key_lane,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("api-key lane") && err.contains("keyacct"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reentry_plan_honors_a_replacement_cwd_over_an_unreachable_recorded_one() {
+        // --cwd re-homes a row whose recorded worktree is gone: the operator's
+        // live replacement outranks the recorded dir for the check and the plan.
+        let mut e = row("moved");
+        e.harness_session_id = Some("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into());
+        e.short_id = "aaaaaaaa".into();
+        e.launch_account = Some("default".into());
+        e.cwd = "/no/such/dir/anywhere".into();
+        let live = std::env::temp_dir().to_string_lossy().to_string();
+        let plan = resolve_reentry_with(
+            &reg(vec![e]),
+            "moved",
+            ReentryTransition::Resume,
+            None,
+            &binding_ok,
+            Some(&live),
+        )
+        .unwrap();
+        assert_eq!(plan.cwd, live);
     }
 
     #[test]
@@ -806,6 +912,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("ambiguous"), "{err}");
@@ -816,6 +923,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("no registry row"), "{err}");
@@ -831,6 +939,7 @@ mod tests {
             ReentryTransition::Attach,
             None,
             &binding_ok,
+            None,
         )
         .unwrap_err();
         assert!(err.contains("claude-only"), "{err}");

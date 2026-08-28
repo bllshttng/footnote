@@ -1924,6 +1924,7 @@ def record_session_observation(
         return row, "refused-cap"
 
     observed: list[AgentEntry] = []
+    cap_hit: list[bool] = []
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
@@ -1946,12 +1947,22 @@ def record_session_observation(
                         entry.short_id = lead
                 observed.append(entry)
                 return entries
+            if entry_related:
+                # Both slots filled under the lock by concurrent observations
+                # that all passed the pre-read: a THIRD distinct id writes
+                # nothing. Overwriting the related slot here would silently
+                # drop the id the first winner recorded - the same cap the
+                # pre-read enforces, re-decided under the lock.
+                cap_hit.append(True)
+                return entries
             entry.related_session_id = session_id
             observed.append(entry)
             return entries
         return entries
 
     update_registry(_updater, path=registry_path)
+    if cap_hit:
+        return row, "refused-cap"
     if not observed:
         # A concurrent observation won the slot between the pre-read and the
         # lock: nothing was written, and the honest outcome is the no-op.

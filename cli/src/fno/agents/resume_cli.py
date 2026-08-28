@@ -361,8 +361,16 @@ def _default_wake_fn(
     # route overlay, same precedence as every spawn seam - account selects
     # the namespace, route wins endpoint/auth/model. Cleared FIRST so an
     # ambient dir from the caller's shell (an alt-account alias) cannot
-    # survive a row bound to a different account.
+    # survive a row bound to a different account. Auth vars scrub for the
+    # same reason the attach seam scrubs them: an ambient credential of a
+    # DIFFERENT kind (an oauth token next to the account's api key) outranks
+    # the overlay in claude and bills whoever the caller's shell was logged
+    # in as.
     if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        for var in SCRUB_AUTH_VARS:
+            env.pop(var, None)
         env.pop("CLAUDE_CONFIG_DIR", None)
         env.update(account_env)
     # Scrub only when there is something to restore, matching

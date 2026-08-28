@@ -1063,6 +1063,53 @@ def test_observation_refuses_a_third_distinct_id_and_names_both(
     assert after == before, "a refused observation changes nothing on disk"
 
 
+def test_the_cap_redecides_under_the_registry_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two concurrent SessionStarts with different ids both pass a pre-read
+    that saw an empty related slot. The first updater fills it; the second
+    must re-decide the cap UNDER the lock and write nothing, never overwrite
+    the id the first winner recorded."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import registry as registry_mod
+
+    _spawned_row()  # primary filled, related empty
+    # The concurrent winner's write lands on the real file...
+    _observe("target-x-f0c2", FORK)
+    # ...but THIS caller's pre-read already snapshotted the pre-fork row.
+    from fno.agents.registry import AgentEntry as _AE
+
+    stale_snapshot = [
+        _AE(
+            name="target-x-f0c2",
+            harness="claude",
+            cwd="/proj",
+            log_path="/tmp/forked.log",
+            short_id="cafef00d",
+            status="live",
+        )
+    ]
+
+    real_load = registry_mod.load_registry
+
+    def stale_first_read(path=None):
+        if stale_first_read.calls:  # noqa: B008 - simple flag
+            return real_load(path=path)
+        stale_first_read.calls += 1
+        return stale_snapshot
+
+    stale_first_read.calls = 0
+    monkeypatch.setattr(registry_mod, "load_registry", stale_first_read)
+
+    entry, outcome = _observe("target-x-f0c2", THIRD)
+    assert outcome == "refused-cap", outcome
+    row = real_load()[0]
+    assert row.harness_session_id == BIRTH
+    assert row.related_session_id == FORK, (
+        "the under-lock cap wrote nothing: the winner's id stays"
+    )
+
+
 def test_a_refused_observation_is_visible_and_the_hook_stays_fail_soft(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:

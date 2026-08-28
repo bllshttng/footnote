@@ -2446,7 +2446,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // EnterWorktree after registration has its transcript under a different
     // project dir than the recorded (pre-EnterWorktree) cwd. Resolve the cwd
     // from where the transcript actually is; other harnesses keep the recorded.
-    let resolved_cwd = if let Some(override_cwd) = cwd_override {
+    let resolved_cwd = if let Some(override_cwd) = cwd_override.clone() {
         override_cwd
     } else if harness == "claude" {
         let claude_uuid = entry
@@ -2574,6 +2574,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             &row_name,
             crate::reentry::ReentryTransition::Resume,
             None,
+            cwd_override.as_deref(),
         ) {
             Ok(plan) => reentry_plan = Some(plan),
             Err(reason) => {
@@ -2903,6 +2904,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
         &name,
         crate::reentry::ReentryTransition::Recover,
         select_session.as_deref(),
+        None,
     ) {
         Ok(plan) => plan,
         Err(reason) => {
@@ -3340,6 +3342,7 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         &home.registry_json(),
         &name,
         crate::reentry::ReentryTransition::Attach,
+        None,
         None,
     ) {
         Ok(p) => p,
