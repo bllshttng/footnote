@@ -356,12 +356,14 @@ def coverage_verdict(
         cov, recompute_note = _merge._review_coverage_for_pr(pr_number, repo, head)
     else:
         try:
-            from fno.pr._reviews import review_coverage_for_head
+            from fno.pr._reviews import coverage_pin_note, review_coverage_for_head
 
             cov = review_coverage_for_head(pr_number, repo, head)
+            # The pin describes the stored row, so it rides BOTH surfaces or
+            # the two refuse with different sentences for one row.
+            recompute_note = coverage_pin_note(pr_number, repo)
         except Exception as exc:  # noqa: BLE001 - instrument failure, not absence
             return UNANSWERED, "", "", f"events read raised: {exc}"
-        recompute_note = ""
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, repo)
