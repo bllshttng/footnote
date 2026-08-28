@@ -1760,7 +1760,23 @@ fn gc_sweep_impl_with_node_cascade(
             exited_at,
             // A one-shot ask carries neither pid nor short_id: no worker can be
             // hiding behind an identity that was never recorded.
-            liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
+            //
+            // The third term is load-bearing since codex threads moved to the
+            // shared app-server daemon (x-6678). Such a row records NO pid
+            // (fno owns no process for it) and an empty short_id, so without
+            // it every codex thread row has no surface at all and
+            // `removal_is_corroborated` clears it on absence alone - while the
+            // thread is still alive on the daemon and the row is the only
+            // pointer back to it.
+            //
+            // Scoped to that row SHAPE rather than to "has a session id": a
+            // one-shot ask records a `harness_session_id` too, and it names a
+            // finished exchange, not a live worker. Widening the term to any
+            // recorded session id gives those rows a surface nothing probes,
+            // which strands them instead of reaping them. A codex thread's
+            // identity IS probeable (`thread/loaded/list`), and a probe that
+            // comes back empty corroborates through `harness_session_gone`.
+            liveness_surface: e.pid.is_some() || !e.short_id.is_empty() || is_codex_thread_entry(e),
             transcript_fresh,
             harness_session_gone,
             dormant_done,

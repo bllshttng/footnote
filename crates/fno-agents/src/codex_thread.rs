@@ -23,9 +23,8 @@
 
 use crate::codex_inject::{
     codex_app_server_socket_path, connect_shared_app_server, ensure_codex_daemon,
-    initialize_request_json, initialized_notification_json, parse_review_start_response,
-    review_start_request_json, CodexAppServerSink, CodexAppServerStream, ReviewDelivery,
-    ReviewTarget,
+    parse_review_start_response, review_start_request_json, CodexAppServerSink,
+    CodexAppServerStream, ReviewDelivery, ReviewTarget,
 };
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -357,7 +356,6 @@ impl CodexThread {
     ) -> Result<Self, ThreadDriverError> {
         let cwd = cwd.into();
         let mut driver = Self::launch(cwd.clone()).await?;
-        driver.initialize().await?;
         let request = thread_start_request_with_options(1, &cwd, model, yolo, "never");
         let response = driver.request(1, request).await?;
         let (thread_id, rollout_path) = parse_thread_start_response(&response)
@@ -384,7 +382,6 @@ impl CodexThread {
         }
         let cwd = cwd.into();
         let mut driver = Self::launch(cwd.clone()).await?;
-        driver.initialize().await?;
         let request = thread_resume_request_with_options(1, thread_id, &cwd, model, yolo, "never");
         let response = driver.request(1, request).await?;
         let (confirmed_id, rollout_path) = parse_thread_start_response(&response)
@@ -439,16 +436,6 @@ impl CodexThread {
         })
     }
 
-    /// A no-op on the shared lane: [`connect_shared_app_server`] completes the
-    /// `initialize` / `initialized` exchange before it hands the connection
-    /// back, so both call sites share one handshake instead of two spellings
-    /// of it. Kept as a named step because `start` and `resume` read as a
-    /// protocol sequence.
-    async fn initialize(&mut self) -> Result<(), ThreadDriverError> {
-        let _ = (initialize_request_json(), initialized_notification_json());
-        Ok(())
-    }
-
     async fn request(&mut self, id: u64, request: String) -> Result<String, ThreadDriverError> {
         self.request_value(id, request)
             .await
@@ -486,16 +473,24 @@ impl CodexThread {
                 "actor owns the read pump; legacy reads are unavailable".into(),
             ));
         };
+        // ONE deadline for the whole call. A fresh `read_timeout` per skipped
+        // frame lets a daemon pinging faster than the budget keep this call
+        // alive forever, and the callers recompute their own remaining budget
+        // only BETWEEN calls - so REQUEST_TIMEOUT and TURN_TIMEOUT could never
+        // fire during one. The pre-WebSocket read could not loop at all.
+        let deadline = Instant::now() + read_timeout;
         loop {
-            let frame = tokio::time::timeout(read_timeout, stream.next())
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(ThreadDriverError::Timeout);
+            }
+            let frame = tokio::time::timeout(remaining, stream.next())
                 .await
                 .map_err(|_| ThreadDriverError::Timeout)?;
             match frame {
                 Some(Ok(Message::Text(text))) => {
                     return serde_json::from_str(text.trim()).map_err(|_| {
-                        ThreadDriverError::Protocol(
-                            "app-server emitted a non-JSON frame".into(),
-                        )
+                        ThreadDriverError::Protocol("app-server emitted a non-JSON frame".into())
                     })
                 }
                 // ping / pong / binary carry no protocol payload.

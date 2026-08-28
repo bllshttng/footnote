@@ -49,7 +49,10 @@ async fn ndjson_without_a_websocket_upgrade_is_refused() {
         let (stream, _) = listener.accept().await.unwrap();
         // A WebSocket server hands a non-upgrading client an error, never a
         // JSON-RPC response.
-        tokio_tungstenite::accept_async(stream).await.err().is_some()
+        tokio_tungstenite::accept_async(stream)
+            .await
+            .err()
+            .is_some()
     });
 
     let mut raw = UnixStream::connect(&sock).await.unwrap();

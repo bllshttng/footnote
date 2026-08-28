@@ -421,7 +421,6 @@ impl HarnessContract {
             &format!("lane {lane:?} needs a non-empty session id"),
         ))
     }
-
 }
 
 /// (x-6678) Compose a form's `pre_exec` with its rendered argv:

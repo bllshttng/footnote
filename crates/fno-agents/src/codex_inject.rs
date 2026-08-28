@@ -276,10 +276,8 @@ async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static s
 }
 
 /// The write half of a connection to the shared codex app-server daemon.
-pub type CodexAppServerSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<UnixStream>,
-    Message,
->;
+pub type CodexAppServerSink =
+    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<UnixStream>, Message>;
 /// The read half of a connection to the shared codex app-server daemon.
 pub type CodexAppServerStream =
     futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<UnixStream>>;
@@ -305,7 +303,20 @@ pub async fn connect_shared_app_server(
     sink.send(Message::Text(initialize_request_json().into()))
         .await
         .map_err(|_| "io-error")?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    // The id-matched frame is not automatically a successful handshake. A
+    // daemon that refuses `initialize` (protocol or version skew) answers with
+    // an `error` on the same id, and treating that as healthy is worse than a
+    // bad message: `probe_codex_app_server` runs this same helper, so the
+    // refusing daemon would report healthy, never be rebooted, and every
+    // later call would fail naming something else.
+    let response = read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    if serde_json::from_str::<serde_json::Value>(&response)
+        .ok()
+        .and_then(|frame| frame.get("error").cloned())
+        .is_some_and(|error| !error.is_null())
+    {
+        return Err("initialize-refused");
+    }
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
         .map_err(|_| "io-error")?;
@@ -1283,7 +1294,10 @@ async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
 /// Read Text frames until one whose `id` equals `want`, returning its raw text.
 /// Skips notifications (no `id`) and frames for other ids; ignores non-Text
 /// frames. Bounded by [`MAX_FRAMES`]; a read error / closed stream is `"io-error"`.
-pub(crate) async fn read_until_id<S>(stream: &mut S, want: &serde_json::Value) -> Result<String, &'static str>
+pub(crate) async fn read_until_id<S>(
+    stream: &mut S,
+    want: &serde_json::Value,
+) -> Result<String, &'static str>
 where
     S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 {

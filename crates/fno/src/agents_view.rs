@@ -342,34 +342,34 @@ fn bundled_attach_forms() -> std::collections::HashMap<String, AttachForm> {
             cursor = cursor.and_then(|n| n.get(key));
         }
         let Some(form) = cursor else { continue };
-                if form.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
-                    continue;
-                }
-                let tokens: Vec<String> = form
-                    .get("tokens")
-                    .and_then(|t| t.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|t| t.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let id_kind = if tokens.iter().any(|t| t == "{short_id}") {
-                    IdKind::Short
-                } else if tokens.iter().any(|t| t == "{session_id}") {
-                    IdKind::Session
-                } else {
-                    continue;
-                };
-                let pre_exec: Vec<String> = form
-                    .get("pre_exec")
-                    .and_then(|t| t.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|t| t.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
+        if form.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
+            continue;
+        }
+        let tokens: Vec<String> = form
+            .get("tokens")
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let id_kind = if tokens.iter().any(|t| t == "{short_id}") {
+            IdKind::Short
+        } else if tokens.iter().any(|t| t == "{session_id}") {
+            IdKind::Session
+        } else {
+            continue;
+        };
+        let pre_exec: Vec<String> = form
+            .get("pre_exec")
+            .and_then(|t| t.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|t| t.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
         out.insert(
             name.clone(),
             AttachForm {
@@ -4422,7 +4422,9 @@ config_dir = "~/.claude-alt"
         assert_eq!(form.pre_exec, ["openclaw", "daemon", "start"]);
         let rendered = form.render("sess-1");
         assert_eq!(rendered.first().map(String::as_str), Some("sh"));
-        assert!(rendered.join(" ").contains("; exec 'openclaw' 'resume' 'sess-1'"));
+        assert!(rendered
+            .join(" ")
+            .contains("; exec 'openclaw' 'resume' 'sess-1'"));
 
         // No pre_exec: the argv is the bare command, no shell in the way.
         let bare: toml::Value =
@@ -4433,9 +4435,11 @@ config_dir = "~/.claude-alt"
         // A form that names no id cannot address a session, so it is not one.
         let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
         assert!(parse_attach_form(&idless).is_none());
-        let unsupported: toml::Value =
-            toml::from_str(r#"kind = "unsupported"
-tokens = []"#).unwrap();
+        let unsupported: toml::Value = toml::from_str(
+            r#"kind = "unsupported"
+tokens = []"#,
+        )
+        .unwrap();
         assert!(parse_attach_form(&unsupported).is_none());
     }
 
@@ -4493,8 +4497,9 @@ tokens = []"#).unwrap();
         );
 
         for name in &declared {
-            let form = attach_form(name)
-                .unwrap_or_else(|| panic!("{name} declares an attach form the reader cannot parse"));
+            let form = attach_form(name).unwrap_or_else(|| {
+                panic!("{name} declares an attach form the reader cannot parse")
+            });
             let rendered = form.render("ID-UNDER-TEST");
             let flat = rendered.join(" ");
             assert!(
@@ -4527,8 +4532,8 @@ tokens = []"#).unwrap();
             let raw = format!(
                 r#"{{"agents":[{{"name":"w","cwd":"/tmp","harness":"{name}","{id_field}":"abcd1234","status":"live"}}]}}"#
             );
-            let rows = derive_rows(&raw, 0)
-                .unwrap_or_else(|| panic!("{name} registry fixture parses"));
+            let rows =
+                derive_rows(&raw, 0).unwrap_or_else(|| panic!("{name} registry fixture parses"));
             let row = rows.first().unwrap_or_else(|| panic!("{name} row derived"));
             assert_eq!(
                 row.attach_id.as_deref(),

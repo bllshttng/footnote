@@ -2757,7 +2757,6 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     1
 }
 
-
 /// (x-6678) Attach through the harness's OWN declared `interactive_attach`
 /// form, or `None` when it declares none (the caller then keeps its refusal).
 ///
@@ -2789,14 +2788,12 @@ fn attach_via_declared_form(
     // this harness declares a form at all, before the row's real (possibly
     // empty) ids can turn "declares none" and "declares one I cannot fill"
     // into the same answer.
-    let declares = render(Some("probe-session"), None).is_ok()
-        || render(None, Some("probeid")).is_ok();
+    let declares =
+        render(Some("probe-session"), None).is_ok() || render(None, Some("probeid")).is_ok();
     if !declares {
         return None;
     }
-    let argv = match render(Some(session_id), None)
-        .or_else(|_| render(None, Some(short_id)))
-    {
+    let argv = match render(Some(session_id), None).or_else(|_| render(None, Some(short_id))) {
         Ok(argv) => argv,
         Err(_) => {
             // A thread with no turns yet has no session id recorded, and a
