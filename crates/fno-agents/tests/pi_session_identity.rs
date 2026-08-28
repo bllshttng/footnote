@@ -45,10 +45,7 @@ fn a_duplicate_id_refuses_and_names_every_session() {
     let cwd = Path::new("/repo/worktrees/pi-dupes");
     let dir = tmp.join("agent").join("sessions").join(encode_cwd(cwd));
     std::fs::create_dir_all(&dir).unwrap();
-    let stamps = [
-        "2026-08-28T20-58-10-768Z",
-        "2026-08-28T20-58-10-817Z",
-    ];
+    let stamps = ["2026-08-28T20-58-10-768Z", "2026-08-28T20-58-10-817Z"];
     for stamp in stamps {
         std::fs::write(dir.join(format!("{stamp}_fno-race-0001.jsonl")), "{}\n").unwrap();
     }
@@ -81,5 +78,8 @@ fn the_cwd_encoding_matches_the_observed_directories() {
         encode_cwd(&PathBuf::from("/Users/bb16/code/footnote/footnote")),
         "--Users-bb16-code-footnote-footnote--"
     );
-    assert_eq!(encode_cwd(&PathBuf::from("/private/tmp")), "--private-tmp--");
+    assert_eq!(
+        encode_cwd(&PathBuf::from("/private/tmp")),
+        "--private-tmp--"
+    );
 }

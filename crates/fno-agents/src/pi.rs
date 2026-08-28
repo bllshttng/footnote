@@ -295,7 +295,10 @@ mod tests {
             matches!(lookup, SessionLookup::Unknown { .. }),
             "missing dir must read Unknown, got {lookup:?}"
         );
-        assert_eq!(duplicate_resume_refusal(Path::new("/repo"), "s-1", &lookup), None);
+        assert_eq!(
+            duplicate_resume_refusal(Path::new("/repo"), "s-1", &lookup),
+            None
+        );
         std::env::remove_var("PI_HOME");
     }
 
