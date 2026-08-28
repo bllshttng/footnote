@@ -2134,7 +2134,13 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
                 "highest band):\n\n"
                 "| worker | band |\n"
                 "|--------|------|\n"
-                f"{rows}\n"
+                f"{rows}\n\n"
+                "For every dispatch round: run the --ready query with "
+                "`--band <your row's band>` and take only the FIRST entry of "
+                "`ready` - claim it, work it to done, then re-query. Entries "
+                "under `above_band` are not yours. Never dispatch the whole "
+                "set; a joined worker that races the whole set undoes the "
+                "partition this table encodes.\n"
             )
         (brief_dir / f"{node_id}.md").write_text(
             f"# Joiner brief: {node_id}\n\n"
