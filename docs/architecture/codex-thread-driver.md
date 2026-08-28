@@ -84,17 +84,55 @@ Codex persists every conversation as a rollout at `~/.codex/sessions/YYYY/MM/DD/
 
 The transcript half and the resume half are both on disk. What is missing is an fno-side driver that owns the lifecycle.
 
-## Transport: no daemon required
+## Transport: the driver is a client of the shared daemon
 
-`codex app-server` speaks JSON-RPC 2.0. The `"jsonrpc":"2.0"` header is omitted on the wire. Its default transport is newline-delimited JSON on stdin and stdout. A plain pipe child speaks the whole protocol. No PTY, no WebSocket and no daemon are involved.
+**Superseded 2026-08-28 (x-6678).** This section was titled "no daemon required". It ended "A driver does not need it." Both sentences were true about the protocol. Both were wrong about the system, and the build followed them literally. The correction is kept beside its cause. The cause is the reusable part.
 
-That matters for a driver's dependency surface. The detached `codex app-server --remote-control` daemon is a second way in. It listens at `$CODEX_HOME/app-server-control/app-server-control.sock` over a WebSocket, using the standard HTTP Upgrade handshake. `crates/fno-agents/src/codex_inject.rs` binds to it. A driver does not need it.
+`codex app-server` speaks JSON-RPC 2.0 with the `"jsonrpc":"2.0"` header omitted on the wire. A plain pipe child does speak the whole protocol over stdin and stdout, with no PTY and no WebSocket. That is what the old section measured, and it is still accurate.
+
+**It never asked who owns the process.** Every codex verb that finds a session is scoped to the SHARED daemon. `codex agents` says so itself: "Browse all agent sessions on the shared local app-server daemon".
+
+A thread on a private app-server forfeits `codex agents`, `resume`, `fork`, `queue` and `archive` at once. Remote Control goes with them. So does every verb the vendor ships next.
+
+It also forfeits three surfaces inside fno. Mail's live-inject lane is `mail_inject.rs` -> `deliver_via_codex_daemon`. The refusal that falls mail back to the durable queue is `mail/cli.py` `_codex_daemon_socket_absent`. Agent discovery is `discover.py` -> `codex-loaded-threads`, which enumerates `thread/loaded/list`.
+
+Measured 2026-08-27: seven private `codex app-server` processes, every one a child of `fno-agents-daemon`. The shared daemon sat unused at pid 75439.
+
+There is no symptom for this. Nothing errors. A thing the operator expects to work simply does not.
+
+So the driver connects to `$CODEX_HOME/app-server-control/app-server-control.sock` over the WebSocket lane `codex_inject.rs` already spoke, via the one shared `connect_shared_app_server`. Connect first, since a completed handshake IS the health proof, and boot only on refusal.
+
+### The exec-versus-proxy rule
+
+**fno never renders or customizes a harness TUI.** The viewport EXECS the harness's own attach command. It does not read frames and draw them. Exec, and the real interface arrives with fno drawing nothing. Proxy, and the render layer this page exists to delete is rebuilt, merely relocated into a pane.
+
+A screenshot cannot tell those apart, so the invariant is asserted on the PROCESS TREE, not the picture:
+
+```
+ps -o pid,ppid,command -p $(pgrep -f "codex app-server")
+```
+
+Every hit's parent must be pid 1 or launchd. No hit has `fno-agents-daemon` as its parent. Read every hit's parent. Never read a count. A count of one is also what a broken daemon plus one private child looks like.
+
+The same rule for the pane: `pgrep -P <pane-pid>` names the harness, and nothing named `fno` sits between the terminal and it. This is why a `pre_exec` form renders as `sh -c '<pre_exec>; exec <attach>'` - the `exec` is what keeps that true.
+
+### Attaching a real TUI
+
+`codex resume <id>` opens codex's own interface on a thread the daemon holds. Measured 2026-08-28 against codex-cli 0.149.1, in a real pane: the banner, the model picker line, the permissions line, and the thread's existing turns on screen.
+
+Three facts a future change is likely to get wrong:
+
+1. **A bare resume auto-attaches to a running daemon.** One marker proves it. The session was absent from `thread/loaded/list` before the resume and present after. So `--remote unix://` is not what reaches the daemon. It makes the daemon-DOWN case loud. A bare resume there runs a private in-process app-server against a copy of the rollout.
+2. **`thread/resume` resolves a rollout, and `thread/start` writes none.** A thread with no turn cannot be attached: `no rollout found for thread id <id> (code -32600)`. That is why a seedless spawn takes one warmup turn.
+3. **Detaching kills nothing.** The pane was hard-killed mid-turn. The daemon then wrote 7,241 more bytes with no client attached and reached `task_complete`. A stop is its interrupt, never the dropped connection.
 
 Two transport traps are recorded here so nobody re-discovers them.
 
 **The control socket file outlives the process that bound it.** Unless a process cleans up on exit, its unix socket inode stays. So an `exists()` probe reads healthy against a daemon dead for a day. Read the pid from `~/.codex/app-server-daemon/app-server.pid` instead. Probe that pid. Use its `processStartTime` as an incarnation token. Require the `initialize` handshake to return.
 
-**`codex app-server proxy --sock <path>` is unreliable.** It accepted frames and returned nothing against a confirmed-live daemon, twice, with no stderr. The WebSocket lane to that same socket worked in the same session. Prefer stdio, or the existing WS client.
+**`codex app-server proxy --sock <path>` is unreliable.** It accepted frames and returned nothing against a confirmed-live daemon, twice, with no stderr. The WebSocket lane to that same socket worked in the same session. Use the WS client.
+
+**Newline-delimited JSON to the control socket is refused.** The socket answers an HTTP upgrade and nothing else, so a raw NDJSON write closes the connection. Transport is the whole difference between the two lanes, not protocol. So one `connect_shared_app_server` serves the health probe, the mail injector, discovery and the driver. Four hand-written clients are four chances to get the upgrade wrong.
 
 ## What the protocol offers a driver
 

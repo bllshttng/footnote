@@ -67,6 +67,13 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>mi
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
+# A codex thread lives in codex's SHARED app-server daemon, so it survives both
+# mux death and `fno-agents-daemon` death, and it is visible to `codex agents`,
+# `resume`, `fork`, `queue` and Remote Control. Corrected 2026-08-28 (x-6678):
+# the bit was flipped when the lane forked a PRIVATE app-server per worker,
+# which survives mux death but not its own parent's, and which no codex verb
+# can see. The bit promised more than it delivered in one direction and less in
+# the other; it now says what was measured.
 thread = true
 autonomous_pane = true
 route_on_pane = false
