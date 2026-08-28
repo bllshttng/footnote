@@ -132,9 +132,12 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
         assert cmd[cmd.index("--cwd") + 1] == str(tmp_path / "wt")
         assert cmd[cmd.index("--name") + 1] == name
         assert cmd[-1] == f"/fno:execute waves {tmp_path / 'plan.md'}"
-    # Joiner 1 is the mail hub; joiner 2's brief NAMES the hub (LD 3).
+    # Joiner 1 is the mail hub; joiner 2's brief NAMES the hub (LD 3). Both
+    # briefs carry the claim-before-dispatch instruction (waves.md 3e).
     assert "lead joiner" in call_env(calls[0], "TARGET_BRIEF")
     assert receipt["lead"] in call_env(calls[1], "TARGET_BRIEF")
+    for call in calls:
+        assert "task update" in call_env(call, "TARGET_BRIEF")
 
 
 def call_env(call, key):

@@ -2050,6 +2050,10 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
+        ) + (
+            f". Before dispatching any worker, claim ONE ready task via "
+            f"fno backlog task update {node_id} <task> --status in_progress "
+            f"(the waves.md 3e step; your roster name binds the holder)"
         )
         cmd = [
             *_subprocess_util.fno_py_cmd(),
