@@ -1998,27 +1998,70 @@ def _plan_parallel_width(plan_path: Path) -> int:
     return width
 
 
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+def _plan_wave_bands(plan_path: Path) -> list[str]:
+    """The plan's distinct wave bands, highest first (x-dadc).
+
+    The band is the axis the plan carries; the lane (harness + model)
+    resolves in config against live capacity, never here. Only legal bands
+    survive; an illegal wave spelling reads as unbanded and takes the
+    frontmatter fallback, the same rule the orchestrator's ``_wave_band``
+    applies when it reports ``bands``. A plan with no band anywhere returns
+    ``[]`` and the join degrades to joiner 2's shapeless spawn.
+    """
+    from fno.plan._doc import load_plan
+    from fno.plan.brief import parse_execution_strategy
+
+    doc = load_plan(plan_path)
+    body = doc.get_section("Execution Strategy")
+    if body is None:
+        return []
+    raw = parse_execution_strategy(body)
+    fallback = str(doc.frontmatter.get("difficulty") or "").strip().lower()
+    fallback = fallback if fallback in _BAND_RANK else ""
+    bands: set[str] = set()
+    for wave_data in raw.get("waves", []):
+        if not isinstance(wave_data, dict):
+            continue
+        band = str(wave_data.get("difficulty") or "").strip().lower()
+        if band not in _BAND_RANK:
+            band = fallback
+        if band:
+            bands.add(band)
+    return sorted(bands, key=lambda b: -_BAND_RANK[b])
+
+
 def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
     Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
     manifest snapshot), computes the bound plan's ready-graph width, and
-    spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>`` workers
-    there via ``fno agents spawn --substrate thread``. Joiner 1 is the lead
-    and mail hub (Locked Decision 3). The brief rides TWO channels: the file
+    spawns ``/fno:execute waves <plan>`` workers there via ``fno agents spawn
+    --substrate thread`` - one per distinct wave band when the plan carries
+    bands (highest band first, the lead; each lane resolved per band by
+    ``_grid_lane_for``), else ``min(workers, width - 1)`` shapeless workers
+    (joiner 2). Either way the width rule caps the count: the node holder is
+    one of the width workers. The brief rides TWO channels: the file
     ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
     which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
-    that inherit the spawner's env, e.g. panes). The spawned process exports
+    that inherit the spawner's env, e.g. panes); a banded brief also carries
+    the per-worker band table, the band's durable channel beside the
+    best-effort ``FNO_WORKER_BAND`` env export. The spawned process exports
     FNO_WORKER_NAME from ``--name``, so each joiner's task-claim holder is
     its own roster name (the joiner 1 contract; where the env export cannot
     reach, resolve_task_holder reads the roster binding). ``model`` rides as
     an explicit ``--model``: a typed model with no vendor implication
     overrides a config-injected default whose lane would refuse.
 
-    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead"}``.
-    Raises JoinRefuse (exit 2/3/4) on a precondition failure and SpawnError
-    when the lead spawn itself fails; a non-lead spawn failure warns to
-    stderr and shrinks ``spawned`` instead of aborting the join.
+    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead",
+    "lanes"}`` - ``lanes`` maps each spawned name to its ``band``/``harness``/
+    ``model`` (plus ``"grid": "declined"`` when the grid declined that band
+    and the joiner rides the caller's default lane). Raises JoinRefuse (exit
+    2/3/4) on a precondition failure and SpawnError when the lead spawn
+    itself fails; a non-lead spawn failure warns to stderr and shrinks
+    ``spawned`` instead of aborting the join.
     """
     from fno.claims.core import claim_status
     from fno.graph.collision import resolve_plan_path
@@ -2060,19 +2103,43 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             3, f"width {width}: a second worker has nothing to pull"
         )
-    count = min(max(1, workers), width - 1)
+    bands = _plan_wave_bands(plan_path)
+    # One worker per band present, highest first (x-dadc); an unbanded plan
+    # keeps joiner 2's shapeless count. The width rule still caps: the node
+    # holder is one of the width workers, so joiners stay under it.
+    if bands:
+        count = min(max(1, workers), len(bands), width - 1)
+        worker_bands = bands[:count]
+    else:
+        count = min(max(1, workers), width - 1)
+        worker_bands = [""] * count
 
     lead = f"j-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
     # worker inherits the claude daemon's env (x-6de8), so the env export in
     # the spawn below reaches panes but not this lane's serving sessions.
-    # waves.md's joiner posture reads this file before dispatching.
+    # waves.md's joiner posture reads this file before dispatching - the band
+    # table is the band's durable channel for the same reason.
     brief_dir = Path(worktree) / ".fno" / "join-briefs"
     try:
         brief_dir.mkdir(parents=True, exist_ok=True)
+        band_table = ""
+        if bands:
+            rows = "\n".join(
+                f"| j-{node_id}-{k} | {band} |"
+                for k, band in enumerate(worker_bands, start=1)
+            )
+            band_table = (
+                "\nband table (your band is your row's; the lead is the "
+                "highest band):\n\n"
+                "| worker | band |\n"
+                "|--------|------|\n"
+                f"{rows}\n"
+            )
         (brief_dir / f"{node_id}.md").write_text(
             f"# Joiner brief: {node_id}\n\n"
-            f"lead and mail hub: {lead}\n\n"
+            f"lead and mail hub: {lead}\n"
+            f"{band_table}\n"
             f"Before dispatching any worker, claim ONE ready task via "
             f"`fno backlog task update {node_id} <task> --status in_progress` "
             f"(the waves.md 3e step; your roster name binds the holder).\n"
@@ -2080,17 +2147,38 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     except OSError as exc:
         raise SpawnError(f"join cannot write the joiner brief: {str(exc)[:160]}") from exc
     spawned: list[str] = []
-    for k in range(1, count + 1):
+    lanes: dict[str, dict] = {}
+    for k, band in enumerate(worker_bands, start=1):
         name = f"j-{node_id}-{k}"
         brief = (
             f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
             if k == 1
             else f"joiner of {node_id}: mail hub is {lead}"
         ) + (
+            f"; your band is {band}"
+            if band
+            else ""
+        ) + (
             f". Before dispatching any worker, claim ONE ready task via "
             f"fno backlog task update {node_id} <task> --status in_progress "
             f"(the waves.md 3e step; your roster name binds the holder)"
         )
+        # The grid picks this band's lane, not the node's: the joiner pulls
+        # the waves its band can carry, so its lane must match the band.
+        # An unbanded joiner (or an explicit --model) skips the grid and
+        # rides the caller's default lane.
+        lane_h: Optional[str] = None
+        lane_m: Optional[str] = None
+        if band:
+            lane_h, lane_m = _grid_lane_for(
+                {
+                    "difficulty": band,
+                    "plan_path": str(plan_path),
+                    "priority": entry.get("priority"),
+                },
+                model=model,
+                provider=None,
+            )
         cmd = [
             *_subprocess_util.fno_py_cmd(),
             "agents", "spawn", "--substrate", "thread",
@@ -2098,15 +2186,20 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             # untagged spawn leaves the lane unresolved, and this machine's
             # codex-scoped agents.defaults.model then injects onto it and
             # trips the vendor-mismatch refusal (live proof, 2026-08-27).
-            "--harness", "claude",
+            "--harness", lane_h or "claude",
             # x-571f shape: an explicit model rides as a spawn flag.
-            *(("--model", model) if model else ()),
+            *(("--model", lane_m or model) if (lane_m or model) else ()),
             "--cwd", worktree, "--name", name,
             f"/fno:execute waves {plan_path}",
         ]
+        spawn_env = {**os.environ, "TARGET_BRIEF": brief}
+        if band:
+            # Best-effort channel: reaches panes, not daemon-forked threads;
+            # the brief's band table is the durable one (x-6de8).
+            spawn_env["FNO_WORKER_BAND"] = band
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=600,
-            env={**os.environ, "TARGET_BRIEF": brief},
+            env=spawn_env,
         )
         identity = ""
         if proc.returncode == 0:
@@ -2118,12 +2211,16 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             print(f"join: spawn {name} failed: {detail}", file=sys.stderr)
             continue
         spawned.append(name)
+        lanes[name] = {"band": band, "harness": lane_h, "model": lane_m}
+        if band and lane_h is None:
+            lanes[name]["grid"] = "declined"
     return {
         "node": node_id,
         "worktree": worktree,
         "width": width,
         "spawned": spawned,
         "lead": lead,
+        "lanes": lanes,
     }
 
 

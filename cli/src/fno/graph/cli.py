@@ -5128,11 +5128,13 @@ def cmd_join(
 
     The node must hold a LIVE node claim with a bound plan: join resolves the
     holder's worktree from the claim, computes the plan's ready-graph width,
-    and spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>``
-    workers INTO that worktree as visitors - they take task claims under
-    their own roster names and never the node claim. Joiner 1 is the lead
-    and mail hub. Prints one JSON receipt:
-    ``{"node", "worktree", "width", "spawned", "lead"}``.
+    and spawns ``/fno:execute waves <plan>`` workers INTO that worktree as
+    visitors - they take task claims under their own roster names and never
+    the node claim. One worker per wave band when the plan carries bands
+    (highest band first, the lead; each lane resolved per band), else
+    ``min(workers, width - 1)`` shapeless workers; the width rule caps the
+    count either way. Prints one JSON receipt:
+    ``{"node", "worktree", "width", "spawned", "lead", "lanes"}``.
 
     Refusals: exit 2 nothing to join (no live claim), exit 3 width 1, exit 4
     no usable bound plan.
