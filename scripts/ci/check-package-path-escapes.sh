@@ -4,8 +4,8 @@
 # Condition: an expression in the installed package that roots a repo-tree
 # path at parents[N] of __file__ escapes the package root. The wheel ships
 # cli/src/fno only - no scripts/, no hooks/ - so such an expression either
-# crashes (module scope, the x-3b05 import-time FileNotFoundError) or
-# silently disables the leg it feeds (an is_file() guard that quietly
+# crashes (a module-scope import-time FileNotFoundError, as shipped once)
+# or silently disables the leg it feeds (an is_file() guard that quietly
 # reads "unchecked"/skip/UNKNOWN on every installed copy). CI never saw it
 # because a source checkout always has the tree the expression escapes to.
 #

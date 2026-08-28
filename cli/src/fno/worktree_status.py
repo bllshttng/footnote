@@ -24,7 +24,10 @@ from pathlib import Path
 from typing import Optional
 
 
-_ALIVE_STATUSES = frozenset({"spawning", "ready", "idle", "busy", "live", "restarting"})
+# Non-terminal AgentStatus vocabulary, one definition: importing the
+# canonical set (crates/fno-agents `AgentStatus` mirror) keeps the display
+# leg and the stranded classifier agreeing when the vocabulary grows.
+from fno.agents.registry import _OWNERSHIP_LIVE_STATUSES as _ALIVE_STATUSES
 
 
 def _load_registry() -> tuple[dict[str, tuple[str, str]], bool]:
@@ -107,7 +110,11 @@ def main(argv: list[str]) -> int:
     as_json = "--json" in argv
     repo = Path.cwd()
     if "--repo" in argv:
-        repo = Path(argv[argv.index("--repo") + 1])
+        i = argv.index("--repo")
+        if i + 1 >= len(argv):
+            print("worktree-status: --repo requires a value", file=sys.stderr)
+            return 2
+        repo = Path(argv[i + 1])
 
     registry, registry_ok = _load_registry()
     if not registry_ok:
