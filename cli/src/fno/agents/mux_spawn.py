@@ -2426,7 +2426,11 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 #: call a healthy worker a failure; reporting True would be the same unverified
 #: "it's live" this change exists to remove. Their receipts are exactly as
 #: trustworthy as before, and now say so.
-_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+#: pi pins one up front like claude, and its capability row declares the
+#: binding REQUIRED: pi adopts any caller-assigned `--session-id`, and letting
+#: it mint its own would hand the fleet a UUIDv7 whose head-8 is the same clock
+#: bucket that collides two codex short ids.
+_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "pi")
 
 
 def _ensure_agy_folder_trusted(cwd: Path) -> bool:
@@ -3409,6 +3413,14 @@ def dispatch_spawn_pane(
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
+    # (x-c198) pi's id is CALLER-ASSIGNED and fno must never let pi mint one.
+    # pi's own default is a UUIDv7, whose head-8 is the same ~65s clock bucket
+    # that collides two codex short ids, and its capability row declares
+    # `session_binding.required = true`. Dropping the flag here would leave the
+    # row id-less AND hand pi the id, which is both halves of the hazard at
+    # once. The `happy` monitor caveat is claude's alone: it strips a pinned
+    # `--session-id` out of the argv it forwards, and it never wraps pi.
+    pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     if provider == "agy":
         _ensure_agy_folder_trusted(cwd)
@@ -3608,7 +3620,28 @@ def dispatch_spawn_pane(
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
         pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
         pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
-        proc = _run_mux(run_args, runner, env=pane_env)
+        if provider == "pi" and session_uuid:
+            # (x-c198) Launching pi on an id is a CREATE when that id has no
+            # session yet, and concurrent creates on one id are unserialised
+            # and SILENT: four at once produced four sessions, every process
+            # exiting 0 and every file internally perfect, after which a resume
+            # picked the oldest and named none of the rest.
+            #
+            # So the create DECISION is serialised, and only that. Appends are
+            # measured safe and are never locked. The claim is the primitive
+            # that already exists, on a session-id key carrying the cwd, and it
+            # is released the moment the pane exists.
+            #
+            # A fresh uuid4 makes a collision unlikely on THIS path; the claim
+            # is here because the id is not always fresh. A retry, a watchdog
+            # wake, or a king re-dispatching a stalled node is a create on an id
+            # that may already exist, and this fleet does all three.
+            from fno.agents.harnesses.pi import create_decision as _pi_create
+
+            with _pi_create(cwd, session_uuid, holder=f"spawn:{name}"):
+                proc = _run_mux(run_args, runner, env=pane_env)
+        else:
+            proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
         if proc.returncode == _MUX_CONTROL_UNANSWERED:
