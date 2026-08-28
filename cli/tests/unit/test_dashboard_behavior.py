@@ -328,3 +328,48 @@ def test_a_graph_value_named_after_an_object_member_is_inert(tmp_path: Path):
     assert "native code" not in html.lower()
     # The child is not terminal, so the parent reads 1 of 1 still open.
     assert "1/1" in out["detail"] or "1/1" in html, out["detail"][:400]
+
+
+def test_the_node_id_copies_without_toggling_the_row(tmp_path: Path):
+    """The id is the thing most often copied off this board, so it is one click
+    ON the id rather than a trip through the detail.
+
+    `.rmain` is already a button, so the id is a span; the click must stop
+    propagating or copying would also expand the row.
+    """
+    out = _run(
+        tmp_path,
+        [_entry("ab-16000001", title="Copy me")],
+        BOARD_ACTION="copyId:ab-16000001",
+    )
+    assert out["after"]["copied"] == ["ab-16000001"], out["after"]["copied"]
+    assert out["after"]["detailOpen"] is False, (
+        "copying the id also expanded the row, so the click reached .rmain"
+    )
+
+
+def test_the_plan_path_is_copyable_from_the_detail(tmp_path: Path):
+    """Regression: the canonical template carried a Copy path button and the
+    port dropped it. The operator reaches for this constantly."""
+    out = _run(
+        tmp_path,
+        [_entry("ab-16000002", title="Has a plan", plan_path="internal/fno/plans/x.md")],
+        BOARD_ACTION="copyPath:ab-16000002",
+    )
+    assert out["after"]["copied"] == ["internal/fno/plans/x.md"], out["after"]["copied"]
+
+
+def test_a_public_board_offers_no_id_copy(tmp_path: Path):
+    """The public board emits no ids, so there is nothing to copy and no
+    affordance suggesting there is."""
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    entries = [_entry("ab-16000003", project="fno", title="Public row")]
+    public = render_public_backlog_html(entries, "fno")
+    # The button lives behind `if (LOCAL && n.pl)`, so the JS SOURCE carries the
+    # label on both boards. Assert on the rendered rows, not the document, or
+    # this passes on the script text and proves nothing.
+    body = public.split("<body", 1)[1].split("<script>", 1)[0]
+    assert "Copy path" not in body
+    assert "ab-16000003" not in body
+    assert 'class="rid"></span>' in body, "the public row still emits an empty id cell"

@@ -39,14 +39,66 @@ class El {
     this._listeners = {};
     this.classList = new ClassList(this);
   }
-  set innerHTML(v) { this._html = String(v); if (v === "") this.children = []; }
+  // innerHTML is BOTH stored and parsed. Storing only the string left every
+  // element the board builds this way invisible to querySelector, so a handler
+  // bound through it could never be reached by a test: the guard would pass
+  // while asserting nothing. The parser covers the subset this board emits
+  // (open/close tags, attributes, text) and is deliberately not a real HTML
+  // parser; it has no entity decoding and no void-element table beyond the
+  // self-closing form.
+  set innerHTML(v) {
+    this._html = String(v);
+    this.children = [];
+    if (!v) return;
+    const stack = [this];
+    const token = /<\/?([a-zA-Z][\w-]*)([^>]*?)(\/?)>|([^<]+)/g;
+    let m;
+    while ((m = token.exec(this._html))) {
+      const [raw, tag, attrs, selfClose, text] = m;
+      const parent = stack[stack.length - 1];
+      if (text !== undefined) {
+        if (text.trim()) parent.textContent += text;
+        continue;
+      }
+      if (raw[1] === "/") {
+        if (stack.length > 1) stack.pop();
+        continue;
+      }
+      const el = new El(tag);
+      for (const a of attrs.matchAll(/([\w-]+)\s*=\s*"([^"]*)"/g)) {
+        const [, k, val] = a;
+        if (k === "class") el.className = val;
+        else if (k.startsWith("data-")) {
+          el.dataset[k.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = val;
+          el.attrs[k] = val;
+        } else if (k === "id") el.id = val;
+        else el.attrs[k] = val;
+      }
+      el.parentNode = parent;
+      parent.children.push(el);
+      if (!selfClose) stack.push(el);
+    }
+  }
   get innerHTML() { return this._html; }
   appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addEventListener(k, fn) { (this._listeners[k] ||= []).push(fn); }
-  click() { (this._listeners.click || []).forEach((f) => f({ target: this })); }
-  fire(kind) { (this._listeners[kind] || []).forEach((f) => f({ target: this })); }
+  // Events BUBBLE, and carry stopPropagation. Without both, a handler on a
+  // child that must not trigger its ancestor could never be tested: the assert
+  // would hold because nothing propagated, not because the code stopped it.
+  fire(kind) {
+    const ev = { target: this, _stopped: false,
+      stopPropagation() { this._stopped = true; },
+      preventDefault() {} };
+    let node = this;
+    while (node) {
+      (node._listeners[kind] || []).forEach((f) => f(ev));
+      if (ev._stopped) break;
+      node = node.parentNode;
+    }
+  }
+  click() { this.fire("click"); }
   closest(sel) {
     const want = sel.replace(".", "");
     let n = this;
@@ -110,6 +162,8 @@ const localStorage = {
   getItem: (k) => (store.has(k) ? store.get(k) : null),
   setItem: (k, v) => store.set(k, String(v)),
 };
+const copied = [];
+const navigator = { clipboard: { writeText: (t) => { copied.push(t); return Promise.resolve(); } } };
 const location = { search: process.env.BOARD_QUERY || "", hash: process.env.BOARD_HASH || "" };
 const window = { location, addEventListener() {} };
 
@@ -119,8 +173,8 @@ const js = doc.split("<script>")[1].split("</script>")[0];
 const seed = process.env.BOARD_SEED_PROJECTS;
 if (seed) store.set("fno-kanban-project-state", seed);
 
-new Function("document", "window", "location", "localStorage", "URLSearchParams", js)(
-  document, window, location, localStorage, URLSearchParams,
+new Function("document", "window", "location", "localStorage", "URLSearchParams", "navigator", "setTimeout", js)(
+  document, window, location, localStorage, URLSearchParams, navigator, () => {},
 );
 
 /* ---------- read what it produced ---------- */
@@ -182,6 +236,19 @@ if (act) {
   // Typing in the search box re-renders. The reveal bug only shows up on the
   // SECOND render: revealHash cleared is-hidden directly and render() then
   // reassigned className wholesale, so the anchored row vanished on a keystroke.
+  // Copy affordances: the id lives on the row, the plan path in the detail.
+  if (kind === "copyId") {
+    const row = rows.find((r) => r.id === arg);
+    if (row) row.querySelector(".rid").fire("click");
+  }
+  if (kind === "copyPath") {
+    const row = rows.find((r) => r.id === arg);
+    if (row) {
+      row.querySelector(".rmain").click();
+      const btn = row.descendants.filter((n) => n.attrs["data-copy"] === "path")[0];
+      if (btn) btn.fire("click");
+    }
+  }
   if (kind === "search") {
     const q = byId.get("q");
     q.value = arg || "";
@@ -199,6 +266,14 @@ if (act) {
     // What the board PERSISTED. The blank-board bug survived a reload
     // because an active-but-empty selection was written back.
     persisted: store.get("fno-kanban-project-state") || null,
+    copied: copied.slice(),
+    // Whether the acted-on row ended up expanded. The detail is appended to
+    // the ROW, not inside .rmain, so reading .rmain's innerHTML can never
+    // see it and an assertion built on that proves nothing.
+    detailOpen: (() => {
+      const acted = arg ? board.descendants.find((n) => n.id === arg) : null;
+      return acted ? !!acted.querySelector(".detail") : null;
+    })(),
     // Whether the row named by location.hash is still on screen.
     revealedVisible: process.env.BOARD_HASH
       ? !(byId.get(process.env.BOARD_HASH.replace(/^#/, "")) || { classList: { contains: () => true } })

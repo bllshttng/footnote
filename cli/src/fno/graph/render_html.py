@@ -484,6 +484,9 @@ select { background:var(--surface-2); color:var(--ink); border:1px solid var(--l
   padding:9px 15px; cursor:pointer; width:100%; background:none; border:0;
   font-family:inherit; color:var(--ink); text-align:left; font-size:14px }
 .rmain:hover { background:var(--surface-2) }
+body[data-local="true"] .rid { cursor:copy; border-radius:4px }
+body[data-local="true"] .rid:hover { background:var(--accent-soft); color:var(--accent) }
+.rid.ok, .pbtn.ok { background:var(--done-bg); color:var(--done); border-color:var(--done) }
 /* A public board emits an empty .rid, so the fixed id column would be a
    permanent empty gutter on every row. Remove the TRACK, not just its width:
    a zero-width column still takes the 11px grid gap, leaving a smaller gutter
@@ -681,6 +684,40 @@ _DASHBOARD_JS = """\
     if (state.q && (String(n.id || '') + ' ' + n.t + ' ' + String(n.d || '') + ' ' + String(n.pl || '')).toLowerCase().indexOf(state.q) < 0) return false;
     return true;
   }
+  // Copy, with the execCommand fallback the canonical template carried. This
+  // board is opened from disk as often as over http, and file:// is not a
+  // secure context, so navigator.clipboard is frequently absent exactly where
+  // the operator uses it most. Dropping the fallback would make the buttons
+  // dead on the surface they matter on.
+  function flash(btn, msg) {
+    var prev = btn.dataset.label || btn.textContent;
+    btn.dataset.label = prev;
+    btn.textContent = msg; btn.classList.add('ok');
+    setTimeout(function () { btn.textContent = prev; btn.classList.remove('ok'); }, 1200);
+  }
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement('textarea');
+      ta.value = text; ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, ta.value.length);
+      var ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) { return false; }
+  }
+  function copyText(text, btn) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          function () { flash(btn, 'copied'); },
+          function () { flash(btn, legacyCopy(text) ? 'copied' : 'select it'); }
+        );
+        return;
+      }
+    } catch (e) {}
+    flash(btn, legacyCopy(text) ? 'copied' : 'select it');
+  }
   var TERMINAL = Object.assign(Object.create(null), { done:1, superseded:1 });
   // A parent's rollup, in the same stacked-bar language the group headers use.
   // Reusing .tw rather than authoring a second progress idiom.
@@ -731,7 +768,7 @@ _DASHBOARD_JS = """\
     h += relatedBlock('kin', 'Unblocks', n.su);
     if (n.sb) h += relatedBlock('kin', 'Superseded by', [n.sb]);
     if (n.d) h += '<p>' + esc(n.d) + '</p>'; else if (LOCAL) h += '<p>No description recorded.</p>';
-    if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
+    if (LOCAL && n.pl) h += '<div class=\"planrow\"><span class=\"plan\">' + esc(n.pl) + '</span>' + '<button class=\"pbtn\" type=\"button\" data-copy=\"path\">Copy path</button>' + (n.link ? '<a class=\"pbtn primary\" href=\"' + esc(n.link) + '\">Open in Obsidian ↗</a>' : '') + '</div>';
     if (LOCAL && n.pr) h += '<div class=\"planrow\">' + (n.pu ? '<a class=\"pbtn primary\" href=\"' + esc(n.pu) + '\">PR #' + esc(n.pr) + '</a>' : '<span class=\"pill\">PR #' + esc(n.pr) + '</span>') + (n.pt ? '<span class=\"plan\">' + esc(n.pt) + '</span>' : '') + '</div>';
     return h;
   }
@@ -758,9 +795,20 @@ _DASHBOARD_JS = """\
         if (n.ty) row.dataset.type = n.ty;
         var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button'; main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
+        // The id is the thing most often copied out of this board, so it is
+        // one click ON the id rather than a trip through the detail. A span,
+        // not a button, because .rmain is already a button and nesting one is
+        // invalid; stopPropagation keeps the copy from toggling the row.
+        if (LOCAL && n.id) { var rid = main.querySelector('.rid');
+          if (rid) { rid.title = 'Copy node id';
+            rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }
         main.addEventListener('click', function () { var old = row.querySelector('.detail');
           if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; }
           var d = document.createElement('div'); d.className = 'detail'; d.innerHTML = detail(n);
+          d.querySelectorAll('[data-copy]').forEach(function (b) {
+            b.addEventListener('click', function (ev) { ev.stopPropagation();
+              copyText(b.dataset.copy === 'id' ? n.id : n.pl, b); });
+          });
           row.appendChild(d); main.setAttribute('aria-expanded', 'true'); });
         row.appendChild(main); list.appendChild(row); return { node:n, el:row }; });
       sec.appendChild(list); board.appendChild(sec);
