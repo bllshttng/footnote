@@ -50,7 +50,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal, NamedTuple, Optional
 
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
@@ -1979,7 +1979,61 @@ class JoinRefuse(Exception):
         self.message = message
 
 
-def _plan_parallel_width(plan_path: Path) -> int:
+_BAND_RANK = {"low": 0, "medium": 1, "high": 2}
+
+
+class _PlanTaskGraph(NamedTuple):
+    """One parse of a plan's Execution Strategy, shared by every join reader.
+
+    ``_plan_parallel_width``, ``_plan_wave_bands``, and the write-policy
+    renderer each used to load + parse the same file; this is the one load.
+    ``wave_bands`` is parallel to ``waves`` (``""`` when a wave resolves to no
+    legal band, the same fallback rule ``_plan_wave_bands`` always applied).
+    """
+
+    waves: list[tuple[str, list[str]]]
+    surfaces: dict[str, list[str]]
+    wave_bands: list[str]
+    declared_blockers: dict[str, set[str]]
+
+
+def _plan_task_graph(plan_path: Path) -> _PlanTaskGraph:
+    """Load and parse a plan's task graph exactly once for all join readers."""
+    from fno.plan._doc import load_plan
+    from fno.plan.brief import parse_execution_strategy
+
+    doc = load_plan(plan_path)
+    fallback = str(doc.frontmatter.get("difficulty") or "").strip().lower()
+    fallback = fallback if fallback in _BAND_RANK else ""
+    body = doc.get_section("Execution Strategy")
+    if body is None:
+        return _PlanTaskGraph([], {}, [], {})
+    raw = parse_execution_strategy(body)
+
+    waves: list[tuple[str, list[str]]] = []
+    wave_bands: list[str] = []
+    for wave_data in raw.get("waves", []):
+        if not isinstance(wave_data, dict):
+            continue
+        tasks_raw = wave_data.get("tasks", [])
+        tasks = [str(t) for t in tasks_raw] if isinstance(tasks_raw, list) else [str(tasks_raw)]
+        waves.append((str(wave_data.get("mode", "sequential")), tasks))
+        band = str(wave_data.get("difficulty") or "").strip().lower()
+        wave_bands.append(band if band in _BAND_RANK else fallback)
+    surfaces = {
+        str(t["id"]): [str(s) for s in t.get("surface", [])]
+        for t in raw.get("tasks", [])
+        if isinstance(t, dict) and t.get("id")
+    }
+    declared_blockers = {
+        str(t["id"]): {str(d) for d in t.get("blocked_by", [])}
+        for t in raw.get("tasks", [])
+        if isinstance(t, dict) and t.get("id") and t.get("blocked_by_declared", False)
+    }
+    return _PlanTaskGraph(waves, surfaces, wave_bands, declared_blockers)
+
+
+def _width_from_graph(graph: _PlanTaskGraph) -> int:
     """Largest simultaneously-ready task set across a full topological walk.
 
     Mirrors the orchestrator's scheduling rule (``effective_blockers`` +
@@ -1991,36 +2045,15 @@ def _plan_parallel_width(plan_path: Path) -> int:
     yields 0; the caller refuses anything below 2.
     """
     from fno.graph.collision import HIDDEN_SHARED_OUTPUT_ROOTS, partition
-    from fno.plan._doc import load_plan
-    from fno.plan.brief import parse_execution_strategy
 
-    doc = load_plan(plan_path)
-    body = doc.get_section("Execution Strategy")
-    if body is None:
-        return 0
-    raw = parse_execution_strategy(body)
-
-    waves: list[tuple[str, list[str]]] = []
-    for wave_data in raw.get("waves", []):
-        if not isinstance(wave_data, dict):
-            continue
-        tasks_raw = wave_data.get("tasks", [])
-        tasks = [str(t) for t in tasks_raw] if isinstance(tasks_raw, list) else [str(tasks_raw)]
-        waves.append((str(wave_data.get("mode", "sequential")), tasks))
+    waves = graph.waves
+    surfaces = graph.surfaces
     if not waves:
         return 0
 
-    surfaces = {
-        str(t["id"]): [str(s) for s in t.get("surface", [])]
-        for t in raw.get("tasks", [])
-        if isinstance(t, dict) and t.get("id")
+    blockers: dict[str, set[str]] = {
+        tid: set(deps) for tid, deps in graph.declared_blockers.items()
     }
-    blockers: dict[str, set[str]] = {}
-    for t in raw.get("tasks", []):
-        if not isinstance(t, dict) or not t.get("id"):
-            continue
-        if t.get("blocked_by_declared", False):
-            blockers[str(t["id"])] = {str(d) for d in t.get("blocked_by", [])}
     all_ids: list[str] = []
     for pos, (_mode, tasks) in enumerate(waves):
         for tid in tasks:
@@ -2074,7 +2107,96 @@ def _plan_parallel_width(plan_path: Path) -> int:
     return width
 
 
-_BAND_RANK = {"low": 0, "medium": 1, "high": 2}
+def _plan_parallel_width(plan_path: Path) -> int:
+    """Width of the plan at ``plan_path`` (see :func:`_width_from_graph`)."""
+    return _width_from_graph(_plan_task_graph(plan_path))
+
+
+# Write roots every joiner legitimately needs regardless of band: version
+# control, fno's own per-worktree state (claims, briefs, join state), and the
+# build/cache directories a test run touches. ``.git/hooks`` and ``.git/config``
+# stay denied by the sandbox's own ug5 list.
+INFRA_WRITE_ROOTS = (
+    ".git/",
+    ".fno/",
+    "target/",
+    "node_modules/",
+    ".venv/",
+    "__pycache__/",
+)
+
+
+class JoinWritePolicy(NamedTuple):
+    """One band's sandbox verdict: ``enforced`` carries the two lists; the
+    refusals to narrow (``overlapping``, ``unevaluated``) carry none (LD2)."""
+
+    band: str
+    verdict: str  # enforced | overlapping | unevaluated
+    allow_write: Optional[tuple[str, ...]]
+    deny_edit: Optional[tuple[str, ...]]
+
+
+def render_join_write_policy(
+    graph: _PlanTaskGraph, bands: list[str]
+) -> dict[str, JoinWritePolicy]:
+    """Per-band write policy rendered from the plan's own partition (LD1/LD2).
+
+    Items are ``(band, union of that band's task surfaces)`` run through
+    ``collision.partition`` at BAND grain with no shared roots: the infra
+    roots are granted to every band by design, so they must not merge bands
+    the way the task-grain hidden roots do. A singleton group with at least
+    one usable path renders ``allow_write`` (own surfaces + INFRA_WRITE_ROOTS)
+    and ``deny_edit`` (the peer bands' surfaces minus its own - the peer set,
+    never the complement, so the deny list cannot name a path the worker
+    legitimately needs). Anything else reads ``overlapping`` or
+    ``unevaluated`` and carries no policy.
+    """
+    from fno.graph.collision import partition
+
+    band_surfaces: dict[str, set[str]] = {}
+    for pos, (_mode, tasks) in enumerate(graph.waves):
+        band = graph.wave_bands[pos] if pos < len(graph.wave_bands) else ""
+        if not band:
+            continue
+        acc = band_surfaces.setdefault(band, set())
+        for tid in tasks:
+            acc.update(graph.surfaces.get(tid, []))
+    items = [(band, set(paths)) for band, paths in band_surfaces.items()]
+    groups, unevaluated = partition(items)
+    group_of = {band: i for i, group in enumerate(groups) for band in group}
+    policies: dict[str, JoinWritePolicy] = {}
+    for band in bands:
+        own = band_surfaces.get(band)
+        if not own or band in unevaluated:
+            policies[band] = JoinWritePolicy(band, "unevaluated", None, None)
+            continue
+        if len(groups[group_of[band]]) > 1:
+            policies[band] = JoinWritePolicy(band, "overlapping", None, None)
+            continue
+        peers: set[str] = set()
+        for other, paths in band_surfaces.items():
+            if other != band:
+                peers |= paths
+        policies[band] = JoinWritePolicy(
+            band,
+            "enforced",
+            tuple(sorted(own)) + INFRA_WRITE_ROOTS,
+            tuple(sorted(peers - own)),
+        )
+    return policies
+
+
+def _bands_from_graph(graph: _PlanTaskGraph) -> list[str]:
+    """The plan's distinct wave bands, highest first (x-dadc).
+
+    Only legal bands survive; an illegal wave spelling reads as unbanded and
+    takes the frontmatter fallback, the same rule the orchestrator's
+    ``_wave_band`` applies when it reports ``bands``. A plan with no band
+    anywhere returns ``[]`` and the join degrades to joiner 2's shapeless
+    spawn.
+    """
+    bands: set[str] = {b for b in graph.wave_bands if b}
+    return sorted(bands, key=lambda b: -_BAND_RANK[b])
 
 # Terminal states of the claude harness store (`claude agents --json --all`);
 # anything else (working, blocked, a future spelling) reads as alive.
@@ -2172,35 +2294,8 @@ def _live_joiner_names(node_id: str) -> list[str]:
 
 
 def _plan_wave_bands(plan_path: Path) -> list[str]:
-    """The plan's distinct wave bands, highest first (x-dadc).
-
-    The band is the axis the plan carries; the lane (harness + model)
-    resolves in config against live capacity, never here. Only legal bands
-    survive; an illegal wave spelling reads as unbanded and takes the
-    frontmatter fallback, the same rule the orchestrator's ``_wave_band``
-    applies when it reports ``bands``. A plan with no band anywhere returns
-    ``[]`` and the join degrades to joiner 2's shapeless spawn.
-    """
-    from fno.plan._doc import load_plan
-    from fno.plan.brief import parse_execution_strategy
-
-    doc = load_plan(plan_path)
-    body = doc.get_section("Execution Strategy")
-    if body is None:
-        return []
-    raw = parse_execution_strategy(body)
-    fallback = str(doc.frontmatter.get("difficulty") or "").strip().lower()
-    fallback = fallback if fallback in _BAND_RANK else ""
-    bands: set[str] = set()
-    for wave_data in raw.get("waves", []):
-        if not isinstance(wave_data, dict):
-            continue
-        band = str(wave_data.get("difficulty") or "").strip().lower()
-        if band not in _BAND_RANK:
-            band = fallback
-        if band:
-            bands.add(band)
-    return sorted(bands, key=lambda b: -_BAND_RANK[b])
+    """The plan's distinct wave bands, highest first (see :func:`_bands_from_graph`)."""
+    return _bands_from_graph(_plan_task_graph(plan_path))
 
 
 def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
