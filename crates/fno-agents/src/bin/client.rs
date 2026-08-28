@@ -48,6 +48,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "promote",
     "reap",
     "reconcile",
+    "recover",
+    "reentry-plan",
     "report",
     "review-coverage",
     "restart",
