@@ -99,6 +99,24 @@ def test_retired_config_key_in_caller_surface_fails(repo: Path) -> None:
     assert "review.github_apps" in result.stderr
 
 
+def test_retired_config_key_in_nested_toml_fails(repo: Path) -> None:
+    (repo / "scripts/ci/retired-config-leaves.txt").write_text(
+        "review.github_apps|deleted|use one-shot review evidence\n"
+    )
+    _add(repo, "docs/config.toml", "[review]\ngithub_apps = []\n")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "docs/config.toml" in result.stderr
+
+
+def test_missing_config_canary_fails_closed(repo: Path) -> None:
+    (repo / "scripts/ci/fixtures/retired-config-leaf-canary.py").unlink()
+    _git(repo, "add", "-A")
+    result = _run(repo)
+    assert result.returncode == 1
+    assert "config canary not found" in result.stderr
+
+
 def test_failure_message_names_command_replacement_and_ruling(repo: Path) -> None:
     _add(repo, "cli/src/fno/new.py", 'HELP = "Clean up with claude rm <short_id>."\n')
     result = _run(repo)
