@@ -58,6 +58,17 @@ Reading them from `$HOME` would make them differ between the two lanes below, an
 No environment variable bounds that, so the carve-out channel is closed at the reader (`_hermetic_promise_carveout_gate` in `cli/tests/conftest.py`) for the pytest tree, and by running from a non-worktree directory for a shell test.
 This is a real limit of the env-level cure, stated here rather than papered over.
 
+### The channel a pin cannot reach: a hand-built path
+
+An env pin only reaches a reader that consults it. A module that composes `<root>/.fno/events.jsonl` itself consults nothing, so `FNO_EVENTS_PATH` never applies and no amount of pinning helps. This is not hypothetical. On 2026-08-27 six `think_offered` rows sat in the operator's live journal. They carried the fixture node id `x-2222aaaa` and surfaced as a born-with-why offer for a node that does not exist. `spawn_think._events_path` built `Path.cwd() / ".fno" / "events.jsonl"`. A worktree's `.fno/events.jsonl` is a symlink to the canonical journal, so a worker running the suite inside one wrote straight into the operator's needs panel.
+
+Two moves close it, and the pair is the point: fix the caller, then make the next one impossible.
+
+1. **Every journal path resolves through one function.** Python callers use `fno.paths.project_events_json`. Rust loop callers use `ProjectJournalPath::for_repo`. The shell uses `scripts/lib/events.sh`, and claim audits use `claims::claim_events_path`. All four implement the same precedence: an explicitly named journal, then the pin, then the resolved repo root. A caller that holds its own root still wins. One sandbox journal serves a whole pytest process. Honouring the pin there replaces that caller's file with a shared bucket.
+2. **`append_event` refuses a write that leaves the sandbox.** `FNO_TEST_HERMETIC` was a receipt nothing read. It is now the key this guard turns on. Under it, a resolved path outside `HOME`, `TMPDIR`, or the pin raises `HermeticEscapeError`. The refusal names the path and both ways to fix the call. Every Python event write funnels through that function. A future hand-built path now fails loudly instead of landing in production. One limit, stated rather than hidden. On a CI runner the checkout sits under `HOME`, so the guard permits an ephemeral in-checkout write. It protects a developer's machine, where the journal is load-bearing.
+
+The same rule covers the operator's screen. `fno/notify/_impl.py` suppresses the `osascript` / `notify-send` dispatch under `FNO_TEST_HERMETIC`, and `scripts/lib/notify.sh` matches it. `daemon.rs` already gated its own `fno inbox notify` spawn. The check sits at the dispatch, not at the top of `send_notification`. That keeps the no-notifier degrade (AC2-FR) answering non-zero, so a caller that escalates on it is never fed a false "delivered". A test that asserts a dispatch happens opts out with `monkeypatch.delenv("FNO_TEST_HERMETIC")`.
+
 ## Move 2: one boundary, four trees
 
 `cli/src/fno/test_cmd.py::_child_env` builds the environment for all four test trees:
