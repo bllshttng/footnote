@@ -19,7 +19,7 @@ KNOWN_PROVIDERS: tuple[str, ...] = ("claude", "codex")
 
 # Harnesses the thread/headless spawn seam accepts. The pane-only roster lives
 # in mux_spawn.PANE_HOSTABLE_PROVIDERS and remains wider than this tuple.
-SPAWN_HARNESSES: tuple[str, ...] = KNOWN_PROVIDERS + ("opencode",)
+from fno.harness_names import SPAWN_HARNESSES  # noqa: E402
 
 # The spawn/pane read-tolerance roster: harnesses a pane can HOST even without a
 # Python ask adapter. `agy` (Antigravity) and `opencode` (x-51f6) land pane rows

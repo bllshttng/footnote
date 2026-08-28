@@ -5104,16 +5104,16 @@ def cmd_dispatch_lanes(
             harness = harness.strip()
             if not harness:
                 raise DispatchFlagError("--harness must not be empty")
-            from fno.agents.dispatch import (
-                DispatchAskError,
-                _check_spawn_harness,
-            )
+            from fno.harness_names import SPAWN_HARNESSES
 
-            try:
-                _check_spawn_harness(harness)
-            except DispatchAskError as exc:
-                typer.echo(f"dispatch-lanes: {exc}", err=True)
-                raise typer.Exit(code=exc.exit_code) from exc
+            if harness not in SPAWN_HARNESSES:
+                accepted = ", ".join(SPAWN_HARNESSES)
+                raise DispatchFlagError(
+                    f"unknown harness {harness!r} on the thread substrate "
+                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
+                    "agy and gemini launch on --substrate pane only.\n"
+                    "If you meant a model VENDOR, that is -P/--provider."
+                )
         if provider is not None:
             provider = provider.strip()
             if not provider:
