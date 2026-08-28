@@ -26,8 +26,8 @@ PRIMARY="e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
 FORK="f00baa11-2222-4333-8444-555566667777"
 SECRET="repro-route-secret-do-not-leak"
 
-mkdir -p "$scratch/work" "$scratch/acct/.claude" "$scratch/.fno/agents" "$scratch/bin" "$scratch/out"
-printf '{}' > "$scratch/acct/.claude/.credentials.json"
+mkdir -p "$scratch/work" "$scratch/acct/cfg" "$scratch/.fno/agents" "$scratch/bin" "$scratch/out"
+printf '{}' > "$scratch/acct/cfg/.credentials.json"
 
 fail() {
   echo "repro-route-survival: FAIL: $*" >&2
@@ -61,7 +61,7 @@ state_dir = "$scratch/.fno/"
 
 [config.providers]
 records = [
-  { id = "makers", name = "Makers", harness = "claude", auth = "api_key", env = { ANTHROPIC_API_KEY = "repro-placeholder" }, config_dir = "$scratch/acct/.claude", priority = 10 },
+  { id = "makers", name = "Makers", harness = "claude", auth = "api_key", env = { ANTHROPIC_API_KEY = "repro-placeholder" }, config_dir = "$scratch/acct/cfg", priority = 10 },
 ]
 EOF
 export FNO_CONFIG="$scratch/.fno/config.toml"
@@ -110,14 +110,14 @@ fno_agents reentry-plan repro-router --transition attach > "$scratch/out/attach.
 grep -q '"claude"' "$scratch/out/attach.json" || fail "attach plan has no provider invocation"
 grep -q '"attach"' "$scratch/out/attach.json" || fail "attach plan is not an attach"
 grep -q 'e6f78b98' "$scratch/out/attach.json" || fail "attach plan lost the transport key"
-grep -q "$scratch/acct/.claude" "$scratch/out/attach.json" || fail "attach plan lost the account namespace"
+grep -q "$scratch/acct/cfg" "$scratch/out/attach.json" || fail "attach plan lost the account namespace"
 grep -q "$scratch/route.json" "$scratch/out/attach.json" || fail "attach plan lost the route settings"
 
 fno_agents reentry-plan repro-router --transition resume > "$scratch/out/resume.json" 2> "$scratch/out/resume.err" \
   || fail "resume plan refused: $(cat "$scratch/out/resume.err")"
 grep -q '\-\-resume' "$scratch/out/resume.json" || fail "resume plan is not a resume"
 grep -q "$PRIMARY" "$scratch/out/resume.json" || fail "resume plan lost the session id"
-grep -q "$scratch/acct/.claude" "$scratch/out/resume.json" || fail "resume plan lost the account namespace"
+grep -q "$scratch/acct/cfg" "$scratch/out/resume.json" || fail "resume plan lost the account namespace"
 grep -q "$scratch/route.json" "$scratch/out/resume.json" || fail "resume plan lost the route settings"
 
 printf '%s\n' 'repro 3/5: recover refuses two ids until one is named'
@@ -133,7 +133,7 @@ for id in "$PRIMARY" "$FORK"; do
     > "$scratch/out/recover-print-$id.out" 2> "$scratch/out/recover-print-$id.err" \
     || fail "recover --print-command for $id refused: $(cat "$scratch/out/recover-print-$id.err")"
   grep -q -- "--resume $id" "$scratch/out/recover-print-$id.out" || fail "print form lost the selected id $id"
-  grep -q "CLAUDE_CONFIG_DIR=$scratch/acct/.claude" "$scratch/out/recover-print-$id.out" \
+  grep -q "CLAUDE_CONFIG_DIR=$scratch/acct/cfg" "$scratch/out/recover-print-$id.out" \
     || fail "print form lost the account namespace for $id"
   grep -q -- "--settings $scratch/route.json" "$scratch/out/recover-print-$id.out" \
     || fail "print form lost the route settings for $id"
@@ -146,7 +146,7 @@ fno_agents recover repro-router --session "$FORK" \
   || fail "recover exec failed: $(cat "$scratch/out/recover-exec.err")"
 grep -q -- "--resume $FORK" "$scratch/out/claude-calls.log" || fail "the provider saw the wrong session id"
 grep -q -- "--settings $scratch/route.json" "$scratch/out/claude-calls.log" || fail "the provider saw no route settings"
-grep -q "CLAUDE_CONFIG_DIR: $scratch/acct/.claude" "$scratch/out/claude-calls.log" \
+grep -q "CLAUDE_CONFIG_DIR: $scratch/acct/cfg" "$scratch/out/claude-calls.log" \
   || fail "the provider ran outside the recorded namespace"
 
 printf '%s\n' 'repro 5/5: the sentinel secret stays inside the route file'

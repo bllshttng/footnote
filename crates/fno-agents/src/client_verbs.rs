@@ -2571,53 +2571,58 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // the plan's env is layered on that arm's argv; a duplicate --settings
     // from the plan argv would hand claude the flag twice. A proven default
     // row resolves to no env and no route: byte-identical to today.
-    let reentry_env = if harness == "claude" {
+    let reentry_plan = if harness == "claude" {
         match crate::reentry::resolve_reentry(
             &home.registry_json(),
             &name,
             crate::reentry::ReentryTransition::Resume,
             None,
         ) {
-            Ok(plan) => plan.env,
+            Ok(plan) => Some(plan),
             Err(reason) => {
                 eprintln!("fno agents resume: refused: {reason}");
                 return crate::reentry::REENTRY_REFUSED_EXIT;
             }
         }
     } else {
-        Default::default()
+        None
     };
 
     if print_command {
-        // x-d285: paths and ids only. The env prefix names the config dir the
-        // row recorded; nothing from inside the route file is printed.
-        let env_prefix = reentry_env
-            .iter()
-            .map(|(k, v)| format!("{}={}", shlex_quote(k), shlex_quote(v)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let env_prefix = if env_prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{env_prefix} ")
+        // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
+        // session id, and the recorded --settings together - so the inspection
+        // form matches what `fno agents attach` and `recover --print-command`
+        // print for the same row. The dead arm's local argv equals the plan's;
+        // the live arm's bare attach line did not carry a recorded route.
+        // Paths and ids only; nothing from inside the route file is printed.
+        let printed_argv: Vec<String> = match &reentry_plan {
+            Some(plan) => {
+                // Same shape the mux server's verdict prefix builds: env(1)
+                // assignments, then the provider argv.
+                let mut prefixed: Vec<String> =
+                    plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                prefixed.extend(plan.argv.iter().cloned());
+                prefixed
+            }
+            None => argv.clone(),
         };
         if let Some(session) = mux_session.as_deref() {
             // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
             // from inside the route file reaches the printed command (AC5).
-            let pane = mux_pane_run_argv(session, cwd, &argv);
+            let pane = mux_pane_run_argv(session, cwd, &printed_argv);
             let pane_q = pane
                 .iter()
                 .map(|a| shlex_quote(a))
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("fno {}{}", env_prefix, pane_q);
+            println!("fno {pane_q}");
         } else {
-            let argv_q = argv
+            let argv_q = printed_argv
                 .iter()
                 .map(|a| shlex_quote(a))
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("cd {} && exec {}{}", shlex_quote(cwd), env_prefix, argv_q);
+            println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
         }
         return 0;
     }
@@ -2677,8 +2682,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // x-d285: the delegated wake re-resolves the same plan on the Python
         // side; carrying the env here keeps the two runtimes from disagreeing
         // if a stale binary lags one side of the rule.
-        for (key, value) in &reentry_env {
-            command.env(key, value);
+        if let Some(plan) = &reentry_plan {
+            for (key, value) in &plan.env {
+                command.env(key, value);
+            }
         }
         if cross_project {
             command.arg("--cross-project");
@@ -2737,11 +2744,12 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         // x-d285: the account namespace rides the pane relaunch. The mux CLI
         // forwards its environment to the pane child; the server-side
         // canonical resolution lands with the mux gestures (wave 2.2).
-        for (key, value) in &reentry_env {
-            pane_command.env(key, value);
+        if let Some(plan) = &reentry_plan {
+            for (key, value) in &plan.env {
+                pane_command.env(key, value);
+            }
         }
-        match pane_command.status()
-        {
+        match pane_command.status() {
             Ok(s) if s.success() => {
                 // session_id is the transport short_id, empty on a pane row;
                 // the resumed session's id is the uuid (claim_uuid).
@@ -2805,8 +2813,10 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     use std::os::unix::process::CommandExt;
     let mut exec_command = std::process::Command::new(&argv[0]);
     exec_command.args(&argv[1..]);
-    for (key, value) in &reentry_env {
-        exec_command.env(key, value);
+    if let Some(plan) = &reentry_plan {
+        for (key, value) in &plan.env {
+            exec_command.env(key, value);
+        }
     }
     let err = exec_command.exec();
     // exec only returns on failure.
@@ -2848,9 +2858,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
                     }
                 });
             }
-            other if !other.starts_with('-') && name.is_none() => {
-                name = Some(other.to_string())
-            }
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
             other => {
                 eprintln!("fno agents recover: unexpected argument {other:?}");
                 return 2;
@@ -2928,9 +2936,7 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
     // The restored session keeps the single-writer guard resume's dead arm
     // uses: the claim is keyed on the SELECTED id, so the primary and the
     // fork id can never be recovered into two live writers.
-    if let Err((code, msg)) =
-        acquire_resume_session_claim(&plan.session_id, None, None)
-    {
+    if let Err((code, msg)) = acquire_resume_session_claim(&plan.session_id, None, None) {
         eprintln!("{msg}");
         return code;
     }
@@ -2964,13 +2970,14 @@ pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
                 return 0;
             }
             Ok(s) => {
-                eprintln!("{}", mux_pane_run_failure_message(&name, &mux_ref.session, s));
+                eprintln!(
+                    "{}",
+                    mux_pane_run_failure_message(&name, &mux_ref.session, s)
+                );
                 return 1;
             }
             Err(e) => {
-                eprintln!(
-                    "fno agents recover: failed to launch {name} on a mux pane: {e}"
-                );
+                eprintln!("fno agents recover: failed to launch {name} on a mux pane: {e}");
                 return 1;
             }
         }

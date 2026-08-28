@@ -490,7 +490,7 @@ class AgentEntry:
     # mirrors it as additive-optional passthrough so the daemon's
     # read-modify-write keeps it.
     delivery_policy: Optional[str] = None
-    # v19 (x-d285): the ACCOUNT axis this worker was launched under. Three
+    # v20 (x-d285): the ACCOUNT axis this worker was launched under. Three
     # values, never two: "default" (the spawn positively pinned no account),
     # a registered account id (explicit or headroom-picked), or None (a legacy
     # row or a mint that cannot know - never readable as "default", because a
@@ -499,7 +499,7 @@ class AgentEntry:
     # CLAUDE_CONFIG_DIR or refuse. Rust's RegistryEntry mirrors it as
     # additive-optional passthrough so the daemon's read-modify-write keeps it.
     launch_account: Optional[str] = None
-    # v19 (x-d285): the SECOND valid session id an additive fork/background
+    # v20 (x-d285): the SECOND valid session id an additive fork/background
     # minted on this row. A fork is additive: both ids stay valid forever,
     # resolve to this same row and its launch binding, and neither replaces
     # the other. At most ONE optional id - no list, edge, generation, or

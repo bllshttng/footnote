@@ -21,7 +21,9 @@ What each harness fundamentally is, from fno's point of view:
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
 The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+
 A claude re-entry door resolves the row's recorded account and route before launch, on every verb above (`attach`, `resume`, `spawn --resume`, `recover`). A row whose binding evidence is missing or stale refuses with the field named. A claude row can hold two valid session ids after a fork. `recover` is the verb that restores one: with two ids recorded it requires `--session <id>` to name the chosen one, and `--print-command` prints the inspection form without launching.
+
 Codex pane spawn waits for rollout binding for 60 seconds. A bound receipt includes `status: live`, `session_id`, and the derived eight-character `short_id`. If binding expires, fno reaps the pane and exits nonzero. It does not return an unaddressable `status: spawning` receipt.
 
 agy pane spawns trust the exact cwd before launch. The shared gate clears remaining trust prompts. It submits seeds after the composer paints.

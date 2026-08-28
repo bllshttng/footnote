@@ -1682,8 +1682,8 @@ impl ReentryVerdict {
     /// same refusal the raw subprocess failure is: `resolved != true` carries
     /// no launch, so nothing may spawn off it.
     fn from_plan_json(raw: &[u8]) -> Result<Self, String> {
-        let value: serde_json::Value = serde_json::from_slice(raw)
-            .map_err(|e| format!("malformed re-entry verdict: {e}"))?;
+        let value: serde_json::Value =
+            serde_json::from_slice(raw).map_err(|e| format!("malformed re-entry verdict: {e}"))?;
         if value.get("resolved").and_then(|v| v.as_bool()) != Some(true) {
             return Err("re-entry verdict is not resolved".to_string());
         }
@@ -1704,9 +1704,15 @@ impl ReentryVerdict {
             .and_then(|v| v.as_object())
             .map(|m| {
                 m.iter()
-                    .map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default()))
-                    .collect::<Vec<_>>()
+                    .map(|(k, v)| {
+                        v.as_str()
+                            .map(|s| format!("{k}={s}"))
+                            .ok_or_else(|| format!("env value for {k} is not a string"))
+                    })
+                    .collect::<Result<Vec<_>, String>>()
             })
+            .transpose()
+            .map_err(|e| format!("re-entry verdict carries a malformed env: {e}"))?
             .unwrap_or_default();
         let config_dir = value
             .get("claude_config_dir")
@@ -10120,8 +10126,7 @@ impl Core {
                     thread_pane: true,
                     ..Default::default()
                 };
-                let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement)
-                else {
+                let Some((argv, _cd)) = self.attach_gesture_argv(client_id, &id, &placement) else {
                     return Flow::Continue;
                 };
                 argv
@@ -10792,7 +10797,14 @@ impl Core {
                         } else {
                             None
                         };
-                        match self.resume_worker_into(&facts, sid, Some(pid), rows, cols, plan.as_ref()) {
+                        match self.resume_worker_into(
+                            &facts,
+                            sid,
+                            Some(pid),
+                            rows,
+                            cols,
+                            plan.as_ref(),
+                        ) {
                             Ok((resumed, _, fallback_notice)) => {
                                 focus_pid = resumed;
                                 if let Some(notice) = fallback_notice {
@@ -11308,9 +11320,7 @@ impl Core {
                     let Some(plan) = self.resume_gesture_plan(
                         client_id,
                         &name,
-                        ReentrySpawnRequest::Resume {
-                            name: name.clone(),
-                        },
+                        ReentrySpawnRequest::Resume { name: name.clone() },
                     ) else {
                         return Flow::Continue;
                     };
@@ -11847,6 +11857,13 @@ impl Core {
                 };
                 self.notice(client_id, msg);
                 self.push_layout(true);
+                // (x-d285) A member skipped at a gate above never consumed its
+                // staged plan. Draining here keeps that verdict from being
+                // consumed by a LATER recruit gesture as fresh (the
+                // contains_key check would treat it as just-resolved).
+                for id in &ids {
+                    self.batch_plans.remove(id);
+                }
                 Flow::Continue
             }
             Command::DismissMember { squad, attach_id } => {
@@ -12306,11 +12323,19 @@ impl Core {
             CoreMsg::BatchPlansReady { id, plans, replay } => {
                 self.batch_plans = plans;
                 match *replay {
-                    BatchReplay::Restore { home_sid, rows, cols } => {
+                    BatchReplay::Restore {
+                        home_sid,
+                        rows,
+                        cols,
+                    } => {
                         self.restore_squads(rows, cols, home_sid);
                         // (x-7561) The external-tombstone reconcile runs
                         // AFTER restore, as the synchronous path orders it.
                         self.reconcile_external_lifecycle();
+                        // (x-d285) A member vanished mid-resolution leaves its
+                        // staged plan unconsumed; drop it so a later batch or
+                        // recruit gesture resolves fresh, never stale.
+                        self.batch_plans.clear();
                     }
                     BatchReplay::Recruit { squad, ids } => {
                         self.command(id, Command::RecruitAgents { squad, ids });
@@ -22675,9 +22700,9 @@ mod tests {
             argv: vec!["/bin/cat".into(), "deadbee1".into()],
             env: vec![
                 "FNO_ACCOUNT=makers".into(),
-                "CLAUDE_CONFIG_DIR=/acct/makers/.claude".into(),
+                "CLAUDE_CONFIG_DIR=/acct/makers/cfg".into(),
             ],
-            config_dir: Some("/acct/makers/.claude".into()),
+            config_dir: Some("/acct/makers/cfg".into()),
         }
     }
 
@@ -22692,23 +22717,17 @@ mod tests {
         // The machine grammar: a resolved verdict with argv + env parses; an
         // unresolved one, malformed JSON, a missing argv, or an empty argv is
         // the same refusal - nothing may spawn off it.
-        let ok = br#"{"resolved":true,"argv":["claude","attach","deadbee1"],"env":{"FNO_ACCOUNT":"makers"},"claude_config_dir":"/acct/.claude"}"#;
+        let ok = br#"{"resolved":true,"argv":["claude","attach","deadbee1"],"env":{"FNO_ACCOUNT":"makers"},"claude_config_dir":"/acct/cfg"}"#;
         let verdict = ReentryVerdict::from_plan_json(ok).expect("a resolved plan parses");
         assert_eq!(verdict.argv, vec!["claude", "attach", "deadbee1"]);
         assert_eq!(verdict.env, vec!["FNO_ACCOUNT=makers"]);
         assert_eq!(
             verdict.config_dir.as_deref(),
-            Some(std::path::Path::new("/acct/.claude"))
+            Some(std::path::Path::new("/acct/cfg"))
         );
         assert_eq!(
             verdict.prefixed_argv(),
-            vec![
-                "env",
-                "FNO_ACCOUNT=makers",
-                "claude",
-                "attach",
-                "deadbee1"
-            ],
+            vec!["env", "FNO_ACCOUNT=makers", "claude", "attach", "deadbee1"],
             "the env assignments prefix the provider argv"
         );
         for bad in [
@@ -22716,6 +22735,10 @@ mod tests {
             br#"{"argv":["claude"]}"#.as_slice(),
             br#"not json"#.as_slice(),
             br#"{"resolved":true,"argv":[]}"#.as_slice(),
+            // A non-string env value parsed as an empty assignment would
+            // launch with a blanked namespace; it refuses like the rest.
+            br#"{"resolved":true,"argv":["claude"],"env":{"CLAUDE_CONFIG_DIR":5}}"#
+                .as_slice(),
         ] {
             assert!(
                 ReentryVerdict::from_plan_json(bad).is_err(),
@@ -22726,7 +22749,9 @@ mod tests {
         // No env means the argv runs bare, with no env(1) prefix.
         let bare = br#"{"resolved":true,"argv":["claude"]}"#;
         assert_eq!(
-            ReentryVerdict::from_plan_json(bare).unwrap().prefixed_argv(),
+            ReentryVerdict::from_plan_json(bare)
+                .unwrap()
+                .prefixed_argv(),
             vec!["claude"]
         );
     }
@@ -22824,10 +22849,15 @@ mod tests {
                 "01a027ad-fe00-7c12-a116-9ee37c6bdfec".into(),
             ],
             env: vec!["FNO_ACCOUNT=makers".into()],
-            config_dir: Some("/acct/makers/.claude".into()),
+            config_dir: Some("/acct/makers/cfg".into()),
         });
 
-        core.command(1, Command::ResumeAgent { name: "routed-glm".into() });
+        core.command(
+            1,
+            Command::ResumeAgent {
+                name: "routed-glm".into(),
+            },
+        );
 
         let notices = drain_notices(&mut rx).join("\n");
         assert!(notices.contains("resumed routed-glm"), "{notices}");
@@ -22881,7 +22911,8 @@ mod tests {
             claude_bg_row("routed-a", "/x", Some("deadbee1")),
             claude_bg_row("routed-b", "/x", Some("deadbee2")),
         ];
-        core.batch_plans.insert("deadbee1".into(), Ok(staged_reentry_verdict()));
+        core.batch_plans
+            .insert("deadbee1".into(), Ok(staged_reentry_verdict()));
         core.batch_plans.insert(
             "deadbee2".into(),
             Err("row records no launch account".into()),

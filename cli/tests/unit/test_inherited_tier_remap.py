@@ -194,6 +194,16 @@ def test_account_spawn_scrubs_at_the_seam_so_rust_inherits_it(monkeypatch):
     assert os.environ["CLAUDE_CONFIG_DIR"] == "/tmp/x"
 
 
+def test_seam_clears_a_stale_launch_account_on_an_unaccounted_spawn(monkeypatch):
+    # A worker spawned under --account carries FNO_LAUNCH_ACCOUNT in its env.
+    # When THAT worker spawns a child with no account of its own, the seam must
+    # clear the inherited id: the Rust mint reads it first, so a stale value
+    # stamps the parent's account onto a row that pinned nothing.
+    monkeypatch.setenv("FNO_LAUNCH_ACCOUNT", "parent-acct")
+    _scrub_account_auth_at_seam([*BASE, "--model", "opus"])
+    assert "FNO_LAUNCH_ACCOUNT" not in os.environ
+
+
 def test_seam_resolves_the_account_before_scrubbing(monkeypatch):
     # An api_key record may reference the ambient env
     # (ANTHROPIC_API_KEY = "${ENV:ANTHROPIC_API_KEY}") and resolve_env_value

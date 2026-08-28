@@ -826,6 +826,12 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     """
     account = _spawn_flag_value(args, "--account")
     if not account:
+        # x-d285: an inherited FNO_LAUNCH_ACCOUNT (set by the PARENT worker's
+        # own --account spawn) must not outlive that spawn. The Rust mint reads
+        # it first, so a stale value would stamp the parent's account onto a
+        # child that pinned none. Clearing here keeps the three-valued read
+        # honest: this spawn's account fact is its own, or absent.
+        os.environ.pop("FNO_LAUNCH_ACCOUNT", None)
         return
     if _is_route_bearing_spawn("spawn", args):
         return

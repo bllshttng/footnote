@@ -233,8 +233,16 @@ pub fn resolve_reentry_with(
             if !id.is_empty() && (primary == id || (!related.is_empty() && related == id)) {
                 id.to_string()
             } else {
-                let a = if primary.is_empty() { "-" } else { primary.as_str() };
-                let b = if related.is_empty() { "-" } else { related.as_str() };
+                let a = if primary.is_empty() {
+                    "-"
+                } else {
+                    primary.as_str()
+                };
+                let b = if related.is_empty() {
+                    "-"
+                } else {
+                    related.as_str()
+                };
                 return Err(format!(
                     "session {id:?} is not one of the ids row {name:?} records (primary {a}, related {b})"
                 ));
@@ -258,7 +266,9 @@ pub fn resolve_reentry_with(
         }
     };
     if session_id.is_empty() {
-        return Err(format!("row {name:?} records no harness session id; nothing to re-enter"));
+        return Err(format!(
+            "row {name:?} records no harness session id; nothing to re-enter"
+        ));
     }
     let short_id = if !entry.short_id.is_empty() {
         entry.short_id.clone()
@@ -351,10 +361,7 @@ pub fn resolve_reentry_with(
         short_id,
         launch_account: launch_account.unwrap_or_else(|| "unknown".to_string()),
         claude_config_dir,
-        route_settings_path: entry
-            .route_settings_path
-            .clone()
-            .filter(|p| !p.is_empty()),
+        route_settings_path: entry.route_settings_path.clone().filter(|p| !p.is_empty()),
         cwd: entry.cwd.clone(),
         substrate: substrate_of(entry).to_string(),
         mux: entry.mux.clone(),
@@ -399,7 +406,9 @@ pub fn run_reentry_plan(args: &[String], home: &crate::paths::AgentsHome) -> i32
                 Some("resume") => transition = ReentryTransition::Resume,
                 Some("recover") => transition = ReentryTransition::Recover,
                 other => {
-                    eprintln!("reentry-plan: unknown --transition {other:?} (attach|resume|recover)");
+                    eprintln!(
+                        "reentry-plan: unknown --transition {other:?} (attach|resume|recover)"
+                    );
                     return 2;
                 }
             },
@@ -512,7 +521,7 @@ mod tests {
 
     fn binding_ok(id: &str) -> Result<Option<String>, String> {
         if id == "makers" {
-            Ok(Some("/acct/makers/.claude".into()))
+            Ok(Some("/acct/makers/cfg".into()))
         } else {
             Err(format!("account {id:?} is not registered"))
         }
@@ -556,17 +565,26 @@ mod tests {
         )
         .unwrap();
         assert!(plan.resolved);
-        assert_eq!(plan.claude_config_dir.as_deref(), Some("/acct/makers/.claude"));
+        assert_eq!(plan.claude_config_dir.as_deref(), Some("/acct/makers/cfg"));
         let want_path = dir.to_string_lossy().to_string();
-        assert_eq!(plan.route_settings_path.as_deref(), Some(want_path.as_str()));
-        assert_eq!(plan.argv, vec![
-            "claude".to_string(),
-            "--resume".to_string(),
-            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
-            "--settings".to_string(),
-            dir.to_string_lossy().to_string(),
-        ]);
-        assert_eq!(plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str), Some("/acct/makers/.claude"));
+        assert_eq!(
+            plan.route_settings_path.as_deref(),
+            Some(want_path.as_str())
+        );
+        assert_eq!(
+            plan.argv,
+            vec![
+                "claude".to_string(),
+                "--resume".to_string(),
+                "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".to_string(),
+                "--settings".to_string(),
+                dir.to_string_lossy().to_string(),
+            ]
+        );
+        assert_eq!(
+            plan.env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+            Some("/acct/makers/cfg")
+        );
         // Secrets never cross the boundary: the token lives in the 0600 file
         // the plan only NAMES.
         let json = serde_json::to_string(&plan).unwrap();
@@ -600,8 +618,7 @@ mod tests {
         e.short_id = "aaaaaaaa".into();
         e.provider = Some("zai".into());
         e.launch_account = Some("makers".into());
-        e.route_settings_path =
-            Some("/nonexistent/route-settings/gone.json".into());
+        e.route_settings_path = Some("/nonexistent/route-settings/gone.json".into());
         e.cwd = std::env::temp_dir().to_string_lossy().to_string();
         let err = resolve_reentry_with(
             &reg(vec![e]),
@@ -732,9 +749,18 @@ mod tests {
         assert!(err.contains("11111111-2222"), "{err}");
 
         // Either recorded id resolves; neither replaces the other on the row.
-        for id in ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "11111111-2222-3333-4444-555555555555"] {
-            let plan = resolve_reentry_with(r, "forked", ReentryTransition::Recover, Some(id), &binding_ok)
-                .unwrap();
+        for id in [
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+            "11111111-2222-3333-4444-555555555555",
+        ] {
+            let plan = resolve_reentry_with(
+                r,
+                "forked",
+                ReentryTransition::Recover,
+                Some(id),
+                &binding_ok,
+            )
+            .unwrap();
             assert_eq!(plan.session_id, id);
         }
 
@@ -764,7 +790,10 @@ mod tests {
             &binding_ok,
         )
         .unwrap_err();
-        assert!(err.contains("removed-acct") && err.contains("no longer resolves"), "{err}");
+        assert!(
+            err.contains("removed-acct") && err.contains("no longer resolves"),
+            "{err}"
+        );
     }
 
     #[test]

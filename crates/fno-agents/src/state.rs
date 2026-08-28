@@ -186,10 +186,13 @@ impl Registry {
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|entry| {
             entry.name == token
-                || [entry.harness_session_id.as_deref(), entry.related_session_id.as_deref()]
-                    .into_iter()
-                    .flatten()
-                    .any(|session_id| session_handle_tier(token, session_id) == Some(0))
+                || [
+                    entry.harness_session_id.as_deref(),
+                    entry.related_session_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|session_id| session_handle_tier(token, session_id) == Some(0))
         })
     }
 
@@ -485,7 +488,7 @@ pub struct RegistryEntry {
     /// full session id and stable fno id rather than sharing a mutable row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
-    /// The ACCOUNT axis this worker was launched under (x-d285, v19). Three
+    /// The ACCOUNT axis this worker was launched under (x-d285, v20). Three
     /// values, never two: `Some("default")` (the spawn positively pinned no
     /// account), `Some(<account-id>)` (explicit or headroom-picked), `None`
     /// (legacy row or a mint that cannot know - never readable as default,
@@ -497,7 +500,7 @@ pub struct RegistryEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub launch_account: Option<String>,
     /// The SECOND valid session id an additive fork/background minted on this
-    /// row (x-d285, v19). Both ids stay valid forever and resolve to the same
+    /// row (x-d285, v20). Both ids stay valid forever and resolve to the same
     /// row and launch binding; neither replaces the other, and at most ONE
     /// optional id exists (no list, edge, or lineage graph). Mirrors Python's
     /// `AgentEntry.related_session_id`; same X3 passthrough.
@@ -2439,7 +2442,7 @@ mod tests {
 
     #[test]
     fn launch_account_and_related_id_survive_a_daemon_read_modify_write() {
-        // v19 (x-d285): Python stamps both at the spawn seams and the re-entry
+        // v20 (x-d285): Python stamps both at the spawn seams and the re-entry
         // resolver reads them. Same passthrough claim as route_settings_path:
         // a daemon write-back that dropped either key would strip the account
         // axis off every row it touched.
@@ -2456,7 +2459,10 @@ mod tests {
         wire["agents"][0]["related_session_id"] = serde_json::Value::from("sess-fork");
         let reg: Registry = serde_json::from_value(wire).unwrap();
         assert_eq!(reg.entries[0].launch_account.as_deref(), Some("makers"));
-        assert_eq!(reg.entries[0].related_session_id.as_deref(), Some("sess-fork"));
+        assert_eq!(
+            reg.entries[0].related_session_id.as_deref(),
+            Some("sess-fork")
+        );
         let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
         assert_eq!(back["agents"][0]["launch_account"], "makers");
         assert_eq!(back["agents"][0]["related_session_id"], "sess-fork");
@@ -2478,9 +2484,11 @@ mod tests {
         assert!(reg
             .find_name_or_full_session_id("01a027ad-fe00-7c12-a116-9ee37c6bdfec")
             .is_some());
-        assert!(reg
-            .find_name_or_full_session_id("02b118cf-aa11-4d55-9bc2-7f33a1e99110")
-            .is_some(), "the related id resolves the row");
+        assert!(
+            reg.find_name_or_full_session_id("02b118cf-aa11-4d55-9bc2-7f33a1e99110")
+                .is_some(),
+            "the related id resolves the row"
+        );
         assert!(reg.find_name_or_full_session_id("nosuch").is_none());
     }
 
@@ -2517,7 +2525,11 @@ mod tests {
 
         assert_eq!(a.as_deref(), Some("makers"), "seam id outranks ambient dir");
         assert_eq!(b, None, "an ambient config dir is unknown, never default");
-        assert_eq!(c.as_deref(), Some("default"), "neither present proves default");
+        assert_eq!(
+            c.as_deref(),
+            Some("default"),
+            "neither present proves default"
+        );
     }
 
     #[test]
