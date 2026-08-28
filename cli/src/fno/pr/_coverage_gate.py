@@ -210,24 +210,23 @@ def covered_conjuncts(
     return True, ""
 
 
-def _resolved_github_approval_satisfies(repo: str) -> bool:
-    """The resolved ``config.review.github_approval_satisfies``. True is BOTH
-    the config default and the unreadable-config direction, mirroring the Rust
-    fail-closed settings parse (None -> true): the two surfaces must not split
-    on the same unreadable config."""
-    try:
-        from fno.config import load_settings_for_repo
+def _repo_root(repo: str) -> Path:
+    """The repo root ``load_settings_for_repo`` wants. ``_repo_state_dir``
+    already does the ``rev-parse --show-toplevel``, so a ``repo`` that names a
+    subdirectory still resolves to the checkout whose config the gate reads."""
+    return Path(_merge._repo_state_dir(repo)).parent
 
-        root = Path(_merge._repo_state_dir(repo)).parent
-        return bool(
-            getattr(
-                load_settings_for_repo(root).review,
-                "github_approval_satisfies",
-                True,
-            )
-        )
-    except Exception:  # noqa: BLE001 - mirror of the Rust None -> true default
-        return True
+
+def _github_approval_satisfies(repo: str) -> bool:
+    """The resolved flag, read through ``_reviews``' resolver rather than a
+    second copy of it: the reachable-paths gate names a config key carried in
+    two Python files as a twin, and this gate's whole subject is one rule with
+    one implementation. Passing the rev-parsed root keeps the sibling
+    resolvers here (``require_corroboration``, ``nonblocking_categories``)
+    reading the same checkout this one does."""
+    from fno.pr import _reviews
+
+    return _reviews._resolved_github_approval_flag(str(_repo_root(repo)))
 
 
 def rests_on_self_attestation_alone(
@@ -289,11 +288,10 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
     if not cov:
         return None
     try:
-        from pathlib import Path
 
         from fno.config import load_settings_for_repo
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         review = load_settings_for_repo(root).review
         if not getattr(review, "require_corroboration", False):
             return None
@@ -301,7 +299,7 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
         return None
 
     if not rests_on_self_attestation_alone(
-        cov, _resolved_github_approval_satisfies(repo)
+        cov, _github_approval_satisfies(repo)
     ):
         return None
     return (
@@ -561,11 +559,10 @@ def coverage_verdict(
     # difference - the exact delivery gap the render closes.
     hint = None
     try:
-        from pathlib import Path
 
         from fno.review_capability import render_self_review_invocation
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         rendered = render_self_review_invocation(project_root=root)
         # An unsized render (no merge-base against main/master) keeps its
         # `<level>` placeholder - teachable on the orienter surface, but a
@@ -731,7 +728,7 @@ def _resolved_categories(repo: str) -> frozenset[str]:
         from fno.config import load_settings_for_repo
         from fno.review.findings import resolve_nonblocking_categories
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         return resolve_nonblocking_categories(
             getattr(
                 load_settings_for_repo(root).review, "nonblocking_categories", None
@@ -821,7 +818,7 @@ def disposition_refusal(
     corroborated = not (
         cov is not None
         and rests_on_self_attestation_alone(
-            cov, _resolved_github_approval_satisfies(repo)
+            cov, _github_approval_satisfies(repo)
         )
     )
 
@@ -1048,7 +1045,7 @@ def resolved_max_rounds(repo: str) -> int:
     try:
         from fno.config import load_settings_for_repo
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         value = getattr(load_settings_for_repo(root).review, "max_rounds", None)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
             return value
