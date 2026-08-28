@@ -177,7 +177,7 @@ pub fn turn_start_request_json_with_effort(
     text: &str,
     effort: Option<&str>,
 ) -> String {
-    turn_start_request_json_full(id, thread_id, text, effort, &[])
+    turn_start_request_json_full(id, thread_id, text, effort, &[], None)
 }
 
 /// `turn/start` with the optional state-root grant (x-f22f).
@@ -204,14 +204,45 @@ pub fn turn_start_request_json_with_effort(
 /// `writableRoots: []` and can still write its own cwd - so naming the state
 /// root does not take the worktree away.
 ///
-/// A measured LIMIT, stated rather than left for a reader to discover: the
-/// probe established that `writableRoots` is honored here, and it did not
-/// establish what a per-turn policy does to the SIBLING fields of the thread's
-/// posture. The turn sends a whole `workspaceWrite` object, so a field omitted
-/// here takes whatever default the server applies rather than inheriting the
-/// thread's value. `networkAccess` is left off because the scalar posture this
-/// replaces measured `networkAccess: false`, which is also the default, so
-/// both paths agree today on the measured configuration.
+/// The thread's resolved posture with `state_dirs` added to its writable roots.
+///
+/// Additive and order-stable: the posture's own roots come first and a root it
+/// already names is not repeated, so the turn widens the policy and narrows
+/// nothing.
+fn sandbox_policy_with_roots(resolved: Option<&Value>, state_dirs: &[String]) -> Value {
+    let mut policy = resolved.cloned().unwrap_or_else(
+        || json!({"type": "workspaceWrite", "writableRoots": Vec::<String>::new()}),
+    );
+    let mut roots: Vec<String> = policy
+        .get("writableRoots")
+        .and_then(Value::as_array)
+        .map(|existing| {
+            existing
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for dir in state_dirs {
+        if !roots.iter().any(|root| root == dir) {
+            roots.push(dir.clone());
+        }
+    }
+    policy["writableRoots"] = json!(roots);
+    policy
+}
+
+/// `turn/start` takes a whole `sandboxPolicy` object, never a `writableRoots`
+/// delta, so the policy is built FROM the thread's own resolved posture
+/// (`resolved`) with only the roots widened. Hand-building the object instead
+/// replaces every sibling field - `networkAccess`, the tmp exclusions, roots
+/// the posture already carried - with the server's defaults, which would let a
+/// directory grant silently change the worker's network access.
+///
+/// With no resolved posture to echo, it falls back to the minimal object. The
+/// scalar posture this replaces measured `networkAccess: false`, the same as
+/// the default, so the fallback matches on the measured configuration.
 ///
 /// Empty `state_dirs` builds today's frame byte-for-byte.
 pub fn turn_start_request_json_full(
@@ -220,6 +251,7 @@ pub fn turn_start_request_json_full(
     text: &str,
     effort: Option<&str>,
     state_dirs: &[String],
+    resolved: Option<&Value>,
 ) -> String {
     let mut params = json!({
         "threadId": thread_id,
@@ -229,10 +261,7 @@ pub fn turn_start_request_json_full(
         params["effort"] = json!(effort);
     }
     if !state_dirs.is_empty() {
-        params["sandboxPolicy"] = json!({
-            "type": "workspaceWrite",
-            "writableRoots": state_dirs,
-        });
+        params["sandboxPolicy"] = sandbox_policy_with_roots(resolved, state_dirs);
     }
     json!({
         "id": id,
@@ -270,6 +299,23 @@ pub fn turn_interrupt_request_json(id: u64, thread_id: &str, turn_id: &str) -> S
         "params": {"threadId": thread_id, "turnId": turn_id},
     })
     .to_string()
+}
+
+/// The sandbox posture the server RESOLVED for this thread, as it reports it.
+///
+/// Read so a per-turn override can be built FROM it. `turn/start` takes a whole
+/// `sandboxPolicy` object rather than a `writableRoots` delta, so a
+/// hand-built object silently replaces every sibling field - `networkAccess`,
+/// the tmp exclusions, any roots the posture already carried - with whatever
+/// default the server applies. Echoing the resolved posture back with only
+/// `writableRoots` widened keeps the turn's policy equal to the thread's in
+/// every other respect.
+pub fn parse_resolved_sandbox(raw: &str) -> Option<Value> {
+    serde_json::from_str::<Value>(raw)
+        .ok()?
+        .pointer("/result/sandbox")
+        .filter(|sandbox| sandbox.get("type").and_then(Value::as_str) == Some("workspaceWrite"))
+        .cloned()
 }
 
 pub fn parse_thread_start_response(raw: &str) -> Result<(String, String), ThreadStartError> {
@@ -398,6 +444,10 @@ pub struct CodexThread {
     /// already `danger-full-access` and would be NARROWED by a workspaceWrite
     /// policy, and empty when the seam published nothing.
     state_dirs: Vec<String>,
+    /// The sandbox posture the server resolved for this thread, echoed back on
+    /// every per-turn override so the grant widens the roots and changes
+    /// nothing else. `None` when the thread is not `workspaceWrite`.
+    resolved_sandbox: Option<Value>,
     current_turn_id: Option<String>,
 }
 
@@ -455,6 +505,7 @@ impl CodexThread {
         } else {
             state_dirs.to_vec()
         };
+        driver.resolved_sandbox = parse_resolved_sandbox(&response);
         Ok(driver)
     }
 
@@ -507,6 +558,7 @@ impl CodexThread {
         } else {
             state_dirs.to_vec()
         };
+        driver.resolved_sandbox = parse_resolved_sandbox(&response);
         Ok(driver)
     }
 
@@ -552,6 +604,7 @@ impl CodexThread {
             cwd,
             effort: None,
             state_dirs: Vec::new(),
+            resolved_sandbox: None,
             current_turn_id: None,
         })
     }
@@ -663,6 +716,7 @@ impl CodexThread {
             text,
             self.effort.as_deref(),
             &self.state_dirs,
+            self.resolved_sandbox.as_ref(),
         );
         let response = self.request(request_id, request).await?;
         let turn_id = parse_turn_start_response(&response)?;
@@ -691,6 +745,7 @@ impl CodexThread {
             text,
             self.effort.as_deref(),
             &self.state_dirs,
+            self.resolved_sandbox.as_ref(),
         );
         self.write_frame(&request).await?;
         Ok(request_id)
@@ -1630,7 +1685,7 @@ mod tests {
     fn turn_start_carries_the_state_root_grant() {
         let roots = vec!["/Users/x/.fno".to_string()];
         let value: Value = serde_json::from_str(&turn_start_request_json_full(
-            7, "thread-1", "go", None, &roots,
+            7, "thread-1", "go", None, &roots, None,
         ))
         .unwrap();
         assert_eq!(value["params"]["sandboxPolicy"]["type"], "workspaceWrite");
@@ -1650,10 +1705,84 @@ mod tests {
     #[test]
     fn turn_start_without_roots_is_byte_identical_to_today() {
         let with_helper = turn_start_request_json_with_effort(7, "thread-1", "go", Some("high"));
-        let with_empty = turn_start_request_json_full(7, "thread-1", "go", Some("high"), &[]);
+        let with_empty = turn_start_request_json_full(7, "thread-1", "go", Some("high"), &[], None);
         assert_eq!(with_helper, with_empty);
         let value: Value = serde_json::from_str(&with_empty).unwrap();
         assert!(value["params"].get("sandboxPolicy").is_none());
+    }
+
+    /// The turn sends a WHOLE policy object, so a hand-built one silently
+    /// replaces every sibling field of the thread's posture with a server
+    /// default. Echoing the resolved posture back keeps the turn equal to the
+    /// thread in every respect except the roots it widens.
+    #[test]
+    fn turn_start_preserves_the_threads_own_posture_fields() {
+        // The shape the live daemon reports for a bounded thread.
+        let resolved = json!({
+            "type": "workspaceWrite",
+            "writableRoots": ["/repo/already-granted"],
+            "networkAccess": true,
+            "excludeSlashTmp": true,
+            "excludeTmpdirEnvVar": false,
+        });
+        let roots = vec!["/Users/x/.fno".to_string()];
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7,
+            "thread-1",
+            "go",
+            None,
+            &roots,
+            Some(&resolved),
+        ))
+        .unwrap();
+        let policy = &value["params"]["sandboxPolicy"];
+        // Widened, and nothing else touched.
+        assert_eq!(
+            policy["writableRoots"],
+            json!(["/repo/already-granted", "/Users/x/.fno"])
+        );
+        assert_eq!(policy["networkAccess"], true);
+        assert_eq!(policy["excludeSlashTmp"], true);
+        assert_eq!(policy["excludeTmpdirEnvVar"], false);
+    }
+
+    /// A root the posture already names is not repeated.
+    #[test]
+    fn turn_start_does_not_duplicate_a_root_the_posture_already_has() {
+        let resolved = json!({
+            "type": "workspaceWrite",
+            "writableRoots": ["/Users/x/.fno"],
+        });
+        let roots = vec!["/Users/x/.fno".to_string()];
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7,
+            "thread-1",
+            "go",
+            None,
+            &roots,
+            Some(&resolved),
+        ))
+        .unwrap();
+        assert_eq!(
+            value["params"]["sandboxPolicy"]["writableRoots"],
+            json!(["/Users/x/.fno"])
+        );
+    }
+
+    /// The resolved posture is read from the thread/start response, and only
+    /// for a workspaceWrite thread: a full-access thread must not be handed a
+    /// workspaceWrite object to echo.
+    #[test]
+    fn resolved_sandbox_is_read_only_for_a_bounded_thread() {
+        let bounded =
+            r#"{"id":1,"result":{"sandbox":{"type":"workspaceWrite","writableRoots":[]}}}"#;
+        assert_eq!(
+            parse_resolved_sandbox(bounded).unwrap()["type"],
+            "workspaceWrite"
+        );
+        let full = r#"{"id":1,"result":{"sandbox":{"type":"dangerFullAccess"}}}"#;
+        assert!(parse_resolved_sandbox(full).is_none());
+        assert!(parse_resolved_sandbox(r#"{"id":1,"result":{}}"#).is_none());
     }
 
     /// `thread/start` keeps the SCALAR field and its exact spelling. The

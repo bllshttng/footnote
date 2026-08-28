@@ -11,6 +11,7 @@ paths is decorative.
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -291,8 +292,14 @@ def test_seam_export_publishes_the_set_for_the_rust_route(
 
     env: dict[str, str] = {}
     published = export_worker_writable_dirs(tmp_path, env)
-    assert published == [str(fake_state)]
-    assert env[WORKER_ADD_DIRS_ENV] == str(fake_state)
+    # The state root, then the mail bus the seam creates so its grant survives
+    # the existing-only filter. A worker with the claim store and no mail bus
+    # holds its node and reports nothing.
+    mail_bus = fake_state / "inbox" / "agents"
+    assert published == [str(fake_state), str(mail_bus)]
+    assert env[WORKER_ADD_DIRS_ENV] == os.pathsep.join(
+        [str(fake_state), str(mail_bus)]
+    )
 
 
 def test_seam_export_publishes_nothing_when_the_set_is_empty(
@@ -507,3 +514,33 @@ def test_mail_bus_under_the_state_root_is_listed_but_grants_nothing_new(
     granted = worker_writable_dirs(tmp_path)
     assert granted == [str(fake_state), str(bus)]
     assert Path(granted[1]).is_relative_to(Path(granted[0]))
+
+
+def test_seam_creates_the_mail_bus_so_the_grant_is_not_dropped(
+    tmp_path, monkeypatch
+) -> None:
+    """The existing-only filter drops a grant naming a missing directory, and
+    the worker cannot create it either because the parent is ungranted. So the
+    SEAM creates it - the one caller with spawn semantics, running unsandboxed
+    on the dispatcher side."""
+    from fno.agents.writable_dirs import export_worker_writable_dirs
+
+    state = tmp_path / "state"
+    (state / "claims").mkdir(parents=True)
+    mail = tmp_path / "vault" / "internal" / "agents"
+    assert not mail.exists()
+    monkeypatch.setattr("fno.paths.state_dir", lambda: state)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: state)
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: state / "claims")
+    monkeypatch.setattr("fno.paths.inbox_root_for", lambda name: mail / name / "inbox")
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
+
+    # The resolver alone stays pure: it drops the absent directory.
+    assert worker_writable_dirs(tmp_path) == [str(state)]
+
+    env: dict = {}
+    published = export_worker_writable_dirs(tmp_path, env)
+    assert mail.is_dir(), "the seam creates it so the grant is real"
+    assert str(mail) in published

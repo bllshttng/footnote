@@ -193,12 +193,12 @@ def _mail_bus_root() -> "Path":
 
     sentinel = "fnoprobeproject"
     resolved = inbox_root_for(sentinel)
+    root = resolved
     for parent in [resolved, *resolved.parents]:
         if parent.name == sentinel:
-            return parent.parent
-    # No `{project}` component in the configured path: every project shares one
-    # directory, so that directory IS the root.
-    return resolved
+            root = parent.parent
+            break
+    return root
 
 
 def _plan_dir(cwd: Path, plan_path: Optional[Path]) -> Optional[Path]:
@@ -277,8 +277,29 @@ def export_worker_writable_dirs(cwd: "Path", env: "MutableMapping[str, str]") ->
     Python token builders never see. Returns what it published so a caller can
     log or assert on it. Publishes nothing when the set is empty, so an argv that
     would gain no grant is byte-identical to today's.
+
+    Creates the mail bus first, and only here. ``worker_writable_dirs`` grants
+    only directories that exist, because a harness refuses a grant naming a
+    missing path. On a vault whose agents directory has never been created that
+    filter drops the grant, and the worker cannot create the directory either,
+    since its parent is ungranted - so its first durable mail write fails and
+    the worker is mute for exactly the reason this grant exists to prevent.
+    The mkdir lives at the SEAM rather than in the resolver: this is the one
+    caller with spawn semantics, it runs unsandboxed on the dispatcher side,
+    and a resolver that creates directories as a side effect changes what every
+    other caller computes.
     """
     dirs = worker_writable_dirs(cwd)
+    if dirs:
+        # Only when something already resolved. An unconditional mkdir here
+        # would make the set non-empty on every call and break the
+        # publishes-nothing-when-empty contract above, which is what keeps a
+        # grantless argv byte-identical to today's.
+        try:
+            _mail_bus_root().mkdir(parents=True, exist_ok=True)
+            dirs = worker_writable_dirs(cwd)
+        except Exception:
+            pass
     if dirs:
         env[WORKER_ADD_DIRS_ENV] = os.pathsep.join(dirs)
     else:
