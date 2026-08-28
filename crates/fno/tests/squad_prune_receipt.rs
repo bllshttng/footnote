@@ -75,13 +75,7 @@ fn contradictory_scope_flags_are_a_usage_error() {
     let scratch = Scratch::new("receipt-scope-xor");
     let out = scratch
         .command()
-        .args([
-            "mux",
-            "workspace",
-            "prune",
-            "--tabs-only",
-            "--dead-only",
-        ])
+        .args(["mux", "workspace", "prune", "--tabs-only", "--dead-only"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "usage refusal");
@@ -203,10 +197,7 @@ fn tabs_only_scope_leaves_the_store_alone() {
 #[test]
 fn dead_only_scope_reaps_members_and_leaves_tabs_alone() {
     let scratch = Scratch::new("receipt-dead-only");
-    let origin = seed_store_with(
-        &scratch,
-        r#"{"attach_id":"deadbeef","tombstone":false}"#,
-    );
+    let origin = seed_store_with(&scratch, r#"{"attach_id":"deadbeef","tombstone":false}"#);
     let sock = scratch.main_sock();
     let _server = spawn_server(&sock, &[("SHELL", "/bin/bash")]);
 
@@ -223,12 +214,18 @@ fn dead_only_scope_reaps_members_and_leaves_tabs_alone() {
     let receipt: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("prune --json emits JSON");
     assert_eq!(receipt["members_reaped"], 1, "{receipt}");
-    assert_eq!(receipt["tabs_closed"], 0, "dead-only never closes tabs: {receipt}");
+    assert_eq!(
+        receipt["tabs_closed"], 0,
+        "dead-only never closes tabs: {receipt}"
+    );
     assert_eq!(
         receipt["pruned_count"], 0,
         "dead-only never removes a squad row: {receipt}"
     );
     let after = store_after(&scratch);
-    assert!(!after.contains("deadbeef"), "the dead member was reaped: {after}");
+    assert!(
+        !after.contains("deadbeef"),
+        "the dead member was reaped: {after}"
+    );
     assert!(after.contains(&origin), "the squad row survives: {after}");
 }
