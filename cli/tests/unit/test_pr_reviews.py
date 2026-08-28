@@ -390,3 +390,36 @@ class TestCachedNegativeNamesItsInput:
         assert pin == "coverage row pinned to abc123def at 2026-08-28T07:15:38Z"
         assert _reviews.split_pin_note("") == ("", "")
         assert _reviews.split_pin_note("recomputed") == ("recomputed", "")
+
+    def test_a_same_second_pass_in_the_other_spelling_still_overtakes(
+        self, monkeypatch, tmp_path
+    ):
+        """The two producers spell one moment differently.
+
+        The Rust gate writes second precision with a `Z`. Python's event log
+        writes `datetime.isoformat()`, so microseconds and `+00:00`. Both `.`
+        and `+` sort BEFORE `Z`, so a lexical compare reads the Python
+        attestation as OLDER than the Rust row it actually followed, and the
+        cached uncovered row stays stuck exactly when the two land in one
+        second. Asserted on the real spellings, not on invented ones.
+        """
+        _isolate_logs(monkeypatch, tmp_path)
+        row = _uncovered_row("2026-08-28T07:15:38Z")
+        later = _pass_attestation("2026-08-28T07:15:38.123456+00:00")
+        # The trap, stated as the measurement: lexically the pass reads older.
+        assert not (later["ts"] > row["ts"])
+        _write_log(tmp_path, row, later)
+        fired = []
+        monkeypatch.setattr(
+            _reviews,
+            "_fire_review_coverage_verb",
+            lambda *a, **k: (fired.append(a) or (True, "")),
+        )
+        _reviews.review_coverage_for_gate(1242, str(tmp_path), _H)
+        assert fired, "a same-second pass in the other spelling did not overtake"
+
+    def test_an_unparseable_timestamp_falls_back_without_raising(self):
+        """A malformed line fails quiet, the same as the chain read does."""
+        assert _reviews._instant("not-a-timestamp") is None
+        assert _reviews._is_after("zzz", "aaa", None) is True
+        assert _reviews._is_after("aaa", "zzz", None) is False

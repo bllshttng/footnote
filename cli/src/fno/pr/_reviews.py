@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -550,12 +551,44 @@ def _uncovered_row_overtaken(
         chain = attestation_chain(cwd, head_branch="", head=head)
     except Exception:  # noqa: BLE001 - an unreadable chain never forces a recompute
         return False
+    row_at = _instant(row_ts)
     return any(
-        str(event.get("ts") or "") > row_ts
+        _is_after(str(event.get("ts") or ""), row_ts, row_at)
         and event.get("head_sha") == head
         and event.get("verdict") == "pass"
         for event in chain
     )
+
+
+def _instant(ts: str) -> Optional[datetime]:
+    """An event timestamp as a real instant, or None when it will not parse."""
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_after(candidate: str, baseline_ts: str, baseline: Optional[datetime]) -> bool:
+    """Whether ``candidate`` is later than the baseline, by INSTANT not string.
+
+    The two producers spell the same moment differently. The Rust gate writes
+    second precision with a ``Z`` (``2026-08-28T07:15:38Z``); Python's event
+    log writes ``datetime.isoformat()``, so microseconds and ``+00:00``
+    (``2026-08-28T07:15:38.123456+00:00``). Both ``.`` and ``+`` sort BEFORE
+    ``Z``, so a lexical compare reads a Python attestation as older than a
+    Rust row it actually followed - and the cached uncovered row this arm
+    exists to refresh stays stuck exactly when the two land in one second.
+
+    Falls back to the string compare only when a timestamp will not parse,
+    which is the same fail-quiet the chain read takes on a malformed line.
+    """
+    other = _instant(candidate)
+    if baseline is None or other is None:
+        return candidate > baseline_ts
+    return other > baseline
 
 
 def _is_covered(data: Optional[dict]) -> bool:
