@@ -20,6 +20,7 @@ from fno.review.findings import (
     FindingsNormalizeError,
     normalize,
     resolve_nonblocking_categories,
+    shrink_summary,
     summarize,
 )
 
@@ -120,6 +121,17 @@ def build_emit_record(payload: Any) -> dict[str, Any]:
         findings = findings[:_FINDINGS_COUNT_CAP]
         truncated = True
     record["findings"] = findings
+    # Shed summary DETAIL before dropping any finding. Carrying the producer's
+    # text must never reduce how many findings the gate sees: a truncated
+    # array sets findings_truncated, and the gate reads that remainder as
+    # BLOCKING with the literal key "(truncated remainder)", which no
+    # disposition can clear. Losing a sentence is recoverable; losing a
+    # finding into an unclearable blocker is not.
+    for limit in (120, 60, 0):
+        if len(json.dumps(record, ensure_ascii=False)) <= _RECORD_BYTE_BUDGET:
+            break
+        for item in findings:
+            item["summary"] = shrink_summary(item.get("summary"), limit)
     while len(json.dumps(record, ensure_ascii=False)) > _RECORD_BYTE_BUDGET and findings:
         findings = findings[:-1]
         truncated = True

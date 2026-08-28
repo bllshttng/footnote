@@ -426,3 +426,97 @@ def test_execute_graphql_refuses_when_the_proxy_cannot_identify_itself(monkeypat
     result = _quota.execute_graphql("discretionary", ["api", "graphql", "-f", "query=x"])
     assert result.returncode == 2
     assert "cannot identify its own install directory" in result.stderr
+
+
+# ---- the reserve funds the NARROWER read, not only the wider one ----
+#
+# `_coverage_read` matched the field set EXACTLY, which inverted the cost bound
+# it exists to enforce. The stop gate's round-budget read asks for `reviews`
+# alone - a strict subset of the reviews shape - and it was refused on every
+# call on every PR, while the sibling read asking for MORE fields passed. The
+# reviews axis of the round count was inert from the day it shipped.
+
+
+def test_the_round_budget_reviews_read_can_consume_reserved_points(tmp_path):
+    """The exact argv the stop gate sends: `pr view <n> --json reviews`.
+
+    Pinned to the argv, not to a field set of the test's own invention. A test
+    that asserted some narrower read is funded would pass while the one read
+    that actually spins stays refused.
+    """
+    calls: list[list[str]] = []
+    result = _quota.execute_graphql(
+        "coverage",
+        ["pr", "view", "1252", "--json", "reviews"],
+        runner=_runner(_quota.GRAPHQL_RESERVE, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0, result.stderr
+    assert calls == [
+        ["/real/gh", "api", "rate_limit"],
+        ["/real/gh", "pr", "view", "1252", "--json", "reviews"],
+    ]
+
+
+def test_a_subset_of_one_shape_is_funded_but_a_union_across_shapes_is_not(
+    tmp_path,
+):
+    """Subset per shape, never against their union.
+
+    A union test would fund combinations no caller makes, widening the reserve
+    instead of correcting it. `commits` and `labels` are each funded alone and
+    the pair is refused, which is the discriminator between the two designs.
+    """
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "reviews"])
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "reviews,headRefOid"])
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "commits"])
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "labels"])
+    assert not _quota._coverage_read(["pr", "view", "1", "--json", "commits,labels"])
+    assert not _quota._coverage_read(["pr", "view", "1", "--json", "reviews,labels"])
+    assert not _quota._coverage_read(["pr", "view", "1", "--json", "files"])
+
+
+def test_a_narrowing_must_still_be_the_read_the_reserve_funds(tmp_path):
+    """Subset alone would widen the reserve, not correct it.
+
+    `purpose=coverage` skips the remaining-budget check, so every field set it
+    accepts can spend reserved points with the GraphQL quota exhausted. A bare
+    `comments` or `headRefOid` read is a subset of the reviews shape without
+    being the reviews read, and the exact-match rule refused it. It still is
+    refused: a narrowing has to keep the field that makes it that read.
+    """
+    assert _quota._coverage_read(["pr", "view", "1", "--json", "reviews,headRefOid"])
+    for stray in ("comments", "headRefOid", "baseRefName"):
+        assert not _quota._coverage_read(["pr", "view", "1", "--json", stray]), stray
+
+
+def test_an_empty_field_selection_is_refused(tmp_path):
+    """An empty set is a subset of everything, so subset alone would fund a
+    malformed read. It is not a narrower read; it is a broken one."""
+    assert not _quota._coverage_read(["pr", "view", "1", "--json", ""])
+
+def test_gh_global_flags_before_the_command_word_reach_the_coverage_reserve(
+    tmp_path,
+):
+    """`_coverage_read` judges the NORMALIZED command, like the argv guard does.
+
+    `execute_graphql` normalizes precisely so gh-wide options before the
+    command word do not change policy. Judging the raw argv refused
+    `gh -R o/r pr view N --json reviews` with the reserve message - the same
+    wrong-refusal class the subset rule was just corrected for.
+    """
+    calls: list[list[str]] = []
+    result = _quota.execute_graphql(
+        "coverage",
+        ["-R", "owner/repo", "pr", "view", "1252", "--json", "reviews"],
+        runner=_runner(_quota.GRAPHQL_RESERVE, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0, result.stderr
+    # The full argv rides along, options included - normalization decides
+    # policy, never what gets executed.
+    assert calls[-1] == [
+        "/real/gh", "-R", "owner/repo", "pr", "view", "1252", "--json", "reviews",
+    ]

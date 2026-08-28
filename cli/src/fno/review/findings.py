@@ -247,6 +247,43 @@ def finding_key(record: FindingRecord) -> str:
     return f"{_clean(record.file) or ''}:{line}:{category.lower()}"
 
 
+#: Per-finding cap on the summary the primitive carries. Bounded at the
+#: primitive so one pathological finding cannot eat the array budget; the
+#: array-level truncation rule in ``review/cli.py`` is unchanged and still
+#: sets ``findings_truncated``, which the gate reads as blocking.
+SUMMARY_MAX = 240
+SUMMARY_ELLIPSIS = "..."
+
+
+def shrink_summary(value: Optional[str], limit: int) -> Optional[str]:
+    """Re-cap an already-bounded summary to ``limit``, or drop it at 0.
+
+    The byte-budget escape hatch. A summary is DETAIL; a finding is a gate
+    input, and the gate treats a truncated findings array as a blocking
+    remainder whose key no disposition can ever clear. So detail is shed first
+    and findings are dropped only after every summary is gone.
+    """
+    if value is None:
+        return None
+    if limit <= 0:
+        return None
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - len(SUMMARY_ELLIPSIS))] + SUMMARY_ELLIPSIS
+
+
+def _bounded_summary(value: Any) -> Optional[str]:
+    """The record's own summary, stripped and capped.
+
+    The marker is load-bearing: a silently cut sentence reads as the whole
+    finding, and a reader cannot tell a short finding from a truncated one.
+    """
+    text = _clean(value)
+    if text is None or len(text) <= SUMMARY_MAX:
+        return text
+    return text[: SUMMARY_MAX - len(SUMMARY_ELLIPSIS)] + SUMMARY_ELLIPSIS
+
+
 @dataclass
 class FindingPrimitive:
     """The bounded per-finding tuple the attestation event carries.
@@ -262,6 +299,17 @@ class FindingPrimitive:
     blocking: bool
     has_required_fields: bool
     finding_key: str
+    #: The producer's own one-line statement, bounded. Never re-derived, the
+    #: same way ``findings_blocking`` is the producer's own count.
+    #:
+    #: Without it a blocking finding's entire human payload is
+    #: ``file:line:category``, and the gate that blocks on it carries nothing
+    #: a reader can act on. That makes the ``fixed`` disposition unreachable:
+    #: clearing a blocking finding means fixing it, fixing it means knowing
+    #: what it says, and the only remaining disposition is ``declined``, which
+    #: needs corroboration a solo author cannot mint. The record already
+    #: carried the text; only this primitive dropped it.
+    summary: Optional[str] = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -270,6 +318,7 @@ class FindingPrimitive:
             "blocking": self.blocking,
             "has_required_fields": self.has_required_fields,
             "finding_key": self.finding_key,
+            "summary": self.summary,
         }
 
 
@@ -314,6 +363,7 @@ def summarize(
                 blocking=verdict == BLOCKING,
                 has_required_fields=_has_required_fields(record),
                 finding_key=finding_key(record),
+                summary=_bounded_summary(record.summary),
             )
         )
         if verdict == BLOCKING:

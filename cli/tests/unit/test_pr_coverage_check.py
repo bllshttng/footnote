@@ -15,6 +15,7 @@ instrument failure, reachable here only by forcing the head fetch to fail or
 the read to raise, never by an empty read.
 """
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -265,7 +266,10 @@ def test_raised_read_is_unanswered_not_absence(
     def boom(*a, **k):
         raise OSError("log unreadable")
 
-    monkeypatch.setattr(_reviews, "latest_review_coverage", boom)
+    # Patch the reader ACTUALLY on the no-recompute path. `latest_review_coverage`
+    # is a thin wrapper the gate no longer calls, so patching it raises nothing
+    # and the assertion below would pass on a read that quietly succeeded.
+    monkeypatch.setattr(_reviews, "latest_review_coverage_row", boom)
     rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
     note = capsys.readouterr().err.strip()
     assert rc == 4
@@ -1508,6 +1512,156 @@ def test_file_findings_at_cap_is_idempotent_on_the_finding_key(monkeypatch, tmp_
     assert not any(c[:3] == ["fno", "backlog", "idea"] for c in seen)
 
 
+# ---- the cap filing reaches the REAL argument parser ----
+#
+# The test above is the shape that let the defect ship: a mocked `run` accepts
+# any argv, so it cannot see a flag the parser rejects. `fno backlog idea`
+# requires --difficulty on a non-interactive filing, this call has no tty, and
+# without the flag every filing raised - which made the cap's designed merge
+# exit (file the remainder, then merge) unreachable on every capped PR.
+#
+# So the guard below EXECUTES the CLI out of process rather than mocking it.
+# It is hermetic: HOME points at a tmp dir, so the graph the filing writes is
+# the tmp graph and never ~/.fno/graph.json.
+
+
+def _real_cli_runner(home, repo):
+    """A ``_proc.run`` stand-in that executes the real fno CLI, hermetically.
+
+    Only the TRANSPORT is substituted (a PATH lookup for `fno` becomes an
+    interpreter running the same entry point). The argument list still reaches
+    the same parser the shipped binary uses, which is the whole point: that
+    parser is the thing a mock cannot represent.
+    """
+    import os
+    import subprocess
+    import sys
+
+    import fno
+
+    src_root = str(Path(fno.__file__).resolve().parent.parent)
+
+    def run(cmd, **kwargs):
+        assert cmd and cmd[0] == "fno", f"unexpected binary: {cmd[:1]}"
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [src_root, *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+        # A stale FNO_REPO_ROOT inherited from the running session would pin
+        # config resolution back at the real checkout and defeat the isolation.
+        env.pop("FNO_REPO_ROOT", None)
+        proc = subprocess.run(
+            [sys.executable, "-c", "from fno.cli import app; app()", *cmd[1:]],
+            cwd=kwargs.get("cwd") or str(repo),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        return Result(proc.returncode, proc.stdout, proc.stderr)
+
+    return run
+
+
+def _tmp_graph_titles(home):
+    """Every node title in the throwaway graph the filing wrote."""
+    graph = Path(home) / ".fno" / "graph.json"
+    if not graph.is_file():
+        return []
+    entries = json.loads(graph.read_text()).get("entries") or []
+    return [n.get("title", "") for n in entries if isinstance(n, dict)]
+
+
+def test_file_findings_at_cap_files_through_the_real_cli(monkeypatch, tmp_path):
+    """The filing succeeds against the real `fno backlog idea` parser.
+
+    Asserts the node id AND the node's presence in the graph by title. A test
+    that only asserted "no exception" would pass on a run that filed nothing.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    key = "cli/src/fno/pr/_coverage_gate.py:1057:correctness"
+    ids = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+
+    assert len(ids) == 1
+    assert re.fullmatch(r"[a-z]+-[0-9a-f]{4,}", ids[0]), ids
+    assert f"review finding filed at round cap: {key}" in _tmp_graph_titles(home)
+
+
+def test_file_findings_at_cap_mints_once_through_the_real_cli(monkeypatch, tmp_path):
+    """The idempotency branch holds against the real find/idea round trip.
+
+    This branch is what unstuck a capped PR by hand: a worker pre-filed the
+    finding with the exact cap title and the gate reused it. Asserting the
+    SAME id back plus exactly one node with that title is the positive marker;
+    asserting "no second call happened" would pass on a run that filed nothing
+    at all.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    key = "cli/src/fno/pr/_reviews.py:430:correctness"
+    first = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+    second = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+
+    assert first == second, (first, second)
+    title = f"review finding filed at round cap: {key}"
+    assert _tmp_graph_titles(home).count(title) == 1
+
+
+def test_two_findings_at_the_cap_both_mint_through_the_real_cli(
+    monkeypatch, tmp_path
+):
+    """The fold gate must never swallow the second finding.
+
+    `--difficulty` is what OPENS the pre-mint fold gate, so the flag that made
+    filing work also created this trap. Every cap filing shares a title prefix,
+    which makes the first node a fold candidate for the second. Non-interactive,
+    the offer prints and the command exits 0 having minted NOTHING - and the
+    caller then scrapes an id out of the printed wave command and reports a
+    finding it never filed.
+
+    Asserts TWO DISTINCT ids and two nodes in the graph. Asserting the call
+    succeeded passes on exactly the silent loss this guards.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    keys = [
+        "cli/src/fno/pr/_coverage_gate.py:1057:correctness",
+        "cli/src/fno/pr/_coverage_gate.py:1099:correctness",
+    ]
+    ids = _coverage_gate.file_findings_at_cap(keys, 42, str(repo))
+
+    assert len(ids) == 2, ids
+    assert len(set(ids)) == 2, f"the two findings folded into one node: {ids}"
+    titles = _tmp_graph_titles(home)
+    for key in keys:
+        assert f"review finding filed at round cap: {key}" in titles, key
+
+
 # ---- x-aecc: declining must satisfy coverage ----
 #
 # The pass condition is ANSWERED at this head, never clean at this head. The
@@ -2029,18 +2183,23 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
 
     monkeypatch.setattr("fno.pr._proc.run", fake_run)
     monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
-    reviews = _coverage_gate._pr_reviews(42, "/repo")
+    reviews, unread = _coverage_gate._pr_reviews(42, "/repo")
+    assert unread == "", unread
     oids = [r["commit"]["oid"] for r in reviews]
     assert oids[:2] == ["c1", "c2"] and oids[-1] == "c3" and len(oids) == 101
     assert reviews[-1]["submittedAt"] == "2026-08-26T13:00:00Z"
     assert "author" not in reviews[0], "no reader consumes author; do not map it"
 
-    # A failed read fails open to the events-only budget, never an exception.
+    # A failed read fails open to the events-only budget, never an exception -
+    # and NAMES itself, so the budget can report a zero the reviews axis never
+    # contributed to instead of presenting it as a measured count.
     def failing_run(cmd, **kwargs):
         return Result(1, "", "boom")
 
     monkeypatch.setattr("fno.pr._proc.run", failing_run)
-    assert _coverage_gate._pr_reviews(42, "/repo") is None
+    rows, unread = _coverage_gate._pr_reviews(42, "/repo")
+    assert rows is None
+    assert unread, "a failed reviews read must name its cause, not answer a bare None"
 
 
 def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tmp_path):
@@ -2082,7 +2241,7 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
         )
     )
     (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(rows) + "\n")
-    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: (None, ""))
     monkeypatch.setattr(
         _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
     )
@@ -2114,3 +2273,102 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
     # cap exists to bound.
     for needle in ("/code-review", "/review", "/fno:review", "review verb"):
         assert needle not in note, f"past-cap receipt names {needle}: {note}"
+
+
+def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
+    monkeypatch, tmp_path
+):
+    """The connector-lane shape, measured on a live PR: the attestation chain
+    is EMPTY, so disposition_refusal returns nothing, no finding is named, and
+    the cap-file arm never runs. The question that decides whether the PR is
+    stranded is not whether that arm works - it is whether the round count is
+    honest, because the spent-budget waiver is keyed on `rounds >= max_rounds`
+    alone and needs no chain at all.
+
+    A GitHub-App reviewer leaves no attestation row anywhere, so its rounds
+    exist only as review objects. With the reviews axis read, two distinct
+    reviewed commits are two rounds, the budget is spent, and the waiver
+    discharges the obligation. Asserting the filing succeeds proves nothing
+    about this shape: the filing arm is never reached here.
+    """
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    # No review_attestation events at all: chain is empty by construction.
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-28T05:00:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 1252,
+                    "coverage": "uncovered",
+                    "review_state": "unreviewed",
+                    "reviewed_count": 0,
+                    "self_attested_count": 0,
+                    "head_sha": FIXTURE_HEAD,
+                    "verdicts": [],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    two_reviewed_commits = [
+        {"state": "COMMENTED", "submittedAt": "2026-08-28T05:53:00Z",
+         "commit": {"oid": "aaaa000000000000000000000000000000000000"}},
+        {"state": "COMMENTED", "submittedAt": "2026-08-28T06:10:00Z",
+         "commit": {"oid": "bbbb000000000000000000000000000000000000"}},
+    ]
+    monkeypatch.setattr(
+        _coverage_gate, "_pr_reviews", lambda *a, **k: (two_reviewed_commits, "")
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-8439", head=FIXTURE_HEAD
+    )
+    assert chain == [], "the specimen shape is an EMPTY chain; fixture drifted"
+
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        1252, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, f"stranded with no merge path: {refusal}"
+    assert head, "a covered verdict must name the head it covers"
+    assert "review budget discharged (2/2 rounds)" in note, note
+    # The waiver names what it waived, and the provenance names which
+    # instrument produced the 2. Both figures, so a reader can see the count
+    # came from the reviews axis and not from an attestation chain that is empty.
+    assert "waived at the cap: uncovered" in note, note
+
+
+def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
+    monkeypatch, tmp_path
+):
+    """The reviews read FAILS and the gate says so.
+
+    The budget keeps its answer either way - that fail-open is deliberate, a
+    cap that fired on a broken read would waive a remainder it may not have
+    spent - but a zero an instrument never contributed to must not read as one
+    it measured. That discriminator is what the old bare None destroyed: the
+    same cause produced opposite symptoms on two PRs, one escaping the cap
+    entirely and the other locked out by it.
+
+    Round counting itself is ONE axis (attestations), per the operator ruling
+    that retired the two-axis provenance rendering, so this asserts the read
+    failure is named and nothing more.
+    """
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        json.dumps(_soft_round("2026-08-28T05:00:00Z", FIXTURE_HEAD)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "_pr_reviews",
+        lambda *a, **k: (None, "gh: 403 secondary rate limit"),
+    )
+    _state, refusal, _head, note = _coverage_gate.coverage_verdict(
+        1252, str(tmp_path), recompute=False
+    )
+    rendered = f"{refusal} {note}"
+    assert "reviews read unavailable: gh: 403 secondary rate limit" in rendered, rendered

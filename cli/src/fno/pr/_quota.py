@@ -132,8 +132,47 @@ def resolve_real_gh() -> Optional[str]:
     return None
 
 
+#: The read shapes the coverage reserve funds, as ``(required, shape)``.
+#:
+#: ``shape`` is the widest selection the read ever makes. ``required`` is the
+#: field that MAKES it that read: a selection may narrow the shape, but it
+#: must still be the read the reserve was set aside for. Without the required
+#: half, subset alone funds `--json comments` and `--json headRefOid` on the
+#: coverage purpose, which skips the remaining-budget check - a wider reserve
+#: than the exact-match rule ever granted, rather than a corrected one.
+#:
+#: The cost bound is the SHAPE, never the field count. `gh pr view --json` is
+#: one GraphQL query whatever it selects, so asking for fewer fields is never
+#: the expensive direction. The reserve also bounds the NUMBER of calls, which
+#: is what the required field keeps honest.
+_COVERAGE_READ_SHAPES = (
+    (frozenset({"reviews"}), frozenset({"reviews", "comments", "headRefOid", "baseRefName"})),
+    (frozenset({"commits"}), frozenset({"commits"})),
+    (frozenset({"labels"}), frozenset({"labels"})),
+)
+
+
 def _coverage_read(args: Sequence[str]) -> bool:
-    """Only review-coverage computation and publication reads spend the reserve."""
+    """Only review-coverage computation and publication reads spend the reserve.
+
+    Subset per shape, not equality. Equality inverted the cost bound it was
+    meant to enforce: the NARROWER read was refused and the wider one allowed.
+    Measured - the stop gate's round-budget read sends
+    ``pr view <sel> --json reviews``, a strict subset of the reviews shape, and
+    it was refused on every call on every PR. The reviews axis of the round
+    count was inert from the day it shipped, so a spinning PR counted 0 rounds
+    against a cap of 2 while its sibling read, asking for MORE fields, passed.
+
+    Subset is tested against each shape individually rather than their union: a
+    union test would fund combinations no caller makes (``commits`` beside
+    ``labels``), which widens the reserve instead of correcting it.
+
+    Each shape also carries the field that MAKES it that read. A narrowing
+    still has to be the read the reserve was set aside for, so ``reviews``
+    alone is funded while ``comments`` alone is not. Subset without that half
+    funds every stray field in the shape and grants a wider reserve than the
+    exact-match rule ever did.
+    """
     if len(args) < 4 or list(args[:2]) != ["pr", "view"]:
         return False
     try:
@@ -143,12 +182,13 @@ def _coverage_read(args: Sequence[str]) -> bool:
             (arg.partition("=")[2] for arg in args if arg.startswith("--json=")), ""
         )
     fields = frozenset(part for part in fields_arg.split(",") if part)
-    return fields in {
-        frozenset({"reviews", "comments"}),
-        frozenset({"reviews", "comments", "headRefOid", "baseRefName"}),
-        frozenset({"commits"}),
-        frozenset({"labels"}),
-    }
+    if not fields:
+        # An empty selection is not a narrower read, it is a malformed one, and
+        # it is a subset of everything. Refuse rather than fund it.
+        return False
+    return any(
+        required <= fields <= shape for required, shape in _COVERAGE_READ_SHAPES
+    )
 
 
 def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
@@ -262,7 +302,12 @@ def execute_graphql(
     if not command or command[0].startswith("-"):
         first = command[0] if command else gh_args[0]
         return Result(2, "", _malformed_argv_refusal(first))
-    if purpose == "coverage" and not _coverage_read(gh_args):
+    # The NORMALIZED command, not the raw argv. `command` exists two lines up
+    # precisely so gh-wide options before the command word do not change
+    # policy, and judging the raw argv here refuses `gh -R o/r pr view N --json
+    # reviews` with the reserve message - the same wrong-refusal class this
+    # predicate was just corrected for.
+    if purpose == "coverage" and not _coverage_read(command):
         return Result(2, "", "coverage reserve accepts review-coverage reads only")
     # A caller spelling bare ``gh`` inside a protected worker would resolve to
     # the proxy. Re-entering the broker while this process holds the flock

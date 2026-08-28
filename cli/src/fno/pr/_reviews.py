@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -254,12 +255,14 @@ def coverage_sources(cwd: Optional[str] = None) -> list[str]:
     return [str(p) for p in paths if p is not None]
 
 
-def latest_review_coverage(
+def latest_review_coverage_row(
     pr_number: int,
     cwd: Optional[str] = None,
     project_events: Optional[Path] = None,
-) -> Optional[dict]:
-    """Latest ``review_coverage`` data for a PR, or None.
+) -> tuple[Optional[dict], str]:
+    """Latest ``review_coverage`` data for a PR and the ts it was written at.
+
+    Returns ``(data, ts)``; ``(None, "")`` when neither log holds a match.
 
     Reads BOTH logs loop-check writes, because which one holds the attestation
     depends on where the reviewing session happened to stand. The stop hook
@@ -303,7 +306,22 @@ def latest_review_coverage(
         ):
             best, best_ts = other, other_ts
 
-    return best
+    return best, best_ts
+
+
+def latest_review_coverage(
+    pr_number: int,
+    cwd: Optional[str] = None,
+    project_events: Optional[Path] = None,
+) -> Optional[dict]:
+    """The row alone, for the callers that never needed its timestamp.
+
+    A thin wrapper over :func:`latest_review_coverage_row`. The timestamp is
+    separated rather than folded into the row because it belongs to the
+    EVENT, not to the coverage data the producer wrote, and a caller deciding
+    whether a stored answer has been overtaken needs to read it.
+    """
+    return latest_review_coverage_row(pr_number, cwd, project_events)[0]
 
 
 def _exit4_degraded_reason(stdout: Optional[str]) -> str:
@@ -412,15 +430,31 @@ def review_coverage_for_gate(
     because a refusal that reports only a count is what taught two workers to
     design around a gate that was green somewhere else.
 
+    A fourth recompute arm covers the cached negative. An UNCOVERED row that
+    pins the CURRENT head passes every freshness check the three arms above
+    apply, because the head matches - so it was never refreshed, and a valid
+    head-pinned pass attestation landing after it was ignored forever. It is a
+    stored NO that outlived the reason it said no, and it is indistinguishable
+    from a live NO to every reader. Measured: a row written at 07:15:38Z read
+    UNCOVERED, the reviewer emitted a pass attestation for the same head at
+    07:48:55Z, the gate still refused, and two readers reached opposite wrong
+    conclusions. So an uncovered row is overtaken when an in-scope attestation
+    for the same head is NEWER than the row, and the read is paid only on the
+    uncovered branch, where it can change the answer.
+
     Returns ``(data_or_None, note)``; ``note`` is ``""`` when no recompute ran,
     else ``"recomputed"``, ``"recompute produced no row"``,
     ``"recompute unavailable: <why>"``, or - when the recompute ran but its gh
     read failed (exhausted quota, secondary limit, or an unstated cause) and
     the re-read row is still ``unknown`` - ``"recompute degraded to unknown:
-    <why>"``, so a gate can say "retry after the quota reset" instead of a
-    bare "nobody reviewed this".
+    <why>"``.
+
+    Any answer resting on a STORED row also carries
+    ``"coverage row pinned to <head> at <ts>"``. That clause holds even when
+    the recompute arm above does not fire, and it is what lets a reader tell a
+    live NO from a stale one instead of inferring it.
     """
-    raw = latest_review_coverage(pr_number, cwd)
+    raw, raw_ts = latest_review_coverage_row(pr_number, cwd)
     note = ""
     data = (
         _shape_review_coverage(raw, head, cwd, pr_number)
@@ -430,20 +464,131 @@ def review_coverage_for_gate(
     ev_head = (raw or {}).get("head_sha")
     mismatch = bool(head and raw and ev_head and head != ev_head)
     unusable = data is not None and data.get("coverage") == "unknown"
-    if raw is None or mismatch or unusable:
+    overtaken = _uncovered_row_overtaken(data, raw_ts, cwd, head)
+    pinned = _pinned_note(data, raw_ts)
+    if raw is None or mismatch or unusable or overtaken:
         ran, why = _fire_review_coverage_verb(pr_number, cwd, head)
         if ran:
-            fresh = latest_review_coverage(pr_number, cwd)
+            fresh, fresh_ts = latest_review_coverage_row(pr_number, cwd)
             if fresh is not None:
                 data = _shape_review_coverage(fresh, head, cwd, pr_number)
                 note = "recomputed"
                 if why and data.get("coverage") == "unknown":
                     note = f"recompute degraded to unknown: {why}"
+                pinned = _pinned_note(data, fresh_ts)
             else:
                 note = "recompute produced no row"
+                pinned = ""
         else:
             note = f"recompute unavailable: {why}"
-    return data, note
+    return data, "; ".join(x for x in (note, pinned) if x)
+
+
+#: Row verdicts that are a stored NO. Only these carry the pin: the contract
+#: binds a cached NEGATIVE to name its input, because a stored NO whose reason
+#: expired is what a reader cannot distinguish from a live one. A covered row
+#: that fails a conjunct refuses with a sentence that already names both heads.
+_NEGATIVE_COVERAGE = frozenset({"uncovered", "unknown"})
+
+#: One spelling of the pin's prefix, so the renderer and the splitter below
+#: cannot drift into disagreeing about what a pin looks like.
+_PIN_PREFIX = "coverage row pinned to "
+
+
+def _pinned_note(row: Optional[dict], ts: str) -> str:
+    """The input a stored NEGATIVE rests on, and when it was recorded.
+
+    Corollary 5 of the refusal contract, as text. A reader who cannot see the
+    pin cannot tell a fresh NO from one whose reason expired, which is the
+    state that sent two readers to opposite wrong ends of one PR.
+    """
+    if not isinstance(row, dict) or str(row.get("coverage")) not in _NEGATIVE_COVERAGE:
+        return ""
+    head_sha = row.get("head_sha")
+    if not head_sha:
+        return ""
+    when = f" at {ts}" if ts else ""
+    return f"{_PIN_PREFIX}{str(head_sha)[:9]}{when}"
+
+
+def split_pin_note(note: str) -> tuple[str, str]:
+    """Split a gate note into ``(recompute_outcome, pinned_input)``.
+
+    The two travel joined because a refusal renders one sentence, but they are
+    different claims: one says what an instrument did, the other says what a
+    stored answer rests on. A consumer that keys on the recompute must not
+    receive the pin wearing its name.
+    """
+    parts = [part.strip() for part in (note or "").split(";") if part.strip()]
+    pins = [p for p in parts if p.startswith(_PIN_PREFIX)]
+    rest = [p for p in parts if not p.startswith(_PIN_PREFIX)]
+    return "; ".join(rest), "; ".join(pins)
+
+
+def _uncovered_row_overtaken(
+    data: Optional[dict], row_ts: str, cwd: Optional[str], head: Optional[str]
+) -> bool:
+    """Whether a head-matching UNCOVERED row has been overtaken by a later pass.
+
+    Narrow by construction. It fires only for a row that is UNCOVERED at the
+    head being asked about, and only when an in-scope attestation pinned to
+    that same head carries a LATER timestamp than the row. A covered row, a
+    head mismatch and an unknown row are all handled by the arms beside it,
+    and a row with no timestamp cannot be compared, so it is left alone rather
+    than recomputed on a guess.
+
+    The chain read is scoped by exact head sha, never by branch: the question
+    is only "did something attest THIS head after the row was written", and a
+    branch-scoped read would pull in rounds for other commits.
+    """
+    if not head or not row_ts or not data or data.get("coverage") != "uncovered":
+        return False
+    if data.get("head_sha") != head:
+        return False
+    try:
+        from fno.pr._coverage_gate import attestation_chain
+
+        chain = attestation_chain(cwd, head_branch="", head=head)
+    except Exception:  # noqa: BLE001 - an unreadable chain never forces a recompute
+        return False
+    row_at = _instant(row_ts)
+    return any(
+        _is_after(str(event.get("ts") or ""), row_ts, row_at)
+        and event.get("head_sha") == head
+        and event.get("verdict") == "pass"
+        for event in chain
+    )
+
+
+def _instant(ts: str) -> Optional[datetime]:
+    """An event timestamp as a real instant, or None when it will not parse."""
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _is_after(candidate: str, baseline_ts: str, baseline: Optional[datetime]) -> bool:
+    """Whether ``candidate`` is later than the baseline, by INSTANT not string.
+
+    The two producers spell the same moment differently. The Rust gate writes
+    second precision with a ``Z`` (``2026-08-28T07:15:38Z``); Python's event
+    log writes ``datetime.isoformat()``, so microseconds and ``+00:00``
+    (``2026-08-28T07:15:38.123456+00:00``). Both ``.`` and ``+`` sort BEFORE
+    ``Z``, so a lexical compare reads a Python attestation as older than a
+    Rust row it actually followed - and the cached uncovered row this arm
+    exists to refresh stays stuck exactly when the two land in one second.
+
+    Falls back to the string compare only when a timestamp will not parse,
+    which is the same fail-quiet the chain read takes on a malformed line.
+    """
+    other = _instant(candidate)
+    if baseline is None or other is None:
+        return candidate > baseline_ts
+    return other > baseline
 
 
 def _is_covered(data: Optional[dict]) -> bool:
@@ -941,6 +1086,34 @@ def review_coverage_for_head(
     )
 
 
+def review_coverage_for_head_row(
+    pr_number: int, cwd: Optional[str], head: Optional[str]
+) -> tuple[Optional[dict], str]:
+    """``(shaped_row, pin_note)`` for the NO-recompute surface, in ONE scan.
+
+    The pin describes the stored ROW, not the recompute that may or may not
+    have run, so both gate surfaces carry it or they refuse with two different
+    sentences for one row - the divergence the shared predicate exists to
+    remove.
+
+    One scan, not two. These logs reach tens of MB and this path is the
+    pre-push git-protection hook, so reading them twice for a note the first
+    read already has is I/O nobody asked for.
+
+    The pin is keyed on the SHAPED row. `_shape_review_coverage` rewrites a
+    covered row to uncovered when its verdicts are stale or malformed, and
+    that is precisely the stored answer whose reason expired - the case the
+    pin exists to explain. Keying on the raw row leaves it unpinned.
+    """
+    raw, raw_ts = latest_review_coverage_row(pr_number, cwd)
+    data = (
+        _shape_review_coverage(raw, head, cwd, pr_number)
+        if raw is not None
+        else None
+    )
+    return data, _pinned_note(data, raw_ts)
+
+
 def read_review_coverage(
     pr_number: int,
     cwd: Optional[str] = None,
@@ -987,8 +1160,15 @@ def read_review_coverage(
     # status` refuse forever on a row `fno do pr merge` accepted (round 3, PR 917).
     if latest.get("verdicts") is not None:
         shaped["verdicts"] = latest["verdicts"]
-    if note:
-        shaped["recompute"] = note
+    recompute_note, pin_note = split_pin_note(note)
+    if recompute_note:
+        shaped["recompute"] = recompute_note
+    if pin_note:
+        # Its own key. `recompute` promises a recompute RAN, and readers act on
+        # that: `_status.coverage_recompute_note` prints every value but the
+        # literal "recomputed", so folding the pin in here narrates a recompute
+        # that never happened on every poll of an uncovered PR.
+        shaped["coverage_pin"] = pin_note
     return shaped
 
 

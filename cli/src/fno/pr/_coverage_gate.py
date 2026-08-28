@@ -4,9 +4,12 @@ Lifted out of ``run_merge`` unchanged so a second caller can ask the same
 question without a second copy of it. The predicate is MOVED, never restated:
 every helper lives in ``fno.pr._merge`` and is reached through the module, so
 the merge path is steered by patching ``_merge`` alone. The verb's no-recompute
-read calls ``_reviews.latest_review_coverage`` directly, so a test that must
-steer BOTH surfaces patches both modules (as this module's own tests do), and
-the two readers that already disagree stay two, not three.
+read calls ``_reviews.review_coverage_for_head_row`` directly, so a test that
+must steer BOTH surfaces patches both modules (as this module's own tests do),
+and the two readers that already disagree stay two, not three. Patch the name
+this module actually calls: ``latest_review_coverage`` is a thin wrapper no
+longer on this path, so patching it steers nothing and a test built on it
+passes on a read that quietly succeeded.
 
 One predicate, three reachable surfaces:
 
@@ -356,12 +359,14 @@ def coverage_verdict(
         cov, recompute_note = _merge._review_coverage_for_pr(pr_number, repo, head)
     else:
         try:
-            from fno.pr._reviews import review_coverage_for_head
+            from fno.pr._reviews import review_coverage_for_head_row
 
-            cov = review_coverage_for_head(pr_number, repo, head)
+            # One scan yields the row and its pin. The pin describes the stored
+            # row, so it rides BOTH surfaces or the two refuse with different
+            # sentences for one row.
+            cov, recompute_note = review_coverage_for_head_row(pr_number, repo, head)
         except Exception as exc:  # noqa: BLE001 - instrument failure, not absence
             return UNANSWERED, "", "", f"events read raised: {exc}"
-        recompute_note = ""
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, repo)
@@ -390,12 +395,16 @@ def coverage_verdict(
     # answer (uncovered, or findings to file/decline); a healthy covered PR
     # with no open findings keeps the events-only count and skips the
     # paginated read. A read failure keeps the events-only answer.
-    reviews_payload = (
-        _pr_reviews(pr_number, repo)
-        if (disposition_named or disposition_text or not covered)
-        else None
-    )
+    if disposition_named or disposition_text or not covered:
+        reviews_payload, reviews_unread = _pr_reviews(pr_number, repo)
+    else:
+        reviews_payload, reviews_unread = None, ""
     rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
+    # A failed reviews read still says so. The budget keeps its answer either
+    # way (a cap that fired on a broken read would waive a remainder it may not
+    # have spent), but a zero an instrument never contributed to must not read
+    # as one it measured.
+    unread_note = f"reviews read unavailable: {reviews_unread}" if reviews_unread else ""
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -437,7 +446,7 @@ def coverage_verdict(
 
     if covered and corroboration:
         return REFUSED, corroboration, "", "; ".join(
-            x for x in (recompute_note, filed_note) if x
+            x for x in (recompute_note, unread_note, filed_note) if x
         )
     if covered:
         if disposition_text:
@@ -445,9 +454,9 @@ def coverage_verdict(
             # refusal teaches the fix-delta remedy AND shows the budget the
             # next round spends - AC7-HP's "how many rounds remain".
             remaining = _rounds_remaining_note(rounds, max_rounds)
-            note = "; ".join(x for x in (recompute_note, remaining) if x)
+            note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
             return REFUSED, disposition_text, "", note
-        notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
+        notes = [n for n in (recompute_note, unread_note, disposition_note, filed_note) if n]
         return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
     # x-aecc: a fail attestation answers this head, so an uncovered row in
     # that shape is uncovered BECAUSE of the non-terminal findings. Name them
@@ -465,7 +474,7 @@ def coverage_verdict(
         and any(e.get("verdict") != "pass" for e in chain)
     ):
         remaining = _rounds_remaining_note(rounds, max_rounds)
-        note = "; ".join(x for x in (recompute_note, remaining) if x)
+        note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
     # The spent budget DISCHARGES the review obligation. It does not fail it.
@@ -533,7 +542,7 @@ def coverage_verdict(
             COVERED,
             "",
             head or "",
-            "; ".join(n for n in (recompute_note, filed_note, waiver) if n),
+            "; ".join(n for n in (recompute_note, unread_note, filed_note, waiver) if n),
         )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
@@ -546,7 +555,7 @@ def coverage_verdict(
         # recompute_note plus the filed node ids when the cap arm fired on the
         # way here (same receipt contract as the returns above and below).
         return REFUSED, corroboration, "", "; ".join(
-            x for x in (recompute_note, filed_note) if x
+            x for x in (recompute_note, unread_note, filed_note) if x
         )
 
     # Same branch order run_merge has always used: the attestation refusal is
@@ -591,7 +600,9 @@ def coverage_verdict(
     # The cap arm may already have FILED findings on the way here (the row
     # stayed uncovered on another conjunct): that side effect must ride the
     # receipt, never vanish behind the refusal it did not soften.
-    return REFUSED, refusal, "", "; ".join(x for x in (recompute_note, filed_note) if x)
+    return REFUSED, refusal, "", "; ".join(
+        x for x in (recompute_note, unread_note, filed_note) if x
+    )
 
 
 def refusal_line(refusal: str, note: str) -> str:
@@ -976,9 +987,15 @@ def rounds_since_last_pass(
     return max(events_rounds, len(counted))
 
 
-def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
-    """The PR's review objects for the round budget, or None on any read
-    failure.
+def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
+    """``(reviews, unread_reason)`` for the round budget.
+
+    ``unread_reason`` is empty when the read succeeded and names the cause
+    when it did not. It used to be swallowed: every failure answered a bare
+    None, the budget silently kept its events-only count, and on a
+    GitHub-App lane - which leaves no attestation row at all - that count is
+    zero. So a failed read and a genuinely unreviewed PR were byte-identical,
+    the cap never fired, and one PR ran twelve rounds against a budget of two.
 
     The paginated REST read rides ``_internal_gh._rest_pages`` (the same
     reader every other gate REST read uses, with its rate-limit-aware
@@ -1004,7 +1021,7 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
     try:
         slug = _repo_slug(repo, _bounded)
         if not slug:
-            return None
+            return None, "repo slug unreadable"
         # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
         # _quota.delegate_environment(), which strips the quota proxy from
         # PATH so the proxy's own delegate call does not recurse. That is
@@ -1012,14 +1029,14 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
         # CLIENT, and every sibling read in this module (_repo_slug just
         # above, _pr_head_oid, _pr_author_login) is brokered. Stamping it
         # here would spend the shared quota unmetered.
-        rows, _reason = _rest_pages(
+        rows, reason = _rest_pages(
             f"repos/{slug}/pulls/{pr_number}/reviews",
             "pull reviews",
             cwd=repo,
             runner=_bounded,
         )
         if rows is None:
-            return None
+            return None, (reason or "pull reviews read failed")
         return [
             {
                 "state": row.get("state") if isinstance(row.get("state"), str) else "",
@@ -1035,9 +1052,9 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
                 },
             }
             for row in rows
-        ]
-    except Exception:  # noqa: BLE001 - an instrument failure never fires the cap
-        return None
+        ], ""
+    except Exception as exc:  # noqa: BLE001 - an instrument failure never fires the cap
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def resolved_max_rounds(repo: str) -> int:
@@ -1091,6 +1108,26 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
                 title,
                 "--type",
                 "bug",
+                # `fno backlog idea` refuses a non-interactive filing with no
+                # --difficulty, and this call has no tty. Without it every
+                # filing raised, so the cap's merge exit - file the remainder,
+                # then merge - was unreachable on every PR that reached the
+                # cap. `low` is correct by construction: a CONFIRMED
+                # correctness or security finding returns IMPOSSIBLE in
+                # `coverage_verdict` before the filing runs, so nothing hard
+                # ever reaches this line.
+                "--difficulty",
+                "low",
+                # --separate is load-bearing BECAUSE of --difficulty. The
+                # pre-mint fold gate keys on difficulty being set, and with a
+                # fold candidate present and no tty it prints the offer and
+                # exits 0 having minted NOTHING. Every finding filed at the cap
+                # shares a title prefix, so the second one on a PR is always a
+                # fold candidate for the first. Without this the caller reads
+                # ok, scrapes an unrelated id out of the printed wave command,
+                # reports the finding as filed, and merges over a finding that
+                # was silently dropped.
+                "--separate",
                 "--details",
                 (
                     f"Filed by the review-coverage gate at the round cap on PR "
