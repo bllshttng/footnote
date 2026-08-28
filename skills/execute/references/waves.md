@@ -210,12 +210,18 @@ READY_ARGS=(--ready --state .fno/STATE.md)
 if [[ -n "${NODE_ID:-}" ]]; then
     READY_ARGS+=(--node "$NODE_ID")
 fi
-# A joined worker filters the pull to its own band. The env export reaches
-# panes; a daemon-forked worker reads its band from the join brief's table
-# instead (the same reachability gap as FNO_WORKER_NAME, x-6de8).
+# A joined worker filters the pull to its own band. Neither env export
+# (FNO_WORKER_BAND, FNO_WORKER_NAME) reaches a daemon-forked worker, so the
+# fallback resolves the roster name from the registry binding (whoami's
+# worker_name - the same rung resolve_task_holder reads) and looks up the
+# band table the join brief carries. The brief exists only in a joined
+# worktree, which gates the whole path; a lone target matches no row and
+# stays unfiltered.
 WORKER_BAND="${FNO_WORKER_BAND:-}"
-if [[ -z "$WORKER_BAND" && "${FNO_WORKER_NAME:-}" == j-* ]]; then
-    WORKER_BAND=$(awk -F'|' -v w="$FNO_WORKER_NAME" \
+if [[ -z "$WORKER_BAND" && -n "$NODE_ID" && -f ".fno/join-briefs/${NODE_ID}.md" ]]; then
+    WORKER=$(fno whoami --json 2>/dev/null | python3 -c \
+        "import json,sys; print(json.load(sys.stdin).get('worker_name') or '')" 2>/dev/null)
+    WORKER_BAND=$(awk -F'|' -v w="$WORKER" \
         'tolower($2) ~ tolower(w) {gsub(/ /, "", $3); print $3; exit}' \
         ".fno/join-briefs/${NODE_ID}.md" 2>/dev/null)
 fi

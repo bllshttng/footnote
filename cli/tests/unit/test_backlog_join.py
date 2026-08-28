@@ -146,9 +146,17 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
         "fno.graph.collision.resolve_plan_path", lambda p: tmp_path / "plan.md"
     )
     # The already-joined guard reads the registry; point it at an absent file
-    # so the suite never depends on this machine's live roster rows.
+    # so the suite never depends on this machine's live roster rows. Its
+    # liveness probes stay dark for the same reason: no harness store read,
+    # no transcript walk.
     monkeypatch.setattr(
         "fno.paths.agents_registry_path", lambda: tmp_path / "registry-absent.json"
+    )
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states", lambda: {}
+    )
+    monkeypatch.setattr(
+        advance, "_transcript_recently_active", lambda sid: False
     )
 
     class _Proc:
@@ -322,7 +330,8 @@ def test_unknown_node_refuses_exit_2(tmp_path, monkeypatch):
 def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
     """Exit 5: live j-<node>-* workers make join non-idempotent. The live
     proof hit this when a JOINER re-ran join on its own node - the rewrite
-    truncated the brief and nearly duplicated the spawns."""
+    truncated the brief and nearly duplicated the spawns. A row counts only
+    when the harness store still answers non-terminally for its session."""
     calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
     reg = tmp_path / "registry.json"
     reg.write_text(json.dumps({"schema_version": 2, "agents": [
@@ -330,11 +339,43 @@ def test_second_join_refuses_while_joiners_live(tmp_path, monkeypatch):
         {"name": "j-x-8d1d-2", "harness_session_id": "s-2", "status": "stopped"},
     ]}))
     monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states",
+        lambda: {"s-1": "working", "s-2": "failed"},
+    )
     with pytest.raises(JoinRefuse) as excinfo:
         join_node("x-8d1d", 5)
     assert excinfo.value.code == 5
     assert "already joined by j-x-8d1d-1" in excinfo.value.message
     assert not calls  # refused before any spawn, brief untouched
+
+
+def test_crashed_joiner_does_not_lock_the_node(tmp_path, monkeypatch):
+    """A registry row can stay ``live`` after its daemon dies (a stored field
+    is not liveness). The guard must probe: harness store terminal or a stale
+    transcript reads dead, and the re-join proceeds."""
+    calls = _wire(monkeypatch, tmp_path, BANDED_PLAN)
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-8d1d-1", "harness_session_id": "s-dead", "status": "live"},
+    ]}))
+    monkeypatch.setattr("fno.paths.agents_registry_path", lambda: reg)
+    monkeypatch.setattr(
+        advance, "_claude_harness_session_states",
+        lambda: {"s-dead": "failed"},
+    )
+    receipt = join_node("x-8d1d", 5)
+    assert len(receipt["spawned"]) == 3
+    # The transcript probe is the second rung: harness store has no row at
+    # all, but the transcript moved inside the window -> still live.
+    monkeypatch.setattr(advance, "_claude_harness_session_states", lambda: {})
+    monkeypatch.setattr(
+        advance, "_transcript_recently_active", lambda sid: sid == "s-dead"
+    )
+    calls.clear()
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 5)
+    assert excinfo.value.code == 5
 
 
 def test_join_allowed_when_no_live_joiner_rows(tmp_path, monkeypatch):

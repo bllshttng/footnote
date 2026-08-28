@@ -385,6 +385,19 @@ def whoami_command(
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
+        # The task-claim holder this session would bind (resolve_task_holder:
+        # the env name, else the roster binding for harness_sid). A
+        # daemon-forked spawned worker inherits neither the env name nor any
+        # other statement of its own roster name; this key is how a joined
+        # worker learns its name (the join brief's band table is keyed by it).
+        try:
+            from fno.claims.self_identity import resolve_task_holder
+
+            worker_name, _why = resolve_task_holder()
+        except Exception:  # noqa: BLE001 - whoami never gains a failure mode
+            worker_name = None
+        if worker_name:
+            payload["worker_name"] = worker_name
         if foreign_identity is not None:
             payload["inherited_identity_env"] = foreign_identity
         payload["model"] = _session_model()

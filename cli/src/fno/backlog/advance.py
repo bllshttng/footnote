@@ -46,6 +46,7 @@ import logging
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2001,14 +2002,75 @@ def _plan_parallel_width(plan_path: Path) -> int:
 
 _BAND_RANK = {"low": 0, "medium": 1, "high": 2}
 
+# Terminal states of the claude harness store (`claude agents --json --all`);
+# anything else (working, blocked, a future spelling) reads as alive.
+_HARNESS_TERMINAL_STATES = {"done", "stopped", "failed"}
+
+# A joiner transcript untouched this long reads idle-dead even when the
+# harness store has no row for it yet (registration can lag the spawn).
+_JOINER_IDLE_WINDOW = 30 * 60
+
+
+def _claude_harness_session_states() -> dict[str, str]:
+    """``{sessionId: state}`` from the claude harness store, else ``{}``.
+
+    Read-only; a missing CLI or an unreadable answer means "unknown" and the
+    caller falls through to the transcript probe.
+    """
+    try:
+        proc = subprocess.run(
+            ["claude", "agents", "--json", "--all"],
+            capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    try:
+        data = json.loads(proc.stdout)
+        rows = data if isinstance(data, list) else data.get("agents", [])
+        return {
+            str(r["sessionId"]): str(r.get("state", ""))
+            for r in rows
+            if isinstance(r, dict) and r.get("sessionId")
+        }
+    except (TypeError, ValueError, KeyError):
+        return {}
+
+
+def _transcript_recently_active(session_id: str) -> bool:
+    """Whether this claude session's transcript moved inside the idle window.
+
+    The transcript is the last truth that outlives a dead daemon (liveness
+    probes and stored status fields have both lied). No transcript at all is
+    activity-nothing; an unreadable glob is activity-UNKNOWN and reads False
+    here, so the caller treats it as dead only when the harness store also
+    went quiet - the transcript is the second probe, never the only one.
+    """
+    if not session_id:
+        return False
+    projects = Path.home() / ".claude" / "projects"
+    try:
+        for transcript in projects.glob(f"*/{session_id}.jsonl"):
+            age = time.time() - transcript.stat().st_mtime
+            if age <= _JOINER_IDLE_WINDOW:
+                return True
+    except OSError:
+        return False
+    return False
+
 
 def _live_joiner_names(node_id: str) -> list[str]:
-    """Live roster names ``j-<node>-*`` in the agents registry.
+    """Live roster names ``j-<node>-*``, probed - not the stored field.
 
     A second join into the same node rewrites the join brief (dropping the
     first join's band table) and then dies on the already-taken lead name -
-    after nearly spawning duplicate workers. The x-dadc live proof hit this
-    when a JOINER itself re-ran join on its own node.
+    after nearly spawning duplicate workers. The live proof hit this when a
+    JOINER itself re-ran join on its own node. But the registry's
+    ``status: live`` is a stored field: a crashed daemon leaves it behind and
+    a bare read would lock every later join out of the node. So a row counts
+    only when something still answers: the claude harness store lists its
+    session non-terminally, or its transcript moved inside the idle window.
+    Join spawns are claude-only (the thread substrate), so the claude probes
+    cover every row this guard can collide with.
     """
     from fno.paths import agents_registry_path
 
@@ -2017,11 +2079,22 @@ def _live_joiner_names(node_id: str) -> list[str]:
     except Exception:  # noqa: BLE001 - an unreadable registry must not block a join
         return []
     prefix = f"j-{node_id}-"
-    return sorted(
-        str(row.get("name"))
+    candidates = [
+        (str(row.get("name")), str(row.get("harness_session_id") or ""))
         for row in reg.get("agents", [])
         if str(row.get("name", "")).startswith(prefix) and row.get("status") == "live"
-    )
+    ]
+    if not candidates:
+        return []
+    harness_states = _claude_harness_session_states()
+    live = []
+    for name, session_id in candidates:
+        state = harness_states.get(session_id)
+        if state is not None and state not in _HARNESS_TERMINAL_STATES:
+            live.append(name)
+        elif state is None and _transcript_recently_active(session_id):
+            live.append(name)
+    return sorted(live)
 
 
 def _plan_wave_bands(plan_path: Path) -> list[str]:
