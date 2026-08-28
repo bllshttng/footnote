@@ -16,9 +16,28 @@ in-clone bash sourcers; only the Python verb is re-pointed here.
 """
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
+
+
+def _suppressed() -> bool:
+    """True when this process must not reach the operator's screen.
+
+    ``fno.hermetic.neutralise`` stamps ``FNO_TEST_HERMETIC=1`` on every child it
+    builds, so one check covers the pytest, shell and cargo trees. ``daemon.rs``
+    already gates its own ``fno inbox notify`` spawn off in tests; this is the
+    Python half of the same rule.
+
+    Deliberately checked at the DISPATCH and not at the top of
+    :func:`send_notification`: the tool-availability contract (AC2-FR, a loud
+    non-zero when neither notifier exists) is what its caller branches on, and
+    short-circuiting the whole function would answer "delivered" on a host that
+    has no notifier at all. Suppressing only the subprocess keeps the returned
+    code honest about the CHANNEL while the toast never fires.
+    """
+    return os.environ.get("FNO_TEST_HERMETIC") == "1"
 
 
 def send_notification(title: str, message: str) -> tuple[int, str]:
@@ -44,6 +63,8 @@ def send_notification(title: str, message: str) -> tuple[int, str]:
         esc_message = message.replace("\\", "\\\\").replace('"', '\\"')
         esc_title = title.replace("\\", "\\\\").replace('"', '\\"')
         try:
+            if _suppressed():
+                return 0, ""
             subprocess.run(
                 [
                     "osascript",
@@ -63,6 +84,8 @@ def send_notification(title: str, message: str) -> tuple[int, str]:
         # notify-send takes argv directly (no shell/AppleScript injection vector),
         # but still bound it with a timeout and swallow failures for parity.
         try:
+            if _suppressed():
+                return 0, ""
             # argv-fence: exempt (a notification body, not a spawn seed: a
             # leading-dash body drops one toast, it never idles a worker).
             subprocess.run(

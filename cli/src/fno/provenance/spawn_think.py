@@ -944,8 +944,28 @@ def _safe_release(key: str, holder: str) -> None:
 
 
 def _events_path(project_root: Optional[Path]) -> Path:
-    root = Path(project_root) if project_root is not None else Path.cwd()
-    return root / ".fno" / "events.jsonl"
+    """The journal to emit into: the caller's root, else the resolved one.
+
+    The ``project_root is None`` leg MUST go through
+    :func:`fno.paths.project_events_json`, never ``Path.cwd()``. A hand-built
+    cwd path consults neither ``FNO_EVENTS_PATH`` (the hermetic journal pin)
+    nor ``FNO_REPO_ROOT``, so an unpathed emit under test wrote a
+    production-shaped ``think_offered`` row into the developer's live journal -
+    and a worktree's ``.fno/events.jsonl`` is a symlink to the canonical one,
+    so every worker's test run landed in the operator's panel. Six fixture rows
+    were measured there on 2026-08-27, carrying the ``x-2222aaaa`` node id that
+    only ``cli/tests/unit/test_spawn_think.py`` knows.
+
+    A caller that HOLDS a root still wins, which is the contract
+    ``project_events_json`` documents: one sandbox journal serves a whole
+    pytest process, so honoring the pin for a caller that named its own root
+    would replace that caller's file with a shared bucket.
+    """
+    if project_root is not None:
+        return Path(project_root) / ".fno" / "events.jsonl"
+    from fno.paths import project_events_json
+
+    return project_events_json()
 
 
 def _emit(kind: str, data: dict, events_path: Path) -> None:

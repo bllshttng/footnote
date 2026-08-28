@@ -385,8 +385,23 @@ def neutralise(
     # a pin only one side honored would split the writers onto different files
     # and stop the mutex serialising them; the cross-impl merge gate catches it.
     #
-    # Still outside the pin: the three loop-journal `ProjectJournalPath` sites in
-    # fno-agents, which build their path by hand and consult no var.
+    # Outside the pin ON PURPOSE: the three loop-journal `ProjectJournalPath`
+    # sites in fno-agents. They look like the hand-built paths this pin exists to
+    # catch, and they are not. Each builds its journal from a `--cwd` the CALLER
+    # supplied, which makes them the "caller holds its own root" case that
+    # `fno.paths.project_events_json` documents as deliberately NOT consulting
+    # the pin. Teaching them to read it was tried and measured: six tests in
+    # `crates/fno-agents/tests/loop_target.rs` seed and read
+    # `<tmpdir>/.fno/events.jsonl` while passing `--cwd <tmpdir>`, and they go
+    # red the moment the binary answers with the sandbox instead. `rust-ci.yml`
+    # runs a bare `cargo test`, so only the pinned local lane broke - the exact
+    # inversion this module exists to prevent.
+    #
+    # The residue a pin can never reach is a module that consults NO var, and
+    # nothing here can make one consult it. That is closed at the WRITE instead:
+    # `append_event` refuses a resolved path outside this sandbox whenever
+    # FNO_TEST_HERMETIC is set, so a hand-built path is stopped rather than
+    # landing in a live journal. See docs/architecture/test-hermeticity.md.
     out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
 
     out.update(caches)

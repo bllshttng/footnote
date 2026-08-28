@@ -959,7 +959,18 @@ def resolve_attester_identity(
         # which can only degrade the witness, never forge one.
         try:
             argv: list = getattr(proc, "cmdline", lambda: [])() or []
-            exe_name = (argv[0] if argv else proc.name()).lower()
+            # BASENAME, which is what the paragraph above already claims. argv[0]
+            # is a full path, and `family_token in <full path>` matches any
+            # DIRECTORY carrying the token - so any process launched from a
+            # worktree whose path contains a harness family name read as a
+            # carrier of that family. The harness-native worktree root is
+            # exactly such a path, and it is this repository's default (the
+            # worktree convention rule states where). Measured:
+            # `test_attestation_attester_session_from_env_marker` passes on a
+            # checkout under /tmp and fails on the same checkout moved beneath
+            # such a directory, because the emitter then sees a family ancestor
+            # that is really pytest.
+            exe_name = os.path.basename(argv[0] if argv else proc.name()).lower()
         except psutil.Error:
             exe_name = ""
         carrier_is_family.append(family_token in exe_name)

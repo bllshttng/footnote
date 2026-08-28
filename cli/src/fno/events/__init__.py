@@ -28,6 +28,7 @@ import datetime as _dt
 import hashlib as _hashlib
 import json as _json
 import math as _math
+import os
 import re as _re
 import secrets as _secrets
 import sys as _sys
@@ -1440,6 +1441,93 @@ def worktree_overlap_observed(
     return _build("worktree_overlap_observed", source, data)
 
 
+class HermeticEscapeError(RuntimeError):
+    """A test process tried to append to a journal outside its sandbox."""
+
+
+def _hermetic_allowed_roots() -> list[Path]:
+    """Roots a hermetic test process may legitimately write a journal into.
+
+    ``fno.hermetic.neutralise`` pins ``FNO_EVENTS_PATH`` to a journal inside a
+    throwaway sandbox, and every test that names its own file names one under
+    ``tmp_path``. Both live under ``TMPDIR``. Both raw and resolved forms of
+    each root are kept because macOS reports ``TMPDIR`` as ``/var/folders/...``
+    while ``Path.resolve()`` yields ``/private/var/...``.
+
+    ``HOME`` is deliberately NOT a root, even though neutralise points it at the
+    sandbox. It is read at call time, so a test that restores the real ``HOME``
+    (``test_provider_usage_live.py``, ``test_retask_live_smoke.py`` and
+    ``test_roundtrip.py`` each do) would widen the allowed root to the whole
+    home directory - which contains both the checkout and ``~/.fno``, the two
+    files this guard exists to protect. Nothing is lost by dropping it: the
+    sandbox HOME is created by ``tempfile.mkdtemp`` and so already sits under
+    ``TMPDIR``.
+    """
+    roots: list[Path] = []
+    candidates = [
+        os.environ.get("TMPDIR") or "/tmp",
+    ]
+    pin = os.environ.get("FNO_EVENTS_PATH")
+    # ABSOLUTE pins only. `Path("events.jsonl").parent` is `.`, and its realpath
+    # is the process cwd - which under a bare `pytest` IS the checkout, so a
+    # relative pin promoted the whole repository to an allowed root and turned
+    # the guard off. `scripts/lib/events.sh` and `hooks/review-hold.sh` both
+    # pass the pin through unvalidated, so this cannot assume a good value.
+    # A relative pin is simply not a root; the write is judged on TMPDIR alone.
+    if pin and Path(pin).is_absolute():
+        candidates.append(str(Path(pin).parent))
+    for raw in candidates:
+        if not raw:
+            continue
+        base = Path(raw)
+        for form in (base, Path(os.path.realpath(raw))):
+            if form not in roots:
+                roots.append(form)
+    return roots
+
+
+def _refuse_hermetic_escape(path: Path) -> None:
+    """Refuse a journal write that would leave a test's sandbox.
+
+    ``FNO_TEST_HERMETIC`` was a receipt nothing read. This is its first
+    consumer, and it closes the class rather than one caller: a module that
+    builds its own ``<root>/.fno/events.jsonl`` by hand consults neither
+    ``FNO_EVENTS_PATH`` nor ``FNO_REPO_ROOT``, so no pin can reach it. Almost
+    every event write in the tree funnels through :func:`append_event`, so the
+    check belongs here - one guard, not one per path builder.
+
+    ``spawn_think`` was the specimen: it wrote ``think_offered`` rows for the
+    fixture node ``x-2222aaaa`` into the developer's live journal, and from
+    there into the operator's needs panel. A worktree's ``.fno/events.jsonl``
+    is a symlink to the canonical journal, so a worker's test run reached the
+    operator's file from a directory nobody thought of as production.
+
+    Scope, stated so the next reader does not overclaim it: this guards
+    :func:`append_event` only. ``events/log.py`` and ``agents/events.py`` write
+    journals through their own file handles and do not pass here, so the doc
+    must not say every Python event write funnels through this function.
+    """
+    if os.environ.get("FNO_TEST_HERMETIC") != "1":
+        return
+    roots = _hermetic_allowed_roots()
+    # ONLY the realpath is judged. Accepting the raw form too would let a
+    # symlink sitting inside the sandbox pass while resolving to a live journal
+    # outside it - which is the precise mechanism this guard exists to stop, a
+    # worktree's `.fno/events.jsonl` being a symlink to the canonical one.
+    # Measured: 200 bytes of a production-shaped row reached the outside file
+    # through exactly that shape. The roots carry both forms already, so the
+    # macOS `/var` vs `/private/var` split is still handled.
+    resolved = Path(os.path.realpath(path))
+    if any(resolved == root or root in resolved.parents for root in roots):
+        return
+    raise HermeticEscapeError(
+        f"append_event refused a journal write outside the test sandbox: {path}. "
+        "A hermetic run must not touch a live events.jsonl. Pass an explicit "
+        "events_path= under tmp_path, or resolve the journal with "
+        "fno.paths.project_events_json() so FNO_EVENTS_PATH applies."
+    )
+
+
 def append_event(
     event: dict[str, Any],
     events_path: Path | None = None,
@@ -1461,12 +1549,20 @@ def append_event(
 
         events_path = project_events_json()
     requested_path = Path(events_path)
+    # Before the mkdir: a refused write must not leave a .fno/ behind either.
+    _refuse_hermetic_escape(requested_path)
     requested_path.parent.mkdir(parents=True, exist_ok=True)
     while True:
         # Setup can replace a local journal with a canonical-journal symlink
         # while this writer waits on the old mutex. Re-resolve after acquiring
         # and retry whenever the leaf changed during that handoff.
         resolved_path = requested_path.resolve()
+        # Re-judge the RESOLVED leaf, not just the requested one. The check
+        # above raced: the loop exists precisely because a local journal can be
+        # swapped for a canonical-journal symlink mid-write, and that swap is
+        # the escape this guard targets. Judging only before the resolve leaves
+        # the window the retry loop was written to acknowledge.
+        _refuse_hermetic_escape(resolved_path)
         resolved_path.parent.mkdir(parents=True, exist_ok=True)
         lock_dir = resolved_path.parent / (resolved_path.name + ".lock.d")
         token = acquire_dir_mutex(lock_dir, lock_timeout_seconds)

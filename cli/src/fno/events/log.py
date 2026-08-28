@@ -133,7 +133,16 @@ def emit_event(
     if state_path is None:
         state_path = Path(".fno/target-state.md")
     if events_path is None:
-        events_path = Path(".fno/events.jsonl")
+        # NOT a cwd-relative literal. This is the defect spawn_think and
+        # backlog/advance both carried: a hand-built path consults neither
+        # FNO_EVENTS_PATH nor FNO_REPO_ROOT, so a test emitting through this
+        # writer lands a production-shaped row in the developer's journal. This
+        # module writes under its own filelock rather than through
+        # append_event, so it never meets that guard and resolving correctly is
+        # the whole protection it gets.
+        from fno.paths import project_events_json
+
+        events_path = project_events_json()
 
     state_path = Path(state_path)
     events_path = Path(events_path)
@@ -200,7 +209,11 @@ def read_events(
         ValueError: If a line is not valid JSON (log corruption).
     """
     if events_path is None:
-        events_path = Path(".fno/events.jsonl")
+        # Read what the writer above writes, or a reader run from a different
+        # cwd answers about a different file.
+        from fno.paths import project_events_json
+
+        events_path = project_events_json()
 
     events_path = Path(events_path)
 

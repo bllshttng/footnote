@@ -76,7 +76,22 @@ def canonical_events_path(cwd: Optional[str] = None) -> Path:
     ``cwd`` when given (a full-graph reconcile in repo A can close a node whose
     worktree is repo B), else the process-cwd canonical root.
     """
+    import os
+
     from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+
+    # The pin outranks BOTH legs below, unlike claims.rs where an explicitly
+    # named journal wins over it. The difference is what the argument means:
+    # `events_dir` there IS a journal the caller chose, while `cwd` here is only
+    # a hint this function resolves a root FROM. Both legs resolve rather than
+    # accept, so both are what `FNO_EVENTS_PATH` exists to stand in for - it
+    # "stands in for a root nobody resolved" (fno.paths.project_events_json).
+    # Without this, a test drove `resolve_canonical_repo_root()` to the
+    # developer's real checkout and gate_escape telemetry landed in the
+    # operator's journal. Empty means unset, matching the other three writers.
+    pin = os.environ.get("FNO_EVENTS_PATH")
+    if pin:
+        return Path(pin)
 
     if cwd:
         canon = resolve_canonical_worktree(Path(cwd))
@@ -104,6 +119,20 @@ def record_emit_failure(
     )
     if log_path is None:
         return
+    # The durable log lands BESIDE the journal, so a refused journal write used
+    # to be followed by this function recreating the very `.fno/` directory the
+    # refusal prevented, and writing a fixture-shaped row into it. Measured:
+    # events.jsonl absent, `<outside>/.fno/gate_escape_emit_failures.jsonl`
+    # present. Refuse here on the same terms; a dropped failure log in a test is
+    # not a loss, because the refusal already printed above.
+    try:
+        from fno.events import HermeticEscapeError, _refuse_hermetic_escape
+
+        _refuse_hermetic_escape(Path(log_path))
+    except HermeticEscapeError:
+        return
+    except Exception:  # noqa: BLE001 - never raise from the telemetry path
+        pass
     try:
         Path(log_path).parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
