@@ -14,8 +14,8 @@ The cause was a private path builder: ``spawn_think._events_path`` composed
 running the suite inside a worktree reached the operator's file.
 
 These tests pin the fix at both altitudes: the caller that had the bug, and the
-shared seam that makes the next hand-built path fail loudly instead of landing
-in production. The notification pair covers the same class on the other
+shared seam that stops the next hand-built path instead of letting it land in
+production. The notification pair covers the same class on the other
 surface a test can reach the operator through.
 """
 from __future__ import annotations
@@ -92,7 +92,6 @@ def test_append_event_refuses_a_write_outside_the_sandbox(monkeypatch, tmp_path)
     home.mkdir()
     outside = tmp_path / "checkout" / ".fno" / "events.jsonl"
     monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("TMPDIR", str(home))
     monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
 
@@ -108,7 +107,6 @@ def test_append_event_allows_a_write_under_the_sandbox(monkeypatch, tmp_path):
     home.mkdir()
     inside = home / "proj" / ".fno" / "events.jsonl"
     monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("TMPDIR", str(home))
 
     append_event(_event(), inside)
@@ -122,7 +120,6 @@ def test_append_event_allows_the_pinned_journal(monkeypatch, tmp_path):
     home.mkdir()
     pinned = tmp_path / "elsewhere" / "events.jsonl"
     monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("TMPDIR", str(home))
     monkeypatch.setenv("FNO_EVENTS_PATH", str(pinned))
 
@@ -137,6 +134,57 @@ def test_append_event_guard_is_inert_outside_a_hermetic_run(monkeypatch, tmp_pat
     outside = tmp_path / "checkout" / ".fno" / "events.jsonl"
     append_event(_event(), outside)
     assert outside.read_text().strip()
+
+
+def test_append_event_refuses_a_symlink_that_resolves_outside(monkeypatch, tmp_path):
+    """Only the RESOLVED path is judged.
+
+    A worktree's ``.fno/events.jsonl`` is a symlink to the canonical journal,
+    which is the whole reason a test run reached the operator's file. Accepting
+    the raw path when it merely SITS inside the sandbox reopens exactly that
+    door: measured at 200 bytes of a production-shaped row landing in the
+    outside file before the guard judged the realpath alone.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    outside = tmp_path / "checkout" / ".fno"
+    outside.mkdir(parents=True)
+    target = outside / "events.jsonl"
+    link = home / "events.jsonl"
+    link.symlink_to(target)
+
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
+    monkeypatch.setenv("TMPDIR", str(home))
+    monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
+
+    with pytest.raises(HermeticEscapeError):
+        append_event(_event(), link)
+    assert not target.exists()
+
+
+def test_home_is_not_an_allowed_root(monkeypatch, tmp_path):
+    """A test that restores the real HOME must not disable the guard.
+
+    ``HOME`` is read at call time, and three live-lane tests in this suite
+    restore the real one. Were it a root, the allowed area would widen to the
+    whole home directory, which contains both the checkout and ``~/.fno`` - the
+    two files this guard exists to protect. Nothing is lost by excluding it: the
+    sandbox HOME is a mkdtemp and so already sits under TMPDIR.
+    """
+    real_home = tmp_path / "real-home"
+    real_home.mkdir()
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    live = real_home / ".fno" / "events.jsonl"
+
+    monkeypatch.setenv("FNO_TEST_HERMETIC", "1")
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("TMPDIR", str(sandbox))
+    monkeypatch.delenv("FNO_EVENTS_PATH", raising=False)
+
+    with pytest.raises(HermeticEscapeError):
+        append_event(_event(), live)
+    assert not live.parent.exists()
 
 
 # ---------------------------------------------------------------------------

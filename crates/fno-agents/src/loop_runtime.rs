@@ -58,40 +58,6 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Using a distinct type prevents silent positional swap of the two same-type args.
 pub struct ProjectJournalPath(pub PathBuf);
 
-impl ProjectJournalPath {
-    /// The project journal for `repo_root`, honouring the `FNO_EVENTS_PATH` pin.
-    ///
-    /// Precedence mirrors `fno.paths.project_events_json`, `scripts/lib/events.sh`
-    /// and `claims::claim_events_path`: the pin wins, else `<repo_root>/.fno`.
-    ///
-    /// The three loop-journal callers used to join the path by hand and so read
-    /// no var at all, which `fno/hermetic.py` named as the one channel its
-    /// journal pin could not reach. A test that drives the loop then wrote a
-    /// production-shaped row into the developer's live journal - the same defect
-    /// that put six fixture `think_offered` rows in the operator's needs panel
-    /// on 2026-08-27 through the Python half of this class.
-    pub fn for_repo(repo_root: &Path) -> Self {
-        Self(Self::resolve(
-            repo_root,
-            std::env::var("FNO_EVENTS_PATH").ok().as_deref(),
-        ))
-    }
-
-    /// The pure core of [`Self::for_repo`], taking the pin as an argument.
-    ///
-    /// Split out for the same reason `claim_events_path_with` is: Rust tests
-    /// share one process and run threaded, so `set_var` would race every other
-    /// test in the binary.
-    fn resolve(repo_root: &Path, pin: Option<&str>) -> PathBuf {
-        // Empty means unset, matching `if override:` in Python and `-n` in the
-        // shell. Deliberately NOT trimmed, for the reason claims.rs gives.
-        if let Some(pinned) = pin.filter(|p| !p.is_empty()) {
-            return PathBuf::from(pinned);
-        }
-        repo_root.join(".fno").join("events.jsonl")
-    }
-}
-
 /// Newtype for the global mirror journal path (`~/.fno/events.jsonl`).
 /// Writes are best-effort only.
 pub struct GlobalJournalPath(pub PathBuf);
@@ -1053,41 +1019,5 @@ mod bg_guard_tests {
             0,
             Some("running as a background agent")
         ));
-    }
-}
-
-#[cfg(test)]
-mod project_journal_tests {
-
-    // ── ProjectJournalPath pin precedence ────────────────────────────────────
-    //
-    // The three loop-journal callers joined their path by hand and read no var,
-    // which `fno/hermetic.py` named as the one channel its `FNO_EVENTS_PATH`
-    // pin could not reach. These lock the precedence to the one the other three
-    // writers already implement (`fno.paths.project_events_json`,
-    // `scripts/lib/events.sh`, `claims::claim_events_path`).
-
-    use super::ProjectJournalPath;
-    use std::path::{Path, PathBuf};
-
-    #[test]
-    fn project_journal_pin_outranks_the_repo_root() {
-        let got = ProjectJournalPath::resolve(Path::new("/repo"), Some("/sandbox/events.jsonl"));
-        assert_eq!(got, PathBuf::from("/sandbox/events.jsonl"));
-    }
-
-    #[test]
-    fn project_journal_falls_back_to_the_repo_root_without_a_pin() {
-        let got = ProjectJournalPath::resolve(Path::new("/repo"), None);
-        assert_eq!(got, PathBuf::from("/repo/.fno/events.jsonl"));
-    }
-
-    #[test]
-    fn project_journal_treats_an_empty_pin_as_unset() {
-        // Matches `if override:` in Python and `-n` in the shell. Three writers
-        // disagreeing about a whitespace pin is worse than all three taking it
-        // as a path, so this is deliberately not trimmed either.
-        let got = ProjectJournalPath::resolve(Path::new("/repo"), Some(""));
-        assert_eq!(got, PathBuf::from("/repo/.fno/events.jsonl"));
     }
 }

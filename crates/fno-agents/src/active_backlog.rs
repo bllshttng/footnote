@@ -809,12 +809,17 @@ async fn per_project_fanout_loop(target: FanoutTarget, fno_bin: String, shutdown
 /// Build the per-project loop journal (project events.jsonl fatal, global mirror
 /// best-effort) for a drain target's cwd.
 fn journal_for(cwd: &Path) -> Journal {
-    let project_events = ProjectJournalPath::for_repo(&crate::paths::worktree_repo_root(cwd));
+    let project_events = crate::paths::worktree_repo_root(cwd)
+        .join(".fno")
+        .join("events.jsonl");
     let home = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     let global_events = home.join(".fno").join("events.jsonl");
-    Journal::new(project_events, GlobalJournalPath(global_events))
+    Journal::new(
+        ProjectJournalPath(project_events),
+        GlobalJournalPath(global_events),
+    )
 }
 
 /// Resolve a [`DrainConfig`] for a mission target, or `None` if the target

@@ -1448,15 +1448,23 @@ class HermeticEscapeError(RuntimeError):
 def _hermetic_allowed_roots() -> list[Path]:
     """Roots a hermetic test process may legitimately write a journal into.
 
-    ``fno.hermetic.neutralise`` pins ``HOME`` to a throwaway sandbox and
-    ``FNO_EVENTS_PATH`` to a journal inside it; every test that names its own
-    file names one under ``tmp_path``, which lives under ``TMPDIR``. Both raw
-    and resolved forms are kept because macOS reports ``TMPDIR`` as
-    ``/var/folders/...`` while ``Path.resolve()`` yields ``/private/var/...``.
+    ``fno.hermetic.neutralise`` pins ``FNO_EVENTS_PATH`` to a journal inside a
+    throwaway sandbox, and every test that names its own file names one under
+    ``tmp_path``. Both live under ``TMPDIR``. Both raw and resolved forms of
+    each root are kept because macOS reports ``TMPDIR`` as ``/var/folders/...``
+    while ``Path.resolve()`` yields ``/private/var/...``.
+
+    ``HOME`` is deliberately NOT a root, even though neutralise points it at the
+    sandbox. It is read at call time, so a test that restores the real ``HOME``
+    (``test_provider_usage_live.py``, ``test_retask_live_smoke.py`` and
+    ``test_roundtrip.py`` each do) would widen the allowed root to the whole
+    home directory - which contains both the checkout and ``~/.fno``, the two
+    files this guard exists to protect. Nothing is lost by dropping it: the
+    sandbox HOME is created by ``tempfile.mkdtemp`` and so already sits under
+    ``TMPDIR``.
     """
     roots: list[Path] = []
     candidates = [
-        os.environ.get("HOME"),
         os.environ.get("TMPDIR") or "/tmp",
     ]
     pin = os.environ.get("FNO_EVENTS_PATH")
@@ -1495,9 +1503,16 @@ def _refuse_hermetic_escape(path: Path) -> None:
     if os.environ.get("FNO_TEST_HERMETIC") != "1":
         return
     roots = _hermetic_allowed_roots()
-    for form in (path, Path(os.path.realpath(path))):
-        if any(form == root or root in form.parents for root in roots):
-            return
+    # ONLY the realpath is judged. Accepting the raw form too would let a
+    # symlink sitting inside the sandbox pass while resolving to a live journal
+    # outside it - which is the precise mechanism this guard exists to stop, a
+    # worktree's `.fno/events.jsonl` being a symlink to the canonical one.
+    # Measured: 200 bytes of a production-shaped row reached the outside file
+    # through exactly that shape. The roots carry both forms already, so the
+    # macOS `/var` vs `/private/var` split is still handled.
+    resolved = Path(os.path.realpath(path))
+    if any(resolved == root or root in resolved.parents for root in roots):
+        return
     raise HermeticEscapeError(
         f"append_event refused a journal write outside the test sandbox: {path}. "
         "A hermetic run must not touch a live events.jsonl. Pass an explicit "
