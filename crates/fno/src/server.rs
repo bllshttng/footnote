@@ -931,6 +931,32 @@ fn attach_argv(
     account: Option<&str>,
     config_dir: Option<&std::path::Path>,
 ) -> Vec<String> {
+    attach_argv_for(Some("claude"), id, account, config_dir)
+}
+
+/// (x-6678) One attach gesture's argv, keyed on the row's HARNESS.
+///
+/// Each harness gets its own interface, because the viewport execs that
+/// interface rather than rendering one:
+///
+/// - claude: `claude attach <id>`, unchanged, account wrapper included.
+/// - codex: `codex resume <thread-id> --remote unix://<control-socket>`, which
+///   opens the real codex TUI on a thread the shared app-server daemon owns.
+///
+/// Any other harness falls through to the claude shape, which is what every
+/// caller did before a harness was passed at all; only rows that resolved an
+/// attach id ever reach here, and outside claude only a codex thread row does.
+fn attach_argv_for(
+    harness: Option<&str>,
+    id: &str,
+    account: Option<&str>,
+    config_dir: Option<&std::path::Path>,
+) -> Vec<String> {
+    if harness == Some("codex") {
+        // No account wrapper: a codex thread is addressed by the control
+        // socket, and `CODEX_HOME` already decides which socket that is.
+        return agents_view::codex_attach_argv(id);
+    }
     let base = attach_base(id);
     let Some(dir) = config_dir else {
         return base;
@@ -7653,6 +7679,16 @@ impl Core {
             .map(|a| a.name.clone())
     }
 
+    /// (x-6678) The harness behind an attach id, from the live catalog. The
+    /// argv builder needs it: each harness execs its own interface, and only
+    /// the row knows which one this id belongs to.
+    fn attach_row_harness(&self, attach_id: &str) -> Option<String> {
+        self.agents
+            .iter()
+            .find(|a| a.attach_id.as_deref() == Some(attach_id))
+            .and_then(|a| a.harness.clone())
+    }
+
     /// (x-d285) One attach gesture's spawn argv. `None` means the canonical
     /// resolution is now running off-loop and the caller must stop - the
     /// verdict re-enters this gesture through `ReentryPlanReady`. A replayed
@@ -7681,7 +7717,11 @@ impl Core {
             return None;
         }
         let (acct, cd) = self.attach_account_ctx(id);
-        Some((attach_argv(id, acct.as_deref(), cd.as_deref()), cd))
+        let harness = self.attach_row_harness(id);
+        Some((
+            attach_argv_for(harness.as_deref(), id, acct.as_deref(), cd.as_deref()),
+            cd,
+        ))
     }
 
     /// (x-d285) A resume gesture's re-entry plan. A replayed gesture holds
@@ -10306,7 +10346,11 @@ impl Core {
     /// a Follow/Locate pane carries the row's name so the tab reads as the
     /// worker it views, not as `sh` or `fno`.
     fn name_thread_viewer_pane(&mut self, pid: u64, row: &RegistryAgent, tier: &Reach) {
-        if matches!(tier, Reach::Drive) {
+        // (x-6678) `name_attached_pane` resolves a name through the claude
+        // attach catalog, so only a claude Drive pane goes that way. A codex
+        // Drive pane takes the row's name, the way Follow and Locate panes
+        // already do.
+        if matches!(tier, Reach::Drive) && row.harness.as_deref() == Some("claude") {
             // The attach argv carries no FNO_AGENT_SELF; name_attached_pane
             // resolves the name from the live catalog the same way.
             if let Some(id) = row.attach_id.as_deref() {
@@ -14833,6 +14877,43 @@ mod tests {
                 "attach".to_string(),
                 "job1".to_string(),
             ]
+        );
+    }
+
+    /// AC14-HP, AC15-HP (x-6678): the argv builder is keyed on the row's
+    /// HARNESS. A codex thread execs codex's own TUI; claude is byte-identical
+    /// to what it was, account wrapper included.
+    #[test]
+    fn attach_argv_execs_each_harness_own_interface() {
+        set_attach_program(&["claude", "attach"]);
+        let dir = std::path::Path::new("/home/u/.claude-alt");
+
+        // AC15: claude, both postures, unchanged.
+        assert_eq!(
+            attach_argv_for(Some("claude"), "job1", None, None),
+            attach_argv("job1", None, None)
+        );
+        assert_eq!(
+            attach_argv_for(Some("claude"), "job1", Some("readyrule"), Some(dir)),
+            attach_argv("job1", Some("readyrule"), Some(dir))
+        );
+        // A row with no harness recorded keeps the claude shape it had before
+        // a harness was passed at all.
+        assert_eq!(
+            attach_argv_for(None, "job1", None, None),
+            attach_argv("job1", None, None)
+        );
+
+        // AC14: codex. No account wrapper - the control socket, and therefore
+        // CODEX_HOME, is what decides which daemon this reaches.
+        let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
+        assert_eq!(
+            attach_argv_for(Some("codex"), uuid, Some("readyrule"), Some(dir)),
+            agents_view::codex_attach_argv(uuid)
+        );
+        assert_eq!(
+            agents_view::codex_attach_argv(uuid)[..2],
+            ["codex".to_string(), "resume".to_string()]
         );
     }
 

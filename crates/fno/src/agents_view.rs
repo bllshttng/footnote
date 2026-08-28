@@ -127,6 +127,38 @@ pub enum Liveness {
 /// exit immediately; that gap is why this list omits opencode).
 const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
+/// (x-6678) The shared codex app-server control socket:
+/// `$CODEX_HOME/app-server-control/app-server-control.sock`, `CODEX_HOME`
+/// defaulting to `~/.codex`. Mirrors `codex_inject::codex_app_server_socket_path`
+/// in fno-agents, which fno never links (it shells the binary at runtime);
+/// `the_attach_argv_is_identical_in_both_crates` in that crate links both and
+/// pins them against each other, so a change to either fails there rather
+/// than drifting.
+pub fn codex_app_server_socket_path() -> std::path::PathBuf {
+    let home = std::env::var("CODEX_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("{}/.codex", std::env::var("HOME").unwrap_or_default()));
+    std::path::PathBuf::from(home)
+        .join("app-server-control")
+        .join("app-server-control.sock")
+}
+
+/// (x-6678) The argv that opens codex's OWN interface on `thread_id`.
+///
+/// An EXEC target, never a proxy. The viewport replaces a pane with a real
+/// `codex` process and draws nothing itself; anything that read frames here
+/// and painted them would rebuild the rendering layer this lane deleted.
+pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
+    vec![
+        "codex".to_string(),
+        "resume".to_string(),
+        thread_id.to_string(),
+        "--remote".to_string(),
+        format!("unix://{}", codex_app_server_socket_path().display()),
+    ]
+}
+
 /// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
 /// `Drive` when the row carries an attach id (an interactive attach form
 /// resolved it), `Follow` when the harness's transcript has a peek reader,
@@ -1431,20 +1463,54 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // Registry v10 renamed this axis to `harness` and dropped `provider`
         // from disk; reading only the departed key silently un-attached every
         // live row, because the fixtures here still wrote the pre-v10 shape.
-        let is_claude = row
+        let harness_name = row
             .get("harness")
             .or_else(|| row.get("provider"))
-            .and_then(|v| v.as_str())
-            == Some("claude");
-        let attach_id = is_claude
-            .then(|| {
-                row.get("short_id")
-                    .or_else(|| row.get("claude_short_id"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-            })
-            .flatten()
-            .map(str::to_string);
+            .and_then(|v| v.as_str());
+        let is_claude = harness_name == Some("claude");
+        // (x-6678) A codex THREAD row's attach target is its thread id on the
+        // shared app-server daemon, which `codex resume --remote` opens.
+        // Mirrors `is_codex_thread_entry` in the daemon: interactive host
+        // mode, no claude short id, and no pane of its own. A codex PANE row
+        // is excluded on the `mux` clause and keeps navigating to its tab,
+        // where its process already lives.
+        //
+        // This is per-harness derivation, not a second harness-name gate:
+        // `thread_reach` still asks only whether an attach form resolved, and
+        // a harness with none (agy, opencode, gemini) yields `None` here and
+        // keeps the tier it has.
+        let is_codex_thread = harness_name == Some("codex")
+            && row
+                .get("host_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("exec")
+                == "interactive"
+            && row
+                .get("short_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .is_empty()
+            // A PRESENT mux key means pane-hosted, whether or not it parses
+            // into a (session, pane_id) pair. `mux` above is the parsed form,
+            // and a half-written `{"session": "s"}` parses to None there; a
+            // row is not promoted to a drivable thread by a malformed field.
+            // The CLI verb's `is_codex_thread_row` reads the raw key the same
+            // way, so both doors answer alike.
+            && row.get("mux").is_none_or(serde_json::Value::is_null);
+        let attach_id = if is_claude {
+            row.get("short_id")
+                .or_else(|| row.get("claude_short_id"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        } else if is_codex_thread {
+            row.get("harness_session_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
         // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn, and the
         // transcript key for the extended table's message tail. Claude rows
         // only: a codex row's session id is not a claude transcript name. v10
@@ -2513,6 +2579,92 @@ mod tests {
             Some("12345678-1234-1234-1234-1234567890ab")
         );
         assert_eq!(get("cx").claude_session_uuid, None, "codex carries no uuid");
+    }
+
+    /// AC11-HP, AC12-EDGE, AC13-EDGE (x-6678): `attach_id` is derived PER
+    /// HARNESS at the `derive_rows` seam, so a codex thread row reaches Drive
+    /// while no other harness gains a tier.
+    ///
+    /// `thread_reach` itself is unchanged and still asks only whether an
+    /// attach form resolved (law d-dbf83820: never keyed on a harness name
+    /// for its own sake). What changed is that a codex thread row now HAS one.
+    #[test]
+    fn a_codex_thread_row_derives_an_attach_id_and_no_other_harness_does() {
+        use crate::proto::Reach;
+        let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
+        let raw = reg(&format!(
+            r#"{{"name":"cx-thread","cwd":"/w","status":"live","harness":"codex",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}"}},
+               {{"name":"cx-no-id","cwd":"/w","status":"live","harness":"codex",
+                "host_mode":"interactive","short_id":""}},
+               {{"name":"cx-pane","cwd":"/w","status":"live","harness":"codex",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}",
+                "mux":{{"session":"s","pane_id":4}}}},
+               {{"name":"cx-exec","cwd":"/w","status":"live","harness":"codex",
+                "short_id":"","harness_session_id":"{uuid}"}},
+               {{"name":"agy-row","cwd":"/w","status":"live","harness":"agy",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}"}},
+               {{"name":"oc-row","cwd":"/w","status":"live","harness":"opencode",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}"}},
+               {{"name":"gm-row","cwd":"/w","status":"live","harness":"gemini",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}"}}"#
+        ));
+        let rows = derive_rows(&raw, NOW).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        let reach = |n: &str| {
+            let row = get(n);
+            thread_reach(row.harness.as_deref(), row.attach_id.as_deref())
+        };
+
+        // AC11: the live thread row carries its session id and drives.
+        assert_eq!(get("cx-thread").attach_id.as_deref(), Some(uuid));
+        assert_eq!(reach("cx-thread"), Reach::Drive);
+
+        // AC12: no session id recorded, so no attach form resolved and the
+        // tier is what it was before this change.
+        assert_eq!(get("cx-no-id").attach_id, None);
+        assert_eq!(reach("cx-no-id"), Reach::Follow);
+
+        // A codex PANE row keeps navigating to its tab: its process already
+        // has a place, and a second view of it is not what selecting the row
+        // means.
+        assert_eq!(get("cx-pane").attach_id, None);
+        // A one-shot exec codex row is not a thread either.
+        assert_eq!(get("cx-exec").attach_id, None);
+
+        // AC13: no other harness gained a tier.
+        for name in ["agy-row", "oc-row", "gm-row"] {
+            assert_eq!(
+                get(name).attach_id,
+                None,
+                "{name} must resolve no attach form"
+            );
+        }
+        assert_eq!(reach("agy-row"), Reach::Locate);
+        assert_eq!(reach("oc-row"), Reach::Locate);
+        assert_eq!(reach("gm-row"), Reach::Locate);
+    }
+
+    /// AC14-HP, AC16-EDGE (x-6678): the codex attach argv execs codex's own
+    /// resume verb against the shared control socket, and honours a relocated
+    /// `CODEX_HOME` instead of hardcoding `~/.codex`.
+    #[test]
+    fn codex_attach_argv_execs_resume_against_the_control_socket() {
+        let argv = super::codex_attach_argv("01a04546-28b2-7a41-ae4c-892bbeb8e295");
+        assert_eq!(
+            argv[..4],
+            [
+                "codex".to_string(),
+                "resume".to_string(),
+                "01a04546-28b2-7a41-ae4c-892bbeb8e295".to_string(),
+                "--remote".to_string(),
+            ]
+        );
+        assert_eq!(
+            argv[4],
+            format!("unix://{}", super::codex_app_server_socket_path().display())
+        );
+        assert_eq!(argv.len(), 5, "the argv is the exec target, nothing more");
     }
 
     #[test]

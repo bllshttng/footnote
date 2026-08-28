@@ -71,6 +71,13 @@ status_pattern = 'Model:\s+(?P<model>\S+).*?(?:reasoning|effort)\s+(?P<effort>mi
 [harness.codex]
 permission_bypass = ["--dangerously-bypass-approvals-and-sandbox"]
 resume = "native-thread"
+# A codex thread lives on the SHARED `codex app-server daemon`, which owns it.
+# So it survives mux death AND `fno-agents-daemon` death: neither process
+# holds it. The bit was first flipped for mux survival alone, when the lane
+# forked a private app-server per worker as a child of `fno-agents-daemon`.
+# That child did survive mux death and did not obviously survive its own
+# parent's, so the bit promised more than it delivered; measured 2026-08-27,
+# corrected 2026-08-28 (docs/architecture/codex-thread-driver.md).
 thread = true
 autonomous_pane = true
 route_on_pane = false

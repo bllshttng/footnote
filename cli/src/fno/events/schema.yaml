@@ -2255,6 +2255,21 @@ event_types:
         error:
           type: string
 
+  - name: agent_stop_refused
+    description: "A stop request left the agent running because the interrupt never settled."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        backend:
+          type: string
+          description: "Driver that refused the stop (e.g. codex-thread)."
+        interrupt:
+          type: string
+          description: "Outcome of the interrupt attempt (e.g. no-turn, refused, timeout)."
+
   - name: daemon_recovery_error
     description: "An error occurred during the daemon recovery/orphan-reap sweep."
     sources: [daemon]

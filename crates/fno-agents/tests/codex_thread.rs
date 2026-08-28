@@ -1,8 +1,10 @@
+use fno_agents::codex_fake_daemon::{Behavior, FakeDaemon, Interrupt, Steer};
 use fno_agents::codex_thread::{
     parse_thread_start_response, thread_start_request_json, CodexThread, CodexThreadActor,
     InterruptOutcome, ThreadStartError,
 };
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[test]
 fn thread_start_reads_nested_thread_id_and_rejects_top_level_alias() {
@@ -25,247 +27,62 @@ fn thread_start_reads_nested_thread_id_and_rejects_top_level_alias() {
     );
 }
 
-/// A stub app-server on PATH: enough protocol to start a thread, then a turn
-/// that streams MORE frames than the old frame ceiling and goes quiet LONGER
-/// than the old per-frame timeout before completing. The journey test's live
-/// seed answers in a handful of frames and well under 15s, so it cleared both
-/// old bounds by being small; this fixture is the scale the real lane runs at.
-const FAKE_APP_SERVER: &str = r#"#!/usr/bin/env python3
-import json, sys, time
+/// Serializes every `CODEX_HOME` mutation in this binary: two fake daemons
+/// must never overlap, because the variable that points the driver at one is
+/// process-global.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+/// Run `body` against a fake SHARED app-server daemon.
+///
+/// The fakes these tests used to install were `codex app-server` children on
+/// PATH speaking newline-delimited JSON on stdio. That is the transport this
+/// lane stopped using, so they stopped covering the driver and started
+/// reaching the operator's real daemon instead.
+async fn with_fake_daemon(behavior: Behavior, body: impl std::future::Future<Output = ()>) {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _daemon = FakeDaemon::start(behavior);
+    body.await;
+}
 
-for line in sys.stdin:
-    try:
-        msg = json.loads(line)
-    except ValueError:
-        continue
-    method = msg.get("method")
-    if method == "initialize":
-        send({"id": msg.get("id"), "result": {}})
-    elif method == "thread/start":
-        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-bounds", "path": "/tmp/fake-rollout.jsonl"}}})
-    elif method == "turn/start":
-        send({"id": msg.get("id"), "result": {"turn": {"id": "turn-bounds"}}})
-        for i in range(300):
-            send({"method": "turn/event", "params": {"seq": i}})
-        time.sleep(16)
-        send({"method": "turn/completed", "params": {"turn": {"id": "turn-bounds", "status": "completed", "items": [{"type": "agentMessage", "text": "BOUNDS_EXCEEDED_TOKEN"}]}}})
-"#;
-
-#[tokio::test]
+/// A turn that streams MORE frames than the old frame ceiling and goes quiet
+/// LONGER than the old per-frame timeout before completing. The journey
+/// test's live seed answers in a handful of frames and well under 15s, so it
+/// cleared both old bounds by being small; this is the scale the real lane
+/// runs at.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn turn_survives_more_frames_and_a_longer_gap_than_the_old_bounds() {
-    with_fake_codex(FAKE_APP_SERVER, async {
+    let behavior = Behavior::quick()
+        .with_thread_id("thread-bounds")
+        .with_event_frames(300)
+        .with_turn_duration(Duration::from_secs(16));
+    with_fake_daemon(behavior, async {
         let worktree = tempfile::tempdir().unwrap();
         let mut thread = CodexThread::start(worktree.path(), None, false, None)
             .await
-            .expect("thread starts against the stub app-server");
-        let result = thread.drive_turn("run the wide turn").await;
-        let turn = result.expect("turn completes under the whole-turn budget");
-        assert_eq!(turn.turn_id, "turn-bounds");
-        assert_eq!(turn.text, "BOUNDS_EXCEEDED_TOKEN");
+            .expect("thread starts against the fake daemon");
+        assert_eq!(thread.thread_id(), "thread-bounds");
+        let turn = thread
+            .drive_turn("run the wide turn")
+            .await
+            .expect("turn completes under the whole-turn budget");
+        assert_eq!(turn.turn_id, "turn-1");
+        assert_eq!(turn.text, "REPLY-1");
     })
     .await;
 }
 
 // ---------------------------------------------------------------------------
-// Actor tests (single-owner rewrite, x-de10). Every script is a self-contained
-// fake app-server with the scenario's behavior hardcoded (no env knobs: tests
-// in one binary share the process environment, so per-test env would race).
+// Actor tests (single-owner rewrite, x-de10). Each names the scenario it needs
+// through the shared fake's knobs rather than embedding its own app-server.
 // ---------------------------------------------------------------------------
-
-/// Serializes every PATH mutation in this binary: `set_var`/`remove_var` race
-/// when two fake-codex tests run concurrently and one restores PATH under the
-/// other's feet, resolving `codex` to the REAL binary mid-test.
-static PATH_LOCK: Mutex<()> = Mutex::new(());
-
-async fn with_fake_codex(script: &str, body: impl std::future::Future<Output = ()>) {
-    let _guard = PATH_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let bin_dir = tempfile::tempdir().unwrap();
-    let fake = bin_dir.path().join("codex");
-    std::fs::write(&fake, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    let saved_path = std::env::var_os("PATH");
-    let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
-    prefixed.push(":");
-    if let Some(rest) = saved_path.as_ref() {
-        prefixed.push(rest);
-    }
-    std::env::set_var("PATH", &prefixed);
-    body.await;
-    if let Some(path) = saved_path {
-        std::env::set_var("PATH", path);
-    } else {
-        std::env::remove_var("PATH");
-    }
-}
-
-/// Shared fake skeleton: a reader thread queues stdin lines so a turn's sleep
-/// can answer steer/interrupt MID-TURN (a sequential `for line in sys.stdin`
-/// fake cannot - it sleeps inside the turn/start branch and leaves the
-/// interrupt unread for 30s, which is not how the real app-server behaves).
-/// Each scenario embeds it with its own turn-wait inner loop.
-fn queue_fake(turn_wait_body: &str) -> String {
-    format!(
-        r#"#!/usr/bin/env python3
-import json, sys, time, threading, queue
-
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-q = queue.Queue()
-def _reader():
-    for line in sys.stdin:
-        q.put(line)
-threading.Thread(target=_reader, daemon=True).start()
-
-turn_n = 0
-while True:
-    try:
-        msg = json.loads(q.get())
-    except Exception:
-        break
-    method = msg.get("method")
-    if method == "initialize":
-        send({{"id": msg.get("id"), "result": {{}}}})
-    elif method == "thread/start":
-        send({{"id": msg.get("id"), "result": {{"thread": {{"id": "thread-actor", "path": "/tmp/fake-actor-rollout.jsonl"}}}}}})
-    elif method == "turn/start":
-        turn_n += 1
-        send({{"id": msg.get("id"), "result": {{"turn": {{"id": f"turn-{{turn_n}}"}}}}}})
-{turn_wait_body}
-        send({{"method": "turn/completed", "params": {{"turn": {{"id": f"turn-{{turn_n}}", "status": "completed", "items": [{{"type": "agentMessage", "text": f"REPLY-{{turn_n}}"}}]}}}}}})
-"#
-    )
-}
-
-/// AC1: a turn that completes 1.2s in; a steer arriving mid-turn acks into the
-/// SAME turn immediately.
-fn fake_steer() -> String {
-    queue_fake(
-        r#"        end = time.time() + 1.2
-        steered = False
-        while time.time() < end:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/steer" and not steered:
-                send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-                steered = True"#,
-    )
-}
-
-/// AC2: a steer arriving mid-turn fails its expectedTurnId precondition
-/// immediately (the turn completed in the race window); the completion still
-/// arrives at the 1.2s mark, and the next turn/start drives a fresh turn.
-fn fake_precondition() -> String {
-    queue_fake(
-        r#"        end = time.time() + 1.2
-        failed = False
-        while time.time() < end:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/steer" and not failed:
-                send({"id": m2.get("id"), "error": {"message": f"turn-{turn_n} is not active"}})
-                failed = True"#,
-    )
-}
-
-/// AC5/AC17: a turn that would run 30s unless interrupted; interrupt acks and
-/// completes the turn as `interrupted` immediately.
-fn fake_interrupt() -> String {
-    queue_fake(
-        r#"        end = time.time() + 30
-        interrupted = False
-        while time.time() < end:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/interrupt" and not interrupted:
-                send({"id": m2.get("id"), "result": {}})
-                send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "interrupted", "items": []}}})
-                interrupted = True
-                sys.exit(0)"#,
-    )
-}
-
-/// The foreign-completion wedge: mid-turn, a `turn/completed` for a turn id
-/// nobody drives arrives (the review lane's own turn, a stale completion
-/// racing a retry), then the REAL completion lands normally.
-fn fake_foreign_completion() -> String {
-    queue_fake(
-        r#"        time.sleep(0.6)
-        send({"method": "turn/completed", "params": {"turn": {"id": "turn-stray", "status": "completed", "items": [{"type": "agentMessage", "text": "STRAY"}]}}})
-        time.sleep(0.6)"#,
-    )
-}
-
-/// The stacked-bounds wedge: interrupt acks SLOWLY (1s) and the turn never
-/// completes. Against stacked full bounds the settle wait then runs its own
-/// 65s after the ack; against the shared budget it gets only the remainder.
-fn fake_slow_interrupt_ack() -> String {
-    queue_fake(
-        r#"        end = time.time() + 30
-        interrupted = False
-        while time.time() < end:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/interrupt" and not interrupted:
-                time.sleep(1.0)
-                send({"id": m2.get("id"), "result": {}})
-                interrupted = True"#,
-    )
-}
-
-/// AC3: a turn that completes 1.5s in - slower than the caller's bounded wait,
-/// fast enough to observe the late receipt. No mid-turn input, so no queue
-/// needed.
-const FAKE_LATE: &str = r#"#!/usr/bin/env python3
-import json, sys, time
-
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-turn_n = 0
-
-for line in sys.stdin:
-    try:
-        msg = json.loads(line)
-    except ValueError:
-        continue
-    method = msg.get("method")
-    if method == "initialize":
-        send({"id": msg.get("id"), "result": {}})
-    elif method == "thread/start":
-        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-actor", "path": "/tmp/fake-actor-rollout.jsonl"}}})
-    elif method == "turn/start":
-        turn_n += 1
-        send({"id": msg.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-        time.sleep(1.5)
-        send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": "LATE_REPLY"}]}}})
-"#;
 
 async fn start_actor() -> (CodexThreadActor, tempfile::TempDir) {
     let worktree = tempfile::tempdir().unwrap();
     let driver = CodexThread::start(worktree.path(), None, false, None)
         .await
-        .expect("thread starts against the fake app-server");
+        .expect("thread starts against the fake daemon");
     (driver.into_actor(Arc::new(|_| {})), worktree)
 }
 
@@ -277,7 +94,7 @@ async fn start_actor() -> (CodexThreadActor, tempfile::TempDir) {
 /// probe that fails on the old code; this pins the actor's half.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn submit_while_driving_steers_into_the_shared_turn() {
-    with_fake_codex(&fake_steer(), async {
+    with_fake_daemon(Behavior::quick(), async {
         let (actor, _keep) = start_actor().await;
         let reply_a = actor.submit("first question".into()).await.unwrap();
         // Give the actor time to receive the turn/start ack (turn 1 driving).
@@ -314,33 +131,36 @@ async fn submit_while_driving_steers_into_the_shared_turn() {
 /// a reply from the new turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_precondition_failure_drains_then_retries_fresh_start() {
-    with_fake_codex(&fake_precondition(), async {
-        let (actor, _keep) = start_actor().await;
-        let reply_a = actor.submit("first".into()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // Turn 1 is driving server-side but completes 200ms in; submit B so the
-        // steer lands while the actor still holds turn-1 as driving, forcing
-        // the precondition error + drain path.
-        let reply_b = actor.submit("second".into()).await.unwrap();
-        let a = tokio::time::timeout(std::time::Duration::from_secs(15), reply_a)
-            .await
-            .expect("first submit resolves from the drained completion")
-            .unwrap()
-            .expect("turn 1 receipt");
-        let b = tokio::time::timeout(std::time::Duration::from_secs(15), reply_b)
-            .await
-            .expect("retried submit resolves")
-            .unwrap()
-            .expect("fresh turn receipt");
-        assert_eq!(a.turn_id, "turn-1");
-        assert_eq!(a.text, "REPLY-1");
-        assert_eq!(
-            b.turn_id, "turn-2",
-            "the retry is a fresh turn/start, not a second steer"
-        );
-        assert_eq!(b.text, "REPLY-2");
-        actor.shutdown().await.unwrap();
-    })
+    with_fake_daemon(
+        Behavior::quick().with_steer(Steer::FailPreconditionOnce),
+        async {
+            let (actor, _keep) = start_actor().await;
+            let reply_a = actor.submit("first".into()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Turn 1 is driving server-side but completes 200ms in; submit B so the
+            // steer lands while the actor still holds turn-1 as driving, forcing
+            // the precondition error + drain path.
+            let reply_b = actor.submit("second".into()).await.unwrap();
+            let a = tokio::time::timeout(std::time::Duration::from_secs(15), reply_a)
+                .await
+                .expect("first submit resolves from the drained completion")
+                .unwrap()
+                .expect("turn 1 receipt");
+            let b = tokio::time::timeout(std::time::Duration::from_secs(15), reply_b)
+                .await
+                .expect("retried submit resolves")
+                .unwrap()
+                .expect("fresh turn receipt");
+            assert_eq!(a.turn_id, "turn-1");
+            assert_eq!(a.text, "REPLY-1");
+            assert_eq!(
+                b.turn_id, "turn-2",
+                "the retry is a fresh turn/start, not a second steer"
+            );
+            assert_eq!(b.text, "REPLY-2");
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -349,7 +169,7 @@ async fn steer_precondition_failure_drains_then_retries_fresh_start() {
 /// it is the interrupt handle after any caller-side timeout.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_mid_turn_resolves_interrupted_and_survives_as_handle() {
-    with_fake_codex(&fake_interrupt(), async {
+    with_fake_daemon(Behavior::long(), async {
         let (actor, _keep) = start_actor().await;
         let reply = actor.submit("long turn".into()).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -385,23 +205,27 @@ async fn interrupt_mid_turn_resolves_interrupted_and_survives_as_handle() {
 /// here in seconds instead of 66.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_settle_shares_one_deadline_with_the_ack_wait() {
-    with_fake_codex(&fake_slow_interrupt_ack(), async {
-        std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
-        let (actor, _keep) = start_actor().await;
-        let _reply = actor.submit("long turn".into()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(actor.current_turn_id().as_deref(), Some("turn-1"));
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), actor.interrupt())
-            .await
-            .expect("interrupt answers inside the shared budget, not the stacked 66s")
-            .unwrap();
-        assert!(
-            matches!(outcome, InterruptOutcome::Timeout),
-            "the settle wait consumed the remaining budget: {outcome:?}"
-        );
-        std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
-        actor.shutdown().await.unwrap();
-    })
+    with_fake_daemon(
+        Behavior::long().with_interrupt(Interrupt::AckOnly(Duration::from_secs(1))),
+        async {
+            std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
+            let (actor, _keep) = start_actor().await;
+            let _reply = actor.submit("long turn".into()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(actor.current_turn_id().as_deref(), Some("turn-1"));
+            let outcome =
+                tokio::time::timeout(std::time::Duration::from_secs(5), actor.interrupt())
+                    .await
+                    .expect("interrupt answers inside the shared budget, not the stacked 66s")
+                    .unwrap();
+            assert!(
+                matches!(outcome, InterruptOutcome::Timeout),
+                "the settle wait consumed the remaining budget: {outcome:?}"
+            );
+            std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -412,23 +236,26 @@ async fn interrupt_settle_shares_one_deadline_with_the_ack_wait() {
 /// on the first foreign completion.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foreign_completion_leaves_the_driving_turn_untouched() {
-    with_fake_codex(&fake_foreign_completion(), async {
-        let (actor, _keep) = start_actor().await;
-        let reply = actor.submit("drive me".into()).await.unwrap();
-        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
-            .await
-            .expect("the driving turn's waiter survives the foreign completion")
-            .unwrap()
-            .expect("turn 1 receipt");
-        assert_eq!(turn.turn_id, "turn-1");
-        assert_eq!(turn.text, "REPLY-1");
-        assert_eq!(
-            actor.current_turn_id(),
-            None,
-            "cleared by the real completion, not the stray"
-        );
-        actor.shutdown().await.unwrap();
-    })
+    with_fake_daemon(
+        Behavior::quick().with_stray_completion_after(Duration::from_millis(600)),
+        async {
+            let (actor, _keep) = start_actor().await;
+            let reply = actor.submit("drive me".into()).await.unwrap();
+            let turn = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
+                .await
+                .expect("the driving turn's waiter survives the foreign completion")
+                .unwrap()
+                .expect("turn 1 receipt");
+            assert_eq!(turn.turn_id, "turn-1");
+            assert_eq!(turn.text, "REPLY-1");
+            assert_eq!(
+                actor.current_turn_id(),
+                None,
+                "cleared by the real completion, not the stray"
+            );
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -440,66 +267,74 @@ async fn foreign_completion_leaves_the_driving_turn_untouched() {
 async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
     let done: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let seen = Arc::clone(&done);
-    with_fake_codex(FAKE_LATE, async move {
-        let worktree = tempfile::tempdir().unwrap();
-        let driver = CodexThread::start(worktree.path(), None, false, None)
-            .await
-            .expect("thread starts");
-        let actor = driver.into_actor(Arc::new(move |receipt| {
-            seen.lock().unwrap().push(receipt.turn_id.clone());
-        }));
-        let reply = actor.submit("slow question".into()).await.unwrap();
-        let expired = tokio::time::timeout(std::time::Duration::from_millis(250), reply).await;
-        assert!(expired.is_err(), "the bounded wait expires first");
-        assert_eq!(
-            actor.current_turn_id().as_deref(),
-            Some("turn-1"),
-            "the id survives the expired wait as the interrupt handle"
-        );
-        // The caller drops its receiver (the in_flight ask already answered);
-        // the turn keeps running and the done callback still fires.
-        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-        assert_eq!(
-            done.lock().unwrap().as_slice(),
-            ["turn-1"],
-            "agent_ask_done hook fired exactly once at completion"
-        );
-        assert_eq!(actor.current_turn_id(), None);
-        actor.shutdown().await.unwrap();
-    })
+    with_fake_daemon(
+        Behavior::quick().with_turn_duration(Duration::from_millis(1500)),
+        async move {
+            let worktree = tempfile::tempdir().unwrap();
+            let driver = CodexThread::start(worktree.path(), None, false, None)
+                .await
+                .expect("thread starts");
+            let actor = driver.into_actor(Arc::new(move |receipt| {
+                seen.lock().unwrap().push(receipt.turn_id.clone());
+            }));
+            let reply = actor.submit("slow question".into()).await.unwrap();
+            let expired = tokio::time::timeout(std::time::Duration::from_millis(250), reply).await;
+            assert!(expired.is_err(), "the bounded wait expires first");
+            assert_eq!(
+                actor.current_turn_id().as_deref(),
+                Some("turn-1"),
+                "the id survives the expired wait as the interrupt handle"
+            );
+            // The caller drops its receiver (the in_flight ask already answered);
+            // the turn keeps running and the done callback still fires.
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            assert_eq!(
+                done.lock().unwrap().as_slice(),
+                ["turn-1"],
+                "agent_ask_done hook fired exactly once at completion"
+            );
+            assert_eq!(actor.current_turn_id(), None);
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
-/// AC5 (pid half): shutdown acks only AFTER the driver dropped, so
-/// `kill_on_drop` has already signaled the app-server child - a caller that
-/// waits for the ack never reads a live pid as stopped.
+/// AC5 (ownership half): shutdown closes THIS driver's connection and leaves
+/// the app-server running.
+///
+/// The assertion this replaces was the opposite one: the recorded pid had to
+/// be GONE within five seconds, because the driver owned a private
+/// app-server child and `kill_on_drop` ended it. Against the shared daemon
+/// that same assertion would demand a worker's stop kill every other codex
+/// session on the machine.
+///
+/// The positive marker is a FRESH connection succeeding after the shutdown
+/// ack: the daemon is still serving, which no absence check could establish.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn shutdown_kills_the_child_before_acking() {
-    with_fake_codex(&fake_interrupt(), async {
+async fn shutdown_closes_the_connection_and_leaves_the_daemon_serving() {
+    with_fake_daemon(Behavior::long(), async {
+        let socket = fno_agents::codex_inject::codex_app_server_socket_path();
         let (actor, _keep) = start_actor().await;
-        let pid = actor.pid().expect("fake app-server pid");
+        let pid = actor.pid().expect("the serving app-server pid");
+        assert_eq!(
+            pid,
+            std::process::id(),
+            "the recorded pid is the daemon's, not a child's"
+        );
         let _reply = actor.submit("long turn".into()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
         actor.shutdown().await.unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            // `kill -0` probes existence without signaling; success = alive.
-            let alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|status| status.success())
-                .unwrap_or(false);
-            if !alive {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "app-server child {pid} outlived the shutdown ack"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
+
+        let _reconnected = fno_agents::codex_inject::connect_app_server(&socket)
+            .await
+            .expect("the shared daemon still serves after one worker stopped");
+        // Further commands are refused: the actor is gone even though the
+        // daemon is not.
+        assert!(
+            actor.submit("after shutdown".into()).await.is_err(),
+            "a shut-down actor must refuse work"
+        );
     })
     .await;
 }

@@ -52,6 +52,11 @@ pub mod claude_roster;
 pub mod client;
 pub mod client_verbs;
 pub mod codex_ask;
+/// Test support: a fake shared codex app-server daemon. Public because the
+/// in-crate daemon tests and the integration tests both need one fake, and
+/// only a library item reaches both.
+#[doc(hidden)]
+pub mod codex_fake_daemon;
 pub mod codex_inject;
 pub mod codex_thread;
 mod completion_output;
@@ -666,6 +671,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     "agent_stopped",
+    // A stop the daemon REFUSED to claim: the interrupt never confirmed a
+    // terminal turn, so the row stays live and the work is still running.
+    "agent_stop_refused",
     "agent_exited",
     "agent_removed",
     "agent_inconsistent",

@@ -738,6 +738,18 @@ async fn run(args: Vec<String>) -> i32 {
                         eprintln!("{w}");
                     }
                 }
+                // (x-6678) A refused stop is not a success. The daemon answers
+                // `stopped: false` over a turn whose interrupt never settled,
+                // and the mux viewport's `run_agent_action` reads ONLY this
+                // exit code. A 0 there prints "stopped <name>" over a worker
+                // that is still running, which is the report the daemon arm
+                // refuses to make. `Busy` is the shape: the turn holds the
+                // thread, and a retry can still reach it.
+                if verb_owned == "stop"
+                    && result.get("stopped").and_then(Value::as_bool) == Some(false)
+                {
+                    return 18;
+                }
                 0
             }
         },
@@ -1352,7 +1364,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // daemon stays mandatory where it is load-bearing (inject/mail
             // ensure their own).
             let daemon_receipt = match fno_agents::codex_inject::ensure_codex_daemon() {
-                Ok(receipt) => Some(receipt),
+                Ok(result) => Some(result.receipt),
                 Err(error) => {
                     eprintln!("spawn: harness=codex daemon-ensure degraded: {error}");
                     None
@@ -2436,6 +2448,20 @@ fn format_success(
             }
         }
         "stop" => {
+            let outcome = result
+                .get("interrupt")
+                .and_then(|v| v.as_str())
+                .filter(|outcome| *outcome != "no-turn");
+            // The daemon REFUSED the stop: its interrupt never settled and the
+            // turn is still driving in the worker's worktree. Saying "stopped"
+            // here is the report-it-did-not-perform shape the daemon arm exists
+            // to prevent, so the word never appears on this path.
+            if result.get("stopped").and_then(Value::as_bool) == Some(false) {
+                return Some(format!(
+                    "stop refused: {name} is still running ({})",
+                    outcome.unwrap_or("the interrupt never settled")
+                ));
+            }
             let mut line = match result.get("short_id").and_then(|v| v.as_str()) {
                 Some(short_id) => format!("stopped: {name} ({short_id})"),
                 None => format!("stopped: {name}"),
@@ -2444,11 +2470,7 @@ fn format_success(
             // a bare "stopped" over an interrupt the daemon never confirmed is
             // the exact report-it-did-not-perform shape this field exists to
             // prevent. `no-turn` (nothing was driving) stays silent.
-            if let Some(outcome) = result
-                .get("interrupt")
-                .and_then(|v| v.as_str())
-                .filter(|outcome| *outcome != "no-turn")
-            {
+            if let Some(outcome) = outcome {
                 line.push_str(&format!(" (turn {outcome})"));
             }
             Some(line)
@@ -3475,8 +3497,6 @@ mod tests {
     // Task 2.1: format_success per-verb output (stop/rm stdout parity)
     // -----------------------------------------------------------------------
 
-    /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
-    #[test]
     /// A codex thread stop names the interrupt outcome; `no-turn` stays silent.
     #[test]
     fn format_success_stop_names_the_interrupt_outcome() {
@@ -3489,6 +3509,30 @@ mod tests {
         assert_eq!(out, "stopped: t");
     }
 
+    /// (x-6678) A refused stop never prints the word "stopped". The daemon
+    /// answers `stopped: false` over a turn its interrupt never settled, and
+    /// the old formatter read only `interrupt`, so it printed
+    /// "stopped: t (turn timeout-turn-still-running)" over a live worker.
+    #[test]
+    fn format_success_stop_refused_never_claims_a_stop() {
+        let result = json!({
+            "stopped": false,
+            "backend": "codex-thread",
+            "interrupt": "timeout-turn-still-running",
+        });
+        let out = format_success("stop", "t", &result, false, true, false).expect("stop line");
+        assert!(
+            !out.contains("stopped"),
+            "a refused stop must not report one: {out}"
+        );
+        assert_eq!(
+            out,
+            "stop refused: t is still running (timeout-turn-still-running)"
+        );
+    }
+
+    /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
+    #[test]
     fn format_success_stop_with_short_id() {
         let result = json!({"stopped": true, "short_id": "fo-1a2b"});
         let out = format_success("stop", "foo", &result, false, true, false);
