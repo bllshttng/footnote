@@ -856,9 +856,6 @@ def _emit_ledger_transition(entry: dict) -> None:
     the ledger write itself already succeeded, so missing telemetry
     should not fail the caller. See gate-provenance plan phase 02.
     """
-    import shlex
-    import subprocess
-
     root_path = entry.get("root_path")
     if not root_path:
         return
