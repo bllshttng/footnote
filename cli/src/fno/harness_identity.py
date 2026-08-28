@@ -961,12 +961,14 @@ def resolve_attester_identity(
             argv: list = getattr(proc, "cmdline", lambda: [])() or []
             # BASENAME, which is what the paragraph above already claims. argv[0]
             # is a full path, and `family_token in <full path>` matches any
-            # DIRECTORY carrying the token - so every process launched from a
-            # worktree under `.claude/worktrees/` read as a claude-family
-            # carrier, which is this repository's default worktree location.
-            # Measured: `test_attestation_attester_session_from_env_marker`
-            # passes on a checkout at /tmp and fails on the same checkout moved
-            # under a `.claude` path, because the emitter sees a family ancestor
+            # DIRECTORY carrying the token - so any process launched from a
+            # worktree whose path contains a harness family name read as a
+            # carrier of that family. The harness-native worktree root is
+            # exactly such a path, and it is this repository's default (the
+            # worktree convention rule states where). Measured:
+            # `test_attestation_attester_session_from_env_marker` passes on a
+            # checkout under /tmp and fails on the same checkout moved beneath
+            # such a directory, because the emitter then sees a family ancestor
             # that is really pytest.
             exe_name = os.path.basename(argv[0] if argv else proc.name()).lower()
         except psutil.Error:
