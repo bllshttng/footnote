@@ -27,6 +27,9 @@ from fno.graph.render import (
     UNSCOPED_LABEL,  # noqa: F401  re-exported for importers; see the note below
     _project_key,
 )
+# The status rule lives in statuses.py beside its closure test: one copy per
+# renderer is how the dashboard and the public roadmap came to disagree.
+from fno.graph.statuses import derived_status as _row_status
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -857,7 +860,7 @@ def _dashboard_rows(
                 successors.setdefault(blocker, []).append(successor)
     rows: list[dict] = []
     for entry in entries:
-        status = "done" if entry.get("completed_at") else str(entry.get("status") or "unknown")
+        status = _row_status(entry)
         row: dict[str, object] = {
             "s": status,
             "t": str(entry.get("title") or "(untitled)").replace("\n", " ").strip(),
@@ -890,7 +893,7 @@ def _dashboard_rows(
                     "ki": [
                         {
                             "id": str(child.get("id") or "?"),
-                            "s": str(child.get("status") or "unknown"),
+                            "s": _row_status(child),
                             "t": str(child.get("title") or "")[:90],
                             "ty": str(child.get("type") or ""),
                         }
@@ -919,7 +922,7 @@ def _dashboard_rows(
                     "su": [
                         {
                             "id": str(successor.get("id") or "?"),
-                            "s": str(successor.get("status") or "unknown"),
+                            "s": _row_status(successor),
                             "t": str(successor.get("title") or "")[:90],
                         }
                         for successor in successors.get(str(entry.get("id") or ""), ())
@@ -927,9 +930,8 @@ def _dashboard_rows(
                     "sb": (
                         {
                             "id": str(entry.get("superseded_by")),
-                            "s": str(
-                                index.get(entry.get("superseded_by"), {}).get("status")
-                                or "not found"
+                            "s": _row_status(
+                                index.get(entry.get("superseded_by")), "not found"
                             ),
                             "t": str(
                                 index.get(entry.get("superseded_by"), {}).get("title")
@@ -943,7 +945,7 @@ def _dashboard_rows(
                     "bb": [
                         {
                             "id": bid,
-                            "s": str(index.get(bid, {}).get("status") or "not found"),
+                            "s": _row_status(index.get(bid), "not found"),
                             "t": str(index.get(bid, {}).get("title") or "")[:90],
                         }
                         for bid in entry.get("blocked_by") or []

@@ -792,3 +792,144 @@ def test_the_public_board_removes_the_id_track_not_just_its_width():
     # The narrow layout re-points meta and dot, which would otherwise address
     # a column that no longer exists on a public board.
     assert 'body[data-local="false"] .meta, body[data-local="false"] .dot { grid-column:1 }' in css
+
+
+def test_a_child_completed_at_beats_its_stale_open_status_in_the_parent_rollup():
+    """A legacy child carrying completed_at beside an open status must summarise
+    as done in the parent's `ki`, the same rule the child's own row already uses.
+    Without it kidBar() counts a finished child as open, so parent progress
+    contradicts the child row rendered directly beneath it."""
+    entries = [
+        _entry("ab-00000010", project="fno", title="parent"),
+        _entry(
+            "ab-00000011",
+            project="fno",
+            title="legacy child",
+            parent="ab-00000010",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000011"]["s"] == "done", "control: the child's own row"
+    assert rows["ab-00000010"]["ki"] == [
+        {"id": "ab-00000011", "s": "done", "t": "legacy child", "ty": "feature"}
+    ], "the parent rollup must agree with the child's own row"
+
+
+def test_completed_at_beats_a_stale_status_in_every_relation_projection():
+    """The rule the row's own status uses must hold in all four projections.
+    Fixing `ki` alone left `su`, `bb` and `sb` reading status raw, so a finished
+    dependency still rendered open inside the red Dependencies box and the node
+    read as blocked by work that was done."""
+    entries = [
+        _entry(
+            "ab-00000020",
+            project="fno",
+            title="finished blocker",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "ab-00000021",
+            project="fno",
+            title="dependent",
+            blocked_by=["ab-00000020"],
+            superseded_by="ab-00000020",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000020"]["s"] == "done", "control: the blocker's own row"
+    assert rows["ab-00000021"]["bb"] == [
+        {"id": "ab-00000020", "s": "done", "t": "finished blocker"}
+    ], "Dependencies must not show a finished blocker as open"
+    assert rows["ab-00000021"]["sb"] == {
+        "id": "ab-00000020",
+        "s": "done",
+        "t": "finished blocker",
+    }, "Superseded by must agree with the row"
+    assert rows["ab-00000020"]["su"] == [
+        {"id": "ab-00000021", "s": "ready", "t": "dependent"}
+    ], "an unfinished successor still reads its own stored status"
+
+
+def test_an_unresolvable_relation_id_still_reports_not_found():
+    """The shared helper must keep the missing-row fallback the projections had:
+    an id absent from the index is 'not found', never 'unknown'."""
+    entries = [_entry("ab-00000030", project="fno", blocked_by=["ab-missing1"])]
+
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000030"]["bb"] == [{"id": "ab-missing1", "s": "not found", "t": ""}]
+
+
+def test_a_legacy_deferred_sentinel_in_completed_at_is_not_read_as_done():
+    """A pre-migration row encodes deferral INSIDE completed_at as a `deferred:`
+    sentinel, and deferral is a returnable rung. The render path reads through
+    read_graph_with_archive, which does not run the recompute migration, so the
+    sentinel arrives intact. A bare truthiness test relabels that work done: the
+    parent shows a full kidBar and a deferred blocker reads as finished inside
+    the Dependencies box, so the node looks unblocked."""
+    entries = [
+        _entry("ab-00000040", project="fno", title="parent"),
+        _entry(
+            "ab-00000041",
+            project="fno",
+            title="legacy deferred",
+            parent="ab-00000040",
+            status="deferred",
+            completed_at="deferred:2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "ab-00000042",
+            project="fno",
+            title="really done",
+            parent="ab-00000040",
+            status="ready",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000041"]["s"] == "deferred", "the sentinel is not a completion"
+    assert rows["ab-00000042"]["s"] == "done", "control: a real timestamp still closes"
+    assert sorted((k["id"], k["s"]) for k in rows["ab-00000040"]["ki"]) == [
+        ("ab-00000041", "deferred"),
+        ("ab-00000042", "done"),
+    ], "the parent rollup must not count deferred work as finished"
+
+
+def test_a_terminal_status_without_a_timestamp_keeps_its_stored_status():
+    """`superseded` carrying no completed_at reads as itself, not as done."""
+    entries = [_entry("ab-00000050", project="fno", status="superseded")]
+
+    rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
+
+    assert rows["ab-00000050"]["s"] == "superseded"
+
+
+def test_the_public_backlog_agrees_with_the_dashboard_on_a_stale_completed_row():
+    """The fifth reader. `public_backlog_entries` selected on raw `status`, so an
+    archived row carrying completed_at beside a stale open status stayed in the
+    published backlog while the dashboard and the roadmap both called it done.
+    Both controls matter: the filter must still list genuinely open work, and it
+    must still list a legacy-deferred row, whose sentinel is not a completion."""
+    from fno.graph.roadmap_public import public_backlog_entries
+
+    stale = _entry(
+        "ab-00000060", project="fno", status="ready",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    live = _entry("ab-00000061", project="fno", status="ready")
+    deferred = _entry(
+        "ab-00000062", project="fno", status="ready",
+        completed_at="deferred:2026-01-01T00:00:00Z",
+    )
+
+    listed = [e["id"] for e in public_backlog_entries([stale, live, deferred], "fno")]
+
+    assert "ab-00000060" not in listed, "a completed row is not open backlog"
+    assert "ab-00000061" in listed, "control: genuinely open work still lists"
+    assert "ab-00000062" in listed, "control: the deferred sentinel is not a completion"

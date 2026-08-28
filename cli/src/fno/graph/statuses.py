@@ -62,6 +62,40 @@ def is_terminal_entry(entry: object) -> bool:
     return bool(completed) and not str(completed).startswith(_LEGACY_DEFER_PREFIX)
 
 
+def derived_status(entry: object, missing: str = "unknown") -> str:
+    """The one status string every reader of a row must agree on.
+
+    A legacy or archived row can carry ``completed_at`` beside a stale open
+    status. A reader that takes ``status`` raw then contradicts the row shown
+    beside it: a finished dependency renders open inside the Dependencies box,
+    a parent rollup counts it open, and the public backlog lists work the
+    dashboard calls done.
+
+    Closure is asked of ``is_terminal_entry``, never of a bare ``completed_at``
+    truthiness test, which that helper's docstring forbids. The ``deferred:``
+    sentinel a pre-migration row hides in ``completed_at`` is a RETURNABLE rung,
+    and the render path reads through ``read_graph_with_archive``, which does
+    not run the recompute migration, so the sentinel arrives intact.
+
+    The ``completed_at`` term keeps a row terminal by ``status`` alone, carrying
+    no timestamp, on its stored status. A ``superseded`` row that DOES carry
+    ``completed_at`` reads ``done``, which is long-standing renderer behaviour
+    and is left unchanged.
+
+    ``missing`` is the caller's word for an entry that is absent entirely, so a
+    relation pointing at an id no longer in the graph keeps saying ``not found``
+    rather than ``unknown``.
+
+    Homed here, beside ``is_terminal_entry``, because a copy of this rule per
+    renderer is how the dashboard and the public roadmap came to disagree.
+    """
+    if not isinstance(entry, dict) or not entry:
+        return missing
+    if is_terminal_entry(entry) and entry.get("completed_at"):
+        return "done"
+    return str(entry.get("status") or missing)
+
+
 def _rung_to_graph_status() -> dict:
     """Plan rung -> derived graph status. Total over ``Rung`` by construction.
 
