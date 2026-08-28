@@ -267,6 +267,12 @@ def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
             report.update({
                 "requested": 2,
                 "filled": len(receipts),
+                "dispatched": sum(
+                    receipt.get("status") == "dispatched" for receipt in receipts
+                ),
+                "skipped": sum(
+                    receipt.get("status") == "skipped" for receipt in receipts
+                ),
                 "stop": "filled" if len(receipts) == 2 else "no-candidate",
                 "excluded": [],
             })

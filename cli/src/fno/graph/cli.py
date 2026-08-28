@@ -5088,8 +5088,10 @@ def cmd_dispatch_lanes(
     Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
     ``.fno/config.local.toml`` (x-cbce: own project.id), and
-    spawns a detached ``/target --no-merge`` worker rooted there. Prints one JSON
-    receipt per lane (``status`` dispatched | skipped). ``max_lanes < 1`` spawns
+    spawns a detached ``/target`` worker rooted there (merge posture per
+    ``config.auto_merge.grant``). Prints one JSON object: ``lanes`` (one receipt
+    per selected lane, ``status`` dispatched | skipped) plus a ``fill`` summary.
+    ``max_lanes < 1`` spawns
     nothing (a single lane is the daemon's sequential path).
     """
     from fno.dispatch_flags import (
@@ -5144,17 +5146,15 @@ def cmd_dispatch_lanes(
         vendor=provider,
         report=fill,
     )
+    # dispatch_lanes fills every key before returning (both the no-selection and
+    # completion paths write the report), so the shape is read directly.
     fill_output = {
-        "requested": fill.get("requested", max_lanes),
-        "selected": fill.get("filled", len(receipts)),
-        "dispatched": fill.get("dispatched", sum(
-            receipt.get("status") == "dispatched" for receipt in receipts
-        )),
-        "skipped": fill.get("skipped", sum(
-            receipt.get("status") == "skipped" for receipt in receipts
-        )),
-        "stop": fill.get("stop", "no-candidate"),
-        "excluded": fill.get("excluded", []),
+        "requested": fill["requested"],
+        "selected": fill["filled"],
+        "dispatched": fill["dispatched"],
+        "skipped": fill["skipped"],
+        "stop": fill["stop"],
+        "excluded": fill["excluded"],
     }
     typer.echo(json.dumps({"lanes": receipts, "fill": fill_output}, indent=2))
     if receipts and not any(
