@@ -2388,7 +2388,6 @@ async fn probe_update_readiness() -> UpdateOutcome {
 /// intentionally absent - there is no config-reload machinery to route it to
 /// (a net-new capability, not a re-route), so the menu advertises only what
 /// actually works.
-#[cfg(test)]
 fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
@@ -25162,7 +25161,7 @@ mod tests {
     /// the same framed block the click router hit-tests against.
     fn overlay_footer_cell(layout: &OverlayLayout) -> (u16, u16) {
         for (li, line) in layout.framed.lines.iter().enumerate() {
-            if let Some(&(t, off, len)) = line
+            if let Some(&(_t, off, len)) = line
                 .hits
                 .iter()
                 .find(|(t, _, _)| *t == crate::chrome::ESC_CLOSE_HIT)
