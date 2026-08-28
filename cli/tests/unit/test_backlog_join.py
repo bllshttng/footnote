@@ -1,0 +1,211 @@
+"""Unit tests for ``fno backlog join`` (x-8d1d, epic x-956c joiner 2).
+
+``join_node`` resolves the holder's worktree from the LIVE node claim,
+computes the bound plan's ready-graph width, and spawns
+``min(workers, width - 1)`` ``/fno:execute waves <plan>`` joiners there as
+visitors. The graph and claim seams are monkeypatched; the plan fixtures are
+real files (the width walk runs the actual parser); the spawn subprocess is
+recorded, never run.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from fno.backlog import advance
+from fno.backlog.advance import JoinRefuse, SpawnError, _plan_parallel_width, join_node
+
+PARALLEL_PLAN = """---
+title: t
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: parallel
+    tasks: ['1.1', '1.2', '1.3']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['src/a.py']
+  - id: '1.2'
+    title: b
+    surface: ['src/b.py']
+  - id: '1.3'
+    title: c
+    surface: ['src/c.py']
+```
+"""
+
+SEQUENTIAL_PLAN = """---
+title: t
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: sequential
+waves:
+  - wave: 1
+    tasks: ['1.1']
+  - wave: 2
+    tasks: ['2.1']
+  - wave: 3
+    tasks: ['3.1']
+  - wave: 4
+    tasks: ['4.1']
+  - wave: 5
+    tasks: ['5.1']
+tasks:
+  - id: '1.1'
+    title: a
+  - id: '2.1'
+    title: b
+  - id: '3.1'
+    title: c
+  - id: '4.1'
+    title: d
+  - id: '5.1'
+    title: e
+```
+"""
+
+
+def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True):
+    """Mock join's seams; returns the recorded spawn calls."""
+    calls: list[dict] = []
+    entry: dict = {"id": "x-8d1d", "slug": "joiner-2"}
+    if plan_text is not None:
+        plan = tmp_path / "plan.md"
+        plan.write_text(plan_text)
+        entry["plan_path"] = str(plan)
+    status: dict = {"key": "node:x-8d1d", "state": claim_state}
+    if worktree:
+        status["metadata"] = {"worktree": str(tmp_path / "wt")}
+        (tmp_path / "wt").mkdir(exist_ok=True)
+
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda *_a, **_k: [entry])
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr("fno.claims.core.claim_status", lambda key, root=None: status)
+    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    # Plan fixtures are absolute; skip resolve_plan_path's git rev-parse so the
+    # recorded spawn calls carry ONLY join's own spawns.
+    monkeypatch.setattr(
+        "fno.graph.collision.resolve_plan_path", lambda p: tmp_path / "plan.md"
+    )
+
+    class _Proc:
+        returncode = 0
+        stdout = '{"name": "j", "short_id": "abcd1234"}\n'
+        stderr = ""
+
+    monkeypatch.setattr(
+        advance.subprocess, "run",
+        lambda cmd, **_kw: (calls.append({"cmd": cmd, "env": _kw.get("env")}), _Proc())[1],
+    )
+    return calls
+
+
+def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch):
+    """AC1-HP: three disjoint parallel tasks -> two joiners, first is lead."""
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    receipt = join_node("x-8d1d", 3)
+    assert receipt == {
+        "node": "x-8d1d",
+        "worktree": str(tmp_path / "wt"),
+        "width": 3,
+        "spawned": ["j-x-8d1d-1", "j-x-8d1d-2"],
+        "lead": "j-x-8d1d-1",
+    }
+    assert len(calls) == 2
+    for call, name in zip(calls, receipt["spawned"]):
+        cmd = call["cmd"]
+        assert cmd[cmd.index("--substrate") + 1] == "thread"
+        assert cmd[cmd.index("--cwd") + 1] == str(tmp_path / "wt")
+        assert cmd[cmd.index("--name") + 1] == name
+        assert cmd[-1] == f"/fno:execute waves {tmp_path / 'plan.md'}"
+    # Joiner 1 is the mail hub; joiner 2's brief NAMES the hub (LD 3).
+    assert "lead joiner" in call_env(calls[0], "TARGET_BRIEF")
+    assert receipt["lead"] in call_env(calls[1], "TARGET_BRIEF")
+
+
+def call_env(call, key):
+    return (call["env"] or {}).get(key, "")
+
+
+def test_join_worker_count_capped_at_width_minus_one(tmp_path, monkeypatch):
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    receipt = join_node("x-8d1d", 5)
+    assert len(calls) == 2
+    assert len(receipt["spawned"]) == 2
+
+
+def test_sequential_plan_refuses_width_one(tmp_path, monkeypatch):
+    """AC1-ERR: five sequential waves -> exit 3, width 1."""
+    _wire(monkeypatch, tmp_path, SEQUENTIAL_PLAN)
+    assert _plan_parallel_width(tmp_path / "plan.md") == 1
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 3
+    assert "width 1: a second worker has nothing to pull" in str(excinfo.value)
+
+
+def test_shared_surface_serializes_and_shrinks_width(tmp_path):
+    """The partition walk mirrors the orchestrator: 1.1/1.2 share a file, so
+    the wave's ready width is 2, never 3."""
+    plan = PARALLEL_PLAN.replace("surface: ['src/b.py']", "surface: ['src/a.py']")
+    (tmp_path / "plan.md").write_text(plan)
+    assert _plan_parallel_width(tmp_path / "plan.md") == 2
+
+
+def test_no_live_claim_refuses_exit_2(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, PARALLEL_PLAN, claim_state="free")
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 2
+    assert "nothing to join" in str(excinfo.value)
+
+
+def test_live_claim_without_worktree_refuses_exit_2(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, PARALLEL_PLAN, worktree=False)
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 2
+
+
+def test_no_bound_plan_refuses_exit_4(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, None)
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 4
+
+
+def test_unknown_node_refuses_exit_2(tmp_path, monkeypatch):
+    _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-9999", 3)
+    assert excinfo.value.code == 2
+
+
+def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
+    """A thread spawn with exit 0 but no receipt is not a join: the lead
+    refusal fails the call instead of reporting a phantom worker."""
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+
+    class _Bare:
+        returncode = 0
+        stdout = "spawned ok\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        advance.subprocess, "run",
+        lambda cmd, **_kw: (calls.append({"cmd": cmd}), _Bare())[1],
+    )
+    with pytest.raises(SpawnError):
+        join_node("x-8d1d", 3)
+    assert calls  # the spawn was attempted, its receipt just proved nothing

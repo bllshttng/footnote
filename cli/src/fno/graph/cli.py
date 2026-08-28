@@ -5108,6 +5108,47 @@ def cmd_dispatch_lanes(
     typer.echo(json.dumps(receipts, indent=2))
 
 
+# -- join --
+
+
+@cli.command("join", hidden=True)
+def cmd_join(
+    node: str = typer.Argument(..., help="Node id (slug / bare hex resolve)."),
+    workers: int = typer.Option(
+        1, "--workers",
+        help="Requested joiner count; the plan's ready-graph width bounds it.",
+    ),
+) -> None:
+    """Spawn execute-waves joiners into a held node's worktree (x-8d1d).
+
+    The node must hold a LIVE node claim with a bound plan: join resolves the
+    holder's worktree from the claim, computes the plan's ready-graph width,
+    and spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>``
+    workers INTO that worktree as visitors - they take task claims under
+    their own roster names and never the node claim. Joiner 1 is the lead
+    and mail hub. Prints one JSON receipt:
+    ``{"node", "worktree", "width", "spawned", "lead"}``.
+
+    Refusals: exit 2 nothing to join (no live claim), exit 3 width 1, exit 4
+    no usable bound plan.
+    """
+    from fno.backlog.advance import JoinRefuse, join_node
+    from fno.graph.fuzzy import resolve_node
+
+    entries = _display_entries("backlog.join")
+    match = resolve_node(node, entries)
+    if match.kind != "exact" or not match.id:
+        typer.echo(f"backlog join: no node matches '{node}'", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        receipt = join_node(match.id, max(1, workers))
+    except JoinRefuse as exc:
+        typer.echo(f"backlog join: {exc.message}", err=True)
+        raise typer.Exit(code=exc.code)
+    typer.echo(json.dumps(receipt, indent=2))
+
+
 # -- groom --
 
 
@@ -14643,6 +14684,9 @@ _TRACKER_OWNED_VERBS = frozenset(
         "lanes",
         "lane-fill",
         "dispatch-lanes",
+        # join spawns workers into a held worktree; the joiners, not join,
+        # write task rows (x-8d1d)
+        "join",
         # footnote-owned DATA with a graph-resident write path (refused until the
         # write moves to the sidecar seam)
         "cost",

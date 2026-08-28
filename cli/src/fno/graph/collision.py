@@ -38,6 +38,19 @@ from typing import Collection, Iterable, Literal, TypedDict, cast
 # both are self, but for different reasons and a bare None conflates them.
 _UNSET_PLAN = object()
 
+# Hidden shared-output roots (the generated-output rule): two tasks writing
+# under one of these directories collide even when no literal path overlaps.
+# Canonical home is here so the cli's task-grain width walk and the skills
+# orchestrator read ONE tuple; the orchestrator imports the name so its own
+# callers keep the original spelling.
+HIDDEN_SHARED_OUTPUT_ROOTS = (
+    ".fno/",
+    ".codex/agents/",
+    ".gemini/agents/",
+    "docs/",
+    "internal/",
+)
+
 Severity = Literal["low", "medium", "high"]
 Action = Literal["coordinate", "absorb", "supersede"]
 ResolvedStatus = Literal["done", "merged"]

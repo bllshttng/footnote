@@ -67,7 +67,8 @@ def test_map_covers_current_surface_once():
     # Counted from the merged file, not taken from either side: main carried
     # 529 and a branch added `config routing`, `doctor route`, `route init`
     # and `route inventory`; this branch adds `agents king manifest-path`.
-    assert len(mapped) == 534, (
+    # +1 for `backlog join`, the held-worktree joiner spawner (x-8d1d).
+    assert len(mapped) == 535, (
         f"{len(mapped)} rows in verb-collapse-map.tsv; bump this count when a "
         "new CLI action is deliberately allocated a row"
     )

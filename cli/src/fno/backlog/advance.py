@@ -1196,6 +1196,36 @@ def _refuse_repeated_dead_dispatch(
     return action
 
 
+def _spawn_receipt_identity(proc_stdout: Optional[str], proc_stderr: Optional[str]) -> str:
+    """Launch identity from a thread-substrate spawn receipt (shared scan).
+
+    A ``thread``/``bg`` spawn prints a compact JSON receipt whose launch proof
+    is ``{"name", "short_id", ...}`` for claude, or for a codex thread the FULL
+    ``harness_session_id`` (codex has no short id; a head-8 slice is refused by
+    shape elsewhere). Scans past lines that merely MENTION an id field but are
+    not the receipt (banner/log noise) - only a line whose id actually parses
+    stops the scan. Empty string = no receipt (the caller decides severity).
+    """
+    short_id = ""
+    harness_session_id = ""
+    for line in (proc_stdout or "").splitlines():
+        if '"short_id"' not in line and '"harness_session_id"' not in line and '"session_id"' not in line:
+            continue
+        try:
+            receipt = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(receipt, dict):
+            continue
+        short_id = receipt.get("short_id") or ""
+        harness_session_id = (
+            receipt.get("harness_session_id") or receipt.get("session_id") or ""
+        )
+        if short_id or harness_session_id:
+            break
+    return short_id or harness_session_id
+
+
 def _spawn_worker(
     node_id: str,
     node_cwd: Optional[str],
@@ -1396,24 +1426,7 @@ def _spawn_worker(
         return "headless"
     # Keep scanning past a line that merely MENTIONS an id field but is not the
     # JSON receipt (banner/log noise) - only stop once an id actually parses.
-    short_id = ""
-    harness_session_id = ""
-    for line in (proc.stdout or "").splitlines():
-        if '"short_id"' not in line and '"harness_session_id"' not in line and '"session_id"' not in line:
-            continue
-        try:
-            receipt = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(receipt, dict):
-            continue
-        short_id = receipt.get("short_id") or ""
-        harness_session_id = (
-            receipt.get("harness_session_id") or receipt.get("session_id") or ""
-        )
-        if short_id or harness_session_id:
-            break
-    launch_identity = short_id or harness_session_id
+    launch_identity = _spawn_receipt_identity(proc.stdout, proc.stderr)
     if not launch_identity:
         raise SpawnError(
             f"fno agents spawn exit 0 but no launch-identity receipt: "
@@ -1423,12 +1436,11 @@ def _spawn_worker(
     # address: refuse by shape instead of binding a duplicate worker to the
     # wrong session (ruling d-513d9d22, harness_identity.is_unsafe_short_address).
     resolved_harness = (resolved.get("harness") or "").strip()
-    for token in (short_id, harness_session_id):
-        if token and is_unsafe_short_address(token, resolved_harness or None):
-            raise SpawnError(
-                f"fno agents spawn receipt carries a codex head-8 launch "
-                f"identity ({token}): {CODEX_SHORT_ADDRESS_RULE}"
-            )
+    if is_unsafe_short_address(launch_identity, resolved_harness or None):
+        raise SpawnError(
+            f"fno agents spawn receipt carries a codex head-8 launch "
+            f"identity ({launch_identity}): {CODEX_SHORT_ADDRESS_RULE}"
+        )
     return launch_identity
 
 
@@ -1863,6 +1875,207 @@ def dispatch_lanes(
             }
         )
     return receipts
+
+
+# ---------------------------------------------------------------------------
+# Join (epic x-956c, x-8d1d): spawn execute-waves joiners into a HELD worktree
+# ---------------------------------------------------------------------------
+#
+# dispatch_lanes is one worker per node and a second `/target <id>` refuses
+# (target init takes the node claim). Join is the complement: N
+# `/fno:execute waves <plan>` workers run INSIDE the holder's worktree as
+# visitors - they take task claims under their FNO_WORKER_NAME and never the
+# node claim (Locked Decision 1). Worker count is bounded by the plan's
+# ready-graph width, never by N alone (Locked Decision 2); joiner 1 of the
+# epic made each worker's holder provable via FNO_WORKER_NAME.
+
+
+class JoinRefuse(Exception):
+    """A join precondition failed; ``code`` is the CLI exit code.
+
+    2 = no live node claim (nothing to join), 3 = width 1 (a second worker
+    has nothing to pull), 4 = no usable bound plan.
+    """
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _plan_parallel_width(plan_path: Path) -> int:
+    """Largest simultaneously-ready task set across a full topological walk.
+
+    Mirrors the orchestrator's scheduling rule (``effective_blockers`` +
+    ``apply_partition_edges`` + ``ready_tasks``) so join's width can never
+    disagree with what a joined worker's ``--ready`` query actually returns:
+    a declared ``blocked_by`` wins outright, an undeclared task inherits the
+    previous wave's whole task list, and parallel waves serialize collision
+    groups (the derived partition edges). A plan with no Execution Strategy
+    yields 0; the caller refuses anything below 2.
+    """
+    from fno.graph.collision import HIDDEN_SHARED_OUTPUT_ROOTS, partition
+    from fno.plan._doc import load_plan
+    from fno.plan.brief import parse_execution_strategy
+
+    doc = load_plan(plan_path)
+    body = doc.get_section("Execution Strategy")
+    if body is None:
+        return 0
+    raw = parse_execution_strategy(body)
+
+    waves: list[tuple[str, list[str]]] = []
+    for wave_data in raw.get("waves", []):
+        if not isinstance(wave_data, dict):
+            continue
+        tasks_raw = wave_data.get("tasks", [])
+        tasks = [str(t) for t in tasks_raw] if isinstance(tasks_raw, list) else [str(tasks_raw)]
+        waves.append((str(wave_data.get("mode", "sequential")), tasks))
+    if not waves:
+        return 0
+
+    surfaces = {
+        str(t["id"]): [str(s) for s in t.get("surface", [])]
+        for t in raw.get("tasks", [])
+        if isinstance(t, dict) and t.get("id")
+    }
+    blockers: dict[str, set[str]] = {}
+    for t in raw.get("tasks", []):
+        if not isinstance(t, dict) or not t.get("id"):
+            continue
+        if t.get("blocked_by_declared", False):
+            blockers[str(t["id"])] = {str(d) for d in t.get("blocked_by", [])}
+    all_ids: list[str] = []
+    for pos, (_mode, tasks) in enumerate(waves):
+        for tid in tasks:
+            all_ids.append(tid)
+            if tid not in blockers:
+                blockers[tid] = set(waves[pos - 1][1]) if pos else set()
+
+    # Derived within-wave edges for parallel waves (the orchestrator's
+    # partition_edges): group order serializes, unevaluated tasks wait out
+    # the evaluated ones.
+    for pos, (mode, tasks) in enumerate(waves):
+        if mode != "parallel":
+            continue
+        items = [(tid, set(surfaces.get(tid, []))) for tid in tasks]
+        groups, unevaluated = partition(items, shared_roots=HIDDEN_SHARED_OUTPUT_ROOTS)
+        edges: dict[str, list[str]] = {}
+        for group in groups:
+            ordered = [tid for tid in tasks if tid in group]
+            for prev, cur in zip(ordered, ordered[1:]):
+                edges.setdefault(cur, []).append(prev)
+        evaluated = [tid for tid in tasks if tid not in unevaluated]
+        for tid in tasks:
+            if tid in unevaluated and evaluated:
+                edges[tid] = list(evaluated)
+        for tid, extra in edges.items():
+            base = blockers.get(tid)
+            if base is None:
+                base = set(waves[pos - 1][1]) if pos else set()
+            blockers[tid] = base | set(extra)
+
+    done: set[str] = set()
+    width = 0
+    while True:
+        batch = [
+            tid for tid in all_ids
+            if tid not in done and blockers.get(tid, set()) <= done
+        ]
+        if not batch:
+            break
+        width = max(width, len(batch))
+        done.update(batch)
+    return width
+
+
+def join_node(node_id: str, workers: int) -> dict:
+    """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
+
+    Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
+    manifest snapshot), computes the bound plan's ready-graph width, and
+    spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>`` workers
+    there via ``fno agents spawn --substrate thread``. Joiner 1 is the lead
+    and mail hub (Locked Decision 3); every other joiner's TARGET_BRIEF names
+    it. The spawned process exports FNO_WORKER_NAME from ``--name``, so each
+    joiner's task-claim holder is its own roster name (the joiner 1 contract).
+
+    Returns the receipt ``{"node", "worktree", "width", "spawned", "lead"}``.
+    Raises JoinRefuse (exit 2/3/4) on a precondition failure and SpawnError
+    when the lead spawn itself fails; a non-lead spawn failure warns to
+    stderr and shrinks ``spawned`` instead of aborting the join.
+    """
+    from fno.claims.core import claim_status
+    from fno.graph.collision import resolve_plan_path
+    from fno.graph.store import read_graph
+    from fno.paths import graph_json
+
+    entry = next((e for e in read_graph(graph_json()) if e.get("id") == node_id), None)
+    if entry is None:
+        raise JoinRefuse(2, f"no graph node {node_id}")
+    plan_raw = entry.get("plan_path")
+    if not plan_raw:
+        raise JoinRefuse(4, f"{node_id} has no bound plan")
+    claim_key = f"node:{node_id}"
+    status = claim_status(claim_key, root=_claims_root_for(claim_key))
+    if status.get("state") != "live":
+        raise JoinRefuse(
+            2,
+            f"{node_id} has no live node claim (state: {status.get('state')}); "
+            "nothing to join",
+        )
+    worktree = str((status.get("metadata") or {}).get("worktree") or "").strip()
+    if not worktree:
+        raise JoinRefuse(
+            2, f"live claim for {node_id} names no holder worktree; nothing to join"
+        )
+    try:
+        plan_path = resolve_plan_path(str(plan_raw))
+        width = _plan_parallel_width(plan_path)
+    except Exception as exc:  # noqa: BLE001 - an unreadable plan is no plan to join
+        raise JoinRefuse(4, f"{node_id} bound plan unreadable: {str(exc)[:160]}") from exc
+    if width < 2:
+        raise JoinRefuse(
+            3, f"width {width}: a second worker has nothing to pull"
+        )
+    count = min(workers, width - 1)
+
+    lead = f"j-{node_id}-1"
+    spawned: list[str] = []
+    for k in range(1, count + 1):
+        name = f"j-{node_id}-{k}"
+        brief = (
+            f"lead joiner of {node_id}: you are the mail hub for j-{node_id}-*"
+            if k == 1
+            else f"joiner of {node_id}: mail hub is {lead}"
+        )
+        cmd = [
+            *_subprocess_util.fno_py_cmd(),
+            "agents", "spawn", "--substrate", "thread",
+            "--cwd", worktree, "--name", name,
+            f"/fno:execute waves {plan_path}",
+        ]
+        proc = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+            env={**os.environ, "TARGET_BRIEF": brief},
+        )
+        identity = ""
+        if proc.returncode == 0:
+            identity = _spawn_receipt_identity(proc.stdout, proc.stderr)
+        if not identity:
+            detail = (proc.stderr or proc.stdout or "").strip()[:200]
+            if not spawned:
+                raise SpawnError(f"join spawn {name} failed: {detail}")
+            print(f"join: spawn {name} failed: {detail}", file=sys.stderr)
+            continue
+        spawned.append(name)
+    return {
+        "node": node_id,
+        "worktree": worktree,
+        "width": width,
+        "spawned": spawned,
+        "lead": lead,
+    }
 
 
 # ---------------------------------------------------------------------------
