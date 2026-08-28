@@ -671,6 +671,9 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Agent lifecycle (daemon-emitted)
     "agent_spawned",
     "agent_stopped",
+    // A stop the daemon REFUSED to claim: the interrupt never confirmed a
+    // terminal turn, so the row stays live and the work is still running.
+    "agent_stop_refused",
     "agent_exited",
     "agent_removed",
     "agent_inconsistent",

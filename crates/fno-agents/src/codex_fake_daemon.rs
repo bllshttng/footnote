@@ -171,8 +171,13 @@ impl FakeDaemon {
             json!({"pid": pid, "processStartToken": start}).to_string(),
         )
         .expect("write daemon state");
-        let listener =
-            UnixListener::bind(control.join("app-server-control.sock")).expect("bind control sock");
+        let socket = control.join("app-server-control.sock");
+        // A run killed by a signal or a CI timeout never runs `Drop`, so the
+        // socket file outlives it. `bind` on an existing path fails, and a
+        // later run that happens to reuse the pid would panic here instead of
+        // starting.
+        std::fs::remove_file(&socket).ok();
+        let listener = UnixListener::bind(&socket).expect("bind control sock");
         let saved_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("CODEX_HOME", &home);
         let server = tokio::spawn(async move {

@@ -318,6 +318,19 @@ pub type AppServerStream =
 pub async fn connect_app_server(
     socket_path: &Path,
 ) -> Result<(AppServerSink, AppServerStream), &'static str> {
+    // Bounded HERE, not at each call site. `read_until_id` caps FRAMES, never
+    // wall clock, so a daemon that accepts the connection and completes the
+    // upgrade but never answers `initialize` parks the caller forever. That
+    // is a reachable state: `ensure_codex_daemon`'s probe is a separate,
+    // earlier connection, and the daemon can wedge between the two.
+    tokio::time::timeout(HANDSHAKE_TIMEOUT, connect_app_server_unbounded(socket_path))
+        .await
+        .unwrap_or(Err("timeout"))
+}
+
+async fn connect_app_server_unbounded(
+    socket_path: &Path,
+) -> Result<(AppServerSink, AppServerStream), &'static str> {
     let conn = UnixStream::connect(socket_path)
         .await
         .map_err(|_| "connect-failed")?;

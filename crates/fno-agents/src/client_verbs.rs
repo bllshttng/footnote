@@ -3211,6 +3211,11 @@ fn validate_lifecycle_name(name: &str) -> Result<(), (i32, String)> {
 /// short id and no pane of its own. A codex PANE row answers false and keeps
 /// the refusal, because its process already has a place and `fno mux` is how
 /// you reach it.
+///
+/// A PRESENT `mux` key means pane-hosted whether or not it parses into a
+/// (session, pane_id) pair, which is the same rule `agents_view::derive_rows`
+/// applies. A half-written field must not decide that one door drives the row
+/// and the other refuses it.
 fn is_codex_thread_row(entry: &Value) -> bool {
     entry
         .get("host_mode")

@@ -127,18 +127,13 @@ pub enum Liveness {
 /// exit immediately; that gap is why this list omits opencode).
 const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
-/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
-/// `Drive` when the row carries an attach id (an interactive attach form
-/// resolved it), `Follow` when the harness's transcript has a peek reader,
-/// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
-/// d-dbf83820): the two sets below are capability mirrors, and a harness that
-/// gains a capability moves tier with no edit here.
 /// (x-6678) The shared codex app-server control socket:
 /// `$CODEX_HOME/app-server-control/app-server-control.sock`, `CODEX_HOME`
 /// defaulting to `~/.codex`. Mirrors `codex_inject::codex_app_server_socket_path`
 /// in fno-agents, which fno never links (it shells the binary at runtime);
-/// `codex_attach_argv_matches_the_agents_crate` in that crate pins the two
-/// against each other, so a change to either fails there rather than drifting.
+/// `the_attach_argv_is_identical_in_both_crates` in that crate links both and
+/// pins them against each other, so a change to either fails there rather
+/// than drifting.
 pub fn codex_app_server_socket_path() -> std::path::PathBuf {
     let home = std::env::var("CODEX_HOME")
         .ok()
@@ -164,6 +159,12 @@ pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
     ]
 }
 
+/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
+/// `Drive` when the row carries an attach id (an interactive attach form
+/// resolved it), `Follow` when the harness's transcript has a peek reader,
+/// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
+/// d-dbf83820): the two sets below are capability mirrors, and a harness that
+/// gains a capability moves tier with no edit here.
 pub fn thread_reach(harness: Option<&str>, attach_id: Option<&str>) -> Reach {
     if attach_id.is_some() {
         return Reach::Drive;
@@ -1489,7 +1490,13 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .is_empty()
-            && mux.is_none();
+            // A PRESENT mux key means pane-hosted, whether or not it parses
+            // into a (session, pane_id) pair. `mux` above is the parsed form,
+            // and a half-written `{"session": "s"}` parses to None there; a
+            // row is not promoted to a drivable thread by a malformed field.
+            // The CLI verb's `is_codex_thread_row` reads the raw key the same
+            // way, so both doors answer alike.
+            && row.get("mux").is_none_or(serde_json::Value::is_null);
         let attach_id = if is_claude {
             row.get("short_id")
                 .or_else(|| row.get("claude_short_id"))
