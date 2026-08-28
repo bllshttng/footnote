@@ -3558,12 +3558,12 @@ def _pre_push_hook_report(src: Optional[Path]) -> dict[str, Any]:
     there is exactly one implementation of "is the installed hook the bad
     one". Never changes status/exit; an absent or foreign hook is not a
     defect and reports nothing."""
+    from fno import paths
+
     candidates = []
     if src is not None:
         candidates.append(src / "scripts" / "install-pre-push-hook.sh")
-    candidates.append(
-        Path(__file__).resolve().parents[3] / "scripts" / "install-pre-push-hook.sh"
-    )
+    candidates.append(paths.resolve_plugin_script("scripts/install-pre-push-hook.sh"))
     script = next((c for c in candidates if c.is_file()), None)
     if script is None:
         return {"status": "unchecked"}

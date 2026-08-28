@@ -178,17 +178,21 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
     for the whole batch, not once per worktree - and the last-commit age
     rides the same loop iteration rather than a second subprocess per path.
 
-    The script's own path is resolved from this FILE's location, never
-    ``resolve_repo_root()``: that helper reads the caller's ambient cwd (or
-    a process-wide cached env var) and has no idea which of possibly many
-    swept repos is in play, so a multi-repo sweep - or a daemon started
-    with no ambient cwd at all - could resolve the wrong repo, or none, for
-    every root after whichever one happened to be cached first. This
-    script always lives at a fixed offset from this module regardless of
-    which worktree's commits are being counted."""
+    The script is resolved via ``paths.resolve_plugin_script``: env hint,
+    then a fixed offset from this package validated as the plugin root, then
+    the persisted pointer, and only then ambient-cwd repo discovery. Never a
+    bare ``parents[N]`` offset: an installed wheel has no ``scripts/`` tree,
+    and such an expression either crashes or silently disables this leg
+    outside a source checkout. A resolved-but-absent script returns {} and
+    every path then reads UNKNOWN (``read failed: git``) per the module's
+    fail-open contract - the sweep reports the miss, it never guesses."""
     if not paths:
         return {}
-    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-unpushed.sh"
+    from fno import paths as _paths
+
+    script = _paths.resolve_plugin_script("scripts/lib/worktree-unpushed.sh")
+    if not script.is_file():
+        return {}
     driver = (
         'source "$1"; shift\n'
         'for p in "$@"; do\n'

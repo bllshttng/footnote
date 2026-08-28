@@ -876,16 +876,12 @@ def _emit_ledger_transition(entry: dict) -> None:
     if not nonce or nonce == "null":
         return
 
-    # Locate events.sh. PLUGIN_ROOT env wins; otherwise walk up from this file
-    # to the repo root and reach scripts/lib/events.sh. This module lives at
-    # cli/src/fno/cost/_register.py, so the repo root is parents[4]. (In the
-    # installed wheel there is no scripts/ tree, so the is_file() guard below
-    # skips the best-effort emit - the ledger append already succeeded.)
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if plugin_root:
-        events_sh = Path(plugin_root) / "scripts" / "lib" / "events.sh"
-    else:
-        events_sh = Path(__file__).resolve().parents[4] / "scripts" / "lib" / "events.sh"
+    # Locate events.sh through the canonical resolver (env hint -> validated
+    # package offset -> persisted pointer -> repo discovery). Never a bare
+    # parents[N] walk: an installed wheel has no scripts/ tree, and the
+    # is_file() guard below then skips the best-effort emit - the ledger
+    # append already succeeded.
+    events_sh = _paths.resolve_plugin_script("scripts/lib/events.sh")
     if not events_sh.is_file():
         return
 
