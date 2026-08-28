@@ -5916,6 +5916,7 @@ pub fn rounds_since_last_pass(
     reviews: Option<&[Value]>,
 ) -> i64 {
     let mut rounds: i64 = 0;
+    let mut counted_heads: Vec<String> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5937,8 +5938,21 @@ pub fn rounds_since_last_pass(
             continue;
         }
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
+            // A declared round number is already the round's identity, so the
+            // running max cannot double-count and needs no head collapse.
             Some(n) if n >= 0 => rounds = rounds.max(n),
-            _ => rounds += 1,
+            // One reviewed head is ONE round, the same unit the reviews axis
+            // uses (DISTINCT commit.oid). Without this the two axes measure
+            // different things and max() over them is not a budget: a
+            // producer that emits a corrective second verdict at an unchanged
+            // head spends two rounds for zero code change.
+            _ => {
+                if counted_heads.iter().any(|h| h == line_head) {
+                    continue;
+                }
+                counted_heads.push(line_head.to_string());
+                rounds += 1;
+            }
         }
     }
     let events_rounds = rounds;

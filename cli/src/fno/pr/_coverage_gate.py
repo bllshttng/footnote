@@ -902,12 +902,26 @@ def rounds_since_last_pass(
     the two are held equal by the shared corpus.
     """
     rounds = 0
+    counted_heads: set[str] = set()
     for event in chain:
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+            # A declared round number is already the round's identity, so the
+            # running max cannot double-count and needs no head collapse.
             rounds = max(rounds, declared)
-        else:
-            rounds += 1
+            continue
+        # One reviewed head is ONE round, the same unit the reviews axis uses
+        # (it counts DISTINCT commit.oid). Without this the two axes measure
+        # different things and max() over them is not a budget: a producer
+        # that emits a corrective second verdict at an unchanged head spends
+        # two rounds for zero code change. A row carrying no head is counted,
+        # fail-closed: an unreadable head never buys a free round.
+        event_head = event.get("head_sha")
+        if isinstance(event_head, str) and event_head:
+            if event_head in counted_heads:
+                continue
+            counted_heads.add(event_head)
+        rounds += 1
     events_rounds = rounds
     if reviews is None:
         return events_rounds
