@@ -2545,48 +2545,50 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
-    // Validate cwd for ALL paths before printing, claiming, delegating, or
-    // launching. A deleted worktree is a cleanup job, not a resume. The exec
-    // path re-checks via set_current_dir below (race-free for its own chdir),
-    // but bailing here means a gone cwd never acquires the session claim, and
-    // never burns a wake attempt, on the failure path.
-    if !Path::new(cwd).is_dir() {
-        eprintln!(
-            "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
-             is recoverable first (renamed worktree base, unmounted volume): \
-             the row is the resume handle. To re-drive the session under fno from a live cwd, \
-             rm this row and `fno agents adopt <id>` rebinds a fresh one; rm alone deletes the \
-             handle and the session binding with it. rm is for a path that is gone for good.",
-            py_repr_str(cwd),
-            py_repr_str(&name)
-        );
-        return 13;
-    }
-
     // x-d285: a claude row's re-entry resolves through the canonical plan so
     // the ACCOUNT axis (and, on the attach arm, the route) rides every launch
     // shape below - delegation, --print-command, the mux pane relaunch, and
     // the in-terminal exec. The dead arm's own `--settings` splice stays the
     // route carrier there (it applies the identical usability rule), so only
-    // the plan's env is layered on that arm's argv; a duplicate --settings
+    // the plan's env is layered on that arm's argv; a duplicate `--settings`
     // from the plan argv would hand claude the flag twice. A proven default
-    // row resolves to no env and no route: byte-identical to today.
-    let reentry_plan = if harness == "claude" {
+    // row resolves to no env and no route: byte-identical to today. The
+    // resolver keys on the RESOLVED row's name - the caller's token may be a
+    // short id or a full uuid the heal just adopted, which is not a name the
+    // registry can answer.
+    let row_name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    // The print form is pure inspection and stays available when no plan can
+    // resolve: a heal that could not REGISTER its row (an unwritable registry)
+    // still resolves the session from the store, and a rowless session records
+    // no binding to restore - the bare argv is the honest print. Every launch
+    // shape below keeps the refusal.
+    let mut reentry_plan = None;
+    if harness == "claude" {
         match crate::reentry::resolve_reentry(
             &home.registry_json(),
-            &name,
+            &row_name,
             crate::reentry::ReentryTransition::Resume,
             None,
         ) {
-            Ok(plan) => Some(plan),
+            Ok(plan) => reentry_plan = Some(plan),
             Err(reason) => {
-                eprintln!("fno agents resume: refused: {reason}");
-                return crate::reentry::REENTRY_REFUSED_EXIT;
+                if print_command {
+                    eprintln!(
+                        "fno agents resume: no canonical re-entry plan ({reason}); \
+                         printing the bare recorded argv"
+                    );
+                } else {
+                    eprintln!("fno agents resume: refused: {reason}");
+                    return crate::reentry::REENTRY_REFUSED_EXIT;
+                }
             }
         }
-    } else {
-        None
-    };
+    }
 
     if print_command {
         // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
@@ -2625,6 +2627,26 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             println!("cd {} && exec {}", shlex_quote(cwd), argv_q);
         }
         return 0;
+    }
+
+    // Validate cwd before claiming, delegating, or launching - AFTER the print
+    // form above, which is pure inspection and stays available for a row whose
+    // cwd is gone (a heal can synthesize one from a store). A deleted worktree
+    // is a cleanup job, not a resume. The exec path re-checks via
+    // set_current_dir below (race-free for its own chdir), but bailing here
+    // means a gone cwd never acquires the session claim, and never burns a
+    // wake attempt, on the failure path.
+    if !Path::new(cwd).is_dir() {
+        eprintln!(
+            "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
+             is recoverable first (renamed worktree base, unmounted volume): \
+             the row is the resume handle. To re-drive the session under fno from a live cwd, \
+             rm this row and `fno agents adopt <id>` rebinds a fresh one; rm alone deletes the \
+             handle and the session binding with it. rm is for a path that is gone for good.",
+            py_repr_str(cwd),
+            py_repr_str(&name)
+        );
+        return 13;
     }
 
     // Live claude row (short_id, no mux ref): `claim_uuid` is None only on
