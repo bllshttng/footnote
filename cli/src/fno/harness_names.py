@@ -20,7 +20,14 @@ from __future__ import annotations
 KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "gemini", "agy", "opencode", "pi")
 
 # Thread/headless accepts opencode through its launch seam. agy and gemini are
-# pane-only and stay out of this tuple. pi joins it on its rpc lane: `pi --mode
-# rpc` is strict JSONL over stdin/stdout with typed events, which is a driving
-# transport rather than a keystroke one.
-SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "pi")
+# pane-only and stay out of this tuple.
+#
+# pi is pane-only TODAY and stays out for the same reason opencode's thread bit
+# reads false: the lane has to exist before the roster advertises it. pi's rpc
+# transport is built and tested (`fno.agents.harnesses.pi.PiRpcSession`), but
+# `dispatch_spawn` has no pi arm, so listing pi here sent a
+# `--substrate thread` spawn past this gate and into the terminal else-branch,
+# which refuses by naming gemini's retirement - a harness the operator never
+# mentioned. A wrong refusal is worse than an honest one, and the honest one is
+# this tuple.
+SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")

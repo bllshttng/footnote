@@ -60,11 +60,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence
+
+from fno.agents.dispatch import DispatchAskError
 
 # pi's provider and model for this fleet. Both are always passed: see trap 3 in
 # the module docstring. Env overrides so a different subscription needs no
@@ -255,11 +258,16 @@ def create_claim_key(cwd: Path | str, session_id: str) -> str:
     return f"pi-session:{cwd}:{session_id}"
 
 
-class PiCreateHeld(Exception):
+class PiCreateHeld(DispatchAskError):
     """Another process is creating this exact pi session, and it is named.
 
-    A refusal that names the holder is what a caller needs; a timeout naming
+    A refusal that names the holder is what a caller needs. A timeout naming
     only a clock is the diagnostic seam this whole lane exists to avoid.
+
+    It subclasses ``DispatchAskError`` deliberately: the spawn CLI catches that
+    type and prints its message with a taxonomy exit code. A bare ``Exception``
+    would escape as a traceback, so the one refusal this lane exists to deliver
+    would be the one a caller never reads.
     """
 
     def __init__(self, key: str, holder: str, pid: Optional[int], host: str) -> None:
@@ -269,9 +277,10 @@ class PiCreateHeld(Exception):
         self.host = host
         super().__init__(
             f"pi session create for {key!r} is held by {holder} "
-            f"(pid={pid}, host={host}); this is a create, and creates are "
+            f"(pid={pid}, host={host}). This is a create, and creates are "
             "serialised. Wait for the holder to finish, then JOIN the session "
-            "it made."
+            "it made.",
+            exit_code=1,
         )
 
 
@@ -374,6 +383,44 @@ def create_decision(
         yield decision
     finally:
         release_claim(key, holder, root=claims_root)
+
+
+#: How long :func:`await_session_created` waits for pi to make its create
+#: decision. Bounded by measurement: pi reaches session-id adoption at 0.64s and
+#: writes its first session file at 5.81s, 4.96s and 4.94s across three runs.
+#: 15s is roughly 2.5x the slowest, and it sits well inside the claim's own TTL
+#: so the wait can never outlive the claim it is protecting.
+CREATE_SETTLE_TIMEOUT_S = 15.0
+
+
+def await_session_created(
+    cwd: Path | str,
+    session_id: str,
+    *,
+    timeout_s: float = CREATE_SETTLE_TIMEOUT_S,
+    poll_s: float = 0.2,
+) -> SessionLookup:
+    """Wait, inside the create claim, until pi's session provably exists.
+
+    The claim is worthless without this. `mux pane run` returns as soon as the
+    PANE exists, in tens of milliseconds, while pi reaches session-id adoption
+    at 0.64s and writes its first session file at about 5s. A claim released on
+    the pane therefore covers a window in which pi has not yet decided
+    anything, and two racers on one id would both pass through it.
+
+    Returns the final reading rather than raising. A timeout is NOT a failure
+    here: the blind window is real, and a session whose first turn has not been
+    attempted writes no file at all. The honest outcome for that is
+    ``"none"``, which the caller records as a create it could not confirm. What
+    this function must never do is report an unconfirmed create as a confirmed
+    one.
+    """
+    deadline = time.monotonic() + timeout_s
+    lookup = lookup_sessions(cwd, session_id)
+    while lookup.state not in {"one", "duplicate"} and time.monotonic() < deadline:
+        time.sleep(poll_s)
+        lookup = lookup_sessions(cwd, session_id)
+    return lookup
 
 
 def rpc_argv(
@@ -530,6 +577,26 @@ class PiRpcSession:
         self.argv = list(argv or rpc_argv(session_id, provider=provider, model=model))
         self._env = env
         self.proc: Optional[subprocess.Popen] = None
+        #: The ONE event iterator for this session's lifetime. It must not be
+        #: rebuilt per turn: `iter_jsonl` keeps its partial-record buffer in the
+        #: generator, and a 64KB read routinely returns `agent_settled` plus the
+        #: first bytes of the next record. A per-turn generator drops that tail,
+        #: so the following turn resumes mid-record, its first line fails to
+        #: parse, and it is skipped silently - losing events, and hanging the
+        #: turn outright when the discarded tail held its own settle marker.
+        self._events: Optional[Iterator[dict[str, Any]]] = None
+        #: pi's human-readable notices go to stderr ("creating a new session
+        #: with that id", provider retries, the tmux extended-keys warning).
+        #: Nothing here needs them, but an undrained PIPE deadlocks the child
+        #: once the OS buffer fills: pi blocks on write, stops emitting stdout,
+        #: and `run_turn` waits forever for a marker that cannot arrive. A
+        #: reader thread keeps the pipe moving and keeps the text available.
+        self._stderr: list[str] = []
+        self._stderr_thread: Optional[threading.Thread] = None
+        #: Per-turn request id. The protocol's `id` correlates a request to its
+        #: response, so reusing one constant would attribute every later turn's
+        #: response, error, or refusal to the first turn.
+        self._turn = 0
 
     def __enter__(self) -> "PiRpcSession":
         self.start()
@@ -547,7 +614,20 @@ class PiRpcSession:
             stderr=subprocess.PIPE,
             env=self._env,
         )
+        stderr = self.proc.stderr
+        if stderr is not None:
+            def _drain() -> None:
+                for line in iter(stderr.readline, b""):
+                    self._stderr.append(line.decode("utf-8", "replace").rstrip("\n"))
+
+            self._stderr_thread = threading.Thread(target=_drain, daemon=True)
+            self._stderr_thread.start()
         return self
+
+    @property
+    def stderr_text(self) -> str:
+        """Everything pi has written to stderr so far, for a diagnostic."""
+        return "\n".join(self._stderr)
 
     def send(self, command: dict[str, Any]) -> None:
         """Write one JSONL command. Never closes stdin."""
@@ -557,9 +637,15 @@ class PiRpcSession:
         self.proc.stdin.flush()
 
     def events(self) -> Iterator[dict[str, Any]]:
-        """Every typed event and response, in order."""
+        """Every typed event and response, in order, across every turn.
+
+        The iterator is built ONCE and reused. See ``_events`` for why: the
+        framing buffer belongs to the session, not to a turn.
+        """
         if self.proc is None or self.proc.stdout is None:
             raise RuntimeError("pi rpc session is not started")
+        if self._events is not None:
+            return self._events
         stdout = self.proc.stdout
 
         def _chunks() -> Iterator[bytes]:
@@ -569,9 +655,16 @@ class PiRpcSession:
                     return
                 yield chunk
 
-        return iter_jsonl(_chunks())
+        self._events = iter_jsonl(_chunks())
+        return self._events
 
-    def run_turn(self, message: str, *, msg_id: str = "fno-1") -> list[dict[str, Any]]:
+    def next_msg_id(self) -> str:
+        """The next per-turn request id. Never a constant: the protocol's
+        ``id`` is what correlates a response to its request."""
+        self._turn += 1
+        return f"fno-{self._turn}"
+
+    def run_turn(self, message: str, *, msg_id: Optional[str] = None) -> list[dict[str, Any]]:
         """Send one prompt and collect events until ``agent_settled``.
 
         Returns every event seen, settled event included. If the stream ends
@@ -579,7 +672,7 @@ class PiRpcSession:
         explanations and only one of them is the outcome, so a turn that merely
         stopped producing output is never reported as a turn that completed.
         """
-        self.send(prompt_command(message, msg_id=msg_id))
+        self.send(prompt_command(message, msg_id=msg_id or self.next_msg_id()))
         seen: list[dict[str, Any]] = []
         for event in self.events():
             seen.append(event)
@@ -588,7 +681,8 @@ class PiRpcSession:
         raise RuntimeError(
             f"pi rpc stream ended without {SETTLED_EVENT!r} after {len(seen)} events. "
             "rpc mode exits on stdin EOF mid-turn with status 0, so this is NOT a "
-            "completed turn and the exit code does not say otherwise."
+            f"completed turn and the exit code does not say otherwise. pi's stderr: "
+            f"{self.stderr_text or '<empty>'}"
         )
 
     def steer(self, message: str, *, msg_id: Optional[str] = None) -> None:
@@ -596,7 +690,11 @@ class PiRpcSession:
         self.send(steer_command(message, msg_id=msg_id))
 
     def close(self) -> None:
-        """End the session deliberately, by closing stdin and reaping."""
+        """End the session deliberately, by closing stdin and reaping.
+
+        Closing stdin is the ONLY place an EOF is sent, and it is sent as an
+        intent to end rather than as a way to finish a turn.
+        """
         if self.proc is None:
             return
         if self.proc.stdin is not None:
@@ -609,3 +707,13 @@ class PiRpcSession:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=5)
+        # Close the read ends too: without this every session leaks two file
+        # descriptors, which a long-lived driver notices before anything else
+        # does.
+        for stream in (self.proc.stdout, self.proc.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+        self._events = None

@@ -90,8 +90,23 @@ def test_pi_is_registered_at_every_seam_a_spawn_reads():
     from fno.harness_names import KNOWN_HARNESSES, SPAWN_HARNESSES
 
     assert "pi" in KNOWN_HARNESSES
-    assert "pi" in SPAWN_HARNESSES
     assert "pi" in READABLE_PROVIDERS
+
+    # pi is NOT in SPAWN_HARNESSES, and that absence is asserted rather than
+    # merely true. That tuple is the thread/headless gate, and `dispatch_spawn`
+    # has no pi arm behind it: listing pi there sent a `--substrate thread`
+    # spawn past the gate into the terminal else-branch, which refuses by
+    # naming gemini's retirement - a harness the operator never mentioned. The
+    # name goes back when the spawn arm ships, and this assertion is what makes
+    # someone add it deliberately rather than by widening a roster.
+    assert "pi" not in SPAWN_HARNESSES
+
+    from fno.agents.harness_map import capabilities
+
+    assert capabilities("pi")["thread"] is False, (
+        "the capability bit must agree with the roster: a true bit routes "
+        "autonomous dispatch onto a lane that does not exist"
+    )
 
 
 def test_the_capability_row_records_the_create_hazard_in_words():

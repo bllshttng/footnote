@@ -1448,6 +1448,13 @@ fn pi_run_tail(message: &str) -> Vec<String> {
         "--model".to_string(),
         crate::pi::pi_model(),
         "--print".to_string(),
+        // argv-fence: exempt. Probed on pi 0.84.2: `pi -- --version` PRINTS
+        // the version, so `--` is not an end-of-options marker here and a
+        // fence would be decoration. `--print` is a boolean flag and the
+        // message is a positional, so there is no equal-form either. The
+        // honest mitigation is that fno's driving lane never uses this argv:
+        // the rpc lane carries the message as a JSON string field, where no
+        // parser can read it as a flag.
         message.to_string(),
     ]
 }
