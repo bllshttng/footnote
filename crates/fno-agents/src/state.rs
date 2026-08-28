@@ -1484,16 +1484,39 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// apart means reading the deployed binary's own constant, and the case
 /// self-heals in seconds because every deployed process stamps this file on its
 /// next write. The cost of guessing wrong the other way is a fleet-wide outage.
-fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
+/// The whole decision, as a pure function of its inputs: `Some(root)` refuses
+/// and names the checkout, `None` lets the write proceed.
+///
+/// Split out from the environment read below on purpose. The condition that
+/// matters most here cannot be reproduced on every machine - it needs a
+/// git-managed `$HOME`, which is a common dotfiles pattern and is not how this
+/// developer's machine is set up. A test that can only observe the ambient
+/// environment would be green here for the wrong reason, so the inputs are
+/// arguments and the test constructs the case instead of hoping for it.
+fn source_ahead_root(
+    exe: &Path,
+    home: Option<&Path>,
+    resolved_target: &Path,
+    shared: &Path,
+    found: u32,
+) -> Option<PathBuf> {
     if found >= REGISTRY_SCHEMA_VERSION {
-        return Ok(());
+        return None;
     }
+    if resolved_target != shared {
+        return None;
+    }
+    let root = source_root_for_exe(exe, home)?;
+    if resolved_target.starts_with(&root) {
+        return None;
+    }
+    Some(root)
+}
+
+fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
     let shared = crate::paths::AgentsHome::from_env().registry_json();
     let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let shared = shared.canonicalize().unwrap_or(shared);
-    if resolved != shared {
-        return Ok(());
-    }
     let Ok(exe) = std::env::current_exe() else {
         return Ok(());
     };
@@ -1508,12 +1531,9 @@ fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateE
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .map(|h| h.canonicalize().unwrap_or(h));
-    let Some(root) = source_root_for_exe(&exe, home.as_deref()) else {
+    let Some(root) = source_ahead_root(&exe, home.as_deref(), &resolved, &shared, found) else {
         return Ok(());
     };
-    if resolved.starts_with(&root) {
-        return Ok(());
-    }
     Err(StateError::SourceAheadSchemaBump {
         path: path.display().to_string(),
         found,
@@ -3332,6 +3352,76 @@ mod tests {
 
         std::fs::remove_file(&link).ok();
         std::fs::remove_dir_all(&real).ok();
+    }
+
+    /// The git-managed-$HOME case, constructed rather than observed.
+    ///
+    /// This developer's machine has an unsymlinked HOME with no `.git` above
+    /// `~/.fno`, so the inverted guard cannot fire here and a green suite would
+    /// say nothing about it. A dotfiles repo at `$HOME` is one of the most
+    /// common setups there is, and footnote ships to those people.
+    ///
+    /// Writing this test narrowed the claim it was written to defend, which is
+    /// why it exists. At the DEFAULT registry location the home stop is not what
+    /// saves a deployed binary: `~/.fno/agents/registry.json` sits inside `$HOME`,
+    /// so the store-inside-the-root escape hatch already returns "proceed" with
+    /// or without it. The stop is load-bearing only once the registry lives
+    /// OUTSIDE home - `FNO_AGENTS_HOME` pointed at `/var/lib/...`, or a
+    /// relocated `config.paths.agents_registry_path`. Both are asserted below,
+    /// in both directions, so neither reads as passing by accident.
+    #[test]
+    fn a_deployed_binary_under_a_git_managed_home_still_writes() {
+        let home = tmpdir("git-managed-home").canonicalize().unwrap();
+        std::fs::create_dir_all(home.join(".git")).unwrap();
+        let exe = home.join(".cargo").join("bin").join("fno-agents");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        let older = REGISTRY_SCHEMA_VERSION - 1;
+
+        // The default location, inside home. Deployed either way: the
+        // store-inside-the-root check answers this one before the stop matters.
+        let in_home = home.join(".fno").join("agents").join("registry.json");
+        std::fs::create_dir_all(in_home.parent().unwrap()).unwrap();
+        assert_eq!(
+            source_ahead_root(&exe, Some(&home), &in_home, &in_home, older),
+            None
+        );
+        assert_eq!(
+            source_ahead_root(&exe, None, &in_home, &in_home, older),
+            None
+        );
+
+        // A registry OUTSIDE home (FNO_AGENTS_HOME, or a relocated path). Here
+        // the stop is the only thing keeping a deployed binary writable.
+        let outside = tmpdir("git-managed-home-store")
+            .canonicalize()
+            .unwrap()
+            .join("registry.json");
+        std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+        assert_eq!(
+            source_ahead_root(&exe, Some(&home), &outside, &outside, older),
+            None,
+            "a cargo-installed binary must write even when $HOME is a git repo"
+        );
+        assert_eq!(
+            source_ahead_root(&exe, None, &outside, &outside, older),
+            Some(home.clone()),
+            "without the stop the same deployed binary refuses: this is the bug"
+        );
+
+        // SOURCE: a real checkout that is not home still refuses, so the stop
+        // did not buy deployment safety by disarming the guard.
+        let checkout = home.join("code").join("footnote");
+        let src_exe = checkout.join("target").join("debug").join("fno-agents");
+        std::fs::create_dir_all(src_exe.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(checkout.join(".git")).unwrap();
+        assert_eq!(
+            source_ahead_root(&src_exe, Some(&home), &outside, &outside, older),
+            Some(checkout),
+            "a source build outside home must still refuse"
+        );
+
+        std::fs::remove_dir_all(outside.parent().unwrap()).ok();
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
