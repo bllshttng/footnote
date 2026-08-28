@@ -40,6 +40,7 @@ def _no_real_mail_inject(monkeypatch):
     monkeypatch.setattr(
         dispatch_mod, "_registered_family1_state", lambda _entry: "working"
     )
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
 
 
 # ---------------------------------------------------------------------------

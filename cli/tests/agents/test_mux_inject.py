@@ -82,6 +82,18 @@ class FakeMux:
         self.fail_times = fail_times or {}
 
     def __call__(self, argv, input=None, **kwargs):
+        # This stub replaces subprocess.run for the WHOLE process, so it sees
+        # every shell-out the code under test makes, not only `fno mux pane
+        # <verb>`. It assumed otherwise twice over: it indexed argv[3]
+        # unconditionally, and it recorded every call into `self.calls`, which
+        # every assertion here reads as "the pane verbs, in order". A second
+        # caller appeared (the crown read resolves the registry through the
+        # config layer, which runs `git rev-parse`) and broke both.
+        #
+        # A foreign call is answered as success and NOT recorded, so `calls`
+        # keeps meaning what its readers think it means.
+        if argv[1:3] != ["mux", "pane"] or len(argv) < 4:
+            return subprocess.CompletedProcess(argv, 0, "", "")
         verb = argv[3]
         self.calls.append((list(argv), input))
         times = self.fail_times.get(verb)

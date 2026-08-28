@@ -47,6 +47,7 @@ def isolate_mailbox(tmp_path, monkeypatch):
 def mailbox(tmp_path, monkeypatch):
     """Co-isolate the md render (FNO_INBOX_ROOT), the bus log, and the roster under tmp."""
     isolate_mailbox(tmp_path, monkeypatch)
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     return tmp_path
 
 

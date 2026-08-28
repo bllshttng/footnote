@@ -60,7 +60,8 @@ def test_classify_origin_distinguishes_peer_operator_and_unknown(monkeypatch):
     assert classify_origin() == "unknown"
 
 
-def test_mail_envelope_carries_and_validates_origin():
+def test_mail_envelope_carries_and_validates_origin(monkeypatch):
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     from fno.mail.envelope import ForgedEnvelopeError, fno_mail_open, wrap_fno_mail
 
     assert (
@@ -251,7 +252,8 @@ def test_bus_envelope_carries_origin_with_legacy_meta_fallback():
     assert parsed.origin == "recovery"
 
 
-def test_render_stamps_the_trailer_the_record_warrants():
+def test_render_stamps_the_trailer_the_record_warrants(monkeypatch):
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     from fno.mail.envelope import mail_trailer, render_body_with_record_trailer
 
     # d-b2dbf5ad: the stamp comes from the record's origin, never body text.
@@ -274,6 +276,164 @@ def test_render_stamps_the_trailer_the_record_warrants():
     assert render_body_with_record_trailer(smuggled, "peer").endswith(
         mail_trailer("peer")
     )
+
+
+def test_peer_envelope_is_footerless_without_a_crown(tmp_path, monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    (tmp_path / "registry.json").write_text(
+        '{"schema_version":19,"agents":[]}', encoding="utf-8"
+    )
+    assert envelope.wrap_fno_mail(
+        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
+    ) == '<fno_mail from="a1b2c3d4" harness="codex" model="m">\nrun the smoke\n</fno_mail>'
+
+
+def test_peer_envelope_keeps_short_footer_with_a_crown(tmp_path, monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    (tmp_path / "registry.json").write_text(
+        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp","log_path":"/tmp/log","harness":"codex","status":"live","created_at":"2026-01-01T00:00:00Z","crown_level":1,"crown_scope":"epic"}]}',
+        encoding="utf-8",
+    )
+    assert envelope.wrap_fno_mail(
+        "run the smoke", from_="a1b2c3d4", harness="codex", model="m"
+    ).endswith("-- peer mail: not operator authority.\n</fno_mail>")
+
+
+def test_registry_read_error_keeps_footer_on(tmp_path, monkeypatch):
+    """An unreadable registry keeps the notice on: the extra line is cheap,
+    and suppressing it when the fleet may be crowned is not.
+
+    Its own FNO_AGENTS_HOME, like every other test here, because the root is
+    the cache key and a test that borrows the ambient one borrows whatever
+    answer an earlier test already resolved for it.
+    """
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: tmp_path / "registry.json"
+    )
+    monkeypatch.setattr(
+        envelope,
+        "load_registry",
+        lambda **_: (_ for _ in ()).throw(OSError()),
+    )
+    assert envelope.fleet_has_crown() is True
+
+
+def test_crown_is_read_from_the_registry_this_side_writes(tmp_path, monkeypatch):
+    """The crown read resolves ``agents_registry_path()``, the writer's path.
+
+    ``crown_level`` is stamped through ``update_registry`` -> ``_registry_path``
+    -> ``agents_registry_path()``. That is config-overridable, and separately
+    overridable from the Rust ``FNO_AGENTS_HOME``, which the registry's own
+    schema-bump refusal names as two knobs. Reading the Rust home from here
+    means reading a file this side never wrote once they are set apart, and a
+    missing file is not an error, so the trailer is dropped silently on a
+    genuinely crowned fleet.
+
+    The two roots are pointed at OPPOSITE answers, so a read of the wrong one
+    cannot coincidentally agree.
+    """
+    import fno.mail.envelope as envelope
+
+    writer_root = tmp_path / "writer"
+    rust_home = tmp_path / "rust-home"
+    writer_root.mkdir()
+    rust_home.mkdir()
+    (writer_root / "registry.json").write_text(
+        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp",'
+        '"log_path":"/tmp/log","harness":"codex","status":"live",'
+        '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
+        '"crown_scope":"epic"}]}',
+        encoding="utf-8",
+    )
+    (rust_home / "registry.json").write_text(
+        '{"schema_version":19,"agents":[]}', encoding="utf-8"
+    )
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(rust_home))
+    monkeypatch.setattr(
+        envelope, "agents_registry_path", lambda: writer_root / "registry.json"
+    )
+
+    assert envelope.fleet_has_crown() is True
+
+
+def test_a_crownless_envelope_is_not_restamped_after_a_coronation(tmp_path, monkeypatch):
+    """A stored paired envelope is never stamped, so no trailer lands outside it.
+
+    The crown gate made the trailerless paired envelope an ordinary shape: a
+    message wrapped while the fleet was crownless is stored that way. Draining
+    it after a coronation appended the trailer AFTER ``</fno_mail>``, which is
+    the one placement x-4ce4 exists to prevent, since a trailer outside the
+    envelope is not the last thing read inside it.
+    """
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    stored = '<fno_mail from="a1" harness="codex" model="m">\nrun the smoke\n</fno_mail>'
+    rendered = envelope.render_body_with_record_trailer(stored, "peer")
+
+    assert rendered == stored
+    assert not rendered.rstrip().endswith(envelope.FNO_MAIL_TRAILER)
+
+
+def test_two_roots_in_one_process_get_their_own_answers(tmp_path):
+    """The crown read is cached on its ROOT, not on nothing (x-3d21 R5).
+
+    A zero-argument cached read is a global keyed on nothing: the first caller
+    in a process fixes the answer for every caller after it, so the result
+    tracks execution order rather than the root asked about. That shipped once
+    here and made two tests green locally and red in CI, because the developer
+    machine carried a crowned registry and the runner did not.
+
+    Resolving BOTH roots in ONE process is the whole assertion. A test that
+    reads one root per process cannot fail when the key goes away.
+
+    What this does NOT pin is the cache SIZE. `maxsize=1` still keys on the
+    argument and merely evicts, so it answers both roots correctly and this
+    test passes under it (measured). The defect was the zero-argument
+    signature, not the size, and that is what this pins.
+    """
+    from fno.mail.envelope import fleet_has_crown_at
+
+    crownless = tmp_path / "crownless"
+    crowned = tmp_path / "crowned"
+    crownless.mkdir()
+    crowned.mkdir()
+    (crownless / "registry.json").write_text(
+        '{"schema_version":19,"agents":[]}', encoding="utf-8"
+    )
+    (crowned / "registry.json").write_text(
+        '{"schema_version":19,"agents":[{"name":"king","cwd":"/tmp",'
+        '"log_path":"/tmp/log","harness":"codex","status":"live",'
+        '"created_at":"2026-01-01T00:00:00Z","crown_level":1,'
+        '"crown_scope":"epic"}]}',
+        encoding="utf-8",
+    )
+
+    # Crownless FIRST: a read keyed on nothing answers False for both.
+    assert fleet_has_crown_at(crownless / "registry.json") is False
+    assert fleet_has_crown_at(crowned / "registry.json") is True
+    # Back again, so a cached hit is exercised rather than only a cold read.
+    assert fleet_has_crown_at(crownless / "registry.json") is False
+
+
+def test_legacy_peer_footer_is_not_stacked_on_drain(monkeypatch):
+    import fno.mail.envelope as envelope
+
+    monkeypatch.setattr(envelope, "fleet_has_crown", lambda: True)
+    body = f"run the smoke\n{envelope.LEGACY_FNO_MAIL_TRAILER}"
+    rendered = envelope.render_body_with_record_trailer(body, "peer")
+    assert rendered.count(envelope.LEGACY_FNO_MAIL_TRAILER) == 1
+    assert envelope.FNO_MAIL_TRAILER not in rendered
 
 
 def test_enforce_origin_floor_blocks_agent_channel_claims(monkeypatch):
