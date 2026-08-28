@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, NoReturn, Optional
+from typing import Any, Literal, NoReturn, Optional
 from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
@@ -869,6 +869,16 @@ def _refuse_provider_cap(
     raise GateRefused(EXIT_PROVIDER_CAP, receipt)
 
 
+def _emit_gate_event(kind: str, **data: Any) -> None:
+    """Best-effort agents-log event. Never raises, never blocks a spawn."""
+    try:
+        from fno.agents import events
+
+        events.emit(kind, **data)
+    except Exception:  # noqa: BLE001 - telemetry never changes a gate outcome
+        pass
+
+
 def _check_registry_schema() -> None:
     """Refuse a spawn into a fleet whose shared registry this fno cannot write.
 
@@ -898,10 +908,18 @@ def _check_registry_schema() -> None:
     try:
         target = _registry_path(None)
         raw = _read_raw_registry(target)
-    except Exception:  # noqa: BLE001 - resolving the path needs settings, and
-        # an unreadable config is not a fleet condition. Silent, matching the
-        # module contract that global guards fail OPEN on read errors: no spawn
-        # is ever blocked because a path could not be resolved.
+    except Exception as exc:  # noqa: BLE001 - resolving the path needs settings,
+        # and an unreadable config is not a fleet condition: no spawn is blocked
+        # because a path could not be resolved (the module contract that global
+        # guards fail OPEN on read errors).
+        #
+        # The skip leaves a trace, but NOT on stderr. `_check_ram_floor` and
+        # `_check_load_ceiling` warn on their equivalent skips, and this one
+        # cannot: the gate's own `test_under_cap_passes_silently` pins an empty
+        # stderr on the pass path, and this branch fires there. A silent skip is
+        # still unobservable, so it emits instead - the same aggregation argument
+        # the refusal below already makes, applied to the absence of a check.
+        _emit_gate_event("registry_schema_check_skipped", reason=repr(exc))
         return
     if raw is None:
         return
@@ -916,17 +934,12 @@ def _check_registry_schema() -> None:
         f"update), or repair the file (fno agents registry-repair --to "
         f"{SCHEMA_VERSION} --apply)."
     )
-    try:
-        from fno.agents import events
-
-        events.emit(
-            "registry_schema_ahead",
-            registry_path=str(target),
-            on_disk=on_disk,
-            understood=SCHEMA_VERSION,
-        )
-    except Exception:  # noqa: BLE001 - telemetry never blocks the refusal
-        pass
+    _emit_gate_event(
+        "registry_schema_ahead",
+        registry_path=str(target),
+        on_disk=on_disk,
+        understood=SCHEMA_VERSION,
+    )
     raise GateRefused(
         EXIT_REGISTRY_SCHEMA,
         {

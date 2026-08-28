@@ -138,6 +138,28 @@ def test_a_registry_at_or_below_this_fno_passes(shared: Path, delta: int) -> Non
     spawn_gate._check_registry_schema()
 
 
+def test_an_unresolvable_path_skips_but_leaves_a_trace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The skip is fail-open by contract, but it must not be invisible.
+
+    Its sibling guards warn on the equivalent skip; this one cannot, because the
+    gate's own `test_under_cap_passes_silently` pins an empty stderr on the pass
+    path and this branch fires there. So it emits instead.
+    """
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
+    monkeypatch.setattr(
+        paths, "agents_registry_path", lambda: (_ for _ in ()).throw(RuntimeError("no settings"))
+    )
+
+    spawn_gate._check_registry_schema()
+
+    rows = [json.loads(line) for line in events.read_text().splitlines() if line]
+    assert [r["kind"] for r in rows] == ["registry_schema_check_skipped"]
+    assert "no settings" in rows[0]["reason"]
+
+
 @pytest.mark.parametrize("body", [None, "", "{", "[]", '{"schema_version": "20"}'])
 def test_an_unreadable_registry_skips_the_check(shared: Path, body) -> None:
     """Same contract as the RAM floor and the load ceiling: unreadable skips.
