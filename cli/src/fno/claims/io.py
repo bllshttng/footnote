@@ -315,6 +315,26 @@ def _denied_root(path: Path) -> str:
     return str(parent)
 
 
+def _ambient_session_id() -> str:
+    """This worker's harness session id, or empty when nothing names it.
+
+    Reads the marker table in ``fno.harness_identity`` rather than naming the
+    per-harness variables here. A second hand-written list of those names is a
+    twin the reachable-paths gate refuses, and rightly: a harness added there
+    would silently produce breadcrumbs with a blank session id.
+    """
+    try:
+        from fno.harness_identity import FNO_HARNESS_SESSION_ID, HARNESS_SESSION_MARKERS
+
+        for name in (FNO_HARNESS_SESSION_ID, *(m for m, _ in HARNESS_SESSION_MARKERS)):
+            value = os.environ.get(name)
+            if value:
+                return value
+    except Exception:
+        pass
+    return ""
+
+
 def _write_denial_breadcrumb(denied_root: str) -> None:
     """Write ``<repo>/.fno/state-root-denied.json``. Never raises."""
     try:
@@ -327,10 +347,7 @@ def _write_denial_breadcrumb(denied_root: str) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "denied_root": denied_root,
-            "session_id": os.environ.get("CODEX_COMPANION_SESSION_ID")
-            or os.environ.get("CLAUDE_SESSION_ID")
-            or os.environ.get("FNO_AGENT_SELF")
-            or "",
+            "session_id": _ambient_session_id(),
             "denied_at": datetime.now(timezone.utc).isoformat(),
         }
         target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

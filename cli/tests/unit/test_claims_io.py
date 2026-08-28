@@ -392,7 +392,10 @@ def test_denied_claim_write_leaves_a_breadcrumb_the_operator_can_read(tmp_path, 
     repo = tmp_path / "repo"
     repo.mkdir()
     monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
-    monkeypatch.setenv("CODEX_COMPANION_SESSION_ID", "sess-probe-1")
+    # The canonical carrier, not a per-harness one: the resolver reads the
+    # marker table in fno.harness_identity rather than a second hand-written
+    # list, so this pins the contract instead of one harness's spelling.
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", "sess-probe-1")
     claims.chmod(0o500)
     try:
         with pytest.raises(ClaimStateRootDenied):
