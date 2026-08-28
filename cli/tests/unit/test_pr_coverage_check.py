@@ -1625,6 +1625,43 @@ def test_file_findings_at_cap_mints_once_through_the_real_cli(monkeypatch, tmp_p
     assert _tmp_graph_titles(home).count(title) == 1
 
 
+def test_two_findings_at_the_cap_both_mint_through_the_real_cli(
+    monkeypatch, tmp_path
+):
+    """The fold gate must never swallow the second finding.
+
+    `--difficulty` is what OPENS the pre-mint fold gate, so the flag that made
+    filing work also created this trap. Every cap filing shares a title prefix,
+    which makes the first node a fold candidate for the second. Non-interactive,
+    the offer prints and the command exits 0 having minted NOTHING - and the
+    caller then scrapes an id out of the printed wave command and reports a
+    finding it never filed.
+
+    Asserts TWO DISTINCT ids and two nodes in the graph. Asserting the call
+    succeeded passes on exactly the silent loss this guards.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    keys = [
+        "cli/src/fno/pr/_coverage_gate.py:1057:correctness",
+        "cli/src/fno/pr/_coverage_gate.py:1099:correctness",
+    ]
+    ids = _coverage_gate.file_findings_at_cap(keys, 42, str(repo))
+
+    assert len(ids) == 2, ids
+    assert len(set(ids)) == 2, f"the two findings folded into one node: {ids}"
+    titles = _tmp_graph_titles(home)
+    for key in keys:
+        assert f"review finding filed at round cap: {key}" in titles, key
+
+
 # ---- x-aecc: declining must satisfy coverage ----
 #
 # The pass condition is ANSWERED at this head, never clean at this head. The

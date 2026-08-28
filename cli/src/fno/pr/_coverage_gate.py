@@ -4,9 +4,12 @@ Lifted out of ``run_merge`` unchanged so a second caller can ask the same
 question without a second copy of it. The predicate is MOVED, never restated:
 every helper lives in ``fno.pr._merge`` and is reached through the module, so
 the merge path is steered by patching ``_merge`` alone. The verb's no-recompute
-read calls ``_reviews.latest_review_coverage`` directly, so a test that must
-steer BOTH surfaces patches both modules (as this module's own tests do), and
-the two readers that already disagree stay two, not three.
+read calls ``_reviews.review_coverage_for_head_row`` directly, so a test that
+must steer BOTH surfaces patches both modules (as this module's own tests do),
+and the two readers that already disagree stay two, not three. Patch the name
+this module actually calls: ``latest_review_coverage`` is a thin wrapper no
+longer on this path, so patching it steers nothing and a test built on it
+passes on a read that quietly succeeded.
 
 One predicate, three reachable surfaces:
 
@@ -1154,6 +1157,16 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
                 # ever reaches this line.
                 "--difficulty",
                 "low",
+                # --separate is load-bearing BECAUSE of --difficulty. The
+                # pre-mint fold gate keys on difficulty being set, and with a
+                # fold candidate present and no tty it prints the offer and
+                # exits 0 having minted NOTHING. Every finding filed at the cap
+                # shares a title prefix, so the second one on a PR is always a
+                # fold candidate for the first. Without this the caller reads
+                # ok, scrapes an unrelated id out of the printed wave command,
+                # reports the finding as filed, and merges over a finding that
+                # was silently dropped.
+                "--separate",
                 "--details",
                 (
                     f"Filed by the review-coverage gate at the round cap on PR "

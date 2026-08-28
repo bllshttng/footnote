@@ -495,3 +495,28 @@ def test_an_empty_field_selection_is_refused(tmp_path):
     """An empty set is a subset of everything, so subset alone would fund a
     malformed read. It is not a narrower read; it is a broken one."""
     assert not _quota._coverage_read(["pr", "view", "1", "--json", ""])
+
+def test_gh_global_flags_before_the_command_word_reach_the_coverage_reserve(
+    tmp_path,
+):
+    """`_coverage_read` judges the NORMALIZED command, like the argv guard does.
+
+    `execute_graphql` normalizes precisely so gh-wide options before the
+    command word do not change policy. Judging the raw argv refused
+    `gh -R o/r pr view N --json reviews` with the reserve message - the same
+    wrong-refusal class the subset rule was just corrected for.
+    """
+    calls: list[list[str]] = []
+    result = _quota.execute_graphql(
+        "coverage",
+        ["-R", "owner/repo", "pr", "view", "1252", "--json", "reviews"],
+        runner=_runner(_quota.GRAPHQL_RESERVE, calls),
+        real_gh="/real/gh",
+        lock_path=tmp_path / "quota.lock",
+    )
+    assert result.returncode == 0, result.stderr
+    # The full argv rides along, options included - normalization decides
+    # policy, never what gets executed.
+    assert calls[-1] == [
+        "/real/gh", "-R", "owner/repo", "pr", "view", "1252", "--json", "reviews",
+    ]

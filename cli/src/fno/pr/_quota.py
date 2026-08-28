@@ -302,7 +302,12 @@ def execute_graphql(
     if not command or command[0].startswith("-"):
         first = command[0] if command else gh_args[0]
         return Result(2, "", _malformed_argv_refusal(first))
-    if purpose == "coverage" and not _coverage_read(gh_args):
+    # The NORMALIZED command, not the raw argv. `command` exists two lines up
+    # precisely so gh-wide options before the command word do not change
+    # policy, and judging the raw argv here refuses `gh -R o/r pr view N --json
+    # reviews` with the reserve message - the same wrong-refusal class this
+    # predicate was just corrected for.
+    if purpose == "coverage" and not _coverage_read(command):
         return Result(2, "", "coverage reserve accepts review-coverage reads only")
     # A caller spelling bare ``gh`` inside a protected worker would resolve to
     # the proxy. Re-entering the broker while this process holds the flock

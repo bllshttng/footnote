@@ -353,7 +353,12 @@ fn new_reader_sites_must_join_the_table() {
         let text = fs::read_to_string(entry.path()).unwrap();
         if text.contains("review_coverage_for_gate")
             || text.contains("review_coverage_for_head(")
+            // The no-recompute surface reads the row and its pinned-input note
+            // in one scan. A separate needle, not a paren-less prefix: the
+            // parens are what keep a prose mention out of the reader table.
+            || text.contains("review_coverage_for_head_row(")
             || text.contains("latest_review_coverage(")
+            || text.contains("latest_review_coverage_row(")
             || text.contains("read_review_coverage(")
             || text.contains("_scan_coverage(")
         {

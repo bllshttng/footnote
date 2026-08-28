@@ -349,3 +349,44 @@ class TestCachedNegativeNamesItsInput:
         assert len(scans) == 1, scans
         assert data["coverage"] == "uncovered"
         assert "coverage row pinned to 74106361b" in note, note
+
+    def test_the_pin_does_not_ride_the_recompute_key(self, monkeypatch, tmp_path):
+        """`recompute` promises a recompute RAN, and readers act on that.
+
+        `_status.coverage_recompute_note` prints every value but the literal
+        "recomputed", so folding the pin into that key narrates a recompute
+        that never happened on every status poll of an uncovered PR.
+        """
+        _isolate_logs(monkeypatch, tmp_path)
+        _write_log(tmp_path, _uncovered_row("2026-08-28T07:15:38Z"))
+        monkeypatch.setattr(
+            _reviews, "_fire_review_coverage_verb", lambda *a, **k: (False, "no binary")
+        )
+        # A head-matching uncovered row with no later attestation runs no
+        # recompute, so the ONLY note is the pin. It must not arrive wearing
+        # the recompute key.
+        shaped = _reviews.read_review_coverage(
+            1242, str(tmp_path), _H, recompute=True
+        )
+        assert shaped["coverage_pin"].startswith("coverage row pinned to 74106361b")
+        assert "recompute" not in shaped, shaped.get("recompute")
+
+        # And where a recompute DOES run, both keys carry their own claim.
+        # Asserting only the case above would pass on a build that dropped the
+        # recompute note entirely.
+        other = "ffffffff00000000000000000000000000000000"
+        shaped = _reviews.read_review_coverage(
+            1242, str(tmp_path), other, recompute=True
+        )
+        assert shaped["recompute"] == "recompute unavailable: no binary"
+        assert "pinned to" not in shaped["recompute"]
+
+    def test_split_pin_note_separates_two_different_claims(self):
+        """One says what an instrument did, the other what a stored answer
+        rests on. A consumer keyed on the first must not receive the second."""
+        joined = "recomputed; coverage row pinned to abc123def at 2026-08-28T07:15:38Z"
+        recompute, pin = _reviews.split_pin_note(joined)
+        assert recompute == "recomputed"
+        assert pin == "coverage row pinned to abc123def at 2026-08-28T07:15:38Z"
+        assert _reviews.split_pin_note("") == ("", "")
+        assert _reviews.split_pin_note("recomputed") == ("recomputed", "")

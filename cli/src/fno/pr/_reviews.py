@@ -489,6 +489,10 @@ def review_coverage_for_gate(
 #: that fails a conjunct refuses with a sentence that already names both heads.
 _NEGATIVE_COVERAGE = frozenset({"uncovered", "unknown"})
 
+#: One spelling of the pin's prefix, so the renderer and the splitter below
+#: cannot drift into disagreeing about what a pin looks like.
+_PIN_PREFIX = "coverage row pinned to "
+
 
 def _pinned_note(row: Optional[dict], ts: str) -> str:
     """The input a stored NEGATIVE rests on, and when it was recorded.
@@ -503,7 +507,21 @@ def _pinned_note(row: Optional[dict], ts: str) -> str:
     if not head_sha:
         return ""
     when = f" at {ts}" if ts else ""
-    return f"coverage row pinned to {str(head_sha)[:9]}{when}"
+    return f"{_PIN_PREFIX}{str(head_sha)[:9]}{when}"
+
+
+def split_pin_note(note: str) -> tuple[str, str]:
+    """Split a gate note into ``(recompute_outcome, pinned_input)``.
+
+    The two travel joined because a refusal renders one sentence, but they are
+    different claims: one says what an instrument did, the other says what a
+    stored answer rests on. A consumer that keys on the recompute must not
+    receive the pin wearing its name.
+    """
+    parts = [part.strip() for part in (note or "").split(";") if part.strip()]
+    pins = [p for p in parts if p.startswith(_PIN_PREFIX)]
+    rest = [p for p in parts if not p.startswith(_PIN_PREFIX)]
+    return "; ".join(rest), "; ".join(pins)
 
 
 def _uncovered_row_overtaken(
@@ -1109,8 +1127,15 @@ def read_review_coverage(
     # status` refuse forever on a row `fno do pr merge` accepted (round 3, PR 917).
     if latest.get("verdicts") is not None:
         shaped["verdicts"] = latest["verdicts"]
-    if note:
-        shaped["recompute"] = note
+    recompute_note, pin_note = split_pin_note(note)
+    if recompute_note:
+        shaped["recompute"] = recompute_note
+    if pin_note:
+        # Its own key. `recompute` promises a recompute RAN, and readers act on
+        # that: `_status.coverage_recompute_note` prints every value but the
+        # literal "recomputed", so folding the pin in here narrates a recompute
+        # that never happened on every poll of an uncovered PR.
+        shaped["coverage_pin"] = pin_note
     return shaped
 
 
