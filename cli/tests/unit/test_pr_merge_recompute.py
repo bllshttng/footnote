@@ -158,8 +158,37 @@ def test_recompute_moved_head_still_refuses(enabled, monkeypatch, capsys, tmp_pa
     # shape); the heads disagreeing is the point, and so is the recompute
     # clause proving a fresh event was attempted and did not clear it.
     assert "otherhea" in reason and "newhead" in reason, reason
-    assert "[recomputed]" in reason, reason
+    # The OPEN marker, not "[recomputed]" with its closing bracket. The note
+    # is a clause list, and pinning the terminator makes any later disclosure
+    # look like a regression - which would push a future author to shorten the
+    # message to go green. The next test pins the disclosed form itself.
+    assert "[recomputed" in reason, reason
     assert len(calls) == 1
+
+
+def test_a_failed_reviews_read_is_disclosed_beside_the_recompute(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The disclosure the clause above deliberately leaves room for.
+
+    The round budget reads the PR's review objects, and that read can fail.
+    It used to answer a bare None, so the budget silently kept its
+    events-only count and a failed read was byte-identical to a genuinely
+    unreviewed PR. The refusal names the failure now, beside the recompute
+    outcome rather than instead of it.
+    """
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
+    calls: list = []
+    _stub_recompute(
+        monkeypatch, tmp_path, coverage="covered", count=2, head="otherhead", calls=calls
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    reason = _last_json(capsys, stream="err")["reason"]
+    # Both clauses, in one note: what the recompute did, and what the reviews
+    # read could not do. Asserting either alone passes on a note that dropped
+    # the other.
+    assert "recomputed" in reason, reason
+    assert "reviews read unavailable: " in reason, reason
 
 
 # ---- x-b56a: a degraded recompute names its reason ----
