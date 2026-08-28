@@ -3032,6 +3032,12 @@ fn exit_code_for(code: ErrorCode) -> i32 {
         // Distinct from Internal on purpose: a caller racing daemon teardown
         // can retry, where a real Internal fault should not be retried blind.
         ErrorCode::ShuttingDown => 19,
+        // Also distinct, and for the opposite reason: two fno builds disagree
+        // about the registry schema, so retrying changes nothing. The repair is
+        // a deploy or a redirect. A caller that folded this into Internal would
+        // report a daemon fault, which is how the 2026-08-28 outage was
+        // misdiagnosed twice.
+        ErrorCode::SchemaMismatch => 20,
     }
 }
 

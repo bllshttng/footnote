@@ -1729,8 +1729,17 @@ fn write_valid_registry(home: &AgentsHome) {
             r#"{{"name":"{name}","cwd":"/tmp/proj","harness":"claude","harness_session_id":"11111111-2222-3333-4444-555555555555","status":"live","created_at":"2026-08-16T00:00:00Z"}}"#
         )
     };
+    // The CURRENT version, not a fixed older one. These rows already carry
+    // `harness` outright, so nothing here needed a migration, but the daemon's
+    // startup reconcile read-modify-writes this file through
+    // `state::update_registry` - and a test daemon is built inside the checkout,
+    // so raising an older version on the process-global registry is exactly what
+    // x-665d's write guard refuses. The sweep then reported
+    // `startup_reconcile_failed` and the wait for `startup_reconcile_done` timed
+    // out. The guard has no bypass by design.
     let body = format!(
-        r#"{{"schema_version":14,"agents":[{},{}]}}"#,
+        r#"{{"schema_version":{},"agents":[{},{}]}}"#,
+        state::REGISTRY_SCHEMA_VERSION,
         row("worker-alpha"),
         row("worker-gamma")
     );
