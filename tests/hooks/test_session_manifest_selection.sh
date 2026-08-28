@@ -132,6 +132,25 @@ else
     fail "target visitor outcome missing (rc=$TARGET_RC stderr=$TARGET_STDERR)"
 fi
 
+# x-8d1d: a joiner spawned by `fno backlog join` shares the holder's worktree
+# but owns no manifest - its session id matches none, the target session's
+# manifest stays selected for its own session, and the joiner's stop still
+# allows the visitor out with exit 0.
+printf '{"message":{"role":"assistant","content":"working"}}\n' > "$TMP/joiner-j-x-8d1d-1.jsonl"
+JOINER_RC=0
+(
+    cd "$TMP/b" || exit 1
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" SELECTED_STATE="$TMP/a/.fno/target-state.md" \
+        RESOLVER_RC=1 STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
+        bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$TMP/joiner-j-x-8d1d-1.jsonl\"}"
+) >/dev/null 2>"$TMP/joiner.stderr" || JOINER_RC=$?
+JOINER_STDERR="$(cat "$TMP/joiner.stderr")"
+if [[ "$JOINER_RC" -eq 0 && "$JOINER_STDERR" == *"no manifest names session joiner-j-x-8d1d-1; visitor allowed"* ]]; then
+    pass "joiner session matching no manifest stops as a visitor (x-8d1d)"
+else
+    fail "joiner visitor outcome missing (rc=$JOINER_RC stderr=$JOINER_STDERR)"
+fi
+
 run_target 2
 if [[ "$TARGET_RC" -eq 2 && "$TARGET_STDERR" == *"checker unavailable"* ]]; then
     pass "target resolver failure takes the bounded-block path"

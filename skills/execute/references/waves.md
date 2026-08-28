@@ -50,6 +50,10 @@ Validate plan structure before execution. On ERROR: stop. On WARN: log and proce
 
 Load [plan-validation.md](plan-validation.md) for the full protocol.
 
+#### Joiner posture (`FNO_WORKER_NAME` starts with `j-`)
+
+A worker spawned by `fno backlog join <node>` (`j-<node>-<k>`) is a VISITOR in the node holder's worktree, not a target. First: `.fno/join-briefs/<node>.md` carries your joiner brief (the lead and mail hub, and your claim discipline) - when that file exists for the bound node, read it before dispatching. Never run `target init` and never take the node claim: the target session keeps it, and a joiner that runs `target init` anyway gets the existing "another session holds the node, not this caller" refusal - on that refusal, stop with `<help>` instead of retrying. Read `graph_node_id` from THIS worktree's manifest with `target_state_field` (step 3e), and let `FNO_WORKER_NAME` be the task-claim holder (the joiner 1 contract): the task verbs bind their holder to the roster name, so each joiner is provable as a distinct owner. Everything else in this flow runs unchanged - a joiner's stop hook exits 0 (`visitor allowed`) because its session id matches no manifest in the worktree.
+
 ### 0b. Structural Context (AUTO)
 
 Generate fresh codemap for structural awareness:
@@ -374,6 +378,8 @@ if [[ -n "$NODE_ID" ]]; then
   [[ $TASK_CLAIM_RC -eq 0 ]] || echo "task $TASK_ID not claimed (rc=$TASK_CLAIM_RC)"
 fi
 ```
+
+For a joiner (`FNO_WORKER_NAME` starts with `j-`, step 0 posture) this block is the whole claim path: the manifest read still resolves `graph_node_id` (that field names the node, not the session), and the task verbs bind the claim's holder to the joiner's roster name, so a joined worker's owner is provable without any session identity of the target.
 
 Branch on `TASK_CLAIM_RC`. Every nonzero code means you did NOT take the claim, so dispatching anyway is the double-worker bug this step exists to close.
 

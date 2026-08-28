@@ -140,14 +140,19 @@ def resolve_task_holder(
     """Resolve the holder for a task-grain claim, or name why it cannot.
 
     Returns ``(holder, "")`` or ``(None, refusal_reason)``; the caller turns a
-    refusal into an exit-4 identity failure. Two identities are acceptable:
+    refusal into an exit-4 identity failure. Three identities are acceptable:
 
     1. ``FNO_WORKER_NAME``: the roster name ``fno agents spawn`` exports into
        the worker it launches. A spawned worker can prove the name is its own
        because its parent minted it specifically for this child, and two
        siblings in one worktree carry two names - the collapse this resolver
        exists to break.
-    2. The ambient session id, when this process PROVES it (process-tree
+    2. The roster name bound to this session id in the agents registry (the
+       spawn-time name<->session binding; see
+       :func:`_roster_name_for_session`). The env export in 1 cannot reach a
+       daemon-forked worker, whose serving session inherits the daemon's env;
+       the registry row survives that fork and proves the same fact.
+    3. The ambient session id, when this process PROVES it (process-tree
        ancestry) or the marker is at least not the worktree manifest's shared
        value. The manifest is read by every fno process in the directory, so
        an identity that only matches it is a shared anchor: refusing names the
@@ -168,5 +173,57 @@ def resolve_task_holder(
                 "the only provable identity is the worktree manifest's shared "
                 "session id, which every fno process in this directory reads"
             )
+    roster = _roster_name_for_session(ident.session_id)
+    if roster:
+        return roster, ""
     return ident.session_id, ""
+
+
+def _roster_name_for_session(session_id: str) -> str:
+    """The roster name bound to this harness session id, or ``""``.
+
+    ``fno agents spawn`` writes the name->harness_session_id binding into the
+    registry at spawn time, so a row naming this exact session id proves the
+    name is this worker's own - the same guarantee the ``FNO_WORKER_NAME``
+    export was meant to give. The env write cannot reach a daemon-forked
+    worker: the serving session inherits the claude daemon's env, never the
+    spawning process's (x-6de8), so a spawned worker's holder degraded to a
+    raw session id (live join proof, 2026-08-27). The registry row survives
+    that fork. Best-effort by design: an unreadable registry, a missing row,
+    or an ambiguous session id (two names) answers "" and the caller keeps
+    the previous resolution unchanged.
+
+    The registry FILE is read directly (paths -> json) rather than through
+    ``fno.agents.registry``: that module is L5 runtime and this resolver is
+    L1 core, a new edge the boundary gate refuses. The coupled shape is the
+    documented store layout - ``{"schema_version": N, "agents": [row]}`` with
+    the session-id fields per row - and the read degrades to "" on anything
+    else, so an L5-side schema change cannot crash identity resolution.
+    """
+    sid = (session_id or "").strip()
+    if not sid:
+        return ""
+    try:
+        import json
+
+        from fno.paths import agents_registry_path
+
+        raw = json.loads(agents_registry_path().read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - identity must degrade, never crash
+        return ""
+    rows = raw.get("agents") if isinstance(raw, dict) else None
+    if not isinstance(rows, list):
+        return ""
+    names = {
+        str(row["name"])
+        for row in rows
+        if isinstance(row, dict) and row.get("name")
+        and sid in {
+            str(row.get(k) or "").strip()
+            for k in ("harness_session_id", "cc_session_id", "session_id")
+        }
+    }
+    if len(names) == 1:
+        return next(iter(names))
+    return ""
 

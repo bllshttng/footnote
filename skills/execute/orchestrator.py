@@ -215,13 +215,6 @@ class ImpeccableStageLoop:
         if final_score < self.critique_floor:
             return ImpeccableVerdict.FAILED
         return ImpeccableVerdict.DONE_WITH_CONCERNS
-HIDDEN_SHARED_OUTPUT_ROOTS = (
-    ".fno/",
-    ".codex/agents/",
-    ".gemini/agents/",
-    "docs/",
-    "internal/",
-)
 
 
 def _parse_scalar(value: str):
@@ -467,7 +460,11 @@ def detect_hidden_output_conflicts(
     ``unevaluated`` ids with no parseable file list) plus the two legacy
     conflict keys the ``--wave-decision`` printer still reports.
     """
-    from fno.graph.collision import match_shared_root, partition
+    from fno.graph.collision import (
+        HIDDEN_SHARED_OUTPUT_ROOTS,
+        match_shared_root,
+        partition,
+    )
 
     by_file: Dict[str, List[str]] = {}
     by_root: Dict[str, List[str]] = {}
@@ -513,7 +510,7 @@ def partition_edges(
     ``--ready`` query unions these with the declared ``blocked_by`` edges,
     so the overlapping tasks serialize without flipping the wave's mode.
     """
-    from fno.graph.collision import partition
+    from fno.graph.collision import HIDDEN_SHARED_OUTPUT_ROOTS, partition
 
     items = [
         (task_id, set(_task_targets(plan_path, task_id, surfaces)))
