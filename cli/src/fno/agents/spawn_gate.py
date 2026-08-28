@@ -895,8 +895,14 @@ def _check_registry_schema() -> None:
         _registry_path,
     )
 
-    target = _registry_path(None)
-    raw = _read_raw_registry(target)
+    try:
+        target = _registry_path(None)
+        raw = _read_raw_registry(target)
+    except Exception:  # noqa: BLE001 - resolving the path needs settings, and
+        # an unreadable config is not a fleet condition. Silent, matching the
+        # module contract that global guards fail OPEN on read errors: no spawn
+        # is ever blocked because a path could not be resolved.
+        return
     if raw is None:
         return
     on_disk = raw.get("schema_version")

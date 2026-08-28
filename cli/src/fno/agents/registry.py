@@ -1246,7 +1246,8 @@ def _plan_registry_schema_repair(
             raise RegistryRepairRefused(
                 f"refusing to repair {target}: row {index} is not an object."
             )
-        name = row.get("name") if isinstance(row.get("name"), str) else f"<row {index}>"
+        raw_name = row.get("name")
+        name = raw_name if isinstance(raw_name, str) else f"<row {index}>"
         unknown = [k for k in row if k not in _INIT_FIELD_NAMES]
         if not unknown:
             continue
