@@ -406,3 +406,153 @@ tokens = []
 effort_labels = {}
 status_command = ""
 status_pattern = ""
+
+# pi (@earendil-works/pi-coding-agent 0.84.2), a DUAL-LANE harness. Which lane
+# a session gets is a choice fno makes at exec, never a property of pi:
+#
+#   rpc lane    `pi --mode rpc`. Strict JSONL over stdin/stdout, typed events,
+#               LF the only record delimiter, `id` correlating request to
+#               response. The DRIVING lane: spawn, ask, and mail injection,
+#               the last of which rides pi's native `steer` command rather
+#               than typed keystrokes.
+#   pane lane   plain interactive `pi` in a mux pane, showing pi's real TUI.
+#               The WATCHING lane, and the only lane where `/login <provider>`
+#               can be run at all. Measured 2026-08-28: a TUI opened on a
+#               session an rpc driver already holds JOINS it, renders that
+#               session's own turns, and the session-file count stays at ONE.
+#               So the pane is a VIEW onto a live rpc session, not a rival
+#               launch, and no lane has to be chosen at spawn.
+#
+# CALLER-ASSIGNED IDS REMOVE THE CLOCK-BUCKET COLLISION AND DO NOT REMOVE THE
+# COLLISION. pi adopts any `--session-id`, so it cannot suffer the ~65s clock
+# bucket that collides two codex short ids. But CONCURRENT CREATE on one id is
+# UNSERIALISED AND SILENT: four simultaneous creates on one id each printed
+# "creating a new session with that id", each exited 0, and produced FOUR
+# session files 49ms apart, every one of them internally perfect. A later
+# resume picked the OLDEST and named none of the other three. Joining an
+# EXISTING session is safe, measured four times, one linear parentId chain.
+# Creating one concurrently is not. fno serialises the CREATE DECISION with
+# `fno agents claim` on a `pi-session:<cwd>:<id>` key and releases it as soon
+# as the winner is recorded.
+#
+# Session lookup is CWD-SCOPED. Sessions live at
+# ~/.pi/agent/sessions/<encoded-cwd>/<ISO-timestamp>_<session-id>.jsonl, so the
+# identity is the pair (cwd, session_id) and never the id alone. A resume issued
+# from the canonical checkout will not see a session started in a worktree.
+[harness.pi]
+# pi ships NO permission popups. Its own docs/usage.md says so in as many
+# words, and `pi --help` carries no bypass flag: `--approve`/`-a` trusts
+# project-local FILES for a run, which is a different axis. So there is no
+# prompt to bypass and nothing honest to put here.
+permission_bypass = []
+resume = "native-session"
+# The rpc lane is a real driving transport: typed events, an `id` per request,
+# and native mid-turn injection. It is not a keystroke lane wearing a thread
+# label.
+thread = true
+autonomous_pane = false
+route_on_pane = false
+stop_hook = "native"
+command_surface = "slash"
+slash_prefix = ""
+# Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries
+# the cost, the subscription tag, the context percentage and the compaction
+# tag, and it is the lowest-priority rule in manifests/pi.toml precisely
+# because it is drawn while WORKING too. The spinner rule outranks it, so only
+# a screen with the bar and no spinner reads idle. These are the PANE lane's
+# rules. The rpc lane reads no screen at all: it asserts the typed
+# `agent_settled` event, which is the only sound completion read there, because
+# rpc mode EXITS ON STDIN EOF mid-turn with status 0 and a clean exit therefore
+# proves nothing about a turn.
+ready_marker = "idle_status_bar"
+ready_rule_ids = ["idle_status_bar"]
+# Only the idle/blocked vocabulary belongs in this field; the working rule
+# that outranks this one lives in manifests/pi.toml, where the arbitration
+# happens. pi declares no blocked rule because it has no approval screen.
+manifest_rules = [{ id = "idle_status_bar", state = "idle" }]
+# Measured 2026-08-28 in a live tmux pane against pi 0.84.2, testing the exact
+# shape that broke codex in x-4b0b: a large multi-line paste followed
+# immediately by a return, with no settle time. Payload 6,155 bytes / 42 lines,
+# the size of a real fno_mail envelope; delay 0 ms; three trials, all three
+# SUBMITTED with the composer cleared and the model replying; plus one short
+# single-line trial, also submitted. This 0 is MEASURED. The 0 the gemini and
+# opencode rows carry is a placeholder for a keystroke lane neither has. Do not
+# copy this value to another harness: the evidence above is what makes it
+# legitimate, and a 0 without it is indistinguishable from an unset default.
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+# `--session-id <id>` is documented as "Use exact project session ID, creating
+# it if missing" and behaves that way across two separate processes: a second
+# run with the same assigned id recalled the first run's answer and printed no
+# creation warning. fno MUST always mint and pass the id. pi's own default is a
+# UUIDv7, whose head-8 is the same clock bucket that collides on codex.
+session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, timeout_ms = 60000 }
+
+# pi has no approval UI, so there is no keystroke answer to record and all
+# three actions are unsupported. This is an absence in pi, not an unmeasured
+# field: docs/usage.md states outright that pi ships no permission popups, and
+# manifests/pi.toml therefore declares no blocked rule for these to name. The
+# rpc lane does carry an Extension UI Protocol, where `select`, `confirm`,
+# `input` and `editor` dialogs go out on stdout as `extension_ui_request` and
+# come back on stdin as `extension_ui_response` with the matching id. That is a
+# structured round-trip on a different surface from this keystroke contract.
+[harness.pi.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.pi.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.pi.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.pi.resume_strategy.forms.interactive_create]
+kind = "session_flag"
+tokens = ["pi", "--session-id", "{session_id}"]
+
+# Create and resume are the SAME flag on pi: `--session-id` adopts an existing
+# session and creates one when it is absent. That is exactly why the create has
+# to be serialised elsewhere. The flag itself cannot tell a caller which of the
+# two it just did, and neither can its exit code.
+[harness.pi.resume_strategy.forms.interactive_resume]
+kind = "session_flag"
+tokens = ["pi", "--session-id", "{session_id}"]
+
+# The attach LANE is unsupported because this table's attach form is keyed on a
+# `{short_id}`, and pi has none: its handle is the caller-assigned session id in
+# its cwd, which is the interactive_resume form above. pi IS attachable, and the
+# viewport builds that argv in `crate::pi::pi_attach_argv`, the same way PR 1255
+# builds codex's. Opening it is a JOIN onto a session the rpc lane already
+# holds; opening it on an id that does not exist yet is a CREATE and races.
+[harness.pi.resume_strategy.forms.interactive_attach]
+kind = "unsupported"
+tokens = []
+
+[harness.pi.resume_strategy.forms.headless_create]
+kind = "session_flag"
+tokens = ["pi", "--session-id", "{session_id}"]
+
+[harness.pi.resume_strategy.forms.headless_resume]
+kind = "session_flag"
+tokens = ["pi", "--session-id", "{session_id}"]
+
+# Unsupported in THIS table's vocabulary, which is a keystroke contract: a
+# `direct` strategy types a slash command and reads a `/status` screen back.
+# pi switches models on a different surface entirely - `set_model` (provider +
+# modelId) over the rpc lane, and Ctrl+P cycling through `--models` in the TUI.
+# Neither is a typed slash command with a status screen to scrape, so declaring
+# `direct` here would be a spelling borrowed from codex rather than a fact about
+# pi. The rpc lane's own driver reaches `set_model` directly.
+[harness.pi.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""

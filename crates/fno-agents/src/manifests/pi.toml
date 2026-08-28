@@ -1,21 +1,55 @@
-# pi readiness manifest (x-83e7) - full-roster parity port from
-# the reference manifest for pi per ADAPTING.md. the reference set ships a
-# single working marker for pi; no blocked/idle rules known yet.
+# pi readiness manifest. PINNED AGAINST A LIVE pi 0.84.2 TUI on 2026-08-28
+# (x-c198), replacing the unvalidated import this file used to carry. pi now
+# has an fno provider host, so this manifest is live rather than dormant.
 #
-# UNVALIDATED + INERT: pi has no fno provider host (no build_pane_argv arm /
-# provider impl), so scrape_targets never selects it and this manifest is
-# bundled-but-dormant (like opencode). The "Working..." marker is capitalized in
-# the reference's source (the reference engine lowercases at match; our engine is case-sensitive, so the
-# case here IS load-bearing - kept verbatim as it reads on screen). NOT pinned
-# against a live pi TUI. State vocab + arbitration: see codex.toml.
+# WHAT WAS MEASURED, in a 120x40 tmux pane on the openai-codex subscription:
 #
-# Priority: 100 working_literal (working).
+#   mid-turn   a braille spinner and the literal "Working..." on one line,
+#              sitting FIVE non-empty lines from the bottom in 15 consecutive
+#              samples across two turns. It disappears the moment the turn
+#              settles, in the same sample that the cost figure stops moving.
+#   settled    no spinner anywhere on screen. The bottom three non-empty lines
+#              are the composer's lower rule, the cwd line, and the status bar:
+#                ↑9.4k ↓1.1k R17k CH79.8% $0.088 (sub) 2.7%/272k (auto)   (openai-codex) gpt-5.5 • medium
+#
+# ARBITRATION, and it is codex.toml's shape for codex.toml's reason. The status
+# bar is drawn while WORKING too, so `idle_status_bar` alone would false-ready a
+# running agent. `working_spinner` outranks it, so a screen carrying both
+# resolves to working. Only a screen with the status bar and NO spinner is idle.
+#
+# The spinner glyph is REQUIRED, not decorative. "Working..." on its own is text
+# a model reply can print, and the bottom-six-line region does not exclude an
+# assistant message. The braille frame is drawn by pi and cannot be faked by
+# transcript content. The ten glyphs below are the full observed cycle
+# (U+280B U+2819 U+2839 U+2838 U+283C U+2834 U+2826 U+2827 U+2807 U+280F).
+#
+# NOT MEASURED, and stated rather than guessed: pi ships NO permission popups
+# (its own docs/usage.md says so outright), so this manifest declares no blocked
+# rule and the capability row's three permission_response actions are
+# unsupported. There is no approval screen to answer. A tool-call gap inside one
+# turn, where the spinner may drop while the run has not settled, was not
+# sampled; the rpc lane does not read this manifest at all and asserts the typed
+# `agent_settled` event instead, which is the lane fno drives on.
+#
+# State vocab + engine semantics: see codex.toml.
+# Priority: 900 working_spinner (working) > 100 idle_status_bar (idle).
 
 min_engine_version = 1
 
 [[rule]]
-id = "working_literal"
+id = "working_spinner"
 state = "working"
+priority = 900
+region = "bottom_non_empty_lines(6)"
+gate = { line_regex = '[\x{280b}\x{2819}\x{2839}\x{2838}\x{283c}\x{2834}\x{2826}\x{2827}\x{2807}\x{280f}]\s+Working\.\.\.' }
+
+# pi's status bar: the session cost, the "(sub)" subscription tag, the context
+# percentage, and the "(auto)" compaction tag, all on one line. Present on every
+# rendered screen, which is why it is the LOWEST-priority rule here rather than
+# a positive idle signal on its own.
+[[rule]]
+id = "idle_status_bar"
+state = "idle"
 priority = 100
-region = "whole_recent"
-gate = { contains = "Working..." }
+region = "bottom_non_empty_lines(3)"
+gate = { line_regex = '\$[0-9]+\.[0-9]+\s+\(sub\).*%/.*\(auto\)' }

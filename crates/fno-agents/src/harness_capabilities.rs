@@ -13,6 +13,11 @@ const SESSION_LANES: [&str; 5] = [
     "headless_resume",
 ];
 const RESPONSE_ACTIONS: [&str; 3] = ["allow_once", "allow_always", "deny"];
+/// The rule states a capability row may DECLARE. A readiness manifest carries
+/// more (`working`, and rules that hold the current state), but only these two
+/// are part of the row's contract, and the Python validator enforces the same
+/// pair.
+const DECLARABLE_RULE_STATES: [&str; 2] = ["idle", "blocked"];
 const RESUME_KINDS: [&str; 4] = ["flag", "subcommand", "session_flag", "unsupported"];
 const MODEL_SWITCH_KINDS: [&str; 3] = ["direct", "menu_walk", "unsupported"];
 const MODEL_SWITCH_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -175,6 +180,22 @@ impl HarnessContract {
                 .ok_or_else(|| field_error(harness, "ready_marker", "no bundled manifest"))?
                 .map_err(|error| field_error(harness, "ready_marker", &error.to_string()))?;
             for declared in &caps.manifest_rules {
+                // The declared state vocabulary is idle/blocked ONLY, matching
+                // the Python validator in `fno.agents.harness_map`. A manifest
+                // may carry other states (`working`, and the engine's
+                // skip_state_update), but a capability ROW declaring one would
+                // parse here and be refused there, so a harness would load in
+                // one language and brick the other.
+                if !DECLARABLE_RULE_STATES.contains(&declared.state.as_str()) {
+                    return Err(field_error(
+                        harness,
+                        "manifest_rules",
+                        &format!(
+                            "state {:?} is not declarable here; use idle or blocked",
+                            declared.state
+                        ),
+                    ));
+                }
                 if !manifest
                     .rules()
                     .iter()
@@ -330,6 +351,13 @@ impl HarnessContract {
                 "preassigned-or-session-start",
                 "rollout-fd-or-daemon",
                 "preassigned",
+                // The caller mints the id AND the harness scopes its lookup by
+                // cwd, so the identity is the PAIR and the id alone addresses
+                // nothing. Distinct from "preassigned", where the id is the
+                // whole handle: a resume issued from the wrong directory finds
+                // no session here and, on pi, CREATES a second one under the
+                // same id rather than failing.
+                "caller-assigned-cwd-scoped",
                 "store-lookup",
                 "unsupported",
             ]
@@ -626,7 +654,7 @@ mod tests {
         assert_eq!(contract.map_version, 11);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
-            ["agy", "claude", "codex", "gemini", "opencode"]
+            ["agy", "claude", "codex", "gemini", "opencode", "pi"]
         );
         for (name, caps) in &contract.harness {
             assert_eq!(caps.permission_response.len(), 3, "{name}");

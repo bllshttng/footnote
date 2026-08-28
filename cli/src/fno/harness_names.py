@@ -17,8 +17,10 @@ from __future__ import annotations
 # fno.agents.harness_map._HARNESS_CAPS in the same change; the map asserts the
 # two agree at import time. Order is capability-table order, not alphabetical;
 # readers that need sorted output call sorted() (as known_harnesses() does).
-KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "gemini", "agy", "opencode")
+KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "gemini", "agy", "opencode", "pi")
 
 # Thread/headless accepts opencode through its launch seam. agy and gemini are
-# pane-only and stay out of this tuple.
-SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+# pane-only and stay out of this tuple. pi joins it on its rpc lane: `pi --mode
+# rpc` is strict JSONL over stdin/stdout with typed events, which is a driving
+# transport rather than a keystroke one.
+SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "pi")

@@ -455,6 +455,7 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "gemini",
     "agy",
     "opencode",
+    "pi",
 )
 
 
@@ -503,6 +504,15 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
             "(toolPermission).",
             exit_code=2,
         )
+    if provider == "pi":
+        raise DispatchAskError(
+            f"pi --permission-mode {mode!r} unmappable, and this is an absence in "
+            "pi rather than a gap in fno: pi ships NO permission popups (its own "
+            "docs say so) and `pi --help` carries no bypass flag, so there is "
+            "nothing to answer and nothing to skip. `--approve` trusts "
+            "project-local FILES, a different axis, and stays an operator choice.",
+            exit_code=2,
+        )
     raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
 
 
@@ -547,11 +557,17 @@ def tier3_pane_tokens(
     if tools:
         if provider == "claude":
             out += ["--allowedTools", tools]
+        elif provider == "pi":
+            # pi's own allowlist flag, spanning built-in, extension and custom
+            # tools in one comma-separated list.
+            out += ["--tools", tools]
         else:
             unsupported("--tools")
     if deny_tools:
         if provider == "claude":
             out += ["--disallowedTools", deny_tools]
+        elif provider == "pi":
+            out += ["--exclude-tools", deny_tools]
         else:
             unsupported("--deny-tools")
     return out
@@ -576,6 +592,12 @@ def effort_tokens(provider: str, value: str) -> list[str]:
         return ["-c", f"model_reasoning_effort={value}"]
     if provider == "opencode":
         return []
+    if provider == "pi":
+        # pi's effort axis is `--thinking <level>`, a first-class flag rather
+        # than a model suffix or a config key: off, minimal, low, medium, high,
+        # xhigh, max. Exact passthrough, like claude's - pi validates the
+        # vocabulary itself, and fno does not keep a second copy of it.
+        return ["--thinking", value]
     raise DispatchAskError(
         f"provider {provider!r} has no reasoning-effort surface; omit --effort",
         exit_code=2,
@@ -1354,6 +1376,46 @@ def build_pane_argv(
             emitted += ["--yolo", "--dangerously-skip-permissions"]
         argv += pane_passthrough_tokens(passthrough, emitted)
         argv += perm
+        return argv
+    if provider == "pi":
+        # pi's WATCHING lane: the plain interactive TUI, never `--mode rpc`
+        # (the two are mutually exclusive per process, chosen at exec). The
+        # pinned `--session-id` is what makes this a JOIN onto a session the
+        # rpc lane may already be driving: measured 2026-08-28, a TUI opened on
+        # a live rpc session rendered that session's own turns and the
+        # session-file count for the id stayed at ONE.
+        #
+        # Opening it on an id that does NOT exist yet is a CREATE, and creates
+        # are the unserialised half (four simultaneous creates on one id
+        # produced four sessions, silently, every process exiting 0). The spawn
+        # lane serialises that decision with
+        # `fno.agents.harnesses.pi.create_decision`; this builder only composes
+        # argv.
+        #
+        # `--provider` AND `--model` both, always: `--provider openai-codex`
+        # without `--model` falls through to a Bedrock model and dies naming an
+        # expired AWS SSO session, which misdirects completely.
+        #
+        # pi ships NO permission popups (its own docs/usage.md says so), so
+        # there is no never-prompt flag to add and `yolo` maps to nothing here.
+        # `--approve` trusts project-local FILES, a different axis, and stays an
+        # operator choice.
+        from fno.agents.harnesses.pi import pi_model, pi_provider
+
+        argv = [*identity, "--provider", pi_provider(), "--model", model or pi_model()]
+        if effort:
+            argv += effort_tokens("pi", effort)
+        if permission_mode:
+            argv += permission_pane_tokens("pi", permission_mode)
+        argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
+        if message:
+            # argv-fence: exempt. Probed on pi 0.84.2: `pi -- --version` PRINTS
+            # the version, so `--` is not an end-of-options marker here and a
+            # fence would be decoration. The seed is a positional and pi offers
+            # no equal-form. fno's DRIVING lane is rpc, where the message rides
+            # a JSON string field that no parser can read as a flag.
+            argv += [message]
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
