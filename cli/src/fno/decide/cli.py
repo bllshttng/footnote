@@ -35,6 +35,25 @@ _DEPRECATION_NOTICE = (
 )
 
 
+def _subject_node_id(subject: str) -> Optional[str]:
+    """The graph node a query subject names, when it names one.
+
+    The empty-answer text uses it to point at the one authority surface that
+    is not a decision record: a ruling written on the node itself. An
+    unreadable graph means an absent hint, never a failed read; the empty
+    answer below still states what it does not cover.
+    """
+    from fno.decide import _graph_entries, _resolved_node
+
+    try:
+        entries = _graph_entries()
+        return _resolved_node(subject, entries) or _resolved_node(
+            subject.strip().casefold(), entries
+        )
+    except Exception:  # noqa: BLE001 - an advisory hint is never the answer
+        return None
+
+
 def _render_claim_receipt(node_id: str, event: dict) -> None:
     """Print advisory claim context for a recorded node decision."""
     key = f"node:{node_id}"
@@ -777,7 +796,15 @@ def _list_decisions(
                 f"LAW CONFLICT  {canonical}  {','.join(verdict['decision_ids'])}"
             )
         else:
-            typer.echo(f"NO CURRENT LAW  {canonical}")
+            # Scoped because this line is the one a reader quotes. `NO CURRENT
+            # LAW` alone reads as "no rule exists", and a worker acted on that
+            # reading (x-0413): the verdict covers the law lane only, and the
+            # ruling that governs can sit in another lane or on the node
+            # itself, outside every decision record.
+            typer.echo(
+                f"NO CURRENT LAW  {canonical}  (law lane only; a ruling can "
+                "sit in another lane or on the node itself)"
+            )
 
     if not decisions:
         # Exit 0: a read that answered "none" is a successful read. Only a read
@@ -802,6 +829,7 @@ def _list_decisions(
             _, unfiltered, _ = list_decisions(subject, limit=None, state="all")
             if unfiltered:
                 noun = "decision" if len(unfiltered) == 1 else "decisions"
+                verb = "sits" if len(unfiltered) == 1 else "sit"
                 counts: "dict[str, int]" = {}
                 for d in unfiltered:
                     key = str(d.get("lane") or "unattributed")
@@ -823,7 +851,7 @@ def _list_decisions(
                 recovery_command += " --state all"
                 typer.echo(
                     f"backlog decisions: 0 {filter_label} decisions for '{label}', but "
-                    f"{len(unfiltered)} {noun} sit under it: {lanes}."
+                    f"{len(unfiltered)} {noun} {verb} under it: {lanes}."
                     f"{hint} Read all lifecycle states with: {recovery_command}.",
                     err=True,
                 )
@@ -853,10 +881,24 @@ def _list_decisions(
                 err=True,
             )
         else:
+            # A subject that names a graph node carries authority this store
+            # structurally cannot hold: a king's ruling or an operator note on
+            # the node itself (x-0413's third condition). Naming that surface
+            # is the difference between an honest empty and "no rule exists".
+            node_surface = ""
+            if subject:
+                node_id = _subject_node_id(subject)
+                if node_id:
+                    node_surface = (
+                        " That is not a finding that no rule exists: a king's "
+                        "ruling or an operator note on the node itself is "
+                        "authority no decision record carries. Read it with: "
+                        f"fno backlog get {node_id}."
+                    )
             typer.echo(
                 f"backlog decisions: no decision is indexed under the subject "
-                f"'{label}'{hint}. Rulings on other subjects are unaffected; "
-                "browse them with: fno backlog decisions",
+                f"'{label}'{hint}.{node_surface} Rulings on other subjects are "
+                "unaffected; browse them with: fno backlog decisions",
                 err=True,
             )
         return
