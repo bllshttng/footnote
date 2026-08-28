@@ -293,6 +293,21 @@ def _fake_headroom(monkeypatch, states):
     return _many
 
 
+def _account_settings(*records: dict) -> object:
+    """A settings stand-in declaring exactly these account records.
+
+    Passing this is not decoration. ``settings=None`` means "load the real
+    config" - correct in production, ambient in a test, and `load_settings` is
+    `lru_cache`d per process, so whatever an earlier test in the same xdist
+    worker put in that cache is what these assertions read. One extra
+    claude-bound record is enough to flip the first assertion below, because
+    the fake headroom answers `unknown` for any account it was not told about
+    and `unknown` outranks `exhausted` in `_CAPACITY_RANK`. Measured: a lone
+    `{"id": "ccm", "harness": "claude"}` turns `exhausted` into `unknown`.
+    """
+    return type("S", (), {"accounts": type("A", (), {"records": list(records)})})()
+
+
 def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
     """AC11-HP: an exhausted record bound to claude reads claude exhausted only
     when EVERY claude account is; one healthy account means usable."""
@@ -301,14 +316,14 @@ def test_runtime_capacity_aggregates_max_over_accounts(monkeypatch):
          "account": "primary"},
     ])
     _fake_headroom(monkeypatch, {"primary": "exhausted"})
-    cap = rr.runtime_capacity(("claude",), inventory=inv)
+    cap = rr.runtime_capacity(("claude",), settings=_account_settings(), inventory=inv)
     # the harness has one declared account, exhausted -> exhausted
     assert rr._capacity_state(cap["claude"])[0] == "exhausted"
     # a second healthy account (registered record) makes the harness usable
-    settings = type("S", (), {"accounts": type("A", (), {"records": [
+    settings = _account_settings(
         {"id": "primary", "harness": "claude"},
         {"id": "backup", "harness": "claude"},
-    ]})})()
+    )
     _fake_headroom(monkeypatch, {"primary": "exhausted", "backup": "ok"})
     cap = rr.runtime_capacity(("claude",), settings=settings, inventory=inv)
     assert rr._capacity_state(cap["claude"])[0] == "ok"
@@ -365,8 +380,12 @@ def test_same_model_two_access_paths_two_cost_profiles():
 
 
 def test_runtime_capacity_records_window_absent_with_no_accounts(monkeypatch):
+    # "no accounts" has to be DECLARED. Left ambient this reads the real config
+    # through the process-cached `load_settings`, and on a machine that has
+    # claude account records it probes their real headroom and reports a window
+    # of "lock" rather than "absent". Same defect as the aggregation test above.
     cap = rr.runtime_capacity(
-        ("claude",), inventory=rr.Inventory()
+        ("claude",), settings=_account_settings(), inventory=rr.Inventory()
     )
     assert cap["claude"]["window"] == "absent"
     assert cap["claude"]["state"] == "unknown"
