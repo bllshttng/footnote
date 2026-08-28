@@ -40,6 +40,7 @@ EXIT_RAM_REFUSED = 77
 EXIT_PROVIDER_CAP = 78
 EXIT_LOAD_REFUSED = 79
 EXIT_KING_SHARE = 80
+EXIT_REGISTRY_SCHEMA = 81
 
 QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
@@ -868,6 +869,70 @@ def _refuse_provider_cap(
     raise GateRefused(EXIT_PROVIDER_CAP, receipt)
 
 
+def _check_registry_schema() -> None:
+    """Refuse a spawn into a fleet whose shared registry this fno cannot write.
+
+    Claiming a node and stamping mail are both WRITES, so while the shared
+    registry sits ahead of this fno the whole spawn path is refused. On
+    2026-08-28 that produced a worker that reported "Claim store is not writable
+    for this Codex session", attributed it to a sandbox permission profile, and
+    was believed. Nothing in that chain named the registry.
+
+    So this refuses rather than warns, and the message carries both integers,
+    the file, and the repair verb. Same contract as :func:`_check_ram_floor` and
+    :func:`_check_load_ceiling` on the edges: an unreadable file skips, because
+    a spawn is not the place to adjudicate a torn registry and refusing there
+    would make the repair verb itself unspawnable.
+
+    The event is the other half. Every degraded READ prints a banner, but a
+    refused WRITE returns an error to one caller who reports it in its own words
+    to a king who is not watching; nothing collects those into "the fleet cannot
+    write". Emission is best-effort and never blocks the refusal.
+    """
+    from fno.agents.registry import (
+        SCHEMA_VERSION,
+        _read_raw_registry,
+        _registry_path,
+    )
+
+    target = _registry_path(None)
+    raw = _read_raw_registry(target)
+    if raw is None:
+        return
+    on_disk = raw.get("schema_version")
+    if not isinstance(on_disk, int) or on_disk <= SCHEMA_VERSION:
+        return
+    _warn(
+        f"spawn-gate: the shared agent registry at {target} is "
+        f"schema_version={on_disk}, ahead of the schema_version={SCHEMA_VERSION} "
+        "this fno understands, so this worker could neither claim its node nor "
+        "stamp its mail; refusing to spawn. Upgrade this fno (fno doctor "
+        f"update), or repair the file (fno agents registry-repair --to "
+        f"{SCHEMA_VERSION} --apply)."
+    )
+    try:
+        from fno.agents import events
+
+        events.emit(
+            "registry_schema_ahead",
+            registry_path=str(target),
+            on_disk=on_disk,
+            understood=SCHEMA_VERSION,
+        )
+    except Exception:  # noqa: BLE001 - telemetry never blocks the refusal
+        pass
+    raise GateRefused(
+        EXIT_REGISTRY_SCHEMA,
+        {
+            "status": "refused",
+            "reason": "registry_schema",
+            "registry_path": str(target),
+            "on_disk": on_disk,
+            "understood": SCHEMA_VERSION,
+        },
+    )
+
+
 def _check_ram_floor(floor_gb: float) -> None:
     """Refuse (never queue) below the floor; <= 0 disables; unreadable skips."""
     if floor_gb <= 0:
@@ -1215,6 +1280,11 @@ def run_gate(
                 _warn(w)
             slots = c.slot_count
             if slots < cap:
+                try:
+                    _check_registry_schema()
+                except GateRefused:
+                    guard.release()
+                    raise
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:

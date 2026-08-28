@@ -1,0 +1,101 @@
+"""A spawn into a write-refusing fleet must name the schema mismatch.
+
+On 2026-08-28 the shared registry sat one version ahead of the deployed fno for
+several hours. Claiming a node and stamping mail are both WRITES, so the whole
+spawn path was refused, and no symptom named the registry. A blocked worker
+reported "Claim store is not writable for this Codex session" and blamed a
+sandbox permission profile, and the king accepted that reading. This is the
+"symptom surfaces far from the cause" property ``registry.py`` already warns
+about, observed a second time and still not caught in the moment.
+
+So the gate refuses, loudly, and says which two integers disagree.
+
+It also emits ONE event. Every degraded READ prints a banner, but a refused
+WRITE returns an error to one caller, and that caller reports it in its own
+words to a king who is not watching. Nothing collects those into "the fleet
+cannot write."
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from fno import paths
+from fno.agents import registry as reg
+from fno.agents import spawn_gate
+
+
+@pytest.fixture
+def shared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    target = tmp_path / "fno-home" / "agents" / "registry.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: target)
+    return target
+
+
+def _write(path: Path, version: int) -> None:
+    path.write_text(
+        json.dumps({"schema_version": version, "agents": []}, indent=2),
+        encoding="utf-8",
+    )
+
+
+def test_a_registry_ahead_of_this_fno_refuses_the_spawn(
+    shared: Path, capsys: pytest.CaptureFixture
+) -> None:
+    ahead = reg.SCHEMA_VERSION + 1
+    _write(shared, ahead)
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate._check_registry_schema()
+
+    assert excinfo.value.code == spawn_gate.EXIT_REGISTRY_SCHEMA
+    receipt = excinfo.value.receipt
+    assert receipt["reason"] == "registry_schema"
+    assert receipt["on_disk"] == ahead
+    assert receipt["understood"] == reg.SCHEMA_VERSION
+
+    message = capsys.readouterr().err
+    assert f"schema_version={ahead}" in message
+    assert f"schema_version={reg.SCHEMA_VERSION}" in message
+    assert str(shared) in message
+    assert "fno agents registry-repair" in message
+
+
+def test_the_refusal_leaves_a_machine_readable_trail(
+    shared: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One worker's prose to an unwatching king is not a fleet-wide signal."""
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(paths, "state_dir", lambda: tmp_path)
+    _write(shared, reg.SCHEMA_VERSION + 1)
+
+    with pytest.raises(spawn_gate.GateRefused):
+        spawn_gate._check_registry_schema()
+
+    rows = [json.loads(line) for line in events.read_text().splitlines() if line]
+    assert [r["kind"] for r in rows] == ["registry_schema_ahead"]
+    assert rows[0]["on_disk"] == reg.SCHEMA_VERSION + 1
+    assert rows[0]["understood"] == reg.SCHEMA_VERSION
+
+
+@pytest.mark.parametrize("delta", [0, -1])
+def test_a_registry_at_or_below_this_fno_passes(shared: Path, delta: int) -> None:
+    _write(shared, reg.SCHEMA_VERSION + delta)
+
+    spawn_gate._check_registry_schema()
+
+
+@pytest.mark.parametrize("body", [None, "", "{", "[]", '{"schema_version": "20"}'])
+def test_an_unreadable_registry_skips_the_check(shared: Path, body) -> None:
+    """Same contract as the RAM floor and the load ceiling: unreadable skips.
+
+    A spawn is not the place to adjudicate a torn file, and refusing here would
+    make the repair verb itself unspawnable.
+    """
+    if body is not None:
+        shared.write_text(body, encoding="utf-8")
+
+    spawn_gate._check_registry_schema()
