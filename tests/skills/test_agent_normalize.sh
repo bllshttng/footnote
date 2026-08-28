@@ -607,6 +607,20 @@ else
   fail "x-3218 bridge unreachable: no cli venv at $VENV_PY"
 fi
 
+# --- x-0413: the handoff SEED carries the every-lane decisions check ---
+# The emitted message is what a spawned worker receives; the skill doc only
+# describes it. A codex P1 landed when the doc was fixed and the seed was not.
+HANDOFF_DOC="$TMP/handoff.md"; printf '# handoff\ncontinue here\n' > "$HANDOFF_DOC"
+OUT="$(DISPATCH_PROVIDER_RESOLVER="$STUB_EMPTY" bash "$NORM" --input "$HANDOFF_DOC" --handoff --provider claude)"
+if [[ "$(field "$OUT" payload_mode)" == "handoff" ]] \
+   && printf '%s' "$OUT" | grep -q "fno inbox decisions <topic>" \
+   && printf '%s' "$OUT" | grep -q "fno backlog get <node>" \
+   && ! printf '%s' "$OUT" | grep -q -- "--lane law"; then
+  pass "x-0413 handoff seed carries the every-lane decisions check + node lookup"
+else
+  fail "x-0413 handoff seed check: $OUT"
+fi
+
 echo ""
 echo "test_agent_normalize: $PASS passed, $FAIL failed"
 [[ "$FAIL" -eq 0 ]]

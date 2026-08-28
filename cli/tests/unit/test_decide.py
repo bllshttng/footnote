@@ -1180,6 +1180,125 @@ def test_lifecycle_filtered_empty_list_reports_all_state_recovery(
     assert "fno backlog decisions 'x-history' --state all" in listed.output
 
 
+def _handoff_guardrail_text() -> str:
+    """The GUARDRAIL the normalizer emits into every handoff seed.
+
+    The runtime surface a spawned worker actually receives, not the skill
+    doc that describes it: a review finding (codex P1) landed when only the
+    doc carried the corrected query and the emitted seed kept the old shape.
+    """
+    script = (
+        Path(__file__).resolve().parents[3]
+        / "skills"
+        / "agent"
+        / "scripts"
+        / "normalize.sh"
+    )
+    text = script.read_text(encoding="utf-8")
+    start = text.index("GUARDRAIL: Do not autonomously")
+    end = text.index("proceeds normally.", start)
+    return text[start:end]
+
+
+def test_agent_seed_command_reads_rulings_the_lanes_hide(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """x-0413 acceptance: the command the handoff seed mandates, run verbatim,
+    finds the rulings the law-only query hid.
+
+    The specimens: d-52433165 (coord) and d-4d05272e (unattributed) governed
+    while `--lane law --state live` returned nothing, so workers following the
+    old instruction escalated, halted, or overruled a king. The fixture rows
+    stand in for those two, same lanes, same subjects.
+    """
+    import re
+
+    guardrail = _handoff_guardrail_text()
+    command = re.search(r"fno inbox decisions <topic>", guardrail)
+    assert command, "the handoff seed must carry a runnable decisions command"
+    assert "fno backlog get <node>" in guardrail, (
+        "the seed must name the node surface where a king's ruling lives "
+        "with no decision record"
+    )
+    assert "--lane" not in guardrail and "--state" not in guardrail, (
+        "a lane or state filter on the seed's query hides coord and "
+        "unattributed rulings; that is the x-0413 defect"
+    )
+
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-52433165",
+            "decision": "Review rounds capped; never fix or request reviews past the cap.",
+            "subject": "review-cap",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-26T00:00:00Z",
+        },
+        {
+            "decision_id": "d-4d05272e",
+            "decision": "The review-coverage-at-head gate is waived for merging.",
+            "subject": "review-coverage-waiver",
+            "ts": "2026-08-18T00:00:00Z",
+        },
+    )
+
+    from fno.inbox.cli import inbox_app
+
+    for subject, wanted in (
+        ("review-cap", "d-52433165"),
+        ("review-coverage-waiver", "d-4d05272e"),
+    ):
+        listed = runner.invoke(inbox_app, ["decisions", subject])
+        assert listed.exit_code == 0, listed.output
+        assert wanted in listed.output, (
+            f"the seed's bare command must return {wanted} for '{subject}'"
+        )
+
+
+def test_empty_for_a_node_subject_names_the_node_as_authority(
+    root: Path, tmp_graph: Path, index: Path
+):
+    """x-0413 decisive specimen: the query against a node with no decision
+    record must not render as no-rule-exists, and must name the node as a
+    place authority lives (bp-pi-rpc discarded a king's ruling because it
+    could not)."""
+    from fno.inbox.cli import inbox_app
+
+    listed = runner.invoke(
+        inbox_app, ["decisions", "x-7d94", "--lane", "law", "--state", "live"]
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "NO CURRENT LAW  x-7d94  (law lane only" in listed.output
+    assert "fno backlog get x-7d94" in listed.output
+    assert "not a finding that no rule exists" in listed.output
+
+
+def test_lane_filtered_empty_counts_agree_with_its_noun(
+    root: Path, tmp_graph: Path, index: Path
+):
+    _write_decision_index(
+        index,
+        {
+            "decision_id": "d-coordonly",
+            "decision": "coordinate this node",
+            "subject": "x-7d94",
+            "authority_source": "agent",
+            "expiry_ref": {"kind": "node", "node_id": "x-7d94"},
+            "ts": "2026-08-20T00:00:00Z",
+        },
+    )
+
+    listed = runner.invoke(
+        decide_app,
+        ["list", "--subject", "x-7d94", "--lane", "law", "--state", "live"],
+    )
+    assert listed.exit_code == 0, listed.output
+    assert "0 law live decisions for 'x-7d94'" in listed.output
+    assert "1 decision sits under it: 1 coord" in listed.output
+    assert "fno backlog decisions 'x-7d94' --state all" in listed.output
+
+
 def test_state_filter_empty_preserves_requested_lane_in_recovery(
     root: Path, tmp_graph: Path, index: Path
 ):
