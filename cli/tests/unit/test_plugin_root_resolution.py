@@ -163,3 +163,22 @@ def test_persist_stays_subprocess_free(tmp_path, isolated_home, monkeypatch):
     assert (isolated_home / "plugin-root").read_text().strip() == str(wt)
 
 
+
+
+def test_fno_repo_root_project_pin_does_not_capture_plugin_scripts(tmp_path, monkeypatch, isolated_home):
+    """FNO_REPO_ROOT's documented meaning is the TARGET PROJECT root (tests and
+    CI pin it to whatever project is under test), which usually carries no
+    plugin manifest. An ungated hint resolved plugin scripts against that
+    foreign tree and silently disabled the caller's leg (the stranded unpushed
+    read went all-UNKNOWN); it must fall through to the real plugin instead."""
+    project = tmp_path / "target-project"
+    (project / "scripts" / "lib").mkdir(parents=True)
+    (project / "scripts" / "lib" / "set-gate.sh").write_text("#!/bin/bash\n")
+    monkeypatch.setenv("FNO_REPO_ROOT", str(project))
+
+    got = paths.resolve_plugin_script("scripts/lib/set-gate.sh")
+
+    real_plugin = Path(paths.__file__).resolve().parents[3]
+    assert got == real_plugin / "scripts" / "lib" / "set-gate.sh"
+    assert got != project / "scripts" / "lib" / "set-gate.sh"
+    assert (isolated_home / "plugin-root").read_text().strip() != str(project)
