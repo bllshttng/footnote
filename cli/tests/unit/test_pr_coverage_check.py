@@ -2143,18 +2143,23 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
 
     monkeypatch.setattr("fno.pr._proc.run", fake_run)
     monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
-    reviews = _coverage_gate._pr_reviews(42, "/repo")
+    reviews, unread = _coverage_gate._pr_reviews(42, "/repo")
+    assert unread == "", unread
     oids = [r["commit"]["oid"] for r in reviews]
     assert oids[:2] == ["c1", "c2"] and oids[-1] == "c3" and len(oids) == 101
     assert reviews[-1]["submittedAt"] == "2026-08-26T13:00:00Z"
     assert "author" not in reviews[0], "no reader consumes author; do not map it"
 
-    # A failed read fails open to the events-only budget, never an exception.
+    # A failed read fails open to the events-only budget, never an exception -
+    # and NAMES itself, so the budget can report a zero the reviews axis never
+    # contributed to instead of presenting it as a measured count.
     def failing_run(cmd, **kwargs):
         return Result(1, "", "boom")
 
     monkeypatch.setattr("fno.pr._proc.run", failing_run)
-    assert _coverage_gate._pr_reviews(42, "/repo") is None
+    rows, unread = _coverage_gate._pr_reviews(42, "/repo")
+    assert rows is None
+    assert unread, "a failed reviews read must name its cause, not answer a bare None"
 
 
 def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tmp_path):
@@ -2196,7 +2201,7 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
         )
     )
     (tmp_path / ".fno" / "events.jsonl").write_text("\n".join(rows) + "\n")
-    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: None)
+    monkeypatch.setattr(_coverage_gate, "_pr_reviews", lambda *a, **k: (None, ""))
     monkeypatch.setattr(
         _coverage_gate, "file_findings_at_cap", lambda *a, **k: ["x-filed1"]
     )
@@ -2228,3 +2233,101 @@ def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tm
     # cap exists to bound.
     for needle in ("/code-review", "/review", "/fno:review", "review verb"):
         assert needle not in note, f"past-cap receipt names {needle}: {note}"
+
+
+def test_rounds_spent_with_zero_attestations_has_a_permitted_merge_path(
+    monkeypatch, tmp_path
+):
+    """The connector-lane shape, measured on a live PR: the attestation chain
+    is EMPTY, so disposition_refusal returns nothing, no finding is named, and
+    the cap-file arm never runs. The question that decides whether the PR is
+    stranded is not whether that arm works - it is whether the round count is
+    honest, because the spent-budget waiver is keyed on `rounds >= max_rounds`
+    alone and needs no chain at all.
+
+    A GitHub-App reviewer leaves no attestation row anywhere, so its rounds
+    exist only as review objects. With the reviews axis read, two distinct
+    reviewed commits are two rounds, the budget is spent, and the waiver
+    discharges the obligation. Asserting the filing succeeds proves nothing
+    about this shape: the filing arm is never reached here.
+    """
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    # No review_attestation events at all: chain is empty by construction.
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-08-28T05:00:00Z",
+                "type": "review_coverage",
+                "source": "hook",
+                "data": {
+                    "pr": 1252,
+                    "coverage": "uncovered",
+                    "review_state": "unreviewed",
+                    "reviewed_count": 0,
+                    "self_attested_count": 0,
+                    "head_sha": FIXTURE_HEAD,
+                    "verdicts": [],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    two_reviewed_commits = [
+        {"state": "COMMENTED", "submittedAt": "2026-08-28T05:53:00Z",
+         "commit": {"oid": "aaaa000000000000000000000000000000000000"}},
+        {"state": "COMMENTED", "submittedAt": "2026-08-28T06:10:00Z",
+         "commit": {"oid": "bbbb000000000000000000000000000000000000"}},
+    ]
+    monkeypatch.setattr(
+        _coverage_gate, "_pr_reviews", lambda *a, **k: (two_reviewed_commits, "")
+    )
+    chain = _coverage_gate.attestation_chain(
+        str(tmp_path), head_branch="feature/x-8439", head=FIXTURE_HEAD
+    )
+    assert chain == [], "the specimen shape is an EMPTY chain; fixture drifted"
+
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        1252, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED, f"stranded with no merge path: {refusal}"
+    assert head, "a covered verdict must name the head it covers"
+    assert "review budget discharged (2/2 rounds)" in note, note
+    # The waiver names what it waived, and the provenance names which
+    # instrument produced the 2. Both figures, so a reader can see the count
+    # came from the reviews axis and not from an attestation chain that is empty.
+    assert "waived at the cap: uncovered" in note, note
+
+
+def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
+    monkeypatch, tmp_path
+):
+    """Corollary 6. The same shape, but the reviews read FAILS. The budget
+    keeps its events-only answer - that fail-open is deliberate, a cap that
+    fired on a broken read would waive a remainder the budget may not have
+    spent - but the refusal must say the axis went unread rather than present
+    0 as something an instrument measured.
+
+    This is the discriminator the old bare None destroyed: a zero from an
+    instrument that never ran was byte-identical to a measured zero, and the
+    same cause produced opposite symptoms on two PRs - one escaping the cap
+    entirely, the other locked out by it.
+    """
+    _specimen_gates(monkeypatch)
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "events.jsonl").write_text(
+        json.dumps(_soft_round("2026-08-28T05:00:00Z", FIXTURE_HEAD)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "_pr_reviews",
+        lambda *a, **k: (None, "gh: 403 secondary rate limit"),
+    )
+    _state, refusal, _head, note = _coverage_gate.coverage_verdict(
+        1252, str(tmp_path), recompute=False
+    )
+    rendered = f"{refusal} {note}"
+    assert "reviews axis unread: gh: 403 secondary rate limit" in rendered, rendered
+    assert "attestations 1" in rendered, rendered

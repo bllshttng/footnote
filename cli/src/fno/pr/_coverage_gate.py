@@ -392,12 +392,14 @@ def coverage_verdict(
     # answer (uncovered, or findings to file/decline); a healthy covered PR
     # with no open findings keeps the events-only count and skips the
     # paginated read. A read failure keeps the events-only answer.
-    reviews_payload = (
-        _pr_reviews(pr_number, repo)
-        if (disposition_named or disposition_text or not covered)
-        else None
-    )
-    rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
+    if disposition_named or disposition_text or not covered:
+        reviews_payload, reviews_unread = _pr_reviews(pr_number, repo)
+    else:
+        reviews_payload, reviews_unread = None, ""
+    rounds, events_rounds, reviews_rounds = rounds_axes(chain, reviews=reviews_payload)
+    # Corollary 6: the count travels with the instrument that produced it, so
+    # a zero from a failed read is never byte-identical to a measured zero.
+    axes = rounds_provenance(events_rounds, reviews_rounds, reviews_unread)
 
     # Locked Decision 4's fourth state, before any covered/uncovered branch:
     # the all-fails loop shape never produces a covered row - that is exactly
@@ -411,7 +413,9 @@ def coverage_verdict(
         if disposition_hard:
             return (
                 IMPOSSIBLE,
-                _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
+                _impossible_refusal(
+                    rounds, max_rounds, ", ".join(disposition_hard), axes
+                ),
                 "",
                 "",
             )
@@ -446,7 +450,7 @@ def coverage_verdict(
             # Rounds remain (the exhausted case returned above), so the
             # refusal teaches the fix-delta remedy AND shows the budget the
             # next round spends - AC7-HP's "how many rounds remain".
-            remaining = _rounds_remaining_note(rounds, max_rounds)
+            remaining = _rounds_remaining_note(rounds, max_rounds, axes)
             note = "; ".join(x for x in (recompute_note, remaining) if x)
             return REFUSED, disposition_text, "", note
         notes = [n for n in (recompute_note, disposition_note, filed_note) if n]
@@ -466,7 +470,7 @@ def coverage_verdict(
         and disposition_named
         and any(e.get("verdict") != "pass" for e in chain)
     ):
-        remaining = _rounds_remaining_note(rounds, max_rounds)
+        remaining = _rounds_remaining_note(rounds, max_rounds, axes)
         note = "; ".join(x for x in (recompute_note, remaining) if x)
         return REFUSED, disposition_text, "", note
 
@@ -941,6 +945,22 @@ def rounds_since_last_pass(
     per round. The Rust-side mirror is ``loopcheck::rounds_since_last_pass``;
     the two are held equal by the shared corpus.
     """
+    return rounds_axes(chain, reviews)[0]
+
+
+def rounds_axes(
+    chain: list[dict],
+    reviews: Optional[list[dict]] = None,
+) -> Tuple[int, int, Optional[int]]:
+    """``(total, events_rounds, reviews_rounds)`` - the count and its provenance.
+
+    One counting rule, read three ways. The total is what the budget spends;
+    the two figures beside it are which instrument produced it, so a reader
+    can tell a measured zero from a zero the reviews read never contributed
+    to. ``reviews_rounds`` is None when no payload was supplied, which is the
+    honest answer for an axis that did not run - distinct from 0, which means
+    it ran and counted nothing.
+    """
     rounds = 0
     counted_heads: set[str] = set()
     for event in chain:
@@ -964,7 +984,7 @@ def rounds_since_last_pass(
         rounds += 1
     events_rounds = rounds
     if reviews is None:
-        return events_rounds
+        return events_rounds, events_rounds, None
     counted: set[str] = set()
     for review in reviews:
         state = review.get("state")
@@ -975,12 +995,43 @@ def rounds_since_last_pass(
         if not isinstance(oid, str) or not oid:
             continue
         counted.add(oid)
-    return max(events_rounds, len(counted))
+    return max(events_rounds, len(counted)), events_rounds, len(counted)
 
 
-def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
-    """The PR's review objects for the round budget, or None on any read
-    failure.
+def rounds_provenance(
+    events_rounds: int, reviews_rounds: Optional[int], reviews_unread: str
+) -> str:
+    """Which instrument produced the round count, as text.
+
+    Corollary 6 of the refusal contract. An absence has three explanations -
+    the real outcome, an instrument that never ran, or a pipeline that ate the
+    output - and a count printed bare cannot distinguish them. Measured: one
+    PR read ``rounds_used 0`` while an honest count read 2, and the SAME cause
+    produced the opposite symptom elsewhere, 12 uncounted rounds past a cap of
+    2. One PR escaped the budget entirely; the other was locked out by it.
+
+    A read that FAILED is named as unread rather than rendered as a zero,
+    because a zero from an instrument that never ran must not be
+    byte-identical to a measured zero.
+    """
+    if reviews_unread:
+        return f"attestations {events_rounds}, reviews axis unread: {reviews_unread}"
+    if reviews_rounds is None:
+        return f"attestations {events_rounds}, reviews axis not read"
+    return (
+        f"attestations {events_rounds}, distinct reviewed commits {reviews_rounds}"
+    )
+
+
+def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
+    """``(reviews, unread_reason)`` for the round budget.
+
+    ``unread_reason`` is empty when the read succeeded and names the cause
+    when it did not. It used to be swallowed: every failure answered a bare
+    None, the budget silently kept its events-only count, and on a
+    GitHub-App lane - which leaves no attestation row at all - that count is
+    zero. So a failed read and a genuinely unreviewed PR were byte-identical,
+    the cap never fired, and one PR ran twelve rounds against a budget of two.
 
     The paginated REST read rides ``_internal_gh._rest_pages`` (the same
     reader every other gate REST read uses, with its rate-limit-aware
@@ -1006,7 +1057,7 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
     try:
         slug = _repo_slug(repo, _bounded)
         if not slug:
-            return None
+            return None, "repo slug unreadable"
         # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
         # _quota.delegate_environment(), which strips the quota proxy from
         # PATH so the proxy's own delegate call does not recurse. That is
@@ -1014,14 +1065,14 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
         # CLIENT, and every sibling read in this module (_repo_slug just
         # above, _pr_head_oid, _pr_author_login) is brokered. Stamping it
         # here would spend the shared quota unmetered.
-        rows, _reason = _rest_pages(
+        rows, reason = _rest_pages(
             f"repos/{slug}/pulls/{pr_number}/reviews",
             "pull reviews",
             cwd=repo,
             runner=_bounded,
         )
         if rows is None:
-            return None
+            return None, (reason or "pull reviews read failed")
         return [
             {
                 "state": row.get("state") if isinstance(row.get("state"), str) else "",
@@ -1037,9 +1088,9 @@ def _pr_reviews(pr_number: int, repo: str) -> Optional[list[dict]]:
                 },
             }
             for row in rows
-        ]
-    except Exception:  # noqa: BLE001 - an instrument failure never fires the cap
-        return None
+        ], ""
+    except Exception as exc:  # noqa: BLE001 - an instrument failure never fires the cap
+        return None, f"{type(exc).__name__}: {exc}"
 
 
 def resolved_max_rounds(repo: str) -> int:
@@ -1126,19 +1177,25 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
 
 
 def _impossible_refusal(
-    rounds: int, max_rounds: int, disposition_refusal_text: str
+    rounds: int, max_rounds: int, disposition_refusal_text: str, axes: str = ""
 ) -> str:
     """The IMPOSSIBLE sentence: rounds spent, findings non-terminal, both
-    remedies, and no instruction that asks for another review."""
+    remedies, and no instruction that asks for another review.
+
+    ``axes`` names which instrument produced the round count. A reader deciding
+    whether a cap is real needs it: the same defect that under-counted one PR
+    to a stuck zero let another run twelve rounds past a budget of two."""
+    provenance = f" [{axes}]" if axes else ""
     return (
         f"review coverage is impossible to satisfy by further review: {rounds} "
-        f"review rounds used (max {max_rounds}) with blocking finding(s) still "
-        f"non-terminal ({disposition_refusal_text}); this cannot be cleared by "
-        f"re-reviewing - the two acts that clear it are {IMPOSSIBLE_REMEDIES}"
+        f"review rounds used (max {max_rounds}){provenance} with blocking "
+        f"finding(s) still non-terminal ({disposition_refusal_text}); this "
+        f"cannot be cleared by re-reviewing - the two acts that clear it are "
+        f"{IMPOSSIBLE_REMEDIES}"
     )
 
 
-def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
+def _rounds_remaining_note(rounds: int, max_rounds: int, axes: str = "") -> str:
     """The REFUSED-side note AC7-HP demands: the budget a worker can see
     before the next round reports impossible. Zero remaining is still worth
     saying - the next round is the one that trips, and a worker who cannot
@@ -1146,15 +1203,16 @@ def _rounds_remaining_note(rounds: int, max_rounds: int) -> str:
     # One less than the raw difference: at rounds = max_rounds - 1 the NEXT
     # round is the last the budget funds, so zero remain after it.
     remaining = max_rounds - rounds - 1
+    provenance = f" [{axes}]" if axes else ""
     if remaining <= 0:
         return (
-            f"{rounds}/{max_rounds} review rounds used; the next round "
-            "is the last the budget funds"
+            f"{rounds}/{max_rounds} review rounds used{provenance}; the next "
+            "round is the last the budget funds"
         )
     plural = "" if remaining == 1 else "s"
     return (
-        f"{rounds}/{max_rounds} review rounds used; {remaining} round{plural} "
-        "remain before the gate reports impossible"
+        f"{rounds}/{max_rounds} review rounds used{provenance}; {remaining} "
+        f"round{plural} remain before the gate reports impossible"
     )
 
 
