@@ -2234,7 +2234,13 @@ def test_attach_codex_refused_with_exit_13(
     assert called is False
     err = capsys.readouterr().err
     assert "one-shot" in err
-    assert "Phase 6" in err
+    # The refusal used to close by promising cross-provider attach "in the
+    # Phase 6 supervisor". That supervisor is codex's own app-server daemon,
+    # it is already running, and a codex THREAD attaches through it now. What
+    # is left here is the fallback for a row with no persistent session, so
+    # the sentence pointing at a retired plan is gone.
+    assert "Phase 6" not in err
+    assert "fno agents logs worker-codex --follow" in err
 
 
 def test_attach_agent_not_found(tmp_path: Path, monkeypatch) -> None:
