@@ -358,9 +358,14 @@ fn raw_monotonic_nanos() -> u64 {
 /// subprocess through it): two tests racing `set_var` under the default
 /// parallel test threads make the loser inherit the winner's stub dir - or a
 /// deleted tempdir, which exits 127. Take `PATH_TEST_MUTEX` around both the
-/// mutation and the PATH-dependent work. cfg(test) in the lib only.
+/// mutation and the PATH-dependent work.
+///
+/// An alias for [`codex_test_daemon::ENV_TEST_MUTEX`], which is the one lock
+/// for every process-global env mutation in this crate. PATH and `CODEX_HOME`
+/// mutators must serialize against EACH OTHER, not merely within their own
+/// kind, so there is exactly one lock and two names for it.
 #[cfg(test)]
-pub static PATH_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub use crate::codex_test_daemon::ENV_TEST_MUTEX as PATH_TEST_MUTEX;
 
 #[cfg(test)]
 mod tests {

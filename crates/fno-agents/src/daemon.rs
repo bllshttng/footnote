@@ -12865,38 +12865,26 @@ for line in sys.stdin:
         sys.stdout.write(json.dumps({"id": msg.get("id"), "result": {"thread": {"id": "thread-p", "path": "/tmp/p.jsonl"}}}) + "\n")
     sys.stdout.flush()
 "#;
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let bin_dir = tempfile::tempdir().unwrap();
-        let fake = bin_dir.path().join("codex");
-        std::fs::write(&fake, json).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let saved_path = std::env::var_os("PATH");
-        let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
-        prefixed.push(":");
-        if let Some(rest) = saved_path.as_ref() {
-            prefixed.push(rest);
-        }
-        std::env::set_var("PATH", &prefixed);
+        // The driver is a client of the shared app-server daemon, so the fake
+        // is a control socket rather than a fake `codex` on PATH. Without it
+        // this test reached the OPERATOR'S real daemon and started a real
+        // thread (it passed, which is the worrying part).
         let start = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
             .block_on(async {
-                crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
-                    .await
-                    .expect("yolo thread starts")
+                let mut started = None;
+                crate::codex_test_daemon::with_fake_codex_daemon(json, async {
+                    started = Some(
+                        crate::codex_thread::CodexThread::start(worktree.path(), None, true, None)
+                            .await
+                            .expect("yolo thread starts"),
+                    );
+                })
+                .await;
+                started.expect("the fixture ran the body")
             });
-        if let Some(path) = saved_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
         let yolo = build_codex_thread_entry("t", worktree.path(), &start, None, None, true);
         assert_eq!(yolo.sandbox_posture.as_deref(), Some("danger-full-access"));
         assert!(entry_posture_is_full_access(&yolo));

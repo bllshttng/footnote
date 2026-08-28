@@ -11,25 +11,36 @@
 //! second copy is a second fake daemon to keep in step with the real protocol.
 #![doc(hidden)]
 
+/// Serializes every test that mutates PROCESS-GLOBAL env: `PATH`, `CODEX_HOME`,
+/// or anything else a subprocess resolves through. One lock for all of them,
+/// because the failures cross: a PATH mutator (client_verbs.rs REPLACES PATH
+/// with a tempdir) leaves this module's bridge unable to spawn its child, and
+/// a second fake daemon restores `CODEX_HOME` under the first one's feet and
+/// points the driver at the operator's REAL daemon - a live model call from a
+/// unit test. Lives here rather than behind `cfg(test)` in lib.rs so the
+/// integration-test binaries share the same lock, not a second one.
+/// `crate::PATH_TEST_MUTEX` is an alias kept for its existing callers.
+pub static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 use futures_util::{SinkExt, StreamExt};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio_tungstenite::tungstenite::Message;
 
-/// Serializes every `CODEX_HOME` mutation in a test binary. Two fake-daemon
-/// tests running concurrently would restore the var under each other's feet
-/// and point the driver at the operator's REAL codex daemon mid-test. That is
-/// not a flake, it is a live model call from a unit test, so the lock is
-/// load-bearing rather than tidy.
-pub static CODEX_HOME_LOCK: Mutex<()> = Mutex::new(());
-
 /// Run `body` with `CODEX_HOME` pointed at a temporary root whose control
 /// socket is served by `script`.
 pub async fn with_fake_codex_daemon(script: &str, body: impl std::future::Future<Output = ()>) {
-    let _guard = CODEX_HOME_LOCK
+    // ONE lock for every process-global env mutation in this crate, shared
+    // with the PATH mutators rather than minted fresh. Two reasons, and the
+    // second cost a full-suite run to learn: a concurrent fixture would
+    // restore CODEX_HOME under this one's feet and point the driver at the
+    // operator's REAL daemon, which is a live model call from a unit test;
+    // and a concurrent PATH mutator (client_verbs.rs REPLACES PATH with a
+    // tempdir) leaves this bridge unable to spawn its own child, which
+    // surfaces as a handshake timeout against a socket that is right there.
+    let _guard = ENV_TEST_MUTEX
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // Short and directly under /tmp on purpose: a unix socket path is capped
@@ -77,7 +88,7 @@ async fn bridge_connection(stream: UnixStream, script: PathBuf) {
         return;
     };
     let (mut sink, mut frames) = ws.split();
-    let mut child = match tokio::process::Command::new("python3")
+    let mut child = match tokio::process::Command::new("/usr/bin/python3")
         .arg(&script)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
