@@ -1179,13 +1179,14 @@ def run_gate(
         _admission_token=_PROVIDER_ADMISSION_TOKEN,
     )
 
-    # Ahead of the force branch and outside the queue loop, deliberately.
-    # `--force` means "I know the machine is busy", and a schema mismatch is not
-    # resource pressure: it is a worker that can neither claim its node nor stamp
-    # its mail, which is the failure this check exists to name. Forcing past it
-    # would reproduce that failure with the diagnosis suppressed. Running it here
-    # also reads the file once per spawn rather than once per queue tick, and
-    # nothing is held yet, so a refusal needs no `guard.release()`.
+    # Ahead of the force branch, deliberately. `--force` means "I know the
+    # machine is busy", and a schema mismatch is not resource pressure: it is a
+    # worker that can neither claim its node nor stamp its mail, which is the
+    # failure this check exists to name. Forcing past it would reproduce that
+    # failure with the diagnosis suppressed. Nothing is held yet, so a refusal
+    # here needs no `guard.release()`. The dequeue path re-checks, the way the
+    # RAM floor does, because the queue window is long enough for the shared
+    # schema to move underneath a waiting spawn.
     _check_registry_schema()
 
     if force and provider_cap is None:
@@ -1295,6 +1296,16 @@ def run_gate(
                 _warn(w)
             slots = c.slot_count
             if slots < cap:
+                try:
+                    # Re-checked on dequeue for the same reason the RAM floor is
+                    # (test_dequeue_ram_recheck_refuses): a spawn can sit here for
+                    # up to QUEUE_TIMEOUT_S, and another process can raise the
+                    # shared schema inside that window. The entry check above owns
+                    # the force path; this one owns the queue window.
+                    _check_registry_schema()
+                except GateRefused:
+                    guard.release()
+                    raise
                 try:
                     _check_ram_floor(floor_gb)
                 except GateRefused:

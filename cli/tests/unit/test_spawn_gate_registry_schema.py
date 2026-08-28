@@ -102,6 +102,35 @@ def test_force_does_not_bypass_the_schema_check(
     assert excinfo.value.code == spawn_gate.EXIT_REGISTRY_SCHEMA
 
 
+def test_the_dequeue_path_rechecks_the_schema(
+    shared: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A spawn can sit in the queue for up to QUEUE_TIMEOUT_S, and another
+    process can raise the shared schema inside that window. The entry check
+    cannot see that; the dequeue re-check can, the way the RAM floor already
+    re-checks on dequeue."""
+    _write(shared, reg.SCHEMA_VERSION)
+    monkeypatch.delenv("FNO_SPAWN_GATE", raising=False)
+    monkeypatch.setattr(
+        spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+    )
+    # Entry sees a healthy registry; the file moves ahead before the dequeue
+    # check reads it again.
+    real_check = spawn_gate._check_ram_floor
+
+    def _poison_then_check(floor_gb: float) -> None:
+        _write(shared, reg.SCHEMA_VERSION + 1)
+        real_check(floor_gb)
+
+    monkeypatch.setattr(spawn_gate, "_check_ram_floor", _poison_then_check)
+    spawn_gate.run_gate("first", "bg").release()
+
+    with pytest.raises(spawn_gate.GateRefused) as excinfo:
+        spawn_gate.run_gate("second", "bg")
+
+    assert excinfo.value.code == spawn_gate.EXIT_REGISTRY_SCHEMA
+
+
 @pytest.mark.parametrize("delta", [0, -1])
 def test_a_registry_at_or_below_this_fno_passes(shared: Path, delta: int) -> None:
     _write(shared, reg.SCHEMA_VERSION + delta)
