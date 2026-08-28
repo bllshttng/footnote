@@ -30,7 +30,7 @@ _REQUIRED_INTERACTIVE_FIELDS = {
 
 
 def test_packaged_contract_is_complete_for_every_known_harness():
-    assert MAP_VERSION == 10
+    assert MAP_VERSION == 11
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
     for harness in known_harnesses():
         caps = capabilities(harness)
