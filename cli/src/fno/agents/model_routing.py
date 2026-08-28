@@ -1029,7 +1029,10 @@ def resolve_explicit_route(
     return _route_for_target(pname, model.strip(), block, env, notice, ctx=f"peer {pname!r}")
 
 
-def materialize_route_settings(route_env: Mapping[str, str]) -> str:
+def materialize_route_settings(
+    route_env: Mapping[str, str],
+    sandbox: "Optional[Mapping[str, object]]" = None,
+) -> str:
     """Write ``route_env`` as a claude ``--settings`` JSON and return its path.
 
     A ``claude --bg`` session's serving process is forked by the claude daemon
@@ -1047,12 +1050,17 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     endpoint could still authenticate with an inherited ``ANTHROPIC_API_KEY``.
     A composed ``--route`` + ``--account`` spawn writes ONLY this file (the
     route wins the settings file by design), which is where that gap lived.
+
+    ``sandbox`` composes a sandbox settings block into the SAME file: there is
+    only one ``--settings`` flag, so a sibling file would silently drop this
+    one. It is part of the content address, so a per-worker write policy
+    naturally yields its own file.
     """
     from fno.agents.account_env import SCRUB_AUTH_VARS
 
     env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
     env.update(route_env)
-    return _write_settings_env_file(env)
+    return _write_settings_env_file(env, sandbox=sandbox)
 
 
 def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
@@ -1073,13 +1081,46 @@ def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
     return _write_settings_env_file({name: "" for name in dropped})
 
 
-def _write_settings_env_file(env: Mapping[str, str]) -> str:
-    """Content-addressed ``0600`` write of ``{"env": env}`` under
-    ``paths.state_dir() / "route-settings"``; returns the path.
+def load_sandbox_write_policy(path: str) -> dict[str, object]:
+    """Read a ``--sandbox-write-policy`` file and return its ``sandbox`` block.
+
+    The join call site writes one policy file per worker carrying both the
+    hook layer's ``deny_edit`` list and this sandbox block, and the spawn CLI
+    hands the SAME file over: one artifact, two enforcement layers. Any
+    malformed input exits non-zero rather than degrading - a policy that
+    silently loads as nothing is a spawn that looks enforced and is not.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    try:
+        payload = json.loads(Path(path).read_text())
+        block = payload.get("sandbox") if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        block = None
+    if not isinstance(block, dict) or not block.get("enabled"):
+        print(
+            f"sandbox write policy {path} carries no enabled sandbox block",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return block
+
+
+def _write_settings_env_file(
+    env: Mapping[str, str],
+    sandbox: "Optional[Mapping[str, object]]" = None,
+) -> str:
+    """Content-addressed ``0600`` write of ``{"env": env}`` (plus an optional
+    sibling ``sandbox`` block) under ``paths.state_dir() / "route-settings"``;
+    returns the path.
 
     Shared by :func:`materialize_route_settings` and
     :func:`materialize_model_scrub_settings` so the atomic-write mechanics
-    (content addressing, tmp-then-``os.replace``) exist in one place.
+    (content addressing, tmp-then-``os.replace``) exist in one place. The
+    digest covers the WHOLE payload, so a sandbox-only difference still gets
+    its own file while identical calls keep collapsing to one.
     """
     import hashlib
     import json
@@ -1087,7 +1128,10 @@ def _write_settings_env_file(env: Mapping[str, str]) -> str:
 
     from fno import paths
 
-    payload = json.dumps({"env": dict(env)}, sort_keys=True)
+    payload_obj: dict[str, object] = {"env": dict(env)}
+    if sandbox:
+        payload_obj["sandbox"] = dict(sandbox)
+    payload = json.dumps(payload_obj, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare
     # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and
@@ -1121,6 +1165,7 @@ def route_settings_path_for(
     route_env: Optional[Mapping[str, str]],
     account_env: Optional[Mapping[str, str]] = None,
     env: Optional[Mapping[str, str]] = None,
+    sandbox: "Optional[Mapping[str, object]]" = None,
 ) -> Optional[str]:
     """The ``--settings`` path a spawn carrying these overlays launches with.
 
@@ -1143,7 +1188,7 @@ def route_settings_path_for(
     second file - which is what lets a caller that only holds the resolved env
     recover the path without threading it through.
     """
-    if not (route_env or account_env):
+    if not (route_env or account_env or sandbox):
         return None
     overlay = {
         k: v for k, v in (account_env or {}).items() if k != "CLAUDE_CONFIG_DIR"
@@ -1164,7 +1209,7 @@ def route_settings_path_for(
     # this file already writes never covered the model vars (round 3).
     for key in unrouted_model_keys(env):
         merged.setdefault(key, "")
-    return materialize_route_settings(merged)
+    return materialize_route_settings(merged, sandbox=sandbox)
 
 
 def read_route_settings(path: str) -> dict[str, str]:

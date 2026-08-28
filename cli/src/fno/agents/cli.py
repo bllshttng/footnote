@@ -1201,6 +1201,18 @@ def cmd_spawn(
             "capital -P to keep the letter free for it."
         ),
     ),
+    sandbox_write_policy: str | None = typer.Option(
+        None,
+        "--sandbox-write-policy",
+        help=(
+            "Path to a JSON policy file whose `sandbox` block composes into "
+            "the worker's ONE --settings file (the OS-layer write allowlist, "
+            "e.g. `fno backlog join`). The same file carries the hook layer's "
+            "deny_edit list, so one artifact drives both enforcement layers. "
+            "Refused on the pane substrate, where mux_spawn reserves "
+            "--settings for its hook server."
+        ),
+    ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory for the agent subprocess."
     ),
@@ -2280,6 +2292,22 @@ def cmd_spawn(
     prov_prev["FNO_WORKER_NAME"] = os.environ.get("FNO_WORKER_NAME")
     os.environ["FNO_WORKER_NAME"] = name
 
+    # The write policy resolves BEFORE the substrate branch so a pane spawn
+    # refuses instead of silently dropping the enforcement it was handed.
+    sandbox_settings: dict[str, object] | None = None
+    if sandbox_write_policy:
+        if substrate == "pane" and not once:
+            print(
+                "--sandbox-write-policy needs the thread substrate: a pane "
+                "spawn's --settings slot is reserved by the mux hook server, "
+                "so a pane cannot carry the OS write allowlist.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from fno.agents.model_routing import load_sandbox_write_policy
+
+        sandbox_settings = load_sandbox_write_policy(sandbox_write_policy)
+
     # `--once` is the pre-substrate spelling of headless (the Rust client maps
     # it to --substrate headless): it always means a one-shot, never a pane.
     spawn_succeeded = False
@@ -2536,6 +2564,7 @@ def cmd_spawn(
                 succession=succeed,
                 route_provider=route_provider,
                 provider_gate=gate,
+                sandbox_settings=sandbox_settings,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

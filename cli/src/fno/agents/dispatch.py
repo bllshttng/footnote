@@ -1587,6 +1587,7 @@ def _claude_create_path(
     succession: bool = False,
     succession_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
+    sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1729,7 +1730,9 @@ def _claude_create_path(
     from fno.agents.model_routing import route_settings_path_for
 
     route_settings_path = (
-        route_settings_path_for(route_env, account_env) if route_env else None
+        route_settings_path_for(route_env, account_env, sandbox=sandbox_settings)
+        if (route_env or sandbox_settings)
+        else None
     )
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
@@ -1756,6 +1759,7 @@ def _claude_create_path(
             tools=tools,
             deny_tools=deny_tools,
             account_env=account_env,
+            sandbox_settings=sandbox_settings,
         )
     except claude_mod.ProviderSubprocessError as exc:
         # Only a never-executed claude proves no supervisor exists. A timeout or
@@ -2687,6 +2691,7 @@ def dispatch_spawn(
     succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -3211,6 +3216,7 @@ def dispatch_spawn(
                         deny_tools=deny_tools,
                         account_env=account_env,
                         launch_account=row_launch_account,
+                        sandbox_settings=sandbox_settings,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,
