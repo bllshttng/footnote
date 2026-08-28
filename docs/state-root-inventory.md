@@ -156,3 +156,17 @@ A king runs in the canonical checkout. A target manifest can sit there too. So t
 | Entry | Writer | Lifetime |
 |---|---|---|
 | `.fno/run-log.jsonl` | `crates/fno-agents/src/loopcheck.rs` through `run_state::append_transition` | append-only per checkout; retained as the lifecycle fold and deleted with a disposable worktree |
+
+## Project-relative sandbox breadcrumb
+
+| Entry | Writer | Lifetime |
+|---|---|---|
+| `.fno/state-root-denied.json` | the DENIED worker, through `crates/fno-agents/src/claims.rs::write_state_root_breadcrumb` and its Python twin `cli/src/fno/claims/io.py::_write_denial_breadcrumb` | until the next successful claim on this repo, which deletes it |
+
+This file is here because it is the only thing a mute worker can still say.
+
+A worker whose sandbox denies the fno state root has lost the claim store, the mail bus and the spawn mutex in one move. It cannot report that, because reporting is the capability it lost. It reports into its own transcript, which nothing reads, and the fleet meanwhile sees a live row with progress advancing. Five workers died that way in one night. Two of them finished real work nobody heard about.
+
+The same sandbox that took the state root left the repo writable. So the refusal is written here, inside the one root the worker demonstrably has, and the operator reads it from outside the sandbox. The write is best effort and never raises: a breadcrumb that cannot be written must not become a second failure stacked on the first.
+
+It carries the denied absolute root, the harness session id, and a UTC timestamp. A successful claim write clears it, because a stale breadcrumb reads as a live problem forever.

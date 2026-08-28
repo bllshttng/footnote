@@ -177,12 +177,53 @@ pub fn turn_start_request_json_with_effort(
     text: &str,
     effort: Option<&str>,
 ) -> String {
+    turn_start_request_json_full(id, thread_id, text, effort, &[])
+}
+
+/// `turn/start` with the optional state-root grant (x-f22f).
+///
+/// `turn/start` is the carrier, and that is a MEASUREMENT rather than a
+/// reading of the protocol docs. Against the live app-server on 2026-08-28,
+/// `thread/start` accepted a `sandboxPolicy` object without complaint and
+/// IGNORED it, falling back to the machine's configured default; only the
+/// scalar `sandbox` enum reaches it. `turn/start` honors
+/// `sandboxPolicy.writableRoots`: with the state root named, a shell command
+/// in that turn created a file under it, and with the root withheld the same
+/// command was denied while still writing inside cwd.
+///
+/// The grant rides EVERY turn, not just the first. A turn-level override
+/// becomes the thread's default for later turns, so once would be enough on a
+/// thread that is never resumed - and a resumed thread re-resolves its
+/// posture, which would silently drop the grant with a slower fuse. Sending it
+/// per turn makes resume carry it for free.
+///
+/// Only `writableRoots` is set. `networkAccess` and the tmp exclusions are left
+/// off so they keep the defaults the scalar posture already resolved to
+/// (network off): this change grants directories and must not widen anything
+/// else. The roots are ADDITIVE to the workspace - a bounded thread reports
+/// `writableRoots: []` and can still write its own cwd - so naming the state
+/// root does not take the worktree away.
+///
+/// Empty `state_dirs` builds today's frame byte-for-byte.
+pub fn turn_start_request_json_full(
+    id: u64,
+    thread_id: &str,
+    text: &str,
+    effort: Option<&str>,
+    state_dirs: &[String],
+) -> String {
     let mut params = json!({
         "threadId": thread_id,
         "input": [{"type": "text", "text": text}],
     });
     if let Some(effort) = effort.filter(|effort| !effort.is_empty()) {
         params["effort"] = json!(effort);
+    }
+    if !state_dirs.is_empty() {
+        params["sandboxPolicy"] = json!({
+            "type": "workspaceWrite",
+            "writableRoots": state_dirs,
+        });
     }
     json!({
         "id": id,
@@ -341,6 +382,13 @@ pub struct CodexThread {
     rollout_path: PathBuf,
     cwd: PathBuf,
     effort: Option<String>,
+    /// The fno state roots this thread is granted, spent on every `turn/start`
+    /// (x-f22f). Per THREAD, never per daemon: the daemon is shared and owns
+    /// every thread on the box, so a grant applied at daemon scope would widen
+    /// every other worker's sandbox at once. Empty for a yolo thread, which is
+    /// already `danger-full-access` and would be NARROWED by a workspaceWrite
+    /// policy, and empty when the seam published nothing.
+    state_dirs: Vec<String>,
     current_turn_id: Option<String>,
 }
 
@@ -367,6 +415,19 @@ impl CodexThread {
         yolo: bool,
         effort: Option<&str>,
     ) -> Result<Self, ThreadDriverError> {
+        Self::start_with_state_dirs(cwd, model, yolo, effort, &[]).await
+    }
+
+    /// [`CodexThread::start`] plus the state-root grant this thread carries on
+    /// every turn (x-f22f). `yolo` drops the roots: that posture is already
+    /// `danger-full-access`, so a workspaceWrite policy would narrow it.
+    pub async fn start_with_state_dirs(
+        cwd: impl Into<PathBuf>,
+        model: Option<&str>,
+        yolo: bool,
+        effort: Option<&str>,
+        state_dirs: &[String],
+    ) -> Result<Self, ThreadDriverError> {
         let cwd = cwd.into();
         // `launch` completes the app-server handshake as part of connecting,
         // so the driver is protocol-ready the moment it exists.
@@ -380,6 +441,11 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
+        driver.state_dirs = if yolo {
+            Vec::new()
+        } else {
+            state_dirs.to_vec()
+        };
         Ok(driver)
     }
 
@@ -389,6 +455,20 @@ impl CodexThread {
         model: Option<&str>,
         yolo: bool,
         effort: Option<&str>,
+    ) -> Result<Self, ThreadDriverError> {
+        Self::resume_with_state_dirs(cwd, thread_id, model, yolo, effort, &[]).await
+    }
+
+    /// [`CodexThread::resume`] plus the state-root grant. A resumed thread
+    /// re-resolves its posture server-side, so a resume that forgot the roots
+    /// would be the same silent defect with a slower fuse.
+    pub async fn resume_with_state_dirs(
+        cwd: impl Into<PathBuf>,
+        thread_id: &str,
+        model: Option<&str>,
+        yolo: bool,
+        effort: Option<&str>,
+        state_dirs: &[String],
     ) -> Result<Self, ThreadDriverError> {
         if thread_id.trim().is_empty() {
             return Err(ThreadDriverError::Protocol(
@@ -413,6 +493,11 @@ impl CodexThread {
         driver.effort = effort
             .filter(|effort| !effort.is_empty())
             .map(str::to_string);
+        driver.state_dirs = if yolo {
+            Vec::new()
+        } else {
+            state_dirs.to_vec()
+        };
         Ok(driver)
     }
 
@@ -457,6 +542,7 @@ impl CodexThread {
             rollout_path: PathBuf::new(),
             cwd,
             effort: None,
+            state_dirs: Vec::new(),
             current_turn_id: None,
         })
     }
@@ -562,11 +648,12 @@ impl CodexThread {
     pub async fn drive_turn(&mut self, text: &str) -> Result<TurnResult, ThreadDriverError> {
         let request_id = self.next_id;
         self.next_id += 1;
-        let request = turn_start_request_json_with_effort(
+        let request = turn_start_request_json_full(
             request_id,
             &self.thread_id,
             text,
             self.effort.as_deref(),
+            &self.state_dirs,
         );
         let response = self.request(request_id, request).await?;
         let turn_id = parse_turn_start_response(&response)?;
@@ -589,11 +676,12 @@ impl CodexThread {
     pub async fn send_turn_start(&mut self, text: &str) -> Result<u64, ThreadDriverError> {
         let request_id = self.next_id;
         self.next_id += 1;
-        let request = turn_start_request_json_with_effort(
+        let request = turn_start_request_json_full(
             request_id,
             &self.thread_id,
             text,
             self.effort.as_deref(),
+            &self.state_dirs,
         );
         self.write_frame(&request).await?;
         Ok(request_id)
@@ -1524,6 +1612,57 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value["params"]["effort"], "high");
+    }
+
+    /// The grant rides `turn/start`, and only there. Measured against the live
+    /// app-server on 2026-08-28: `thread/start` ignores a `sandboxPolicy`
+    /// object without erroring, `turn/start` honors it.
+    #[test]
+    fn turn_start_carries_the_state_root_grant() {
+        let roots = vec!["/Users/x/.fno".to_string()];
+        let value: Value = serde_json::from_str(&turn_start_request_json_full(
+            7, "thread-1", "go", None, &roots,
+        ))
+        .unwrap();
+        assert_eq!(value["params"]["sandboxPolicy"]["type"], "workspaceWrite");
+        assert_eq!(
+            value["params"]["sandboxPolicy"]["writableRoots"],
+            json!(["/Users/x/.fno"])
+        );
+        // Nothing else widens. The scalar posture already resolved network
+        // access off, and this change grants directories only.
+        assert!(value["params"]["sandboxPolicy"]
+            .get("networkAccess")
+            .is_none());
+    }
+
+    /// An ungranted spawn must build TODAY's frame, byte for byte. A new
+    /// always-on field would change the posture of every existing lane.
+    #[test]
+    fn turn_start_without_roots_is_byte_identical_to_today() {
+        let with_helper = turn_start_request_json_with_effort(7, "thread-1", "go", Some("high"));
+        let with_empty = turn_start_request_json_full(7, "thread-1", "go", Some("high"), &[]);
+        assert_eq!(with_helper, with_empty);
+        let value: Value = serde_json::from_str(&with_empty).unwrap();
+        assert!(value["params"].get("sandboxPolicy").is_none());
+    }
+
+    /// `thread/start` keeps the SCALAR field and its exact spelling. The
+    /// app-server rejects the docs' `workspaceWrite` spelling outright
+    /// (`-32600 unknown variant`), so the code is right and the doc is wrong;
+    /// this pins the code against a well-meaning "fix" toward the doc.
+    #[test]
+    fn thread_start_keeps_the_scalar_sandbox_spelling_the_server_accepts() {
+        let value: Value = serde_json::from_str(&thread_start_request_with_options(
+            1,
+            std::path::Path::new("/tmp/w"),
+            None,
+            false,
+            "never",
+        ))
+        .unwrap();
+        assert_eq!(value["params"]["sandbox"], "workspace-write");
+        assert!(value["params"].get("sandboxPolicy").is_none());
     }
 
     #[test]

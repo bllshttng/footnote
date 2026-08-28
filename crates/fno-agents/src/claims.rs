@@ -636,19 +636,106 @@ fn atomic_create_exclusive(path: &Path, content: &str) -> Result<(), CreateError
         None => return Err(CreateError::Io("claim path has no parent".into())),
     };
     match create_via_link(parent, path, content) {
-        Ok(()) => Ok(()),
+        Ok(()) => {
+            clear_state_root_breadcrumb();
+            Ok(())
+        }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(CreateError::AlreadyHeld),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::create_dir_all(parent).map_err(|e| CreateError::Io(e.to_string()))?;
+            std::fs::create_dir_all(parent).map_err(|e| map_create_io_error(path, e))?;
             match create_via_link(parent, path, content) {
-                Ok(()) => Ok(()),
+                Ok(()) => {
+                    clear_state_root_breadcrumb();
+                    Ok(())
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                     Err(CreateError::AlreadyHeld)
                 }
-                Err(e) => Err(CreateError::Io(e.to_string())),
+                Err(e) => Err(map_create_io_error(path, e)),
             }
         }
-        Err(e) => Err(CreateError::Io(e.to_string())),
+        Err(e) => Err(map_create_io_error(path, e)),
+    }
+}
+
+/// Turn a claim-create I/O error into a message that says WHICH failure it is.
+///
+/// A permission denial and lock contention both leave the caller without a
+/// claim, and they are not the same problem: contention clears on its own, a
+/// missing state-root grant never does. A worker told only that the claim
+/// failed reads it as contention and waits for a holder that does not exist.
+/// So a denial names the absolute root and says it is a grant failure (epic
+/// rule R3), and drops a breadcrumb the operator can read from outside the
+/// worker's sandbox.
+fn map_create_io_error(path: &Path, error: std::io::Error) -> CreateError {
+    let denied = matches!(
+        error.kind(),
+        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem
+    );
+    if !denied {
+        return CreateError::Io(error.to_string());
+    }
+    let root = denied_state_root(path);
+    write_state_root_breadcrumb(&root);
+    CreateError::Io(format!(
+        "claim write denied by the sandbox: {root} is not writable for this session. \
+         This is a missing state-root grant, NOT lock contention: no other holder exists \
+         and waiting will not clear it. A worker here cannot claim, mail, or spawn. \
+         Dispatch on a lane that declares state_root_grant for this substrate. ({error})"
+    ))
+}
+
+/// The state root a denied claim file sits under. The grant is a DIRECTORY
+/// grant, so the directory is the actionable name, not the lock file.
+fn denied_state_root(path: &Path) -> String {
+    let parent = path.parent().unwrap_or(path);
+    let root = if parent.file_name().and_then(|n| n.to_str()) == Some("claims") {
+        parent.parent().unwrap_or(parent)
+    } else {
+        parent
+    };
+    root.display().to_string()
+}
+
+/// Path of the breadcrumb a mute worker leaves for the operator.
+///
+/// `<repo>/.fno/` is chosen because it is the ONE place a denied worker can
+/// still write: the sandbox that took the state root left the repo writable.
+/// Everything else it would normally speak through - the claim store, the mail
+/// bus, the spawn mutex - lives under the root it just lost.
+fn state_root_breadcrumb_path() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let repo = crate::paths::canonical_repo_root(&cwd).unwrap_or(cwd);
+    Some(repo.join(".fno").join("state-root-denied.json"))
+}
+
+/// Best effort, and deliberately silent on failure: the caller is already
+/// returning a refusal that names the root, and a breadcrumb that cannot be
+/// written must never become a second failure on top of the first.
+fn write_state_root_breadcrumb(denied_root: &str) {
+    let Some(target) = state_root_breadcrumb_path() else {
+        return;
+    };
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let session_id = std::env::var("CODEX_COMPANION_SESSION_ID")
+        .or_else(|_| std::env::var("CLAUDE_SESSION_ID"))
+        .or_else(|_| std::env::var("FNO_AGENT_SELF"))
+        .unwrap_or_default();
+    let payload = serde_json::json!({
+        "denied_root": denied_root,
+        "session_id": session_id,
+        "denied_at": crate::events::now_rfc3339(),
+    });
+    let _ = std::fs::write(&target, format!("{payload:#}\n"));
+}
+
+/// A successful claim write proves the grant is present now, so a breadcrumb
+/// from an earlier denial is stale and would otherwise read as a live problem.
+fn clear_state_root_breadcrumb() {
+    if let Some(target) = state_root_breadcrumb_path() {
+        let _ = std::fs::remove_file(target);
     }
 }
 
@@ -2135,6 +2222,49 @@ mod tests {
 
     fn lockfile(root: &TempDir, key: &str) -> PathBuf {
         claim_path(key, Some(root.path())).unwrap()
+    }
+
+    /// R3: a denial names the absolute root and reads as a grant failure, not
+    /// as lock contention. The two have opposite remedies, and a worker told
+    /// only "no claim" waits forever for a holder that does not exist.
+    #[test]
+    fn denied_claim_write_names_the_root_and_is_not_contention() {
+        let denied = std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "Operation not permitted",
+        );
+        let path = Path::new("/Users/x/.fno/claims/node%3Aab-1.lock");
+        let CreateError::Io(message) = map_create_io_error(path, denied) else {
+            panic!("a permission denial must not be reported as AlreadyHeld");
+        };
+        assert!(message.contains("/Users/x/.fno"), "{message}");
+        assert!(
+            !message.contains("/claims/"),
+            "names the dir, not the file: {message}"
+        );
+        assert!(message.contains("NOT lock contention"), "{message}");
+    }
+
+    /// A denial is the only thing that takes this branch. ENOSPC and friends
+    /// keep surfacing as themselves.
+    #[test]
+    fn other_io_errors_are_left_alone() {
+        let full = std::io::Error::other("No space left on device");
+        let CreateError::Io(message) =
+            map_create_io_error(Path::new("/x/.fno/claims/a.lock"), full)
+        else {
+            panic!("unexpected variant");
+        };
+        assert!(message.contains("No space left"), "{message}");
+        assert!(!message.contains("state-root grant"), "{message}");
+    }
+
+    #[test]
+    fn denied_root_is_the_state_root_not_the_claims_subdir() {
+        assert_eq!(
+            denied_state_root(Path::new("/Users/x/.fno/claims/node%3Aa.lock")),
+            "/Users/x/.fno"
+        );
     }
 
     fn read_events(root: &TempDir) -> Vec<Value> {

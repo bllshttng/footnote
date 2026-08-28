@@ -18,6 +18,7 @@
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_tungstenite::tungstenite::Message;
@@ -64,6 +65,15 @@ pub struct Behavior {
     /// Emit a `turn/completed` for a turn NOBODY drives, this far into a turn.
     /// The stray-completion wedge.
     pub stray_completion_after: Option<Duration>,
+    /// Every request frame this fake received, in arrival order.
+    ///
+    /// The fake models no sandbox and deliberately never will: whether the
+    /// REAL app-server honors a field is a question only the real daemon can
+    /// answer, and a green run against a double would measure the double.
+    /// Recording the frames asks a different and answerable question - did
+    /// fno's three hops put the roots on the wire - which is the regression
+    /// worth pinning in CI.
+    pub received: Arc<Mutex<Vec<Value>>>,
 }
 
 impl Default for Behavior {
@@ -75,6 +85,7 @@ impl Default for Behavior {
             interrupt: Interrupt::Refuse,
             event_frames: 0,
             stray_completion_after: None,
+            received: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -138,6 +149,7 @@ pub struct FakeDaemon {
     home: PathBuf,
     saved_home: Option<std::ffi::OsString>,
     server: tokio::task::JoinHandle<()>,
+    received: Arc<Mutex<Vec<Value>>>,
 }
 
 impl FakeDaemon {
@@ -180,6 +192,7 @@ impl FakeDaemon {
         let listener = UnixListener::bind(&socket).expect("bind control sock");
         let saved_home = std::env::var_os("CODEX_HOME");
         std::env::set_var("CODEX_HOME", &home);
+        let received = Arc::clone(&behavior.received);
         let server = tokio::spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
                 tokio::spawn(serve(conn, behavior.clone()));
@@ -189,6 +202,7 @@ impl FakeDaemon {
             home,
             saved_home,
             server,
+            received,
         }
     }
 
@@ -202,6 +216,22 @@ impl FakeDaemon {
     /// The pid recorded as the serving app-server, which is this process.
     pub fn recorded_pid(&self) -> u32 {
         std::process::id()
+    }
+
+    /// Every request frame received so far, in arrival order.
+    pub fn received(&self) -> Vec<Value> {
+        self.received
+            .lock()
+            .map(|frames| frames.clone())
+            .unwrap_or_default()
+    }
+
+    /// The params of the first frame with `method`, if one arrived.
+    pub fn first_params(&self, method: &str) -> Option<Value> {
+        self.received()
+            .into_iter()
+            .find(|frame| frame.get("method").and_then(Value::as_str) == Some(method))
+            .and_then(|frame| frame.get("params").cloned())
     }
 }
 
@@ -274,6 +304,9 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
         let Ok(msg) = serde_json::from_str::<Value>(&frame) else {
             continue;
         };
+        if let Ok(mut received) = behavior.received.lock() {
+            received.push(msg.clone());
+        }
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let reply = match msg.get("method").and_then(Value::as_str) {
             Some("initialize") => json!({"id": id, "result": {}}),

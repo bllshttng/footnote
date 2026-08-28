@@ -2,7 +2,7 @@
 # Edit this file, then resync the copy:
 #   cp crates/fno-agents/src/harness_capabilities.toml cli/src/fno/agents/harness_capabilities.toml
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when the two differ.
-map_version = 10
+map_version = 11
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -25,6 +25,17 @@ submit_keys = ["enter"]
 stop_strategy = "claude-short-id"
 remove_strategy = "claude-short-id"
 session_binding = { strategy = "preassigned-or-session-start", required = true, timeout_ms = 60000 }
+
+# Which carrier this harness uses to hand a worker the fno state root, per
+# substrate. An ABSENT substrate key means no carrier: a worker there can edit
+# code and cannot claim, mail, or spawn, so the spawn gate refuses it by name
+# (epic rule R3). Absent by default is the point - a lane added later inherits
+# the refusal rather than inheriting silence.
+[harness.claude.state_root_grant]
+# `--add-dir`, spent by `claude_ask::build_argv` on every claude substrate.
+pane = "argv-add-dir"
+thread = "argv-add-dir"
+headless = "argv-add-dir"
 
 [harness.claude.permission_response.allow_once]
 supported = true
@@ -102,6 +113,18 @@ stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
 session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_ms = 60000 }
 
+[harness.codex.state_root_grant]
+# pane/headless spend `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS). The thread
+# lane builds NO argv - it sends JSON-RPC to a shared app-server - so its only
+# carrier is a protocol field. Measured against the live daemon on 2026-08-28:
+# `thread/start` takes only the scalar `sandbox` enum and IGNORES a
+# `sandboxPolicy` object without erroring, while `turn/start` honors
+# `sandboxPolicy.writableRoots`. docs/architecture/codex-thread-driver.md
+# records the measurement and the frames it came from.
+pane = "argv-add-dir"
+thread = "turn-start-sandbox-policy"
+headless = "argv-add-dir"
+
 [harness.codex.permission_response.allow_once]
 supported = true
 rule_ids = ["approval_prompt"]
@@ -160,6 +183,11 @@ submit_keys = ["unsupported"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "preassigned", required = true, timeout_ms = 60000 }
+
+[harness.gemini.state_root_grant]
+# Deliberately empty. gemini maps no additive write grant on any substrate, so
+# a gemini worker cannot claim, mail, or spawn. Under R3 that lane is refused
+# at spawn by name rather than launched mute. The CLI is deprecated upstream.
 
 [harness.gemini.permission_response.allow_once]
 supported = false
@@ -226,6 +254,12 @@ submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "unsupported", required = false, timeout_ms = 0 }
+
+[harness.agy.state_root_grant]
+# `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS).
+pane = "argv-add-dir"
+thread = "argv-add-dir"
+headless = "argv-add-dir"
 
 [harness.agy.permission_response.allow_once]
 supported = false
@@ -297,6 +331,13 @@ submit_keys = ["unsupported"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "store-lookup", required = false, timeout_ms = 2000 }
+
+[harness.opencode.state_root_grant]
+# opencode maps no additive dir flag (`--dir` SETS cwd, verified against
+# v1.14.50), so its argv lanes carry nothing. The serve-HTTP thread lane does:
+# `opencode_serve.rs` turns FNO_WORKER_ADD_DIRS into per-session
+# `external_directory` allow rules. pane and headless are refused, per R3.
+thread = "serve-external-directory"
 
 [harness.opencode.permission_response.allow_once]
 supported = false

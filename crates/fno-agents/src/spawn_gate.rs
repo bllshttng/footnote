@@ -33,6 +33,8 @@ use crate::AgentStatus;
 pub const EXIT_QUEUE_TIMEOUT: i32 = 75;
 pub const EXIT_NO_WAIT: i32 = 76;
 pub const EXIT_RAM_REFUSED: i32 = 77;
+/// The lane declares no carrier for the fno state root (epic rule R3).
+pub const EXIT_STATE_ROOT_UNGRANTED: i32 = 78;
 pub const EXIT_LOAD_REFUSED: i32 = 79;
 
 /// Queue mechanics (Claude's Discretion 2: targets, not contracts).
@@ -384,6 +386,52 @@ fn maybe_emit_spawn_cap_escape() {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+/// Refuse a spawn onto a lane that declares no carrier for the fno state root.
+///
+/// THIS GUARD FAILS CLOSED, and it is the only one in this module that does.
+/// Every other guard here fails OPEN on a read error because the gate is
+/// protective infrastructure and must never brick spawning (LD5). That
+/// reasoning holds for a RAM floor, where a missed refusal costs a slow
+/// machine, and it INVERTS here. A spawn allowed past a missing grant produces
+/// a worker that goes live, runs, edits code, and cannot claim a node, deliver
+/// mail, or spawn a peer - and cannot report that it cannot, because reporting
+/// is the thing it lost. Five such workers died mute in one night and two of
+/// them finished real work nobody could hear about. Silence is the harm, so an
+/// unreadable contract refuses. Do not "fix" this back to fail-open.
+///
+/// Fails open on exactly one case: `roots` is empty. There is then no root to
+/// grant and nothing to refuse.
+pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -> Result<(), i32> {
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let contract = match crate::harness_capabilities::HarnessContract::packaged() {
+        Ok(contract) => contract,
+        Err(error) => {
+            eprintln!("refused: the harness capability contract is unreadable ({error})");
+            eprintln!(
+                "  a state root resolves for this spawn and no lane can be verified to carry it."
+            );
+            return Err(EXIT_STATE_ROOT_UNGRANTED);
+        }
+    };
+    if contract.state_root_carrier(harness, substrate).is_some() {
+        return Ok(());
+    }
+    // R3: name the root. A refusal that says "denied" without saying WHICH
+    // directory sends the reader back to the code to find out.
+    eprintln!("refused: the {harness}/{substrate} lane declares no carrier for the state root");
+    for root in roots {
+        eprintln!("  {root}");
+    }
+    eprintln!("a worker on this lane can edit code and cannot claim, mail, or spawn.");
+    eprintln!(
+        "declare state_root_grant for [harness.{harness}.state_root_grant] {substrate}, \
+         or dispatch on a granted lane."
+    );
+    Err(EXIT_STATE_ROOT_UNGRANTED)
 }
 
 /// Run the full gate for a `bg`/`headless` spawn. Returns a guard to keep
@@ -886,6 +934,57 @@ pub fn qos_demote_bg_worker(config_cwd: &Path, job_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ROOTS: [&str; 1] = ["/Users/x/.fno"];
+
+    fn roots() -> Vec<String> {
+        ROOTS.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn ungranted_lane_is_refused_with_its_own_exit_code() {
+        // gemini declares no carrier on any substrate: a worker there can edit
+        // code and cannot claim, mail, or spawn.
+        assert_eq!(
+            state_root_grant_gate("gemini", "headless", &roots()),
+            Err(EXIT_STATE_ROOT_UNGRANTED)
+        );
+        // opencode carries the grant on its serve thread lane only.
+        assert_eq!(
+            state_root_grant_gate("opencode", "headless", &roots()),
+            Err(EXIT_STATE_ROOT_UNGRANTED)
+        );
+        // An unknown harness declares nothing, so it is refused too.
+        assert_eq!(
+            state_root_grant_gate("nosuchharness", "thread", &roots()),
+            Err(EXIT_STATE_ROOT_UNGRANTED)
+        );
+    }
+
+    #[test]
+    fn granted_lanes_pass() {
+        for (harness, substrate) in [
+            ("claude", "thread"),
+            ("claude", "headless"),
+            ("codex", "thread"),
+            ("codex", "headless"),
+            ("agy", "thread"),
+            ("opencode", "thread"),
+        ] {
+            assert_eq!(
+                state_root_grant_gate(harness, substrate, &roots()),
+                Ok(()),
+                "{harness}/{substrate}"
+            );
+        }
+    }
+
+    /// The one narrow fail-open case: no root resolved means there is nothing
+    /// to grant and nothing to refuse.
+    #[test]
+    fn no_resolved_root_passes_even_on_an_ungranted_lane() {
+        assert_eq!(state_root_grant_gate("gemini", "headless", &[]), Ok(()));
+    }
 
     #[test]
     fn spawn_cap_guard_agrees_with_python_gate_fixture() {

@@ -345,3 +345,89 @@ def test_claims_root_for_honors_env_override(tmp_path, monkeypatch):
 def test_claims_root_for_repo_local_and_unknown_keys_return_none(key):
     """AC1-ERR: repo-local / unrecognized / colon-less keys keep the default (None)."""
     assert claims_root_for(key) is None
+
+
+# --- The state-root denial (x-f22f) -----------------------------------------
+#
+# A permission denial and lock contention both leave the caller without a
+# claim, and they have opposite remedies: contention clears on its own, a
+# missing write grant never does. A worker told only "no claim" reads it as
+# contention and waits for a holder that does not exist.
+
+
+def test_denied_claim_write_is_not_reported_as_contention(tmp_path, monkeypatch):
+    from fno.claims.io import ClaimStateRootDenied
+
+    state_root = tmp_path / ".fno"
+    claims = state_root / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    claims.chmod(0o500)  # readable, not writable: the sandbox's shape
+    try:
+        with pytest.raises(ClaimStateRootDenied) as caught:
+            atomic_create_exclusive(claims / "node%3Aab-1.lock", "x: 1\n")
+    finally:
+        claims.chmod(0o700)
+
+    message = str(caught.value)
+    assert str(state_root) in message, message
+    assert "NOT lock contention" in message, message
+
+
+def test_denied_claim_write_leaves_a_breadcrumb_the_operator_can_read(tmp_path, monkeypatch):
+    """The one channel a mute worker still has.
+
+    A worker denied the state root has lost the claim store, the mail bus and
+    the spawn mutex at once, so it cannot report its own condition through any
+    of them. The repo stays writable, so the refusal is written there.
+    """
+    import json
+
+    from fno.claims.io import ClaimStateRootDenied
+
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    monkeypatch.setenv("CODEX_COMPANION_SESSION_ID", "sess-probe-1")
+    claims.chmod(0o500)
+    try:
+        with pytest.raises(ClaimStateRootDenied):
+            atomic_create_exclusive(claims / "node%3Aab-2.lock", "x: 1\n")
+    finally:
+        claims.chmod(0o700)
+
+    crumb = repo / ".fno" / "state-root-denied.json"
+    assert crumb.exists(), "the denial must be readable from outside the sandbox"
+    payload = json.loads(crumb.read_text())
+    assert payload["denied_root"] == str(tmp_path / ".fno")
+    assert payload["session_id"] == "sess-probe-1"
+    assert payload["denied_at"].endswith("+00:00")
+
+
+def test_a_later_successful_claim_clears_the_breadcrumb(tmp_path, monkeypatch):
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    crumb = repo / ".fno" / "state-root-denied.json"
+    crumb.parent.mkdir(parents=True)
+    crumb.write_text("{}")
+
+    atomic_create_exclusive(claims / "node%3Aab-3.lock", "x: 1\n")
+
+    assert not crumb.exists(), "a successful claim proves the grant is back"
+
+
+def test_contention_is_still_contention(tmp_path):
+    """The denial branch must not swallow the AlreadyHeld signal."""
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    target = claims / "node%3Aab-4.lock"
+    atomic_create_exclusive(target, "x: 1\n")
+    with pytest.raises(ClaimAlreadyHeld):
+        atomic_create_exclusive(target, "x: 2\n")

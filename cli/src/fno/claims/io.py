@@ -56,6 +56,17 @@ class ClaimAlreadyHeld(Exception):
     """
 
 
+class ClaimStateRootDenied(Exception):
+    """A claim write was denied by the sandbox, not by another holder.
+
+    Distinct from :class:`ClaimAlreadyHeld` on purpose. Both make a caller fail
+    to get a claim, and the remedies have nothing in common: contention clears
+    on its own, a missing write grant never does. A worker told only "no claim"
+    reads it as contention and waits forever for a lock nobody holds. One did
+    diagnose this correctly from scratch, and no worker should have to.
+    """
+
+
 class ClaimCorrupted(Exception):
     """Raised when a claim file exists but cannot be parsed as YAML+schema."""
 
@@ -248,7 +259,86 @@ def atomic_create_exclusive(path: Path, content: str) -> None:
     except OSError as exc:
         if exc.errno == errno.EEXIST:
             raise ClaimAlreadyHeld(str(path)) from exc
+        if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS):
+            raise _state_root_denied(path) from exc
         raise
+    # Reached only when the claim file was actually created, by either the
+    # first attempt or the post-mkdir retry. A successful claim write is proof
+    # the grant is present now, so any breadcrumb from an earlier denial is
+    # stale and would otherwise read as a live problem forever.
+    _clear_denial_breadcrumb()
+
+
+def _clear_denial_breadcrumb() -> None:
+    """Remove ``<repo>/.fno/state-root-denied.json``. Never raises."""
+    try:
+        from fno.paths import resolve_repo_root
+
+        (resolve_repo_root() / ".fno" / "state-root-denied.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _state_root_denied(path: Path) -> ClaimStateRootDenied:
+    """Name the denied root, drop a breadcrumb, and return the refusal.
+
+    The breadcrumb is the load-bearing half. A worker denied the state root has
+    lost the claim store, the mail bus and the spawn mutex in one move, so it
+    cannot report its own condition through any of them - it reports into its
+    own transcript, which nothing reads. It is not voiceless, though: the same
+    sandbox that took the state root left the repo writable, so the refusal is
+    written there and the king reads it from outside the sandbox. That is the
+    difference between a failure that is visible and one that is not.
+
+    Best effort throughout. A breadcrumb that cannot be written must never
+    become a second failure stacked on the first.
+    """
+    root = _denied_root(path)
+    _write_denial_breadcrumb(root)
+    return ClaimStateRootDenied(
+        f"claim write denied by the sandbox: {root} is not writable for this session. "
+        f"This is a missing state-root grant, NOT lock contention: no other holder "
+        f"exists and waiting will not clear it. A worker here cannot claim, mail, or "
+        f"spawn. Dispatch on a lane that declares state_root_grant for this substrate."
+    )
+
+
+def _denied_root(path: Path) -> str:
+    """The state root the denied claim file lives under.
+
+    Reported rather than the lock file itself: the grant is a directory grant,
+    so the directory is the actionable name.
+    """
+    parent = path.parent
+    if parent.name == "claims":
+        parent = parent.parent
+    return str(parent)
+
+
+def _write_denial_breadcrumb(denied_root: str) -> None:
+    """Write ``<repo>/.fno/state-root-denied.json``. Never raises."""
+    try:
+        import json
+        from datetime import datetime, timezone
+
+        from fno.paths import resolve_repo_root
+
+        target = resolve_repo_root() / ".fno" / "state-root-denied.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "denied_root": denied_root,
+            "session_id": os.environ.get("CODEX_COMPANION_SESSION_ID")
+            or os.environ.get("CLAUDE_SESSION_ID")
+            or os.environ.get("FNO_AGENT_SELF")
+            or "",
+            "denied_at": datetime.now(timezone.utc).isoformat(),
+        }
+        target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        # Deliberately total. The caller is already returning a refusal that
+        # names the root; a breadcrumb failure must not replace it with a
+        # different error, and there is nowhere left to report this one.
+        pass
 
 
 def serialize_claim(claim: Claim) -> str:

@@ -338,3 +338,99 @@ async fn shutdown_closes_the_connection_and_leaves_the_daemon_serving() {
     })
     .await;
 }
+
+// ---------------------------------------------------------------------------
+// The state-root grant on the wire (x-f22f).
+//
+// These read the frames the fake RECEIVED. They deliberately do not ask the
+// fake whether a sandbox was applied: it models no sandbox, so an assertion
+// about enforcement would measure the double instead of the target. Whether
+// the real app-server HONORS the field was settled by a live probe against the
+// real daemon and is recorded in docs/architecture/codex-thread-driver.md.
+// What is worth pinning in CI is the other half - that fno's hops put the
+// roots on the wire at all, on the carrier that probe identified.
+// ---------------------------------------------------------------------------
+
+fn grant_roots() -> Vec<String> {
+    vec!["/Users/x/.fno".to_string()]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn granted_thread_puts_the_roots_on_every_turn_start() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-grant"));
+    let worktree = tempfile::tempdir().unwrap();
+    let mut thread =
+        CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &grant_roots())
+            .await
+            .expect("thread starts");
+    thread.drive_turn("first").await.expect("turn 1");
+    thread.drive_turn("second").await.expect("turn 2");
+
+    // thread/start keeps the scalar posture: the object form is ignored there.
+    let start = daemon.first_params("thread/start").expect("a thread/start");
+    assert_eq!(start["sandbox"], "workspace-write");
+    assert!(start.get("sandboxPolicy").is_none());
+
+    // Every turn carries the grant, not just the first. A turn-level override
+    // becomes the thread default, so once would hold for a thread that is
+    // never resumed - and a resumed thread re-resolves its posture.
+    let turns: Vec<_> = daemon
+        .received()
+        .into_iter()
+        .filter(|f| f.get("method").and_then(|m| m.as_str()) == Some("turn/start"))
+        .collect();
+    assert_eq!(turns.len(), 2, "two turns were driven");
+    for turn in turns {
+        let policy = &turn["params"]["sandboxPolicy"];
+        assert_eq!(policy["type"], "workspaceWrite");
+        assert_eq!(policy["writableRoots"][0], "/Users/x/.fno");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ungranted_thread_emits_todays_frames_unchanged() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-plain"));
+    let worktree = tempfile::tempdir().unwrap();
+    let mut thread = CodexThread::start_with_state_dirs(worktree.path(), None, false, None, &[])
+        .await
+        .expect("thread starts");
+    thread.drive_turn("go").await.expect("turn");
+
+    let start = daemon.first_params("thread/start").expect("a thread/start");
+    assert_eq!(start["sandbox"], "workspace-write");
+    let turn = daemon.first_params("turn/start").expect("a turn/start");
+    assert!(
+        turn.get("sandboxPolicy").is_none(),
+        "no roots resolved, so the frame must be today's: {turn}"
+    );
+}
+
+/// A yolo thread is already `danger-full-access`. A workspaceWrite policy
+/// would NARROW it, so the roots are dropped rather than sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn yolo_thread_is_never_narrowed_by_the_grant() {
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let daemon = FakeDaemon::start(Behavior::quick().with_thread_id("thread-yolo"));
+    let worktree = tempfile::tempdir().unwrap();
+    let mut thread =
+        CodexThread::start_with_state_dirs(worktree.path(), None, true, None, &grant_roots())
+            .await
+            .expect("thread starts");
+    thread.drive_turn("go").await.expect("turn");
+
+    let start = daemon.first_params("thread/start").expect("a thread/start");
+    assert_eq!(start["sandbox"], "danger-full-access");
+    let turn = daemon.first_params("turn/start").expect("a turn/start");
+    assert!(
+        turn.get("sandboxPolicy").is_none(),
+        "a full-access thread must not be handed a narrower policy: {turn}"
+    );
+}
