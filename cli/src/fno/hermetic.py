@@ -385,8 +385,16 @@ def neutralise(
     # a pin only one side honored would split the writers onto different files
     # and stop the mutex serialising them; the cross-impl merge gate catches it.
     #
-    # Still outside the pin: the three loop-journal `ProjectJournalPath` sites in
-    # fno-agents, which build their path by hand and consult no var.
+    # The three loop-journal `ProjectJournalPath` sites in fno-agents used to sit
+    # outside this pin, building their path by hand and consulting no var.
+    # `ProjectJournalPath::for_repo` gives them the same precedence now.
+    #
+    # A pin still only reaches a reader that consults it, and nothing here can
+    # make a module consult one. That residue is closed at the WRITE instead:
+    # `append_event` refuses a resolved path outside this sandbox whenever
+    # FNO_TEST_HERMETIC is set, so a future hand-built path fails loudly and
+    # names itself rather than landing in a live journal. See
+    # docs/architecture/test-hermeticity.md.
     out["FNO_EVENTS_PATH"] = str(sandbox / "events.jsonl")
 
     out.update(caches)
