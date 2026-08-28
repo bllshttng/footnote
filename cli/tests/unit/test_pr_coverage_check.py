@@ -15,6 +15,7 @@ instrument failure, reachable here only by forcing the head fetch to fail or
 the read to raise, never by an empty read.
 """
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -1506,6 +1507,119 @@ def test_file_findings_at_cap_is_idempotent_on_the_finding_key(monkeypatch, tmp_
     )
     assert ids == ["x-77aa"]
     assert not any(c[:3] == ["fno", "backlog", "idea"] for c in seen)
+
+
+# ---- the cap filing reaches the REAL argument parser ----
+#
+# The test above is the shape that let the defect ship: a mocked `run` accepts
+# any argv, so it cannot see a flag the parser rejects. `fno backlog idea`
+# requires --difficulty on a non-interactive filing, this call has no tty, and
+# without the flag every filing raised - which made the cap's designed merge
+# exit (file the remainder, then merge) unreachable on every capped PR.
+#
+# So the guard below EXECUTES the CLI out of process rather than mocking it.
+# It is hermetic: HOME points at a tmp dir, so the graph the filing writes is
+# the tmp graph and never ~/.fno/graph.json.
+
+
+def _real_cli_runner(home, repo):
+    """A ``_proc.run`` stand-in that executes the real fno CLI, hermetically.
+
+    Only the TRANSPORT is substituted (a PATH lookup for `fno` becomes an
+    interpreter running the same entry point). The argument list still reaches
+    the same parser the shipped binary uses, which is the whole point: that
+    parser is the thing a mock cannot represent.
+    """
+    import os
+    import subprocess
+    import sys
+
+    import fno
+
+    src_root = str(Path(fno.__file__).resolve().parent.parent)
+
+    def run(cmd, **kwargs):
+        assert cmd and cmd[0] == "fno", f"unexpected binary: {cmd[:1]}"
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["PYTHONPATH"] = os.pathsep.join(
+            [src_root, *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+        )
+        # A stale FNO_REPO_ROOT inherited from the running session would pin
+        # config resolution back at the real checkout and defeat the isolation.
+        env.pop("FNO_REPO_ROOT", None)
+        proc = subprocess.run(
+            [sys.executable, "-c", "from fno.cli import app; app()", *cmd[1:]],
+            cwd=kwargs.get("cwd") or str(repo),
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        return Result(proc.returncode, proc.stdout, proc.stderr)
+
+    return run
+
+
+def _tmp_graph_titles(home):
+    """Every node title in the throwaway graph the filing wrote."""
+    graph = Path(home) / ".fno" / "graph.json"
+    if not graph.is_file():
+        return []
+    entries = json.loads(graph.read_text()).get("entries") or []
+    return [n.get("title", "") for n in entries if isinstance(n, dict)]
+
+
+def test_file_findings_at_cap_files_through_the_real_cli(monkeypatch, tmp_path):
+    """The filing succeeds against the real `fno backlog idea` parser.
+
+    Asserts the node id AND the node's presence in the graph by title. A test
+    that only asserted "no exception" would pass on a run that filed nothing.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    key = "cli/src/fno/pr/_coverage_gate.py:1057:correctness"
+    ids = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+
+    assert len(ids) == 1
+    assert re.fullmatch(r"[a-z]+-[0-9a-f]{4,}", ids[0]), ids
+    assert f"review finding filed at round cap: {key}" in _tmp_graph_titles(home)
+
+
+def test_file_findings_at_cap_mints_once_through_the_real_cli(monkeypatch, tmp_path):
+    """The idempotency branch holds against the real find/idea round trip.
+
+    This branch is what unstuck a capped PR by hand: a worker pre-filed the
+    finding with the exact cap title and the gate reused it. Asserting the
+    SAME id back plus exactly one node with that title is the positive marker;
+    asserting "no second call happened" would pass on a run that filed nothing
+    at all.
+    """
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    (home / ".fno").mkdir(parents=True)
+    repo.mkdir()
+    import subprocess as _sp
+
+    _sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+
+    monkeypatch.setattr("fno.pr._proc.run", _real_cli_runner(home, repo))
+    key = "cli/src/fno/pr/_reviews.py:430:correctness"
+    first = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+    second = _coverage_gate.file_findings_at_cap([key], 42, str(repo))
+
+    assert first == second, (first, second)
+    title = f"review finding filed at round cap: {key}"
+    assert _tmp_graph_titles(home).count(title) == 1
 
 
 # ---- x-aecc: declining must satisfy coverage ----

@@ -1091,6 +1091,16 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
                 title,
                 "--type",
                 "bug",
+                # `fno backlog idea` refuses a non-interactive filing with no
+                # --difficulty, and this call has no tty. Without it every
+                # filing raised, so the cap's merge exit - file the remainder,
+                # then merge - was unreachable on every PR that reached the
+                # cap. `low` is correct by construction: a CONFIRMED
+                # correctness or security finding returns IMPOSSIBLE in
+                # `coverage_verdict` before the filing runs, so nothing hard
+                # ever reaches this line.
+                "--difficulty",
+                "low",
                 "--details",
                 (
                     f"Filed by the review-coverage gate at the round cap on PR "
