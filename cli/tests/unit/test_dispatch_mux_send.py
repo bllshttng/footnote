@@ -83,7 +83,13 @@ def test_default_send_wraps_the_body_in_an_fno_mail_envelope(monkeypatch):
 
     This is the whole node in one assertion: a worker reading the paste can tell
     it came from a peer, whichever transport typed it.
+
+    Crowned topology, because x-2dfa gates the trailer on the crown: the
+    subject here is that the PANE transport carries whatever the single
+    renderer produced, not which topology produces a trailer (that pair is
+    asserted in ``test_mail_origin.py``).
     """
+    monkeypatch.setattr("fno.mail.envelope.fleet_has_crown", lambda: True)
     calls: list[dict] = []
     monkeypatch.setattr(dispatch.subprocess, "run", _runner(calls))
     monkeypatch.setattr(dispatch.time, "sleep", lambda *_a: None)
