@@ -909,8 +909,17 @@ fn client_ask_full_codex_session_id_resumes_named_row() {
     let marker = "RECOVERY-RESUME-OK-client";
     install_fake_codex(&bin_dir, session_id, marker);
     let log_path = home_dir.join("agents/full-id/output.jsonl");
+    // The CURRENT schema, with the identity fields stated rather than derived.
+    // This row used to say v3 and let the pre-v15 provider-semantics migration
+    // produce `harness`/`harness_session_id`. The ask below writes this file
+    // through `state::update_registry`, and a test binary is built inside the
+    // checkout, so raising v3 to the current version on what FNO_AGENTS_HOME
+    // makes the process-global registry is exactly what x-665d's write guard
+    // refuses. The subject here is full-session-id resolution, not migration.
     let registry = format!(
-        r#"{{"schema_version":3,"agents":[{{"name":"01a03a0e","provider":"codex","cwd":"{}","codex_session_id":"{}","status":"orphaned","created_at":"2026-08-25T00:00:00Z","log_path":"{}"}}]}}"#,
+        r#"{{"schema_version":{},"agents":[{{"name":"01a03a0e","provider":"codex","harness":"codex","harness_session_id":"{}","cwd":"{}","codex_session_id":"{}","status":"orphaned","created_at":"2026-08-25T00:00:00Z","log_path":"{}"}}]}}"#,
+        fno_agents::state::REGISTRY_SCHEMA_VERSION,
+        session_id,
         cwd.display(),
         session_id,
         log_path.display()
