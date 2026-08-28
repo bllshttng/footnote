@@ -169,6 +169,26 @@ def _state_roots() -> list[Path]:
         out.append(claims_dir(global_claims_root()).parent)
     except Exception:
         pass
+    try:
+        from fno.paths import inbox_agents_root
+
+        # The mail bus, and it is NOT always under the state root. On a vault
+        # setup it resolves to `<vault>/internal/agents`, so a worker granted
+        # `~/.fno` and nothing else still cannot write a durable envelope.
+        # Measured 2026-08-28 on a bounded codex thread worker that had the
+        # state root and answered: `durable envelope write failed: [Errno 1]
+        # Operation not permitted: <vault>/internal/agents/<handle>`.
+        #
+        # That is the whole defect this grant exists to close. A worker that
+        # cannot mail cannot tell you it cannot mail, and the claim store alone
+        # buys a worker that holds its node and still reports nothing.
+        #
+        # The agents subdirectory, never the vault root: the same narrowness
+        # `_plan_dir` argues for. Off a vault this already sits inside the
+        # state root and dedups away.
+        out.append(inbox_agents_root())
+    except Exception:
+        pass
     return out
 
 

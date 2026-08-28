@@ -462,3 +462,48 @@ def test_seam_cwd_scan_reads_the_short_spelling_and_stops_at_the_fence(
     seen.clear()
     rr._export_worker_dirs_at_seam(["spawn", "w", "--", "codex", "--cwd", "/x"])
     assert seen[-1] != Path("/x")
+
+
+def test_mail_bus_is_granted_even_when_it_sits_outside_the_state_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The claim store alone buys a worker that holds its node and says nothing.
+
+    On a vault setup the mail bus resolves to ``<vault>/internal/agents``, not
+    under the state root. Measured 2026-08-28: a bounded codex thread worker
+    granted ``~/.fno`` and nothing else acquired its claim and then answered
+    ``durable envelope write failed: [Errno 1] Operation not permitted`` on the
+    vault path. A worker that cannot mail cannot tell you it cannot mail.
+    """
+    state = tmp_path / "state"
+    (state / "claims").mkdir(parents=True)
+    mail = tmp_path / "vault" / "internal" / "agents"
+    mail.mkdir(parents=True)
+    monkeypatch.setattr("fno.paths.state_dir", lambda: state)
+    monkeypatch.setattr("fno.claims.io.global_claims_root", lambda: state)
+    monkeypatch.setattr("fno.claims.io.claims_dir", lambda root=None: state / "claims")
+    monkeypatch.setattr("fno.paths.inbox_agents_root", lambda: mail)
+    monkeypatch.setattr(
+        "fno.paths.plans_content_dir", lambda project_root=None: tmp_path / "nope"
+    )
+
+    assert worker_writable_dirs(tmp_path) == [str(state), str(mail)]
+
+
+def test_mail_bus_under_the_state_root_is_listed_but_grants_nothing_new(
+    fake_state: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off a vault the bus already sits INSIDE the state root.
+
+    Dedup is by exact path, so the nested directory is still listed. That is
+    redundant rather than wrong: the grant is recursive, so the state root
+    already covers it and the extra token widens nothing. Pinned so the
+    redundancy is a recorded choice and not a surprise in a worker's argv.
+    """
+    bus = fake_state / "inbox" / "agents"
+    bus.mkdir(parents=True)
+    monkeypatch.setattr("fno.paths.inbox_agents_root", lambda: bus)
+
+    granted = worker_writable_dirs(tmp_path)
+    assert granted == [str(fake_state), str(bus)]
+    assert Path(granted[1]).is_relative_to(Path(granted[0]))
