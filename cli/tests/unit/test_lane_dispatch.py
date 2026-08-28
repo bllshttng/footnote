@@ -14,10 +14,13 @@ monkeypatched (no real git / spawn).
 
 from __future__ import annotations
 
+import json
 import tomllib
 import pytest
+from typer.testing import CliRunner
 
 from fno.backlog import advance
+from fno.graph import cli as graph_cli
 from fno.claims.lanes import active_lane_count, find_lane_slot
 from fno.config import WORKTREE_LOCAL_KEYS, _worktree_local_override
 
@@ -32,20 +35,38 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     # claims root into tmp so it lands in the same isolated dir as the explicit
     # lane-slot root (claims_root=tmp_path/"claims") and never touches ~/.fno.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claims"))
-    monkeypatch.setattr(advance, "_ready_nodes", lambda project=None, mission=None: list(ready))
-    monkeypatch.setattr(advance, "_canonical_root", lambda: tmp_path / "canonical")
+    canonical = tmp_path / "canonical"
+    (canonical / ".git").mkdir(parents=True, exist_ok=True)
+    ready_rows = [dict(node) for node in ready]
+    for node in ready_rows:
+        node.setdefault("cwd", str(canonical))
+    monkeypatch.setattr(
+        advance, "_ready_nodes", lambda project=None, mission=None: list(ready_rows)
+    )
+    monkeypatch.setattr(advance, "_canonical_root", lambda: canonical)
     monkeypatch.setattr(advance, "_base_project_id", lambda root: "fno")
 
-    calls: dict = {"worktrees": [], "spawns": []}
+    calls: dict = {
+        "worktrees": [],
+        "worktree_roots": [],
+        "spawns": [],
+        "spawn_options": [],
+    }
 
     def fake_ensure(node_id, *, canonical_root, harness="claude"):
         wt = tmp_path / "wt" / node_id
         (wt / ".fno").mkdir(parents=True, exist_ok=True)
         calls["worktrees"].append((node_id, harness))
+        calls["worktree_roots"].append((node_id, canonical_root))
         return wt
 
     def fake_spawn(node_id, cwd, slug, model=None, provider=None, **kwargs):
         calls["spawns"].append((node_id, cwd, slug))
+        calls["spawn_options"].append({
+            "model": model,
+            "provider": provider,
+            **kwargs,
+        })
         if spawn is not None:
             return spawn(node_id)
         return f"short-{node_id}"
@@ -53,6 +74,55 @@ def _wire(monkeypatch, tmp_path, ready, *, spawn=None):
     monkeypatch.setattr(advance, "_ensure_lane_worktree", fake_ensure)
     monkeypatch.setattr(advance, "_spawn_worker", fake_spawn)
     return calls
+
+
+def test_dispatch_uses_each_nodes_own_repository(tmp_path, monkeypatch):
+    foreign = tmp_path / "foreign"
+    (foreign / ".git").mkdir(parents=True)
+    ready = [{
+        "id": "n-foreign",
+        "domain": "code",
+        "title": "n-foreign",
+        "slug": "n-foreign",
+        "cwd": str(foreign),
+    }]
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    receipts = advance.dispatch_lanes(
+        1, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert calls["worktree_roots"] == [("n-foreign", foreign)]
+    assert receipts[0]["worktree"] == str(tmp_path / "wt" / "n-foreign")
+
+
+@pytest.mark.parametrize("cwd", ["", "missing"])
+def test_dispatch_skips_lane_with_unusable_node_root(tmp_path, monkeypatch, cwd):
+    value = "" if not cwd else str(tmp_path / cwd)
+    ready = [{
+        "id": "n-bad-root",
+        "domain": "code",
+        "title": "n-bad-root",
+        "slug": "n-bad-root",
+        "cwd": value,
+    }]
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    receipts = advance.dispatch_lanes(
+        1, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert len(receipts) == 1
+    assert receipts[0]["node_id"] == "n-bad-root"
+    assert receipts[0]["status"] == "skipped"
+    assert receipts[0]["error"].startswith("lane-root: ")
+    assert "n-bad-root" in receipts[0]["error"]
+    if value:
+        assert value in receipts[0]["error"]
+    else:
+        assert "empty" in receipts[0]["error"]
+    assert calls["worktrees"] == []
+    assert find_lane_slot("n-bad-root", root=tmp_path / "claims") is None
 
 
 def test_lane_harness_resolution():
@@ -178,6 +248,188 @@ def test_empty_ready_dispatches_nothing(tmp_path, monkeypatch):
     assert advance.dispatch_lanes(3, claims_root=tmp_path / "claims") == []
 
 
+@pytest.mark.parametrize(
+    ("receipts", "exit_code"),
+    [
+        ([{"node_id": "n-a", "status": "skipped", "error": "boom"}], 1),
+        ([], 0),
+        ([
+            {"node_id": "n-a", "status": "skipped", "error": "boom"},
+            {"node_id": "n-b", "status": "dispatched"},
+        ], 0),
+    ],
+)
+def test_dispatch_lanes_exit_reflects_whether_any_lane_launched(
+    monkeypatch, receipts, exit_code
+):
+    def fake_dispatch(*_args, report=None, **_kwargs):
+        if report is not None:
+            report.update({
+                "requested": 2,
+                "filled": len(receipts),
+                "dispatched": sum(
+                    receipt.get("status") == "dispatched" for receipt in receipts
+                ),
+                "skipped": sum(
+                    receipt.get("status") == "skipped" for receipt in receipts
+                ),
+                "stop": "filled" if len(receipts) == 2 else "no-candidate",
+                "excluded": [],
+            })
+        return receipts
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
+
+    result = CliRunner().invoke(graph_cli.cli, ["dispatch-lanes", "--max", "2"])
+
+    assert result.exit_code == exit_code
+    payload = json.loads(result.output)
+    assert payload["lanes"] == receipts
+    assert payload["fill"]["selected"] == len(receipts)
+    assert payload["fill"]["dispatched"] == sum(
+        receipt.get("status") == "dispatched" for receipt in receipts
+    )
+    assert payload["fill"]["skipped"] == sum(
+        receipt.get("status") == "skipped" for receipt in receipts
+    )
+
+
+def test_dispatch_report_explains_cap_full_after_one_selection(tmp_path, monkeypatch):
+    from fno.claims.lanes import acquire_lane_slot
+
+    ready = _nodes(("n-a", "code"), ("n-b", "code"), ("n-c", "code"))
+    _wire(monkeypatch, tmp_path, ready)
+    root = tmp_path / "claims"
+    assert acquire_lane_slot(3, "peer-a", root=root) is not None
+    assert acquire_lane_slot(3, "peer-b", root=root) is not None
+    report = {}
+
+    receipts = advance.dispatch_lanes(3, claims_root=root, report=report)
+
+    assert len(receipts) == 1
+    assert report["requested"] == 3
+    assert report["filled"] == 1
+    assert report["stop"] == "cap-full"
+    assert report["dispatched"] == 1
+    assert report["skipped"] == 0
+
+
+def test_lane_fill_report_preserves_classifier_exclusion(tmp_path, monkeypatch):
+    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
+    _wire(monkeypatch, tmp_path, ready)
+    monkeypatch.setattr(
+        advance,
+        "_classify_lane_candidate",
+        lambda node, **_kwargs: "high-collision:plan" if node["id"] == "n-a" else None,
+    )
+    report = {}
+
+    selected = advance.select_lane_fill(
+        1, claim=False, claims_root=tmp_path / "claims", report=report
+    )
+
+    assert [node["id"] for node in selected] == ["n-b"]
+    assert report == {
+        "requested": 1,
+        "filled": 1,
+        "stop": "filled",
+        "excluded": [{"id": "n-a", "reason": "high-collision:plan"}],
+    }
+
+
+def test_dispatch_lanes_forwards_vendor_and_model_on_claude_harness(
+    tmp_path, monkeypatch
+):
+    ready = _nodes(("n-a", "code"))
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    advance.dispatch_lanes(
+        1,
+        project_root=tmp_path,
+        claims_root=tmp_path / "claims",
+        model="glm-5.3-flash[1m]",
+        harness="claude",
+        vendor="zai",
+    )
+
+    options = calls["spawn_options"][0]
+    assert options["provider"] == "claude"
+    assert options["harness"] == "claude"
+    assert options["vendor"] == "zai"
+    assert options["model"] == "glm-5.3-flash[1m]"
+
+
+def test_spawn_worker_forwards_vendor_in_spawn_argv(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(
+            returncode=0,
+            stdout='{"short_id":"abcd1234"}\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(advance.subprocess, "run", fake_run)
+
+    advance._spawn_worker(
+        "n-a",
+        str(tmp_path),
+        "n-a",
+        model="glm-5.3-flash[1m]",
+        provider="claude",
+        harness="claude",
+        vendor="zai",
+    )
+
+    assert captured["cmd"][captured["cmd"].index("--provider") + 1] == "zai"
+    assert captured["cmd"][captured["cmd"].index("--model") + 1] == "glm-5.3-flash[1m]"
+
+
+def test_dispatch_lanes_refuses_harness_name_on_vendor_axis(monkeypatch):
+    called = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
+
+    result = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--provider", "codex", "--max", "1"]
+    )
+
+    assert result.exit_code == 2
+    assert (
+        "--provider names the model VENDOR axis; 'codex' is a HARNESS. "
+        "Use -H/--harness codex."
+    ) in result.output
+    assert called is False
+
+
+def test_dispatch_lanes_refuses_pane_only_harness_before_selection(monkeypatch):
+    called = False
+
+    def fake_dispatch(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return []
+
+    monkeypatch.setattr(advance, "dispatch_lanes", fake_dispatch)
+
+    result = CliRunner().invoke(
+        graph_cli.cli, ["dispatch-lanes", "--harness", "gemini", "--max", "1"]
+    )
+
+    assert result.exit_code == 2
+    assert "accepted here: claude, codex, opencode" in result.output
+    assert "agy and gemini launch on --substrate pane only" in result.output
+    assert called is False
+
+
 def test_dispatch_reservation_skips_node_already_being_dispatched(tmp_path, monkeypatch):
     """A concurrent sequential advance holds dispatch:<id>; the lane path (which
     the sequential path can't see via node:/dispatch:) must not double-launch."""
@@ -211,6 +463,38 @@ def test_lane_receipt_preserves_family2_refusal_reason(tmp_path, monkeypatch, re
 
     assert receipts == [{"node_id": "n-a", "status": "skipped", "error": reason}]
     assert calls["spawns"] == []
+
+
+def test_lane_preflight_error_returns_receipts_and_releases_slots(
+    tmp_path, monkeypatch
+):
+    ready = _nodes(("n-a", "code"), ("n-b", "docs"))
+    calls = _wire(monkeypatch, tmp_path, ready)
+
+    def fail_preflight(*_args):
+        raise OSError("claim observation failed")
+
+    monkeypatch.setattr(advance, "_node_dispatch_block_reason", fail_preflight)
+
+    receipts = advance.dispatch_lanes(
+        2, project_root=tmp_path, claims_root=tmp_path / "claims"
+    )
+
+    assert receipts == [
+        {
+            "node_id": "n-a",
+            "status": "skipped",
+            "error": "preflight-error: claim observation failed",
+        },
+        {
+            "node_id": "n-b",
+            "status": "skipped",
+            "error": "preflight-error: claim observation failed",
+        },
+    ]
+    assert calls["spawns"] == []
+    assert find_lane_slot("n-a", root=tmp_path / "claims") is None
+    assert find_lane_slot("n-b", root=tmp_path / "claims") is None
 
 
 def test_seed_heals_symlinked_fno_before_writing(tmp_path):

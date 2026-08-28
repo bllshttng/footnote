@@ -5070,10 +5070,17 @@ def cmd_dispatch_lanes(
         "-m",
         help="Pin a model for every lane spawned this run, overriding node annotations.",
     ),
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        "-H",
+        help="Pin the CLI harness for every lane.",
+    ),
     provider: Optional[str] = typer.Option(
         None,
         "--provider",
-        help="Pin a provider for every lane. (No -p short: it is --project here.)",
+        "-P",
+        help="Pin the model vendor for every lane.",
     ),
 ) -> None:
     """Spawn up to max_lanes isolated background lanes (parallel mode, group 3).
@@ -5081,20 +5088,45 @@ def cmd_dispatch_lanes(
     Selects collision-clean ready nodes (like ``lane-fill``), then for each one
     isolates a worktree off origin/main, seeds its per-lane
     ``.fno/config.local.toml`` (x-cbce: own project.id), and
-    spawns a detached ``/target --no-merge`` worker rooted there. Prints one JSON
-    receipt per lane (``status`` dispatched | skipped). ``max_lanes < 1`` spawns
+    spawns a detached ``/target`` worker rooted there (merge posture per
+    ``config.auto_merge.grant``). Prints one JSON object: ``lanes`` (one receipt
+    per selected lane, ``status`` dispatched | skipped) plus a ``fill`` summary.
+    ``max_lanes < 1`` spawns
     nothing (a single lane is the daemon's sequential path).
     """
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
     )
     from fno.backlog.advance import dispatch_lanes
 
     try:
         model = reject_empty_model(model)
-        provider = resolve_dispatch_provider(provider)[0] if provider is not None else None
+        if harness is not None:
+            harness = harness.strip()
+            if not harness:
+                raise DispatchFlagError("--harness must not be empty")
+            from fno.harness_names import SPAWN_HARNESSES
+
+            if harness not in SPAWN_HARNESSES:
+                accepted = ", ".join(SPAWN_HARNESSES)
+                raise DispatchFlagError(
+                    f"unknown harness {harness!r} on the thread substrate "
+                    f"(--harness names the CLI BINARY); accepted here: {accepted}.\n"
+                    "agy and gemini launch on --substrate pane only.\n"
+                    "If you meant a model VENDOR, that is -P/--provider."
+                )
+        if provider is not None:
+            provider = provider.strip()
+            if not provider:
+                raise DispatchFlagError("--provider must not be empty")
+            from fno.harness_names import KNOWN_HARNESSES
+
+            if provider in KNOWN_HARNESSES:
+                raise DispatchFlagError(
+                    f"--provider names the model VENDOR axis; {provider!r} is a "
+                    f"HARNESS. Use -H/--harness {provider}."
+                )
     except DispatchFlagError as exc:
         typer.echo(f"dispatch-lanes: {exc}", err=True)
         raise typer.Exit(code=2)
@@ -5104,8 +5136,31 @@ def cmd_dispatch_lanes(
 
         max_lanes = load_settings().parallel.max_lanes
 
-    receipts = dispatch_lanes(max_lanes, project, mission=mission, model=model, provider=provider)
-    typer.echo(json.dumps(receipts, indent=2))
+    fill: dict = {}
+    receipts = dispatch_lanes(
+        max_lanes,
+        project,
+        mission=mission,
+        model=model,
+        harness=harness,
+        vendor=provider,
+        report=fill,
+    )
+    # dispatch_lanes fills every key before returning (both the no-selection and
+    # completion paths write the report), so the shape is read directly.
+    fill_output = {
+        "requested": fill["requested"],
+        "selected": fill["filled"],
+        "dispatched": fill["dispatched"],
+        "skipped": fill["skipped"],
+        "stop": fill["stop"],
+        "excluded": fill["excluded"],
+    }
+    typer.echo(json.dumps({"lanes": receipts, "fill": fill_output}, indent=2))
+    if receipts and not any(
+        receipt.get("status") == "dispatched" for receipt in receipts
+    ):
+        raise typer.Exit(code=1)
 
 
 # -- join --

@@ -282,6 +282,10 @@ fno backlog dispatch-lanes         # manually fire one lane-fill round
 fno backlog lanes                  # rollup: live lanes vs the cap, per-node status
 ```
 
+`dispatch-lanes` uses the same axis names as `fno agents spawn`: `-H/--harness` selects the CLI binary and `-P/--provider` selects the model vendor. For example, `fno backlog dispatch-lanes -H claude -P zai --model "glm-5.3-flash[1m]"` launches Claude lanes routed to Z.ai.
+
+The command prints one object with `lanes` receipts and a `fill` receipt. `fill` includes `requested`, `selected`, `dispatched`, `skipped`, `stop`, and capped `excluded` rows. Every selected lane appears in `lanes`, including refusals. If lanes are selected but none dispatch, it exits 1. If no lane is selected or at least one dispatches, it exits 0.
+
 ## Worktree isolation policy
 
 Every code payload launched from a repo main checkout is auto-isolated into a worktree by `fno agents workspace worktree ensure`. `config.worktree.policy` opts a project out of that. Values (`never | harness-native | external`):

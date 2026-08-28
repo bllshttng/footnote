@@ -491,6 +491,40 @@ def test_spawn_unknown_provider_exits_2(workdir) -> None:
     )
 
 
+def test_spawn_thread_refusal_names_axis_and_actual_accept_set(workdir) -> None:
+    from fno.agents.cli import agents_app
+
+    result = _make_runner().invoke(
+        agents_app,
+        [
+            "spawn", "--name", "fooagent", "--harness", "zai",
+            "--substrate", "thread", "hello",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert (
+        "unknown harness 'zai' on the thread substrate (--harness names the "
+        "CLI BINARY); accepted here: claude, codex, opencode."
+    ) in result.output
+    assert "agy and gemini launch on --substrate pane only." in result.output
+    assert "If you meant a model VENDOR, that is -P/--provider." in result.output
+
+
+def test_spawn_thread_refusal_renders_from_accept_set(monkeypatch) -> None:
+    from fno.agents import dispatch
+
+    dispatch._check_spawn_harness("opencode")
+    monkeypatch.setattr(
+        dispatch, "SPAWN_HARNESSES", (*dispatch.SPAWN_HARNESSES, "future")
+    )
+
+    with pytest.raises(dispatch.DispatchAskError) as caught:
+        dispatch._check_spawn_harness("zai")
+
+    assert "accepted here: claude, codex, opencode, future" in str(caught.value)
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring: spawn verb is registered
 # ---------------------------------------------------------------------------

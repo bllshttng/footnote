@@ -44,7 +44,7 @@ from fno.agents import rm_notice
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
-from fno.agents.harnesses import KNOWN_PROVIDERS
+from fno.agents.harnesses import KNOWN_PROVIDERS, SPAWN_HARNESSES
 from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
@@ -463,6 +463,20 @@ class DispatchAskError(RuntimeError):
     def __init__(self, message: str, *, exit_code: int) -> None:
         super().__init__(message)
         self.exit_code = exit_code
+
+
+def _check_spawn_harness(name: str) -> None:
+    """Validate a harness at the thread/headless spawn seam."""
+    if name in SPAWN_HARNESSES:
+        return
+    accepted = ", ".join(SPAWN_HARNESSES)
+    raise DispatchAskError(
+        f"unknown harness {name!r} on the thread substrate (--harness names "
+        f"the CLI BINARY); accepted here: {accepted}.\n"
+        "agy and gemini launch on --substrate pane only.\n"
+        "If you meant a model VENDOR, that is -P/--provider.",
+        exit_code=2,
+    )
 
 
 # Exit-code taxonomy (documented here for cross-language parity with Rust Task 1.3):
@@ -2813,18 +2827,9 @@ def dispatch_spawn(
     validate_spawn_name(name)
     _validate_from_name(from_name)
 
-    # 2. Provider validation. _check_known_provider raises ValueError, which
-    # cmd_spawn does not catch (it only catches DispatchAskError) -- wrap it
-    # so an unknown --provider exits 2 cleanly instead of tracebacking.
-    # opencode is admitted HERE only: it is not in the Python ask vocabulary
-    # (KNOWN_PROVIDERS), but its bg spawn is dispatchable -- 4b2 delegates to
-    # the Rust serve lane and refuses every other substrate itself, so this
-    # admission covers exactly the spawn surface, never ask.
-    try:
-        _check_known_provider(provider)
-    except ValueError as exc:
-        if provider != "opencode":
-            raise DispatchAskError(str(exc), exit_code=2) from exc
+    # 2. Harness validation. The thread/headless accept-set is separate from
+    # the narrower ask vocabulary and the wider pane-hostable set.
+    _check_spawn_harness(provider)
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):

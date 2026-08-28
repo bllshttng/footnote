@@ -18,3 +18,7 @@ from __future__ import annotations
 # two agree at import time. Order is capability-table order, not alphabetical;
 # readers that need sorted output call sorted() (as known_harnesses() does).
 KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "gemini", "agy", "opencode")
+
+# Thread/headless accepts opencode through its launch seam. agy and gemini are
+# pane-only and stay out of this tuple.
+SPAWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")

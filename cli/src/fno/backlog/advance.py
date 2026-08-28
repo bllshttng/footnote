@@ -635,6 +635,7 @@ def select_lane_fill(
     mission: Optional[str] = None,
     claim: bool = True,
     claims_root: Optional[Path] = None,
+    report: Optional[dict] = None,
 ) -> list[dict]:
     """Select up to ``max_lanes`` ready nodes, each collision-clean to dispatch.
 
@@ -680,6 +681,15 @@ def select_lane_fill(
     """
     from fno.claims.lanes import acquire_lane_slot, release_lane_slot
 
+    if report is not None:
+        report.clear()
+        report.update({
+            "requested": max_lanes,
+            "filled": 0,
+            "stop": "no-candidate",
+            "excluded": [],
+        })
+
     if max_lanes < 1:
         return []
 
@@ -720,6 +730,7 @@ def select_lane_fill(
             # and refresh only the claim-state. The fresh query is what makes
             # distinctness "recomputed after each claim" not snapshot-stale.
             candidate = None
+            pick_excluded: list[dict] = []
             for node in _ready_nodes(project, mission):
                 nid = node["id"]
                 if nid in picked_ids:
@@ -736,6 +747,8 @@ def select_lane_fill(
                 if reason is not None and not reason.startswith(_UNEVALUATED_PREFIX):
                     if reason.startswith(_HIGH_COLLISION_PREFIX):
                         _LOG.warning("lane-fill: skipping %s - %s", nid, reason)
+                    if report is not None and len(pick_excluded) < 5:
+                        pick_excluded.append({"id": nid, "reason": reason})
                     continue  # leave it ready; reversible, retried next round
                 if reason is not None and (
                     inflight
@@ -772,6 +785,8 @@ def select_lane_fill(
                 candidate = (node, node.get("domain") or _DOMAIN_UNSET)
                 break
             if candidate is None:
+                if report is not None:
+                    report["excluded"].extend(pick_excluded)
                 break  # no selectable, unclaimed node left
 
             node, domain = candidate
@@ -783,8 +798,14 @@ def select_lane_fill(
                     root=claims_root,
                 )
                 if slot is None:
+                    if report is not None:
+                        report["excluded"].extend(pick_excluded)
+                        report["stop"] = "cap-full"
                     break  # cap full: every slot held by a live peer lane
             selected.append(node)
+            if report is not None:
+                report["excluded"].extend(pick_excluded)
+                report["filled"] = len(selected)
             used_domains.add(domain)
             picked_ids.add(node["id"])
             if node.get("plan_path"):
@@ -807,6 +828,11 @@ def select_lane_fill(
                 except Exception:  # noqa: BLE001 - best-effort cleanup
                     pass
         raise
+
+    if report is not None and len(selected) >= max_lanes:
+        report["stop"] = "filled"
+    elif report is not None and report.get("stop") != "cap-full":
+        report["stop"] = "no-candidate"
 
     return selected
 
@@ -1234,6 +1260,7 @@ def _spawn_worker(
     reconcile_manifest: Optional[str] = None,
     model: Optional[str] = None,
     provider: Optional[str] = None,
+    vendor: Optional[str] = None,
     harness: Optional[str] = None,
     verb: Optional[str] = None,
     brief: Optional[str] = None,
@@ -1358,6 +1385,8 @@ def _spawn_worker(
         *_subprocess_util.fno_py_cmd(),
         "agents", "spawn", "--harness", prov, "--substrate", substrate,
     ]
+    if vendor:
+        cmd += ["--provider", vendor]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
@@ -1485,6 +1514,10 @@ class WorktreeEnsureError(RuntimeError):
     """`fno agents workspace worktree ensure` failed; the lane cannot be isolated, so it is skipped."""
 
 
+class LaneRootError(RuntimeError):
+    """A selected node has no repository where its lane can be isolated."""
+
+
 def _canonical_root() -> Path:
     """The canonical (main-checkout) repo root a lane worktree spawns from."""
     from fno.paths import resolve_canonical_repo_root
@@ -1492,12 +1525,27 @@ def _canonical_root() -> Path:
     return resolve_canonical_repo_root()
 
 
+def _node_repo_root(node: dict) -> Path:
+    """Resolve a selected node's own canonical repository root."""
+    raw = node.get("_resolved_cwd") or node.get("cwd")
+    node_id = node.get("id") or "unknown"
+    if not raw or not str(raw).strip():
+        raise LaneRootError(f"node {node_id} has empty cwd")
+    path = Path(str(raw)).expanduser()
+    from fno.paths import resolve_canonical_worktree
+
+    root = resolve_canonical_worktree(path) or path
+    if not (root / ".git").exists():
+        raise LaneRootError(f"node {node_id} cwd {path} has no .git")
+    return root.resolve()
+
+
 def _base_project_id(canonical_root: Path) -> str:
     """The shared project.id lane ids are derived from (fallback: repo basename)."""
     try:
-        from fno.config import load_settings
+        from fno.config import load_settings_for_repo
 
-        pid = load_settings().project.id
+        pid = load_settings_for_repo(canonical_root).project.id
         if pid:
             return pid
     except Exception:  # noqa: BLE001 - a settings read error must not crash dispatch
@@ -1712,12 +1760,14 @@ def dispatch_lanes(
     events_path: Optional[Path] = None,
     claims_root: Optional[Path] = None,
     model: Optional[str] = None,
-    provider: Optional[str] = None,
+    harness: Optional[str] = None,
+    vendor: Optional[str] = None,
+    report: Optional[dict] = None,
 ) -> list[dict]:
     """Select and spawn up to ``max_lanes`` isolated background lanes.
 
-    A dispatch-time ``model``/``provider`` applies to every lane spawned this run
-    and outranks each node's own annotation (Locked Decision 1).
+    Dispatch-time ``model``/``harness``/``vendor`` values apply to every lane
+    spawned this run and outrank each node's own annotation (Locked Decision 1).
 
     The parallel-mode dispatcher (epic x-42d5, group 3). Selects collision-clean
     ready nodes via :func:`select_lane_fill` (which atomically holds a lane slot
@@ -1740,14 +1790,21 @@ def dispatch_lanes(
     from fno.claims.lanes import release_lane_slot
 
     selected = select_lane_fill(
-        max_lanes, project, mission=mission, claim=True, claims_root=claims_root
+        max_lanes,
+        project,
+        mission=mission,
+        claim=True,
+        claims_root=claims_root,
+        report=report,
     )
     if not selected:
+        if report is not None:
+            report["dispatched"] = 0
+            report["skipped"] = 0
         return []
 
     canonical = _canonical_root()
-    base_pid = _base_project_id(canonical)
-    ev_path = events_path or _events_path(project_root)
+    ev_path = events_path or _events_path(project_root or canonical)
 
     receipts: list[dict] = []
     for node in selected:
@@ -1769,19 +1826,26 @@ def dispatch_lanes(
                 )
             receipts.append({"node_id": _nid, "status": "skipped", "error": reason})
 
-        # The lane slot (parallel-lane:<id>) is invisible to the sequential
-        # advance()/dispatch-node.sh path, which dedups on node:<id> + dispatch:<id>.
-        # During the boot window before this lane's worker owns node:<id>, that
-        # path would see the node as ready+unclaimed and double-launch it. Guard
-        # with the SAME dispatch:<id> reservation advance() uses (global-rooted,
-        # TTL bridge) so the two dispatchers dedup against each other.
-        block_reason = _node_dispatch_block_reason(node_id, str(canonical))
+        try:
+            root = _node_repo_root(node)
+            # The lane slot (parallel-lane:<id>) is invisible to the sequential
+            # advance()/dispatch-node.sh path, which dedups on node:<id> +
+            # dispatch:<id>. Guard with the same dispatch:<id> reservation.
+            block_reason = _node_dispatch_block_reason(node_id, str(root))
+            dispatch_key = f"dispatch:{node_id}"
+            dispatch_holder = f"advance:{os.getpid()}"
+            dispatch_root = _claims_root_for(dispatch_key)
+        except LaneRootError as exc:
+            _skip(f"lane-root: {exc}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - one lane cannot abort its peers
+            _LOG.warning("dispatch_lanes: lane %s preflight failed: %s", node_id, exc)
+            _skip(f"preflight-error: {str(exc)[:180]}")
+            continue
+
         if block_reason:
             _skip(block_reason)
             continue
-        dispatch_key = f"dispatch:{node_id}"
-        dispatch_holder = f"advance:{os.getpid()}"
-        dispatch_root = _claims_root_for(dispatch_key)
         try:
             acquire_claim(
                 dispatch_key,
@@ -1805,9 +1869,9 @@ def dispatch_lanes(
         # (LD#8) once its target-init claims the node. Both are released on the
         # failure path below.
         try:
-            eff_provider = provider if provider is not None else node.get("provider")
+            eff_harness = harness if harness is not None else node.get("provider")
             resolved_model = _route_resolve.node_model(
-                node, explicit=model, provider=eff_provider, resolve_difficulty=False
+                node, explicit=model, provider=eff_harness, resolve_difficulty=False
             )
             # The grid must decide BEFORE the worktree is placed: placement is
             # harness-keyed (claude-native vs external base), so it has to agree
@@ -1817,25 +1881,28 @@ def dispatch_lanes(
             # spawn seam, and a capacity change in between could land the worker
             # on a harness the worktree was not keyed for.
             lane_grid_harness, lane_grid_model = _grid_lane_for(
-                node, model=resolved_model, provider=eff_provider
+                node, model=resolved_model, provider=eff_harness
             )
-            lane_placement_harness = _lane_harness(lane_grid_harness or eff_provider)
+            lane_placement_harness = _lane_harness(lane_grid_harness or eff_harness)
             worktree = _ensure_lane_worktree(
                 node_id,
-                canonical_root=canonical,
+                canonical_root=root,
                 harness=lane_placement_harness,
             )
             # A never-policy lane runs in the canonical checkout in place; seeding
             # a per-lane config.local.toml there would write into canonical .fno.
-            if worktree.resolve() != canonical.resolve():
-                _seed_lane_local_settings(worktree, node_id, base_pid)
+            if worktree.resolve() != root.resolve():
+                _seed_lane_local_settings(
+                    worktree, node_id, _base_project_id(root)
+                )
             _brief, _brief_tag = _autobrief.resolve_dispatch_brief(node)
             short_id = _spawn_worker(
                 node_id,
                 str(worktree),
                 slug,
                 model=lane_grid_model or resolved_model,
-                provider=lane_grid_harness or eff_provider,
+                provider=lane_grid_harness or eff_harness,
+                vendor=vendor,
                 # The placement value unconditionally: a grid pick is always a
                 # fixed point of _lane_harness today, and if that ever stops
                 # holding, the raw pick would reopen the split this pins shut.
@@ -1873,6 +1940,13 @@ def dispatch_lanes(
                 "short_id": short_id,
                 "worktree": str(worktree),
             }
+        )
+    if report is not None:
+        report["dispatched"] = sum(
+            receipt.get("status") == "dispatched" for receipt in receipts
+        )
+        report["skipped"] = sum(
+            receipt.get("status") == "skipped" for receipt in receipts
         )
     return receipts
 

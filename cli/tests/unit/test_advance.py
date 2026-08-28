@@ -521,7 +521,11 @@ def test_dispatch_lanes_places_worktree_on_the_grid_harness(monkeypatch, tmp_pat
     the grid must decide BEFORE _ensure_lane_worktree runs: placement and spawn
     are one decision, never two."""
     captured = {}
-    node = {"id": "x-grid2", "slug": "grid-two", "difficulty": "high", "priority": "p1"}
+    (tmp_path / ".git").mkdir()
+    node = {
+        "id": "x-grid2", "slug": "grid-two", "difficulty": "high",
+        "priority": "p1", "cwd": str(tmp_path),
+    }
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
     monkeypatch.setattr(adv, "_node_dispatch_block_reason", lambda *a, **k: None)
@@ -562,7 +566,11 @@ def test_dispatch_lanes_pins_spawn_to_placement_harness_on_grid_decline(
     placement and spawn must not land the worker on a different harness than
     the one the worktree was keyed for: one decision, never two."""
     captured = {}
-    node = {"id": "x-dec1", "slug": "decline-pin", "difficulty": "high", "priority": "p1"}
+    (tmp_path / ".git").mkdir()
+    node = {
+        "id": "x-dec1", "slug": "decline-pin", "difficulty": "high",
+        "priority": "p1", "cwd": str(tmp_path),
+    }
     capacity = {"claude": "exhausted", "codex": "exhausted"}
 
     monkeypatch.setattr(adv, "select_lane_fill", lambda *a, **k: [node])
