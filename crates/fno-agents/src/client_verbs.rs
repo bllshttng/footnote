@@ -3258,7 +3258,10 @@ fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<
             &[
                 ("name", Value::String(name.to_string())),
                 ("provider", Value::String("codex".to_string())),
-                ("reason", Value::String("codex-daemon-unavailable".to_string())),
+                (
+                    "reason",
+                    Value::String("codex-daemon-unavailable".to_string()),
+                ),
                 ("detail", Value::String(error)),
             ],
         );

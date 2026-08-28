@@ -73,7 +73,10 @@ fn the_attach_argv_execs_codex_resume_against_the_control_socket() {
 #[test]
 fn the_attach_argv_is_identical_in_both_crates() {
     let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
-    assert_eq!(codex_attach_argv(uuid), fno::agents_view::codex_attach_argv(uuid));
+    assert_eq!(
+        codex_attach_argv(uuid),
+        fno::agents_view::codex_attach_argv(uuid)
+    );
     assert_eq!(
         codex_app_server_socket_path(),
         fno::agents_view::codex_app_server_socket_path()

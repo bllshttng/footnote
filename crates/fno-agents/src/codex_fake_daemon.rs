@@ -283,16 +283,22 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
                 let now = tokio::time::Instant::now();
                 pending = Some((turn_id.clone(), now + behavior.turn_duration));
                 stray = behavior.stray_completion_after.map(|after| now + after);
-                if send(&mut sink, json!({"id": id, "result": {"turn": {"id": turn_id}}}))
-                    .await
-                    .is_err()
+                if send(
+                    &mut sink,
+                    json!({"id": id, "result": {"turn": {"id": turn_id}}}),
+                )
+                .await
+                .is_err()
                 {
                     return;
                 }
                 for seq in 0..behavior.event_frames {
-                    if send(&mut sink, json!({"method": "turn/event", "params": {"seq": seq}}))
-                        .await
-                        .is_err()
+                    if send(
+                        &mut sink,
+                        json!({"method": "turn/event", "params": {"seq": seq}}),
+                    )
+                    .await
+                    .is_err()
                     {
                         return;
                     }
@@ -323,7 +329,10 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
                     tokio::time::sleep(delay).await;
                     let (turn_id, _) = pending.take().expect("just matched");
                     stray = None;
-                    if send(&mut sink, json!({"id": id, "result": {}})).await.is_err() {
+                    if send(&mut sink, json!({"id": id, "result": {}}))
+                        .await
+                        .is_err()
+                    {
                         return;
                     }
                     completed(&turn_id, "interrupted", "")

@@ -2644,12 +2644,15 @@ mod tests {
     #[test]
     fn codex_attach_argv_execs_resume_against_the_control_socket() {
         let argv = super::codex_attach_argv("01a04546-28b2-7a41-ae4c-892bbeb8e295");
-        assert_eq!(argv[..4], [
-            "codex".to_string(),
-            "resume".to_string(),
-            "01a04546-28b2-7a41-ae4c-892bbeb8e295".to_string(),
-            "--remote".to_string(),
-        ]);
+        assert_eq!(
+            argv[..4],
+            [
+                "codex".to_string(),
+                "resume".to_string(),
+                "01a04546-28b2-7a41-ae4c-892bbeb8e295".to_string(),
+                "--remote".to_string(),
+            ]
+        );
         assert_eq!(
             argv[4],
             format!("unix://{}", super::codex_app_server_socket_path().display())

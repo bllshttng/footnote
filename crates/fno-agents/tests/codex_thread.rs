@@ -131,33 +131,36 @@ async fn submit_while_driving_steers_into_the_shared_turn() {
 /// a reply from the new turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn steer_precondition_failure_drains_then_retries_fresh_start() {
-    with_fake_daemon(Behavior::quick().with_steer(Steer::FailPreconditionOnce), async {
-        let (actor, _keep) = start_actor().await;
-        let reply_a = actor.submit("first".into()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // Turn 1 is driving server-side but completes 200ms in; submit B so the
-        // steer lands while the actor still holds turn-1 as driving, forcing
-        // the precondition error + drain path.
-        let reply_b = actor.submit("second".into()).await.unwrap();
-        let a = tokio::time::timeout(std::time::Duration::from_secs(15), reply_a)
-            .await
-            .expect("first submit resolves from the drained completion")
-            .unwrap()
-            .expect("turn 1 receipt");
-        let b = tokio::time::timeout(std::time::Duration::from_secs(15), reply_b)
-            .await
-            .expect("retried submit resolves")
-            .unwrap()
-            .expect("fresh turn receipt");
-        assert_eq!(a.turn_id, "turn-1");
-        assert_eq!(a.text, "REPLY-1");
-        assert_eq!(
-            b.turn_id, "turn-2",
-            "the retry is a fresh turn/start, not a second steer"
-        );
-        assert_eq!(b.text, "REPLY-2");
-        actor.shutdown().await.unwrap();
-    })
+    with_fake_daemon(
+        Behavior::quick().with_steer(Steer::FailPreconditionOnce),
+        async {
+            let (actor, _keep) = start_actor().await;
+            let reply_a = actor.submit("first".into()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // Turn 1 is driving server-side but completes 200ms in; submit B so the
+            // steer lands while the actor still holds turn-1 as driving, forcing
+            // the precondition error + drain path.
+            let reply_b = actor.submit("second".into()).await.unwrap();
+            let a = tokio::time::timeout(std::time::Duration::from_secs(15), reply_a)
+                .await
+                .expect("first submit resolves from the drained completion")
+                .unwrap()
+                .expect("turn 1 receipt");
+            let b = tokio::time::timeout(std::time::Duration::from_secs(15), reply_b)
+                .await
+                .expect("retried submit resolves")
+                .unwrap()
+                .expect("fresh turn receipt");
+            assert_eq!(a.turn_id, "turn-1");
+            assert_eq!(a.text, "REPLY-1");
+            assert_eq!(
+                b.turn_id, "turn-2",
+                "the retry is a fresh turn/start, not a second steer"
+            );
+            assert_eq!(b.text, "REPLY-2");
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -205,22 +208,24 @@ async fn interrupt_settle_shares_one_deadline_with_the_ack_wait() {
     with_fake_daemon(
         Behavior::long().with_interrupt(Interrupt::AckOnly(Duration::from_secs(1))),
         async {
-        std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
-        let (actor, _keep) = start_actor().await;
-        let _reply = actor.submit("long turn".into()).await.unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        assert_eq!(actor.current_turn_id().as_deref(), Some("turn-1"));
-        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), actor.interrupt())
-            .await
-            .expect("interrupt answers inside the shared budget, not the stacked 66s")
-            .unwrap();
-        assert!(
-            matches!(outcome, InterruptOutcome::Timeout),
-            "the settle wait consumed the remaining budget: {outcome:?}"
-        );
-        std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
-        actor.shutdown().await.unwrap();
-    })
+            std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
+            let (actor, _keep) = start_actor().await;
+            let _reply = actor.submit("long turn".into()).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            assert_eq!(actor.current_turn_id().as_deref(), Some("turn-1"));
+            let outcome =
+                tokio::time::timeout(std::time::Duration::from_secs(5), actor.interrupt())
+                    .await
+                    .expect("interrupt answers inside the shared budget, not the stacked 66s")
+                    .unwrap();
+            assert!(
+                matches!(outcome, InterruptOutcome::Timeout),
+                "the settle wait consumed the remaining budget: {outcome:?}"
+            );
+            std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -234,22 +239,23 @@ async fn foreign_completion_leaves_the_driving_turn_untouched() {
     with_fake_daemon(
         Behavior::quick().with_stray_completion_after(Duration::from_millis(600)),
         async {
-        let (actor, _keep) = start_actor().await;
-        let reply = actor.submit("drive me".into()).await.unwrap();
-        let turn = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
-            .await
-            .expect("the driving turn's waiter survives the foreign completion")
-            .unwrap()
-            .expect("turn 1 receipt");
-        assert_eq!(turn.turn_id, "turn-1");
-        assert_eq!(turn.text, "REPLY-1");
-        assert_eq!(
-            actor.current_turn_id(),
-            None,
-            "cleared by the real completion, not the stray"
-        );
-        actor.shutdown().await.unwrap();
-    })
+            let (actor, _keep) = start_actor().await;
+            let reply = actor.submit("drive me".into()).await.unwrap();
+            let turn = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
+                .await
+                .expect("the driving turn's waiter survives the foreign completion")
+                .unwrap()
+                .expect("turn 1 receipt");
+            assert_eq!(turn.turn_id, "turn-1");
+            assert_eq!(turn.text, "REPLY-1");
+            assert_eq!(
+                actor.current_turn_id(),
+                None,
+                "cleared by the real completion, not the stray"
+            );
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 
@@ -264,32 +270,33 @@ async fn expired_submit_wait_leaves_turn_running_and_receipt_arrives_later() {
     with_fake_daemon(
         Behavior::quick().with_turn_duration(Duration::from_millis(1500)),
         async move {
-        let worktree = tempfile::tempdir().unwrap();
-        let driver = CodexThread::start(worktree.path(), None, false, None)
-            .await
-            .expect("thread starts");
-        let actor = driver.into_actor(Arc::new(move |receipt| {
-            seen.lock().unwrap().push(receipt.turn_id.clone());
-        }));
-        let reply = actor.submit("slow question".into()).await.unwrap();
-        let expired = tokio::time::timeout(std::time::Duration::from_millis(250), reply).await;
-        assert!(expired.is_err(), "the bounded wait expires first");
-        assert_eq!(
-            actor.current_turn_id().as_deref(),
-            Some("turn-1"),
-            "the id survives the expired wait as the interrupt handle"
-        );
-        // The caller drops its receiver (the in_flight ask already answered);
-        // the turn keeps running and the done callback still fires.
-        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-        assert_eq!(
-            done.lock().unwrap().as_slice(),
-            ["turn-1"],
-            "agent_ask_done hook fired exactly once at completion"
-        );
-        assert_eq!(actor.current_turn_id(), None);
-        actor.shutdown().await.unwrap();
-    })
+            let worktree = tempfile::tempdir().unwrap();
+            let driver = CodexThread::start(worktree.path(), None, false, None)
+                .await
+                .expect("thread starts");
+            let actor = driver.into_actor(Arc::new(move |receipt| {
+                seen.lock().unwrap().push(receipt.turn_id.clone());
+            }));
+            let reply = actor.submit("slow question".into()).await.unwrap();
+            let expired = tokio::time::timeout(std::time::Duration::from_millis(250), reply).await;
+            assert!(expired.is_err(), "the bounded wait expires first");
+            assert_eq!(
+                actor.current_turn_id().as_deref(),
+                Some("turn-1"),
+                "the id survives the expired wait as the interrupt handle"
+            );
+            // The caller drops its receiver (the in_flight ask already answered);
+            // the turn keeps running and the done callback still fires.
+            tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+            assert_eq!(
+                done.lock().unwrap().as_slice(),
+                ["turn-1"],
+                "agent_ask_done hook fired exactly once at completion"
+            );
+            assert_eq!(actor.current_turn_id(), None);
+            actor.shutdown().await.unwrap();
+        },
+    )
     .await;
 }
 

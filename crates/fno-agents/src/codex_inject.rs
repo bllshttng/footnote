@@ -295,10 +295,8 @@ async fn codex_initialize_handshake_with_timeout(
 }
 
 /// The write half of a connected app-server session.
-pub type AppServerSink = futures_util::stream::SplitSink<
-    tokio_tungstenite::WebSocketStream<UnixStream>,
-    Message,
->;
+pub type AppServerSink =
+    futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<UnixStream>, Message>;
 /// The read half of a connected app-server session.
 pub type AppServerStream =
     futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<UnixStream>>;

@@ -440,12 +440,12 @@ impl CodexThread {
                 ThreadDriverError::Protocol(format!("codex app-server daemon unavailable: {error}"))
             })?;
         let socket = crate::codex_inject::codex_app_server_socket_path();
-        let (sink, stream) = connect_app_server(&socket)
-            .await
-            .map_err(|error| ThreadDriverError::Protocol(format!(
+        let (sink, stream) = connect_app_server(&socket).await.map_err(|error| {
+            ThreadDriverError::Protocol(format!(
                 "codex app-server daemon at {} refused the connection: {error}",
                 socket.display()
-            )))?;
+            ))
+        })?;
         Ok(Self {
             sink,
             stream: Some(stream),
@@ -510,9 +510,7 @@ impl CodexThread {
             match frame {
                 Some(Ok(Message::Text(text))) => {
                     return serde_json::from_str(text.trim()).map_err(|_| {
-                        ThreadDriverError::Protocol(
-                            "app-server emitted a non-JSON frame".into(),
-                        )
+                        ThreadDriverError::Protocol("app-server emitted a non-JSON frame".into())
                     })
                 }
                 // Ping/pong/binary carry no protocol payload; keep reading
