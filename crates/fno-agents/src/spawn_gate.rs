@@ -388,18 +388,30 @@ fn maybe_emit_spawn_cap_escape() {
         .status();
 }
 
-/// Refuse a spawn onto a lane that declares no carrier for the fno state root.
+/// Refuse a spawn onto a lane whose stance toward the fno state root is
+/// UNDECLARED.
 ///
-/// THIS GUARD FAILS CLOSED, and it is the only one in this module that does.
+/// The trigger is undeclared, NOT "declares no carrier", and that difference
+/// is the correctness of this guard. Epic rule R3 refuses a process denied its
+/// declared root. A lane running under no sandbox is never denied anything, so
+/// it needs no carrier, and refusing it turns a working spawn into a refused
+/// one. Measured 2026-08-28: an opencode PANE worker with no grant acquired a
+/// claim and delivered mail, both read from the operator root. A
+/// carrier-shaped trigger would have broken that lane.
+///
+/// `writable_dirs.py` had already ruled this way on purpose, printing a named
+/// stderr line rather than raising, so that a computed default the caller
+/// never asked for cannot refuse a spawn. This guard agrees with that rather
+/// than quietly reversing it.
+///
+/// THIS GUARD FAILS CLOSED on an unreadable contract, alone in this module.
 /// Every other guard here fails OPEN on a read error because the gate is
-/// protective infrastructure and must never brick spawning (LD5). That
-/// reasoning holds for a RAM floor, where a missed refusal costs a slow
-/// machine, and it INVERTS here. A spawn allowed past a missing grant produces
-/// a worker that goes live, runs, edits code, and cannot claim a node, deliver
-/// mail, or spawn a peer - and cannot report that it cannot, because reporting
-/// is the thing it lost. Five such workers died mute in one night and two of
-/// them finished real work nobody could hear about. Silence is the harm, so an
-/// unreadable contract refuses. Do not "fix" this back to fail-open.
+/// protective infrastructure and must never brick spawning (LD5). That holds
+/// for a RAM floor, where a missed refusal costs a slow machine, and it
+/// INVERTS here. A spawn allowed past a missing grant produces a worker that
+/// goes live, runs, edits code, and cannot claim a node, deliver mail, or
+/// spawn a peer, and cannot report that either, because reporting is what it
+/// lost. Five such workers died mute in one night. Silence is the harm.
 ///
 /// Fails open on exactly one case: `roots` is empty. There is then no root to
 /// grant and nothing to refuse.
@@ -422,14 +434,20 @@ pub fn state_root_grant_gate(harness: &str, substrate: &str, roots: &[String]) -
     }
     // R3: name the root. A refusal that says "denied" without saying WHICH
     // directory sends the reader back to the code to find out.
-    eprintln!("refused: the {harness}/{substrate} lane declares no carrier for the state root");
+    eprintln!(
+        "refused: the {harness}/{substrate} lane does not declare how it stands \
+         toward the state root"
+    );
     for root in roots {
         eprintln!("  {root}");
     }
-    eprintln!("a worker on this lane can edit code and cannot claim, mail, or spawn.");
     eprintln!(
-        "declare state_root_grant for [harness.{harness}.state_root_grant] {substrate}, \
-         or dispatch on a granted lane."
+        "an undeclared lane can produce a worker that edits code and cannot claim, \
+         mail, or spawn, and cannot report that either."
+    );
+    eprintln!(
+        "add {substrate} to [harness.{harness}.state_root_grant]: a carrier name, \
+         \"unsandboxed\" when measured to need none, or \"unmeasured\"."
     );
     Err(EXIT_STATE_ROOT_UNGRANTED)
 }
@@ -942,27 +960,43 @@ mod tests {
     }
 
     #[test]
-    fn ungranted_lane_is_refused_with_its_own_exit_code() {
-        // gemini declares no carrier on any substrate: a worker there can edit
-        // code and cannot claim, mail, or spawn.
-        assert_eq!(
-            state_root_grant_gate("gemini", "headless", &roots()),
-            Err(EXIT_STATE_ROOT_UNGRANTED)
-        );
-        // opencode carries the grant on its serve thread lane only.
-        assert_eq!(
-            state_root_grant_gate("opencode", "headless", &roots()),
-            Err(EXIT_STATE_ROOT_UNGRANTED)
-        );
-        // An unknown harness declares nothing, so it is refused too.
+    fn undeclared_lane_is_refused_with_its_own_exit_code() {
+        // An unknown harness declares nothing at all, which is the only thing
+        // this gate refuses.
         assert_eq!(
             state_root_grant_gate("nosuchharness", "thread", &roots()),
             Err(EXIT_STATE_ROOT_UNGRANTED)
         );
+        assert_eq!(
+            state_root_grant_gate("claude", "nosuchsubstrate", &roots()),
+            Err(EXIT_STATE_ROOT_UNGRANTED)
+        );
+    }
+
+    /// The regression this gate nearly shipped. Its first trigger was "declares
+    /// no carrier", which refused every opencode pane and gemini spawn. Then an
+    /// opencode PANE worker was measured acquiring a claim and delivering mail
+    /// with no grant at all: it is unsandboxed, so it is never denied the root
+    /// and R3 does not reach it. A lane that works must not be refused.
+    #[test]
+    fn a_lane_that_needs_no_carrier_is_never_refused() {
+        for (harness, substrate) in [
+            ("opencode", "pane"),     // measured unsandboxed
+            ("opencode", "headless"), // unmeasured, so not refused on a guess
+            ("gemini", "headless"),
+            ("gemini", "pane"),
+            ("gemini", "thread"),
+        ] {
+            assert_eq!(
+                state_root_grant_gate(harness, substrate, &roots()),
+                Ok(()),
+                "{harness}/{substrate} declares a stance, so it must pass"
+            );
+        }
     }
 
     #[test]
-    fn granted_lanes_pass() {
+    fn lanes_declaring_a_carrier_pass() {
         for (harness, substrate) in [
             ("claude", "thread"),
             ("claude", "headless"),
@@ -976,6 +1010,22 @@ mod tests {
                 Ok(()),
                 "{harness}/{substrate}"
             );
+        }
+    }
+
+    /// Every harness and substrate the fleet dispatches must declare a stance.
+    /// Without this the gate's refusal is unreachable in practice and a lane
+    /// added later inherits silence instead of a loud refusal.
+    #[test]
+    fn every_shipped_lane_declares_its_stance() {
+        let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
+        for (name, caps) in &contract.harness {
+            for substrate in ["pane", "thread", "headless"] {
+                assert!(
+                    caps.state_root_carrier(substrate).is_some(),
+                    "{name}/{substrate} declares no stance toward the state root"
+                );
+            }
         }
     }
 
