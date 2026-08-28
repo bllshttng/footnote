@@ -5118,6 +5118,11 @@ def cmd_join(
         1, "--workers",
         help="Requested joiner count; the plan's ready-graph width bounds it.",
     ),
+    model: Optional[str] = typer.Option(
+        None, "--model", "-m",
+        help="Explicit model for the joiner spawns (x-571f shape); empty "
+        "leaves the spawn CLI's own default resolution.",
+    ),
 ) -> None:
     """Spawn execute-waves joiners into a held node's worktree (x-8d1d).
 
@@ -5142,7 +5147,7 @@ def cmd_join(
         raise typer.Exit(code=2)
 
     try:
-        receipt = join_node(match.id, max(1, workers))
+        receipt = join_node(match.id, max(1, workers), model=model)
     except JoinRefuse as exc:
         typer.echo(f"backlog join: {exc.message}", err=True)
         raise typer.Exit(code=exc.code)

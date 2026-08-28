@@ -1989,7 +1989,7 @@ def _plan_parallel_width(plan_path: Path) -> int:
     return width
 
 
-def join_node(node_id: str, workers: int) -> dict:
+def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
     Resolves the holder's worktree from the LIVE ``node:<id>`` claim (never a
@@ -1999,6 +1999,8 @@ def join_node(node_id: str, workers: int) -> dict:
     and mail hub (Locked Decision 3); every other joiner's TARGET_BRIEF names
     it. The spawned process exports FNO_WORKER_NAME from ``--name``, so each
     joiner's task-claim holder is its own roster name (the joiner 1 contract).
+    ``model`` rides as an explicit ``--model``: a typed model with no vendor
+    implication overrides a config-injected default whose lane would refuse.
 
     Returns the receipt ``{"node", "worktree", "width", "spawned", "lead"}``.
     Raises JoinRefuse (exit 2/3/4) on a precondition failure and SpawnError
@@ -2057,6 +2059,8 @@ def join_node(node_id: str, workers: int) -> dict:
             # codex-scoped agents.defaults.model then injects onto it and
             # trips the vendor-mismatch refusal (live proof, 2026-08-27).
             "--harness", "claude",
+            # x-571f shape: an explicit model rides as a spawn flag.
+            *(("--model", model) if model else ()),
             "--cwd", worktree, "--name", name,
             f"/fno:execute waves {plan_path}",
         ]
