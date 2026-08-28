@@ -52,7 +52,7 @@ Load [plan-validation.md](plan-validation.md) for the full protocol.
 
 #### Joiner posture (`FNO_WORKER_NAME` starts with `j-`)
 
-A worker spawned by `fno backlog join <node>` (`j-<node>-<k>`) is a VISITOR in the node holder's worktree, not a target. First: `.fno/join-briefs/<node>.md` carries your joiner brief (the lead and mail hub, and your claim discipline) - when that file exists for the bound node, read it before dispatching. Never run `target init` and never take the node claim: the target session keeps it, and a joiner that runs `target init` anyway gets the existing "another session holds the node, not this caller" refusal - on that refusal, stop with `<help>` instead of retrying. Read `graph_node_id` from THIS worktree's manifest with `target_state_field` (step 3e), and let `FNO_WORKER_NAME` be the task-claim holder (the joiner 1 contract): the task verbs bind their holder to the roster name, so each joiner is provable as a distinct owner. Everything else in this flow runs unchanged - a joiner's stop hook exits 0 (`visitor allowed`) because its session id matches no manifest in the worktree.
+A worker spawned by `fno backlog join <node>` (`j-<node>-<k>`) is a VISITOR in the node holder's worktree, not a target. First: `.fno/join-briefs/<node>.md` carries your joiner brief (the lead and mail hub, and your claim discipline) - when that file exists for the bound node, read it before dispatching. The brief's band table names YOUR band (one worker per band, the lead is the highest band): set `FNO_WORKER_BAND` from your row before the dispatch round - the spawn-time env export of the same name cannot reach a daemon-forked worker, the brief file can. Never run `target init` and never take the node claim: the target session keeps it, and a joiner that runs `target init` anyway gets the existing "another session holds the node, not this caller" refusal - on that refusal, stop with `<help>` instead of retrying. Read `graph_node_id` from THIS worktree's manifest with `target_state_field` (step 3e), and let `FNO_WORKER_NAME` be the task-claim holder (the joiner 1 contract): the task verbs bind their holder to the roster name, so each joiner is provable as a distinct owner. Everything else in this flow runs unchanged - a joiner's stop hook exits 0 (`visitor allowed`) because its session id matches no manifest in the worktree.
 
 ### 0b. Structural Context (AUTO)
 
@@ -210,6 +210,18 @@ READY_ARGS=(--ready --state .fno/STATE.md)
 if [[ -n "${NODE_ID:-}" ]]; then
     READY_ARGS+=(--node "$NODE_ID")
 fi
+# A joined worker filters the pull to its own band. The env export reaches
+# panes; a daemon-forked worker reads its band from the join brief's table
+# instead (the same reachability gap as FNO_WORKER_NAME, x-6de8).
+WORKER_BAND="${FNO_WORKER_BAND:-}"
+if [[ -z "$WORKER_BAND" && "${FNO_WORKER_NAME:-}" == j-* ]]; then
+    WORKER_BAND=$(awk -F'|' -v w="$FNO_WORKER_NAME" \
+        'tolower($2) ~ tolower(w) {gsub(/ /, "", $3); print $3; exit}' \
+        ".fno/join-briefs/${NODE_ID}.md" 2>/dev/null)
+fi
+if [[ -n "$WORKER_BAND" ]]; then
+    READY_ARGS+=(--band "$WORKER_BAND")
+fi
 READY_JSON=$(python3 skills/execute/orchestrator.py "$PLAN_PATH" "${READY_ARGS[@]}")
 ```
 
@@ -228,6 +240,8 @@ A task appears under `ready` when its effective blockers are all complete and no
 - Tasks under `blocked_on` need no action; their derived edges hold them until a later round
 
 `bands` maps each task to its wave's `difficulty` band, with the plan frontmatter band as the fallback. A pulling worker takes only tasks at or below its own band. The band-to-harness-and-model mapping lives in config, never in the plan.
+
+**Joined workers pull one task, never the set.** When `--band` was passed (a joined worker, `FNO_WORKER_NAME` starts with `j-`), the response carries `above_band` (tasks above your band, shown not offered) and `ready` sorted highest band first. Do NOT dispatch the whole `ready` set: take the FIRST entry, claim it (step 3e), then rerun the query - your claim holds the task out of every sibling's next `ready`. When every `ready` entry is above your band, dispatch nothing this round and re-query after the peers release their claims. A lone target (no `--band`) keeps whole-set dispatch exactly as below.
 
 An empty `ready` list does not prove execution is complete. If `claimed` is
 non-empty, wait for peer claims to leave `in_progress` and rerun `--ready`. If

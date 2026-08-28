@@ -1538,6 +1538,61 @@ def _wave_band(value: object, fallback: str) -> str:
     return fallback if fallback in _WAVE_BANDS else ""
 
 
+def _worker_band_arg() -> Optional[str]:
+    """The ``--band`` value when the pull is band-filtered, else ``None``.
+
+    The joined worker's own band (``--band "$FNO_WORKER_BAND"``, waves.md's
+    dispatch round). An illegal spelling refuses the run rather than reading
+    as unfiltered, which would silently undo the band partition.
+    """
+    if "--band" not in sys.argv:
+        return None
+    idx = sys.argv.index("--band")
+    if idx + 1 >= len(sys.argv):
+        print("Error: --band requires a value (low|medium|high)", file=sys.stderr)
+        sys.exit(1)
+    band = sys.argv[idx + 1].strip().lower()
+    if band not in _WAVE_BANDS:
+        print(
+            f"Error: --band must be one of {'|'.join(_WAVE_BANDS)}, got {band!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return band
+
+
+def _band_partition(
+    strategy: ExecutionStrategy,
+    ready: List[str],
+    bands: Dict[str, str],
+    worker_band: str,
+) -> Dict[str, List[str]]:
+    """Split `ready` at the worker's band; highest band first within each half.
+
+    A pulling worker takes only tasks at or below its own band (waves.md's
+    band rule); tasks above it surface under `above_band` so the receipt
+    still shows them. An unbanded task is below every band. Without the
+    split, three joined workers race one whole-set dispatch and the claim,
+    not the band, decides who pulls what.
+    """
+    rank = {name: pos for pos, name in enumerate(_WAVE_BANDS)}
+    mine_rank, wave_of = rank[worker_band], {}
+    for wave in strategy.waves:
+        for task_id in wave.tasks:
+            wave_of.setdefault(task_id, wave.number)
+
+    def order_key(task_id: str) -> tuple:
+        return (-rank.get(bands.get(task_id, ""), -1), wave_of.get(task_id, 0), task_id)
+
+    mine = sorted(
+        (t for t in ready if rank.get(bands.get(t, ""), -1) <= mine_rank), key=order_key
+    )
+    above = sorted(
+        (t for t in ready if rank.get(bands.get(t, ""), -1) > mine_rank), key=order_key
+    )
+    return {"ready": mine, "above_band": above}
+
+
 def load_plan_strategy(
     plan_input: str,
 ) -> Optional[ExecutionStrategy]:
@@ -1933,18 +1988,23 @@ if __name__ == "__main__":
                 outstanding = sorted(effective_blockers(strategy, task_id) - set(completed))
                 if outstanding:
                     blocked_on[task_id] = outstanding
-        print(json.dumps({
+        bands = {
+            task_id: wave.difficulty
+            for wave in strategy.waves
+            for task_id in wave.tasks
+        }
+        worker_band = _worker_band_arg()
+        payload = {
             "ready": ready,
             "completed": completed,
             "claimed": claimed,
             "blocked": blocked,
             "blocked_on": blocked_on,
-            "bands": {
-                task_id: wave.difficulty
-                for wave in strategy.waves
-                for task_id in wave.tasks
-            },
-        }))
+            "bands": bands,
+        }
+        if worker_band is not None:
+            payload.update(_band_partition(strategy, ready, bands, worker_band))
+        print(json.dumps(payload))
     elif "--next" in sys.argv:
         next_wave = get_next_wave(strategy, completed_tasks)
         if next_wave:

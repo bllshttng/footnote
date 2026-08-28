@@ -179,6 +179,50 @@ def _write_parallel_fixture(tmp_path: Path, plan_md: str = PARALLEL_PLAN_MD):
     return plan, state
 
 
+# Three banded waves, all three tasks ready at once: the later waves declare
+# explicit empty blockers so nothing holds them back (the band axis, not the
+# wave order, must decide the split).
+BANDED_PLAN_MD = """---
+title: banded fixture
+status: ready
+---
+
+# Banded fixture
+
+## Execution Strategy
+
+```yaml
+execution_mode: parallel
+waves:
+  - wave: 1
+    mode: sequential
+    difficulty: high
+    tasks: ['1.1']
+  - wave: 2
+    mode: sequential
+    difficulty: low
+    tasks: ['1.2']
+  - wave: 3
+    mode: sequential
+    difficulty: medium
+    tasks: ['1.3']
+tasks:
+  - id: '1.1'
+    title: Heavy
+  - id: '1.2'
+    title: Light
+    blocked_by: []
+  - id: '1.3'
+    title: Middle
+    blocked_by: []
+```
+"""
+
+
+def _write_banded_fixture(tmp_path: Path):
+    return _write_parallel_fixture(tmp_path, BANDED_PLAN_MD)
+
+
 class TestReadyCli:
     def test_state_only_read(self, tmp_path):
         # AC3-HP: 2.1 blocks only on 1.1 and STATE.md marks 1.1 [x]; the
@@ -433,6 +477,62 @@ class TestPartitionEdgesReady:
         assert proc.returncode == 0, proc.stderr
         out = json.loads(proc.stdout)
         assert out["bands"]["1.1"] == "medium"
+
+
+class TestReadyBandFilter:
+    def test_band_filters_and_orders_the_pull(self, tmp_path):
+        # AC1-HP: a medium worker takes the medium task first, then the low
+        # one; the high task surfaces under above_band, shown not offered.
+        plan, state = _write_banded_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state),
+                         "--band", "medium"],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.3", "1.2"]
+        assert out["above_band"] == ["1.1"]
+
+    def test_high_band_takes_everything(self, tmp_path):
+        plan, state = _write_banded_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state),
+                         "--band", "high"],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.3", "1.2"]
+        assert out["above_band"] == []
+
+    def test_no_band_keeps_payload_unchanged(self, tmp_path):
+        # AC1-ERR: without --band the receipt is today's shape - wave order,
+        # and no above_band key a lone-target consumer could trip on.
+        plan, state = _write_banded_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state)],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.1", "1.2", "1.3"]
+        assert "above_band" not in out
+
+    def test_band_normalizes_case(self, tmp_path):
+        # The band axis is lowercase; "Medium" rides like "medium" (same
+        # split as AC1-HP, spelled with a capital).
+        plan, state = _write_banded_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state),
+                         "--band", "Medium"],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode == 0, proc.stderr
+        out = json.loads(proc.stdout)
+        assert out["ready"] == ["1.3", "1.2"]
+        assert out["above_band"] == ["1.1"]
+
+    def test_illegal_band_refuses_the_run(self, tmp_path):
+        # A typo reading as unfiltered would silently undo the partition.
+        plan, state = _write_banded_fixture(tmp_path)
+        proc = _run_cli([str(plan), "--ready", "--state", str(state),
+                         "--band", "huge"],
+                        env_path="/usr/bin:/bin", cwd=tmp_path)
+        assert proc.returncode != 0
+        assert "huge" in (proc.stderr + proc.stdout)
 
     def test_canonical_surface_lists_drive_the_partition(self, tmp_path):
         # A plan that declares ownership only through Execution Strategy
