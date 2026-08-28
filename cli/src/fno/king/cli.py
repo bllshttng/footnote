@@ -416,10 +416,13 @@ agents_king_app = typer.Typer(
 agents_king_app.command("init")(init_cmd)
 agents_king_app.command("done")(done_cmd)
 agents_king_app.command("escalate")(escalate_cmd)
-# The stop hook resolves through the deprecated `fno king` spelling, which
-# verb_moves forwards onto THIS app; the verb missed the fold, so the hook's
-# resolver exited 2 and every stop on an active kings dir burned its
-# unavailable-retries before allowing exit. Hidden: a hook surface, not menu UI.
+# The stop hooks resolve the crown manifest here. They once reached it
+# through the deprecated `fno king` spelling that verb_moves forwards onto
+# THIS app; the verb missed the fold, so the resolver exited 2 and every
+# stop on an active kings dir burned its unavailable-retries before
+# allowing exit. The hooks now name `agents king` directly, so the
+# deprecation clock cannot re-open that hole. Hidden: a hook surface, not
+# menu UI.
 agents_king_app.command("manifest-path", hidden=True)(manifest_path_cmd)
 
 
