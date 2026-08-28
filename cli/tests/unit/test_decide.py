@@ -1180,23 +1180,31 @@ def test_lifecycle_filtered_empty_list_reports_all_state_recovery(
     assert "fno backlog decisions 'x-history' --state all" in listed.output
 
 
-def _agent_seed_guardrail_paragraph() -> str:
-    """The standing-guardrail paragraph every spawned worker's seed carries."""
-    skill_path = (
-        Path(__file__).resolve().parents[3] / "skills" / "agent" / "SKILL.md"
+def _handoff_guardrail_text() -> str:
+    """The GUARDRAIL the normalizer emits into every handoff seed.
+
+    The runtime surface a spawned worker actually receives, not the skill
+    doc that describes it: a review finding (codex P1) landed when only the
+    doc carried the corrected query and the emitted seed kept the old shape.
+    """
+    script = (
+        Path(__file__).resolve().parents[3]
+        / "skills"
+        / "agent"
+        / "scripts"
+        / "normalize.sh"
     )
-    text = skill_path.read_text(encoding="utf-8")
-    for paragraph in text.split("\n\n"):
-        if "standing guardrail" in paragraph:
-            return paragraph
-    raise AssertionError(f"no standing-guardrail paragraph in {skill_path}")
+    text = script.read_text(encoding="utf-8")
+    start = text.index("GUARDRAIL: Do not autonomously")
+    end = text.index("proceeds normally.", start)
+    return text[start:end]
 
 
 def test_agent_seed_command_reads_rulings_the_lanes_hide(
     root: Path, tmp_graph: Path, index: Path
 ):
-    """x-0413 acceptance: the command the seed mandates, run verbatim, finds
-    the rulings the law-only query hid.
+    """x-0413 acceptance: the command the handoff seed mandates, run verbatim,
+    finds the rulings the law-only query hid.
 
     The specimens: d-52433165 (coord) and d-4d05272e (unattributed) governed
     while `--lane law --state live` returned nothing, so workers following the
@@ -1205,10 +1213,14 @@ def test_agent_seed_command_reads_rulings_the_lanes_hide(
     """
     import re
 
-    paragraph = _agent_seed_guardrail_paragraph()
-    command = re.search(r"`fno inbox decisions <topic>`", paragraph)
-    assert command, "the agent seed must carry a runnable decisions command"
-    assert "--lane" not in paragraph and "--state" not in paragraph, (
+    guardrail = _handoff_guardrail_text()
+    command = re.search(r"fno inbox decisions <topic>", guardrail)
+    assert command, "the handoff seed must carry a runnable decisions command"
+    assert "fno backlog get <node>" in guardrail, (
+        "the seed must name the node surface where a king's ruling lives "
+        "with no decision record"
+    )
+    assert "--lane" not in guardrail and "--state" not in guardrail, (
         "a lane or state filter on the seed's query hides coord and "
         "unattributed rulings; that is the x-0413 defect"
     )
