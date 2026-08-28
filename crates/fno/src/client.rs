@@ -937,8 +937,6 @@ struct View {
     /// (sessions cannot rename), so the row can never go stale.
     session: String,
     layout: LayoutView,
-    /// Server-authoritative count from the shared dead-member classifier.
-    sweep_dead_count: usize,
     frames: HashMap<u64, Frame>,
     /// Manual sideline toggle; narrow terminals override it (auto-hide).
     /// Orthogonal to [`View::density`]: this is visibility, that is how much
@@ -1326,6 +1324,36 @@ struct View {
     /// An update-readiness probe is in flight; bounds concurrent
     /// probes to one, mirroring `conn_inflight`.
     update_probe_inflight: bool,
+    /// A pending sweep verb (counts probe or scoped apply) for the run
+    /// loop to spawn off the UI thread, mirroring `conn_action`.
+    sweep_action: Option<SweepAction>,
+    /// A sweep verb is in flight; one at a time, so a second tap queues
+    /// nothing and is told so.
+    sweep_inflight: bool,
+}
+
+/// Which half of `mux workspace prune` a sweep action runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepScope {
+    Tabs,
+    Dead,
+    Both,
+}
+
+/// A sweep verb the run loop should spawn: a counts probe for the choice
+/// modal, or an apply of one scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepAction {
+    Counts,
+    Apply(SweepScope),
+}
+
+/// What a finished sweep verb reports back to the UI loop.
+#[derive(Debug, Clone)]
+enum SweepMsg {
+    Counts { tabs: usize, dead: usize },
+    Applied { closed: usize, reaped: usize },
+    Failed(String),
 }
 
 /// A pending destructive/costly action awaiting the operator's one-keypress
@@ -1374,10 +1402,6 @@ enum ConfirmKind {
         squad: Option<u64>,
         dead: usize,
     },
-    /// Sweep the current dead-member set across the sideline stores. The
-    /// server re-folds candidates on Enter; `dead` only names the count shown
-    /// in the centered prompt.
-    SweepDead { dead: usize },
     /// Close one tab (the tab menu's destructive item). The captured stable
     /// [`TabId`], not a view index, commits: `CloseTab` closes the SENDER'S
     /// VIEWED tab server-side, so Enter first selects the captured tab then
@@ -2197,7 +2221,15 @@ enum AuxAction {
     /// and the one computed guidance line. Only offered by the menu when the
     /// last probe reported ready (or degraded) - see `build_sideline_menu`.
     OpenUpdate,
-    SweepDead,
+    /// Probe `mux workspace prune --dry-run` once and open the centered
+    /// sweep-threads choice modal from its counts. Both halves of the prune
+    /// (surplus pristine tabs, dead member rows) live behind this one entry.
+    OpenSweep,
+    /// Apply the prune with one scope. Each choice is the confirmation: the
+    /// modal named the counts, the tap picked the half.
+    SweepTabs,
+    SweepDeadAgents,
+    SweepBoth,
     Detach,
     ToggleHoverFocus,
     ToggleStatus,
@@ -2358,14 +2390,6 @@ async fn probe_update_readiness() -> UpdateOutcome {
 /// actually works.
 #[cfg(test)]
 fn build_sideline_menu(anchor: Anchor, update: Option<&UpdateOutcome>) -> AuxPopup {
-    build_sideline_menu_with_count(anchor, update, 0)
-}
-
-fn build_sideline_menu_with_count(
-    anchor: Anchor,
-    update: Option<&UpdateOutcome>,
-    dead_count: usize,
-) -> AuxPopup {
     let entry = |glyph: &str, label: &str| PopupRow::Entry {
         glyph: glyph.into(),
         label: label.into(),
@@ -2395,12 +2419,12 @@ fn build_sideline_menu_with_count(
         }
         _ => {}
     }
-    rows.push(entry("♺", &format!("Sweep dead ({dead_count})")));
+    rows.push(entry("♺", "sweep threads"));
     rows.push(entry("⌨", "keybinds"));
     rows.push(entry("⚙", "settings"));
     rows.push(entry("⇄", "connections"));
     rows.push(entry("⏏", "detach"));
-    actions.push(AuxAction::SweepDead);
+    actions.push(AuxAction::OpenSweep);
     actions.push(AuxAction::OpenKeybinds);
     actions.push(AuxAction::OpenSettings);
     actions.push(AuxAction::OpenConnections);
@@ -2448,6 +2472,134 @@ fn build_update_modal(outcome: Option<&UpdateOutcome>) -> AuxPopup {
     }
 }
 
+/// Build the centered sweep-threads choice modal from one
+/// `mux workspace prune --dry-run` reading: close the surplus pristine
+/// tabs, reap the dead member rows, or both. A zero count greys its entry
+/// out (0 targets, so arrows skip it and a click is swallowed); with both
+/// counts zero there is nothing to choose, and the header says so.
+fn build_sweep_modal(tabs: usize, dead: usize) -> AuxPopup {
+    let choice = |label: String, hint: &str, enabled: bool| PopupRow::Entry {
+        glyph: "♺".into(),
+        label,
+        hint: hint.into(),
+        enabled,
+    };
+    let mut rows = vec![PopupRow::Header("sweep threads".into()), PopupRow::Rule];
+    let mut actions: Vec<AuxAction> = Vec::new();
+    rows.push(choice(
+        format!("tabs ({tabs})"),
+        "close surplus shell tabs",
+        tabs > 0,
+    ));
+    if tabs > 0 {
+        actions.push(AuxAction::SweepTabs);
+    }
+    rows.push(choice(
+        format!("dead agents ({dead})"),
+        "reap dead member rows",
+        dead > 0,
+    ));
+    if dead > 0 {
+        actions.push(AuxAction::SweepDeadAgents);
+    }
+    rows.push(choice(
+        "both".into(),
+        "tabs and dead agents",
+        tabs > 0 || dead > 0,
+    ));
+    if tabs > 0 || dead > 0 {
+        actions.push(AuxAction::SweepBoth);
+    }
+    if actions.is_empty() {
+        rows.push(PopupRow::Header("nothing to sweep".into()));
+    }
+    AuxPopup {
+        popup: Popup::new(rows, Anchor::Center)
+            .title("sweep threads")
+            .footer("esc close"),
+        actions,
+    }
+}
+
+/// The operator tapped a choice: the modal named the counts, so the tap IS
+/// the confirmation. Queue the apply for the run loop (or say why not).
+fn begin_sweep_apply(view: &mut View, scope: SweepScope) {
+    view.aux = None;
+    if view.sweep_inflight {
+        view.set_notice("a sweep is already running".into());
+    } else {
+        view.sweep_action = Some(SweepAction::Apply(scope));
+    }
+}
+
+/// Run one `mux workspace prune` verb off the UI thread: a `--dry-run --json`
+/// probe for the choice modal's counts, or a scoped apply whose JSON receipt
+/// becomes the notice. Bounded so a wedged server cannot hold the UI loop's
+/// sweep slot forever; the counts parse fails loud rather than opening a
+/// modal with fabricated zeros.
+async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
+    let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    let mut args = vec![
+        "mux".to_string(),
+        "workspace".to_string(),
+        "prune".to_string(),
+        "--json".to_string(),
+    ];
+    let apply_secs = match action {
+        SweepAction::Counts => {
+            args.push("--dry-run".to_string());
+            10
+        }
+        SweepAction::Apply(scope) => {
+            match scope {
+                SweepScope::Tabs => args.push("--tabs-only".to_string()),
+                SweepScope::Dead => args.push("--dead-only".to_string()),
+                SweepScope::Both => {}
+            }
+            // Each folded tab is one control roundtrip; a big workspace
+            // sweep legitimately outlasts a modal probe.
+            60
+        }
+    };
+    command
+        .args(&args)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let fut = crate::process_admission::tokio_output(&mut command);
+    let output = match tokio::time::timeout(Duration::from_secs(apply_secs), fut).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => return SweepMsg::Failed(format!("prune spawn failed: {e}")),
+        Err(_) => return SweepMsg::Failed("prune timed out".into()),
+    };
+    if !output.status.success() {
+        return SweepMsg::Failed(format!(
+            "prune exited {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let parsed: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(e) => return SweepMsg::Failed(format!("prune output unparseable ({e})")),
+    };
+    match action {
+        SweepAction::Counts => {
+            let tabs = parsed["tabs_would_close"].as_u64().unwrap_or(0) as usize;
+            let dead = parsed["members_reaped"].as_u64().unwrap_or(0) as usize;
+            if let Some(notice) = parsed["notice"].as_str() {
+                if !notice.is_empty() {
+                    return SweepMsg::Failed(notice.to_string());
+                }
+            }
+            SweepMsg::Counts { tabs, dead }
+        }
+        SweepAction::Apply(_) => SweepMsg::Applied {
+            closed: parsed["tabs_closed"].as_u64().unwrap_or(0) as usize,
+            reaped: parsed["members_reaped"].as_u64().unwrap_or(0) as usize,
+        },
+    }
+}
+
 impl View {
     fn new(term: (u16, u16), session: String, layout: LayoutView) -> Self {
         // Persisted per-section state wins (x-975a); pruned to the squads this
@@ -2480,7 +2632,6 @@ impl View {
             term,
             session,
             layout,
-            sweep_dead_count: 0,
             frames: HashMap::new(),
             panel_on: true,
             density,
@@ -2580,6 +2731,8 @@ impl View {
             update_outcome: None,
             update_probe_want: false,
             update_probe_inflight: false,
+            sweep_action: None,
+            sweep_inflight: false,
         }
     }
 
@@ -3663,19 +3816,9 @@ impl View {
     /// still renders instantly from whatever outcome is already in hand.
     fn open_sideline_menu(&mut self, anchor: Anchor) {
         self.clear_peek();
-        self.aux = Some(build_sideline_menu_with_count(
-            anchor,
-            self.update_outcome.as_ref(),
-            self.dead_sweep_count(),
-        ));
+        self.aux = Some(build_sideline_menu(anchor, self.update_outcome.as_ref()));
         self.aux_esc.clear();
         self.update_probe_want = true;
-    }
-
-    /// Read the server's positive-dead count from the same classifier the
-    /// confirmed sweep invokes. Unknown and live rows are excluded.
-    fn dead_sweep_count(&self) -> usize {
-        self.sweep_dead_count
     }
 
     /// Rebuild an already-open sideline MENU so a landing update probe shows
@@ -3693,11 +3836,7 @@ impl View {
         }
         let anchor = aux.popup.anchor;
         let sel = aux.popup.sel;
-        let mut menu = build_sideline_menu_with_count(
-            anchor,
-            self.update_outcome.as_ref(),
-            self.dead_sweep_count(),
-        );
+        let mut menu = build_sideline_menu(anchor, self.update_outcome.as_ref());
         let n = menu.popup.targets().len();
         menu.popup.sel = if n > 0 { sel.min(n - 1) } else { 0 };
         self.aux = Some(menu);
@@ -6911,9 +7050,6 @@ impl View {
             ConfirmKind::ClearDead { dead, .. } => {
                 format!("clear {dead} dead row(s) in {label}?")
             }
-            ConfirmKind::SweepDead { dead } => {
-                format!("sweep {dead} dead sideline row(s)?")
-            }
             // A tab close is a GROUP close on the wire: the server reaps every
             // leaf in the tab, not the focused pane. Say the count when there is
             // more than one, so the prompt names what the Enter destroys. Read
@@ -6936,10 +7072,7 @@ impl View {
             .footer("enter confirm · esc cancel")
             .fit_to(dims.1.saturating_sub(chrome::Chrome::FRAME_COLS));
         let lines = [self.confirm_text(action)];
-        let anchor = if matches!(
-            &action.action,
-            ConfirmKind::CloseTab { .. } | ConfirmKind::SweepDead { .. }
-        ) {
+        let anchor = if matches!(&action.action, ConfirmKind::CloseTab { .. }) {
             OverlayAnchor::Center
         } else {
             OverlayAnchor::At {
@@ -10588,7 +10721,7 @@ async fn attach_and_run(
                 backlog,
                 backlog_lanes,
                 backlog_stale,
-                sweep_dead_count,
+                ..
             }) => {
                 view.set_layout(LayoutView {
                     squads,
@@ -10602,7 +10735,6 @@ async fn attach_and_run(
                     backlog_lanes,
                     backlog_stale,
                 });
-                view.sweep_dead_count = sweep_dead_count;
                 break;
             }
             Ok(ServerMsg::ModeSync { bytes }) => stashed_modesync.extend_from_slice(&bytes),
@@ -10778,6 +10910,11 @@ async fn attach_and_run(
         bool, // is_login: keep the pending notice on success, no acting flip
     )>();
 
+    // The sweep verbs (counts probe, scoped apply) run off the UI loop and
+    // report back here. The in-flight flag bounds them to one at a time;
+    // the message carries what the tap asked for.
+    let (sweep_tx, mut sweep_rx) = tokio::sync::mpsc::unbounded_channel::<SweepMsg>();
+
     // The update-readiness probe runs off the UI loop and reports back
     // here. Untagged (unlike conn_rx) - there is no per-open state to
     // invalidate, just a last-outcome-wins cache the menu/overlay read from.
@@ -10902,6 +11039,17 @@ async fn attach_and_run(
                 let _ = tx.send(outcome);
             });
         }
+        // Kick a wanted sweep verb off the UI loop, at most one in flight.
+        if let Some(action) = view.sweep_action.take() {
+            if !view.sweep_inflight {
+                view.sweep_inflight = true;
+                let tx = sweep_tx.clone();
+                tokio::spawn(async move {
+                    let msg = run_sweep_verb(action).await;
+                    let _ = tx.send(msg);
+                });
+            }
+        }
         // Redraw-after-event; expiry of the transient notice needs a timer.
         let notice_deadline = view.notice.as_ref().map(|(_, d)| *d);
         // (x-e10f fix) The held global-chord candidate's quiet-window flush
@@ -10996,9 +11144,8 @@ async fn attach_and_run(
                         }
                     }
                 }
-                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, sweep_dead_count }) => {
+                Ok(ServerMsg::Layout { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale, .. }) => {
                     view.set_layout(LayoutView { squads, active_squad, panes, focus, area, agents, focus_node, backlog, backlog_lanes, backlog_stale });
-                    view.sweep_dead_count = sweep_dead_count;
                     // x-c376: a scrape tick may have removed the peeked row.
                     // Re-anchor to an adjacent agent row (fetch its transcript)
                     // or close - never a stale render / panic (AC1-EDGE).
@@ -11379,6 +11526,30 @@ async fn attach_and_run(
                 view.update_probe_inflight = false;
                 view.update_outcome = Some(outcome);
                 view.refresh_open_sideline_menu();
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some(msg) = sweep_rx.recv() => {
+                // The tap asked for this outcome: counts open the centered
+                // choice modal, an apply speaks in a notice. A modal that
+                // opened meanwhile is the operator's most recent expressed
+                // intent winning - same stomp semantics as the theme apply.
+                view.sweep_inflight = false;
+                match msg {
+                    SweepMsg::Counts { tabs, dead } => {
+                        view.aux = Some(build_sweep_modal(tabs, dead));
+                        view.aux_esc.clear();
+                    }
+                    SweepMsg::Applied { closed, reaped } => {
+                        view.set_notice(format!(
+                            "swept: closed {closed} tab(s), reaped {reaped} dead member(s)"
+                        ));
+                    }
+                    SweepMsg::Failed(reason) => {
+                        view.set_notice(format!("sweep failed: {reason}"));
+                    }
+                }
                 if let Err(e) = compositor.draw(&view.compose()) {
                     break Err(format!("draw: {e}"));
                 }
@@ -12774,7 +12945,6 @@ async fn confirm_keys(
         }
         // Most confirms are one command; clear-dead (x-f300) fans out to one
         // Remove per exited row, so the commit path speaks in a list.
-        let is_sweep = matches!(&action.action, ConfirmKind::SweepDead { .. });
         let cmds = match action.action {
             ConfirmKind::Dispatch { node } => vec![Command::DispatchNode {
                 node,
@@ -12815,16 +12985,8 @@ async fn confirm_keys(
                 }
                 picked
             }
-            ConfirmKind::SweepDead { dead } => {
-                if dead > 0 && view.dead_sweep_count() == 0 {
-                    view.set_notice("swept 0; state changed before confirmation".into());
-                    Vec::new()
-                } else {
-                    vec![Command::SweepDead]
-                }
-            }
         };
-        if cmds.is_empty() && !is_sweep {
+        if cmds.is_empty() {
             view.set_notice("nothing left to clear".into());
         }
         for cmd in cmds {
@@ -13818,14 +13980,17 @@ async fn execute_aux_action(
         AuxAction::OpenUpdate => {
             view.aux = Some(build_update_modal(view.update_outcome.as_ref()));
         }
-        AuxAction::SweepDead => {
-            let dead = view.dead_sweep_count();
+        AuxAction::OpenSweep => {
             view.aux = None;
-            view.open_confirm(ConfirmAction {
-                action: ConfirmKind::SweepDead { dead },
-                label: "sideline".into(),
-            });
+            if view.sweep_inflight {
+                view.set_notice("a sweep is already running".into());
+            } else {
+                view.sweep_action = Some(SweepAction::Counts);
+            }
         }
+        AuxAction::SweepTabs => begin_sweep_apply(view, SweepScope::Tabs),
+        AuxAction::SweepDeadAgents => begin_sweep_apply(view, SweepScope::Dead),
+        AuxAction::SweepBoth => begin_sweep_apply(view, SweepScope::Both),
         AuxAction::OpenConnections => {
             // x-84d7: close the MENU and open the Connections modal in its
             // loading state; arm the first read (the run loop spawns it).
@@ -24793,14 +24958,14 @@ mod tests {
             })
             .collect();
         assert_eq!(labels[0], "update ready");
-        assert_eq!(labels[1], "Sweep dead (0)");
+        assert_eq!(labels[1], "sweep threads");
         assert_eq!(labels[2], "keybinds");
         assert_eq!(menu.actions[0], AuxAction::OpenUpdate);
     }
 
     #[test]
-    fn sideline_menu_shows_counted_bmp_recycle_sweep() {
-        let menu = build_sideline_menu_with_count(Anchor::Center, None, 7);
+    fn sideline_menu_names_the_sweep_entry_off_dead() {
+        let menu = build_sideline_menu(Anchor::Center, None);
         let i = menu
             .popup
             .rows
@@ -24809,10 +24974,10 @@ mod tests {
                 matches!(
                     row,
                     PopupRow::Entry { glyph, label, .. }
-                        if glyph == "♺" && label == "Sweep dead (7)"
+                        if glyph == "♺" && label == "sweep threads"
                 )
             })
-            .expect("counted sweep entry");
+            .expect("sweep threads entry");
         let action_i = menu
             .popup
             .rows
@@ -24821,7 +24986,7 @@ mod tests {
             .filter(|row| matches!(row, PopupRow::Entry { .. }))
             .count()
             - 1;
-        assert_eq!(menu.actions[action_i], AuxAction::SweepDead);
+        assert_eq!(menu.actions[action_i], AuxAction::OpenSweep);
         assert!(crate::popup::menu_glyph_is_bmp("♺"));
         assert!(!crate::popup::menu_glyph_is_bmp("📄"));
         assert_eq!(
@@ -24834,44 +24999,94 @@ mod tests {
         );
     }
 
+    /// The choice modal is centered (not anchored to the menu cell), offers
+    /// the three choices with live counts, and a zero count greys its entry
+    /// out rather than offering a lie.
+    #[test]
+    fn sweep_modal_is_centered_with_live_counts_and_inert_zeroes() {
+        let modal = build_sweep_modal(3, 7);
+        assert_eq!(modal.popup.anchor, Anchor::Center);
+        assert_eq!(modal.popup.targets().len(), 3, "{:?}", modal.popup.rows);
+        assert_eq!(
+            modal.actions,
+            vec![
+                AuxAction::SweepTabs,
+                AuxAction::SweepDeadAgents,
+                AuxAction::SweepBoth
+            ]
+        );
+        let labels: Vec<(String, bool)> = modal
+            .popup
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                PopupRow::Entry { label, enabled, .. } => Some((label.clone(), *enabled)),
+                _ => None,
+            })
+            .collect();
+        assert!(labels.contains(&("tabs (3)".into(), true)), "{labels:?}");
+        assert!(
+            labels.contains(&("dead agents (7)".into(), true)),
+            "{labels:?}"
+        );
+        assert!(labels.contains(&("both".into(), true)), "{labels:?}");
+
+        let half = build_sweep_modal(0, 2);
+        assert_eq!(
+            half.popup.targets().len(),
+            2,
+            "a zero tab count greys its entry out"
+        );
+        assert_eq!(
+            half.actions,
+            vec![AuxAction::SweepDeadAgents, AuxAction::SweepBoth]
+        );
+
+        let empty = build_sweep_modal(0, 0);
+        assert_eq!(empty.popup.targets().len(), 0, "{:?}", empty.popup.rows);
+        assert!(empty
+            .popup
+            .rows
+            .iter()
+            .any(|row| matches!(row, PopupRow::Header(text) if text == "nothing to sweep")));
+    }
+
     #[tokio::test]
-    async fn sideline_sweep_confirm_reuses_centered_action_and_rechecks_count() {
+    async fn sweep_open_queues_one_counts_probe_and_apply_queues_scope() {
         let mut v = view_with_agents(vec![lifecycle_row("dead", true, false)]);
         v.term = (30, 100);
-        v.sweep_dead_count = 1;
-        assert_eq!(v.dead_sweep_count(), 1);
-        v.open_sideline_menu(Anchor::Center);
-        let sweep = v
-            .aux
-            .as_ref()
-            .unwrap()
-            .actions
-            .iter()
-            .position(|action| *action == AuxAction::SweepDead)
-            .unwrap();
-        v.aux.as_mut().unwrap().popup.sel = sweep;
         let mut buf = Vec::new();
-        aux_execute_selected(&mut v, &mut buf).await.unwrap();
-        assert!(matches!(
-            v.confirm.as_ref().map(|action| &action.action),
-            Some(ConfirmKind::SweepDead { dead: 1 })
-        ));
-        let overlay = v.confirm_overlay_layout(30, v.confirm.as_ref().unwrap());
-        assert!(overlay
-            .framed
-            .lines
-            .first()
-            .is_some_and(|line| line.text.starts_with('┌')));
+        execute_aux_action(&mut v, AuxAction::OpenSweep, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.sweep_action, Some(SweepAction::Counts));
+        assert!(
+            v.aux.is_none(),
+            "the menu closes; the modal opens on landing"
+        );
 
-        v.layout.agents.clear();
-        v.sweep_dead_count = 0;
-        assert_eq!(v.dead_sweep_count(), 0);
-        confirm_keys(&mut v, b"\r", &mut buf).await.unwrap();
-        assert!(buf.is_empty(), "zero candidates sends no stale sweep");
+        // A second tap while a verb runs says so instead of queueing: the
+        // pending counts probe stays exactly as the first tap left it.
+        v.sweep_inflight = true;
+        execute_aux_action(&mut v, AuxAction::OpenSweep, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.sweep_action, Some(SweepAction::Counts));
         assert!(v
             .notice
             .as_ref()
-            .is_some_and(|(notice, _)| notice.contains("swept 0")));
+            .is_some_and(|(notice, _)| notice.contains("already running")));
+
+        v.sweep_inflight = false;
+        for (action, scope) in [
+            (AuxAction::SweepTabs, SweepScope::Tabs),
+            (AuxAction::SweepDeadAgents, SweepScope::Dead),
+            (AuxAction::SweepBoth, SweepScope::Both),
+        ] {
+            execute_aux_action(&mut v, action, &mut buf).await.unwrap();
+            assert_eq!(v.sweep_action, Some(SweepAction::Apply(scope)));
+            v.sweep_action = None;
+        }
     }
 
     /// AC3-HP mirrored client-side: not-ready builds the menu with no row.
