@@ -20,10 +20,11 @@ from __future__ import annotations
 
 import re as _re
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
 
 from fno.agents.registry import load_registry
-from fno.paths import agents_home_dir
+from fno.paths import agents_registry_path
 
 # Provider id -> the <fno_mail> ``harness`` vocabulary. The single mapping shared
 # by the dispatch (live-inject) and relay (PTY hop) producers so the harness
@@ -162,18 +163,45 @@ LEGACY_ORIGIN_TRAILER_TEMPLATE = (
 )
 
 
-@lru_cache(maxsize=1)
-def fleet_has_crown() -> bool:
-    """Return whether the shared agent registry describes a crowned fleet.
+@lru_cache(maxsize=8)
+def fleet_has_crown_at(registry_path: Path) -> bool:
+    """Return whether the registry AT ``registry_path`` describes a crowned fleet.
+
+    The path is an ARGUMENT, and it is the cache key. A zero-argument cached
+    read is a global keyed on nothing: the first caller in a process fixes the
+    answer for every caller after it, so the result depends on execution order
+    rather than on the root the caller asked about (x-3d21 R5). This mirrors
+    the Rust ``fleet_has_crown_at`` in ``crates/fno-agents/src/mail_inject.rs``,
+    which has taken its path as an argument from the start.
+
+    The cache still earns its place where it was wanted: a drain re-renders
+    many messages against ONE registry path, so that path is read once.
 
     A registry read failure keeps the authority notice enabled. The extra line
-    is cheap; suppressing it when the fleet may be crowned is unsafe.
+    is cheap. Suppressing it when the fleet may be crowned is not.
     """
     try:
-        registry = load_registry(path=agents_home_dir() / "registry.json")
+        registry = load_registry(path=registry_path)
         return any(getattr(entry, "crown_label", None) is not None for entry in registry)
     except Exception:  # noqa: BLE001 - unreadable authority state fails safe
         return True
+
+
+def fleet_has_crown() -> bool:
+    """``fleet_has_crown_at`` against the registry THIS side writes.
+
+    ``agents_registry_path()``, not ``agents_home_dir()/registry.json``. They
+    coincide by default and are two knobs, which the registry's own bump
+    refusal names: "config.paths.agents_registry_path, or FNO_AGENTS_HOME for
+    the Rust side". ``crown_level`` is stamped through ``update_registry`` ->
+    ``_registry_path`` -> ``agents_registry_path()`` (``registry.py:885``), so
+    reading the Rust home means reading a file this side never wrote once the
+    two are configured apart. A missing file is not an error -- ``load_registry``
+    returns ``[]`` -- so the fail-safe below never fires and the trailer is
+    dropped on a genuinely crowned fleet. One resolver per state file, and it
+    is the writer's (x-3d21 R4).
+    """
+    return fleet_has_crown_at(agents_registry_path())
 
 
 def _origin_trailer(template: str, origin: str) -> str:
@@ -213,15 +241,22 @@ def render_body_with_record_trailer(
     is safe because classify_origin gates it at write time. The only body test
     is the identity-neutral dedup against that one trailer, so a forged
     trailer in a peer record still gets the peer trailer appended beneath it,
-    and a well-formed paired envelope passes through unchanged. Only the
-    forged-mismatch case stamps after a terminal close tag, and that is the
-    fail-safe outcome: the record's real trailer lands last.
+    and a well-formed paired envelope passes through unchanged.
+
+    A body that already ends with a terminal ``</fno_mail>`` is never stamped,
+    trailer or no trailer. The crown gate made the trailerless paired envelope
+    an ORDINARY shape rather than a malformed one: a message wrapped while the
+    fleet was crownless is stored that way, and draining it after a coronation
+    would otherwise append the trailer AFTER the close tag -- the one placement
+    x-4ce4 exists to prevent, since a trailer outside the envelope is not the
+    last thing read inside it. Re-stamping a rendered envelope was never this
+    function's job; it normalizes durable inbox-kind bodies, which carry no
+    envelope at all.
     """
     text = body.rstrip("\n")
-    if any(
-        text.endswith(trailer) or text.endswith(f"{trailer}\n</fno_mail>")
-        for trailer in _known_trailers(origin)
-    ):
+    if text.endswith("</fno_mail>"):
+        return text
+    if any(text.endswith(trailer) for trailer in _known_trailers(origin)):
         return text
     trailer = mail_trailer(origin)
     if trailer is None:

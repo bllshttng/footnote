@@ -430,24 +430,6 @@ def clean_lock_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _fresh_crown_read():
-    """Clear the process-lifetime ``fleet_has_crown`` cache around every test.
-
-    ``fno.mail.envelope.fleet_has_crown`` is ``lru_cache``d because the real
-    process is one short-lived ``fno`` invocation draining many messages. A
-    pytest worker is the opposite: one process, hundreds of tests, each with
-    its own sandbox HOME and its own registry. Without this, the FIRST test to
-    render an envelope decides the trailer for every later one, and which test
-    that is depends on `-p randomly`'s seed.
-    """
-    from fno.mail.envelope import fleet_has_crown
-
-    fleet_has_crown.cache_clear()
-    yield
-    fleet_has_crown.cache_clear()
-
-
-@pytest.fixture(autouse=True)
 def _no_review_coverage_recompute(monkeypatch):
     """Hermetic default for the coverage recompute (x-3a3f).
 
