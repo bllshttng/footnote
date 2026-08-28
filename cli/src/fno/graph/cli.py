@@ -5144,18 +5144,19 @@ def cmd_dispatch_lanes(
         vendor=provider,
         report=fill,
     )
-    fill.setdefault("requested", max_lanes)
-    fill.setdefault("selected", fill.get("filled", len(receipts)))
-    fill["selected"] = fill.get("filled", len(receipts))
-    fill.setdefault("dispatched", sum(
-        receipt.get("status") == "dispatched" for receipt in receipts
-    ))
-    fill.setdefault("skipped", sum(
-        receipt.get("status") == "skipped" for receipt in receipts
-    ))
-    fill.setdefault("stop", "no-candidate")
-    fill.setdefault("excluded", [])
-    typer.echo(json.dumps({"lanes": receipts, "fill": fill}, indent=2))
+    fill_output = {
+        "requested": fill.get("requested", max_lanes),
+        "selected": fill.get("filled", len(receipts)),
+        "dispatched": fill.get("dispatched", sum(
+            receipt.get("status") == "dispatched" for receipt in receipts
+        )),
+        "skipped": fill.get("skipped", sum(
+            receipt.get("status") == "skipped" for receipt in receipts
+        )),
+        "stop": fill.get("stop", "no-candidate"),
+        "excluded": fill.get("excluded", []),
+    }
+    typer.echo(json.dumps({"lanes": receipts, "fill": fill_output}, indent=2))
     if receipts and not any(
         receipt.get("status") == "dispatched" for receipt in receipts
     ):
