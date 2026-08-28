@@ -1,3 +1,7 @@
+# CANONICAL. The generated copy is cli/src/fno/agents/harness_capabilities.toml.
+# Edit this file, then resync the copy:
+#   cp crates/fno-agents/src/harness_capabilities.toml cli/src/fno/agents/harness_capabilities.toml
+# scripts/ci/check-harness-capabilities-fresh.sh fails CI when the two differ.
 map_version = 10
 
 [harness.claude]

@@ -193,6 +193,16 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
+      - name: Harness capabilities table fresh (one canonical source, byte-identical copy)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-harness-capabilities-fresh.sh
+
+      - name: Run harness-capabilities freshness test harness
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_harness_capabilities_fresh.sh
+
       - name: Cargo rustc-wrapper announces its path
         if: ${{ !cancelled() }}
         timeout-minutes: 5
