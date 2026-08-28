@@ -14,8 +14,9 @@ footnote runs as a host runtime on several AI coding CLIs. This is the public su
 | Openclaw | Loop-wrapper path. | Sequential |
 | OpenCode | Native stop-hook plugin (world-gated, in-session re-drive) + loop-wrapper fallback. Reads `AGENTS.md` natively. | Sequential |
 | Antigravity CLI (`agy`) | Native `Stop`-hook adapter (world-gated, `decision:"continue"` re-drive). Claude-shaped hook events, Gemini-family wire format. | Sequential |
+| pi (`@earendil-works/pi-coding-agent`) | Dual-lane: `pi --mode rpc` drives over strict JSONL, and pi's own TUI in a mux pane watches the same session. | Sequential |
 
-Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Pi, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration.
+Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration.
 
 ## What this means in practice
 
@@ -33,6 +34,33 @@ Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Pi, Qoder, Rovo Dev, Trae) are 
 
 A real Claude `UserPromptSubmit` capture on 2026-08-24 exposed `hook_event_name`, `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`, and `prompt`, but no human-origin discriminator. The law path therefore treats the permission decision for the exact proposal-bound command as the authority event. No environment edit, mail delivery, scheduled task, webhook, or agent identity can substitute for that approval.
 
+## pi: two lanes, one session, and one unsafe half
+
+pi is the first harness whose driving lane is neither a shellout nor a keystroke PTY, and the first whose worst failure mode is a SUCCESS. Read this before wiring anything to it.
+
+**The two lanes.** `pi --mode rpc` speaks strict JSONL over stdin and stdout: commands in, typed events out, LF the only record delimiter, an `id` correlating request to response. That is the DRIVING lane. A plain interactive `pi` in a mux pane is the WATCHING lane, showing pi's real TUI. They are mutually exclusive per PROCESS, chosen at exec, and never per session: measured 2026-08-28, a TUI opened on a session an rpc driver was already holding JOINED it, rendered that session's own turns, and left the session-file count at one. So the pane is a view onto a live rpc session rather than a rival launch, and `fno agents attach` on a pi row execs that TUI directly.
+
+**A pi session is the pair `(cwd, session_id)`.** Sessions live at `~/.pi/agent/sessions/<encoded-cwd>/<ISO-timestamp>_<session-id>.jsonl`, where the encoding replaces path separators with `-` and fences the result with `--` at both ends. The id alone addresses nothing. For a worktree-first fleet this bites immediately: a resume issued from the canonical checkout cannot see a session started in a worktree, and on pi that miss is not an error, it CREATES a second session under the same id.
+
+**fno mints the id and pi adopts it.** `--session-id <id>` is documented as "Use exact project session ID, creating it if missing" and behaves that way across separate processes. fno must always pass one. pi's own default is a UUIDv7, whose head-8 is the same clock bucket that collides two codex short ids.
+
+**Appends are safe. Creates are not, and creates fail SILENTLY.** Joining an existing session concurrently was measured four times: the second process exits 0 in about five seconds and its user turn hangs off the holder's last assistant message by `parentId`, one file and one linear chain. Four SIMULTANEOUS creates on one id produced four session files 49ms apart. Every process exited 0. Every process printed "creating a new session with that id". Every file was internally perfect. Then a later resume of that id picked the OLDEST, wrote no fifth file, and named none of the other three. Every component succeeded and the answer was wrong.
+
+So fno serialises the CREATE DECISION and nothing else, using the claim primitive that already exists on a `pi-session:<cwd>:<id>` key. The winner creates, the losers join, and the claim is released as soon as the session exists. The claim is the right instrument rather than a file count because a pi session's file appears at the FIRST TURN ATTEMPT: a live rpc session with no prompt sent leaves the directory empty, so counting files measures nothing in exactly the window the race lives in. A claim is written at acquire.
+
+The reader half is separate and outlives the fix: when one id resolves to more than one session, resume REFUSES and names every session with its timestamp, selecting none. Duplicates can pre-exist from a crash or a hand-run pi, and no claim taken today serialises one already on disk. Never rank duplicates by content: an empty assistant `content` array marks a turn that was attempted and FAILED, so the emptier file is often the one worth reading.
+
+**Two traps that cost a turn each.**
+
+1. rpc mode EXITS ON STDIN EOF, mid-turn, with status 0. A prompt fed from a file yielded five events and stopped at the user's own `message_end`; the assistant never spoke and the exit code still read success. Hold stdin open for the session's life and settle on the typed `agent_settled` event. A clean exit proves nothing.
+2. `--provider openai-codex` WITHOUT `--model` does not resolve to gpt-5.5. It falls through to a Bedrock model and fails with "Token is expired. To refresh this SSO session run 'aws sso login'", naming AWS and misdirecting completely. Pass both, always.
+
+**Mail rides `steer`, not keystrokes.** pi delivers a steering message after the current assistant turn finishes its tool calls and before the next LLM call, which is exactly the semantics fno's mail injection wants and what typing into a pane only approximates. Read the response literally: `success: true` means accepted, queued, or handled. Failures after acceptance arrive through the event stream, never as a second response for the same id.
+
+**Permissions and credentials are operator territory.** pi ships no permission popups at all, so its three `permission_response` actions are unsupported and its readiness manifest declares no blocked rule. `pi auth` is read-only, three verbs, none of which writes; only the TUI's `/login <provider>` writes a credential. Never synthesize one. The pane lane is the only lane where that command can be run, which is its second job beyond watching.
+
+**tmux note.** pi prints its own warning when `extended-keys` is off: modified Enter keys collapse to plain Enter. Plain Enter is `\r` and submits, which is all fno's submit path needs, so this only matters for a human wanting a newline without submitting. `set -g extended-keys on` in `~/.tmux.conf` fixes it.
+
 ## Official CLI documentation
 
 | CLI | Docs |
@@ -42,5 +70,6 @@ A real Claude `UserPromptSubmit` capture on 2026-08-24 exposed `hook_event_name`
 | Gemini CLI | https://geminicli.com/docs |
 | OpenCode | https://opencode.ai/docs |
 | Antigravity CLI (`agy`) | https://antigravity.google/docs/cli/reference |
+| pi | ships its own docs with the package (`docs/rpc.md`, `docs/sessions.md`, `docs/tmux.md`) |
 
 For per-skill cross-CLI consequences see [docs/SKILL-COMPAT-MATRIX.md](SKILL-COMPAT-MATRIX.md); for how footnote wires into each CLI's hook surface see [docs/architecture/multi-cli-hooks.md](architecture/multi-cli-hooks.md).
