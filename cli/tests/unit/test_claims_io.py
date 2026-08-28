@@ -345,3 +345,149 @@ def test_claims_root_for_honors_env_override(tmp_path, monkeypatch):
 def test_claims_root_for_repo_local_and_unknown_keys_return_none(key):
     """AC1-ERR: repo-local / unrecognized / colon-less keys keep the default (None)."""
     assert claims_root_for(key) is None
+
+
+# --- The state-root denial (x-f22f) -----------------------------------------
+#
+# A permission denial and lock contention both leave the caller without a
+# claim, and they have opposite remedies: contention clears on its own, a
+# missing write grant never does. A worker told only "no claim" reads it as
+# contention and waits for a holder that does not exist.
+
+
+def test_denied_claim_write_is_not_reported_as_contention(tmp_path, monkeypatch):
+    from fno.claims.io import ClaimStateRootDenied
+
+    state_root = tmp_path / ".fno"
+    claims = state_root / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    claims.chmod(0o500)  # readable, not writable: the sandbox's shape
+    try:
+        with pytest.raises(ClaimStateRootDenied) as caught:
+            atomic_create_exclusive(claims / "node%3Aab-1.lock", "x: 1\n")
+    finally:
+        claims.chmod(0o700)
+
+    message = str(caught.value)
+    assert str(state_root) in message, message
+    assert "NOT lock contention" in message, message
+
+
+def test_denied_claim_write_leaves_a_breadcrumb_the_operator_can_read(tmp_path, monkeypatch):
+    """The one channel a mute worker still has.
+
+    A worker denied the state root has lost the claim store, the mail bus and
+    the spawn mutex at once, so it cannot report its own condition through any
+    of them. The repo stays writable, so the refusal is written there.
+    """
+    import json
+
+    from fno.claims.io import ClaimStateRootDenied
+
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    # The canonical carrier, not a per-harness one: the resolver reads the
+    # marker table in fno.harness_identity rather than a second hand-written
+    # list, so this pins the contract instead of one harness's spelling.
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", "sess-probe-1")
+    claims.chmod(0o500)
+    try:
+        with pytest.raises(ClaimStateRootDenied):
+            atomic_create_exclusive(claims / "node%3Aab-2.lock", "x: 1\n")
+    finally:
+        claims.chmod(0o700)
+
+    crumb = repo / ".fno" / "state-root-denied.json"
+    assert crumb.exists(), "the denial must be readable from outside the sandbox"
+    payload = json.loads(crumb.read_text())
+    assert payload["denied_root"] == str(tmp_path / ".fno")
+    assert payload["session_id"] == "sess-probe-1"
+    assert payload["denied_at"].endswith("+00:00")
+
+
+def test_a_later_successful_claim_clears_the_breadcrumb(tmp_path, monkeypatch):
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    crumb = repo / ".fno" / "state-root-denied.json"
+    crumb.parent.mkdir(parents=True)
+    crumb.write_text("{}")
+
+    atomic_create_exclusive(claims / "node%3Aab-3.lock", "x: 1\n")
+
+    assert not crumb.exists(), "a successful claim proves the grant is back"
+
+
+def test_contention_is_still_contention(tmp_path):
+    """The denial branch must not swallow the AlreadyHeld signal."""
+    claims = tmp_path / ".fno" / "claims"
+    claims.mkdir(parents=True)
+    target = claims / "node%3Aab-4.lock"
+    atomic_create_exclusive(target, "x: 1\n")
+    with pytest.raises(ClaimAlreadyHeld):
+        atomic_create_exclusive(target, "x: 2\n")
+
+
+def test_denial_on_a_not_yet_created_claims_dir_is_still_named(tmp_path, monkeypatch):
+    """The case this feature exists for, and the one the first version missed.
+
+    A sandboxed worker usually meets a state root whose ``claims`` child does
+    not exist yet. The create then fails ``FileNotFoundError``, the retry branch
+    calls ``mkdir``, and THAT is the call the sandbox denies. An earlier version
+    mapped denials only on the first attempt, so this escaped as a raw
+    ``PermissionError``: no named refusal, no breadcrumb, and a worker left to
+    read it as lock contention.
+    """
+    import json
+
+    from fno.claims.io import ClaimStateRootDenied
+
+    state_root = tmp_path / ".fno"
+    state_root.mkdir()  # exists, but has NO claims child
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    state_root.chmod(0o500)
+    try:
+        with pytest.raises(ClaimStateRootDenied) as caught:
+            atomic_create_exclusive(state_root / "claims" / "node%3Aab-9.lock", "x: 1\n")
+    finally:
+        state_root.chmod(0o700)
+
+    assert str(state_root) in str(caught.value)
+    crumb = repo / ".fno" / "state-root-denied.json"
+    assert crumb.exists(), "the denial must leave a breadcrumb here too"
+    assert json.loads(crumb.read_text())["denied_root"] == str(state_root)
+
+
+def test_a_claim_under_a_different_root_leaves_a_live_denial_alone(tmp_path, monkeypatch):
+    """An unconditional clear erased a denial the worker still had.
+
+    A worker holds claims under more than one root. A success under the
+    repo-local store must not delete the report that the GLOBAL store is
+    denied: the problem stands and the only record of it disappears.
+    """
+    import json
+
+    other_root = tmp_path / "other" / ".fno"
+    claims = other_root / "claims"
+    claims.mkdir(parents=True)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr("fno.paths.resolve_repo_root", lambda: repo)
+    crumb = repo / ".fno" / "state-root-denied.json"
+    crumb.parent.mkdir(parents=True)
+    crumb.write_text(json.dumps({"denied_root": "/some/other/.fno"}))
+
+    atomic_create_exclusive(claims / "node%3Aab-10.lock", "x: 1\n")
+
+    assert crumb.exists(), "a success elsewhere must not erase a live denial"
+    assert json.loads(crumb.read_text())["denied_root"] == "/some/other/.fno"

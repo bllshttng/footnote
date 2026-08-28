@@ -50,6 +50,13 @@ pub struct HarnessCapabilities {
     pub stop_strategy: String,
     pub remove_strategy: String,
     pub session_binding: SessionBinding,
+    /// How this harness stands toward the fno state root, keyed by substrate.
+    /// The value is a carrier name, `unsandboxed` for a lane measured to need
+    /// none, or `unmeasured`. An ABSENT key means the lane declares nothing,
+    /// which the spawn gate refuses (epic rule R3). `default` keeps an older
+    /// packaged copy parseable.
+    #[serde(default)]
+    pub state_root_grant: BTreeMap<String, String>,
     pub permission_response: BTreeMap<String, PermissionResponse>,
     pub resume_strategy: ResumeStrategy,
     pub model_switch_strategy: ModelSwitchStrategy,
@@ -101,9 +108,27 @@ pub struct ModelSwitchStrategy {
     pub status_pattern: String,
 }
 
+impl HarnessCapabilities {
+    /// How this harness stands toward the state root on `substrate`, or `None`
+    /// when it declares nothing.
+    ///
+    /// Deliberately NOT named `carrier`: the value can be `unsandboxed` or
+    /// `unmeasured`, and a caller that read either as a carrier name would try
+    /// to spend a stance. `None` is the refusal case.
+    pub fn state_root_stance(&self, substrate: &str) -> Option<&str> {
+        self.state_root_grant.get(substrate).map(String::as_str)
+    }
+}
+
 impl HarnessContract {
     pub fn packaged() -> Result<Self, ContractError> {
         Self::parse(CAPABILITY_TOML)
+    }
+
+    /// [`HarnessCapabilities::state_root_stance`] for an unknown-harness name.
+    /// An unknown harness declares nothing, so it too is refused.
+    pub fn state_root_stance(&self, harness: &str, substrate: &str) -> Option<&str> {
+        self.harness.get(harness)?.state_root_stance(substrate)
     }
 
     pub fn parse(text: &str) -> Result<Self, ContractError> {
@@ -598,7 +623,7 @@ mod tests {
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 10);
+        assert_eq!(contract.map_version, 11);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode"]

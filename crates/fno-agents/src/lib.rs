@@ -711,6 +711,11 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // its slot frees instead of parking at an idle prompt forever.
     "bg_worker_terminal_stopped",
     "agent_spawn_failed",
+    // A codex thread was auto-resumed with no reconstructible state-root grant
+    // (x-f22f). The roots reach a spawn as an RPC param from the Python seam,
+    // and daemon-side recovery has no such param, so that worker may be unable
+    // to claim or mail. Emitted so the loss is readable instead of silent.
+    "codex_thread_resumed_without_state_grant",
     "agent_stop_error",
     "agent_spawn_cwd_fallback",
     // Claude stream-json adoption front door (daemon-emitted, ab-734fcd6c):

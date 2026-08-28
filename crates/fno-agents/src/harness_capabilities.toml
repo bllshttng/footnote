@@ -2,7 +2,7 @@
 # Edit this file, then resync the copy:
 #   cp crates/fno-agents/src/harness_capabilities.toml cli/src/fno/agents/harness_capabilities.toml
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when the two differ.
-map_version = 10
+map_version = 11
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -25,6 +25,31 @@ submit_keys = ["enter"]
 stop_strategy = "claude-short-id"
 remove_strategy = "claude-short-id"
 session_binding = { strategy = "preassigned-or-session-start", required = true, timeout_ms = 60000 }
+
+# How each harness and substrate stands toward the fno state root. One of:
+#
+#   "<carrier>"    the lane is sandboxed and this names how the grant travels
+#   "unsandboxed"  MEASURED to need no carrier: the worker runs with the user's
+#                  own permissions, so nothing restricts its state-root writes
+#   "unmeasured"   nobody has measured this lane. It is NOT refused, because
+#                  refusing on an unmeasured premise is the same guess in the
+#                  other direction; the caller gets the stderr note that
+#                  writable_dirs.py already prints
+#
+# The spawn gate refuses only an ABSENT key, meaning a lane nobody declared at
+# all. That keeps a newly added lane loud on day one without converting a
+# working spawn into a refused one.
+#
+# The trigger is deliberately not "declares no carrier". Epic rule R3 refuses a
+# process DENIED its declared root, and a lane that runs under no sandbox is
+# never denied anything. Measured 2026-08-28: an opencode PANE worker acquired
+# a claim and delivered mail with no grant at all, so refusing it would have
+# broken a lane that works.
+[harness.claude.state_root_grant]
+# `--add-dir`, spent by `claude_ask::build_argv` on every claude substrate.
+pane = "argv-add-dir"
+thread = "argv-add-dir"
+headless = "argv-add-dir"
 
 [harness.claude.permission_response.allow_once]
 supported = true
@@ -102,6 +127,18 @@ stop_strategy = "registry-noop"
 remove_strategy = "codex-session-index"
 session_binding = { strategy = "rollout-fd-or-daemon", required = true, timeout_ms = 60000 }
 
+[harness.codex.state_root_grant]
+# pane/headless spend `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS). The thread
+# lane builds NO argv - it sends JSON-RPC to a shared app-server - so its only
+# carrier is a protocol field. Measured against the live daemon on 2026-08-28:
+# `thread/start` takes only the scalar `sandbox` enum and IGNORES a
+# `sandboxPolicy` object without erroring, while `turn/start` honors
+# `sandboxPolicy.writableRoots`. docs/architecture/codex-thread-driver.md
+# records the measurement and the frames it came from.
+pane = "argv-add-dir"
+thread = "turn-start-sandbox-policy"
+headless = "argv-add-dir"
+
 [harness.codex.permission_response.allow_once]
 supported = true
 rule_ids = ["approval_prompt"]
@@ -160,6 +197,15 @@ submit_keys = ["unsupported"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "preassigned", required = true, timeout_ms = 60000 }
+
+[harness.gemini.state_root_grant]
+# gemini maps no additive write grant on any substrate. Whether a gemini worker
+# is actually DENIED the state root is unmeasured, and the CLI is deprecated
+# upstream, so nobody is going to measure it. Declared rather than refused: the
+# stderr note already warns, and a refusal here would rest on a guess.
+pane = "unmeasured"
+thread = "unmeasured"
+headless = "unmeasured"
 
 [harness.gemini.permission_response.allow_once]
 supported = false
@@ -226,6 +272,12 @@ submit_keys = ["enter"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "unsupported", required = false, timeout_ms = 0 }
+
+[harness.agy.state_root_grant]
+# `--add-dir` (writable_dirs.ADD_DIR_PROVIDERS).
+pane = "argv-add-dir"
+thread = "argv-add-dir"
+headless = "argv-add-dir"
 
 [harness.agy.permission_response.allow_once]
 supported = false
@@ -297,6 +349,21 @@ submit_keys = ["unsupported"]
 stop_strategy = "registry-noop"
 remove_strategy = "registry-only"
 session_binding = { strategy = "store-lookup", required = false, timeout_ms = 2000 }
+
+[harness.opencode.state_root_grant]
+# opencode maps no additive dir flag (`--dir` SETS cwd, verified against
+# v1.14.50), so its argv lanes carry nothing. The serve-HTTP thread lane does:
+# `opencode_serve.rs` turns FNO_WORKER_ADD_DIRS into per-session
+# `external_directory` allow rules.
+#
+# pane is MEASURED unsandboxed, 2026-08-28: an opencode pane worker with no
+# grant acquired `session:probe-<nonce>` and delivered mail carrying the same
+# nonce, both read by the dispatcher from the operator root. opencode is
+# pane-hosted and a mux pane is an ordinary user process, so there is nothing
+# to widen. headless has had no such measurement.
+pane = "unsandboxed"
+thread = "serve-external-directory"
+headless = "unmeasured"
 
 [harness.opencode.permission_response.allow_once]
 supported = false

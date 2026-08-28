@@ -56,6 +56,17 @@ class ClaimAlreadyHeld(Exception):
     """
 
 
+class ClaimStateRootDenied(Exception):
+    """A claim write was denied by the sandbox, not by another holder.
+
+    Distinct from :class:`ClaimAlreadyHeld` on purpose. Both make a caller fail
+    to get a claim, and the remedies have nothing in common: contention clears
+    on its own, a missing write grant never does. A worker told only "no claim"
+    reads it as contention and waits forever for a lock nobody holds. One did
+    diagnose this correctly from scratch, and no worker should have to.
+    """
+
+
 class ClaimCorrupted(Exception):
     """Raised when a claim file exists but cannot be parsed as YAML+schema."""
 
@@ -233,22 +244,156 @@ def atomic_create_exclusive(path: Path, content: str) -> None:
             except OSError:
                 pass
 
+    # One mapper for every failure, on BOTH the first attempt and the retry.
+    # An earlier version mapped denials only on the first attempt, so the case
+    # this feature exists for - a sandboxed worker whose `.fno/claims` does not
+    # exist yet - escaped as a raw PermissionError from `mkdir` inside the
+    # except block, with no named refusal and no breadcrumb.
+    def _map(exc: OSError) -> BaseException:
+        if isinstance(exc, FileExistsError) or exc.errno == errno.EEXIST:
+            return ClaimAlreadyHeld(str(path))
+        if exc.errno in (errno.EPERM, errno.EACCES, errno.EROFS):
+            return _state_root_denied(path)
+        return exc
+
     try:
         _attempt()
-    except FileExistsError as exc:
-        raise ClaimAlreadyHeld(str(path)) from exc
     except FileNotFoundError:
-        # Parent directory missing. Create it once and retry.
-        path.parent.mkdir(parents=True, exist_ok=True)
+        # Parent directory missing. Create it once and retry. The mkdir is
+        # INSIDE the mapper's reach because on a denied state root it is the
+        # first call that fails, before any claim file is attempted.
         try:
+            path.parent.mkdir(parents=True, exist_ok=True)
             _attempt()
-        except FileExistsError as exc:
-            raise ClaimAlreadyHeld(str(path)) from exc
-        # ENOSPC etc. propagate to the caller.
+        except OSError as exc:
+            raise _map(exc) from exc
     except OSError as exc:
-        if exc.errno == errno.EEXIST:
-            raise ClaimAlreadyHeld(str(path)) from exc
-        raise
+        raise _map(exc) from exc
+    # Reached only when the claim file was actually created, by either the
+    # first attempt or the post-mkdir retry. A successful claim write is proof
+    # the grant is present now, so any breadcrumb from an earlier denial is
+    # stale and would otherwise read as a live problem forever.
+    _clear_denial_breadcrumb(_denied_root(path))
+
+
+def _breadcrumb_path() -> Path:
+    """``<repo>/.fno/state-root-denied.json`` for the CURRENT worktree.
+
+    The current worktree, never the canonical checkout. A sandboxed worker runs
+    in a linked worktree and is granted THAT directory; the main worktree is
+    outside its sandbox, so a breadcrumb aimed there is silently dropped by the
+    very failure it is reporting.
+    """
+    from fno.paths import resolve_repo_root
+
+    return resolve_repo_root() / ".fno" / "state-root-denied.json"
+
+
+def _clear_denial_breadcrumb(granted_root: str) -> None:
+    """Clear the breadcrumb when it names the root we just wrote under.
+
+    Root-matched on purpose. A worker can hold claims under more than one root
+    (the global store and a repo-local one), so an unconditional clear lets a
+    success under one root erase a live denial of another - the report
+    disappears while the problem stands.
+
+    Cheap on the hot path: this runs on EVERY successful claim create, so it
+    must not resolve a repo root (which shells out to git) unless a breadcrumb
+    is actually there. The common case is one `exists()` on a cached path.
+    """
+    try:
+        target = _breadcrumb_path()
+        if not target.exists():
+            return
+        import json
+
+        try:
+            recorded = json.loads(target.read_text()).get("denied_root")
+        except Exception:
+            recorded = None
+        # An unreadable breadcrumb is cleared: it names no root to protect, and
+        # leaving a corrupt file behind reports a problem nobody can act on.
+        if recorded is None or recorded == granted_root:
+            target.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _state_root_denied(path: Path) -> ClaimStateRootDenied:
+    """Name the denied root, drop a breadcrumb, and return the refusal.
+
+    The breadcrumb is the load-bearing half. A worker denied the state root has
+    lost the claim store, the mail bus and the spawn mutex in one move, so it
+    cannot report its own condition through any of them - it reports into its
+    own transcript, which nothing reads. It is not voiceless, though: the same
+    sandbox that took the state root left the repo writable, so the refusal is
+    written there and the king reads it from outside the sandbox. That is the
+    difference between a failure that is visible and one that is not.
+
+    Best effort throughout. A breadcrumb that cannot be written must never
+    become a second failure stacked on the first.
+    """
+    root = _denied_root(path)
+    _write_denial_breadcrumb(root)
+    return ClaimStateRootDenied(
+        f"claim write denied by the sandbox: {root} is not writable for this session. "
+        f"This is a missing state-root grant, NOT lock contention: no other holder "
+        f"exists and waiting will not clear it. A worker here cannot claim, mail, or "
+        f"spawn. Dispatch on a lane that declares state_root_grant for this substrate."
+    )
+
+
+def _denied_root(path: Path) -> str:
+    """The state root the denied claim file lives under.
+
+    Reported rather than the lock file itself: the grant is a directory grant,
+    so the directory is the actionable name.
+    """
+    parent = path.parent
+    if parent.name == "claims":
+        parent = parent.parent
+    return str(parent)
+
+
+def _ambient_session_id() -> str:
+    """This worker's harness session id, or empty when nothing names it.
+
+    Reads the marker table in ``fno.harness_identity`` rather than naming the
+    per-harness variables here. A second hand-written list of those names is a
+    twin the reachable-paths gate refuses, and rightly: a harness added there
+    would silently produce breadcrumbs with a blank session id.
+    """
+    try:
+        from fno.harness_identity import FNO_HARNESS_SESSION_ID, HARNESS_SESSION_MARKERS
+
+        for name in (FNO_HARNESS_SESSION_ID, *(m for m, _ in HARNESS_SESSION_MARKERS)):
+            value = os.environ.get(name)
+            if value:
+                return value
+    except Exception:
+        pass
+    return ""
+
+
+def _write_denial_breadcrumb(denied_root: str) -> None:
+    """Write ``<repo>/.fno/state-root-denied.json``. Never raises."""
+    try:
+        import json
+        from datetime import datetime, timezone
+
+        target = _breadcrumb_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "denied_root": denied_root,
+            "session_id": _ambient_session_id(),
+            "denied_at": datetime.now(timezone.utc).isoformat(),
+        }
+        target.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        # Deliberately total. The caller is already returning a refusal that
+        # names the root; a breadcrumb failure must not replace it with a
+        # different error, and there is nowhere left to report this one.
+        pass
 
 
 def serialize_claim(claim: Claim) -> str:

@@ -4101,17 +4101,37 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let effort = req.params.get("effort").and_then(Value::as_str);
+    // Hop 2 of the state-root grant (x-f22f). Read the roots from the REQUEST,
+    // never from this process's environment. This daemon is long-lived and
+    // shared across every thread on the machine, so its own env is not the
+    // spawning client's - a `state_dirs_from_env()` call here would read
+    // whatever shell started the daemon, which is the exact mistake the next
+    // reader of this function will be tempted to make.
+    let state_dirs: Vec<String> = req
+        .params
+        .get("state_dirs")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|dir| !dir.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
     let seed = req
         .params
         .get("message")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
-    let driver = match crate::codex_thread::CodexThread::start(
+    let driver = match crate::codex_thread::CodexThread::start_with_state_dirs(
         cwd.to_path_buf(),
         model,
         yolo,
         effort,
+        &state_dirs,
     )
     .await
     {
@@ -4245,6 +4265,29 @@ async fn ensure_codex_thread_handle(
     // `codex_threads` is the map every other codex ask, stop and retask goes
     // through. Holding it across that await let one slow connect stall every
     // other codex thread on the machine, including the recovery loop.
+    // The state-root grant (x-f22f) cannot be reconstructed here, and the loss
+    // is announced rather than taken quietly. The roots reach a spawn from the
+    // Python seam's `FNO_WORKER_ADD_DIRS`, which this long-lived shared daemon
+    // does not have, and Rust deliberately runs no second copy of the resolver
+    // (`writable_dirs.published_worker_writable_dirs`: one published value, two
+    // readers). Reading this daemon's own env instead would grant whatever
+    // shell started it, which is wrong in a more dangerous direction.
+    //
+    // In practice the grant usually survives: a turn-level `sandboxPolicy`
+    // becomes the thread's default server-side, so a thread still loaded by the
+    // codex app-server keeps it across an `fno-agents-daemon` restart. It is
+    // lost only when the app-server itself restarted and reloaded the thread
+    // from its rollout. That worker is then mute again, so it gets an event
+    // instead of silence. The durable fix is a granted-roots receipt on the
+    // registry row, which belongs to the sibling node that owns that schema.
+    //
+    // Emitted only for a thread that COULD have lost something. A yolo thread
+    // is `danger-full-access` and needs no grant, and a resume that succeeds
+    // says nothing on its own, so the event fires after the resume and only
+    // for a bounded thread. An unconditional emit on every cache miss reports
+    // a loss that never happened, which is the kind of telemetry an operator
+    // learns to ignore.
+    let bounded = !entry_posture_is_full_access(entry);
     let driver = crate::codex_thread::CodexThread::resume(
         cwd,
         &session_id,
@@ -4254,6 +4297,12 @@ async fn ensure_codex_thread_handle(
     )
     .await
     .map_err(|error| format!("codex thread '{}' resume refused: {error}", entry.name))?;
+    if bounded {
+        let _ = ctx.emitter.emit(
+            "codex_thread_resumed_without_state_grant",
+            &json!({"name": entry.name, "lane": "thread", "session_id": session_id}),
+        );
+    }
     let mut threads = ctx.codex_threads.lock().await;
     // A concurrent caller may have won the race while we were connecting.
     // Theirs is already published, so keep it and drop ours: dropping a

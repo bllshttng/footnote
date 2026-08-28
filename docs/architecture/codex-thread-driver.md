@@ -138,6 +138,35 @@ Also present: `thread/fork`, `thread/rollback`, `thread/compact/start`, `thread/
 
 `turn/steer`'s `expectedTurnId` is worth dwelling on. A keystroke into a pane cannot assert which turn it steers. A driver can.
 
+## The sandbox carrier, measured rather than read
+
+A thread worker needs the fno state root writable or it cannot claim a node, deliver mail, or spawn a peer. Every other codex lane grants that as argv. This lane builds no argv, so the grant has to be a protocol field, and which field is not a thing the docs settle.
+
+Measured against the live app-server on 2026-08-28, codex-cli 0.149.1. The docs and the code disagreed going in, so the daemon's own answers are recorded here verbatim.
+
+| Sent on `thread/start` | The daemon's answer |
+|---|---|
+| `"sandbox": "workspace-write"` | honored: resolves to `workspaceWrite` with `writableRoots: []` |
+| `"sandbox": "workspaceWrite"` | REFUSED, `-32600 Invalid request: unknown variant workspaceWrite, expected one of read-only, workspace-write, danger-full-access` |
+| `"sandbox": {object}` | refused, `-32600 invalid value: map, expected map with a single key` / `invalid type: map, expected unit` |
+| `"sandboxPolicy": {type, writableRoots}` | ACCEPTED AND IGNORED: no error, and the thread resolves to the machine's configured default as though the field were absent |
+
+So `thread/start` carries only the scalar enum. A `sandboxPolicy` there is the worst possible answer. It looks accepted and changes nothing. On a machine whose configured default is wider than `workspace-write`, it silently WIDENS the worker instead of narrowing it.
+
+`turn/start` is the carrier. On a thread started bounded (`writableRoots: []`), a `turn/start` naming the state root let a shell command create a file under it. The identical turn with the root withheld was denied while still writing inside `cwd`. Both arms wrote a second file inside `cwd`, and both of those appeared. So the denied arm is a sandbox refusal, not a model that declined to run the command.
+
+Two consequences worth stating, because both invert an obvious assumption:
+
+The docs' `"workspaceWrite"` spelling is the one the server rejects, and `codex_thread.rs`'s `"workspace-write"` is the one it accepts. The code is right and the doc is wrong. A unit test pins the spelling so nobody "fixes" it toward the doc.
+
+The roots are ADDITIVE, not a replacement. A bounded thread reports `writableRoots: []` and can still write its own `cwd`, so naming the state root does not take the worktree away.
+
+The grant is sent on every turn rather than only the first. The protocol makes a turn-level override the thread's default for later turns. One turn is enough for a thread nobody resumes. A resumed thread re-resolves its posture server-side, so sending it per turn makes resume carry the grant for free.
+
+The grant is per THREAD, never per daemon. One shared app-server owns every thread on the machine. A grant applied at daemon scope widens every other worker at once.
+
+A live probe is the only instrument that can answer this. `codex_fake_daemon.rs` models no sandbox field at all. A green run against it measures the double and not the target. The fake records the frames it received instead, which pins the other half: fno's three hops put the roots on the wire.
+
 ## `thread/list` is a roster with the right cwd
 
 One stdio child paged `thread/list` to exhaustion. It returned 630 threads. 171 of those sat across 121 distinct worktree paths, each carrying its true working directory.
