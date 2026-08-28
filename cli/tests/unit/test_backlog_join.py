@@ -126,6 +126,9 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
     for call, name in zip(calls, receipt["spawned"]):
         cmd = call["cmd"]
         assert cmd[cmd.index("--substrate") + 1] == "thread"
+        # Explicit lane: an untagged spawn lets a codex-scoped default model
+        # inject and trip the vendor-mismatch refusal.
+        assert cmd[cmd.index("--harness") + 1] == "claude"
         assert cmd[cmd.index("--cwd") + 1] == str(tmp_path / "wt")
         assert cmd[cmd.index("--name") + 1] == name
         assert cmd[-1] == f"/fno:execute waves {tmp_path / 'plan.md'}"

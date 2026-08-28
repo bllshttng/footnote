@@ -2052,6 +2052,11 @@ def join_node(node_id: str, workers: int) -> dict:
         cmd = [
             *_subprocess_util.fno_py_cmd(),
             "agents", "spawn", "--substrate", "thread",
+            # Explicit harness, like _spawn_worker's `prov` default: an
+            # untagged spawn leaves the lane unresolved, and this machine's
+            # codex-scoped agents.defaults.model then injects onto it and
+            # trips the vendor-mismatch refusal (live proof, 2026-08-27).
+            "--harness", "claude",
             "--cwd", worktree, "--name", name,
             f"/fno:execute waves {plan_path}",
         ]
