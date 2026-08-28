@@ -2158,6 +2158,19 @@ event_types:
         detail:
           type: string
 
+  - name: codex_thread_resumed_without_state_grant
+    description: "A codex thread was auto-resumed with no reconstructible state-root grant. The roots reach a spawn as an RPC param from the Python seam, and daemon-side recovery has no such param, so this worker may be unable to claim or mail. Emitted so the loss is readable instead of silent; bounded threads only, since a full-access thread needs no grant."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+        lane:
+          type: string
+        session_id:
+          type: string
+
   - name: agent_spawn_cwd_fallback
     description: "A spawn/ask request reached the daemon with no cwd, so the worker was launched in a neutral temp dir instead of the caller's project. Signals a misbehaving client (the client should always forward cwd); the launch lands in /tmp rather than silently adopting the daemon's own start dir."
     sources: [daemon]
