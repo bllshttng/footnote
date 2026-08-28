@@ -76,7 +76,22 @@ def canonical_events_path(cwd: Optional[str] = None) -> Path:
     ``cwd`` when given (a full-graph reconcile in repo A can close a node whose
     worktree is repo B), else the process-cwd canonical root.
     """
+    import os
+
     from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree
+
+    # The pin outranks BOTH legs below, unlike claims.rs where an explicitly
+    # named journal wins over it. The difference is what the argument means:
+    # `events_dir` there IS a journal the caller chose, while `cwd` here is only
+    # a hint this function resolves a root FROM. Both legs resolve rather than
+    # accept, so both are what `FNO_EVENTS_PATH` exists to stand in for - it
+    # "stands in for a root nobody resolved" (fno.paths.project_events_json).
+    # Without this, a test drove `resolve_canonical_repo_root()` to the
+    # developer's real checkout and gate_escape telemetry landed in the
+    # operator's journal. Empty means unset, matching the other three writers.
+    pin = os.environ.get("FNO_EVENTS_PATH")
+    if pin:
+        return Path(pin)
 
     if cwd:
         canon = resolve_canonical_worktree(Path(cwd))
