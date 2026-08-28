@@ -1196,7 +1196,7 @@ def _refuse_repeated_dead_dispatch(
     return action
 
 
-def _spawn_receipt_identity(proc_stdout: Optional[str], proc_stderr: Optional[str]) -> str:
+def _spawn_receipt_identity(proc_stdout: Optional[str]) -> str:
     """Launch identity from a thread-substrate spawn receipt (shared scan).
 
     A ``thread``/``bg`` spawn prints a compact JSON receipt whose launch proof
@@ -1426,7 +1426,7 @@ def _spawn_worker(
         return "headless"
     # Keep scanning past a line that merely MENTIONS an id field but is not the
     # JSON receipt (banner/log noise) - only stop once an id actually parses.
-    launch_identity = _spawn_receipt_identity(proc.stdout, proc.stderr)
+    launch_identity = _spawn_receipt_identity(proc.stdout)
     if not launch_identity:
         raise SpawnError(
             f"fno agents spawn exit 0 but no launch-identity receipt: "
@@ -1996,11 +1996,15 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     manifest snapshot), computes the bound plan's ready-graph width, and
     spawns ``min(workers, width - 1)`` ``/fno:execute waves <plan>`` workers
     there via ``fno agents spawn --substrate thread``. Joiner 1 is the lead
-    and mail hub (Locked Decision 3); every other joiner's TARGET_BRIEF names
-    it. The spawned process exports FNO_WORKER_NAME from ``--name``, so each
-    joiner's task-claim holder is its own roster name (the joiner 1 contract).
-    ``model`` rides as an explicit ``--model``: a typed model with no vendor
-    implication overrides a config-injected default whose lane would refuse.
+    and mail hub (Locked Decision 3). The brief rides TWO channels: the file
+    ``<worktree>/.fno/join-briefs/<node>.md`` (reaches daemon-forked workers,
+    which the waves.md joiner posture reads) and TARGET_BRIEF (reaches lanes
+    that inherit the spawner's env, e.g. panes). The spawned process exports
+    FNO_WORKER_NAME from ``--name``, so each joiner's task-claim holder is
+    its own roster name (the joiner 1 contract; where the env export cannot
+    reach, resolve_task_holder reads the roster binding). ``model`` rides as
+    an explicit ``--model``: a typed model with no vendor implication
+    overrides a config-injected default whose lane would refuse.
 
     Returns the receipt ``{"node", "worktree", "width", "spawned", "lead"}``.
     Raises JoinRefuse (exit 2/3/4) on a precondition failure and SpawnError
@@ -2031,6 +2035,11 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             2, f"live claim for {node_id} names no holder worktree; nothing to join"
         )
+    if not Path(worktree).is_dir():
+        raise JoinRefuse(
+            2,
+            f"holder worktree for {node_id} is gone ({worktree}); nothing to join",
+        )
     try:
         plan_path = resolve_plan_path(str(plan_raw))
         width = _plan_parallel_width(plan_path)
@@ -2040,9 +2049,25 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         raise JoinRefuse(
             3, f"width {width}: a second worker has nothing to pull"
         )
-    count = min(workers, width - 1)
+    count = min(max(1, workers), width - 1)
 
     lead = f"j-{node_id}-1"
+    # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
+    # worker inherits the claude daemon's env (x-6de8), so the env export in
+    # the spawn below reaches panes but not this lane's serving sessions.
+    # waves.md's joiner posture reads this file before dispatching.
+    brief_dir = Path(worktree) / ".fno" / "join-briefs"
+    try:
+        brief_dir.mkdir(parents=True, exist_ok=True)
+        (brief_dir / f"{node_id}.md").write_text(
+            f"# Joiner brief: {node_id}\n\n"
+            f"lead and mail hub: {lead}\n\n"
+            f"Before dispatching any worker, claim ONE ready task via "
+            f"`fno backlog task update {node_id} <task> --status in_progress` "
+            f"(the waves.md 3e step; your roster name binds the holder).\n"
+        )
+    except OSError as exc:
+        raise SpawnError(f"join cannot write the joiner brief: {str(exc)[:160]}") from exc
     spawned: list[str] = []
     for k in range(1, count + 1):
         name = f"j-{node_id}-{k}"
@@ -2074,7 +2099,7 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         )
         identity = ""
         if proc.returncode == 0:
-            identity = _spawn_receipt_identity(proc.stdout, proc.stderr)
+            identity = _spawn_receipt_identity(proc.stdout)
         if not identity:
             detail = (proc.stderr or proc.stdout or "").strip()[:200]
             if not spawned:

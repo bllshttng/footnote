@@ -184,6 +184,51 @@ def test_live_claim_without_worktree_refuses_exit_2(tmp_path, monkeypatch):
     assert excinfo.value.code == 2
 
 
+def test_join_writes_the_brief_file_into_the_holder_worktree(tmp_path, monkeypatch):
+    """The brief must survive the daemon fork: TARGET_BRIEF cannot reach a
+    serving session, so the file channel carries the hub + claim step."""
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    join_node("x-8d1d", 3)
+    brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
+    assert "mail hub: j-x-8d1d-1" in brief
+    assert "task update x-8d1d" in brief
+
+
+def test_missing_holder_worktree_refuses_exit_2(tmp_path, monkeypatch):
+    """A live claim whose worktree was deleted has nothing to join."""
+    entry_plan = tmp_path / "plan.md"
+    entry_plan.write_text(PARALLEL_PLAN)
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph",
+        lambda *_a, **_k: [{"id": "x-8d1d", "plan_path": str(entry_plan)}],
+    )
+    monkeypatch.setattr("fno.paths.graph_json", lambda: tmp_path / "graph.json")
+    monkeypatch.setattr(
+        "fno.claims.core.claim_status",
+        lambda key, root=None: {
+            "key": key, "state": "live",
+            "metadata": {"worktree": str(tmp_path / "gone")},
+        },
+    )
+    monkeypatch.setattr(advance, "_claims_root_for", lambda key: tmp_path / "claims")
+    monkeypatch.setattr(
+        "fno.graph.collision.resolve_plan_path", lambda p: entry_plan
+    )
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 2
+    assert "is gone" in excinfo.value.message
+
+
+def test_zero_workers_still_spawns_one(tmp_path, monkeypatch):
+    """A direct join_node(workers=0) must not return a receipt claiming a
+    lead that was never spawned."""
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    receipt = join_node("x-8d1d", 0)
+    assert receipt["spawned"] == ["j-x-8d1d-1"]
+    assert len(calls) == 1
+
+
 def test_no_bound_plan_refuses_exit_4(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, None)
     with pytest.raises(JoinRefuse) as excinfo:
