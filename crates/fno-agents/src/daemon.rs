@@ -12907,9 +12907,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     /// start there).
     /// AC11: a yolo spawn stamps the posture on the row; the resume lane's
     /// helper reads it back.
-    /// The posture stamp, driven against a fake SHARED daemon.
     ///
-    /// This used to install a stdio `codex` on PATH and let the driver fork
+    /// It drives a fake SHARED daemon. It used to install a stdio `codex` on PATH and let the driver fork
     /// it. After the transport moved to the shared daemon that fake was never
     /// reached: on a developer machine the driver connected to the operator's
     /// REAL daemon and the test passed by starting a real thread, and in CI,
@@ -16186,7 +16185,17 @@ done
             crate::codex_fake_daemon::Interrupt::AckOnly(std::time::Duration::ZERO),
         );
         with_fake_codex_daemon(behavior, async {
+            // A Drop guard, not a teardown line: an assertion below panics
+            // out of this body, and a leaked bound would silently shorten
+            // every later test's interrupt wait in the same process.
+            struct BoundGuard;
+            impl Drop for BoundGuard {
+                fn drop(&mut self) {
+                    std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
+                }
+            }
             std::env::set_var("FNO_CODEX_INTERRUPT_BOUND_MS", "1500");
+            let _bound = BoundGuard;
             let home = tmp_home("codex-zombie-stop");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
@@ -16220,7 +16229,6 @@ done
                 "the actor must survive a refused stop; it holds the interrupt handle"
             );
 
-            std::env::remove_var("FNO_CODEX_INTERRUPT_BOUND_MS");
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
         })
