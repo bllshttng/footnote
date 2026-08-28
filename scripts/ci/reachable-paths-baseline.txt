@@ -90,6 +90,7 @@ A	registry read failed: {exc}	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agen
 A	repos/:owner/:repo/statuses/{head}	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	resume-attach:{short_id}	py=cli/src/fno/agents/resume_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# protocol
 A	roster-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# protocol
+A	route settings file {path} has no env mapping	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/reentry.rs	# msg-twin: the Rust resolver and the Python restore read the same settings shape and refuse with the same sentence
 A	route_provider,route_model	py=cli/src/fno/config/__init__.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol
 A	run the review verb at head	py=cli/src/fno/pr/_coverage_gate.py|cli/src/fno/pr/_merge.py;rs=crates/fno-agents/src/loopcheck.rs	# msg-twin
 A	sandbox_mode=workspace-write	py=cli/src/fno/agents/harnesses/codex.py;rs=crates/fno-agents/src/provider.rs	# protocol

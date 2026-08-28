@@ -536,7 +536,7 @@ mod tests {
             })
         } else {
             serde_json::json!({
-                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_BASE_URL": "https://repro.invalid/api/anthropic",
                 "ANTHROPIC_AUTH_TOKEN": SECRET,
                 "FNO_ROUTE_PROVIDER": "zai",
             })

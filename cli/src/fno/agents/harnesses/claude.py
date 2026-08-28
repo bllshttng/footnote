@@ -1860,7 +1860,12 @@ def claude_attach(
         child_env.pop("CLAUDE_CONFIG_DIR", None)
         if env:
             child_env.update(env)
-        run_kwargs["env"] = child_env
+        # The same identity-scrub floor every adapter's child env crosses: the
+        # attach client resolves its target from the jobId argument, never from
+        # an ambient session marker this shell happens to carry.
+        from fno.setup.github_cli import worker_environment
+
+        run_kwargs["env"] = worker_environment(child_env)
     result = _subprocess_run(argv, **run_kwargs)
     return result.returncode
 
