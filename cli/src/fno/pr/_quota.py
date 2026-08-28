@@ -132,8 +132,32 @@ def resolve_real_gh() -> Optional[str]:
     return None
 
 
+#: The read shapes the coverage reserve funds. Each entry is one known read,
+#: and the cost bound is the SHAPE, never the field count: `gh pr view --json`
+#: is one GraphQL query whatever it selects, so asking for fewer fields is
+#: never the expensive direction.
+_COVERAGE_READ_SHAPES = (
+    frozenset({"reviews", "comments", "headRefOid", "baseRefName"}),
+    frozenset({"commits"}),
+    frozenset({"labels"}),
+)
+
+
 def _coverage_read(args: Sequence[str]) -> bool:
-    """Only review-coverage computation and publication reads spend the reserve."""
+    """Only review-coverage computation and publication reads spend the reserve.
+
+    Subset per shape, not equality. Equality inverted the cost bound it was
+    meant to enforce: the NARROWER read was refused and the wider one allowed.
+    Measured - the stop gate's round-budget read sends
+    ``pr view <sel> --json reviews``, a strict subset of the reviews shape, and
+    it was refused on every call on every PR. The reviews axis of the round
+    count was inert from the day it shipped, so a spinning PR counted 0 rounds
+    against a cap of 2 while its sibling read, asking for MORE fields, passed.
+
+    Subset is tested against each shape individually rather than their union: a
+    union test would fund combinations no caller makes (``commits`` beside
+    ``labels``), which widens the reserve instead of correcting it.
+    """
     if len(args) < 4 or list(args[:2]) != ["pr", "view"]:
         return False
     try:
@@ -143,12 +167,11 @@ def _coverage_read(args: Sequence[str]) -> bool:
             (arg.partition("=")[2] for arg in args if arg.startswith("--json=")), ""
         )
     fields = frozenset(part for part in fields_arg.split(",") if part)
-    return fields in {
-        frozenset({"reviews", "comments"}),
-        frozenset({"reviews", "comments", "headRefOid", "baseRefName"}),
-        frozenset({"commits"}),
-        frozenset({"labels"}),
-    }
+    if not fields:
+        # An empty selection is not a narrower read, it is a malformed one, and
+        # it is a subset of everything. Refuse rather than fund it.
+        return False
+    return any(fields <= shape for shape in _COVERAGE_READ_SHAPES)
 
 
 def _quota(payload: str) -> tuple[Optional[int], Optional[int]]:
