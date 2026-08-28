@@ -1986,6 +1986,15 @@ def _plan_parallel_width(plan_path: Path) -> int:
             break
         width = max(width, len(batch))
         done.update(batch)
+    stuck = [tid for tid in all_ids if tid not in done]
+    if stuck:
+        # A cycle or a blocker naming an unknown id: no schedule exists, and
+        # reporting this as "width 1" would send the operator hunting for a
+        # narrow plan instead of the malformed edges.
+        raise ValueError(
+            f"task graph is unsolvable (cycle or unknown blocker): "
+            f"{', '.join(sorted(set(stuck))[:5])}"
+        )
     return width
 
 
@@ -2043,6 +2052,8 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     try:
         plan_path = resolve_plan_path(str(plan_raw))
         width = _plan_parallel_width(plan_path)
+    except ValueError as exc:
+        raise JoinRefuse(4, f"{node_id} plan task graph unsolvable: {str(exc)[:140]}") from exc
     except Exception as exc:  # noqa: BLE001 - an unreadable plan is no plan to join
         raise JoinRefuse(4, f"{node_id} bound plan unreadable: {str(exc)[:160]}") from exc
     if width < 2:

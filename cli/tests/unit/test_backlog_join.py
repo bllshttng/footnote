@@ -229,6 +229,21 @@ def test_zero_workers_still_spawns_one(tmp_path, monkeypatch):
     assert len(calls) == 1
 
 
+def test_unsolvable_task_graph_refuses_exit_4_with_cause(tmp_path, monkeypatch):
+    """A cycle or a blocker naming an unknown id is a malformed plan, not a
+    narrow one: exit 4 names the stuck tasks instead of blaming the width."""
+    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN.replace(
+        "surface: ['src/c.py']",
+        "surface: ['src/c.py']\n    blocked_by: ['9.9']",
+    ))
+    with pytest.raises(JoinRefuse) as excinfo:
+        join_node("x-8d1d", 3)
+    assert excinfo.value.code == 4
+    assert "unsolvable" in excinfo.value.message
+    assert "1.3" in excinfo.value.message
+    assert not calls
+
+
 def test_no_bound_plan_refuses_exit_4(tmp_path, monkeypatch):
     _wire(monkeypatch, tmp_path, None)
     with pytest.raises(JoinRefuse) as excinfo:
