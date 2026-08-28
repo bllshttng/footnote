@@ -12,15 +12,15 @@ What each harness fundamentally is, from fno's point of view:
 
 | | claude | codex | gemini | agy | opencode | pi |
 |---|---|---|---|---|---|---|
-| Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless | pane, **thread**, headless |
-| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) | pi `--mode rpc`: strict JSONL over stdin/stdout, typed events, `id` per request, and native mid-turn injection (`steer`). The driver holds stdin OPEN for the session's life, because rpc mode exits on stdin EOF mid-turn with status 0. |
-| Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) | yes (`pi --print`) |
+| Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless | pane |
+| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) | no. The transport exists and is tested (`pi --mode rpc`: strict JSONL, typed events, an `id` per request, native `steer` injection, stdin held open because rpc exits on EOF mid-turn with status 0), but no spawn arm drives it yet, so the bit reads false and dispatch keeps pi on `pane`. Same posture as opencode's serve lane, for the same reason. |
+| Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) | the argv is built (`pi --print`), but no dispatch arm reaches it |
 | Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) | `harness_session_id`, CALLER-ASSIGNED: fno mints it at spawn and pi adopts it. Never let pi mint one - its default is a UUIDv7 whose head-8 is the same clock bucket that collides two codex short ids. |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` | `attach` execs pi's own TUI on the same session id, in the row's cwd. It JOINS the live rpc session rather than starting a rival one, measured. |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) or `recover` | no | no | no | no | yes: a fresh process on the same `(cwd, session_id)` pair recalls prior context and prints no creation warning |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes | yes |
 
-The pane substrate (the default) is the great equalizer: all six harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+The pane substrate (the default) is the great equalizer: all six harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes. pi is pane-only today, so the pane IS its lane.
 
 A claude re-entry door resolves the row's recorded account and route before launch, on every verb above (`attach`, `resume`, `spawn --resume`, `recover`). A row whose binding evidence is missing or stale refuses with the field named. A claude row can hold two valid session ids after a fork. `recover` is the verb that restores one. With two ids recorded it requires `--session <id>` to name the chosen one. `--print-command` prints the inspection form without launching.
 
@@ -50,6 +50,8 @@ A pi session is the pair `(cwd, session_id)`. Sessions live at `~/.pi/agent/sess
 Appends are safe. Creates are not, and they fail silently. Four simultaneous creates on one id produced four session files 49ms apart. Every process exited 0 and printed "creating a new session with that id". A resume then picked the oldest and named none of the rest. fno serialises the create DECISION with `fno agents claim` on a `pi-session:<cwd>:<id>` key. It releases the claim once the session exists. That key is a SESSION key, not a node key, and the spawn lane takes it rather than a person.
 
 The reader half is separate. A resume whose id resolves to more than one session refuses. It names every session with its timestamp and picks none. Never rank duplicates by content. An empty assistant `content` array marks a turn that was attempted and FAILED.
+
+What ships today is the PANE lane plus the rpc transport as a driver library. `fno agents spawn -H pi` opens a pi TUI in a mux pane with an fno-minted session id, and `fno agents attach` joins that same session. The rpc driver has no spawn arm yet. So mail to a pi worker rides the pane's keystroke path, at a measured 0 ms enter delay. It does not ride the `steer` command the driver implements. Describe the lane that ships, not the one the library will serve.
 
 Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--provider` without `--model` falls through to a Bedrock model. Full contract and the credential rules: [docs/HARNESSES.md](HARNESSES.md).
 

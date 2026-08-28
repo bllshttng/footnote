@@ -3325,12 +3325,16 @@ fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<
 /// row with no cwd recorded is refused rather than defaulting to this
 /// process's own directory.
 fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
-    if !is_codex_thread_row(entry) {
-        // Same predicate, and deliberately the shared one: an interactive host
-        // with no claude short id and no pane of its own. A pi PANE row keeps
-        // navigating to the tab where its process already lives.
-        return None;
-    }
+    // NOT `is_codex_thread_row`, and the difference is load-bearing. That
+    // predicate excludes a pane-hosted row, which is right for codex (its
+    // thread lives in a daemon, and a pane row's process already has a place)
+    // and wrong for every pi row fno can produce today: the pi spawn lane IS
+    // the pane lane, so gating on it refused every real row with "pi agents
+    // are one-shot", contradicting the docs shipped in the same change.
+    //
+    // pi needs neither exclusion, because a second pi on one session id is a
+    // measured-safe JOIN rather than a rival launch. What it does need is the
+    // PAIR: a session id, and the cwd that scopes it.
     let session_id = entry
         .get("harness_session_id")
         .and_then(Value::as_str)
@@ -3341,7 +3345,9 @@ fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i3
         .filter(|c| !c.is_empty());
     let Some(cwd) = cwd else {
         eprintln!(
-            "fno agents attach: registry row {name:?} records no cwd, and a pi session is the              pair (cwd, session id). Attaching from the wrong directory would CREATE a second              session under this id rather than joining the live one, so this is refused."
+            "fno agents attach: registry row {name:?} records no cwd, and a pi session is \
+the pair (cwd, session id). Attaching from the wrong directory would CREATE a second session \
+under this id rather than joining the live one, so this is refused."
         );
         append_agents_event(
             events_path,
@@ -3357,6 +3363,55 @@ fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i3
     if !which_on_path("pi") {
         eprintln!("pi CLI not on PATH");
         return Some(14);
+    }
+    // The cwd has to EXIST, and checking it here is what lets the NotFound arm
+    // below mean the binary and only the binary. A pruned worktree is this
+    // fleet's normal lifecycle, and `Command::current_dir` on a missing
+    // directory fails with ErrorKind::NotFound, which that arm would report as
+    // "pi CLI not on PATH" - sending an operator to reinstall pi over a stale
+    // registry row.
+    let cwd_path = Path::new(cwd);
+    if !cwd_path.is_dir() {
+        eprintln!(
+            "fno agents attach: the cwd recorded for {name:?} is gone: {cwd}. A pi session is \
+the pair (cwd, session id), so there is nothing here to attach to."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-row-cwd-missing".to_string())),
+                ("detail", Value::String(cwd.to_string())),
+            ],
+        );
+        return Some(13);
+    }
+
+    // The duplicate refusal, fired at the door where a human reads it. pi's own
+    // behaviour on an ambiguous id is to pick the OLDEST file and print
+    // nothing, which is how three sessions of real work became unreachable.
+    // An `Unknown` reading is NOT a duplicate and never blocks an attach: it
+    // means the store could not be read, and an unreadable store is evidence
+    // of nothing.
+    let lookup = crate::pi::lookup_sessions(cwd_path, session_id);
+    if let Some(refusal) = crate::pi::duplicate_resume_refusal(cwd_path, session_id, &lookup) {
+        eprintln!("fno agents attach: {refusal}");
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                (
+                    "reason",
+                    Value::String("pi-session-id-ambiguous".to_string()),
+                ),
+                ("session_id", Value::String(session_id.to_string())),
+            ],
+        );
+        return Some(13);
     }
 
     let argv = crate::pi::pi_attach_argv(session_id);

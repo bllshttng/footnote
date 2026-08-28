@@ -354,11 +354,16 @@ def test_scanner_still_sees_the_known_seams() -> None:
     assert counts.get("fenced", 0) >= 20, counts
     assert counts.get("value-form", 0) >= 4, counts
     # A floor AND a ceiling on exemptions: each new exempt marker must be a
-    # visible test edit, never a silent gate bypass. Ten standing
+    # visible test edit, never a silent gate bypass. Twelve standing
     # exemptions: the deprecated-gemini arms, the hermes -q value form, and
     # the notify-send body (a toast, not a worker seed). The agy arm dropped
     # out when the seed moved off the argv seam onto the shared readiness
-    # gate's submit path (x-4c17).
-    assert counts.get("exempt", 0) == 10, counts
+    # gate's submit path (x-4c17). pi added two, its pane arm and its headless
+    # argv tail, on a PROBED reason rather than an assumed one: `pi --
+    # --version` prints the version, so `--` is not an end-of-options marker on
+    # pi 0.84.2 and a fence there would be decoration. `--print` is a boolean
+    # flag and the seed is a positional, so there is no equal-form to reach for
+    # either.
+    assert counts.get("exempt", 0) == 12, counts
     # An unexpected classification kind must surface, not silently count.
     assert set(counts) <= {"fenced", "value-form", "exempt"}, counts

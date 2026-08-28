@@ -144,27 +144,6 @@ pub fn codex_app_server_socket_path() -> std::path::PathBuf {
         .join("app-server-control.sock")
 }
 
-/// (x-6678) The argv that opens codex's OWN interface on `thread_id`.
-///
-/// An EXEC target, never a proxy. The viewport replaces a pane with a real
-/// `codex` process and draws nothing itself; anything that read frames here
-/// and painted them would rebuild the rendering layer this lane deleted.
-pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
-    vec![
-        "codex".to_string(),
-        "resume".to_string(),
-        thread_id.to_string(),
-        "--remote".to_string(),
-        format!("unix://{}", codex_app_server_socket_path().display()),
-    ]
-}
-
-/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
-/// `Drive` when the row carries an attach id (an interactive attach form
-/// resolved it), `Follow` when the harness's transcript has a peek reader,
-/// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
-/// d-dbf83820): the two sets below are capability mirrors, and a harness that
-/// gains a capability moves tier with no edit here.
 /// (x-c198) The argv that opens pi's OWN interface on `session_id`.
 ///
 /// An EXEC target, never a proxy, and the same shape as the codex builder
@@ -207,6 +186,27 @@ pub fn pi_attach_argv(session_id: &str) -> Vec<String> {
     ]
 }
 
+/// (x-6678) The argv that opens codex's OWN interface on `thread_id`.
+///
+/// An EXEC target, never a proxy. The viewport replaces a pane with a real
+/// `codex` process and draws nothing itself; anything that read frames here
+/// and painted them would rebuild the rendering layer this lane deleted.
+pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
+    vec![
+        "codex".to_string(),
+        "resume".to_string(),
+        thread_id.to_string(),
+        "--remote".to_string(),
+        format!("unix://{}", codex_app_server_socket_path().display()),
+    ]
+}
+
+/// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
+/// `Drive` when the row carries an attach id (an interactive attach form
+/// resolved it), `Follow` when the harness's transcript has a peek reader,
+/// `Locate` otherwise. Never keyed on a harness NAME for its own sake (law
+/// d-dbf83820): the two sets below are capability mirrors, and a harness that
+/// gains a capability moves tier with no edit here.
 pub fn thread_reach(harness: Option<&str>, attach_id: Option<&str>) -> Reach {
     if attach_id.is_some() {
         return Reach::Drive;
@@ -1544,13 +1544,18 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // predicate shape as the codex clause above, and for the same reason:
         // a pi PANE row already has a place for its process and keeps
         // navigating to its tab.
+        // The RAW `mux` key, not the parsed one, matching the codex clause
+        // above for the reason its comment gives: a PRESENT key means
+        // pane-hosted whether or not it parses into a (session, pane_id) pair,
+        // and a half-written field must not make the viewport drive a row the
+        // CLI verb treats as pane-hosted.
         let is_pi_thread = harness_name == Some("pi")
             && row
                 .get("host_mode")
                 .and_then(|v| v.as_str())
                 .unwrap_or("exec")
                 == "interactive"
-            && mux.is_none();
+            && row.get("mux").is_none_or(serde_json::Value::is_null);
         let attach_id = if is_claude {
             row.get("short_id")
                 .or_else(|| row.get("claude_short_id"))

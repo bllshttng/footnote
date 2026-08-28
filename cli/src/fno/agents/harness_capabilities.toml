@@ -379,10 +379,15 @@ status_pattern = ""
 # prompt to bypass and nothing honest to put here.
 permission_bypass = []
 resume = "native-session"
-# The rpc lane is a real driving transport: typed events, an `id` per request,
-# and native mid-turn injection. It is not a keystroke lane wearing a thread
-# label.
-thread = true
+# FALSE, and it is a statement about fno rather than about pi. The rpc lane is
+# a real driving transport - typed events, an `id` per request, native mid-turn
+# injection - and its driver is built and tested. What does not exist yet is a
+# spawn arm: `dispatch_spawn` has no pi branch, so a `--substrate thread` pi
+# spawn would reach a lane with nothing behind it. This is opencode's situation
+# exactly, and it takes opencode's answer: the bit reads false, autonomous
+# dispatch keeps pi on `pane`, and the bit flips when the spawn arm ships with
+# its own unattended journey test rather than when the transport merely parses.
+thread = false
 autonomous_pane = false
 route_on_pane = false
 # UNVERIFIED FOR pi, and said so rather than inherited. This field has held one

@@ -3636,10 +3636,21 @@ def dispatch_spawn_pane(
             # is here because the id is not always fresh. A retry, a watchdog
             # wake, or a king re-dispatching a stalled node is a create on an id
             # that may already exist, and this fleet does all three.
-            from fno.agents.harnesses.pi import create_decision as _pi_create
+            from fno.agents.harnesses.pi import (
+                await_session_created as _pi_await,
+                create_decision as _pi_create,
+            )
 
             with _pi_create(cwd, session_uuid, holder=f"spawn:{name}"):
                 proc = _run_mux(run_args, runner, env=pane_env)
+                # `mux pane run` returns as soon as the PANE exists, which is
+                # tens of milliseconds. pi reaches session-id adoption at 0.64s
+                # and writes its first session file at about 5s. Releasing the
+                # claim on the pane would hand the whole create decision to an
+                # unguarded window, which is the race this claim exists to
+                # close. So the claim is held until the session provably
+                # exists, or until a bound expires and the wait says so.
+                _pi_await(cwd, session_uuid)
         else:
             proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None

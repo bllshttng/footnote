@@ -102,6 +102,8 @@ class _FakeProc:
     def __init__(self, chunks: list[bytes]) -> None:
         self.stdin = _FakeStdin()
         self.stdout = _FakeStdout(chunks)
+        # None on purpose: these tests inject the proc after start(), so no
+        # drain thread runs and there is no pipe to fill.
         self.stderr = None
 
     def wait(self, timeout: float | None = None) -> int:
@@ -201,7 +203,7 @@ def test_both_lane_argvs_pin_provider_and_model_and_differ_only_in_mode(monkeypa
         assert argv[argv.index("--model") + 1] == "gpt-5.5"
 
 
-def test_the_two_crates_build_the_same_attach_argv():
+def test_the_two_crates_build_the_same_attach_argv(monkeypatch):
     """Parity with ``fno_agents::pi::pi_attach_argv`` and
     ``fno::agents_view::pi_attach_argv``.
 
@@ -210,6 +212,10 @@ def test_the_two_crates_build_the_same_attach_argv():
     ``the_pi_attach_argv_is_identical_in_both_crates``; this pins the Python
     one to the same literal, so a drift in any of the three fails somewhere.
     """
+    # The overrides the module documents as the way to point at a different
+    # subscription must not read as a cross-crate parity break.
+    monkeypatch.delenv("FNO_PI_PROVIDER", raising=False)
+    monkeypatch.delenv("FNO_PI_MODEL", raising=False)
     assert attach_argv("01a04546-28b2-7a41-ae4c-892bbeb8e295") == [
         "pi",
         "--session-id",
@@ -219,3 +225,46 @@ def test_the_two_crates_build_the_same_attach_argv():
         "--model",
         "gpt-5.5",
     ]
+
+
+def test_the_framing_buffer_survives_a_turn_boundary():
+    """Turn two must not resume mid-record.
+
+    A 64KB read routinely returns ``agent_settled`` plus the first bytes of the
+    next record. A per-turn generator drops that tail, so turn two starts on a
+    fragment, ``json.loads`` rejects it, and the skip arm swallows it silently -
+    losing events, and hanging the turn outright when the discarded tail held
+    its own settle marker. This feeds exactly that shape: one chunk carrying
+    turn one's settle AND the start of turn two.
+    """
+    session = _session(
+        [
+            b'{"type": "agent_settled"}\n{"type": "agent_start"}\n',
+            b'{"type": "agent_settled"}\n',
+        ]
+    )
+    first = session.run_turn("one")
+    assert [e["type"] for e in first] == [SETTLED_EVENT]
+    second = session.run_turn("two")
+    assert [e["type"] for e in second] == ["agent_start", SETTLED_EVENT], second
+
+
+def test_each_turn_carries_its_own_request_id():
+    """The protocol's ``id`` correlates a response to its request, so one
+    constant would attribute turn two's response to turn one."""
+    session = _session([b'{"type": "agent_settled"}\n', b'{"type": "agent_settled"}\n'])
+    session.run_turn("one")
+    session.run_turn("two")
+    ids = [json.loads(raw)["id"] for raw in session.proc.stdin.written]
+    assert ids == ["fno-1", "fno-2"], ids
+
+
+def test_the_held_create_refusal_is_catchable_by_the_spawn_cli():
+    """A bare Exception would escape the CLI's handler as a traceback, so the
+    one refusal this lane exists to deliver is the one nobody would read."""
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.harnesses.pi import PiCreateHeld
+
+    held = PiCreateHeld("pi-session:/w:s-1", "the-winner", 4242, "host-a")
+    assert isinstance(held, DispatchAskError)
+    assert "the-winner" in str(held) and "4242" in str(held)
