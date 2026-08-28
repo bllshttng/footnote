@@ -144,17 +144,27 @@ def test_parallel_codex_asks_serialize_via_flock(
     # Pre-seed the registry so both spawned workers find the agent and
     # route to codex.resume (flock-guarded) instead of hitting the
     # unknown-agent guard (exit 16).
+    # The seed carries the CURRENT schema_version and states `harness`
+    # outright. It used to say v1 and let the v1->v15 provider-semantics
+    # migration derive `harness` from `provider`, but the subject of this test
+    # is flock serialization, not migration (test_registry.py owns that), and
+    # the v1 seed made these workers raise a source-run process's schema on the
+    # process-global registry - which x-665d's write guard refuses. The guard
+    # cannot see into a spawn-mode subprocess to be told otherwise, and it has
+    # no bypass by design.
     import json as _json
+    from fno.agents.registry import SCHEMA_VERSION
     registry_dir = tmp_path / ".fno" / "agents"
     registry_dir.mkdir(parents=True, exist_ok=True)
     registry_path = registry_dir / "registry.json"
     seed_session_id = "00000000-0000-0000-0000-pre-seeded-000"
     registry_path.write_text(
         _json.dumps({
-            "schema_version": 1,
+            "schema_version": SCHEMA_VERSION,
             "agents": [{
                 "name": "parallel-codex",
                 "provider": "codex",
+                "harness": "codex",
                 "cwd": str(tmp_path),
                 "log_path": str(tmp_path / "log.jsonl"),
                 "status": "live",
