@@ -25,6 +25,22 @@ from fno.paths_testing import use_tmpdir
 # ---------------------------------------------------------------------------
 
 
+def _as_deployed(monkeypatch) -> None:
+    """Run the write path as a DEPLOYED fno rather than a source checkout.
+
+    ``_refuse_source_ahead_schema_bump`` refuses to raise the process-global
+    registry's schema when this fno is running from a checkout, because that
+    bump exists only on one branch while every deployed reader on the machine
+    degrades. A test that writes an OLD on-disk version and asserts the write
+    upgrades it is asserting the deployed-upgrade path (AC2), so it says so
+    here rather than being exempted by an is-this-a-test predicate. Every other
+    test in this file leaves the guard live.
+    """
+    from fno.agents import registry as reg
+
+    monkeypatch.setattr(reg, "_running_from_source", lambda: None)
+
+
 def _minimal_entry(name: str = "test-agent", **overrides) -> dict:
     base = {
         "name": name,
@@ -949,6 +965,7 @@ def test_inside_leg_round_trips_across_registry_boundary(
     (c) default to None when absent.
     """
     use_tmpdir(monkeypatch, tmp_path)
+    _as_deployed(monkeypatch)
     from fno.agents.registry import (
         AgentEntry,
         load_registry,
@@ -1028,6 +1045,7 @@ def test_screen_state_round_trips_across_registry_boundary(
     registry never drops it.
     """
     use_tmpdir(monkeypatch, tmp_path)
+    _as_deployed(monkeypatch)
     from fno.agents.registry import (
         AgentEntry,
         load_registry,
@@ -1124,6 +1142,7 @@ def test_us2_first_write_upgrades_on_disk_to_current(tmp_path: Path, monkeypatch
     (v2 additions) and mcp_channel_id (v3 addition).
     """
     use_tmpdir(monkeypatch, tmp_path)
+    _as_deployed(monkeypatch)
     from fno.agents.registry import SCHEMA_VERSION, load_registry, write_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
@@ -1898,6 +1917,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     """AC2-EDGE: a legacy v8 row carrying only claude_short_id resolves by that
     value after load; on write-back it carries short_id and no claude_short_id."""
     use_tmpdir(monkeypatch, tmp_path)
+    _as_deployed(monkeypatch)
     from fno.agents.registry import load_registry, write_registry
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"

@@ -42,6 +42,7 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
 
@@ -1003,6 +1004,88 @@ def _refuse_write_over_newer_schema(raw: Optional[dict], target: Path) -> None:
         )
 
 
+@lru_cache(maxsize=1)
+def _running_from_source() -> Optional[Path]:
+    """The repo root when this fno runs from a checkout, else ``None``.
+
+    Keyed on the MODULE's own path, never on the cwd: a deployed fno invoked
+    from inside a worktree is still deployed and must keep its normal write.
+    A deployed wheel lives under ``.../site-packages/fno/`` and reaches no
+    ``.git`` at any ancestor; source lives at ``<checkout>/cli/src/fno/`` and
+    reaches one four levels up.
+
+    A linked worktree's ``.git`` is a FILE, not a directory, so this tests
+    existence. ``is_dir()`` would miss every worktree, which is the only place
+    a source-ahead process ever runs.
+    """
+    here = Path(__file__).resolve()
+    for parent in list(here.parents)[:6]:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
+def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
+    """Refuse to RAISE the shared registry's schema from a source checkout.
+
+    The inverse of :func:`_refuse_write_over_newer_schema`, and the other half
+    of the same comparison. That guard protects a reader from erasing fields it
+    cannot see. This one stops the bump that creates those readers in the first
+    place: a worktree whose branch raised ``SCHEMA_VERSION`` writes that number
+    into ``~/.fno/agents/registry.json`` on its next ordinary mail send, and
+    every deployed process on the machine degrades until the branch merges.
+
+    Three conditions gate it, each load-bearing:
+
+    - the target IS the process-global registry. A named store is nobody's
+      shared state, so every test and every deliberate non-default store is
+      untouched -- and so is a checkout pointed at its own registry, which is
+      the escape hatch. It works by moving the target, not by silencing a check.
+    - :func:`_running_from_source` found a root and the target lies outside it.
+      A store inside the checkout is worktree-local by construction.
+    - the on-disk version is a readable int strictly BELOW this one. An absent
+      or unparseable file is not a raise, mirroring the sibling guard's
+      reasoning: refusing there would leave a torn registry unrepairable by the
+      command meant to rewrite it.
+
+    There is deliberately NO bypass flag and NO env override. The redirect
+    above already covers a developer exercising a new schema end to end, and a
+    disable switch is the first thing a blocked worker would reach for, which
+    is the failure this exists to stop.
+    """
+    if raw is None:
+        return
+    on_disk = raw.get("schema_version")
+    if not isinstance(on_disk, int) or on_disk >= SCHEMA_VERSION:
+        return
+    root = _running_from_source()
+    if root is None:
+        return
+    resolved = target.resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        pass
+    else:
+        return
+    try:
+        shared = paths.agents_registry_path().resolve()
+    except Exception:  # noqa: BLE001 - unreadable config is not a bump
+        return
+    if resolved != shared:
+        return
+    raise RegistryVersionError(
+        f"refusing to raise the shared registry at {target} from "
+        f"schema_version={on_disk} to schema_version={SCHEMA_VERSION}: this fno "
+        f"is running from source at {root}, not from the deployed install, so "
+        "the bump exists only on this branch and every deployed reader on the "
+        "machine would degrade until it merges. Either deploy this schema "
+        "(fno doctor update), or point this checkout at its own registry "
+        "(config.paths.agents_registry_path, or FNO_AGENTS_HOME for the Rust "
+        "side)."
+    )
+
+
 def _existing_row_names(raw: Optional[dict]) -> set[str]:
     """Names already on disk, from the same read ``_refuse_write_over_newer_schema``
     uses -- so the new-vs-existing split for the resolvable-handle invariant
@@ -1073,6 +1156,7 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
     target = _registry_path(path)
     raw = _read_raw_registry(target)
     _refuse_write_over_newer_schema(raw, target)
+    _refuse_source_ahead_schema_bump(raw, target)
     existing = _existing_row_names(raw)
     for e in entries:
         _validate_single_live_ref(e)
@@ -1096,9 +1180,147 @@ def write_registry(entries: list[AgentEntry], path: Optional[Path] = None) -> No
 
 
 #: Constructor keys of ``AgentEntry``, derived rather than listed so a new
-#: field never has to be remembered here. Used only on the read-forward path,
-#: to drop keys a newer writer added after this fno was built.
+#: field never has to be remembered here. Used on the read-forward path, to
+#: drop keys a newer writer added after this fno was built, and by the repair
+#: verb, to decide which keys a rollback would be discarding.
 _INIT_FIELD_NAMES = frozenset(f.name for f in fields(AgentEntry) if f.init)
+
+
+class RegistryRepairRefused(RuntimeError):
+    """The repair verb refused rather than guessing. Never a partial write."""
+
+
+@dataclass(frozen=True)
+class RegistryRepairPlan:
+    """What a repair would drop, whether or not it was applied."""
+
+    path: Path
+    on_disk: int
+    to_version: int
+    #: row name -> the newer-schema keys this repair discards, all of them empty
+    dropped: dict[str, list[str]]
+    backup: Optional[Path] = None
+
+
+def _plan_registry_schema_repair(
+    raw: object, target: Path, to_version: int
+) -> tuple[dict, RegistryRepairPlan]:
+    """Decide the repair, or refuse. Pure: reads nothing, writes nothing."""
+    if not isinstance(raw, dict):
+        raise RegistryRepairRefused(
+            f"refusing to repair {target}: it is absent, empty, or not a JSON "
+            "object. A torn file is damage, not a version to roll back, and "
+            "this verb never guesses at what the rows were."
+        )
+    on_disk = raw.get("schema_version")
+    if not isinstance(on_disk, int):
+        raise RegistryRepairRefused(
+            f"refusing to repair {target}: schema_version is "
+            f"{on_disk!r}, not an integer."
+        )
+    if on_disk <= to_version:
+        raise RegistryRepairRefused(
+            f"refusing to repair {target}: on-disk schema_version={on_disk} is "
+            f"not above the requested --to {to_version}. This verb only rolls "
+            "a version DOWN; raising one is the deployed writer's job."
+        )
+    agents = raw.get("agents")
+    if not isinstance(agents, list):
+        raise RegistryRepairRefused(
+            f"refusing to repair {target}: 'agents' is {type(agents).__name__}, "
+            "not a list."
+        )
+    dropped: dict[str, list[str]] = {}
+    carrying: list[str] = []
+    for index, row in enumerate(agents):
+        if not isinstance(row, dict):
+            raise RegistryRepairRefused(
+                f"refusing to repair {target}: row {index} is not an object."
+            )
+        name = row.get("name") if isinstance(row.get("name"), str) else f"<row {index}>"
+        unknown = [k for k in row if k not in _INIT_FIELD_NAMES]
+        if not unknown:
+            continue
+        # None and an empty string, list, or object read as "the newer schema
+        # added this field and nothing ever wrote it". Everything else is data,
+        # 0 and False included: those are values a newer schema meant to store.
+        empty = [k for k in unknown if row[k] is None or row[k] in ("", [], {})]
+        real = [k for k in unknown if k not in empty]
+        if real:
+            carrying.append(f"{name}: {', '.join(sorted(real))}")
+        if empty:
+            dropped[name] = sorted(empty)
+    if carrying:
+        raise RegistryRepairRefused(
+            f"refusing to repair {target}: rolling schema_version={on_disk} back "
+            f"to {to_version} would DISCARD data these rows carry - "
+            + "; ".join(carrying)
+            + ". The 2026-08-28 rollback was lossless only because every row "
+            "happened to carry the newer fields empty; this is the assertion "
+            "that ends that luck. Deploy the newer schema instead."
+        )
+    plan = RegistryRepairPlan(
+        path=target, on_disk=on_disk, to_version=to_version, dropped=dropped
+    )
+    return raw, plan
+
+
+def repair_registry_schema(
+    to_version: int,
+    *,
+    path: Optional[Path] = None,
+    apply: bool = False,
+    lock_timeout: Optional[float] = None,
+) -> RegistryRepairPlan:
+    """Roll a poisoned registry's ``schema_version`` back down, under the lock.
+
+    The script the operator ran by hand on 2026-08-28, and whose
+    ``.bak.poison-repair`` sibling shows someone ran on 2026-08-09. Twice by
+    hand is a verb. Five steps, in this order, refusing rather than guessing at
+    any of them:
+
+    1. hold the registry-wide lock, so a live file is never repaired unlocked;
+    2. read the raw JSON, and refuse anything not strictly above ``to_version``;
+    3. assert no row carries a key this fno does not know with a real value;
+    4. write a timestamped backup beside the file;
+    5. drop the empty unknown keys, set the integer, replace atomically.
+
+    Step 3 is the point of the verb. Prevention (the write guard) drives this
+    verb's expected frequency toward zero, but prevention is not retroactive: a
+    worktree that already raised the shared file leaves a state only a hand edit
+    clears.
+
+    Dry run by default; ``apply=True`` performs it.
+    """
+    target = _registry_path(path)
+    with _hold_registry_lock(target, timeout=lock_timeout):
+        try:
+            raw = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RegistryRepairRefused(
+                f"refusing to repair {target}: could not read it ({exc})."
+            ) from exc
+        raw, plan = _plan_registry_schema_repair(raw, target, to_version)
+        if not apply:
+            return plan
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup = target.with_name(f"{target.name}.bak.schema-repair-{stamp}")
+        backup.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        raw["schema_version"] = to_version
+        raw["agents"] = [
+            {k: v for k, v in row.items() if k in _INIT_FIELD_NAMES}
+            for row in raw["agents"]
+        ]
+        tmp = target.with_suffix(target.suffix + ".tmp")
+        try:
+            tmp.write_text(
+                _json_dumps(raw, indent=2, sort_keys=False), encoding="utf-8"
+            )
+            os.replace(tmp, target)
+        except Exception:
+            tmp.unlink(missing_ok=True)
+            raise
+        return replace(plan, backup=backup)
 
 
 def _is_identity_token(value: object) -> bool:
