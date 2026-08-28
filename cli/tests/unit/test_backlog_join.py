@@ -212,3 +212,89 @@ def test_lead_spawn_requires_launch_identity(tmp_path, monkeypatch):
     with pytest.raises(SpawnError):
         join_node("x-8d1d", 3)
     assert calls  # the spawn was attempted, its receipt just proved nothing
+
+
+# ---------------------------------------------------------------------------
+# The roster-name rung in resolve_task_holder (joiner 1's holder contract,
+# completed for daemon-forked workers where the env export cannot reach)
+# ---------------------------------------------------------------------------
+
+
+def _identity(monkeypatch, tmp_path, session_id):
+    import json
+    from types import SimpleNamespace
+
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "j-x-9734-2", "harness_session_id": session_id, "status": "live"},
+    ]}))
+    monkeypatch.setattr("fno.agents.registry._registry_path", lambda path=None: reg)
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env, **_k: SimpleNamespace(
+            session_id=session_id, harness="claude", disposition="proven"
+        ),
+    )
+
+
+def test_task_holder_prefers_env_name(tmp_path, monkeypatch):
+    from fno.claims.self_identity import resolve_task_holder
+
+    holder, why = resolve_task_holder({"FNO_WORKER_NAME": "j-x-9734-1"})
+    assert (holder, why) == ("j-x-9734-1", "")
+
+
+def test_task_holder_reads_roster_binding_when_env_missing(tmp_path, monkeypatch):
+    """The daemon fork drops the env export; the spawn-time registry row
+    proves the same name for the worker it bound."""
+    from fno.claims.self_identity import resolve_task_holder
+
+    sid = "721b0775-8b99-4f8f-a067-b9642e8ced8a"
+    _identity(monkeypatch, tmp_path, sid)
+    holder, why = resolve_task_holder({})
+    assert (holder, why) == ("j-x-9734-2", "")
+
+
+def test_task_holder_ambiguous_registry_falls_back(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    from fno.claims.self_identity import resolve_task_holder
+
+    sid = "aaaa0000-0000-0000-0000-000000000000"
+    reg = tmp_path / "registry.json"
+    reg.write_text(json.dumps({"schema_version": 2, "agents": [
+        {"name": "row-a", "harness_session_id": sid},
+        {"name": "row-b", "harness_session_id": sid},
+    ]}))
+    monkeypatch.setattr(
+        "fno.agents.registry._registry_path", lambda path=None: reg
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env, **_k: SimpleNamespace(
+            session_id=sid, harness="claude", disposition="proven"
+        ),
+    )
+    holder, _why = resolve_task_holder({})
+    assert holder == sid
+
+
+def test_task_holder_missing_registry_keeps_session_id(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from fno.claims.self_identity import resolve_task_holder
+
+    sid = "bbbb0000-0000-0000-0000-000000000000"
+    reg = tmp_path / "absent.json"
+    monkeypatch.setattr(
+        "fno.agents.registry._registry_path", lambda path=None: reg
+    )
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda env, **_k: SimpleNamespace(
+            session_id=sid, harness="claude", disposition="proven"
+        ),
+    )
+    holder, why = resolve_task_holder({})
+    assert (holder, why) == (sid, "")
