@@ -277,7 +277,7 @@ event_types:
           description: "Count of findings this round classified non-blocking by the category allowlist (config.review.nonblocking_categories extends the shipped default). OPTIONAL."
         findings:
           type: array
-          description: "The bounded per-finding primitives the gate re-derives from: `category`, `verdict`, `blocking` (producer's claim), `has_required_fields`, and `finding_key` (file:line:category, the round-over-round identity a disposition keys on). One primitive per classified finding, so nothing is dropped between producer and gate. Capped in count and serialized bytes; an overflow truncates from the end and sets `findings_truncated: true`, which the gate reads as BLOCKING for the truncated remainder. OPTIONAL."
+          description: "The bounded per-finding primitives the gate re-derives from: `category`, `verdict`, `blocking` (producer's claim), `has_required_fields`, `finding_key` (file:line:category, the round-over-round identity a disposition keys on), and `summary` (the producer's own statement, bounded). One primitive per classified finding, so nothing is dropped between producer and gate. Capped in count and serialized bytes; an overflow truncates from the end and sets `findings_truncated: true`, which the gate reads as BLOCKING for the truncated remainder. OPTIONAL."
           items:
             type: object
             properties:
@@ -291,6 +291,9 @@ event_types:
                 type: boolean
               finding_key:
                 type: string
+              summary:
+                type: string
+                description: "The producer's own one-line statement of the finding, bounded at 240 characters with a trailing marker. The payload a reader needs to reach the `fixed` disposition: without it a blocking finding's whole human content is file:line:category, so clearing it requires text the schema never stored, and `declined` (which needs corroboration a solo author cannot mint) becomes the only reachable disposition. The array's existing count and byte truncation rule applies to it unchanged. OPTIONAL, like every other finding-record key, because every pre-landed attestation carries none of them."
         findings_truncated:
           type: boolean
           description: "The `findings` array was capped and the remainder dropped. The gate treats the truncated remainder as non-terminal (blocking), so truncation can never quietly lose a finding into harmlessness. OPTIONAL."

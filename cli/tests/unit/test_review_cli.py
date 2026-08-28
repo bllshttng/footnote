@@ -7,10 +7,13 @@ truncation must set the flag the gate reads as blocking for the remainder.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from fno.review.cli import (
     _FINDINGS_COUNT_CAP,
+    _RECORD_BYTE_BUDGET,
     RecordBuildError,
     build_emit_record,
 )
@@ -88,9 +91,36 @@ class TestBuildEmitRecord:
         assert record["findings_blocking"] == _FINDINGS_COUNT_CAP + 5
 
     def test_byte_budget_truncates_and_flags(self) -> None:
-        # The primitives carry no summary text, so the byte budget bites on
-        # finding_key length (file:line:category), the one unbounded field.
+        # finding_key length (file:line:category) is unbounded, so it can blow
+        # the budget on its own regardless of the bounded summary beside it.
         deep = [_finding(n, file="x" * 1200) for n in range(60)]
         record = build_emit_record(deep)
         assert len(record["findings"]) < 60
         assert record["findings_truncated"] is True
+
+    def test_worst_case_summaries_stay_inside_the_envelope(self) -> None:
+        """The primitives now carry a bounded summary, so the byte arithmetic
+        changed. The RULE did not: an overflow truncates from the end and sets
+        the flag the gate reads as blocking for the remainder.
+
+        Measured rather than assumed, because this is the one thing carrying
+        the finding text could break. Asserts the FLAG on the truncating side,
+        never the absence of overflow: a builder that silently dropped every
+        finding would also produce a record under budget.
+        """
+        from fno.review.findings import SUMMARY_MAX
+
+        payload = [
+            _finding(n, summary="s" * SUMMARY_MAX)
+            for n in range(_FINDINGS_COUNT_CAP)
+        ]
+        record = build_emit_record(payload)
+        serialized = len(json.dumps(record, ensure_ascii=False))
+        assert serialized <= _RECORD_BYTE_BUDGET, serialized
+        if len(record["findings"]) < _FINDINGS_COUNT_CAP:
+            assert record["findings_truncated"] is True
+        else:
+            assert "findings_truncated" not in record
+        # Whatever survived still carries its text: a truncation that emptied
+        # the summaries instead of dropping findings would also fit.
+        assert record["findings"][0]["summary"] == "s" * SUMMARY_MAX

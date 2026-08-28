@@ -224,6 +224,7 @@ class TestSummarize:
             "blocking": True,
             "has_required_fields": True,
             "finding_key": "a.py:1:style",
+            "summary": "a summary",
         }
 
     def test_as_dict_shape(self) -> None:
@@ -232,6 +233,49 @@ class TestSummarize:
         assert payload["findings_blocking"] == 0
         assert payload["findings_nonblocking"] == 1
         assert payload["findings"][0]["finding_key"] == "a.py:1:typo"
+
+
+class TestPrimitiveCarriesTheProducersStatement:
+    """The primitive keeps the summary the record already had.
+
+    Every assertion below reads the TEXT back, never the presence of a key. A
+    field asserted only by name passes on a primitive carrying None, which is
+    exactly the state that made the `fixed` disposition unreachable: the key
+    existed nowhere and the gate blocked on file:line:category alone.
+    """
+
+    def test_the_finding_text_survives_into_the_primitive(self) -> None:
+        text = "the retire guard tests membership negatively"
+        summary = summarize(
+            [_full(category="correctness", verdict="CONFIRMED", summary=text)]
+        )
+        assert summary.findings[0].summary == text
+        assert summary.as_dict()["findings"][0]["summary"] == text
+
+    def test_a_record_with_no_summary_carries_none_not_an_empty_string(self) -> None:
+        # The pre-landed cohort. None round-trips as a JSON null the gate
+        # already tolerates; "" would read as a finding whose author wrote
+        # nothing, which is a different claim.
+        summary = summarize([_full(category="typo", summary=None)])
+        assert summary.as_dict()["findings"][0]["summary"] is None
+
+    def test_an_overlong_summary_is_capped_and_says_so(self) -> None:
+        from fno.review.findings import SUMMARY_ELLIPSIS, SUMMARY_MAX
+
+        text = "x" * (SUMMARY_MAX + 500)
+        carried = summarize([_full(category="correctness", summary=text)]).findings[0]
+        assert len(carried.summary) == SUMMARY_MAX
+        # The marker is the measurement: without it a reader cannot tell a cut
+        # sentence from a short one.
+        assert carried.summary.endswith(SUMMARY_ELLIPSIS)
+
+    def test_a_summary_at_the_cap_is_not_marked(self) -> None:
+        from fno.review.findings import SUMMARY_ELLIPSIS, SUMMARY_MAX
+
+        text = "y" * SUMMARY_MAX
+        carried = summarize([_full(category="correctness", summary=text)]).findings[0]
+        assert carried.summary == text
+        assert not carried.summary.endswith(SUMMARY_ELLIPSIS)
 
 
 class TestFindingKey:
