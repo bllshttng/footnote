@@ -70,20 +70,47 @@ fn tab_close_without_a_target_names_the_bulk_verb() {
     );
 }
 
+/// Both flags together are the sweep modal's "both": the two halves and
+/// nothing else. The squad arm runs only to reap members, so a stale squad
+/// row the modal never offered to remove survives.
 #[test]
-fn contradictory_scope_flags_are_a_usage_error() {
-    let scratch = Scratch::new("receipt-scope-xor");
+fn combined_scope_flags_reap_members_and_remove_no_squad_row() {
+    let scratch = Scratch::new("receipt-combined");
+    let origin = seed_store_with(&scratch, r#"{"attach_id":"deadbeef","tombstone":false}"#);
+    let sock = scratch.main_sock();
+    let _server = spawn_server(&sock, &[("SHELL", "/bin/bash")]);
+
     let out = scratch
         .command()
-        .args(["mux", "workspace", "prune", "--tabs-only", "--dead-only"])
+        .args([
+            "mux",
+            "workspace",
+            "prune",
+            "--tabs-only",
+            "--dead-only",
+            "--json",
+        ])
         .output()
         .unwrap();
-    assert_eq!(out.status.code(), Some(2), "usage refusal");
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("--tabs-only") && stderr.contains("--dead-only"),
-        "the refusal names both flags: {stderr}"
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
     );
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("prune --json emits JSON");
+    assert_eq!(
+        receipt["pruned_count"], 0,
+        "the combined scope removes no squad row: {receipt}"
+    );
+    assert_eq!(receipt["members_reaped"], 1, "{receipt}");
+    assert_eq!(receipt["tabs_closed"], 0, "{receipt}");
+    let after = store_after(&scratch);
+    assert!(
+        !after.contains("deadbeef"),
+        "the dead member was reaped: {after}"
+    );
+    assert!(after.contains(&origin), "the squad row survives: {after}");
 }
 
 #[test]

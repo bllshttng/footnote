@@ -2000,7 +2000,8 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
 /// candidate list (AC1-UI). `--dry-run` writes nothing. `--tabs-only` runs the
 /// tab fold alone and leaves every squad row and member record untouched;
 /// `--dead-only` reaps dead members alone and removes no squad row; together
-/// they are a usage error.
+/// they run exactly those two halves, so the sweep modal's "both" can never
+/// remove a squad row the modal never offered to remove.
 ///
 /// Two arms run in ONE call and they must not contradict each other. The tab arm
 /// folds surplus pristine tabs; the squad arm decides store rows, and a live pane
@@ -2030,10 +2031,6 @@ fn squad_prune(args: &[OsString]) -> i32 {
                 return EXIT_USAGE;
             }
         }
-    }
-    if tabs_only && dead_only {
-        eprintln!("fno mux workspace prune: --tabs-only and --dead-only are mutually exclusive");
-        return EXIT_USAGE;
     }
 
     let evidence = member_evidence();
@@ -2105,9 +2102,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
             false,
             Some(detail),
         )
-    } else if tabs_only {
+    } else if tabs_only && !dead_only {
         // The tab arm above ran alone; the store pass is the half this scope
-        // leaves out, so its counters read zero rather than stale.
+        // leaves out, so its counters read zero rather than stale. With both
+        // flags the combined scope falls through to the store pass below,
+        // where `dead_only` wraps the verdict so no squad row is removed.
         (Vec::new(), 0, 0, 0, 0, 0, 0, !dry_run, None)
     } else if dry_run {
         let loaded = crate::squad_store::load();

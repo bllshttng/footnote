@@ -2553,7 +2553,12 @@ async fn run_sweep_verb(action: SweepAction) -> SweepMsg {
             match scope {
                 SweepScope::Tabs => args.push("--tabs-only".to_string()),
                 SweepScope::Dead => args.push("--dead-only".to_string()),
-                SweepScope::Both => {}
+                // Both halves, and nothing else: bare prune would also remove
+                // stale squad rows, which the modal never offered to remove.
+                SweepScope::Both => {
+                    args.push("--tabs-only".to_string());
+                    args.push("--dead-only".to_string());
+                }
             }
             // Each folded tab is one control roundtrip; a big workspace
             // sweep legitimately outlasts a modal probe.
@@ -11598,8 +11603,18 @@ async fn attach_and_run(
                 view.sweep_inflight = false;
                 match msg {
                     SweepMsg::Counts { tabs, dead } => {
-                        view.aux = Some(build_sweep_modal(tabs, dead));
-                        view.aux_esc.clear();
+                        // A popup opened after the tap is the operator's
+                        // NEWER intent; it is never stomped by a landing
+                        // probe. The tap is answered with a notice instead
+                        // of silently dropped.
+                        if view.aux.is_none() {
+                            view.aux = Some(build_sweep_modal(tabs, dead));
+                            view.aux_esc.clear();
+                        } else {
+                            view.set_notice(format!(
+                                "sweep ready: tabs {tabs}, dead agents {dead} - reopen the menu"
+                            ));
+                        }
                     }
                     SweepMsg::Applied { closed, reaped } => {
                         view.set_notice(format!(
