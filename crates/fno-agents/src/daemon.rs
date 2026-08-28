@@ -3066,9 +3066,12 @@ struct Ctx {
     /// flood of pushes for sessions that never register cannot grow without
     /// limit. Highest seq wins per session.
     pending_inside_leg: std::sync::Mutex<std::collections::HashMap<String, state::InsideLegReport>>,
-    /// Codex app-server children held by this supervisor, keyed by registry
-    /// name. The registry's full `harness_session_id` remains the durable join
-    /// key used to repopulate this map after a daemon restart.
+    /// Live connections to the SHARED codex app-server daemon, one per codex
+    /// thread worker, keyed by registry name. Not children: this supervisor
+    /// owns no app-server process, so an entry here is a socket, and losing
+    /// one loses a connection rather than a thread. The registry's full
+    /// `harness_session_id` remains the durable join key used to repopulate
+    /// this map after a daemon restart.
     codex_threads: Arc<tokio::sync::Mutex<std::collections::HashMap<String, CodexThreadHandle>>>,
 }
 
@@ -3078,7 +3081,7 @@ struct Ctx {
 /// panes registering at once while staying a hard ceiling.
 const PENDING_INSIDE_LEG_CAP: usize = 64;
 
-/// One actor task per thread owns the app-server child exclusively (x-de10).
+/// One actor task per thread owns its daemon connection exclusively (x-de10).
 /// This used to be `Arc<tokio::sync::Mutex<CodexThread>>`, which baked
 /// whole-turn exclusion into the HANDLE TYPE: `drive_turn` held the guard for
 /// up to `TURN_TIMEOUT` (600s), so every follow-up ask blocked behind the
@@ -4246,9 +4249,10 @@ async fn ensure_codex_thread_handle(
     Ok(handle)
 }
 
-/// Rehydrate Codex thread children after daemon startup. Recovery first
-/// selects rows by durable identity; this asynchronous pass owns the actual
-/// app-server children without delaying the supervisor's accept loop.
+/// Reconnect to Codex threads after daemon startup. Recovery first selects
+/// rows by durable identity; this asynchronous pass reopens the shared-daemon
+/// connections without delaying the supervisor's accept loop. The threads
+/// themselves never stopped: the shared app-server daemon kept them.
 fn schedule_codex_thread_recovery(ctx: Arc<Ctx>) {
     tokio::spawn(async move {
         recover_codex_threads(&ctx).await;
@@ -6446,12 +6450,16 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
         return stop_claude(ctx, req, &name, &entry).await;
     }
     if is_codex_thread_entry(&entry) {
-        // Stop means INTERRUPT the in-flight turn, then DROP the actor (its
-        // driver's kill_on_drop kills the app-server child), and only then
-        // stamp Exited. The old shape removed the handle and stamped Exited
-        // without interrupting: a driving turn still held an Arc clone, the
-        // child stayed alive until the turn ended, and the verb reported a
-        // stop it did not perform.
+        // Stop means INTERRUPT the in-flight turn, then DROP the actor
+        // (closing its connection to the shared daemon), and only then stamp
+        // Exited. The old shape removed the handle and stamped Exited without
+        // interrupting: a driving turn still held an Arc clone and the verb
+        // reported a stop it did not perform.
+        //
+        // The interrupt IS the stop now. There is no child to kill: the
+        // shared daemon owns the thread, so a turn that survives the bounded
+        // settle keeps running there, and the report below says exactly that
+        // rather than claiming a kill this verb cannot perform.
         let handle = ctx.codex_threads.lock().await.get(&name).cloned();
         let mut interrupt_report = "no-turn".to_string();
         if let Some(handle) = handle.as_ref() {
@@ -6463,13 +6471,15 @@ async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
             {
                 Ok(Ok(InterruptOutcome::NoTurnInFlight)) => "no-turn".to_string(),
                 Ok(Ok(InterruptOutcome::Interrupted(receipt))) => receipt.status,
-                Ok(Ok(InterruptOutcome::Timeout)) => "timeout-child-killed".to_string(),
-                Ok(Err(error)) => format!("interrupt-failed-child-killed: {error}"),
-                Err(_) => "interrupt-failed-child-killed: stop exchange timed out".to_string(),
+                Ok(Ok(InterruptOutcome::Timeout)) => "timeout-turn-still-running".to_string(),
+                Ok(Err(error)) => format!("interrupt-failed-turn-still-running: {error}"),
+                Err(_) => {
+                    "interrupt-failed-turn-still-running: stop exchange timed out".to_string()
+                }
             };
             interrupt_report = outcome;
-            // Shutdown acks only after the driver dropped, so kill_on_drop
-            // has already signaled the child before the row reads Exited.
+            // Shutdown acks only after the driver dropped, so the daemon
+            // connection is already closed before the row reads Exited.
             let _ = handle.shutdown().await;
         }
         ctx.codex_threads.lock().await.remove(&name);
@@ -15958,126 +15968,18 @@ done
     // retunes FNO_CODEX_ASK_WAIT_MS; a concurrent `set_var` from an unrelated
     // test would make the child inherit a broken PATH (exit 127).
 
-    /// Queue-reader fake whose turns complete 1.2s in; a steer arriving
-    /// mid-turn acks into the SAME turn. (Why a reader thread: a sequential
-    /// `for line in sys.stdin` fake cannot answer steer/interrupt while its
-    /// turn/start branch sleeps, and the real app-server does.)
-    const CODEX_FAKE_QUICK: &str = r#"#!/usr/bin/env python3
-import json, sys, time, threading, queue
-
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-q = queue.Queue()
-def _reader():
-    for line in sys.stdin:
-        q.put(line)
-threading.Thread(target=_reader, daemon=True).start()
-
-turn_n = 0
-while True:
-    try:
-        msg = json.loads(q.get())
-    except Exception:
-        break
-    method = msg.get("method")
-    if method == "initialize":
-        send({"id": msg.get("id"), "result": {}})
-    elif method == "thread/start":
-        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-t", "path": "/tmp/fake-daemon-rollout.jsonl"}}})
-    elif method == "turn/start":
-        turn_n += 1
-        send({"id": msg.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-        end = time.time() + 1.2
-        steered = False
-        while time.time() < end:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/steer" and not steered:
-                send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-                steered = True
-            elif m2.get("method") == "turn/interrupt":
-                # Post-completion interrupts are refused promptly, like the
-                # real app-server refusing an unknown turn.
-                send({"id": m2.get("id"), "error": {"message": f"turn-{turn_n} is not active"}})
-        send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
-"#;
-
-    /// Same skeleton with a 30s turn and an interrupt handler that completes
-    /// the turn as `interrupted` immediately.
-    const CODEX_FAKE_LONG: &str = r#"#!/usr/bin/env python3
-import json, sys, time, threading, queue
-
-def send(obj):
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
-
-q = queue.Queue()
-def _reader():
-    for line in sys.stdin:
-        q.put(line)
-threading.Thread(target=_reader, daemon=True).start()
-
-turn_n = 0
-while True:
-    try:
-        msg = json.loads(q.get())
-    except Exception:
-        break
-    method = msg.get("method")
-    if method == "initialize":
-        send({"id": msg.get("id"), "result": {}})
-    elif method == "thread/start":
-        send({"id": msg.get("id"), "result": {"thread": {"id": "thread-t", "path": "/tmp/fake-daemon-rollout.jsonl"}}})
-    elif method == "turn/start":
-        turn_n += 1
-        send({"id": msg.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-        end = time.time() + 30
-        stopped = False
-        while time.time() < end and not stopped:
-            try:
-                m2 = json.loads(q.get(timeout=0.1))
-            except queue.Empty:
-                continue
-            if m2.get("method") == "turn/steer":
-                send({"id": m2.get("id"), "result": {"turn": {"id": f"turn-{turn_n}"}}})
-            elif m2.get("method") == "turn/interrupt":
-                send({"id": m2.get("id"), "result": {}})
-                send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "interrupted", "items": []}}})
-                stopped = True
-        if not stopped:
-            send({"method": "turn/completed", "params": {"turn": {"id": f"turn-{turn_n}", "status": "completed", "items": [{"type": "agentMessage", "text": f"REPLY-{turn_n}"}]}}})
-"#;
-
-    /// Install a fake `codex` on PATH for the duration of `body`.
-    async fn with_fake_codex_daemon(script: &str, body: impl std::future::Future<Output = ()>) {
+    /// Point `CODEX_HOME` at a fake shared app-server daemon for the duration
+    /// of `body`. The fake lives in [`crate::codex_fake_daemon`]: one
+    /// implementation of the protocol, shared with the integration tests.
+    async fn with_fake_codex_daemon(
+        behavior: crate::codex_fake_daemon::Behavior,
+        body: impl std::future::Future<Output = ()>,
+    ) {
         let _guard = crate::PATH_TEST_MUTEX
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let bin_dir = tempfile::tempdir().unwrap();
-        let fake = bin_dir.path().join("codex");
-        std::fs::write(&fake, script).unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let saved_path = std::env::var_os("PATH");
-        let mut prefixed = std::ffi::OsString::from(bin_dir.path().as_os_str());
-        prefixed.push(":");
-        if let Some(rest) = saved_path.as_ref() {
-            prefixed.push(rest);
-        }
-        std::env::set_var("PATH", &prefixed);
+        let _daemon = crate::codex_fake_daemon::FakeDaemon::start(behavior);
         body.await;
-        if let Some(path) = saved_path {
-            std::env::set_var("PATH", path);
-        } else {
-            std::env::remove_var("PATH");
-        }
     }
 
     /// Spawn a codex thread worker through the real handle_spawn and return
@@ -16106,7 +16008,7 @@ while True:
     /// event, the ask returns the seed turn's own reply.
     #[tokio::test(flavor = "current_thread")]
     async fn codex_thread_ask_while_driving_steers_instead_of_queueing() {
-        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
             let home = tmp_home("codex-steer");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
@@ -16139,13 +16041,18 @@ while True:
     }
 
     /// AC5 + AC6 make-it-fail probe: stop INTERRUPTS the in-flight turn before
-    /// reporting stopped, kills the child, and names the interrupt outcome in
-    /// the response. Old shape: no `interrupt` key (remove-and-stamp while the
-    /// turn task still held an Arc clone and the child lived on), so the
-    /// `interrupt == "interrupted"` assert fails there.
+    /// reporting stopped and names the interrupt outcome in the response. Old
+    /// shape: no `interrupt` key (remove-and-stamp while the turn task still
+    /// held an Arc clone), so the `interrupt == "interrupted"` assert fails
+    /// there.
+    ///
+    /// It also pins the ownership claim this lane exists for. The row's pid
+    /// is the SHARED daemon's, and that daemon is still running after the
+    /// stop. The assertion used to be the opposite (the pid must be GONE),
+    /// which is what owning a private app-server per worker looked like.
     #[tokio::test(flavor = "current_thread")]
-    async fn codex_thread_stop_interrupts_then_kills_child_and_stamps_exited() {
-        with_fake_codex_daemon(CODEX_FAKE_LONG, async {
+    async fn codex_thread_stop_interrupts_and_stamps_exited_without_killing_the_daemon() {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
             let home = tmp_home("codex-stop");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "long seed turn").await;
@@ -16156,7 +16063,21 @@ while True:
             let pid = registry
                 .find("t")
                 .and_then(|entry| entry.pid)
-                .expect("row carries the child pid");
+                .expect("row carries the serving app-server pid");
+            let daemon_state: Value = serde_json::from_str(
+                &std::fs::read_to_string(
+                    std::path::PathBuf::from(std::env::var("CODEX_HOME").unwrap())
+                        .join("app-server-daemon")
+                        .join("app-server.pid"),
+                )
+                .expect("daemon state"),
+            )
+            .expect("daemon state json");
+            assert_eq!(
+                Some(u64::from(pid)),
+                daemon_state["pid"].as_u64(),
+                "the row's app-server pid must BE the shared daemon's"
+            );
 
             // Let the seed turn reach driving, then stop mid-turn.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -16177,25 +16098,20 @@ while True:
                 Some(AgentStatus::Exited)
             );
 
-            // The child must be gone by the time the response said stopped.
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                let alive = std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|status| status.success())
-                    .unwrap_or(false);
-                if !alive {
-                    break;
-                }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "app-server child {pid} outlived a reported stop"
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            }
+            // The shared daemon must SURVIVE the stop. Stopping a worker
+            // closes one connection; killing the app-server would take every
+            // other codex session on the machine with it.
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| status.success())
+                .unwrap_or(false);
+            assert!(
+                alive,
+                "stopping a worker killed the shared app-server daemon {pid}"
+            );
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
         })
@@ -16208,7 +16124,7 @@ while True:
     /// returned a completed reply - `status == "in_flight"` fails there.
     #[tokio::test(flavor = "current_thread")]
     async fn codex_thread_ask_returns_in_flight_when_turn_exceeds_bound() {
-        with_fake_codex_daemon(CODEX_FAKE_LONG, async {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::long(), async {
             std::env::set_var("FNO_CODEX_ASK_WAIT_MS", "200");
             let home = tmp_home("codex-inflight");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
@@ -16253,7 +16169,7 @@ while True:
     /// `delivered` read false - this assert fails there.
     #[tokio::test(flavor = "current_thread")]
     async fn switchboard_to_codex_thread_delivers_on_steering_ack_mid_turn() {
-        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
             let home = tmp_home("codex-mail");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             let spawned = spawn_codex_thread_for_test(&ctx, &home, "seed turn").await;
@@ -16305,7 +16221,7 @@ while True:
             });
             assert!(injected, "injected event missing: {events:?}");
 
-            // Cleanup: the actor holds a real child process.
+            // Cleanup: the actor holds a live daemon connection.
             handle_stop(&ctx, &Request::new(5, "agent.stop", json!({"name": "t"}))).await;
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
@@ -16317,7 +16233,7 @@ while True:
     /// and answers delivered with that turn id - no pane, no durable demote.
     #[tokio::test(flavor = "current_thread")]
     async fn switchboard_to_idle_codex_thread_delivers_on_start_ack() {
-        with_fake_codex_daemon(CODEX_FAKE_QUICK, async {
+        with_fake_codex_daemon(crate::codex_fake_daemon::Behavior::quick(), async {
             let home = tmp_home("codex-mail-idle");
             let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
             // No seed: the row is idle at mail time.

@@ -1352,7 +1352,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
             // daemon stays mandatory where it is load-bearing (inject/mail
             // ensure their own).
             let daemon_receipt = match fno_agents::codex_inject::ensure_codex_daemon() {
-                Ok(receipt) => Some(receipt),
+                Ok(result) => Some(result.receipt),
                 Err(error) => {
                     eprintln!("spawn: harness=codex daemon-ensure degraded: {error}");
                     None

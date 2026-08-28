@@ -227,11 +227,34 @@ fn json_u64(value: &serde_json::Value) -> Option<u64> {
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
-/// Ensure the Codex app-server daemon before a client-side spawn.
-pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::DaemonReceipt, String> {
+/// Ensure the Codex app-server daemon before a client-side spawn or attach.
+///
+/// Returns the whole [`crate::harness_daemon::EnsureResult`] rather than the
+/// receipt alone because the daemon's PID is the thread lane's identity: a
+/// codex thread worker's app-server IS this process, and the registry row
+/// records that pid so the ownership claim is readable without a process
+/// walk.
+pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::EnsureResult, String> {
     crate::harness_daemon::ensure_harness_daemon(&CodexDaemonAdapter::from_environment())
-        .map(|result| result.receipt)
         .map_err(|error| error.to_string())
+}
+
+/// The argv that opens codex's OWN interface on `thread_id`, pointed at the
+/// shared control socket.
+///
+/// This is an EXEC target, never a proxy: the caller replaces itself with (or
+/// spawns into a pane) a real `codex` process, and fno draws nothing. Anything
+/// that reads frames here and renders them is the layer this lane exists to
+/// delete. The socket path comes from [`codex_app_server_socket_path`], so a
+/// relocated `CODEX_HOME` moves the endpoint with it.
+pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
+    vec![
+        "codex".to_string(),
+        "resume".to_string(),
+        thread_id.to_string(),
+        "--remote".to_string(),
+        format!("unix://{}", codex_app_server_socket_path().display()),
+    ]
 }
 
 /// Positive Codex app-server health: the control socket must complete the
@@ -271,7 +294,32 @@ async fn codex_initialize_handshake_with_timeout(
     }
 }
 
-async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
+/// The write half of a connected app-server session.
+pub type AppServerSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<UnixStream>,
+    Message,
+>;
+/// The read half of a connected app-server session.
+pub type AppServerStream =
+    futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<UnixStream>>;
+
+/// Connect to the shared app-server control socket and complete the
+/// `initialize` / `initialized` handshake, returning the two halves ready for
+/// protocol traffic.
+///
+/// The ONE client for this socket. Both the health probe
+/// ([`probe_codex_app_server`]) and the persistent thread driver
+/// ([`crate::codex_thread::CodexThread`]) call it, so there is a single place
+/// where the transport is decided. That transport is WebSocket, not
+/// newline-delimited JSON: a bare NDJSON write to the same socket closes the
+/// connection, which is the entire difference between speaking to the shared
+/// daemon and speaking to a privately forked child.
+///
+/// The returned stream is positioned AFTER the initialize response, so the
+/// caller's first read is its own first frame.
+pub async fn connect_app_server(
+    socket_path: &Path,
+) -> Result<(AppServerSink, AppServerStream), &'static str> {
     let conn = UnixStream::connect(socket_path)
         .await
         .map_err(|_| "connect-failed")?;
@@ -286,7 +334,11 @@ async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static s
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
         .map_err(|_| "send-failed")?;
-    Ok(())
+    Ok((sink, stream))
+}
+
+async fn codex_initialize_handshake(socket_path: &Path) -> Result<(), &'static str> {
+    connect_app_server(socket_path).await.map(|_| ())
 }
 
 /// The `initialize` request frame. Local socket needs no auth/pairing — just the
