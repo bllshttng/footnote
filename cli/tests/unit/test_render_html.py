@@ -458,11 +458,27 @@ def test_successor_lookup_is_indexed_not_a_per_entry_rescan():
     quadratic. Measured on the real graph shape at 4694 entries: 3.26s that
     way, 0.13s indexed, for the same 424 rows that carry a successor.
 
-    Asserted as a RATIO against the same call with successors disabled, not
-    as a wall-clock bound, so it does not go flaky on a loaded machine. A
-    per-entry rescan is ~47x; an index is ~2x.
+    COUNTED, not timed. The first version of this guard asserted a ratio
+    between the local render and the public one and claimed in its own
+    docstring that a ratio "does not go flaky on a loaded machine". It went
+    red on a loaded CI runner at 0.484s against a 0.14s bound, because the
+    two sides do different work: the local path also builds children, parent
+    titles and plan paths, none of which the public path touches. The ratio
+    never isolated the successor index at all.
+
+    Counting how many times the source is traversed measures the actual
+    property, is unaffected by machine load, and fails by a wide margin
+    rather than a narrow one: an index traverses a fixed handful of times,
+    a per-entry rescan traverses once per entry.
     """
-    import time
+    traversals = {"n": 0}
+
+    class CountingSource(list):
+        """A list that records every full traversal of itself."""
+
+        def __iter__(self):  # noqa: D105
+            traversals["n"] += 1
+            return super().__iter__()
 
     entries = [
         {
@@ -475,21 +491,15 @@ def test_successor_lookup_is_indexed_not_a_per_entry_rescan():
         }
         for i in range(3000)
     ]
+    source = CountingSource(entries)
 
-    start = time.perf_counter()
-    local_rows = _dashboard_rows(entries, local=True, context_entries=entries)
-    local_elapsed = time.perf_counter() - start
-
-    # The public projection emits no successors at all, so it is the honest
-    # floor for everything else this function does over the same entries.
-    start = time.perf_counter()
-    _dashboard_rows(entries, local=False, context_entries=entries)
-    baseline = time.perf_counter() - start
+    local_rows = _dashboard_rows(entries, local=True, context_entries=source)
 
     assert sum(1 for r in local_rows if r["su"]) == 2999, "successors still populated"
-    assert local_elapsed < baseline * 10, (
-        f"successor lookup looks quadratic: {local_elapsed:.3f}s local vs "
-        f"{baseline:.3f}s baseline over {len(entries)} entries"
+    assert traversals["n"] <= 8, (
+        f"the source was traversed {traversals['n']} times over {len(entries)} "
+        "entries; a per-entry rescan is quadratic and would traverse it once "
+        "per entry"
     )
 
 
