@@ -43,15 +43,15 @@ Known limitation: the agy seed receipt is unverified. Until action confirmation 
 
 ## The pi dual-lane onboarding
 
-`pi --mode rpc` drives and pi's own TUI watches, and both address ONE session. The lanes are mutually exclusive per PROCESS, chosen at exec, never per session: a TUI opened on a session an rpc driver was holding joined it, rendered that session's own turns, and left the session-file count at one.
+`pi --mode rpc` drives and pi's own TUI watches. Both address ONE session. The lanes are mutually exclusive per PROCESS, chosen at exec, never per session. A TUI opened on a session an rpc driver was holding joined it. It rendered that session's own turns and left the session-file count at one.
 
-A pi session is the pair `(cwd, session_id)`. Sessions live at `~/.pi/agent/sessions/<encoded-cwd>/<ISO-timestamp>_<session-id>.jsonl`, where the encoding replaces separators with `-` and fences the result with `--`. The id alone addresses nothing, so `attach` runs pi in the ROW's cwd and a row with no cwd recorded is refused rather than attaching from the wrong directory.
+A pi session is the pair `(cwd, session_id)`. Sessions live at `~/.pi/agent/sessions/<encoded-cwd>/<ISO-timestamp>_<session-id>.jsonl`. The encoding replaces separators with `-` and fences the result with `--`. The id alone addresses nothing. So `attach` runs pi in the ROW's cwd. A row with no cwd recorded is refused rather than attached from the wrong directory.
 
-Appends are safe. Creates are not, and creates fail silently: four simultaneous creates on one id produced four session files 49ms apart, every process exiting 0 and printing "creating a new session with that id", after which a resume picked the oldest and named none of the rest. fno serialises the create DECISION with `fno agents claim` on a `pi-session:<cwd>:<id>` key and releases it once the session exists. That key is a SESSION key, not a node key, and it is taken by the spawn lane rather than by hand.
+Appends are safe. Creates are not, and they fail silently. Four simultaneous creates on one id produced four session files 49ms apart. Every process exited 0 and printed "creating a new session with that id". A resume then picked the oldest and named none of the rest. fno serialises the create DECISION with `fno agents claim` on a `pi-session:<cwd>:<id>` key. It releases the claim once the session exists. That key is a SESSION key, not a node key, and the spawn lane takes it rather than a person.
 
-The reader half is separate: a resume whose id resolves to more than one session refuses and names every one with its timestamp, picking none. Never rank duplicates by content, because an empty assistant `content` array marks a turn that was attempted and FAILED.
+The reader half is separate. A resume whose id resolves to more than one session refuses. It names every session with its timestamp and picks none. Never rank duplicates by content. An empty assistant `content` array marks a turn that was attempted and FAILED.
 
-Full contract, including the two traps (`rpc` exits on stdin EOF mid-turn with status 0; `--provider` without `--model` falls through to Bedrock) and the credential rules: [docs/HARNESSES.md](HARNESSES.md).
+Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--provider` without `--model` falls through to a Bedrock model. Full contract and the credential rules: [docs/HARNESSES.md](HARNESSES.md).
 
 ## Machine-readable interactive capabilities
 
@@ -70,7 +70,7 @@ Run `fno agents dispatch capabilities <h> --json` to read one harness without di
 
 Session binding has a separate type. Codex tries two oracles in order and waits up to 60 seconds total. First it reads a rollout-fd from the pane's own process tree. Codex 0.148 hands session ownership to a detached `codex app-server --remote-control` daemon that no longer exposes that fd there. So the second oracle reads the app-server's loaded threads for the pane's cwd instead. If neither oracle answers, fno reaps the pane and exits nonzero. `codex exec` (headless) still owns its own rollout and never needs the daemon oracle. The mux grab-work timeout is 75 seconds. A parity test requires 15 seconds more than the longest required binding window.
 
-Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported. pi is `caller-assigned-cwd-scoped`, a strategy of its own: fno mints the id AND pi scopes its lookup by working directory, so the identity is the PAIR and the id alone addresses nothing. A resume issued from the canonical checkout cannot see a session started in a worktree, and on pi that miss is not an error - it CREATES a second session under the same id. See the pi section below.
+Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported. pi is `caller-assigned-cwd-scoped`, a strategy of its own. fno mints the id AND pi scopes its lookup by working directory. So the identity is the PAIR and the id alone addresses nothing. A resume from the canonical checkout cannot see a session started in a worktree. On pi that miss is not an error. It CREATES a second session under the same id. See the pi section above.
 
 Permission responses are rule-gated. Without explicit authorization, a matched permission rule reports `blocked`, never `live`. With an authorized action, fno resolves the harness-native keys. It re-reads the prompt fingerprint while it holds the pane writer claim. Then it sends only those keys and waits for the positive ready marker.
 ## Verbs: creating and reviving workers
