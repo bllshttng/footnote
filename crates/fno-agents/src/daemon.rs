@@ -12908,12 +12908,13 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     /// AC11: a yolo spawn stamps the posture on the row; the resume lane's
     /// helper reads it back.
     ///
-    /// It drives a fake SHARED daemon. It used to install a stdio `codex` on PATH and let the driver fork
-    /// it. After the transport moved to the shared daemon that fake was never
-    /// reached: on a developer machine the driver connected to the operator's
-    /// REAL daemon and the test passed by starting a real thread, and in CI,
-    /// where no daemon runs, it panicked. A test that reaches a live daemon is
-    /// not a unit test, so it takes the same fake every other one here does.
+    /// It drives a fake SHARED daemon. It used to install a stdio `codex` on
+    /// PATH and let the driver fork it. After the transport moved to the
+    /// shared daemon that fake was never reached: on a developer machine the
+    /// driver connected to the operator's REAL daemon and the test passed by
+    /// starting a real thread, and in CI, where no daemon runs, it panicked.
+    /// A test that reaches a live daemon is not a unit test, so it takes the
+    /// same fake every other one here does.
     #[test]
     fn build_codex_thread_entry_stamps_the_launch_posture() {
         let worktree = tempfile::tempdir().unwrap();

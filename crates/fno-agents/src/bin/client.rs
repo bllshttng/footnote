@@ -3491,8 +3491,6 @@ mod tests {
     // Task 2.1: format_success per-verb output (stop/rm stdout parity)
     // -----------------------------------------------------------------------
 
-    /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
-    #[test]
     /// A codex thread stop names the interrupt outcome; `no-turn` stays silent.
     #[test]
     fn format_success_stop_names_the_interrupt_outcome() {
@@ -3527,6 +3525,7 @@ mod tests {
         );
     }
 
+    /// AC1-HP: stop with short_id in result -> "stopped: <name> (<short_id>)"
     #[test]
     fn format_success_stop_with_short_id() {
         let result = json!({"stopped": true, "short_id": "fo-1a2b"});
