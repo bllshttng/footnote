@@ -187,7 +187,7 @@ def test_live_claim_without_worktree_refuses_exit_2(tmp_path, monkeypatch):
 def test_join_writes_the_brief_file_into_the_holder_worktree(tmp_path, monkeypatch):
     """The brief must survive the daemon fork: TARGET_BRIEF cannot reach a
     serving session, so the file channel carries the hub + claim step."""
-    calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
+    _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
     join_node("x-8d1d", 3)
     brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
     assert "mail hub: j-x-8d1d-1" in brief
