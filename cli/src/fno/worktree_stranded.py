@@ -16,9 +16,9 @@ testable with a fixture table with no filesystem or subprocess involved.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -32,25 +32,8 @@ from fno.graph.store import (
     GraphUnreadableError,
     read_graph_strict,
 )
-
-
-def _load_worktree_status_module():
-    """``scripts/lib/worktree-status.py`` as a module, loaded once. It is a
-    standalone script (invoked by worktree-lifecycle.sh via subprocess), not
-    part of the installed package, so it needs ``spec_from_file_location``
-    rather than a normal import - the same porcelain parser and registry
-    reader this file reuses used to be copied verbatim into this file, and a
-    code review caught both copies going byte-for-byte/near-identical in
-    this same PR, exactly the "N implementations of one operation" trap."""
-    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-status.py"
-    spec = importlib.util.spec_from_file_location("_fno_worktree_status", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-_worktree_status_module = _load_worktree_status_module()
-_worktrees = _worktree_status_module._worktrees
+from fno.worktree_status import _load_registry as _load_status_registry
+from fno.worktree_status import _worktrees
 
 _QUIET_TERMINAL_STATUSES = frozenset({"superseded", "deferred"})
 
@@ -188,55 +171,63 @@ def resolve_node_id(
 
 
 def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
-    """path -> (unpushed_count, ok, age). Shells to the shared
-    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh) rather than a
-    second implementation of its fail-toward-keep contract. All paths run in
-    one bash process so the script's own per-process fetch cache (exported
-    ``_WT_REMOTE_REFS_FRESH``/``_STALE``) verifies the remote exactly once
-    for the whole batch, not once per worktree - and the last-commit age
-    rides the same loop iteration rather than a second subprocess per path.
-
-    The script's own path is resolved from this FILE's location, never
-    ``resolve_repo_root()``: that helper reads the caller's ambient cwd (or
-    a process-wide cached env var) and has no idea which of possibly many
-    swept repos is in play, so a multi-repo sweep - or a daemon started
-    with no ambient cwd at all - could resolve the wrong repo, or none, for
-    every root after whichever one happened to be cached first. This
-    script always lives at a fixed offset from this module regardless of
-    which worktree's commits are being counted."""
+    """path -> (unpushed_count, ok, age), via the packaged port of
+    ``wt_unpushed_count`` (scripts/lib/worktree-unpushed.sh; the bash
+    original remains for its shell callers). The port exists so this module
+    never shells out to a clone-only script: an installed wheel carries no
+    ``scripts/`` tree, and rooting that call at the package parent either
+    crashed or silently disabled this leg. The remote-refs refresh is
+    verified once per process (module flags below), the same one-fetch-per-
+    sweep contract the exported bash cache gave."""
     if not paths:
         return {}
-    script = Path(__file__).resolve().parents[3] / "scripts" / "lib" / "worktree-unpushed.sh"
-    driver = (
-        'source "$1"; shift\n'
-        'for p in "$@"; do\n'
-        '  err="$(mktemp)"\n'
-        '  out="$(wt_unpushed_count "$p" 2>"$err")"\n'
-        '  errtext="$(cat "$err")"; rm -f "$err"\n'
-        '  ok=1\n'
-        '  case "$errtext" in *"not verifiable"*) ok=0 ;; esac\n'
-        '  age="$(git -C "$p" log -1 --format=%cr 2>/dev/null)"\n'
-        "  printf '%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$p\" \"$out\" \"$ok\" \"$age\"\n"
-        "done\n"
-    )
-    proc = subprocess.run(
-        ["bash", "-c", driver, "bash", str(script), *paths],
+    results: dict[str, tuple[int, bool, str]] = {}
+    for p in paths:
+        count, ok = _wt_unpushed_count(p)
+        age_p = subprocess.run(
+            ["git", "-C", p, "log", "-1", "--format=%cr"],
+            capture_output=True,
+            text=True,
+        )
+        results[p] = (count, ok, age_p.stdout.strip() or "unknown")
+    return results
+
+
+# Port of scripts/lib/worktree-unpushed.sh. FAIL TOWARD KEEP: only a literal
+# count of 0 from git says "nothing unique"; a missing path, a git error, an
+# unverifiable remote, or any non-numeric answer reads as (1, not-ok). The
+# count is only truthful against CURRENT remote refs, so it is taken after a
+# verified `fetch --all --prune`; a refresh that cannot verify (no network,
+# dead remote) answers "might hold unique commits" - and a FAILED fetch
+# caches too, so a sweep pays one connect timeout, not one per worktree.
+_remote_refs_fresh = False
+_remote_refs_stale = False
+
+
+def _wt_unpushed_count(path: str) -> tuple[int, bool]:
+    """(count, ok); ok False means the read itself is untrustworthy."""
+    global _remote_refs_fresh, _remote_refs_stale
+    if not path or not os.path.isdir(path):
+        return 1, False
+    if not _remote_refs_fresh:
+        if _remote_refs_stale:
+            return 1, False
+        fetch_p = subprocess.run(
+            ["git", "-C", path, "fetch", "--all", "--prune"], capture_output=True
+        )
+        if fetch_p.returncode != 0:
+            _remote_refs_stale = True
+            return 1, False
+        _remote_refs_fresh = True
+    rev_p = subprocess.run(
+        ["git", "-C", path, "rev-list", "--count", "HEAD", "--not", "--remotes"],
         capture_output=True,
         text=True,
     )
-    results: dict[str, tuple[int, bool, str]] = {}
-    for line in (proc.stdout or "").splitlines():
-        parts = line.split("\x1f")
-        if len(parts) != 4:
-            continue
-        p, count_s, ok_s, age = parts
-        count = int(count_s) if count_s.isdigit() else 1
-        results[p] = (count, ok_s == "1", age or "unknown")
-    # A path the driver never reported (bash itself failed) fails toward
-    # "unpushed and unverifiable", the same posture wt_unpushed_count takes.
-    for p in paths:
-        results.setdefault(p, (1, False, "unknown"))
-    return results
+    out = rev_p.stdout.strip()
+    if rev_p.returncode != 0 or not out.isdigit():
+        return 1, False
+    return int(out), True
 
 
 # --- fleet input ---------------------------------------------------------
@@ -245,12 +236,9 @@ def _unpushed_batch(paths: list[str]) -> dict[str, tuple[int, bool, str]]:
 def _load_registry() -> tuple[dict[str, str], bool]:
     """cwd -> status, plus an ok flag.
 
-    Delegates to ``scripts/lib/worktree-status.py``'s own ``_load_registry``
-    (loaded once as ``_worktree_status_module`` below) rather than a second
-    copy of the same best-row selection - the exact "N implementations of
-    one operation" trap ``_worktrees`` below was already fixed for. That
-    function returns cwd -> (name, status); this drops the name, which only
-    the display CLI needs.
+    Delegates to the packaged worktree-status module rather than a second copy
+    of the same best-row selection. That function returns cwd -> (name,
+    status); this drops the name, which only the display CLI needs.
 
     The ok flag matters here in a way it does not for a display tool: a
     missing registry is a legitimate empty fleet (nothing has ever
@@ -258,7 +246,7 @@ def _load_registry() -> tuple[dict[str, str], bool]:
     a genuine read failure - reading it as empty would silently read every
     live worker as absent, which is exactly the false STRANDED constraint 4
     forbids."""
-    by_cwd, ok = _worktree_status_module._load_registry()
+    by_cwd, ok = _load_status_registry()
     return {cwd: status for cwd, (_name, status) in by_cwd.items()}, ok
 
 
@@ -269,13 +257,10 @@ def sweep(repo: Path) -> list[Row]:
     """Classify every worktree registered to ``repo``.
 
     ``repo`` resolution is the caller's job, not this module's: a module
-    that calls the shared ``resolve_repo_root()`` itself would drag every
-    ``scripts/``-relative path in this file (the ``_unpushed_batch`` /
-    ``_worktrees`` script lookups, deliberately package-relative via
-    ``Path(__file__)`` rather than that same resolver - see their
-    docstrings) into `fno doctor lint shellout-drift`'s scan scope for no reason;
-    that guard flags a module on the mere co-occurrence of a bash-exec and
-    a resolver call, not on which one actually roots the script path.
+    that calls the shared ``resolve_repo_root()`` itself would drag any
+    ``scripts/``-relative path in this file into `fno lint shellout-drift`'s
+    scan scope. This module shells out to no repo-root script at all - the
+    unpushed count is a packaged port - so the guard has nothing to flag.
     """
     worktrees = _worktrees(repo)
     paths = [p for _b, p in worktrees]
@@ -355,10 +340,23 @@ def act_on_stranded(row: Row) -> dict:
         f"onto {push_branch} (stranded sweep)."
     )
     get_p = subprocess.run(["fno", "backlog", "get", node], capture_output=True, text=True)
+    if get_p.returncode != 0:
+        acts.append(
+            {
+                "act": "backlog_get",
+                "ok": False,
+                "detail": (get_p.stderr or "backlog get failed").strip()[:500],
+            }
+        )
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
     try:
-        cur_details = (json.loads(get_p.stdout or "{}").get("details") or "") if get_p.returncode == 0 else ""
-    except json.JSONDecodeError:
-        cur_details = ""
+        current = json.loads(get_p.stdout or "")
+        if not isinstance(current, dict):
+            raise ValueError("backlog get returned a non-object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        acts.append({"act": "backlog_get", "ok": False, "detail": str(exc)[:500]})
+        return {"node": node, "class": row.klass, "acts": acts, "stopped_at": "backlog_get"}
+    cur_details = current.get("details") or ""
     new_details = f"{cur_details}\n\n{detail_line}" if cur_details else detail_line
     upd_p = subprocess.run(
         ["fno", "backlog", "update", node, "--details", new_details], capture_output=True, text=True

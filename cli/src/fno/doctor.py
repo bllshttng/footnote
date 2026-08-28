@@ -3557,13 +3557,12 @@ def _pre_push_hook_report(src: Optional[Path]) -> dict[str, Any]:
     destination ref. Detection is delegated to the installer's ``--check`` so
     there is exactly one implementation of "is the installed hook the bad
     one". Never changes status/exit; an absent or foreign hook is not a
-    defect and reports nothing."""
+    defect and reports nothing. Only a resolved source checkout names the
+    installer: an installed wheel has no scripts/ tree, and the advisory
+    reads ``unchecked`` rather than reaching for the package parent."""
     candidates = []
     if src is not None:
         candidates.append(src / "scripts" / "install-pre-push-hook.sh")
-    candidates.append(
-        Path(__file__).resolve().parents[3] / "scripts" / "install-pre-push-hook.sh"
-    )
     script = next((c for c in candidates if c.is_file()), None)
     if script is None:
         return {"status": "unchecked"}

@@ -29,6 +29,11 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 SETUP_WORKTREE_SH="$REPO_ROOT/scripts/setup/setup-worktree.sh"
 
+dispatcher_body="$(sed -n '/^_salvage_dispatcher_body=/,/^fi'"'"'$/p' "$SETUP_WORKTREE_SH")"
+[[ -n "$dispatcher_body" ]] || fail "could not find salvage dispatcher body"
+[[ "$dispatcher_body" != *'[['* ]] \
+  || fail "salvage dispatcher prepended under an existing shebang must be POSIX sh"
+
 extract_install_snippet() {
   # Extracts the REAL salvage-ref install block from setup-worktree.sh
   # instead of hand-copying it a third time (a code-review finding: this
@@ -90,9 +95,31 @@ ref_out="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$wt_name")"
 echo "$ref_out" | grep -q "$sha_attached" || fail "salvage ref does not point at the commit"
 
 remote_ref_out="$(git --git-dir="$remote" for-each-ref "refs/fno/salvage/$wt_name")"
-[[ -n "$remote_ref_out" ]] || fail "salvage ref did not mirror to origin"
+[[ -z "$remote_ref_out" ]] || fail "default commit uploaded a salvage ref without opt-in"
 
-echo "PASS: commit lands a local salvage ref, mirrored to origin"
+echo "PASS: commit lands a local salvage ref without uploading WIP by default"
+
+# --- AC1b: repository opt-in enables the best-effort remote mirror --------
+
+git -C "$canonical" config --local fno.salvageRemoteMirror true
+opted_in="$SCRATCH/opted-in-wt"
+git -C "$canonical" worktree add -q -b opted-in-branch "$opted_in" >/dev/null
+link_real_hook "$opted_in"
+git -C "$opted_in" config user.email t@t.co
+git -C "$opted_in" config user.name t
+echo mirror > "$opted_in/mirror.txt"
+git -C "$opted_in" add mirror.txt
+git -C "$opted_in" commit -q -m "opted-in mirror commit"
+sha_opted_in="$(git -C "$opted_in" rev-parse HEAD)"
+sleep 1
+
+opted_in_name="$(basename "$opted_in")"
+opted_in_remote_ref="$(git --git-dir="$remote" for-each-ref "refs/fno/salvage/$opted_in_name")"
+[[ -n "$opted_in_remote_ref" ]] || fail "explicit mirror opt-in did not write the remote salvage ref"
+echo "$opted_in_remote_ref" | grep -q "$sha_opted_in" \
+  || fail "opted-in remote salvage ref does not point at the commit"
+
+echo "PASS: repository opt-in mirrors the salvage ref to origin"
 
 # --- AC2: a DETACHED worktree's commit survives its own removal ---------
 
@@ -157,7 +184,7 @@ common_dir="$(git -C "$preexisting" rev-parse --git-common-dir)"
 [[ "$common_dir" = /* ]] || common_dir="$preexisting/$common_dir"
 marker_file="$SCRATCH/other-hook-ran"
 cat > "$common_dir/hooks/post-commit" <<HOOK
-#!/usr/bin/env bash
+#!/bin/sh
 touch "$marker_file"
 exit 0
 HOOK
@@ -168,14 +195,17 @@ git -C "$preexisting" config user.email t@t.co
 git -C "$preexisting" config user.name t
 echo v > "$preexisting/j.txt"
 git -C "$preexisting" add j.txt
-git -C "$preexisting" commit -q -m "preexisting-hook commit"
+preexisting_stderr="$SCRATCH/preexisting-hook.stderr"
+git -C "$preexisting" commit -q -m "preexisting-hook commit" 2>"$preexisting_stderr"
 sha_preexisting="$(git -C "$preexisting" rev-parse HEAD)"
 sleep 1
 
 [[ -f "$marker_file" ]] || fail "pre-existing hook's own logic did not run after prepend"
+[[ ! -s "$preexisting_stderr" ]] \
+  || fail "POSIX post-commit hook emitted an interpreter error: $(cat "$preexisting_stderr")"
 
 preexisting_ref="$(git -C "$canonical" for-each-ref "refs/fno/salvage/$(basename "$preexisting")")"
 [[ -n "$preexisting_ref" ]] || fail "salvage ref missing when prepended onto a hook ending in exit 0"
 echo "$preexisting_ref" | grep -q "$sha_preexisting" || fail "salvage ref did not point at the commit"
 
-echo "PASS: prepending onto a pre-existing exit-terminated hook still runs both"
+echo "PASS: prepending onto a POSIX exit-terminated hook runs both without errors"

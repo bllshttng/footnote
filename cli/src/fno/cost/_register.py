@@ -856,9 +856,6 @@ def _emit_ledger_transition(entry: dict) -> None:
     the ledger write itself already succeeded, so missing telemetry
     should not fail the caller. See gate-provenance plan phase 02.
     """
-    import shlex
-    import subprocess
-
     root_path = entry.get("root_path")
     if not root_path:
         return
@@ -876,18 +873,11 @@ def _emit_ledger_transition(entry: dict) -> None:
     if not nonce or nonce == "null":
         return
 
-    # Locate events.sh. PLUGIN_ROOT env wins; otherwise walk up from this file
-    # to the repo root and reach scripts/lib/events.sh. This module lives at
-    # cli/src/fno/cost/_register.py, so the repo root is parents[4]. (In the
-    # installed wheel there is no scripts/ tree, so the is_file() guard below
-    # skips the best-effort emit - the ledger append already succeeded.)
-    plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT")
-    if plugin_root:
-        events_sh = Path(plugin_root) / "scripts" / "lib" / "events.sh"
-    else:
-        events_sh = Path(__file__).resolve().parents[4] / "scripts" / "lib" / "events.sh"
-    if not events_sh.is_file():
-        return
+    # Emit through the packaged fno.events writer (validated envelope, the
+    # same mkdir mutex the Rust claims use) rather than shelling out to
+    # scripts/lib/events.sh - a clone-only script an installed wheel never
+    # carries. The emit stays best-effort: the ledger append already
+    # succeeded.
 
     # Use the target session_id (scalar, set at line 322 from state.get("session_id")),
     # NOT sessions[0] which is the Claude transcript UUID. The stop hook's
@@ -909,43 +899,21 @@ def _emit_ledger_transition(entry: dict) -> None:
             file=sys.stderr,
         )
         return
-    payload = json.dumps({
+    payload = {
         "session_id": session_id,
         "gate": "ledger_updated",
         "phase": "register",
         "nonce": nonce,
-        "pr_number": entry.get("pr_number"),
-    })
-    cmd = f'source {shlex.quote(str(events_sh))} && emit_event_raw "phase_transition" {shlex.quote(payload)}'
-    env = os.environ.copy()
-    env["EVENTS_FILE"] = str(Path(root_path) / ".fno" / "events.jsonl")
+        "gate_bearing": True,
+    }
     try:
-        result = subprocess.run(
-            ["bash", "-c", cmd],
-            check=False,
-            timeout=5,
-            env=env,
-        )
-        if result.returncode != 0 or not (Path(root_path) / ".fno" / "events.jsonl").exists():
-            try:
-                from fno.events import _build, append_event
+        from fno.events import _build, append_event
 
-                fallback = _build(
-                    "phase_transition",
-                    "target",
-                    {
-                        "session_id": session_id,
-                        "gate": "ledger_updated",
-                        "phase": "register",
-                        "nonce": nonce,
-                        "gate_bearing": True,
-                    },
-                )
-                append_event(fallback, Path(root_path) / ".fno" / "events.jsonl")
-            except Exception:  # noqa: BLE001 - telemetry remains best-effort
-                pass
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        # bash missing or hang - non-fatal (the ledger append already succeeded)
+        event = _build("phase_transition", "target", payload)
+        append_event(event, Path(root_path) / ".fno" / "events.jsonl")
+    except Exception:  # noqa: BLE001 - telemetry remains best-effort
+        # The ledger append already succeeded; the gate transition is
+        # best-effort telemetry, never worth failing registration over.
         pass
 
 
