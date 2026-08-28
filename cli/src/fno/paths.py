@@ -1403,15 +1403,8 @@ def resolve_plugin_script(relpath: str) -> Path:
         root = os.environ.get(env_name)
         if root:
             base = Path(root).expanduser()
-            # Manifest-gate the hint like every later branch: FNO_REPO_ROOT's
-            # documented meaning (path-config.md) is the TARGET PROJECT root
-            # for tests and CI, which usually has no .claude-plugin/ marker -
-            # accepting it raw resolved plugin scripts against a foreign tree
-            # and silently disabled the caller's leg. An ungated value falls
-            # through to the package-relative and persisted branches.
-            if _is_plugin_root(base):
-                _persist_plugin_root(base)
-                return base / relpath
+            _persist_plugin_root(base)
+            return base / relpath
     pkg_root = Path(__file__).resolve().parents[3]
     if _is_plugin_root(pkg_root):
         _persist_plugin_root(pkg_root)
