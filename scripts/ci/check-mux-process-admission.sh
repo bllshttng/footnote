@@ -88,5 +88,19 @@ if bypasses:
     print(f"process-admission coverage: inspected={inspected} bypasses={len(bypasses)}", file=sys.stderr)
     print("\n".join(bypasses), file=sys.stderr)
     raise SystemExit(1)
+bootstrap = source_root / "bootstrap.rs"
+bootstrap_text = bootstrap.read_text(encoding="utf-8")
+if re.search(r"Command::new\s*\(|\.spawn\s*\(|\.exec\s*\(", bootstrap_text):
+    print(
+        "process-admission coverage: bootstrap must use explicit bootstrap helpers",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
+if not re.search(r"bootstrap_(?:command|output|status|exec)\s*\(", bootstrap_text):
+    print(
+        "process-admission coverage: bootstrap helper usage marker missing",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 print(f"process-admission coverage: inspected={inspected} bypasses=0")
 PY
