@@ -64,6 +64,7 @@ agents reconcile	T1	agents reconcile	12
 agents recover	T1	agents recover	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
+agents registry-repair	T1	agents registry-repair	4	
 agents rename	T1	agents rename	0
 agents report	T1	agents report	3
 agents restart	T1	agents restart	6
