@@ -14,6 +14,7 @@ from fno.graph.render import (
     make_kanban_classifiers,
 )
 from fno.graph.render_html import PUBLIC_BACKLOG_STATUSES, group_for
+from fno.graph.statuses import derived_status
 
 if TYPE_CHECKING:
     from fno.config import RenderTargetConfig
@@ -112,7 +113,7 @@ def public_backlog_entries(
     return [
         entry
         for entry in _public_entries(entries, project, all_projects=all_projects)
-        if entry.get("status") in PUBLIC_BACKLOG_STATUSES
+        if derived_status(entry) in PUBLIC_BACKLOG_STATUSES
     ]
 
 
@@ -124,7 +125,7 @@ def _backlog_sections_for(items: list[dict]) -> list[tuple[str, list[dict]]]:
     for sorted_items in groups.values():
         sorted_items.sort(
             key=lambda entry: (
-                status_order.get(str(entry.get("status")), 99),
+                status_order.get(derived_status(entry), 99),
                 str(entry.get("priority") or "p2"),
                 str(entry.get("title") or "").lower(),
             )

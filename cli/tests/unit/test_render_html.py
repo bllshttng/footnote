@@ -908,3 +908,28 @@ def test_a_terminal_status_without_a_timestamp_keeps_its_stored_status():
     rows = {r["id"]: r for r in _dashboard_rows(entries, local=True, context_entries=entries)}
 
     assert rows["ab-00000050"]["s"] == "superseded"
+
+
+def test_the_public_backlog_agrees_with_the_dashboard_on_a_stale_completed_row():
+    """The fifth reader. `public_backlog_entries` selected on raw `status`, so an
+    archived row carrying completed_at beside a stale open status stayed in the
+    published backlog while the dashboard and the roadmap both called it done.
+    Both controls matter: the filter must still list genuinely open work, and it
+    must still list a legacy-deferred row, whose sentinel is not a completion."""
+    from fno.graph.roadmap_public import public_backlog_entries
+
+    stale = _entry(
+        "ab-00000060", project="fno", status="ready",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    live = _entry("ab-00000061", project="fno", status="ready")
+    deferred = _entry(
+        "ab-00000062", project="fno", status="ready",
+        completed_at="deferred:2026-01-01T00:00:00Z",
+    )
+
+    listed = [e["id"] for e in public_backlog_entries([stale, live, deferred], "fno")]
+
+    assert "ab-00000060" not in listed, "a completed row is not open backlog"
+    assert "ab-00000061" in listed, "control: genuinely open work still lists"
+    assert "ab-00000062" in listed, "control: the deferred sentinel is not a completion"

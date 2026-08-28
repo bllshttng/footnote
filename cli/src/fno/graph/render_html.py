@@ -27,7 +27,9 @@ from fno.graph.render import (
     UNSCOPED_LABEL,  # noqa: F401  re-exported for importers; see the note below
     _project_key,
 )
-from fno.graph.statuses import is_terminal_entry
+# The status rule lives in statuses.py beside its closure test: one copy per
+# renderer is how the dashboard and the public roadmap came to disagree.
+from fno.graph.statuses import derived_status as _row_status
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -823,36 +825,6 @@ _DASHBOARD_JS = """\
   revealHash();
 })();
 """
-
-
-def _row_status(entry: object, missing: str = "unknown") -> str:
-    """The status this module's row and its four projections must agree on.
-
-    A legacy or archived row can carry `completed_at` beside a stale open
-    status, and a projection that reads `status` raw then contradicts the row
-    rendered beside it: a finished dependency shows open inside the red
-    Dependencies box, and the parent rollup counts it open.
-
-    Closure is asked of `is_terminal_entry`, never of a bare `completed_at`
-    truthiness test, which that helper's own docstring forbids. A pre-migration
-    row encodes deferral INSIDE `completed_at` as a `deferred:` sentinel, and
-    deferral is a returnable rung, so a bare test relabels deferred work done.
-    The render path reads through `read_graph_with_archive`, which does not run
-    the recompute migration, so the sentinel reaches this function intact.
-
-    The `completed_at` term keeps a row that is terminal by `status` alone,
-    carrying no timestamp, on its stored status. A `superseded` row that DOES
-    carry `completed_at` still reads `done` here, which is the behaviour this
-    module already had for the row's own status and is left unchanged.
-
-    Scope is this module. `roadmap_public.public_backlog_entries` selects on
-    raw `status` and does NOT share this rule.
-    """
-    if not isinstance(entry, dict) or not entry:
-        return missing
-    if is_terminal_entry(entry) and entry.get("completed_at"):
-        return "done"
-    return str(entry.get("status") or missing)
 
 
 def _dashboard_rows(
