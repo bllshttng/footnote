@@ -280,9 +280,15 @@ impl HarnessContract {
                 if !RESUME_KINDS.contains(&form.kind.as_str())
                     || form.tokens.iter().any(String::is_empty)
                     || (form.kind == "unsupported" && !form.tokens.is_empty())
+                    // An attach form must name the id its harness's own
+                    // attach command takes: claude's short jobId, or a full
+                    // session id where a short one would collide (codex).
                     || (lane == "interactive_attach"
                         && form.kind != "unsupported"
-                        && !form.tokens.iter().any(|token| token == "{short_id}"))
+                        && !form
+                            .tokens
+                            .iter()
+                            .any(|token| token == "{short_id}" || token == "{session_id}"))
                     || (lane.ends_with("resume")
                         && form.kind != "unsupported"
                         && !form.tokens.iter().any(|token| token == "{session_id}"))

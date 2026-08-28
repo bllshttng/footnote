@@ -127,6 +127,102 @@ pub enum Liveness {
 /// exit immediately; that gap is why this list omits opencode).
 const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
+/// (x-6678) The `interactive_attach` argv a harness declares, parsed once from
+/// the capability contract this binary embeds.
+///
+/// The attach form is the ONE place a harness says "here is the command that
+/// opens my own interface on a session." fno renders it and execs it; it never
+/// draws that interface itself. Adding an attach-capable harness is therefore a
+/// contract edit, not a code edit here - which is the shape law d-dbf83820 asks
+/// for and the shape a `harness == "claude"` gate quietly broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachForm {
+    pub tokens: Vec<String>,
+    /// Which id the form substitutes: `IdKind::Short` for `{short_id}`,
+    /// `IdKind::Session` for `{session_id}`. The contract requires exactly one
+    /// of them on a supported form.
+    pub id_kind: IdKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    Short,
+    Session,
+}
+
+impl AttachForm {
+    /// The form's tokens with its id placeholder filled.
+    pub fn render(&self, id: &str) -> Vec<String> {
+        let placeholder = match self.id_kind {
+            IdKind::Short => "{short_id}",
+            IdKind::Session => "{session_id}",
+        };
+        self.tokens
+            .iter()
+            .map(|token| {
+                if token == placeholder {
+                    id.to_string()
+                } else {
+                    token.clone()
+                }
+            })
+            .collect()
+    }
+}
+
+/// The bundled capability contract. `fno` does not link `fno-agents` (it shells
+/// the binary), so the table is embedded rather than called for.
+const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
+
+/// The attach form `harness` declares, or `None` when it declares none. An
+/// unknown harness, an `unsupported` form, and a malformed one all read as
+/// "cannot attach" - a row that cannot be driven falls to Follow or Locate,
+/// which is the safe direction.
+pub fn attach_form(harness: &str) -> Option<AttachForm> {
+    static FORMS: std::sync::OnceLock<std::collections::HashMap<String, AttachForm>> =
+        std::sync::OnceLock::new();
+    FORMS
+        .get_or_init(|| {
+            let mut out = std::collections::HashMap::new();
+            let Ok(caps) = toml::from_str::<toml::Value>(CAPABILITY_TOML) else {
+                return out;
+            };
+            let Some(table) = caps.get("harness").and_then(|h| h.as_table()) else {
+                return out;
+            };
+            for (name, node) in table {
+                let mut cursor = Some(node);
+                for key in ["resume_strategy", "forms", "interactive_attach"] {
+                    cursor = cursor.and_then(|n| n.get(key));
+                }
+                let Some(form) = cursor else { continue };
+                if form.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
+                    continue;
+                }
+                let tokens: Vec<String> = form
+                    .get("tokens")
+                    .and_then(|t| t.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id_kind = if tokens.iter().any(|t| t == "{short_id}") {
+                    IdKind::Short
+                } else if tokens.iter().any(|t| t == "{session_id}") {
+                    IdKind::Session
+                } else {
+                    continue;
+                };
+                out.insert(name.clone(), AttachForm { tokens, id_kind });
+            }
+            out
+        })
+        .get(harness)
+        .cloned()
+}
+
 /// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
 /// `Drive` when the row carries an attach id (an interactive attach form
 /// resolved it), `Follow` when the harness's transcript has a peek reader,
@@ -1423,27 +1519,31 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 m.get("pane_id")?.as_u64()?,
             ))
         });
-        // The claude bg jobId, when present, is the `claude attach <id>` target
-        // for a paneless row. Since v9 it lives in `short_id` (the unified
-        // transport key), so this must be claude-scoped: a codex/gemini row's
-        // short_id is a daemon socket key, not a claude attach target. A legacy
-        // `claude_short_id` row is tolerated as a fallback (raw read, no backfill).
         // Registry v10 renamed this axis to `harness` and dropped `provider`
         // from disk; reading only the departed key silently un-attached every
         // live row, because the fixtures here still wrote the pre-v10 shape.
-        let is_claude = row
+        let harness_name = row
             .get("harness")
             .or_else(|| row.get("provider"))
-            .and_then(|v| v.as_str())
-            == Some("claude");
-        let attach_id = is_claude
-            .then(|| {
-                row.get("short_id")
-                    .or_else(|| row.get("claude_short_id"))
-                    .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
+            .and_then(|v| v.as_str());
+        let is_claude = harness_name == Some("claude");
+        // (x-6678) The attach target, keyed on the harness's DECLARED attach
+        // form rather than on its name. Which id to read follows the form: a
+        // short jobId where the command takes one (claude, `short_id` since v9,
+        // legacy `claude_short_id` tolerated), the full session id where a
+        // short one would collide (codex). A harness declaring no form yields
+        // None and keeps whatever tier it had.
+        let attach_id = harness_name
+            .and_then(attach_form)
+            .and_then(|form| match form.id_kind {
+                IdKind::Short => row.get("short_id").or_else(|| row.get("claude_short_id")),
+                IdKind::Session => row
+                    .get("harness_session_id")
+                    .or_else(|| row.get("codex_session_id"))
+                    .or_else(|| row.get("claude_session_uuid")),
             })
-            .flatten()
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
             .map(str::to_string);
         // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn, and the
         // transcript key for the extended table's message tail. Claude rows
@@ -2311,9 +2411,16 @@ mod tests {
             bg.claude_session_uuid.as_deref(),
             Some("346f5d0d-9840-473c-af21-eaf100ca9ec2")
         );
-        // A codex row's short_id is a daemon socket key, never an attach target.
+        // A codex row's short_id is a daemon socket key, never an attach
+        // target: its attach form takes the FULL session id, because a codex
+        // UUIDv7 head-8 is a ~65.5s clock bucket and siblings spawned in one
+        // minute collide (x-6678).
         let cx = rows.iter().find(|r| r.name == "cx").unwrap();
-        assert_eq!(cx.attach_id, None);
+        assert_eq!(
+            cx.attach_id.as_deref(),
+            Some("0199f0c0-1111-2222-3333-444455556666")
+        );
+        assert_ne!(cx.attach_id.as_deref(), Some("sockkey1"));
         assert_eq!(cx.claude_session_uuid, None);
     }
 
@@ -4138,19 +4245,24 @@ config_dir = "~/.claude-alt"
         );
     }
 
-    /// The Drive tier rides attach_id presence, and attach_id derives only
-    /// for the harness whose interactive_attach form is supported. Pin BOTH
-    /// halves against the capability contract so a new attach-capable
-    /// harness cannot silently stay Drive-blind.
+    /// (x-6678) Every attach-capable harness in the contract reaches Drive.
+    ///
+    /// This inverts the guard it replaces, which asserted the attach-capable
+    /// set was exactly `["claude"]` and fired the moment codex declared a
+    /// form. That guard was right about the coupling and wrong about the fix:
+    /// the answer is not to add a second harness name in two more places, it
+    /// is for `attach_form` to be the ONE reader of the declaration. So the
+    /// assertion is now a property - declare a form, get a Drive row - and a
+    /// harness added next passes it without touching this file.
     #[test]
-    fn drive_tier_rides_the_only_interactive_attach_harness() {
+    fn every_attach_capable_harness_reaches_drive() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/src/fno/agents/harness_capabilities.toml");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
         let harness = caps.get("harness").expect("harness table");
-        let attach_capable: Vec<&str> = harness
+        let declared: Vec<String> = harness
             .as_table()
             .expect("harness table")
             .keys()
@@ -4166,13 +4278,51 @@ config_dir = "~/.claude-alt"
                 node.and_then(|k| k.as_str())
                     .is_some_and(|k| k != "unsupported")
             })
-            .map(|h| h.as_str())
+            .cloned()
             .collect();
-        assert_eq!(
-            attach_capable,
-            vec!["claude"],
-            "a harness beyond claude gained interactive_attach: the attach_id \
-             gate in derive_rows and the Drive tier must learn it together"
+        assert!(
+            declared.contains(&"claude".to_string()) && declared.contains(&"codex".to_string()),
+            "claude and codex both declare an attach form: {declared:?}"
         );
+
+        for name in &declared {
+            let form = attach_form(name)
+                .unwrap_or_else(|| panic!("{name} declares an attach form the reader cannot parse"));
+            let rendered = form.render("ID-UNDER-TEST");
+            assert!(
+                rendered.iter().any(|token| token == "ID-UNDER-TEST"),
+                "{name}'s attach argv must substitute its id: {rendered:?}"
+            );
+            assert!(
+                !rendered.iter().any(|t| t.contains('{')),
+                "{name}'s attach argv left a placeholder unrendered: {rendered:?}"
+            );
+
+            // A live row on this harness, carrying the id its form takes,
+            // must arrive at Drive.
+            let id_field = match form.id_kind {
+                IdKind::Short => "short_id",
+                IdKind::Session => "harness_session_id",
+            };
+            let raw = format!(
+                r#"{{"agents":[{{"name":"w","cwd":"/tmp","harness":"{name}","{id_field}":"abcd1234","status":"live"}}]}}"#
+            );
+            let rows = derive_rows(&raw, 0)
+                .unwrap_or_else(|| panic!("{name} registry fixture parses"));
+            let row = rows.first().unwrap_or_else(|| panic!("{name} row derived"));
+            assert_eq!(
+                row.attach_id.as_deref(),
+                Some("abcd1234"),
+                "{name} declares an attach form, so its row must carry an attach id"
+            );
+            assert_eq!(
+                thread_reach(Some(name), row.attach_id.as_deref()),
+                Reach::Drive,
+                "{name} carries an attach id, so its thread row must reach Drive"
+            );
+        }
+
+        // A harness that declares none stays where it was.
+        assert!(attach_form("gemini").is_none(), "gemini declares no form");
     }
 }

@@ -114,9 +114,17 @@ tokens = ["codex"]
 kind = "subcommand"
 tokens = ["codex", "resume", "{session_id}"]
 
+# `codex resume <id> --remote unix://` execs codex's OWN TUI against the shared
+# app-server daemon, which is where a thread worker's session lives. Bare
+# `unix://` on purpose: codex resolves the control socket from its own
+# CODEX_HOME, so fno never builds that path and therefore cannot hardcode
+# `~/.codex` (verified 2026-08-28 against codex-cli 0.149.1, both the default
+# and an overridden CODEX_HOME). `{session_id}`, never `{short_id}`: a codex
+# UUIDv7 head-8 is a ~65.5s clock bucket, so siblings spawned in one minute
+# collide and a short id would attach the wrong worker.
 [harness.codex.resume_strategy.forms.interactive_attach]
-kind = "unsupported"
-tokens = []
+kind = "subcommand"
+tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
 
 [harness.codex.resume_strategy.forms.headless_create]
 kind = "subcommand"

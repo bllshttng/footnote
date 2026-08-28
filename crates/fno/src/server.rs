@@ -887,14 +887,22 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-/// The base argv attaching bg session `id`: `claude attach <id>`. `id` is always
-/// a positional arg (never a shell string), so an 8-hex id can only name a
-/// session. Tests override the program via `set_attach_program` (x-9f75).
-fn attach_base(id: &str) -> Vec<String> {
+/// The base argv attaching session `id` on `harness`, rendered from that
+/// harness's declared `interactive_attach` form (x-6678): `claude attach <id>`,
+/// `codex resume <id> --remote unix://`, and whatever a harness declares next.
+/// `id` is always a positional arg (never a shell string), so it can only name
+/// a session. A harness with no declared form falls back to claude's shape,
+/// which is unreachable in practice because `attach_id` is derived from the
+/// same declaration - the Drive tier and this builder read one table.
+/// Tests override the program via `set_attach_program` (x-9f75).
+fn attach_base(harness: Option<&str>, id: &str) -> Vec<String> {
     #[cfg(test)]
     if let Some(mut argv) = ATTACH_PROGRAM.with(|p| p.borrow().clone()) {
         argv.push(id.to_string());
         return argv;
+    }
+    if let Some(form) = harness.and_then(crate::agents_view::attach_form) {
+        return form.render(id);
     }
     vec!["claude".to_string(), "attach".to_string(), id.to_string()]
 }
@@ -907,12 +915,16 @@ fn attach_base(id: &str) -> Vec<String> {
 /// re-attached pane keeps its account glyph. A default-account row passes `None`
 /// and is byte-identical to the pre-feature attach.
 fn attach_argv(
+    harness: Option<&str>,
     id: &str,
     account: Option<&str>,
     config_dir: Option<&std::path::Path>,
 ) -> Vec<String> {
-    let base = attach_base(id);
-    let Some(dir) = config_dir else {
+    let base = attach_base(harness, id);
+    // The account wrapper is claude's routing, not a general one: it points a
+    // claude attach at the right ~/.claude daemon. Another harness carrying a
+    // config_dir must not inherit a CLAUDE_CONFIG_DIR prefix.
+    let Some(dir) = config_dir.filter(|_| harness.is_none_or(|h| h == "claude")) else {
         return base;
     };
     let mut wrapped = vec![
@@ -6470,14 +6482,21 @@ impl Core {
     /// row (or an unknown id) yields `(None, None)`, so the attach runs under
     /// the ambient `~/.claude` exactly as before; an isolated-account row yields
     /// its config_dir so `attach_argv` routes to the right daemon (codex P1).
-    fn attach_account_ctx(&self, attach_id: &str) -> (Option<String>, Option<std::path::PathBuf>) {
-        let account = self
+    /// (x-6678) The row context an attach argv needs: its harness (which
+    /// declares the attach command), its claude account, and that account's
+    /// config dir. One lookup, because all three come off the same row.
+    fn attach_account_ctx(
+        &self,
+        attach_id: &str,
+    ) -> (Option<String>, Option<String>, Option<std::path::PathBuf>) {
+        let row = self
             .agents
             .iter()
-            .find(|a| a.attach_id.as_deref() == Some(attach_id))
-            .and_then(|a| a.account.clone());
+            .find(|a| a.attach_id.as_deref() == Some(attach_id));
+        let harness = row.and_then(|a| a.harness.clone());
+        let account = row.and_then(|a| a.account.clone());
         let dir = account.as_deref().and_then(agents_view::account_config_dir);
-        (account, dir)
+        (harness, account, dir)
     }
 
     /// (x-ed59) Stamp a freshly-attached pane's registered worker name so its
@@ -6953,7 +6972,7 @@ impl Core {
                         m.attach_id
                     ));
                 }
-                let argv = attach_argv(&m.attach_id, acct, cd);
+                let argv = attach_argv(m.harness.as_deref(), &m.attach_id, acct, cd);
                 match self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd) {
                     Ok(pid) => {
                         // (x-ed59) Title the restored pane from its registered name
@@ -7437,7 +7456,7 @@ impl Core {
         action: crate::squad_store::ExternalState,
     ) {
         let core_tx = self.self_tx.clone();
-        let (_acct, config_dir) = self.attach_account_ctx(&attach_id);
+        let (_harness, _acct, config_dir) = self.attach_account_ctx(&attach_id);
         tokio::spawn(async move {
             let (ok, reason) = run_claude_lifecycle(verb, &attach_id, config_dir).await;
             let _ = crate::squad_store::complete_external(
@@ -9730,8 +9749,8 @@ impl Core {
         let argv = match tier {
             Reach::Drive => {
                 let id = row.attach_id.clone().expect("Drive implies attach_id");
-                let (acct, cd) = self.attach_account_ctx(&id);
-                attach_argv(&id, acct.as_deref(), cd.as_deref())
+                let (harness, acct, cd) = self.attach_account_ctx(&id);
+                attach_argv(harness.as_deref(), &id, acct.as_deref(), cd.as_deref())
             }
             Reach::Follow => peek_argv(&row.name),
             Reach::Locate => locate_argv(&row),
@@ -9910,10 +9929,19 @@ impl Core {
     fn name_thread_viewer_pane(&mut self, pid: u64, row: &RegistryAgent, tier: &Reach) {
         if matches!(tier, Reach::Drive) {
             // The attach argv carries no FNO_AGENT_SELF; name_attached_pane
-            // resolves the name from the live catalog the same way.
+            // resolves the name from the live catalog the same way. Its
+            // fallback reads claude's roster, so a non-claude Drive pane takes
+            // the row's name the way Follow and Locate panes already do rather
+            // than looking itself up in another harness's catalog (x-6678).
             if let Some(id) = row.attach_id.as_deref() {
-                let (_, cd) = self.attach_account_ctx(id);
-                self.name_attached_pane(pid, id, cd.as_deref());
+                let (harness, _, cd) = self.attach_account_ctx(id);
+                if harness.as_deref().is_none_or(|h| h == "claude") {
+                    self.name_attached_pane(pid, id, cd.as_deref());
+                    return;
+                }
+            }
+            if let Some(entry) = self.panes.get_mut(&pid) {
+                entry.name = Some(row.name.clone());
             }
             return;
         }
@@ -10560,8 +10588,8 @@ impl Core {
                         .map(|c| c.dims)
                         .unwrap_or((vp.rows, vp.cols));
                     // Spawn-first (Locked 4): a spawn failure leaves the layout untouched (AC3-ERR).
-                    let (acct, cd) = self.attach_account_ctx(&id);
-                    let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                    let (harness, acct, cd) = self.attach_account_ctx(&id);
+                    let argv = attach_argv(harness.as_deref(), &id, acct.as_deref(), cd.as_deref());
                     let pane_count = self
                         .viewed_tab(view)
                         .map(|tab| tree::leaves(&tab.root).len().saturating_sub(1))
@@ -10695,8 +10723,8 @@ impl Core {
                 } else {
                     row_cwd
                 };
-                let (acct, cd) = self.attach_account_ctx(&id);
-                let argv = attach_argv(&id, acct.as_deref(), cd.as_deref());
+                let (harness, acct, cd) = self.attach_account_ctx(&id);
+                let argv = attach_argv(harness.as_deref(), &id, acct.as_deref(), cd.as_deref());
                 let permit = match crate::process_admission::admit_pane(
                     self.placement_pane_count(dest, &effective),
                     effective.max_panes,
@@ -11292,8 +11320,8 @@ impl Core {
                         .and_then(|s| self.session.squad(s))
                         .map(|s| s.canonical_cwd().to_string())
                         .unwrap_or_default();
-                    let (acct, cd) = self.attach_account_ctx(id);
-                    let argv = attach_argv(id, acct.as_deref(), cd.as_deref());
+                    let (harness, acct, cd) = self.attach_account_ctx(id);
+                    let argv = attach_argv(harness.as_deref(), id, acct.as_deref(), cd.as_deref());
                     let pid = match self.spawn_pane_cmd(&argv, rows, cols, &cwd) {
                         Ok(p) => p,
                         Err(e) => {
@@ -14251,7 +14279,7 @@ mod tests {
         set_attach_program(&["claude", "attach"]); // pin the base (no leak)
                                                    // Default account: no env wrapper (byte-identical to the bare attach).
         assert_eq!(
-            attach_argv("job1", None, None),
+            attach_argv(Some("claude"), "job1", None, None),
             vec![
                 "claude".to_string(),
                 "attach".to_string(),
@@ -14262,7 +14290,7 @@ mod tests {
         // birth account stamped for the re-attached pane's glyph.
         let dir = std::path::Path::new("/home/u/.claude-alt");
         assert_eq!(
-            attach_argv("job1", Some("readyrule"), Some(dir)),
+            attach_argv(Some("claude"), "job1", Some("readyrule"), Some(dir)),
             vec![
                 "env".to_string(),
                 "CLAUDE_CONFIG_DIR=/home/u/.claude-alt".to_string(),
