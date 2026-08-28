@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
         let contract = HarnessContract::packaged().unwrap();
-        assert_eq!(contract.map_version, 11);
+        assert_eq!(contract.map_version, 12);
         assert_eq!(
             contract.harness.keys().cloned().collect::<Vec<_>>(),
             ["agy", "claude", "codex", "gemini", "opencode", "pi"]

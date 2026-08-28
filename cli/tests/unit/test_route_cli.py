@@ -305,7 +305,9 @@ def _declare(monkeypatch, rows, objective="cheapest-that-clears"):
 def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     _declare(monkeypatch, [
         {"name": "glm-5.3", "harness": "claude", "model": "glm-5.3", "band": "medium"},
-        {"name": "pi-x", "harness": "pi", "model": "p", "band": "high"},
+        # A harness fno will never know. It used to be "pi", which stopped
+        # being uninstallable the day pi was onboarded.
+        {"name": "ghost-x", "harness": "ghostharness", "model": "g", "band": "high"},
         {"name": "mystery", "harness": "claude", "model": "m"},
     ])
     res = runner.invoke(route_app, ["inventory"])
@@ -313,7 +315,7 @@ def test_inventory_lists_rows_bands_and_verdicts(monkeypatch) -> None:
     assert "objective=cheapest-that-clears" in res.output
     assert "glm-5.3" in res.output and "ok" in res.output
     # AC3-ERR: the uninstalled harness refuses BY NAME on stderr
-    assert "refused: pi-x: harness 'pi' is not installed" in res.output
+    assert "refused: ghost-x: harness 'ghostharness' is not installed" in res.output
     assert "unbanded" in res.output
 
 

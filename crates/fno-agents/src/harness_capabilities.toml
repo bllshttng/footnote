@@ -2,7 +2,7 @@
 # Edit this file, then resync the copy:
 #   cp crates/fno-agents/src/harness_capabilities.toml cli/src/fno/agents/harness_capabilities.toml
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when the two differ.
-map_version = 11
+map_version = 12
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -503,6 +503,29 @@ remove_strategy = "registry-only"
 # creation warning. fno MUST always mint and pass the id. pi's own default is a
 # UUIDv7, whose head-8 is the same clock bucket that collides on codex.
 session_binding = { strategy = "caller-assigned-cwd-scoped", required = true, timeout_ms = 60000 }
+
+[harness.pi.state_root_grant]
+# pi maps NO additive directory flag: `pi --help` on 0.84.2 lists nothing of
+# the `--add-dir` shape, and `--approve`/`-a` trusts project-local FILES for a
+# run, which is a different axis. So no pi lane can carry a grant.
+#
+# pane is unsandboxed, and this is a property of pi rather than a measurement
+# gap. pi ships no permission popups and no sandbox at all - its own
+# docs/usage.md says the tool deliberately excludes them, pointing operators at
+# containers and tmux instead - so a pi pane worker is an ordinary user process
+# with the operator's own reach. There is nothing to widen and nothing that
+# could deny it the state root. That is the same reading opencode's pane lane
+# carries, arrived at from pi's documented absence rather than from a probe.
+#
+# thread and headless say `unmeasured` rather than borrowing that reading. The
+# spawn lane for neither exists yet (`thread = false` above, and pi is out of
+# SPAWN_HARNESSES), so no worker has ever run on them and no claim write has
+# ever been observed. A lane nothing dispatches must not inherit a stance from
+# the lane that does; when the rpc spawn arm ships, its own journey test is what
+# converts these.
+pane = "unsandboxed"
+thread = "unmeasured"
+headless = "unmeasured"
 
 # pi has no approval UI, so there is no keystroke answer to record and all
 # three actions are unsupported. This is an absence in pi, not an unmeasured

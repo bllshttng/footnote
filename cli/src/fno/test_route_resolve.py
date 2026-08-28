@@ -238,11 +238,20 @@ def test_substrate_filter_empties_the_set_with_a_named_reason():
 
 def test_uninstalled_harness_refuses_by_name():
     """AC3-ERR: a declared row on a harness fno cannot drive is refused BY
-    NAME in the chain, not silently skipped."""
-    inv = _inv([{"name": "pi-x", "harness": "pi", "model": "p", "band": "high"}])
-    candidate, chain = rr.resolve_grid("high", "p1", {"pi": "ok"}, inventory=inv)
+    NAME in the chain, not silently skipped.
+
+    The harness name here must stay one fno will never know. It used to be
+    "pi", which stopped working the day pi was onboarded and made this test
+    assert the opposite of what it means.
+    """
+    inv = _inv(
+        [{"name": "ghost-x", "harness": "ghostharness", "model": "g", "band": "high"}]
+    )
+    candidate, chain = rr.resolve_grid(
+        "high", "p1", {"ghostharness": "ok"}, inventory=inv
+    )
     assert candidate is None
-    assert any("refuses pi-x" in step and "not installed" in step for step in chain)
+    assert any("refuses ghost-x" in step and "not installed" in step for step in chain)
 
 
 # --- role + protected floors ------------------------------------------------ #
