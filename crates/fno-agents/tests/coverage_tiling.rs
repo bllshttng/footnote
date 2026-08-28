@@ -779,7 +779,7 @@ fn attestation_round(
 }
 
 #[test]
-fn round_budget_counts_verdicts_since_the_last_pass() {
+fn round_budget_counts_every_verdict_across_the_pr_life() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
@@ -793,9 +793,11 @@ fn round_budget_counts_verdicts_since_the_last_pass() {
             attestation_round("code-review", &shas[2], &shas[3], "fail", None),
         ],
     );
-    // The pass resets: one round since.
-    assert_eq!(rounds_since_last_pass(&events, BRANCH, &shas[3], None), 1);
-    // Drop the pass from the chain: three rounds.
+    // The operator's ruling (x-2219): max_rounds is a per-PR TOTAL. A pass
+    // is a round like any verdict and refunds nothing - four attested
+    // rounds are four, not the reset answer 1.
+    assert_eq!(rounds_since_last_pass(&events, BRANCH, &shas[3], None), 4);
+    // Drop the pass from the chain: still three rounds.
     let no_pass = events_file(
         repo,
         &[
@@ -805,6 +807,31 @@ fn round_budget_counts_verdicts_since_the_last_pass() {
         ],
     );
     assert_eq!(rounds_since_last_pass(&no_pass, BRANCH, &shas[2], None), 3);
+}
+
+#[test]
+fn round_budget_pass_no_longer_refunds_the_budget() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (_base, shas, head) = repo_with(repo, 4);
+    // AC6: the chain pass, round, round is THREE rounds. The pass used to
+    // zero the counter and answer 1-and-change for the rounds after it; a
+    // self-signed pass refreshed the whole budget on demand (measured on
+    // PR #1225: one emit, 0/2 read back, three more rounds ran).
+    let events = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &shas[0], &shas[1], "pass", None),
+            attestation_round("code-review", &shas[1], &shas[2], "fail", None),
+            attestation_round("code-review", &shas[2], &shas[3], "fail", None),
+        ],
+    );
+    assert_eq!(
+        rounds_since_last_pass(&events, BRANCH, &shas[3], None),
+        3,
+        "pass, round, round is three rounds: the pass counts and refunds nothing"
+    );
 }
 
 #[test]
@@ -928,6 +955,43 @@ fn max_rounds_two_is_exhausted_by_the_second_round() {
     );
 }
 
+#[test]
+fn max_rounds_one_and_five_track_the_configured_key() {
+    // AC9: the key is live at every value, not only at the shipped default.
+    // One round exhausts a max of 1; four rounds do not exhaust a max of 5.
+    // Pinning only the default 2 cannot tell a working comparison from a
+    // comparison that ignores the key.
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (base, shas, head) = repo_with(repo, 5);
+    let one = events_file(
+        repo,
+        &[attestation_round(
+            "code-review",
+            &base,
+            &shas[0],
+            "fail",
+            None,
+        )],
+    );
+    let t1 = compute_range_tiling("git", repo, "origin/main", &one, BRANCH, &head, 1);
+    assert_eq!(t1.rounds_used, 1);
+    assert!(t1.rounds_exhausted, "one round of a one-round cap is spent");
+
+    let four = events_file(
+        repo,
+        &[
+            attestation_round("code-review", &base, &shas[0], "fail", None),
+            attestation_round("code-review", &shas[0], &shas[1], "fail", None),
+            attestation_round("code-review", &shas[1], &shas[2], "fail", None),
+            attestation_round("code-review", &shas[2], &shas[3], "fail", None),
+        ],
+    );
+    let t4 = compute_range_tiling("git", repo, "origin/main", &four, BRANCH, &head, 5);
+    assert_eq!(t4.rounds_used, 4);
+    assert!(!t4.rounds_exhausted, "four of five is still under the cap");
+}
+
 // --- rounds the attestation chain never saw: the GitHub review axis ---
 
 /// One `gh pr view --json reviews` review object.
@@ -967,14 +1031,15 @@ fn round_budget_counts_rounds_that_only_github_review_objects_saw() {
 }
 
 #[test]
-fn round_budget_pass_resets_the_github_axis_too() {
+fn round_budget_pass_does_not_truncate_the_github_axis() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
     let (_base, shas, head) = repo_with(repo, 4);
-    // A clean pass at 12:00 resets both axes: the connector review at 11:00
-    // is a spent round, the two reviews after the pass are fresh rounds.
-    // Answer 2, never 3.
+    // A pass at 12:00 no longer truncates the reviews axis: the connector
+    // round at 11:00 was a real round and stays counted. Two attested
+    // rounds plus three reviewed commits answer 3 (the max of the axes),
+    // never the refund answer 2-on-the-events-axis-alone.
     let events = events_file(
         repo,
         &[
@@ -1000,21 +1065,56 @@ fn round_budget_pass_resets_the_github_axis_too() {
     ];
     assert_eq!(
         rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
-        2
+        3
     );
 }
 
 #[test]
-fn round_budget_drops_the_github_axis_when_the_pass_has_no_ts() {
+fn rounds_submitted_before_the_pass_still_count_on_the_reviews_axis() {
     use fno_agents::loopcheck::rounds_since_last_pass;
     let tmp = TempDir::new().unwrap();
     let repo = tmp.path();
     let (_base, shas, head) = repo_with(repo, 4);
-    // A pass with no readable ts leaves nothing to filter the reviews axis
-    // by. Counting the whole review history there would fire the cap on a
-    // budget this very pass just defused. All three reviews below predate
-    // the pass, so the honest answer is the events-only 0; an unfiltered
-    // read answers 3, and that 3 is the regression this pins.
+    // AC7: the same no-refund ruling on the reviews axis alone. The pass
+    // carries a readable ts, and every review object predates it - the old
+    // last_pass_ts filter dropped all three and answered 0, which is the
+    // fixture that failed SEPARATELY from the events-axis reset. The
+    // answer is 3.
+    let events = events_file(
+        repo,
+        &[{
+            let mut row: serde_json::Value = serde_json::from_str(&attestation_round(
+                "code-review",
+                &shas[1],
+                &shas[2],
+                "pass",
+                None,
+            ))
+            .unwrap();
+            row["ts"] = serde_json::json!("2026-08-26T12:00:00Z");
+            row.to_string()
+        }],
+    );
+    let reviews = vec![
+        review_object(CONNECTOR, "COMMENTED", &shas[0], "2026-08-26T09:00:00Z"),
+        review_object(CONNECTOR, "COMMENTED", &shas[1], "2026-08-26T09:30:00Z"),
+        review_object(CONNECTOR, "COMMENTED", &shas[2], "2026-08-26T09:45:00Z"),
+    ];
+    assert_eq!(
+        rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
+        3
+    );
+}
+
+#[test]
+fn round_budget_pass_without_a_ts_still_counts_the_github_axis() {
+    use fno_agents::loopcheck::rounds_since_last_pass;
+    let tmp = TempDir::new().unwrap();
+    let repo = tmp.path();
+    let (_base, shas, head) = repo_with(repo, 4);
+    // The pass_ts_unreadable guard is gone with the reset it served: a
+    // pass with no readable ts leaves the reviews axis whole. Fail plus a
+    // ts-less pass is two attested rounds, three reviewed commits - 3.
     let events = events_file(
         repo,
         &[
@@ -1040,7 +1140,7 @@ fn round_budget_drops_the_github_axis_when_the_pass_has_no_ts() {
     ];
     assert_eq!(
         rounds_since_last_pass(&events, BRANCH, &head, Some(&reviews)),
-        0
+        3
     );
 }
 

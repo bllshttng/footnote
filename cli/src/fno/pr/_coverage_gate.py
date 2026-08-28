@@ -210,7 +210,28 @@ def covered_conjuncts(
     return True, ""
 
 
-def rests_on_self_attestation_alone(cov: dict) -> bool:
+def _repo_root(repo: str) -> Path:
+    """The repo root ``load_settings_for_repo`` wants. ``_repo_state_dir``
+    already does the ``rev-parse --show-toplevel``, so a ``repo`` that names a
+    subdirectory still resolves to the checkout whose config the gate reads."""
+    return Path(_merge._repo_state_dir(repo)).parent
+
+
+def _github_approval_satisfies(repo: str) -> bool:
+    """The resolved flag, read through ``_reviews``' resolver rather than a
+    second copy of it: the reachable-paths gate names a config key carried in
+    two Python files as a twin, and this gate's whole subject is one rule with
+    one implementation. Passing the rev-parsed root keeps the sibling
+    resolvers here (``require_corroboration``, ``nonblocking_categories``)
+    reading the same checkout this one does."""
+    from fno.pr import _reviews
+
+    return _reviews._resolved_github_approval_flag(str(_repo_root(repo)))
+
+
+def rests_on_self_attestation_alone(
+    cov: dict, github_approval_satisfies: bool = False
+) -> bool:
     """Whether a covered coverage row's whole count is the author's own
     (self_attested) local attestation - the same predicate the Rust gate's
     ``CoverageReport::rests_on_self_attestation_alone`` applies, read from the
@@ -218,6 +239,16 @@ def rests_on_self_attestation_alone(cov: dict) -> bool:
     pre-field rows. Unmeasured authorship (no self_attested_count, no origins)
     is NOT self-attestation alone: it is not proof of corroboration, but it is
     not proof of its absence either.
+
+    ``github_approval_satisfies`` is the resolved config flag, and it reaches
+    the verdicts fallback through ``_reviews._human_approval_counts`` - the
+    same helper ``_derive_review_state`` and the Rust ``human_approval_counts``
+    apply. It was hardcoded to the flag-off branch here, which made this a
+    THIRD implementation of one counting rule: under the flag a non-author
+    GitHub approval corroborated on the other two paths and not on this one,
+    while the gate's own refusal advertises that approval as a remedy. The
+    default is False so a caller with no repo to resolve against (the
+    doctor's read-only display) keeps today's answer.
     """
     reviewed = cov.get("reviewed_count")
     self_attested = cov.get("self_attested_count")
@@ -231,12 +262,14 @@ def rests_on_self_attestation_alone(cov: dict) -> bool:
         return isinstance(self_attested, int) and self_attested > 0
     if isinstance(self_attested, int):
         return self_attested == reviewed
+    from fno.pr._reviews import _human_approval_counts
+
     counted = [
         v
         for v in (cov.get("verdicts") or [])
         if isinstance(v, dict)
         and v.get("verdict") == "reviewed"
-        and not v.get("human_approval")
+        and _human_approval_counts(v, github_approval_satisfies)
     ]
     return bool(counted) and all(
         v.get("producer") == "local_attestation"
@@ -255,18 +288,19 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
     if not cov:
         return None
     try:
-        from pathlib import Path
 
         from fno.config import load_settings_for_repo
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         review = load_settings_for_repo(root).review
         if not getattr(review, "require_corroboration", False):
             return None
     except Exception:  # noqa: BLE001 - an unreadable config never tightens a gate
         return None
 
-    if not rests_on_self_attestation_alone(cov):
+    if not rests_on_self_attestation_alone(
+        cov, _github_approval_satisfies(repo)
+    ):
         return None
     return (
         "coverage rests on the author's own attestation alone "
@@ -525,11 +559,10 @@ def coverage_verdict(
     # difference - the exact delivery gap the render closes.
     hint = None
     try:
-        from pathlib import Path
 
         from fno.review_capability import render_self_review_invocation
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         rendered = render_self_review_invocation(project_root=root)
         # An unsized render (no merge-base against main/master) keeps its
         # `<level>` placeholder - teachable on the orienter surface, but a
@@ -653,7 +686,20 @@ def attestation_chain(
                     if scoped:
                         if data.get("repo") != slug:
                             continue
-                    key = json.dumps(data, sort_keys=True)
+                    # Dedup on the producer's invocation_id, falling back to
+                    # the whole payload only when the row predates the field.
+                    # The payload key is wrong across stores: the global
+                    # mirror stamps `repo` onto its copy and the project row
+                    # carries none, so one attestation produced two payload
+                    # keys and the chain counted every mirrored round twice -
+                    # which the no-refund budget turns into "one review reads
+                    # 2/2". The invocation_id is minted once by the producer
+                    # and lands identically on both rows.
+                    invocation_id = data.get("invocation_id")
+                    if isinstance(invocation_id, str) and invocation_id:
+                        key = f"invocation:{invocation_id}"
+                    else:
+                        key = json.dumps(data, sort_keys=True)
                     if key in seen:
                         continue
                     if _in_scope(data):
@@ -682,7 +728,7 @@ def _resolved_categories(repo: str) -> frozenset[str]:
         from fno.config import load_settings_for_repo
         from fno.review.findings import resolve_nonblocking_categories
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         return resolve_nonblocking_categories(
             getattr(
                 load_settings_for_repo(root).review, "nonblocking_categories", None
@@ -769,7 +815,12 @@ def disposition_refusal(
     # Corroboration for declines: the coverage row's existing predicate, read
     # independent of config.review.require_corroboration (Locked Decision 2 -
     # a disposition pass can be gamed by declining, a clean review cannot).
-    corroborated = not (cov is not None and rests_on_self_attestation_alone(cov))
+    corroborated = not (
+        cov is not None
+        and rests_on_self_attestation_alone(
+            cov, _github_approval_satisfies(repo)
+        )
+    )
 
     nonterminal: list[str] = []
     uncorroborated: list[str] = []
@@ -856,69 +907,61 @@ IMPOSSIBLE_REMEDIES = (
 )
 
 
-def _ts_after(a: str, b: str) -> bool:
-    """True iff ``a`` is strictly after ``b``, both RFC3339. Unparseable
-    input answers False, matching the Rust-side ``ts_after``: a round is
-    never counted on a timestamp that cannot be read. TypeError is caught
-    too: comparing an offset-naive timestamp against an offset-aware one
-    raises instead of answering, and the crash would take the whole
-    coverage verdict down with it."""
-    try:
-        from datetime import datetime
-
-        return datetime.fromisoformat(a) > datetime.fromisoformat(b)
-    except (ValueError, TypeError):
-        return False
-
-
 def rounds_since_last_pass(
     chain: list[dict],
     reviews: Optional[list[dict]] = None,
 ) -> int:
-    """Review rounds since the last pass, oldest-first.
+    """The PR's review-round total, oldest-first.
 
-    A round is a review COMPLETION since the last pass, whatever its
-    verdict, on two evidence axes; a pass resets both. The chain axis
-    counts attestation verdicts (the declared ``review_round`` wins when
-    present, the running max since the reset; events from before the field
-    existed fall back to counting verdicts). The reviews axis, when a
-    payload is supplied, counts DISTINCT reviewed commits submitted
-    strictly after the newest pass - a GitHub-App reviewer's rounds leave
+    The operator's ruling (x-2219, 2026-08-27) made this a PER-PR TOTAL:
+    ``max_rounds`` counts rounds across the whole life of the PR, and a
+    ``verdict: pass`` refunds nothing - it is one round like any verdict,
+    and its coverage role lives in the coverage classify, never here. The
+    name survives from the reset semantics it used to implement; this
+    docstring, not the name, is the contract. The chain axis counts
+    attestation verdicts (the declared ``review_round`` wins when present,
+    as the running max; events from before the field existed fall back to
+    counting verdicts). The reviews axis, when a payload is supplied,
+    counts DISTINCT reviewed commits - a GitHub-App reviewer's rounds leave
     no attestation row anywhere, so they exist only as review objects, and
     every fix moves the head, making one reviewed commit one round. No
-    author filter: the codex cloud connector posts its review objects
-    under the PR author's own login (measured live - 116 of 117 objects on
-    the spinning specimen), so an author exclusion deletes the round trace
-    on exactly that lane. Known bound, accepted: reply volume at ONE
-    commit is neutral, but replies landed on distinct never-reviewed heads
-    each count as a round. No discriminator exists in the review-object
-    data, and over-counting fires the cap on a worker already
-    push-replying without re-review, where the old under-count spun
-    forever. The answer is the MAX of the two axes, never the sum: a
-    healthy lane leaves both traces per round. The Rust-side mirror is
-    ``loopcheck::rounds_since_last_pass``; the two are held equal by the
-    shared corpus.
+    timestamp filter on this axis either: a pass that truncated the reviews
+    older than itself would refund rounds only GitHub saw. No author
+    filter: the codex cloud connector posts its review objects under the PR
+    author's own login (measured live - 116 of 117 objects on the spinning
+    specimen), so an author exclusion deletes the round trace on exactly
+    that lane. Known bound, accepted: reply volume at ONE commit is
+    neutral, but replies landed on distinct never-reviewed heads each count
+    as a round. No discriminator exists in the review-object data, and
+    over-counting fires the cap on a worker already push-replying without
+    re-review, where the old under-count spun forever. The answer is the
+    MAX of the two axes, never the sum: a healthy lane leaves both traces
+    per round. The Rust-side mirror is ``loopcheck::rounds_since_last_pass``;
+    the two are held equal by the shared corpus.
     """
     rounds = 0
-    last_pass_ts = ""
-    pass_ts_unreadable = False
+    counted_heads: set[str] = set()
     for event in chain:
-        if event.get("verdict") == "pass":
-            rounds = 0
-            last_pass_ts = str(event.get("ts") or "")
-            # A pass with no readable ts leaves nothing to filter the reviews
-            # axis by. Counting the whole review history there would fire the
-            # cap on a budget this very pass just defused, so the axis is
-            # dropped instead - the same bias as the read-failure arm below.
-            pass_ts_unreadable = not last_pass_ts
-            continue
         declared = event.get("review_round")
         if isinstance(declared, int) and not isinstance(declared, bool) and declared >= 0:
+            # A declared round number is already the round's identity, so the
+            # running max cannot double-count and needs no head collapse.
             rounds = max(rounds, declared)
-        else:
-            rounds += 1
+            continue
+        # One reviewed head is ONE round, the same unit the reviews axis uses
+        # (it counts DISTINCT commit.oid). Without this the two axes measure
+        # different things and max() over them is not a budget: a producer
+        # that emits a corrective second verdict at an unchanged head spends
+        # two rounds for zero code change. A row carrying no head is counted,
+        # fail-closed: an unreadable head never buys a free round.
+        event_head = event.get("head_sha")
+        if isinstance(event_head, str) and event_head:
+            if event_head in counted_heads:
+                continue
+            counted_heads.add(event_head)
+        rounds += 1
     events_rounds = rounds
-    if reviews is None or pass_ts_unreadable:
+    if reviews is None:
         return events_rounds
     counted: set[str] = set()
     for review in reviews:
@@ -928,11 +971,6 @@ def rounds_since_last_pass(
         commit = review.get("commit")
         oid = commit.get("oid") if isinstance(commit, dict) else None
         if not isinstance(oid, str) or not oid:
-            continue
-        submitted = review.get("submittedAt")
-        if not isinstance(submitted, str):
-            submitted = ""
-        if last_pass_ts and not _ts_after(submitted, last_pass_ts):
             continue
         counted.add(oid)
     return max(events_rounds, len(counted))
@@ -1007,7 +1045,7 @@ def resolved_max_rounds(repo: str) -> int:
     try:
         from fno.config import load_settings_for_repo
 
-        root = Path(_merge._repo_state_dir(repo)).parent
+        root = _repo_root(repo)
         value = getattr(load_settings_for_repo(root).review, "max_rounds", None)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
             return value

@@ -311,10 +311,11 @@ pub(crate) struct Settings {
     github_approval_satisfies: Option<bool>,
     /// config.review.max_rounds (default 2, clamped at least 1 at read): the
     /// review-round budget before the gate reports IMPOSSIBLE. More rounds
-    /// than this on the branch since the last pass, with blocking findings
-    /// still non-terminal, means re-reviewing cannot clear it. A round is a
-    /// review VERDICT since the last pass; CI failures, lint failures and
-    /// rebases are not rounds, and a pass resets the counter.
+    /// than this across the whole life of the PR, with blocking findings
+    /// still non-terminal, means re-reviewing cannot clear it. A round is one
+    /// reviewed HEAD, so two verdicts at one unchanged head are one round.
+    /// CI failures, lint failures and rebases are not rounds, and a pass
+    /// refunds nothing: it is one round like any other verdict.
     max_rounds: Option<i64>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
@@ -2807,33 +2808,113 @@ fn read_pr_info(
         // "uncovered" and an instrument-health receipt for reviews that were
         // never queried. A fresh local pass still rescues it inside
         // classify_coverage (positive evidence).
-        let mut coverage = classify_coverage_tiled(
-            &[],
-            &[],
-            &events_text,
-            &[],
-            !(no_external && login_gate_active),
-            author_session,
-            &freshness,
-            &head_branch,
-            head_sha,
-            Some(&tiling),
-            pr_author.as_deref(),
-            github_approval_satisfies,
-        );
-        // Same capture-then-apply order as the external-read arm below: the
-        // predicate reads the pre-downgrade report, and the `reviewed` verdict
-        // needs the same corroboration term or the loop finishes DonePRGreen
-        // on a self-attested-only row the merge verb refuses (round 3: the
-        // solo lane - reviewers configured, no bots, no optional lane - takes
-        // this arm every time).
-        let self_attested_alone = coverage.rests_on_self_attestation_alone();
-        coverage.apply_corroboration_policy(require_corroboration);
-        // Locked Decision 1: the pass condition is disposition-complete.
-        // Non-terminal blocking findings withhold `reviewed` here exactly as
-        // the Python merge gate refuses on them.
-        let blockers =
-            disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
+        // One classification pass over a tiling, as (coverage, self-attested
+        // predicate, blockers): the round-budget refresh below re-runs it so
+        // every conjunct downstream reads the SAME budget, never a mix.
+        let classify_with = |tiling: &RangeTiling| {
+            let mut coverage = classify_coverage_tiled(
+                &[],
+                &[],
+                &events_text,
+                &[],
+                !(no_external && login_gate_active),
+                author_session,
+                &freshness,
+                &head_branch,
+                head_sha,
+                Some(tiling),
+                pr_author.as_deref(),
+                github_approval_satisfies,
+            );
+            // Same capture-then-apply order as the external-read arm below: the
+            // predicate reads the pre-downgrade report, and the `reviewed` verdict
+            // needs the same corroboration term or the loop finishes DonePRGreen
+            // on a self-attested-only row the merge verb refuses (round 3: the
+            // solo lane - reviewers configured, no bots, no optional lane - takes
+            // this arm every time).
+            let self_attested_alone = coverage.rests_on_self_attestation_alone();
+            coverage.apply_corroboration_policy(require_corroboration);
+            // Locked Decision 1: the pass condition is disposition-complete.
+            // Non-terminal blocking findings withhold `reviewed` here exactly as
+            // the Python merge gate refuses on them.
+            let blockers =
+                disposition_blockers(&events_text, &head_branch, head_sha, self_attested_alone);
+            (coverage, self_attested_alone, blockers)
+        };
+        let (mut coverage, mut self_attested_alone, mut blockers) = classify_with(&tiling);
+        // The reviewer scan above read the pre-refresh budget too; a local
+        // mut so the arm's tuple below answers from whatever budget this arm
+        // ends on.
+        let mut reviewers_ok = reviewers_ok;
+        // x-2219: the round budget counts the GitHub reviews axis on THIS arm
+        // too. A stock install (no required bots, no optional lane) never
+        // reached the external arm's refresh, so rounds the connector posted
+        // read 0 here and the cap could not fire on exactly the lane that
+        // spun (PR #1225: five real rounds, counter 0/2). The read mirrors
+        // the Python merge gate's own gating (_coverage_gate._pr_reviews):
+        // pay it only where it can change the answer - the row is uncovered,
+        // or findings are in play - never on a healthy covered PR. A
+        // no_external session reads nothing, whatever the gate says. A
+        // failed read keeps the events-only answer rather than guessing: a
+        // cap that fires on a broken read spends a budget that may be
+        // unspent.
+        if !no_external && (!coverage.coverage.is_covered() || !blockers.is_empty()) {
+            let mut reviews_args = vec!["pr", "view"];
+            reviews_args.extend(sel.iter().copied());
+            reviews_args.extend(["--json", "reviews"]);
+            match bounded_read(
+                gh_bin.as_ref(),
+                &reviews_args,
+                cwd,
+                "pr_reviews",
+                stopgate_read_timeout(),
+            ) {
+                Ok(out) if out.status.success() => {
+                    let parsed = serde_json::from_slice::<Value>(&out.stdout)
+                        .map_err(|_| GhReadError::parse_failed("pr_reviews_parse"));
+                    match parsed {
+                        Ok(reviews_json) => {
+                            let reviews_arr =
+                                reviews_json.get("reviews").and_then(|v| v.as_array());
+                            if let Some(reviews_arr) = reviews_arr {
+                                tiling.rounds_used = rounds_since_last_pass(
+                                    &events_text,
+                                    &head_branch,
+                                    head_sha,
+                                    Some(reviews_arr),
+                                );
+                                tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
+                                // The classification and the reviewer scan
+                                // above judged the pre-refresh budget; re-run
+                                // both so the in-classify spent-budget
+                                // discharge, the withhold/impossible
+                                // conjuncts, and the unattested reviewer's
+                                // cap-yield all read the refreshed one.
+                                let (re_coverage, re_alone, re_blockers) = classify_with(&tiling);
+                                coverage = re_coverage;
+                                self_attested_alone = re_alone;
+                                blockers = re_blockers;
+                                let (re_unattested, _re_malformed) = unattested_reviewers_scan(
+                                    events_path,
+                                    reviewers,
+                                    &freshness,
+                                    &head_branch,
+                                    head_sha,
+                                    tiling.rounds_exhausted,
+                                );
+                                reviewers_ok = re_unattested.is_empty();
+                            }
+                        }
+                        Err(e) => log_bounded_read_error("round-budget reviews read", &e),
+                    }
+                }
+                Ok(out) => log_bounded_read_error(
+                    "round-budget reviews read",
+                    &GhReadError::failed("pr_reviews", stderr_tail(&out.stderr_tail)),
+                ),
+                Err(e) => log_bounded_read_error("round-budget reviews read", &e),
+            }
+        }
         (
             "none".to_string(),
             reviewers_ok
@@ -3045,8 +3126,9 @@ fn read_pr_info(
         // zero rounds and the cap cannot fire. The refreshed values feed
         // every consumer below in this arm (the coverage classify, the
         // withhold/impossible conjuncts, the emitted row). The no-external
-        // arm above keeps the events-only answer: it reads no reviews, so
-        // there is no second axis to count.
+        // arm above pays for the same axis only where it can change the
+        // answer (uncovered row, findings in play) - never on a healthy
+        // covered PR.
         tiling.rounds_used =
             rounds_since_last_pass(&events_text, &head_branch, head_sha, Some(reviews_arr));
         tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
@@ -5487,8 +5569,8 @@ pub struct RangeTiling {
     /// A local attestation whose head is in this list counts as Reviewed
     /// when the whole chain tiles, whatever its single-sha freshness says.
     pub chain_heads: Vec<String>,
-    /// Review rounds since the last pass on this branch (see
-    /// [`rounds_since_last_pass`]). Carried on the chain analysis because it
+    /// Review rounds across the whole life of the PR, one per reviewed head
+    /// (see [`rounds_since_last_pass`]). Carried on the chain analysis because it
     /// reads the same events with the same scoping; computed even on the
     /// git-failure paths, which answer tiling fail-closed but rounds honestly.
     pub rounds_used: i64,
@@ -5788,27 +5870,40 @@ fn git_rev_list(git_bin: &str, cwd: &Path, args: &[&str]) -> Option<Vec<String>>
             .collect(),
     )
 }
-/// Review rounds since the last pass on this branch. A round is a review
-/// COMPLETION since the last pass, whatever its verdict - CI failures, lint
-/// failures and rebases are not rounds - and a pass resets the counter. Two
-/// evidence axes, because the lane that spun never emits an attestation:
-/// its rounds exist only as GitHub review objects. The events axis counts
-/// in-scope `review_attestation` rows (the declared `review_round` wins
-/// when present, the running max since the last reset; events from before
-/// the field existed fall back to counting verdicts). The reviews axis,
-/// when a payload is supplied, counts DISTINCT reviewed commits submitted
-/// after the newest in-scope pass - every fix moves the head, so one
-/// reviewed commit is one round. No author filter: the codex cloud
-/// connector posts its review objects under the PR author's own login
-/// (measured live - 116 of 117 objects on the spinning specimen), so an
-/// author exclusion deletes the round trace on exactly that lane. Known
-/// bound, accepted: reply volume at ONE commit is neutral, but replies
-/// landed on distinct never-reviewed heads each count as a round. No
-/// discriminator exists in the review-object data (the measured lane's
-/// review bursts and the worker's replies share a login, a state, and a
-/// commit), and over-counting fires the cap on a worker already
-/// push-replying without re-review, where the old under-count spun
-/// forever.
+
+/// The PR's review-round total, on two evidence axes. The operator's ruling
+/// (x-2219, 2026-08-27) made this a PER-PR TOTAL: `max_rounds` counts rounds
+/// across the whole life of the PR, and a `verdict: pass` refunds nothing -
+/// it is one round like any verdict, and its coverage role lives elsewhere
+/// (the pass scan and the classify), never here. The name survives from the
+/// reset semantics it used to implement; the docstring, not the name, is
+/// the contract.
+///
+/// One reviewed HEAD is one round, on both axes. The chain axis counts
+/// DISTINCT `head_sha` among the in-scope attestation rows (the declared
+/// `review_round` wins when present, as the running max, and needs no
+/// collapse because the declared number is already the round's identity;
+/// rows from before the field existed collapse by head). A row with no
+/// readable head is dropped before scoping here, as it always was: this
+/// axis cannot place it in the branch's lineage. The Python mirror admits
+/// it on a branch match and counts it, which is the one measured
+/// divergence between the two. Two verdicts at one
+/// unchanged head are therefore ONE round: a cap whose size depends on how
+/// a reviewer batches its output is not a cap. The reviews axis, when
+/// a payload is supplied, counts DISTINCT reviewed commits - a GitHub-App
+/// reviewer's rounds leave no attestation row anywhere, so they exist only
+/// as review objects, and every fix moves the head, making one reviewed
+/// commit one round. No timestamp filter on this axis either: a pass that
+/// truncated the reviews older than itself would refund rounds only GitHub
+/// saw. No author filter: the codex cloud connector posts its review objects
+/// under the PR author's own login (measured live - 116 of 117 objects on
+/// the spinning specimen), so an author exclusion deletes the round trace on
+/// exactly that lane. Known bound, accepted: reply volume at ONE commit is
+/// neutral, but replies landed on distinct never-reviewed heads each count
+/// as a round. No discriminator exists in the review-object data (the
+/// measured lane's review bursts and the worker's replies share a login, a
+/// state, and a commit), and over-counting fires the cap on a worker already
+/// push-replying without re-review, where the old under-count spun forever.
 /// The answer is the MAX of the two, never the sum: a healthy lane leaves
 /// both traces per round and must not count it twice. Scoped exactly like
 /// the tiling and disposition scans: branch match, with the legacy
@@ -5822,8 +5917,7 @@ pub fn rounds_since_last_pass(
     reviews: Option<&[Value]>,
 ) -> i64 {
     let mut rounds: i64 = 0;
-    let mut last_pass_ts = String::new();
-    let mut pass_ts_unreadable = false;
+    let mut counted_heads: Vec<String> = Vec::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
@@ -5844,41 +5938,34 @@ pub fn rounds_since_last_pass(
         if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
             continue;
         }
-        if val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass") {
-            rounds = 0;
-            last_pass_ts = val
-                .get("ts")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            // A pass with no readable ts leaves nothing to filter the reviews
-            // axis by. Counting the whole review history there would fire the
-            // cap on a budget this very pass just defused, so the axis is
-            // dropped instead - the same bias as the absent-reviews arm below.
-            pass_ts_unreadable = last_pass_ts.is_empty();
-            continue;
-        }
         match val.pointer("/data/review_round").and_then(|v| v.as_i64()) {
+            // A declared round number is already the round's identity, so the
+            // running max cannot double-count and needs no head collapse.
             Some(n) if n >= 0 => rounds = rounds.max(n),
-            _ => rounds += 1,
+            // One reviewed head is ONE round, the same unit the reviews axis
+            // uses (DISTINCT commit.oid). Without this the two axes measure
+            // different things and max() over them is not a budget: a
+            // producer that emits a corrective second verdict at an unchanged
+            // head spends two rounds for zero code change.
+            _ => {
+                if counted_heads.iter().any(|h| h == line_head) {
+                    continue;
+                }
+                counted_heads.push(line_head.to_string());
+                rounds += 1;
+            }
         }
     }
     let events_rounds = rounds;
     let Some(reviews) = reviews else {
         return events_rounds;
     };
-    if pass_ts_unreadable {
-        return events_rounds;
-    }
     // The reviews axis. An object counts when it names a real reviewed
-    // commit (state and commit.oid present) and was submitted strictly
-    // after the newest in-scope pass - the reset must reach this axis too,
-    // or a pass never defuses the spent rounds. Any login may carry it: the
+    // commit (state and commit.oid present). Any login may carry it: the
     // codex cloud connector posts its review objects under the PR author's
     // own login, so an author filter deletes the trace on exactly that
     // lane, and reply volume is already neutral because the unit is the
-    // DISTINCT commit. ts_after, never a raw compare: offset-suffixed and
-    // Z-suffixed forms mis-order lexicographically.
+    // DISTINCT commit.
     let mut counted: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for review in reviews {
         if review
@@ -5896,13 +5983,6 @@ pub fn rounds_since_last_pass(
         else {
             continue;
         };
-        let submitted = review
-            .get("submittedAt")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if !last_pass_ts.is_empty() && !ts_after(submitted, &last_pass_ts) {
-            continue;
-        }
         counted.insert(oid);
     }
     events_rounds.max(counted.len() as i64)
@@ -5927,7 +6007,10 @@ pub fn compute_range_tiling(
     let mut tiling = RangeTiling::default();
     // Rounds do not depend on the git walk, so they are computed before the
     // fail-closed early returns: a merge-base failure answers tiling
-    // not-tiled but the round budget honestly.
+    // not-tiled but the round budget honestly. This default is the
+    // events-only answer; each caller that holds review objects refreshes
+    // both axes on top of it (the external arm unconditionally, the
+    // no-external arm behind the same gate the Python merge gate uses).
     tiling.rounds_used = rounds_since_last_pass(events_text, head_branch, head_sha, None);
     tiling.rounds_exhausted = tiling.rounds_used >= max_rounds.max(1);
     // The merge base decides where coverage must start. An unresolvable one
