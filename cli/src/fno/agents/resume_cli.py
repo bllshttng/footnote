@@ -505,7 +505,7 @@ def _resume_claude_wake(
                     "or re-spawn the worker.\n"
                 ),
             )
-        if launch_account not in (None, "default"):
+        if launch_account is not None and launch_account != "default":
             from fno.agents.account_env import (
                 AccountResolutionError,
                 resolve_account_overlay,

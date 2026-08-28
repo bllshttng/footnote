@@ -36,7 +36,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterator,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+)
+
+if TYPE_CHECKING:
+    from fno.agents.account_env import AccountOverlay
 
 from fno import paths
 from fno.agents import events
@@ -2474,7 +2486,7 @@ def _pick_account_overlay(
     *,
     role: Optional[str] = None,
     route_env: Optional[Mapping[str, str]] = None,
-) -> Optional["object"]:
+) -> "Optional[AccountOverlay]":
     """Consult the picker for a spawn that named no account, or None.
 
     Returns the full :class:`AccountOverlay` (env AND account_id), because the
@@ -5206,7 +5218,9 @@ def reconcile_agents(
     )
 
 
-def _reentry_binding_for_row(entry: "object") -> "tuple[Optional[dict[str, str]], Optional[str], Optional[dict[str, str]]]":
+def _reentry_binding_for_row(
+    entry: "AgentEntry",
+) -> "tuple[Optional[dict[str, str]], Optional[str], Optional[Sequence[str]]]":
     """The launch binding a re-entry of this claude row must restore, or a refusal.
 
     The Python-side arm of the x-d285 rule, applied when the Rust client is
@@ -5245,7 +5259,7 @@ def _reentry_binding_for_row(entry: "object") -> "tuple[Optional[dict[str, str]]
 
     binding_env: Optional[dict[str, str]] = None
     scrub_vars: tuple = ()
-    if launch_account not in (None, "default"):
+    if launch_account is not None and launch_account != "default":
         from fno.agents.account_env import (
             AccountResolutionError,
             SCRUB_AUTH_VARS,

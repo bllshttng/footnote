@@ -22737,8 +22737,7 @@ mod tests {
             br#"{"resolved":true,"argv":[]}"#.as_slice(),
             // A non-string env value parsed as an empty assignment would
             // launch with a blanked namespace; it refuses like the rest.
-            br#"{"resolved":true,"argv":["claude"],"env":{"CLAUDE_CONFIG_DIR":5}}"#
-                .as_slice(),
+            br#"{"resolved":true,"argv":["claude"],"env":{"CLAUDE_CONFIG_DIR":5}}"#.as_slice(),
         ] {
             assert!(
                 ReentryVerdict::from_plan_json(bad).is_err(),
