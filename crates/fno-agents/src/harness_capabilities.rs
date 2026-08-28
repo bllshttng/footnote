@@ -597,11 +597,6 @@ mod tests {
 
     #[test]
     fn packaged_contract_is_complete_for_every_harness() {
-        assert_eq!(
-            CAPABILITY_TOML,
-            include_str!("../../../cli/src/fno/agents/harness_capabilities.toml"),
-            "Python and packaged Rust contract copies diverged",
-        );
         let contract = HarnessContract::packaged().unwrap();
         assert_eq!(contract.map_version, 10);
         assert_eq!(

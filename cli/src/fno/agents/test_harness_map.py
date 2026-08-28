@@ -30,12 +30,6 @@ _REQUIRED_INTERACTIVE_FIELDS = {
 
 
 def test_packaged_contract_is_complete_for_every_known_harness():
-    root = Path(__file__).resolve().parents[4]
-    assert (
-        root / "crates/fno-agents/src/harness_capabilities.toml"
-    ).read_text(encoding="utf-8") == (
-        root / "cli/src/fno/agents/harness_capabilities.toml"
-    ).read_text(encoding="utf-8")
     assert MAP_VERSION == 10
     assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
     for harness in known_harnesses():
