@@ -227,7 +227,7 @@ def test_resume_cwd_override_wins_over_the_registrys_recorded_cwd() -> None:
     )
     seen_cwd: list[str] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen_cwd.append(cwd)
 
     states = iter(["Needs input", "Working"])
@@ -491,7 +491,7 @@ def test_claude_resume_wakes_and_verifies_working() -> None:
     )
     wake_calls: list[dict] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         wake_calls.append({"short_id": short_id, "message": message, "route_env": route_env})
 
     states = iter(["Needs input", "Working"])
@@ -526,7 +526,7 @@ def test_claude_resume_retries_once_before_giving_up() -> None:
     )
     wake_calls: list[int] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         wake_calls.append(1)
 
     # Stays "Needs input" through the pre-check and both post-attempt reads.
@@ -562,7 +562,7 @@ def test_claude_resume_stops_retrying_once_the_row_goes_idle_mid_loop() -> None:
     )
     wake_calls: list[int] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         wake_calls.append(1)
 
     states = iter(["Needs input", "Idle"])
@@ -596,7 +596,7 @@ def test_claude_resume_wake_attempt_exception_maps_to_exit_16_not_a_traceback() 
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
     )
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         raise RuntimeError("pty allocation exploded")
 
     res = resume_logic(
@@ -680,7 +680,7 @@ def test_claude_resume_passes_the_agents_cwd_to_wake_fn() -> None:
     )
     seen_cwd: list[str] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen_cwd.append(cwd)
 
     states = iter(["Needs input", "Working"])
@@ -707,9 +707,11 @@ def test_claude_resume_restores_routed_env() -> None:
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
     )
     entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
+    # x-d285: a routed row must carry a launch account, else the wake refuses.
+    entry.launch_account = "default"  # type: ignore[attr-defined]
     seen_env: list[Optional[dict]] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         seen_env.append(route_env)
 
     def _read_route_settings(path):
@@ -749,6 +751,7 @@ def test_claude_resume_refuses_when_route_cannot_be_restored() -> None:
         name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
     )
     entry.route_settings_path = "/tmp/gone.json"  # type: ignore[attr-defined]
+    entry.launch_account = "default"  # type: ignore[attr-defined]
 
     import fno.agents.model_routing as model_routing_mod
 
@@ -1195,7 +1198,7 @@ def test_claude_resume_rechecks_state_after_a_timed_out_attempt() -> None:
     )
     states = iter(["Needs input", "Working"])
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         raise subprocess_mod.TimeoutExpired(cmd="bash", timeout=60.0)
 
     res = resume_logic(
@@ -1363,7 +1366,7 @@ def test_claude_resume_does_not_retry_after_teardown_unconfirmed() -> None:
     )
     wake_calls: list[int] = []
 
-    def _wake(short_id, *, message, route_env, cwd):
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
         wake_calls.append(1)
         raise _WakeTeardownUnconfirmed("teardown unconfirmed")
 
@@ -1527,3 +1530,140 @@ def test_non_codex_resume_argv_is_untouched_by_the_codex_modal_flags() -> None:
 
     argv = _build_resume_argv("opencode", "ses_1", cwd="/tmp/wt/x")
     assert argv == ["opencode", "--session", "ses_1"]
+
+
+# --- x-d285: the account axis rides the wake (task 2.1) ----------------------
+
+
+def test_claude_resume_wake_carries_the_recorded_account_env() -> None:
+    """A pinned-account row wakes under its own CLAUDE_CONFIG_DIR, not the
+    caller's ambient namespace."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.launch_account = "makers"  # type: ignore[attr-defined]
+    seen: list[Optional[dict]] = []
+
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
+        seen.append(account_env)
+
+    import fno.agents.account_env as account_env_mod
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    orig = account_env_mod.resolve_account_overlay
+    account_env_mod.resolve_account_overlay = lambda _id: _Overlay()
+    states = iter(["Needs input", "Working"])
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+            claim_fn=lambda _s: None,
+            execvp=_no_exec,
+            emit_event=lambda *a, **kw: None,
+            wake_fn=_wake,
+            agents_state_fn=lambda: {"deadbeef": {"live_status": next(states)}},
+        )
+    finally:
+        account_env_mod.resolve_account_overlay = orig
+
+    assert res.exit_code == 0
+    assert seen == [{"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}]
+
+
+def test_claude_resume_wake_refuses_a_routed_row_with_no_launch_account() -> None:
+    """A routed row with unknown account refuses (exit 3) before any wake:
+    the woken attach would inherit the caller's ambient namespace."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
+    # no launch_account: the legacy-unknown shape
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("no wake may run on a refused row")
+        ),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+    )
+    assert res.exit_code == 3
+    assert "no launch account" in res.stderr
+
+
+def test_claude_resume_wake_refuses_a_dead_account() -> None:
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.launch_account = "removed-acct"  # type: ignore[attr-defined]
+
+    import fno.agents.account_env as account_env_mod
+
+    def _raise(_id):
+        raise account_env_mod.AccountResolutionError("no longer registered")
+
+    orig = account_env_mod.resolve_account_overlay
+    account_env_mod.resolve_account_overlay = _raise
+    try:
+        res = resume_logic(
+            name="alpha",
+            registry_loader=lambda: [entry],
+            path_checker=_allow_all_path,
+            cwd_checker=lambda _c: True,
+            claim_fn=lambda _s: None,
+            execvp=_no_exec,
+            emit_event=lambda *a, **kw: None,
+            wake_fn=lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("no wake may run on a refused row")
+            ),
+            agents_state_fn=lambda: {"deadbeef": {"live_status": "Needs input"}},
+        )
+    finally:
+        account_env_mod.resolve_account_overlay = orig
+
+    assert res.exit_code == 3
+    assert "removed-acct" in res.stderr
+
+
+def test_claude_resume_wake_skips_account_refusal_for_an_already_working_row() -> None:
+    """The account gate matches the route gate: a skip-eligible row launches
+    nothing, so unknown account evidence cannot turn a no-op read into a
+    refusal."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _FakeAgentEntry(
+        name="alpha", harness="claude", cwd="/cwd", short_id="deadbeef",
+    )
+    entry.route_settings_path = "/tmp/route.json"  # type: ignore[attr-defined]
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [entry],
+        path_checker=_allow_all_path,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        execvp=_no_exec,
+        emit_event=lambda *a, **kw: None,
+        wake_fn=lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("a Working row must not be woken at all")
+        ),
+        agents_state_fn=lambda: {"deadbeef": {"live_status": "Working"}},
+    )
+    assert res.exit_code == 0

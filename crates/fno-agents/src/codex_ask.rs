@@ -1228,6 +1228,9 @@ fn dispatch_create(
         name: name.to_string(),
         short_id: String::new(),
         legacy_provider: String::new(),
+        // x-d285: codex accounts are not the claude account axis; unknown.
+        launch_account: None,
+        related_session_id: None,
         provider: Some("openai".to_string()),
         model: None,
         model_basis: None,

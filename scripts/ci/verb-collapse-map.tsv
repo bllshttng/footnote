@@ -61,6 +61,7 @@ agents ping	T1	agents ping	3
 agents probe-run	T1	agents probe-run	3
 agents reap	T1	agents reap	15
 agents reconcile	T1	agents reconcile	12
+agents recover	T1	agents recover	0
 agents register	T1	agents register	2
 agents registry-json	T1	agents registry-json	3
 agents rename	T1	agents rename	0

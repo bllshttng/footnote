@@ -218,6 +218,13 @@ RUST_CLIENT_VERBS = frozenset(
         # also satisfy it. Dispatched directly in client.rs before
         # build_request (no daemon RPC, no Python impl).
         "review-coverage",
+        # Manual session restoration (x-d285): hidden-but-invocable operator
+        # escape hatch that restores a recorded session under its account and
+        # route, refusing until ``--session`` selects between a fork's two
+        # recorded ids. Dispatched directly in client.rs before build_request
+        # (no daemon RPC, no Python impl); this entry keeps the
+        # client.rs<->router parity test in sync and provides the help line.
+        "recover",
     }
 )
 
@@ -388,6 +395,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
     "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
     "review-coverage": "Emit the review_coverage event for a PR with the stop hook's own resolver/emitter (x-3a3f): --cwd <dir> [--pr <n>] [--head <sha>]. No way to assert coverage without the reads.",
+    "recover": "Restore a recorded claude session under its account and route (x-d285): <agent> [--session <id>] names the id when the row holds two; --print-command prints the inspection form and touches nothing.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other
@@ -818,6 +826,12 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     """
     account = _spawn_flag_value(args, "--account")
     if not account:
+        # x-d285: an inherited FNO_LAUNCH_ACCOUNT (set by the PARENT worker's
+        # own --account spawn) must not outlive that spawn. The Rust mint reads
+        # it first, so a stale value would stamp the parent's account onto a
+        # child that pinned none. Clearing here keeps the three-valued read
+        # honest: this spawn's account fact is its own, or absent.
+        os.environ.pop("FNO_LAUNCH_ACCOUNT", None)
         return
     if _is_route_bearing_spawn("spawn", args):
         return
@@ -832,6 +846,12 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     for var in _account_env.SCRUB_AUTH_VARS:
         os.environ.pop(var, None)
     os.environ.update(overlay.env)
+    # x-d285: the account ID has no argv carrier on the Rust route (the binary
+    # has no --account flag), so publish it on the env for the row mint to
+    # stamp as launch_account. Set at the same seam as the overlay for the
+    # same reason: this is the one edit both runtimes see. An id, never a
+    # credential - the registry row carries it verbatim.
+    os.environ["FNO_LAUNCH_ACCOUNT"] = account
 
 
 #: Verbs whose Rust-client handling launches a harness child that would inherit

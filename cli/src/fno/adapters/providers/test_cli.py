@@ -328,6 +328,41 @@ class TestShow:
         result = _invoke(["show", "nonexistent"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code != 0
 
+    def test_show_print_binding_is_secret_free(self, tmp_path: Path):
+        """--print-binding is the machine projection the Rust re-entry
+        resolver consumes: identity, lane, config dir - never the record's
+        env or credentials."""
+        cfg_dir = tmp_path / ".claude-alt"
+        cfg_dir.mkdir()
+        (cfg_dir / ".credentials.json").write_text("{}", encoding="utf-8")
+        config = _two_record_config()
+        config["config"]["providers"]["records"].append(
+            {
+                "id": "alt",
+                "name": "Alt",
+                "harness": "claude",
+                "auth": "api_key",
+                "env": {"ANTHROPIC_API_KEY": "super-secret-key"},
+                "config_dir": str(cfg_dir),
+                "priority": 30,
+            }
+        )
+        settings_path = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings_path, config)
+        result = _invoke(["show", "alt", "--print-binding"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0
+        assert "ACCOUNT_ID=alt" in result.output
+        assert "LANE=config-dir" in result.output
+        assert f"CLAUDE_CONFIG_DIR={cfg_dir}" in result.output
+        # The projection never carries the record's credential env.
+        assert "super-secret-key" not in result.output
+
+    def test_show_print_binding_unknown_account_exits_nonzero(self, tmp_path: Path):
+        result = _invoke(
+            ["show", "ghost", "--print-binding"], cwd=tmp_path, home=tmp_path
+        )
+        assert result.exit_code != 0
+
 
 # ---------------------------------------------------------------------------
 # AC02.1-HP + AC02.2-ERR: Add

@@ -1,14 +1,18 @@
-"""x-ae2d: a routed worker's route survives a relaunch, or the relaunch refuses.
+"""x-ae2d + x-d285: a routed worker's route and account survive every
+re-entry, or the re-entry refuses.
 
-Two halves, matching the node's two mechanisms. The spawn seams record the PATH
-of the route-settings file a worker was launched with (never its contents, which
-include a live ``ANTHROPIC_AUTH_TOKEN``), and every relaunch entry point either
-re-applies that route or refuses non-zero naming it.
+Two mechanisms. The spawn seams record the PATH of the route-settings file a
+worker was launched with plus its launch account (never the file's contents,
+which include a live ``ANTHROPIC_AUTH_TOKEN``), and every re-entry door either
+restores that whole context or refuses non-zero naming what is missing.
 
-The distinction that keeps this honest: ``claude attach`` opens a session that is
-still running, so neither ``fno agents attach`` nor ``fno agents resume`` (which
-IS ``claude attach``) can lose a route. The one claude door that starts a new
-supervisor is the ``--resume`` revive spawn, so that is where the guard lives.
+The falsified premise this file used to carry - that ``claude attach`` opens a
+running session so attach cannot lose a route - is deleted. The operator
+showed the opposite on 2026-08-23: every re-entry door shells a fresh claude
+process, and a fresh process re-resolves its account namespace from ambient
+env, so an attach or resume launched from the wrong shell lands in the wrong
+config namespace. The transition matrix below is the replacement: one explicit
+row per door, each pinned to the same contract.
 """
 from __future__ import annotations
 
@@ -623,6 +627,523 @@ def test_the_account_picker_never_fires_on_a_revive(tmp_path, monkeypatch, capsy
         )
     assert path in str(exc.value)
     assert "--account" not in str(exc.value), "no refusal about a flag nobody typed"
+
+
+# --- x-d285 task 1.1: the launch account and the related id ride the row -----
+
+
+def test_pane_spawn_with_an_account_records_the_launch_account(tmp_path, monkeypatch) -> None:
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(
+        monkeypatch,
+        tmp_path,
+        account_env={"CLAUDE_CONFIG_DIR": "/x/.claude"},
+        launch_account="makers",
+    )
+    row = load_registry()[0]
+    assert row.launch_account == "makers"
+
+
+def test_unaccounted_pane_spawn_records_default_not_absence(tmp_path, monkeypatch) -> None:
+    """A spawn that positively pinned no account says so with "default".
+
+    Absence is reserved for legacy rows: three values (default | account id |
+    unknown), never two."""
+    from fno.agents.registry import load_registry
+
+    _spawn_pane(monkeypatch, tmp_path)
+    assert load_registry()[0].launch_account == "default"
+
+
+def test_routed_zai_row_with_isolated_account_round_trips(tmp_path, monkeypatch) -> None:
+    """The ZAI/GLM + isolated-account shape from the node, round-tripped."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="glm-worker",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                provider="zai",
+                harness_session_id="sess-glm",
+                launch_account="makers",
+                route_settings_path="/tmp/route-settings/glm.json",
+                related_session_id="sess-glm-fork",
+            )
+        ]
+    )
+    row = load_registry()[0]
+    assert row.launch_account == "makers"
+    assert row.related_session_id == "sess-glm-fork"
+
+
+def test_a_legacy_row_without_launch_account_stays_unknown(tmp_path, monkeypatch) -> None:
+    """AC1-ERR: absence is never normalized to "default" on read."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno import paths
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-old",
+            )
+        ]
+    )
+    target = paths.agents_registry_path()
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    del raw["agents"][0]["launch_account"]
+    del raw["agents"][0]["related_session_id"]
+    target.write_text(json.dumps(raw), encoding="utf-8")
+    row = load_registry()[0]
+    assert row.launch_account is None
+    assert row.related_session_id is None
+
+
+def test_registry_json_emits_the_new_keys_on_every_row(tmp_path, monkeypatch) -> None:
+    """The v19 bump rationale: asdict emits the keys, so a stale reader must
+    refuse on version, not TypeError on the kwarg."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno import paths
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="rower",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-r",
+            )
+        ]
+    )
+    raw = paths.agents_registry_path().read_text(encoding="utf-8")
+    assert json.loads(raw)["schema_version"] >= 19
+    assert '"launch_account"' in raw
+    assert '"related_session_id"' in raw
+
+
+# --- x-d285 task 1.3: the transition matrix ----------------------------------
+#
+# One row per door that re-enters or re-launches a Claude session:
+#
+#   door                 owned by                      wired in
+#   attach (inline)      dispatch.attach_agent         2.1
+#   resume live wake     resume_cli wake arm           2.1
+#   resume dead          resume_cli --resume arm       2.1
+#   mux attach           crates/fno server AttachAgent 2.2 (cargo matrix)
+#   mux ResumeAgent      crates/fno server ResumeAgent 2.2 (cargo matrix)
+#   spawn --resume       dispatch_spawn revive         route: x-ae2d, account: 1.1
+#   bg fresh spawn       dispatch_spawn picker         2.3
+#   loop dispatch        fno/dispatch launch_account   2.3 (test_dispatch_one)
+#   background observe   record_session_observation    3.1
+#   fork observe         record_session_observation    3.1
+#
+# Every Python row runs the same two fixtures: a routed GLM worker with an
+# isolated account, and a default-Anthropic control. The contract per door:
+# the provider invocation carries BOTH the recorded account namespace and the
+# recorded route, or refuses naming the missing evidence. A bare
+# ``claude attach``/``--resume`` observed on a routed row is exactly the
+# defect the row exists to catch.
+#
+# Every door is wired as of x-d285 task 3.1; the strict-xfail scaffolding
+# that held later-wave rows is gone. A NEW door starts xfail(strict=True)
+# the same way: when its wiring lands the marker flips to XPASS, which
+# fails this suite until the marker is removed in the same change.
+
+_WAVE_LATER = pytest.mark.xfail(strict=True, reason="door wired in a later wave")
+
+
+def _routed_glm_row(tmp_path, monkeypatch, *, launch_account="makers"):
+    """The operator's failing shape: routed GLM worker on an isolated account."""
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    if launch_account is not None:
+        from fno.agents.registry import load_registry, update_registry
+
+        def _stamp(rows):
+            for r in rows:
+                if r.name == "router":
+                    r.launch_account = launch_account
+            return rows
+
+        update_registry(_stamp)
+    return path
+
+
+def _capture_claude_invocation(monkeypatch):
+    """Capture every claude argv + env the attach/resume paths would run."""
+    import fno.agents.harnesses.claude as claude_mod
+
+    captured: list[dict] = []
+
+    def _fake_run(argv, **kwargs):
+        captured.append({"argv": list(argv), "env": kwargs.get("env")})
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake_run)
+    return captured
+
+
+def _no_mux(monkeypatch):
+    import fno.agents.mux_spawn as mux_mod
+
+    monkeypatch.setattr(
+        mux_mod,
+        "_run_mux",
+        lambda *a, **k: subprocess.CompletedProcess([], 24, "", "no server"),
+    )
+
+
+def _attach(name: str = "router"):
+    from fno.agents.dispatch import attach_agent
+
+    return attach_agent(name)
+
+
+def test_matrix_attach_routed_row_carries_account_and_route(tmp_path, monkeypatch) -> None:
+    """Door: inline attach. Routed row: the claude invocation must carry the
+    account namespace and the route settings, never ambient env."""
+    import fno.agents.account_env as account_env_mod
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
+    )
+    _routed_glm_row(tmp_path, monkeypatch)
+    _no_mux(monkeypatch)
+    captured = _capture_claude_invocation(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.is_provider_available", lambda p: True
+    )
+    _attach()
+    assert captured, "a claude attach must have run"
+    argv, env = captured[0]["argv"], captured[0]["env"]
+    assert argv[:2] == ["claude", "attach"], argv
+    assert "--settings" in argv, f"the recorded route must ride the argv: {argv}"
+    assert env and env.get("CLAUDE_CONFIG_DIR") == "/acct/makers/.claude", (
+        f"the recorded account namespace must ride the env: {env}"
+    )
+
+
+def test_matrix_attach_unknown_account_refuses_before_claude(tmp_path, monkeypatch) -> None:
+    """Door: inline attach. A routed row with no launch-account evidence
+    refuses; bare `claude attach` is never observed."""
+    from fno.agents.dispatch import DispatchAskError
+
+    _routed_glm_row(tmp_path, monkeypatch, launch_account=None)
+    _no_mux(monkeypatch)
+    captured = _capture_claude_invocation(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.is_provider_available", lambda p: True
+    )
+    with pytest.raises(DispatchAskError) as exc:
+        _attach()
+    assert not captured, "no claude process may start on a refused row"
+    assert "launch account" in str(exc.value)
+
+
+def test_matrix_attach_default_row_stays_bare(tmp_path, monkeypatch) -> None:
+    """Door: inline attach. Default-Anthropic control: a proven default row
+    keeps the historical bare invocation."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry(
+        [
+            AgentEntry(
+                name="plain",
+                cwd=str(tmp_path),
+                log_path="",
+                harness="claude",
+                short_id="deadbeef",
+                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                launch_account="default",
+            )
+        ]
+    )
+    _no_mux(monkeypatch)
+    captured = _capture_claude_invocation(monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.is_provider_available", lambda p: True
+    )
+    result = _attach("plain")
+    assert result.exit_code == 0
+    assert captured[0]["argv"] == ["claude", "attach", "deadbeef"]
+    # env is None today (inherit). Once the resolver lands it may pass an
+    # explicit env, but a default row must NOT pin a foreign account dir.
+    env = captured[0]["env"] or {}
+    assert not env.get("CLAUDE_CONFIG_DIR") or env["CLAUDE_CONFIG_DIR"] == str(
+        Path.home() / ".claude"
+    )
+
+
+def test_matrix_resume_routed_row_wakes_under_the_binding(tmp_path, monkeypatch) -> None:
+    """Door: resume (the Python wake arm; the dead relaunch arm is Rust's and
+    carries --settings there). The woken attach runs under the recorded
+    account namespace with the route restored into its env."""
+    import fno.agents.account_env as account_env_mod
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        account_env_mod, "resolve_account_overlay", lambda _id: _Overlay()
+    )
+    _routed_glm_row(tmp_path, monkeypatch)
+    from types import SimpleNamespace
+
+    from fno.agents.resume_cli import resume_logic
+
+    entry = SimpleNamespace(
+        name="router",
+        harness="claude",
+        cwd=str(tmp_path),
+        short_id="deadbeef",
+        harness_session_id="sess-1",
+        route_settings_path=_routed_claude_row(tmp_path, monkeypatch),
+        launch_account="makers",
+        provider="zai",
+    )
+    seen: dict = {}
+    reads: list[str] = []
+
+    def _state():
+        # Stateful supervisor: the row sits at "Needs input" until the first
+        # wake injects the message, then it is "Working" - the transition the
+        # exit-16 loop needs to observe on its post-wake read.
+        reads.append("r")
+        return "Working" if len(reads) > 1 else "Needs input"
+
+    def _wake(short_id, *, message, route_env, cwd, account_env=None):
+        seen["route_env"] = route_env
+        seen["account_env"] = account_env
+
+    res = resume_logic(
+        name="router",
+        registry_loader=lambda: [entry],
+        path_checker=lambda b: True,
+        cwd_checker=lambda c: True,
+        claim_fn=lambda s: None,
+        execvp=lambda *a, **k: None,
+        emit_event=lambda *a, **k: None,
+        wake_fn=_wake,
+        agents_state_fn=lambda: {"deadbeef": {"live_status": _state()}},
+    )
+    assert res.exit_code == 0
+    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+    assert seen["route_env"] and "ANTHROPIC_BASE_URL" in seen["route_env"], (
+        "the recorded route must ride the wake env"
+    )
+
+
+def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch) -> None:
+    """Door: spawn --resume (revive). The revived row inherits the source
+    row's launch account - the transcript lives under the config dir it was
+    created in, so the account is a fact about the transcript."""
+    from types import SimpleNamespace
+
+    from fno.agents import dispatch
+    from fno.agents.harnesses.base import ProviderResult
+    from fno.agents.registry import load_registry
+
+    _routed_glm_row(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.session_is_live", lambda short: False
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.resolve_session_uuid_at_spawn",
+        lambda home, short: "sess-1",
+    )
+
+    def _fake_bg_create(**kwargs):
+        return ProviderResult(0, "", "", 1, session_id_out="feedface")
+
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.bg_create", _fake_bg_create
+    )
+    result = dispatch.dispatch_spawn(
+        name="router",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+        resume_session_id="sess-1",
+        route_provider="zai",
+        provider_gate=_admitted_zai(monkeypatch),
+    )
+    assert result.kind == "created"
+    row = load_registry()[0]
+    assert row.launch_account == "makers", (
+        "a revive inherits the source row's account axis"
+    )
+
+
+def _fake_bg_seam(monkeypatch):
+    """The bg spawn seam: no live session, a resolvable spawn uuid, and a
+    bg_create that succeeds without launching anything."""
+    from fno.agents.harnesses.base import ProviderResult
+
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.session_is_live", lambda short: False
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.resolve_session_uuid_at_spawn",
+        lambda *a: "sess-2",
+    )
+    monkeypatch.setattr(
+        "fno.agents.harnesses.claude.bg_create",
+        lambda **kwargs: ProviderResult(0, "", "", 1, session_id_out="feedface"),
+    )
+
+
+def test_matrix_bg_fresh_spawn_routed_row_stamps_the_picked_account(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: bg spawn, routed control. A fresh spawn the picker resolves onto
+    the makers account stamps THAT id - the row names the account it rides."""
+    from fno.agents import dispatch
+    from fno.agents.registry import load_registry
+
+    _routed_glm_row(tmp_path, monkeypatch)
+    _fake_bg_seam(monkeypatch)
+
+    class _Overlay:
+        account_id = "makers"
+        env = {"CLAUDE_CONFIG_DIR": "/acct/makers/.claude"}
+        lane = "config-dir"
+
+    monkeypatch.setattr(
+        "fno.agents.dispatch._pick_account_overlay",
+        lambda **kwargs: _Overlay(),
+    )
+    result = dispatch.dispatch_spawn(
+        name="fresh-routed",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+    )
+    assert result.kind == "created"
+    rows = {r.name: r for r in load_registry()}
+    assert rows["fresh-routed"].launch_account == "makers", (
+        "a picked overlay names the account the fresh row records"
+    )
+
+
+def test_matrix_bg_fresh_spawn_default_control_stamps_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: bg spawn, default-Anthropic control. No picker fires, so the
+    fresh row positively records "default" - never an absence that a later
+    read could mistake for legacy-unknown."""
+    from fno.agents import dispatch
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _fake_bg_seam(monkeypatch)
+    result = dispatch.dispatch_spawn(
+        name="fresh-default",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+    )
+    assert result.kind == "created"
+    rows = {r.name: r for r in load_registry()}
+    assert rows["fresh-default"].launch_account == "default", (
+        "a fresh spawn with no account pick positively records default"
+    )
+
+
+def test_matrix_spawn_resume_default_control_inherits_default(
+    tmp_path, monkeypatch
+) -> None:
+    """Door: spawn --resume, default-Anthropic control. A source row that
+    positively recorded "default" (and no route file) revives under the same
+    value - inheritance is exact, not normalized."""
+    from fno.agents import dispatch
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="plain-row",
+                cwd=str(tmp_path),
+                log_path="",
+                harness="claude",
+                harness_session_id="sess-1",
+                launch_account="default",
+            )
+        ]
+    )
+    _fake_bg_seam(monkeypatch)
+    result = dispatch.dispatch_spawn(
+        name="plain-row",
+        message="go",
+        provider="claude",
+        cwd=tmp_path,
+        resume_session_id="sess-1",
+    )
+    assert result.kind == "created"
+    row = [r for r in load_registry() if r.name == "plain-row"][0]
+    assert row.launch_account == "default", (
+        "a revive inherits the source row's exact account value"
+    )
+
+
+def test_matrix_background_observe_records_the_second_id(tmp_path, monkeypatch) -> None:
+    """Door: native background observation. A SessionStart reporting a
+    different id fills related_session_id without replacing the primary."""
+    from fno.agents.registry import load_registry, record_session_observation
+
+    _routed_glm_row(tmp_path, monkeypatch)
+    entry, outcome = record_session_observation(
+        name="router", harness="claude", session_id="sess-fork"
+    )
+    assert outcome == "related"
+    row = load_registry()[0]
+    assert row.harness_session_id == "sess-1", "the primary is never replaced"
+    assert row.related_session_id == "sess-fork"
+
+
+def test_matrix_fork_observation_is_arrival_order_independent(tmp_path, monkeypatch) -> None:
+    """Door: explicit fork. Reversing SessionStart arrival order stores the
+    same two ids - no last-writer replacement either direction."""
+    from fno.agents.registry import load_registry, record_session_observation, write_registry, AgentEntry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry(
+        [
+            AgentEntry(
+                name="forked",
+                cwd=str(tmp_path),
+                log_path="",
+                harness="claude",
+                short_id="deadbeef",
+                harness_session_id="sess-fork",  # fork id arrives FIRST here
+                launch_account="default",
+            )
+        ]
+    )
+    record_session_observation(name="forked", harness="claude", session_id="sess-orig")
+    row = load_registry()[0]
+    assert {row.harness_session_id, row.related_session_id} == {
+        "sess-orig",
+        "sess-fork",
+    }, f"both ids must survive in either arrival order: {row}"
 
 
 def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:

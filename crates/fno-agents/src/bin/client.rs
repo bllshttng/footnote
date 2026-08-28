@@ -48,6 +48,8 @@ const ALL_CLIENT_ACTIONS: &[&str] = &[
     "promote",
     "reap",
     "reconcile",
+    "recover",
+    "reentry-plan",
     "report",
     "review-coverage",
     "restart",
@@ -112,6 +114,16 @@ async fn run(args: Vec<String>) -> i32 {
 
     if matches!(verb, "manifest-eval") {
         return fno_agents::manifest::run_manifest_eval(&args[1..]);
+    }
+
+    // `reentry-plan` is the INTERNAL machine resolver behind every
+    // Claude re-entry door (x-d285): the Rust/Python attach+resume arms and
+    // the mux gestures consume its verdict instead of each rebuilding a
+    // provider argv. Matched with `matches!` (like `claim`/`detect`) so it
+    // stays out of the routable-verb parity sets - it is not an `fno agents`
+    // verb, and adding one needs the Python surface to grow with it.
+    if matches!(verb, "reentry-plan") {
+        return fno_agents::reentry::run_reentry_plan(&args[1..], &AgentsHome::from_env());
     }
 
     if matches!(verb, "manifest-for-session") {
@@ -271,6 +283,12 @@ async fn run(args: Vec<String>) -> i32 {
     }
     if verb == "attach" {
         return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
+    }
+    // `recover` (x-d285): hidden-but-invocable manual restoration of a recorded
+    // session under its account/route, with explicit two-id selection. Reads
+    // the registry and resolver directly, no daemon RPC.
+    if verb == "recover" {
+        return fno_agents::client_verbs::run_recover(&args[1..], &AgentsHome::from_env());
     }
     if verb == "logs" {
         return fno_agents::client_verbs::run_logs(&args[1..], &AgentsHome::from_env()).await;

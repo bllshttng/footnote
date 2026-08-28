@@ -3611,6 +3611,10 @@ fn create(
         harness_session_id: session_uuid.clone(),
         predecessor_session_ids: Vec::new(),
         forked_from_session_id: None,
+        // x-d285: this client inherited the spawn seam's env verbatim, so the
+        // three-valued env read is the honest account fact for the row.
+        launch_account: crate::state::launch_account_from_env(),
+        related_session_id: None,
         cwd: cwd.to_string_lossy().to_string(),
         project_root: String::new(),
         session_id: None,

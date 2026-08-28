@@ -2316,6 +2316,7 @@ def cmd_spawn(
                     route_provider=route_provider,
                     provider_gate=gate,
                     passthrough=passthrough,
+                    launch_account=account or dispatch_account,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)
@@ -2529,6 +2530,7 @@ def cmd_spawn(
                 output_format=output_format,
                 resume_session_id=resume,
                 account_env=account_env,
+                launch_account=account or dispatch_account,
                 crown_level=crown_level,
                 crown_scope=crown_scope,
                 succession=succeed,

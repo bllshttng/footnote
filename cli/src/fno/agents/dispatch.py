@@ -36,7 +36,19 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Iterator,
+    Literal,
+    Mapping,
+    Optional,
+    Sequence,
+)
+
+if TYPE_CHECKING:
+    from fno.agents.account_env import AccountOverlay
 
 from fno import paths
 from fno.agents import events
@@ -1569,6 +1581,7 @@ def _claude_create_path(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    launch_account: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -1862,6 +1875,12 @@ def _claude_create_path(
         # leaves the account behind. Resolved before the launch (above) so its
         # I/O cannot strand a live supervisor.
         route_settings_path=route_settings_path,
+        # x-d285: the account axis, resolved by the caller (explicit > picked >
+        # "default" on a fresh spawn; the source row's value on a revive; None
+        # when the evidence is genuinely absent). Stamped verbatim - this seam
+        # does not guess, because a silent default is how the wrong bill gets
+        # paid.
+        launch_account=launch_account,
         crown_level=crown_level,
         crown_scope=crown_scope,
         crown_grantor=crown_grantor_val,
@@ -2477,12 +2496,16 @@ def _picked_headroom_note(account_id: str) -> str:
     return "headroom unknown"
 
 
-def _pick_account_env(
+def _pick_account_overlay(
     *,
     role: Optional[str] = None,
     route_env: Optional[Mapping[str, str]] = None,
-) -> Optional[Mapping[str, str]]:
+) -> "Optional[AccountOverlay]":
     """Consult the picker for a spawn that named no account, or None.
+
+    Returns the full :class:`AccountOverlay` (env AND account_id), because the
+    spawn seams stamp the picked id on the row's ``launch_account`` (x-d285);
+    the env alone drops the one fact re-entry needs.
 
     Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
@@ -2502,10 +2525,21 @@ def _pick_account_env(
     try:
         from fno.agents.account_env import resolve_account_overlay
 
-        return resolve_account_overlay(picked).env
+        return resolve_account_overlay(picked)
     except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
         print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
         return None
+
+
+def _pick_account_env(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[Mapping[str, str]]:
+    """Env-only view of :func:`_pick_account_overlay` for callers that stamp
+    no row (kept so existing seams need not know the overlay type)."""
+    overlay = _pick_account_overlay(role=role, route_env=route_env)
+    return dict(overlay.env) if overlay is not None else None
 
 
 def pick_account_id(
@@ -2647,6 +2681,7 @@ def dispatch_spawn(
     output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    launch_account: Optional[str] = None,
     crown_level: Optional[int] = None,
     crown_scope: Optional[str] = None,
     succession: bool = False,
@@ -2698,8 +2733,14 @@ def dispatch_spawn(
     # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
     # where that uuid does not exist. It also keeps the revive restore below
     # honest - any --account reaching it is one the operator actually typed.
+    # x-d285: a picked overlay names its account id so the minted row records
+    # WHICH account it rides; an explicit launch_account from the caller wins.
+    effective_launch_account = launch_account
     if account_env is None and provider == "claude" and not resume_session_id:
-        account_env = _pick_account_env(role=role, route_env=route_env)
+        picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
+        if picked_overlay is not None:
+            account_env = picked_overlay.env
+            effective_launch_account = picked_overlay.account_id
 
     launch_role = role
     resolved_providers: list[str] = []
@@ -2986,6 +3027,27 @@ def dispatch_spawn(
                     ),
                     None,
                 )
+            # x-d285: the value the minted row carries on its account axis.
+            # A fresh spawn positively knows: explicit id, picked id, or
+            # "default". A revive does not - the transcript lives under the
+            # config dir it was created in, so its account is a fact about the
+            # SOURCE row, resolved by uuid alone (a row can carry an account
+            # with no route). No source evidence means unknown (None), never
+            # "default": stamping default on a revive is the silent
+            # wrong-account re-entry this node exists to end.
+            row_launch_account = effective_launch_account
+            if resume_session_id and row_launch_account is None:
+                account_source = existing if revive else next(
+                    (
+                        e
+                        for e in entries
+                        if getattr(e, "harness_session_id", None) == resume_session_id
+                    ),
+                    None,
+                )
+                row_launch_account = getattr(account_source, "launch_account", None)
+            elif not resume_session_id:
+                row_launch_account = effective_launch_account or "default"
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
@@ -3148,6 +3210,7 @@ def dispatch_spawn(
                         tools=tools,
                         deny_tools=deny_tools,
                         account_env=account_env,
+                        launch_account=row_launch_account,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,
@@ -5160,6 +5223,86 @@ def reconcile_agents(
     )
 
 
+def _reentry_binding_for_row(
+    entry: "AgentEntry",
+) -> "tuple[Optional[dict[str, str]], Optional[str], Optional[Sequence[str]]]":
+    """The launch binding a re-entry of this claude row must restore, or a refusal.
+
+    The Python-side arm of the x-d285 rule, applied when the Rust client is
+    not installed (with one installed, the runtime router serves attach and
+    resume from the Rust binary, whose doors consume the canonical
+    ``fno-agents reentry-plan`` verdict). Same rule, same primitives the Rust
+    resolver uses: the account axis is three-valued, the route file must still
+    record a route, and missing evidence on a routed or non-Anthropic row
+    refuses rather than guessing a namespace - a silent default is how the
+    wrong bill gets paid.
+
+    Returns ``(binding_env, settings_path, scrub_vars)``:
+    - ``binding_env``: the account overlay (``CLAUDE_CONFIG_DIR``), or None
+      for a proven default/legacy row;
+    - ``settings_path``: the validated route-settings path, or None;
+    - ``scrub_vars``: auth vars the caller must clear from the child env so
+      an ambient credential cannot override the binding (claude prefers an
+      env credential over a settings file).
+
+    Raises :class:`DispatchAskError` (exit 3) naming the missing evidence.
+    """
+    launch_account = getattr(entry, "launch_account", None)
+    route_path = getattr(entry, "route_settings_path", None) or None
+    provider = getattr(entry, "provider", None)
+    routed = bool(route_path)
+    non_anthropic = bool(provider) and provider != "anthropic"
+
+    if launch_account is None and (routed or non_anthropic):
+        shape = "routed" if routed else f"on provider {provider!r}"
+        raise DispatchAskError(
+            f"agent row {entry.name!r} is {shape} and records no launch "
+            "account; re-entering it would guess a namespace. Restamp the "
+            "row or re-spawn the worker.",
+            exit_code=3,
+        )
+
+    binding_env: Optional[dict[str, str]] = None
+    scrub_vars: tuple = ()
+    if launch_account is not None and launch_account != "default":
+        from fno.agents.account_env import (
+            AccountResolutionError,
+            SCRUB_AUTH_VARS,
+            resolve_account_overlay,
+        )
+
+        try:
+            overlay = resolve_account_overlay(launch_account)
+        except AccountResolutionError as exc:
+            raise DispatchAskError(
+                f"launch account {launch_account!r} recorded on row "
+                f"{entry.name!r} no longer resolves: {exc}",
+                exit_code=3,
+            ) from exc
+        binding_env = dict(overlay.env)
+        scrub_vars = SCRUB_AUTH_VARS
+
+    settings_path: Optional[str] = None
+    if route_path:
+        from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+        try:
+            read_route_settings(route_path)
+        except RouteRestoreError as exc:
+            raise DispatchAskError(
+                f"agent row {entry.name!r} was launched on the route recorded "
+                f"at {route_path}, and it cannot be restored ({exc}). Refusing "
+                "to re-enter it on the default account.",
+                exit_code=3,
+            ) from exc
+        settings_path = route_path
+        from fno.agents.account_env import SCRUB_AUTH_VARS as _SCRUB
+
+        scrub_vars = _SCRUB
+
+    return binding_env, settings_path, list(scrub_vars)
+
+
 def attach_agent(name: str) -> AttachResult:
     """Interactive attach to a running agent session.
 
@@ -5283,8 +5426,20 @@ def attach_agent(name: str) -> AttachResult:
 
     from fno.agents.harnesses import claude as claude_mod
 
+    # x-d285: the inline attach restores the row's recorded launch binding or
+    # refuses before anything launches. A fresh claude process re-resolves its
+    # account namespace from ambient env, so a bare `claude attach` from the
+    # wrong shell lands in the wrong config namespace. A proven default row
+    # resolves to no binding and keeps the historical bare invocation.
+    binding_env, settings_path, scrub_vars = _reentry_binding_for_row(existing)
+
     try:
-        exit_code = claude_mod.claude_attach(short_id)
+        exit_code = claude_mod.claude_attach(
+            short_id,
+            env=binding_env,
+            settings_path=settings_path,
+            scrub_vars=scrub_vars,
+        )
     except FileNotFoundError as exc:
         raise DispatchAskError("claude CLI not on PATH", exit_code=14) from exc
     except OSError as exc:

@@ -1821,7 +1821,13 @@ def claude_rm(short_id: str, *, timeout: float = 30.0) -> tuple[int, str]:
     return (result.returncode, result.stderr or "")
 
 
-def claude_attach(short_id: str) -> int:
+def claude_attach(
+    short_id: str,
+    *,
+    env: Optional[dict[str, str]] = None,
+    settings_path: Optional[str] = None,
+    scrub_vars: Optional[Sequence[str]] = None,
+) -> int:
     """Run ``claude attach <short_id>`` inheriting parent stdio.
 
     Returns claude's exit code. Output is NOT captured: the claude TUI
@@ -1829,10 +1835,38 @@ def claude_attach(short_id: str) -> int:
     timeout is applied because attach is an interactive verb whose
     duration is operator-driven, not bounded by fno.
 
+    x-d285: ``env`` is the row's recorded ACCOUNT binding (a
+    ``CLAUDE_CONFIG_DIR`` overlay) and ``settings_path`` the validated
+    route-settings file; a fresh claude process re-resolves its namespace
+    from ambient env, so the recorded binding must ride the child or the
+    attach lands in whatever namespace the caller happened to sit in.
+    ``scrub_vars`` are cleared from the child env before the overlay is
+    applied: claude prefers an env credential over a settings file, so an
+    ambient credential would silently override the binding. All three
+    default to None/off, which reproduces the historical bare invocation
+    for a proven default row byte-for-byte.
+
     Raises:
         FileNotFoundError: claude not on PATH (caller maps to exit 14).
     """
-    result = _subprocess_run(["claude", "attach", short_id])
+    argv = ["claude", "attach", short_id]
+    if settings_path:
+        argv += ["--settings", settings_path]
+    run_kwargs: dict[str, Any] = {}
+    if env or scrub_vars:
+        child_env = dict(os.environ)
+        for var in scrub_vars or ():
+            child_env.pop(var, None)
+        child_env.pop("CLAUDE_CONFIG_DIR", None)
+        if env:
+            child_env.update(env)
+        # The same identity-scrub floor every adapter's child env crosses: the
+        # attach client resolves its target from the jobId argument, never from
+        # an ambient session marker this shell happens to carry.
+        from fno.setup.github_cli import worker_environment
+
+        run_kwargs["env"] = worker_environment(child_env)
+    result = _subprocess_run(argv, **run_kwargs)
     return result.returncode
 
 

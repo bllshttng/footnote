@@ -585,7 +585,7 @@ def test_attach_refuses_registry_name_that_collides_with_store_session(
     attached = []
     monkeypatch.setattr(
         "fno.agents.harnesses.claude.claude_attach",
-        lambda short: attached.append(short) or 0,
+        lambda short, **_kw: attached.append(short) or 0,
     )
 
     with pytest.raises(dispatch.DispatchAskError) as exc:
@@ -806,7 +806,7 @@ def test_attach_heals_an_unregistered_claude_session(_registry_home, monkeypatch
     monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
     monkeypatch.setattr(
         "fno.agents.harnesses.claude.claude_attach",
-        lambda short: attached.append(short) or 0,
+        lambda short, **_kw: attached.append(short) or 0,
     )
 
     result = dispatch.attach_agent("c655c326")
@@ -880,7 +880,7 @@ def test_attach_survives_an_unwritable_registry(_registry_home, monkeypatch):
     monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
     monkeypatch.setattr(
         "fno.agents.harnesses.claude.claude_attach",
-        lambda short: attached.append(short) or 0,
+        lambda short, **_kw: attached.append(short) or 0,
     )
 
     result = dispatch.attach_agent("c655c326")

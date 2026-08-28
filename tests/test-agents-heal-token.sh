@@ -22,7 +22,11 @@ fi
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin" "$tmp/projects/-repo-one" "$tmp/codex/2026/07/20" "$tmp/home"
+FIXCWD="$tmp/repo-one"
+# claude slug-encodes a project dir path (/ and . -> -), so the transcript
+# dir is derived from the fixture cwd the same way the resume resolver does.
+FIXSLUG="$(printf '%s' "$FIXCWD" | tr '/.' '--')"
+mkdir -p "$tmp/bin" "$FIXCWD" "$tmp/projects/$FIXSLUG" "$tmp/codex/2026/07/20" "$tmp/home"
 # Run from a cwd that is NOT a known project: project confinement (defect 1) is
 # N/A outside a project, so this seam-plumbing test exercises adoption through
 # the Rust->Python shellout as before. The confined path (same-project adopt,
@@ -48,11 +52,12 @@ CLAUDE_UUID=c655c326-1111-2222-3333-444455556666
 TWIN_UUID=c655c326-9999-8888-7777-666655554444
 printf '%s\n%s\n%s\n' \
   '{"type":"summary"}' \
-  '{"type":"user","cwd":"/repo/one"}' \
+  '{"type":"user","cwd":"'"$FIXCWD"'"}' \
   '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"<promise>done</promise>"}]}}' \
-  > "$tmp/projects/-repo-one/$CLAUDE_UUID.jsonl"
+  > "$tmp/projects/$FIXSLUG/$CLAUDE_UUID.jsonl"
 
 export HOME="$tmp/home"
+export FIXCWD="$FIXCWD"
 export FNO_CLAUDE_PROJECTS_DIR="$tmp/projects"
 export FNO_CODEX_SESSIONS_DIR="$tmp/codex"
 export PYTHONPATH="$ROOT/cli/src"
@@ -67,16 +72,16 @@ fail() { echo "FAIL: $1"; exit 1; }
 #    claude's own job store, which knows nothing about a reaped session).
 out=$("$BIN" resume c655c326 --print-command 2>&1) || fail "resume of a stored session: $out"
 grep -q -- "--resume $CLAUDE_UUID" <<<"$out" || fail "dead arm did not build the uuid argv: $out"
-grep -q "cd /repo/one" <<<"$out" || fail "healed row lost its recorded cwd: $out"
+grep -qF "cd $FIXCWD" <<<"$out" || fail "healed row lost its recorded cwd: $out"
 "$VENV_PY" - "$REGISTRY" <<'PY' || fail "adopted row is wrong (see above)"
-import json, sys
+import json, os, sys
 rows = json.load(open(sys.argv[1]))["agents"]
 assert len(rows) == 1, rows
 r = rows[0]
 # Store membership proves the session EXISTS, never that it runs.
 assert r["status"] == "orphaned", r
 assert r["short_id"] == "c655c326", r
-assert r["cwd"] == "/repo/one", r
+assert r["cwd"] == os.environ["FIXCWD"], r
 PY
 
 # 2. A name-shaped token never probes: byte-identical refusal, nothing adopted.

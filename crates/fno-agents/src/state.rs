@@ -116,15 +116,16 @@ use std::sync::atomic::{AtomicU32, Ordering};
 // its typed struct and drops the key, and a pre-v17 Python reader would see an
 // unknown key AT its own schema and TypeError. Accepted set widens to 1..=17.
 //
-// v18 adds predecessor/fork lineage fields. An older writer must refuse rather
-// than erase those fields during a read-modify-write.
+// v18 adds predecessor/fork lineage fields. v19 (x-de10) adds
+// `sandbox_posture` - the sandbox posture a codex thread was launched with,
+// applied by `thread/resume` across a daemon restart. Same additive-optional
+// shape as v11-v18: skip-when-None keeps old rows slim, and the bump turns a
+// pre-v19 reader's silent erasure into a loud refusal.
 //
-// Accepted set widens to 1..=18.
-// v19 (x-de10) adds `sandbox_posture` - the sandbox posture a codex thread was
-// launched with, applied by `thread/resume` across a daemon restart. Same
-// additive-optional shape as v11-v18: skip-when-None keeps old rows slim, and
-// the bump turns a pre-v19 reader's silent erasure into a loud refusal.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 19;
+// v20 adds the account axis (`launch_account`) and the one optional
+// `related_session_id`. An older writer must refuse rather than erase those
+// fields during a read-modify-write. Accepted set widens to 1..=20.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 20;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -180,14 +181,18 @@ impl Registry {
     }
 
     /// Find an entry by agent name or its canonical full harness session id.
+    /// The one optional related id resolves at the same tier: a fork's full
+    /// uuid addresses its row too (both ids stay valid forever).
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|entry| {
             entry.name == token
-                || entry
-                    .harness_session_id
-                    .as_deref()
-                    .and_then(|session_id| session_handle_tier(token, session_id))
-                    == Some(0)
+                || [
+                    entry.harness_session_id.as_deref(),
+                    entry.related_session_id.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .any(|session_id| session_handle_tier(token, session_id) == Some(0))
         })
     }
 
@@ -483,6 +488,24 @@ pub struct RegistryEntry {
     /// full session id and stable fno id rather than sharing a mutable row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub forked_from_session_id: Option<String>,
+    /// The ACCOUNT axis this worker was launched under (x-d285, v20). Three
+    /// values, never two: `Some("default")` (the spawn positively pinned no
+    /// account), `Some(<account-id>)` (explicit or headroom-picked), `None`
+    /// (legacy row or a mint that cannot know - never readable as default,
+    /// because a silent default is how the wrong bill gets paid). Mirrors
+    /// Python's `AgentEntry.launch_account`; the re-entry resolver reads it to
+    /// rebuild `CLAUDE_CONFIG_DIR` or refuse. Same X3 passthrough as
+    /// `route_settings_path`: without this mirror a daemon read-modify-write
+    /// drops a Python-stamped account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_account: Option<String>,
+    /// The SECOND valid session id an additive fork/background minted on this
+    /// row (x-d285, v20). Both ids stay valid forever and resolve to the same
+    /// row and launch binding; neither replaces the other, and at most ONE
+    /// optional id exists (no list, edge, or lineage graph). Mirrors Python's
+    /// `AgentEntry.related_session_id`; same X3 passthrough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub related_session_id: Option<String>,
     /// Daemon-set PTY field, mirrored in Python's `AgentEntry` (ab-b946b59c):
     /// skip when absent (Codex P1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -741,6 +764,30 @@ pub fn validate_resolvable_handle(entry: &RegistryEntry) -> Result<(), String> {
 pub const HOST_MODE_EXEC: &str = "exec";
 /// `host_mode` value for a long-lived drivable interactive session.
 pub const HOST_MODE_INTERACTIVE: &str = "interactive";
+
+/// The env key the Python spawn seam sets when an account overlay was applied
+/// (x-d285). An `--account` bg spawn execs into this binary with the overlay
+/// in `os.environ`; the account ID itself has no argv carrier, so the seam
+/// publishes it here for the row mint to stamp. Absent on route-bearing and
+/// pane spawns, which never leave Python.
+pub const LAUNCH_ACCOUNT_ENV_KEY: &str = "FNO_LAUNCH_ACCOUNT";
+
+/// The launch-account value a Rust mint seam stamps (x-d285). Three-valued,
+/// mirroring Python: an explicit `FNO_LAUNCH_ACCOUNT` wins; else an ambient
+/// `CLAUDE_CONFIG_DIR` means a config namespace is in play this mint cannot
+/// attribute, so the row records unknown (`None`) rather than "default";
+/// neither set proves the true default slot, so `Some("default")`.
+pub fn launch_account_from_env() -> Option<String> {
+    if let Ok(id) = std::env::var(LAUNCH_ACCOUNT_ENV_KEY) {
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    if std::env::var_os("CLAUDE_CONFIG_DIR").is_some_and(|v| !v.is_empty()) {
+        return None;
+    }
+    Some("default".to_string())
+}
 /// `host_mode` value for an ADOPTED `claude --bg` session footnote holds live via
 /// a daemon `control.sock` attach (G1 held-attach substrate, x-26df). Distinct
 /// from `interactive` (a footnote-SPAWNED PTY worker): an `attached` row's process
@@ -1754,6 +1801,8 @@ mod tests {
             spawned_by_session: None,
             spawned_by_harness: None,
             spawned_by_cwd: None,
+            launch_account: None,
+            related_session_id: None,
             name: name.into(),
             short_id: format!("{name}-id"),
             legacy_provider: String::new(),
@@ -2388,6 +2437,98 @@ mod tests {
         assert_eq!(
             back["agents"][0]["route_settings_path"], PATH,
             "the daemon must re-emit a Python-stamped route path, not drop it"
+        );
+    }
+
+    #[test]
+    fn launch_account_and_related_id_survive_a_daemon_read_modify_write() {
+        // v20 (x-d285): Python stamps both at the spawn seams and the re-entry
+        // resolver reads them. Same passthrough claim as route_settings_path:
+        // a daemon write-back that dropped either key would strip the account
+        // axis off every row it touched.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("plain"));
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // An unstamped row omits both keys, so Python's AgentEntry(**row) is
+        // unaffected and the absence reads as unknown, never as "default".
+        assert!(wire["agents"][0].get("launch_account").is_none());
+        assert!(wire["agents"][0].get("related_session_id").is_none());
+
+        wire["agents"][0]["launch_account"] = serde_json::Value::from("makers");
+        wire["agents"][0]["related_session_id"] = serde_json::Value::from("sess-fork");
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(reg.entries[0].launch_account.as_deref(), Some("makers"));
+        assert_eq!(
+            reg.entries[0].related_session_id.as_deref(),
+            Some("sess-fork")
+        );
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(back["agents"][0]["launch_account"], "makers");
+        assert_eq!(back["agents"][0]["related_session_id"], "sess-fork");
+    }
+
+    #[test]
+    fn related_session_id_resolves_the_row_at_full_tier() {
+        // x-d285: a fork's full uuid addresses its row through the related
+        // slot at the same tier as the primary - "both ids stay valid
+        // forever" means addressable, not merely stored. The name and the
+        // primary id keep resolving unchanged.
+        let mut reg = Registry::default();
+        let mut row = sample_entry("forked");
+        row.harness_session_id = Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into());
+        row.related_session_id = Some("02b118cf-aa11-4d55-9bc2-7f33a1e99110".into());
+        reg.entries.push(row);
+
+        assert!(reg.find_name_or_full_session_id("forked").is_some());
+        assert!(reg
+            .find_name_or_full_session_id("01a027ad-fe00-7c12-a116-9ee37c6bdfec")
+            .is_some());
+        assert!(
+            reg.find_name_or_full_session_id("02b118cf-aa11-4d55-9bc2-7f33a1e99110")
+                .is_some(),
+            "the related id resolves the row"
+        );
+        assert!(reg.find_name_or_full_session_id("nosuch").is_none());
+    }
+
+    #[test]
+    fn launch_account_from_env_is_three_valued() {
+        // x-d285: the Rust mint's account fact. An explicit seam id wins; an
+        // ambient config dir the mint cannot attribute is unknown; neither
+        // present proves the default slot. Environment mutation is process-
+        // wide, so the test snapshots and restores both keys around its arms.
+        fn restore(launch: Option<std::ffi::OsString>, dir: Option<std::ffi::OsString>) {
+            match launch {
+                Some(v) => std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, v),
+                None => std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY),
+            }
+            match dir {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+        let saved_launch = std::env::var_os(LAUNCH_ACCOUNT_ENV_KEY);
+        let saved_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+
+        std::env::set_var(LAUNCH_ACCOUNT_ENV_KEY, "makers");
+        std::env::set_var("CLAUDE_CONFIG_DIR", "/unrelated");
+        let a = launch_account_from_env();
+
+        std::env::remove_var(LAUNCH_ACCOUNT_ENV_KEY);
+        let b = launch_account_from_env();
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        let c = launch_account_from_env();
+
+        restore(saved_launch, saved_dir);
+
+        assert_eq!(a.as_deref(), Some("makers"), "seam id outranks ambient dir");
+        assert_eq!(b, None, "an ambient config dir is unknown, never default");
+        assert_eq!(
+            c.as_deref(),
+            Some("default"),
+            "neither present proves default"
         );
     }
 

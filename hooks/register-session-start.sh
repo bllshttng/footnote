@@ -38,6 +38,17 @@ cd "$REPO_ROOT" 2>/dev/null || true
 
 ARGS=(--harness "$HARNESS" --session-id "$SESSION_ID" --cwd "$REPO_ROOT")
 
+# Claude sends the SessionStart flavor (startup | resume | clear) as hook-input
+# JSON on stdin. Read it once, without hanging when stdin is absent (a manual
+# run, or a harness that sends nothing): the one-line python reads to EOF on a
+# pipe and errors into the empty default on a terminal. The flavor is
+# observability for the id observation - which kind of SessionStart produced
+# it - never a behavior switch.
+if [[ "$HARNESS" == "claude" && ! -t 0 ]]; then
+    SOURCE="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("source",""))' 2>/dev/null || true)"
+    [[ -n "$SOURCE" ]] && ARGS+=(--source "$SOURCE")
+fi
+
 # A footnote-SPAWNED worker (FNO_AGENT_SELF = its own row name) restamps rather
 # than registers: the session id we passed at spawn is not durable (claude has
 # been seen continuing under a different uuid ~35s in) while the row NAME is,

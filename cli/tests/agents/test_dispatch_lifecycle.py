@@ -2173,7 +2173,7 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
 
     calls: list[str] = []
 
-    def fake_attach(short_id: str) -> int:
+    def fake_attach(short_id: str, **_kwargs) -> int:
         calls.append(short_id)
         return 0
 
@@ -2222,7 +2222,7 @@ def test_attach_codex_refused_with_exit_13(
 
     called = False
 
-    def fake_attach(short_id):
+    def fake_attach(short_id, **_kwargs):
         nonlocal called
         called = True
         return 0
@@ -2262,7 +2262,7 @@ def test_attach_claude_propagates_nonzero_exit(
     from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
-        claude_mod, "claude_attach", lambda short_id: 4
+        claude_mod, "claude_attach", lambda short_id, **_kw: 4
     )
     # No live mux server here (x-07c2): stub _run_mux instead of letting the
     # mux-aware branch exec the real fno binary.
@@ -2811,7 +2811,7 @@ def test_attach_with_live_mux_lands_in_the_thread_pane(
     from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
-    def fake_attach(short_id: str) -> int:
+    def fake_attach(short_id: str, **_kwargs) -> int:
         raise AssertionError("inline attach must not run when the mux answers")
 
     monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)
@@ -2842,7 +2842,7 @@ def test_attach_with_no_mux_server_falls_through_inline(
 
     calls: list[str] = []
 
-    def fake_attach(short_id: str) -> int:
+    def fake_attach(short_id: str, **_kwargs) -> int:
         calls.append(short_id)
         return 0
 
@@ -2875,7 +2875,7 @@ def test_attach_with_usage_exit_falls_through_inline(
 
     calls: list[str] = []
 
-    def fake_attach(short_id: str) -> int:
+    def fake_attach(short_id: str, **_kwargs) -> int:
         calls.append(short_id)
         return 0
 
@@ -2904,7 +2904,7 @@ def test_attach_surfaces_a_mux_refusal_instead_of_double_attaching(
     from fno.agents import dispatch, mux_spawn
     from fno.agents.harnesses import claude as claude_mod
 
-    def fake_attach(short_id: str) -> int:
+    def fake_attach(short_id: str, **_kwargs) -> int:
         raise AssertionError("a refused attach must not fall through inline")
 
     monkeypatch.setattr(claude_mod, "claude_attach", fake_attach)

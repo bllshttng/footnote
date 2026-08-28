@@ -29,6 +29,21 @@ import pytest
 from fno.rust_binary import find_dev_binary
 
 
+@pytest.fixture(autouse=True)
+def _scratch_cwds():
+    """Create the hardcoded parity cwds before any resume row runs.
+
+    The fixtures embed ``/tmp/proj`` and ``/tmp/proj space`` in both the seed
+    rows and the expected output strings, and Rust's resume refuses a gone
+    cwd. No test ever created them: they passed only while a developer's
+    machine happened to hold the directories, and macOS periodic /tmp cleanup
+    removed them, failing every resume parity row on a clean machine. Creating
+    them keeps the expectations byte-identical instead of rewriting five rows.
+    """
+    for path in ("/tmp/proj", "/tmp/proj space"):
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+
 @functools.lru_cache(maxsize=1)
 def _fno_shim_dir() -> str | None:
     """A PATH dir providing ``fno``, or ``None`` when the real one is present.

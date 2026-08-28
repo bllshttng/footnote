@@ -757,6 +757,9 @@ def _dispatch_one(
                 message = cutover_command
                 account_env = cutover.account_env
                 provenance["FNO_ACCOUNT"] = cutover.record_id or ""
+            # x-d285: the account id the row stamps (the record this launch
+            # actually rides), matching the env overlay resolved above.
+            launch_account_id = (cutover.record_id if cutover else None) or account
             # x-9d11 mechanical refusal carrier: the flag in the message is the
             # attributable carrier; the pane env is the backstop, so a worker that
             # never passes the flag through still folds the refusal at init.
@@ -811,6 +814,7 @@ def _dispatch_one(
                     session=session,
                     provenance=provenance,
                     account_env=account_env,
+                    launch_account=launch_account_id,
                     provider_gate=gate,
                 )
             else:
@@ -822,6 +826,7 @@ def _dispatch_one(
                     session=session,
                     provenance=provenance,
                     account_env=account_env,
+                    launch_account=launch_account_id,
                     provider_gate=gate,
                     tab=parent_id,
                 )

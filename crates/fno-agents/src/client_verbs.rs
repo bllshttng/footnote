@@ -393,7 +393,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
 const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
 ];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
@@ -1523,6 +1523,10 @@ fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::Reg
         // "adopted" says that; it is not a claim that no human is sitting in
         // it, and both watchdog lanes treat it as the non-answer it is.
         origin: Some("adopted".into()),
+        // x-d285: synthesized from an identity that arrived without a row; the
+        // account it rode in on is unobserved, so the axis stays unknown.
+        launch_account: None,
+        related_session_id: None,
         short_id: short,
         legacy_provider: String::new(),
         provider: None,
@@ -2442,7 +2446,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // EnterWorktree after registration has its transcript under a different
     // project dir than the recorded (pre-EnterWorktree) cwd. Resolve the cwd
     // from where the transcript actually is; other harnesses keep the recorded.
-    let resolved_cwd = if let Some(override_cwd) = cwd_override {
+    let resolved_cwd = if let Some(override_cwd) = cwd_override.clone() {
         override_cwd
     } else if harness == "claude" {
         let claude_uuid = entry
@@ -2541,19 +2545,82 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
+    // x-d285: a claude row's re-entry resolves through the canonical plan so
+    // the ACCOUNT axis (and, on the attach arm, the route) rides every launch
+    // shape below - delegation, --print-command, the mux pane relaunch, and
+    // the in-terminal exec. The dead arm's own `--settings` splice stays the
+    // route carrier there (it applies the identical usability rule), so only
+    // the plan's env is layered on that arm's argv; a duplicate `--settings`
+    // from the plan argv would hand claude the flag twice. A proven default
+    // row resolves to no env and no route: byte-identical to today. The
+    // resolver keys on the RESOLVED row's name - the caller's token may be a
+    // short id or a full uuid the heal just adopted, which is not a name the
+    // registry can answer.
+    let row_name = entry
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&name)
+        .to_string();
+    // The print form is pure inspection and stays available when no plan can
+    // resolve: a heal that could not REGISTER its row (an unwritable registry)
+    // still resolves the session from the store, and a rowless session records
+    // no binding to restore - the bare argv is the honest print. Every launch
+    // shape below keeps the refusal.
+    let mut reentry_plan = None;
+    if harness == "claude" {
+        match crate::reentry::resolve_reentry(
+            &home.registry_json(),
+            &row_name,
+            crate::reentry::ReentryTransition::Resume,
+            None,
+            cwd_override.as_deref(),
+        ) {
+            Ok(plan) => reentry_plan = Some(plan),
+            Err(reason) => {
+                if print_command {
+                    eprintln!(
+                        "fno agents resume: no canonical re-entry plan ({reason}); \
+                         printing the bare recorded argv"
+                    );
+                } else {
+                    eprintln!("fno agents resume: refused: {reason}");
+                    return crate::reentry::REENTRY_REFUSED_EXIT;
+                }
+            }
+        }
+    }
+
     if print_command {
+        // x-d285: a claude row prints its CANONICAL plan argv - env prefix,
+        // session id, and the recorded --settings together - so the inspection
+        // form matches what `fno agents attach` and `recover --print-command`
+        // print for the same row. The dead arm's local argv equals the plan's;
+        // the live arm's bare attach line did not carry a recorded route.
+        // Paths and ids only; nothing from inside the route file is printed.
+        let printed_argv: Vec<String> = match &reentry_plan {
+            Some(plan) => {
+                // Same shape the mux server's verdict prefix builds: env(1)
+                // assignments, then the provider argv.
+                let mut prefixed: Vec<String> =
+                    plan.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                prefixed.extend(plan.argv.iter().cloned());
+                prefixed
+            }
+            None => argv.clone(),
+        };
         if let Some(session) = mux_session.as_deref() {
             // Pane form: `fno mux pane run ... -- claude ...`. Path only; nothing
             // from inside the route file reaches the printed command (AC5).
-            let pane = mux_pane_run_argv(session, cwd, &argv);
+            let pane = mux_pane_run_argv(session, cwd, &printed_argv);
             let pane_q = pane
                 .iter()
                 .map(|a| shlex_quote(a))
                 .collect::<Vec<_>>()
                 .join(" ");
-            println!("fno {}", pane_q);
+            println!("fno {pane_q}");
         } else {
-            let argv_q = argv
+            let argv_q = printed_argv
                 .iter()
                 .map(|a| shlex_quote(a))
                 .collect::<Vec<_>>()
@@ -2563,11 +2630,13 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         return 0;
     }
 
-    // Validate cwd for ALL paths before claiming, delegating, or launching. A
-    // deleted worktree is a cleanup job, not a resume. The exec path
-    // re-checks via set_current_dir below (race-free for its own chdir), but
-    // bailing here means a gone cwd never acquires the session claim, and
-    // never burns a wake attempt, on the failure path.
+    // Validate cwd before claiming, delegating, or launching - AFTER the print
+    // form above, which is pure inspection and stays available for a row whose
+    // cwd is gone (a heal can synthesize one from a store). A deleted worktree
+    // is a cleanup job, not a resume. The exec path re-checks via
+    // set_current_dir below (race-free for its own chdir), but bailing here
+    // means a gone cwd never acquires the session claim, and never burns a
+    // wake attempt, on the failure path.
     if !Path::new(cwd).is_dir() {
         eprintln!(
             "fno agents resume: cwd {} for {} is no longer reachable. Check whether the path \
@@ -2633,6 +2702,14 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
             // the stale pre-EnterWorktree cwd from the registry entry itself.
             .args(["agents", "resume", &name, "--cwd", cwd])
             .env("FNO_AGENTS_RUNTIME", "python");
+        // x-d285: the delegated wake re-resolves the same plan on the Python
+        // side; carrying the env here keeps the two runtimes from disagreeing
+        // if a stale binary lags one side of the rule.
+        if let Some(plan) = &reentry_plan {
+            for (key, value) in &plan.env {
+                command.env(key, value);
+            }
+        }
         if cross_project {
             command.arg("--cross-project");
         }
@@ -2685,11 +2762,17 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     };
     if let Some(session) = mux_session.as_deref() {
         let pane = mux_pane_run_argv(session, cwd, &argv);
-        match std::process::Command::new("fno")
-            .args(&pane)
-            .stdin(std::process::Stdio::null())
-            .status()
-        {
+        let mut pane_command = std::process::Command::new("fno");
+        pane_command.args(&pane).stdin(std::process::Stdio::null());
+        // x-d285: the account namespace rides the pane relaunch. The mux CLI
+        // forwards its environment to the pane child; the server-side
+        // canonical resolution lands with the mux gestures (wave 2.2).
+        if let Some(plan) = &reentry_plan {
+            for (key, value) in &plan.env {
+                pane_command.env(key, value);
+            }
+        }
+        match pane_command.status() {
             Ok(s) if s.success() => {
                 // session_id is the transport short_id, empty on a pane row;
                 // the resumed session's id is the uuid (claim_uuid).
@@ -2751,9 +2834,207 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
 
     // Replace the process with the provider CLI (os.execvp equivalent).
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let mut exec_command = std::process::Command::new(&argv[0]);
+    exec_command.args(&argv[1..]);
+    if let Some(plan) = &reentry_plan {
+        for (key, value) in &plan.env {
+            exec_command.env(key, value);
+        }
+    }
+    let err = exec_command.exec();
     // exec only returns on failure.
     eprintln!("fno agents resume: failed to exec {}: {err}", argv[0]);
+    1
+}
+
+// ---------------------------------------------------------------------------
+// recover (x-d285 task 3.2)
+// ---------------------------------------------------------------------------
+
+/// `fno agents recover <agent> [--session <id>] [--print-command]` -- restore a
+/// session the row can still prove, under its recorded account and route.
+///
+/// Hidden-but-invocable: the operator's manual escape hatch after a fork or a
+/// supervisor loss, so it takes no daemon RPC and never wakes anything on its
+/// own. Selection is the whole point: with ONE recorded id that id is used,
+/// with TWO (a fork's primary plus related) the verb refuses until `--session`
+/// names one of them -- recovery chooses a valid id, never a winner.
+/// `--print-command` prints the shell-quoted inspection form (paths and ids
+/// only) and touches nothing.
+pub fn run_recover(rest: &[String], home: &AgentsHome) -> i32 {
+    let mut name: Option<String> = None;
+    let mut select_session: Option<String> = None;
+    let mut print_command = false;
+    // Same expansion discipline as every sibling parser here: `--session=<id>`
+    // splits before the match so no flag arm sees a fused value.
+    let rest = expand_eq(rest);
+    let mut iter = rest.iter();
+    while let Some(a) = iter.next() {
+        match a.as_str() {
+            "--print-command" => print_command = true,
+            "--session" => {
+                select_session = Some(match iter.next() {
+                    Some(v) if !v.starts_with("--") => v.clone(),
+                    _ => {
+                        eprintln!("fno-agents: {a} needs a value");
+                        return 2;
+                    }
+                });
+            }
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
+            other => {
+                eprintln!("fno agents recover: unexpected argument {other:?}");
+                return 2;
+            }
+        }
+    }
+    let Some(name) = name else {
+        eprintln!(
+            "fno agents recover: an agent name is required. With two recorded ids, \
+             pass --session <id> to choose."
+        );
+        return 2;
+    };
+
+    // The canonical resolver IS the selection policy: one recorded id uses it,
+    // two refuse until --session names one, and the row's account/route ride
+    // the plan or the whole verb refuses. Nothing here re-derives a binding.
+    let plan = match crate::reentry::resolve_reentry(
+        &home.registry_json(),
+        &name,
+        crate::reentry::ReentryTransition::Recover,
+        select_session.as_deref(),
+        None,
+    ) {
+        Ok(plan) => plan,
+        Err(reason) => {
+            eprintln!("fno agents recover: refused: {reason}");
+            return crate::reentry::REENTRY_REFUSED_EXIT;
+        }
+    };
+
+    // The inspection form: shell-quoted paths and ids only. The env prefix
+    // names the config dir the row recorded; nothing from inside the route
+    // file is printed, exactly like resume's --print-command.
+    if print_command {
+        let env_prefix = plan
+            .env
+            .iter()
+            .map(|(k, v)| format!("{}={}", shlex_quote(k), shlex_quote(v)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let env_prefix = if env_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{env_prefix} ")
+        };
+        let argv_q = plan
+            .argv
+            .iter()
+            .map(|a| shlex_quote(a))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "cd {} && exec {}{}",
+            shlex_quote(&plan.cwd),
+            env_prefix,
+            argv_q
+        );
+        return 0;
+    }
+
+    if !which_on_path(&plan.argv[0]) {
+        eprintln!("fno agents recover: {} CLI not on PATH", plan.argv[0]);
+        return 14;
+    }
+    if !Path::new(&plan.cwd).is_dir() {
+        eprintln!(
+            "fno agents recover: cwd {} for {} is no longer reachable; the row keeps the \
+             binding, recover the path (or rebind via rm + adopt) instead.",
+            py_repr_str(&plan.cwd),
+            py_repr_str(&name)
+        );
+        return 13;
+    }
+
+    // The restored session keeps the single-writer guard resume's dead arm
+    // uses: the claim is keyed on the SELECTED id, so the primary and the
+    // fork id can never be recovered into two live writers.
+    if let Err((code, msg)) = acquire_resume_session_claim(&plan.session_id, None, None) {
+        eprintln!("{msg}");
+        return code;
+    }
+
+    // The recorded mux destination wins when there is one: the pane relaunch
+    // returns after the launch so the operator's terminal stays free, and the
+    // account namespace rides the child environment.
+    if let Some(mux_ref) = plan.mux.as_ref() {
+        let pane = mux_pane_run_argv(&mux_ref.session, &plan.cwd, &plan.argv);
+        let mut pane_command = std::process::Command::new("fno");
+        pane_command.args(&pane).stdin(std::process::Stdio::null());
+        for (key, value) in &plan.env {
+            pane_command.env(key, value);
+        }
+        match pane_command.status() {
+            Ok(s) if s.success() => {
+                append_agents_event(
+                    &trace_events_path(home),
+                    "agent_recovered",
+                    &[
+                        ("name", Value::String(name.clone())),
+                        ("provider", Value::String("claude".to_string())),
+                        ("session_id", Value::String(plan.session_id.clone())),
+                        ("cwd", Value::String(plan.cwd.clone())),
+                    ],
+                );
+                eprintln!(
+                    "fno agents recover: {} relaunched on mux session {}",
+                    name, mux_ref.session
+                );
+                return 0;
+            }
+            Ok(s) => {
+                eprintln!(
+                    "{}",
+                    mux_pane_run_failure_message(&name, &mux_ref.session, s)
+                );
+                return 1;
+            }
+            Err(e) => {
+                eprintln!("fno agents recover: failed to launch {name} on a mux pane: {e}");
+                return 1;
+            }
+        }
+    }
+
+    if let Err(exc) = std::env::set_current_dir(&plan.cwd) {
+        eprintln!(
+            "fno agents recover: cwd {} for {} is no longer reachable: {exc}",
+            py_repr_str(&plan.cwd),
+            py_repr_str(&name)
+        );
+        return 13;
+    }
+    append_agents_event(
+        &trace_events_path(home),
+        "agent_recovered",
+        &[
+            ("name", Value::String(name.clone())),
+            ("provider", Value::String("claude".to_string())),
+            ("session_id", Value::String(plan.session_id.clone())),
+            ("cwd", Value::String(plan.cwd.clone())),
+        ],
+    );
+    // Replace the process with the provider CLI, the recorded env applied.
+    use std::os::unix::process::CommandExt;
+    let mut exec_command = std::process::Command::new(&plan.argv[0]);
+    exec_command.args(&plan.argv[1..]);
+    for (key, value) in &plan.env {
+        exec_command.env(key, value);
+    }
+    let err = exec_command.exec();
+    // exec only returns on failure.
+    eprintln!("fno agents recover: failed to exec {}: {err}", plan.argv[0]);
     1
 }
 
@@ -3050,12 +3331,44 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         return 14;
     }
 
+    // x-d285: the inline attach consumes the canonical re-entry plan. A fresh
+    // claude process re-resolves its account namespace from ambient env, so a
+    // bare `claude attach` from the wrong shell lands in the wrong config
+    // namespace (the falsified "attach has nothing to do" premise). The plan
+    // restores the recorded account namespace and route settings together, or
+    // refuses before anything launches. A proven default row keeps the
+    // historical bare invocation: the plan carries no env and no --settings.
+    let plan = match crate::reentry::resolve_reentry(
+        &home.registry_json(),
+        &name,
+        crate::reentry::ReentryTransition::Attach,
+        None,
+        None,
+    ) {
+        Ok(p) => p,
+        Err(reason) => {
+            eprintln!("fno agents attach: refused: {reason}");
+            append_agents_event(
+                &events_path,
+                "agent_attach_refused",
+                &[
+                    ("name", Value::String(name.clone())),
+                    ("provider", Value::String("claude".to_string())),
+                    ("reason", Value::String("reentry-plan-refused".to_string())),
+                    ("detail", Value::String(reason)),
+                ],
+            );
+            return crate::reentry::REENTRY_REFUSED_EXIT;
+        }
+    };
+    let mut command = std::process::Command::new(&plan.argv[0]);
+    command.args(&plan.argv[1..]);
+    for (key, value) in &plan.env {
+        command.env(key, value);
+    }
+
     // Inherit stdio so the claude TUI takes over; mirror its exit code.
-    match std::process::Command::new("claude")
-        .arg("attach")
-        .arg(short_id)
-        .status()
-    {
+    match command.status() {
         Ok(status) => {
             let exit_code = status.code().unwrap_or(1);
             append_agents_event(
@@ -4522,6 +4835,88 @@ mod tests {
         assert_eq!(message, None);
         assert!(!cross_project);
         assert_eq!(cwd, None);
+    }
+
+    // ---- recover (x-d285 task 3.2) --------------------------------------
+
+    fn forked_row() -> crate::state::RegistryEntry {
+        let mut entry = mint_synthesized_entry(
+            &ManifestIdentity {
+                harness: "claude".into(),
+                harness_session_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
+                ..Default::default()
+            },
+            "forked",
+        );
+        entry.cwd = std::env::temp_dir().to_string_lossy().to_string();
+        entry.name = "forked".into();
+        entry.short_id = "aaaaaaaa".into();
+        entry.launch_account = Some("default".into());
+        entry.related_session_id = Some("11111111-2222-3333-4444-555555555555".into());
+        entry
+    }
+
+    #[test]
+    fn recover_verb_refuses_two_ids_until_a_session_is_named() {
+        // Recovery chooses a valid id, never a winner: with both slots
+        // recorded the bare verb is the refusal, not a guess.
+        let dir = cv_tmpdir();
+        let home = AgentsHome::at(dir.path());
+        let entry = forked_row();
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry);
+        })
+        .unwrap();
+
+        let code = run_recover(&["forked".to_string()], &home);
+        assert_eq!(code, crate::reentry::REENTRY_REFUSED_EXIT);
+
+        // An id that is recorded on NEITHER slot is still a refusal.
+        let code = run_recover(
+            &[
+                "forked".to_string(),
+                "--session".to_string(),
+                "99999999-9999-9999-9999-999999999999".to_string(),
+            ],
+            &home,
+        );
+        assert_eq!(code, crate::reentry::REENTRY_REFUSED_EXIT);
+    }
+
+    #[test]
+    fn recover_verb_print_command_selects_and_prints_paths_and_ids_only() {
+        // --print-command is the no-side-effect inspection form: the selected
+        // fork id rides the argv and nothing launches.
+        let dir = cv_tmpdir();
+        let home = AgentsHome::at(dir.path());
+        let entry = forked_row();
+        crate::state::update_registry(&home.registry_json(), |registry| {
+            registry.entries.push(entry);
+        })
+        .unwrap();
+
+        let code = run_recover(
+            &[
+                "forked".to_string(),
+                "--session".to_string(),
+                "11111111-2222-3333-4444-555555555555".to_string(),
+                "--print-command".to_string(),
+            ],
+            &home,
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn recover_verb_without_a_name_is_exit_2() {
+        let dir = cv_tmpdir();
+        let home = AgentsHome::at(dir.path());
+        assert_eq!(run_recover(&[], &home), 2);
+        assert_eq!(
+            run_recover(&["--print-command".to_string()], &home),
+            2,
+            "a flag is not an agent name"
+        );
     }
 
     #[test]

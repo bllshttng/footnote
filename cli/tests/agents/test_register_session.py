@@ -704,7 +704,9 @@ def test_restamp_keeps_an_independent_short_id(tmp_path: Path, monkeypatch) -> N
 def test_main_agent_self_restamps_instead_of_registering(tmp_path: Path, monkeypatch) -> None:
     """The whole point of the --agent-self branch: registration keys its upsert
     on harness_session_id, so routing a re-minted worker through it would MISS
-    and append a second row for one worker."""
+    and append a second row for one worker. A claude row's observation is
+    ADDITIVE: the re-minted id fills the related slot, the primary stays, and
+    the row count stays one."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.register_session import main
     from fno.agents.registry import load_registry
@@ -720,19 +722,23 @@ def test_main_agent_self_restamps_instead_of_registering(tmp_path: Path, monkeyp
     rows = load_registry()
     assert len(rows) == 1
     assert rows[0].name == "target-x-f0c2"
-    assert rows[0].harness_session_id == REMINT
-    assert "session_id_restamped" in [e["kind"] for e in _events(tmp_path)]
+    assert rows[0].harness_session_id == BIRTH, "the primary is never replaced"
+    assert rows[0].related_session_id == REMINT, "the re-mint lands additively"
+    kinds = [e["kind"] for e in _events(tmp_path)]
+    assert "session_id_recorded" in kinds
 
 
 def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
-    """SessionStart must never block on a locked or unwritable registry."""
+    """SessionStart must never block on a locked or unwritable registry. The
+    claude path's recorder is the seam that can blow up; a non-claude row
+    keeps the same guarantee through the lineage restamp."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents import register_session
 
     def _boom(**kwargs):
         raise OSError("registry unwritable")
 
-    monkeypatch.setattr(register_session, "restamp_harness_session_id", _boom)
+    monkeypatch.setattr("fno.agents.registry.record_session_observation", _boom)
     assert register_session.main([
         "--harness", "claude",
         "--session-id", REMINT,
@@ -774,7 +780,10 @@ def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
 
     rows = load_registry()
     assert len(rows) == 1
-    assert rows[0].harness_session_id == REMINT, "the late row must still be restamped"
+    assert rows[0].harness_session_id == BIRTH, "the late row keeps its primary"
+    assert rows[0].related_session_id == REMINT, (
+        "the late row still records the observed id"
+    )
 
 
 def test_restamp_ignores_a_pending_marker_inherited_from_its_parent(
@@ -932,3 +941,252 @@ def test_restamp_corrects_a_mux_hosted_row(tmp_path: Path, monkeypatch) -> None:
     assert rows[0].harness_session_id == REMINT, "the id change must actually persist"
     assert rows[0].short_id == "", "a mux row holds exactly one live ref"
     assert rows[0].mux == {"session": "main", "pane_id": 10}
+
+
+# ---------------------------------------------------------------------------
+# x-d285 task 3.1: the ADDITIVE SessionStart observation (claude rows).
+# One row, at most one optional related id, no lineage: the lineage restamp
+# above stays for other harnesses and direct callers, but a claude worker's
+# SessionStart never replaces a recorded id again.
+# ---------------------------------------------------------------------------
+FORK = "f00baa11-2222-4333-8444-555566667777"
+THIRD = "aabbbccc-dddd-4eee-8fff-000011112222"
+
+
+def _observe(name: str, session_id: str):
+    from fno.agents.registry import record_session_observation
+
+    return record_session_observation(name=name, harness="claude", session_id=session_id)
+
+
+def test_observation_fills_an_empty_primary_and_promotes_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Case 1: an empty primary accepts the first id it sees. A row parked at
+    `spawning` was waiting for exactly this, so it goes live; the claude 8-hex
+    transport key derives from the uuid it now records."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="waiting",
+            harness="claude",
+            cwd="/proj",
+            log_path="/tmp/waiting.log",
+            short_id="1111aaaa",
+            status="spawning",
+        )
+    ])
+    entry, outcome = _observe("waiting", BIRTH)
+    assert outcome == "primary"
+    row = load_registry()[0]
+    assert row.harness_session_id == BIRTH
+    assert row.status == "live"
+    assert row.short_id == "1111aaaa", "an independent transport key is never rewritten"
+
+
+def test_observation_of_a_recorded_id_is_a_no_op(tmp_path: Path, monkeypatch) -> None:
+    """Case 2: the same id again writes nothing - every later SessionStart of
+    a healthy worker lands here, so it stays silent."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    _spawned_row()
+    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    entry, outcome = _observe("target-x-f0c2", BIRTH)
+    assert outcome == "no-op"
+    assert entry.harness_session_id == BIRTH
+    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    assert after == before, "a no-op observation must not rewrite the file"
+
+
+def test_observation_fills_the_related_slot_without_touching_the_primary(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Case 3: a fork's id fills the ONE optional related slot. The primary
+    stays exactly as spawned - the old last-writer replacement is the defect
+    this exists to end."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    _spawned_row()
+    entry, outcome = _observe("target-x-f0c2", FORK)
+    assert outcome == "related"
+    row = load_registry()[0]
+    assert row.harness_session_id == BIRTH, "the primary is never replaced"
+    assert row.related_session_id == FORK
+    assert len(load_registry()) == 1, "one worker, one row, two valid ids"
+
+
+def test_observation_is_arrival_order_independent(tmp_path: Path, monkeypatch) -> None:
+    """Reversing SessionStart arrival order stores the same two ids. Which id
+    is primary is an accident of timing; the SET is the durable fact."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    for first, second in ((BIRTH, FORK), (FORK, BIRTH)):
+        write_registry([
+            AgentEntry(
+                name="forked",
+                harness="claude",
+                cwd="/proj",
+                log_path="/tmp/forked.log",
+                short_id="cafef00d",
+                status="live",
+            )
+        ])
+        _observe("forked", first)
+        _observe("forked", second)
+        row = load_registry()[0]
+        assert {row.harness_session_id, row.related_session_id} == {BIRTH, FORK}, (
+            "both orders land the same two ids on one row"
+        )
+
+
+def test_observation_refuses_a_third_distinct_id_and_names_both(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The cap: primary and related already hold two different ids, so a
+    third writes NOTHING and the refusal names both recorded ids."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry
+
+    _spawned_row()
+    _observe("target-x-f0c2", FORK)
+    before = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    entry, outcome = _observe("target-x-f0c2", THIRD)
+    assert outcome == "refused-cap"
+    assert entry.harness_session_id == BIRTH
+    assert entry.related_session_id == FORK, "the refusal carries both ids"
+    after = (tmp_path / ".fno" / "agents" / "registry.json").read_text()
+    assert after == before, "a refused observation changes nothing on disk"
+
+
+def test_the_cap_redecides_under_the_registry_lock(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Two concurrent SessionStarts with different ids both pass a pre-read
+    that saw an empty related slot. The first updater fills it; the second
+    must re-decide the cap UNDER the lock and write nothing, never overwrite
+    the id the first winner recorded."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import registry as registry_mod
+
+    _spawned_row()  # primary filled, related empty
+    # The concurrent winner's write lands on the real file...
+    _observe("target-x-f0c2", FORK)
+    # ...but THIS caller's pre-read already snapshotted the pre-fork row.
+    from fno.agents.registry import AgentEntry as _AE
+
+    stale_snapshot = [
+        _AE(
+            name="target-x-f0c2",
+            harness="claude",
+            cwd="/proj",
+            log_path="/tmp/forked.log",
+            short_id="cafef00d",
+            status="live",
+        )
+    ]
+
+    real_load = registry_mod.load_registry
+
+    def stale_first_read(path=None):
+        if stale_first_read.calls:  # noqa: B008 - simple flag
+            return real_load(path=path)
+        stale_first_read.calls += 1
+        return stale_snapshot
+
+    stale_first_read.calls = 0
+    monkeypatch.setattr(registry_mod, "load_registry", stale_first_read)
+
+    entry, outcome = _observe("target-x-f0c2", THIRD)
+    assert outcome == "refused-cap", outcome
+    row = real_load()[0]
+    assert row.harness_session_id == BIRTH
+    assert row.related_session_id == FORK, (
+        "the under-lock cap wrote nothing: the winner's id stays"
+    )
+
+
+def test_a_refused_observation_is_visible_and_the_hook_stays_fail_soft(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    """The cap refusal through the hook path: a warning event naming both
+    ids, a stderr line, and exit 0 - the session never blocks on it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import register_session
+
+    _spawned_row()
+    _observe("target-x-f0c2", FORK)
+    monkeypatch.setenv("FNO_AGENT_SELF", "target-x-f0c2")
+    monkeypatch.setattr(
+        "fno.agents.register_session._row_exists", lambda name, harness: True
+    )
+    rc = register_session.main(
+        [
+            "--harness",
+            "claude",
+            "--session-id",
+            THIRD,
+            "--cwd",
+            "/proj",
+            "--agent-self",
+            "target-x-f0c2",
+            "--source",
+            "resume",
+        ]
+    )
+    assert rc == 0, "the hook never blocks session start"
+    refused = [e for e in _events(tmp_path) if e["kind"] == "session_id_record_refused"]
+    assert refused, "the refusal is a named event"
+    assert refused[0]["recorded_ids"] == f"{BIRTH},{FORK}"
+    assert refused[0]["source"] == "resume"
+    err = capsys.readouterr().err
+    assert BIRTH in err and FORK in err, "both recorded ids are in the visible line"
+
+
+def test_both_ids_resolve_to_the_one_row(tmp_path: Path, monkeypatch) -> None:
+    """Both ids address the row: the full uuids AND their canonical handles,
+    primary and related alike - 'valid forever' means addressable."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, resolve_agent
+
+    _spawned_row()
+    _observe("target-x-f0c2", FORK)
+    for token in (BIRTH, FORK, "e6f78b98", "f00baa11"):
+        resolved = resolve_agent(token)
+        assert resolved.entry.name == "target-x-f0c2", f"{token} must resolve"
+
+
+def test_non_claude_restamp_keeps_its_lineage_path(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The additive contract is claude-only by plan: a codex row's restamp
+    still runs the lineage machinery (predecessor bookkeeping and all)."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import (
+        AgentEntry,
+        load_registry,
+        restamp_harness_session_id,
+        write_registry,
+    )
+
+    write_registry([
+        AgentEntry(
+            name="t-codex",
+            harness="codex",
+            harness_session_id=BIRTH,
+            cwd="/proj",
+            log_path="",
+            status="live",
+        )
+    ])
+    entry = restamp_harness_session_id(
+        name="t-codex", harness="codex", session_id=REMINT, predecessor_reachable=False
+    )
+    row = load_registry()[0]
+    assert entry is not None
+    assert row.harness_session_id == REMINT
+    assert row.predecessor_session_ids == [BIRTH], "the lineage path still runs"
