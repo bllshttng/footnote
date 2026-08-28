@@ -1052,6 +1052,15 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
     above already covers a developer exercising a new schema end to end, and a
     disable switch is the first thing a blocked worker would reach for, which
     is the failure this exists to stop.
+
+    Known sharp edge: this refuses ANY source-run raise of the shared file, not
+    only one that exceeds the deployment. A checkout at the deployed version
+    writing a shared file left at an older one is refused too. Reading the
+    deployed constant to tell those apart needs a machine-specific interpreter
+    path, and in practice the case self-heals in seconds because every deployed
+    process on the machine stamps this file on its next write. The cost of
+    guessing wrong in the other direction is a fleet-wide outage, so the
+    comparison stays local.
     """
     if raw is None:
         return

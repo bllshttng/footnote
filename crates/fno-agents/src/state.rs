@@ -1478,6 +1478,12 @@ fn source_root_for_exe(exe: &Path, home: Option<&Path>) -> Option<PathBuf> {
 /// version is strictly below this one. A missing file reads as
 /// `Registry::default()`, whose version equals this one, so an absent registry
 /// never fires.
+///
+/// Same known sharp edge as the Python half: this refuses ANY source-run raise
+/// of the shared file, not only one that exceeds the deployment. Telling those
+/// apart means reading the deployed binary's own constant, and the case
+/// self-heals in seconds because every deployed process stamps this file on its
+/// next write. The cost of guessing wrong the other way is a fleet-wide outage.
 fn refuse_source_ahead_schema_bump(path: &Path, found: u32) -> Result<(), StateError> {
     if found >= REGISTRY_SCHEMA_VERSION {
         return Ok(());
