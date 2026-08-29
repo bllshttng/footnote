@@ -97,6 +97,72 @@ SECRET_ROUTE_VARS = (
     "ANTHROPIC_AUTH_TOKEN",
 )
 
+# The keys whose value moves FOOTNOTE'S OWN state root, not the harness's
+# credential. A third question, distinct from the two sets above: "which values
+# are safe to hand a process that is itself footnote?" Only HOME today, and one
+# entry is enough to name the axis. Footnote reads it in three resolvers --
+# the home-anchored state root in fno.paths (locks dir, agents dir, and
+# state_dir's expanduser), `$HOME/.fno/agents` (crates/fno-agents/src/paths.rs),
+# and `$FNO_CLAIMS_ROOT, else $HOME` (crates/fno-agents/src/claims.rs). Meanwhile a
+# non-claude oauth_dir record's overlay is exactly `{HOME: <account_dir>/home}`
+# (adapters/providers/dispatch.py `_env_for_oauth`). A wrapper handed that
+# overlay writes its registry row, its claim and its events into the account's
+# home, where nothing looks. The worker still starts, so the strand is silent.
+STATE_ROOT_ENV_KEYS = frozenset({"HOME"})
+
+# The roots that a pin can hold still. Both are read env-first by the runtime
+# that owns them, so setting them alongside a HOME override keeps footnote's
+# state where it was while the harness credential follows the override.
+_STATE_ROOT_PINS = ("FNO_AGENTS_HOME", "FNO_CLAIMS_ROOT")
+
+
+def seal_state_root(env: Mapping[str, str]) -> dict[str, str]:
+    """Pin the two state roots that have an env carrier, around a moved HOME.
+
+    For the seam that has no argv carrier and MUST forward a HOME override,
+    because the env is the only channel to the launched harness. Prefer
+    ``fno agents spawn --dispatch-account <record>`` wherever the launch goes
+    through the spawn front door: that applies the overlay where the harness is
+    exec'd, so no footnote process ever sees the override at all.
+
+    A no-op unless the mapping actually moves HOME. When it does, pin
+    ``FNO_AGENTS_HOME`` and ``FNO_CLAIMS_ROOT`` to the roots THIS process
+    resolves, so the child's registry row and its claim stay findable. A value
+    already in the mapping wins, so an inherited pin propagates unchanged and a
+    caller that meant to redirect a root is not second-guessed.
+
+    **This is a partial seal, and the remainder is the honest part.** Only those
+    two roots read an env var. ``fno.paths.locks_dir`` is deliberately
+    ``$HOME``-only, and ``state_dir`` (graph.json, the ledger, the briefs) has
+    no override at all, so both still follow the moved HOME. Measured under a
+    sealed env: ``agents_home_dir`` resolves the real root while ``locks_dir``
+    and ``graph_json`` resolve under the account's home. A worker that runs
+    ``fno backlog done`` under a forwarded HOME therefore still writes its graph
+    where nothing looks. Closing that needs a state_dir env carrier, which does
+    not exist yet - prefer the argv carrier over this seal wherever there is one.
+
+    Never mutates the input.
+    """
+    import os
+
+    out = dict(env)
+    moved = out.get("HOME")
+    if not moved or moved == os.environ.get("HOME"):
+        return out
+
+    from fno import paths
+
+    current: dict[str, str] = {
+        "FNO_AGENTS_HOME": str(paths.agents_home_dir()),
+    }
+    claims_root = os.environ.get("FNO_CLAIMS_ROOT") or os.environ.get("HOME")
+    if claims_root:
+        current["FNO_CLAIMS_ROOT"] = claims_root
+    for key in _STATE_ROOT_PINS:
+        if key not in out and key in current:
+            out[key] = current[key]
+    return out
+
 
 @dataclass(frozen=True)
 class AccountOverlay:

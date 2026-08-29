@@ -336,3 +336,126 @@ def test_account_only_receipt_has_no_credential_fields(monkeypatch, runner):
     assert receipt["account"] == "readyrule"
     assert "auth" not in receipt
     assert "bills" not in receipt
+
+
+# ---------------------------------------------------------------------------
+# x-c33e: the codex thread client seals footnote's roots around a HOME overlay
+# ---------------------------------------------------------------------------
+
+
+def test_codex_thread_client_env_seals_our_state_roots(monkeypatch, tmp_path):
+    """The lane a fixed cutover lands on forwards HOME without moving our roots.
+
+    Unlike the spawn front door there is no argv carrier here: the env is the
+    only channel to the app-server child. So the credential HOME stays and
+    footnote's own roots are pinned around it, or the client's registry read and
+    the child's claim would resolve under the account's home (x-c33e).
+    """
+    import json
+
+    from fno import rust_binary
+    from fno.agents import dispatch as dsp
+
+    monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
+
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"session_id": "0198c0de-1111-7000-8000-00000000000a"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(dsp.subprocess, "run", fake_run)
+
+    dsp._codex_thread_spawn(
+        name="t-cutover",
+        message="/target ab-2222aaaa",
+        cwd=tmp_path,
+        from_name="",
+        model=None,
+        yolo=False,
+        account_env={"HOME": "/accounts/zai-1/home"},
+        route_env=None,
+    )
+
+    env = captured["env"]
+    # The credential still reaches the launched harness.
+    assert env["HOME"] == "/accounts/zai-1/home"
+    # The positive markers: our roots name the REAL home, not the account's.
+    assert env["FNO_AGENTS_HOME"] == "/real/home/.fno/agents"
+    assert env["FNO_CLAIMS_ROOT"] == "/real/home"
+
+
+def test_codex_thread_client_env_unsealed_without_a_home_overlay(
+    monkeypatch, tmp_path
+):
+    """A route-only overlay moves no root, so nothing is pinned."""
+    import json
+
+    from fno import rust_binary
+    from fno.agents import dispatch as dsp
+
+    monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
+    monkeypatch.setattr(rust_binary, "resolve_binary", lambda: tmp_path / "fno-agents")
+
+    captured = {}
+
+    def fake_run(argv, **kw):
+        captured["env"] = kw.get("env")
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps({"session_id": "0198c0de-1111-7000-8000-00000000000a"}),
+            stderr="",
+        )
+
+    monkeypatch.setattr(dsp.subprocess, "run", fake_run)
+
+    dsp._codex_thread_spawn(
+        name="t-routed",
+        message="/target ab-2222aaaa",
+        cwd=tmp_path,
+        from_name="",
+        model=None,
+        yolo=False,
+        account_env=None,
+        route_env={"ANTHROPIC_BASE_URL": "https://x"},
+    )
+
+    env = captured["env"]
+    assert env["HOME"] == "/real/home"
+    assert "FNO_AGENTS_HOME" not in env
+
+
+def test_codex_one_shot_refuses_a_pinned_account(monkeypatch, tmp_path):
+    """A lane that cannot carry the overlay refuses instead of launching.
+
+    _codex_create_path takes no account_env, and cmd_spawn exports only
+    PROVENANCE_KEYS to os.environ for one-shots, so a resolved overlay would
+    reach nothing here. Launching anyway would bill the ambient account
+    silently, which is the failure both account flags are fail-closed against.
+    """
+    from fno.agents import dispatch as dsp
+
+    def boom(**kw):
+        pytest.fail("must not create a codex agent on the ambient account")
+
+    monkeypatch.setattr(dsp, "_codex_create_path", boom)
+
+    with pytest.raises(dsp.DispatchAskError) as exc:
+        dsp.dispatch_spawn(
+            name="t-once",
+            message="hi",
+            provider="codex",
+            cwd=tmp_path,
+            once=True,
+            account_env={"HOME": "/accounts/zai-1/home"},
+        )
+    assert "one-shot" in str(exc.value)
+    assert "--substrate thread" in str(exc.value)

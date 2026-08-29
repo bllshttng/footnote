@@ -125,8 +125,16 @@ def _select_destination(
     ``--provider`` (validated against the harness set, so a record id must
     never go there) and drives the resolver's substrate; ``account_env``
     (``dispatch_env`` of the record: ``CLAUDE_CONFIG_DIR`` / ``base_url`` / api
-    key) selects the ACCOUNT via the spawn subprocess env. A cross-harness
-    cutover (claude->codex) rides the ``harness`` change.
+    key) selects the ACCOUNT. A cross-harness cutover (claude->codex) rides the
+    ``harness`` change.
+
+    Who applies ``account_env`` is the caller's choice, and the two callers
+    differ on purpose. ``fno dispatch`` spawns the pane itself and hands the
+    overlay to that seam. ``backlog.advance`` shells out to ``fno agents
+    spawn``, so it passes ``record_id`` as ``--dispatch-account`` and lets the
+    front door re-resolve the overlay at the launch boundary; putting it on that
+    wrapper's own env would move footnote's state root, because a non-claude
+    record's overlay is a HOME override (x-c33e).
     """
     try:
         from fno.config import load_settings, load_settings_for_repo

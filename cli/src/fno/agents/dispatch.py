@@ -1496,8 +1496,12 @@ def _codex_thread_spawn(
     ``account_env``/``route_env`` overlay the client subprocess environment.
     They reach the app-server child only when this client also lazy-starts the
     daemon (the child inherits the daemon's env); a warm daemon keeps its own.
+    The two state roots that have an env carrier are pinned around the overlay
+    by ``seal_state_root``; that docstring names what still follows HOME.
     """
     import json
+
+    from fno.agents.account_env import seal_state_root
 
     from fno import rust_binary
 
@@ -1531,6 +1535,15 @@ def _codex_thread_spawn(
     for overlay in (route_env, account_env):
         if overlay:
             env.update(overlay)
+    # This client IS a footnote process, and a non-claude oauth_dir overlay is a
+    # HOME override, so without the seal the client's own registry read and the
+    # daemon child's claim would resolve under the account's home and go
+    # unfindable (x-c33e). Unlike the spawn front door there is no argv carrier
+    # here: the env is the only channel to the app-server child, so the override
+    # stays and the two roots that HAVE an env carrier are pinned around it.
+    # locks_dir and state_dir have none and still follow HOME - see
+    # seal_state_root's docstring for what that leaves open.
+    env = seal_state_root(env)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
     except subprocess.TimeoutExpired as exc:
@@ -3313,6 +3326,21 @@ def dispatch_spawn(
 
                 # 4c. codex --once: create + exchange + teardown.
                 if provider == "codex":
+                    # This lane threads no account overlay: _codex_create_path
+                    # takes none, and cmd_spawn exports only PROVENANCE_KEYS to
+                    # os.environ for one-shots, so a resolved overlay would reach
+                    # nothing and the worker would launch on the AMBIENT account.
+                    # Refuse instead. Silently billing the wrong account is the
+                    # failure --account and --dispatch-account are both
+                    # fail-closed to prevent (x-c33e).
+                    if account_env:
+                        raise DispatchAskError(
+                            "a pinned account is not carried on the codex "
+                            "one-shot lane; spawn on --substrate thread (which "
+                            "forwards the overlay to the app-server child) "
+                            "rather than launching on the ambient account",
+                            exit_code=2,
+                        )
                     create_result = _codex_create_path(
                         name=name,
                         message=message or "hello",

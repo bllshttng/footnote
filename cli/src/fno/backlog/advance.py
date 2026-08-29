@@ -1266,6 +1266,7 @@ def _spawn_worker(
     verb: Optional[str] = None,
     brief: Optional[str] = None,
     extra_env: Optional[dict] = None,
+    dispatch_account: Optional[str] = None,
     permission_mode: Optional[str] = None,
     node: Optional[dict] = None,
 ) -> str:
@@ -1287,6 +1288,14 @@ def _spawn_worker(
     ``/target [--no-merge] --reconcile <manifest> {id}`` template. The agent is named
     ``target-<full-node-id>-<slug>`` (``reconcile`` prefix when G4), and the cwd
     resolves to the node's recorded root (``--cwd``) or canonical main (``--fresh``).
+
+    ``dispatch_account`` is a quota cutover's destination provider RECORD id, and
+    it rides argv. The credentials never do: the spawn front door resolves the
+    record and applies its overlay where the harness is exec'd. That matters
+    because a non-claude record's overlay is a HOME override and footnote reads
+    HOME to find its own state root, so an overlay merged into THIS wrapper's env
+    would file the worker's registry row and claim under the account's home
+    (x-c33e). ``extra_env`` is refused outright for any such key.
 
     Returns the spawn receipt's LAUNCH IDENTITY: the claude short_id, or for a
     codex thread the FULL harness_session_id (codex has no short id; a head-8
@@ -1414,13 +1423,32 @@ def _spawn_worker(
     # (parity); the receipt omits permission_mode, so the posture stays inspectable.
     if mode and resolved.get("harness") == "claude":
         cmd += ["--permission-mode", mode]
+    # A quota cutover's destination account rides argv as a RECORD ID, never as
+    # env: the spawn front door resolves it inside cmd_spawn and applies the
+    # overlay where the harness is exec'd. A codex record's overlay is
+    # {HOME: <account_dir>/home}, and footnote resolves its own state root off
+    # HOME too, so putting it on this wrapper would move the registry, the claim
+    # and the events into the account's home where nothing looks (x-c33e).
+    if dispatch_account:
+        cmd += ["--dispatch-account", dispatch_account]
     cmd += ["--name", agent_name, target_cmd]
 
     # The brief (US3) rides the spawn subprocess env as TARGET_BRIEF (never the
     # command line), mirroring dispatch-node.sh's `export TARGET_BRIEF`. A failover
-    # account's env (dispatch_env: CLAUDE_CONFIG_DIR / base_url / api key) rides
-    # here too, so `--provider <harness>` selects the CLI while extra_env selects
-    # the account (x-0676; --provider never carries a record id).
+    # account does NOT ride here: `--provider <harness>` selects the CLI and
+    # `--dispatch-account <record>` selects the account (x-0676, x-c33e;
+    # --provider never carries a record id).
+    from fno.agents.account_env import STATE_ROOT_ENV_KEYS
+
+    for key in sorted(STATE_ROOT_ENV_KEYS & set(extra_env or {})):
+        raise SpawnError(
+            f"refusing to put {key} on the `fno agents spawn` wrapper: footnote "
+            f"resolves its own state root off {key}, so the worker's registry "
+            "row, claim and events would land in the account's home where "
+            "nothing looks. Pass the destination account as "
+            "--dispatch-account <record> instead; the spawn front door applies "
+            "the overlay where the harness is exec'd."
+        )
     merged_env = {**spawn_env, **(extra_env or {})}
     # x-9d11: the resolver's env is AUTHORITATIVE for the merge posture, so the
     # inherited TARGET_NO_MERGE never survives into a successor the resolver just
@@ -2917,7 +2945,6 @@ def advance(
     #     below so it only lands when a worker actually launched.
     failover_record: Optional[str] = None
     failover_harness: Optional[str] = None
-    failover_env: Optional[dict] = None
     failover_from: Optional[str] = None
     failover_window: Optional[str] = None
     failover_reason: Optional[str] = None
@@ -2971,7 +2998,6 @@ def advance(
     if route is not None and route.action == "cutover":
         failover_record = route.record_id
         failover_harness = route.harness
-        failover_env = route.account_env
         failover_from = route.source_record
         failover_window = route.window
         failover_reason = route.reason
@@ -3001,7 +3027,9 @@ def advance(
     try:
         if failover_record is not None:
             # --provider is the HARNESS (a record id would be rejected by the spawn
-            # front door's known-provider gate); the account rides extra_env.
+            # front door's known-provider gate); the account rides
+            # --dispatch-account, which the front door resolves and applies where
+            # the harness is exec'd (x-c33e).
             eff_provider = failover_harness
         else:
             eff_provider = provider if provider is not None else node.get("provider")
@@ -3015,7 +3043,7 @@ def advance(
             ),
             provider=eff_provider,
             harness=failover_harness,
-            extra_env=failover_env,
+            dispatch_account=failover_record,
             node=node,
             verb=node.get("dispatch_verb"),
             brief=_brief,

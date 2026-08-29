@@ -560,6 +560,26 @@ The distinction matters for callers: `ProviderNotFoundError` is a configuration
 error (stop, ask user to run `fno config accounts add`); `ProviderUnavailableError` is
 a transient error (staging might fix it).
 
+### The overlay is for the harness, never for a footnote process
+
+A non-claude `oauth_dir` record's overlay is `{HOME: <account_dir>/home}`. That is the only way to isolate a harness whose credential is home-scoped. Several are. Codex reads `$HOME`, and pi keeps its credential at `~/.pi/agent/auth.json`. A hermetic sandbox has no such file, so pi's live journey test must restore the real `HOME` to run at all.
+
+Footnote reads the same variable to find its OWN state. `fno.paths` resolves `Path.home() / ".fno"` for the locks dir, the agents dir, and `state_dir`'s expanduser. `crates/fno-agents/src/paths.rs` resolves `$HOME/.fno/agents` for the registry. `crates/fno-agents/src/claims.rs` resolves `$FNO_CLAIMS_ROOT`, else `$HOME`, for claims.
+
+So the same dict means two different things, and the receiver decides which. Hand it to the launched CLI and it isolates a credential. Hand it to a footnote wrapper and it moves that wrapper's state root. The worker starts fine. Its registry row, its claim and its events land in `<account_dir>/home/.fno`, where nothing looks. Silence is the whole problem. A stranded worker looks identical to a worker that never launched.
+
+Two rules follow. Which one applies depends on whether the launch has an argv carrier.
+
+**Prefer the carrier.** `fno agents spawn --dispatch-account <record>` takes the record id on argv. It resolves the overlay inside `cmd_spawn` and applies it where the harness is exec'd. The record id travels. The credentials do not. `backlog.advance` uses this for every cross-harness cutover. `_spawn_worker` refuses an `extra_env` carrying any key in `STATE_ROOT_ENV_KEYS`, and names the carrier in the refusal.
+
+**Seal what must forward.** `_codex_thread_spawn` has no argv carrier, because the env is its only channel to the app-server child. It calls `fno.agents.account_env.seal_state_root`. That pins `FNO_AGENTS_HOME` and `FNO_CLAIMS_ROOT` to the roots the current process resolves, whenever a mapping moves `HOME`. The registry row and the claim stay findable.
+
+The seal is partial, and the remainder is worth stating plainly. Only those two roots read an env var. `locks_dir` is deliberately `$HOME`-only, and `state_dir` has no override at all, so both still follow a moved `HOME`. Measured under a sealed env, `agents_home_dir` resolves the real root while `locks_dir` and `graph_json` resolve under the account's home. A worker running `fno backlog done` under a forwarded `HOME` still writes its graph where nothing looks. Closing that needs a `state_dir` env carrier, which does not exist yet. Prefer the argv carrier over the seal wherever a launch has one.
+
+A lane that can carry neither refuses. The codex one-shot path threads no overlay, so a pinned account there raises rather than launching on the ambient account.
+
+`STATE_ROOT_ENV_KEYS` names the axis, and holds `HOME` alone today. It sits beside `SCRUB_AUTH_VARS` and `SECRET_ROUTE_VARS` in `account_env.py` on purpose. Three sets ask three different questions about the same env dict, so a new variable has to be weighed against each.
+
 ---
 
 ## Migration from cc-switch
