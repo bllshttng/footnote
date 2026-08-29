@@ -186,6 +186,21 @@ def serialize_entry(
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).
         "harness_session_id": entry.harness_session_id,
+        # The two identity axes, stated explicitly (x-dfe7): `thread_id` is
+        # the stable fno identity one worker keeps across succession, and
+        # `current_session_id` is the address delivery follows NOW. They are
+        # emitted separately so a renderer that sourced current identity
+        # from the thread id, pane metadata, or the first predecessor fails
+        # the positive assertion instead of passing silently.
+        "thread_id": getattr(entry, "fno_id", None),
+        "current_session_id": entry.harness_session_id,
+        # Classified lineage: the succession chain A->B->... and the fork
+        # edge of a parallel branch. Empty/None for a worker never re-minted
+        # and never forked - the dominant case.
+        "predecessor_session_ids": list(
+            getattr(entry, "predecessor_session_ids", None) or []
+        ),
+        "forked_from_session_id": getattr(entry, "forked_from_session_id", None),
         "short_id": entry.short_id or None,
         "session_id": entry.session_id,
         # The one identifier in this row that mail can be sent to. Every other

@@ -201,7 +201,10 @@ impl Registry {
 
     /// Find an entry by agent name or its canonical full harness session id.
     /// The one optional related id resolves at the same tier: a fork's full
-    /// uuid addresses its row too (both ids stay valid forever).
+    /// uuid addresses its row too (both ids stay valid forever). A
+    /// predecessor id resolves at the full tier only (x-dfe7): delivery
+    /// naming a succeeded session follows the row that now answers as its
+    /// successor.
     pub fn find_name_or_full_session_id(&self, token: &str) -> Option<&RegistryEntry> {
         self.entries.iter().find(|entry| {
             entry.name == token
@@ -211,6 +214,7 @@ impl Registry {
                 ]
                 .into_iter()
                 .flatten()
+                .chain(entry.predecessor_session_ids.iter().map(String::as_str))
                 .any(|session_id| session_handle_tier(token, session_id) == Some(0))
         })
     }
@@ -2325,6 +2329,27 @@ mod tests {
         assert!(branch.log_path.is_none());
         assert!(branch.mux.is_none());
         assert!(branch.pid.is_none());
+    }
+
+    #[test]
+    fn session_lineage_predecessor_full_id_joins_the_successor_row() {
+        // x-dfe7 AC6-HP (delivery join): mail/inject naming a succeeded
+        // session's full uuid finds the row that now answers as B.
+        let mut registry = Registry::default();
+        let mut entry = sample_entry("worker");
+        entry.harness_session_id = Some("session-b".into());
+        entry.related_session_id = None;
+        entry.predecessor_session_ids = vec!["session-a".into()];
+        registry.entries.push(entry);
+
+        assert!(
+            registry.find_name_or_full_session_id("session-a").is_some(),
+            "a predecessor full id follows the successor row"
+        );
+        assert!(
+            registry.find_name_or_full_session_id("session-b").is_some(),
+            "the current session still joins"
+        );
     }
 
     #[test]

@@ -24,7 +24,11 @@ import argparse
 import os
 import sys
 import time
-from typing import Optional, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Sequence
+
+if TYPE_CHECKING:
+    from fno.agents.reachability import Reachability
 
 from fno.agents import events
 from fno.agents.registry import register_existing_session, restamp_harness_session_id
@@ -68,10 +72,38 @@ def _row_exists(name: str, harness: str) -> bool:
         return True
 
 
-def _predecessor_observation(
+def _reading_for_entry(entry: Any) -> Optional["Reachability"]:
+    """One row's family-1 reading, from the entry the caller already holds.
+
+    The ONE reachability derivation every agents surface shares
+    (``resolve_session_truth`` for the transcript evidence,
+    ``registry_falsifier`` for the row's own falsifier - a mux row's pane,
+    otherwise its pid/exit record), re-deriving neither. Returns ``None``
+    when the evidence is unavailable, which classifies as deferred - never
+    as death.
+    """
+    from fno.agents.reachability import classify_reachability, registry_falsifier
+    from fno.agents.session_truth import resolve_session_truth
+
+    try:
+        truth = resolve_session_truth(entry.name)
+        return classify_reachability(
+            truth_state=truth.get("state"),
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(entry),
+        )
+    except Exception:
+        return None
+
+
+def _predecessor_reading(
     name: str, harness: str
-) -> tuple[Optional[str], Optional[bool]]:
-    """Return the sampled predecessor ID and transcript reachability."""
+) -> tuple[Optional[str], Optional["Reachability"]]:
+    """Sample the row's recorded id and its family-1 truth reading.
+
+    Returns ``(recorded_session_id, Reachability | None)``; ``None`` reading
+    means the evidence is unavailable.
+    """
     from fno.agents.registry import load_registry
 
     try:
@@ -89,21 +121,15 @@ def _predecessor_observation(
     if entry is None or not entry.harness_session_id:
         return None, None
 
-    from fno.agents.reachability import REACHABLE, UNREACHABLE, reachability
+    return entry.harness_session_id, _reading_for_entry(entry)
 
-    try:
-        reading = reachability(
-            entry.name,
-            pid=None if entry.mux else entry.pid,
-            pid_start_time=None if entry.mux else entry.pid_start_time,
-        )
-    except Exception:
-        return entry.harness_session_id, None
-    if reading.verdict == REACHABLE:
-        return entry.harness_session_id, True
-    if reading.verdict == UNREACHABLE:
-        return entry.harness_session_id, False
-    return entry.harness_session_id, None
+
+def _predecessor_observation(
+    name: str, harness: str
+) -> tuple[Optional[str], Optional[bool]]:
+    """Return the sampled predecessor ID and transcript reachability."""
+    recorded, reading = _predecessor_reading(name, harness)
+    return recorded, _verdict_bool(reading)
 
 
 def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -> int:
@@ -165,27 +191,52 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
             if harness == "claude":
                 from fno.agents.registry import record_session_observation
 
+                expected, reading = _reading_for_transition(
+                    agent_self, harness, session_id
+                )
                 entry, outcome = record_session_observation(
                     name=agent_self,
                     harness=harness,
                     session_id=session_id,
+                    predecessor_reachable=_verdict_bool(reading),
+                    expected_predecessor_session_id=expected,
                 )
                 if outcome != "no-row" or existed:
                     _report_observation(
                         agent_self, harness, session_id, source, entry, outcome
+                    )
+                    _emit_transition_events(
+                        agent_self,
+                        harness,
+                        session_id,
+                        source,
+                        entry,
+                        outcome,
+                        reading,
                     )
                     return 0
             else:
                 expected_predecessor_session_id, predecessor_reachable = (
                     _predecessor_observation(agent_self, harness)
                 )
+                transitions: list = []
                 entry = restamp_harness_session_id(
                     name=agent_self,
                     harness=harness,
                     session_id=session_id,
                     predecessor_reachable=predecessor_reachable,
                     expected_predecessor_session_id=expected_predecessor_session_id,
+                    transitions=transitions,
                 )
+                for applied in transitions:
+                    _emit_and_ask_on_branch(
+                        name=applied.get("name") or agent_self,
+                        harness=harness,
+                        classification=applied["classification"],
+                        predecessor=applied["predecessor"],
+                        successor=applied["successor"],
+                        source=source,
+                    )
                 if entry is not None or existed:
                     break
             if time.monotonic() >= deadline:
@@ -216,6 +267,231 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
             file=sys.stderr,
         )
     return 0
+
+
+def _verdict_bool(reading: Optional["Reachability"]) -> Optional[bool]:
+    """The classifier's tri-state from one reachability reading.
+
+    REACHABLE is True, UNREACHABLE is False, and UNKNOWN (or no reading at
+    all) is None: unknown is terminal and must never be coerced to either
+    pole - a coerced unknown is how a healthy row gets declared dead.
+    """
+    from fno.agents.reachability import REACHABLE, UNREACHABLE
+
+    if reading is None:
+        return None
+    if reading.verdict == REACHABLE:
+        return True
+    if reading.verdict == UNREACHABLE:
+        return False
+    return None
+
+
+def _reading_for_transition(
+    name: str, harness: str, session_id: str
+) -> tuple[Optional[str], Optional["Reachability"]]:
+    """Sample family-1 evidence ONLY when the payload could be a transition.
+
+    A same-id SessionStart (every healthy restart, every compact) can never
+    reclassify anything, so it pays no transcript read. A different id
+    samples the row's recorded id plus its reachability reading, for the
+    compare-and-swap guard and the classifier respectively.
+    """
+    from fno.agents.registry import load_registry
+
+    try:
+        entry = next(
+            (
+                candidate
+                for candidate in load_registry()
+                if candidate.harness == harness
+                and (candidate.name == name or name in candidate.aliases)
+            ),
+            None,
+        )
+    except Exception:
+        return None, None
+    if entry is None:
+        return None, None
+    primary = entry.harness_session_id or ""
+    if not primary or primary == session_id:
+        return None, None
+    # The row is in hand; the reading derives from it without a second load.
+    return primary, _reading_for_entry(entry)
+
+
+def _predecessor_of_outcome(entry: object, outcome: str, successor: str) -> Optional[str]:
+    """The A a finished observation retired, parked, or forked from."""
+    if entry is None:
+        return None
+    if outcome == "succession":
+        predecessors = getattr(entry, "predecessor_session_ids", None) or []
+        return predecessors[-1] if predecessors else None
+    if outcome == "branch":
+        return getattr(entry, "forked_from_session_id", None)
+    return getattr(entry, "harness_session_id", None) or None
+
+
+def _emit_transition_events(
+    name: str,
+    harness: str,
+    session_id: str,
+    source: str,
+    entry: object,
+    outcome: str,
+    reading: Optional["Reachability"],
+) -> None:
+    """Emit the typed transition event for one finished observation.
+
+    Succession and branch classify; a second id parked in the related slot
+    under unavailable evidence defers, positively naming WHY. The
+    idempotency replay (the payload's id already primary, its predecessor in
+    the chain) emits the already-applied marker instead of a second
+    classified event. Every helper here is best-effort by construction.
+    """
+    from fno.agents.events import (
+        KIND_SESSION_TRANSITION_ALREADY_APPLIED,
+        KIND_SESSION_TRANSITION_CLASSIFIED,
+        KIND_SESSION_TRANSITION_DEFERRED,
+        emit_session_transition,
+    )
+
+    try:
+        if outcome == "no-op":
+            predecessors = getattr(entry, "predecessor_session_ids", None) or []
+            if (
+                predecessors
+                and (getattr(entry, "harness_session_id", None) or "") == session_id
+            ):
+                emit_session_transition(
+                    KIND_SESSION_TRANSITION_ALREADY_APPLIED,
+                    name=name,
+                    harness=harness,
+                    predecessor_session_id=predecessors[-1],
+                    successor_session_id=session_id,
+                    source=source or None,
+                )
+            return
+        predecessor = _predecessor_of_outcome(entry, outcome, session_id)
+        if not predecessor:
+            return
+        if outcome in ("succession", "branch"):
+            emit_session_transition(
+                KIND_SESSION_TRANSITION_CLASSIFIED,
+                name=name,
+                harness=harness,
+                predecessor_session_id=predecessor,
+                successor_session_id=session_id,
+                classification=outcome,
+                basis=getattr(reading, "basis", None),
+                source=source or None,
+            )
+            if outcome == "branch":
+                _record_branch_question(
+                    name=name,
+                    harness=harness,
+                    predecessor=predecessor,
+                    successor=session_id,
+                    branch_name=getattr(entry, "name", name),
+                )
+        elif outcome == "related" and reading is not None:
+            # Evidence was sampled and came back unavailable: the id is
+            # parked additively and reconciliation retries later. No
+            # operator question and no overwrite (AC3-ERR).
+            emit_session_transition(
+                KIND_SESSION_TRANSITION_DEFERRED,
+                name=name,
+                harness=harness,
+                predecessor_session_id=predecessor,
+                successor_session_id=session_id,
+                basis=getattr(reading, "basis", None),
+                source=source or None,
+            )
+    except Exception:  # noqa: BLE001 -- observability never blocks session start
+        pass
+
+
+_BRANCH_QUESTION_MARKER = "session-transition-branch"
+
+
+def _branch_question_open(root, key: str) -> bool:
+    from fno.agents.stale_escalate import already_asked
+
+    return already_asked(root, key, marker=_BRANCH_QUESTION_MARKER) is not None
+
+
+def _record_branch_question(
+    *, name: str, harness: str, predecessor: str, successor: str, branch_name: str
+) -> None:
+    """Record the branch fork's ONE durable operator question.
+
+    The only transition that asks anything: should the new live session
+    inherit the node and its claim, or start clean? Exactly two options,
+    recorded once per fork edge - a re-observed branch never re-asks.
+    """
+    import secrets
+
+    from fno.events import operator_question
+    from fno.outstanding.core import append_question_event
+
+    # The hook cds to the repo root before invoking this module, so the
+    # session's project journal is the cwd one; the machine-wide question
+    # index gets the same event and is what the dedupe read folds.
+    root = Path(os.getcwd())
+    key = f"{name}:{predecessor}:{successor}"
+    if _branch_question_open(root, key):
+        return
+    append_question_event(
+        operator_question(
+            question_id=f"q-{secrets.token_hex(4)}",
+            question=(
+                f"[{_BRANCH_QUESTION_MARKER}:{key}] "
+                f"Branch {branch_name} ({harness}) forked live session "
+                f"{predecessor} into {successor}. Should it inherit the node "
+                f"and claim, or start clean?"
+            ),
+            session_id=successor,
+            ask=(
+                "answer inherit or clean; inherit proceeds only through the "
+                "voluntary claim-handover path and never force-releases the "
+                "live predecessor"
+            ),
+            options=["inherit node and claim", "start clean"],
+            source="hook",
+        ),
+        root,
+    )
+
+
+def _emit_and_ask_on_branch(
+    *, name: str, harness: str, classification: str, predecessor: str, successor: str, source: str
+) -> None:
+    """Emit one applied non-claude restamp transition, asking on a branch."""
+    from fno.agents.events import (
+        KIND_SESSION_TRANSITION_CLASSIFIED,
+        emit_session_transition,
+    )
+
+    try:
+        emit_session_transition(
+            KIND_SESSION_TRANSITION_CLASSIFIED,
+            name=name,
+            harness=harness,
+            predecessor_session_id=predecessor,
+            successor_session_id=successor,
+            classification=classification,
+            source=source or None,
+        )
+        if classification == "branch":
+            _record_branch_question(
+                name=name,
+                harness=harness,
+                predecessor=predecessor,
+                successor=successor,
+                branch_name=name,
+            )
+    except Exception:  # noqa: BLE001 -- observability never blocks session start
+        pass
 
 
 def _report_observation(

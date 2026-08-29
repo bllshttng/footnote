@@ -1084,7 +1084,28 @@ use crate::identity::session_handle_tier;
 
 fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
     let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
-    session_handle_tier(token, session_id)
+    if let Some(tier) = session_handle_tier(token, session_id) {
+        return Some(tier);
+    }
+    // The one optional related id addresses the row at the same tiers as the
+    // primary (x-d285: both ids stay valid forever).
+    if let Some(related) = entry.get("related_session_id").and_then(Value::as_str) {
+        if let Some(tier) = session_handle_tier(token, related) {
+            return Some(tier);
+        }
+    }
+    // A predecessor id addresses the row at the FULL tier only (x-dfe7):
+    // succession retired it, so delivery naming A follows the row that now
+    // answers as B, while A's retired short/handle forms stay retired.
+    entry
+        .get("predecessor_session_ids")
+        .and_then(Value::as_array)
+        .and_then(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .any(|id| session_handle_tier(token, id) == Some(0))
+                .then_some(0)
+        })
 }
 
 /// Return the single matched row, or an ambiguity error. Dedup only repeated
@@ -4552,6 +4573,36 @@ mod tests {
             let e = find_agent_entry(&rows, tok).expect("resolves");
             assert_eq!(e["name"], "billing");
         }
+    }
+
+    #[test]
+    fn session_lineage_predecessor_full_id_resolves_the_current_row() {
+        // x-dfe7 AC6-HP (Rust half): delivery naming a succeeded session's
+        // full uuid follows the row that now answers as its successor.
+        let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
+        row["predecessor_session_ids"] = json!(["e6f78b98-1111-2222-3333-444444444444"]);
+        let rows = vec![row];
+
+        let e = find_agent_entry(&rows, "e6f78b98-1111-2222-3333-444444444444")
+            .expect("predecessor full id resolves");
+        assert_eq!(
+            e["harness_session_id"],
+            "08054b1d-2222-3333-4444-555555555555"
+        );
+    }
+
+    #[test]
+    fn session_lineage_predecessor_short_form_stays_retired() {
+        // x-dfe7: a predecessor's 8-hex short retired with it and never
+        // re-enters the successor's short-address namespace.
+        let mut row = claude_row("worker", "08054b1d", "08054b1d-2222-3333-4444-555555555555");
+        row["predecessor_session_ids"] = json!(["e6f78b98-1111-2222-3333-444444444444"]);
+        let rows = vec![row];
+
+        assert!(matches!(
+            find_agent_entry(&rows, "e6f78b98"),
+            Err(ResolveError::NotFound(_))
+        ));
     }
 
     #[test]

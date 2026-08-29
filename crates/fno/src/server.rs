@@ -3476,6 +3476,24 @@ impl Core {
                         }
                         None => (0, None, 0, String::new(), None, None),
                     };
+                // (x-dfe7) The lineage join: when exactly ONE registry row
+                // hosts this pane, its identity fields ride the listing so
+                // the stable thread id (fno_id) and the CURRENT harness
+                // session are printed beside each other, never conflated.
+                // An ambiguous pane (two rows on one mux ref) carries none
+                // of them, mirroring the fno_id rule.
+                let joined_rows: Vec<&RegistryAgent> = agents
+                    .iter()
+                    .filter(|a| {
+                        a.mux
+                            .as_ref()
+                            .is_some_and(|(sess, pane)| sess == &self.session_name && *pane == pid)
+                    })
+                    .collect();
+                let joined_row = joined_rows
+                    .first()
+                    .filter(|_| joined_rows.len() == 1)
+                    .copied();
                 PaneInfo {
                     pane_id: pid,
                     squad_id,
@@ -3492,6 +3510,12 @@ impl Core {
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
                     fno_id: self.fno_id_for_pane_with_agents(pid, agents),
+                    harness_session_id: joined_row.and_then(|a| a.harness_session_id.clone()),
+                    predecessor_session_ids: joined_row
+                        .map(|a| a.predecessor_session_ids.clone())
+                        .unwrap_or_default(),
+                    forked_from_session_id: joined_row
+                        .and_then(|a| a.forked_from_session_id.clone()),
                 }
             })
             .collect();
@@ -15310,6 +15334,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: "w".into(),
             cwd: "/w".into(),
             exited,
@@ -15478,6 +15504,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "foreign-pane".into(),
                 cwd: "/other".into(),
                 exited: false,
@@ -15501,6 +15529,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
                 exited: false,
@@ -15524,6 +15554,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: Some("codex-live-id".into()),
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "live-paneless".into(),
                 cwd: "/live".into(),
                 exited: false,
@@ -15658,6 +15690,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "watcher".into(),
                 cwd: "/grp/backend/sub/dir".into(),
                 exited: false,
@@ -15735,6 +15769,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
@@ -15784,6 +15820,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "think-x-9999".into(),
                 cwd: "/w".into(),
                 exited: false,
@@ -15806,6 +15844,8 @@ mod tests {
                 spawned_by_session: None,
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 name: "dead-ext".into(),
                 cwd: "/w".into(),
                 exited: true,
@@ -15862,6 +15902,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
@@ -17972,6 +18014,45 @@ mod tests {
     }
 
     #[test]
+    fn session_lineage_pane_ls_reports_thread_and_current_beside_each_other() {
+        // AC7-HP (mux half): the listing carries the stable thread id AND the
+        // current harness session, with the succession chain and fork edge
+        // alongside, so a retired id can never read as current.
+        let (mut core, pane_id) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane_id).unwrap().name = Some("worker".into());
+        let mut successor = agent_in("sess", pane_id, None, false);
+        successor.harness_session_id = Some("session-b".into());
+        successor.predecessor_session_ids = vec!["session-a".into()];
+        successor.forked_from_session_id = None;
+        successor.name = "worker".into();
+
+        match core.pane_ls_from_fresh_agents(Some(&[successor.clone()])) {
+            ServerMsg::PaneList { panes } => {
+                let pane = panes.iter().find(|p| p.pane_id == pane_id).unwrap();
+                assert_eq!(pane.harness_session_id.as_deref(), Some("session-b"));
+                assert_eq!(pane.predecessor_session_ids, vec!["session-a"]);
+                assert!(pane.forked_from_session_id.is_none());
+            }
+            other => panic!("pane ls should join lineage, got {other:?}"),
+        }
+
+        // A branch row shows its fork edge.
+        let mut branch = agent_in("sess", pane_id, None, false);
+        branch.harness_session_id = Some("session-c".into());
+        branch.forked_from_session_id = Some("session-b".into());
+        branch.name = "worker-branch".into();
+        match core.pane_ls_from_fresh_agents(Some(&[branch.clone()])) {
+            ServerMsg::PaneList { panes } => {
+                let pane = panes.iter().find(|p| p.pane_id == pane_id).unwrap();
+                assert_eq!(pane.forked_from_session_id.as_deref(), Some("session-b"));
+                assert!(pane.predecessor_session_ids.is_empty());
+            }
+            other => panic!("pane ls should join the fork edge, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn rename_squad_blank_clears_origin_squad_and_refuses_origin_less() {
         // AC1-EDGE + AC1-ERR (server half): a blank rename clears an origin-
         // backed squad to its derived label, but an origin-less (NewSquad)
@@ -18536,6 +18617,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
@@ -19304,6 +19387,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -19382,6 +19467,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -19464,6 +19551,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "live-codex".into(),
             cwd: "/tmp".into(),
@@ -19579,6 +19668,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "w".into(),
             cwd: "/w".into(),
@@ -19689,6 +19780,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a027ad".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("codex".into()),
             name: "w".into(),
             cwd: "/w".into(),
@@ -19813,6 +19906,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: Some("01a03a4e-b862".into()),
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("claude".into()),
             name: "worker".into(),
             cwd: "/w".into(),
@@ -20015,12 +20110,16 @@ mod tests {
         let ext_live = RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             external: true,
             ..bg_row("ext-a", "/tmp", Some("deadbee1"))
         };
         let ext_dead = RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             external: true,
             exited: true,
             ..bg_row("ext-b", "/tmp", Some("deadbee2"))
@@ -20181,6 +20280,8 @@ mod tests {
         core.agents = vec![RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             external: true,
             ..bg_row("ext-live", "/tmp", Some("deadbeef"))
         }];
@@ -20203,6 +20304,8 @@ mod tests {
         let shared = |external, exited, attach: &str| RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             external,
             exited,
             ..bg_row("dup", "/tmp", Some(attach))
@@ -21997,6 +22100,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: name.into(),
             cwd: cwd.into(),
             exited: false,
@@ -22336,12 +22441,16 @@ mod tests {
             RegistryAgent {
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 exited: true,
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee2"))
             },
             RegistryAgent {
                 session_id: None,
                 harness_session_id: None,
+                predecessor_session_ids: Vec::new(),
+                forked_from_session_id: None,
                 mux: Some(("test".into(), 5)),
                 ..bg_row("tgt-x-ddd", "/w", Some("deadbee3"))
             },

@@ -291,7 +291,12 @@ fn default_true() -> bool {
 /// instead of running the reach; the handshake is what stops the skew.
 /// `AgentRow.reach` rides the same bump (additive-tolerant on its own via
 /// `#[serde(default)]`, but it is the shape change the verb belongs to).
-pub const PROTO_VERSION: u32 = 58;
+///
+/// v59 (classified lineage): `PaneInfo` gains `harness_session_id`,
+/// `predecessor_session_ids`, and `forked_from_session_id` - each
+/// additive-tolerant via `#[serde(default)]`, but the shape change belongs
+/// to one bump, and the handshake, not serde tolerance, is the skew guard.
+pub const PROTO_VERSION: u32 = 59;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -2261,6 +2266,18 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
+    /// session the row answers as, the succession chain it retired (oldest
+    /// first), and the fork edge of a parallel branch. `fno_id` stays the
+    /// stable thread join; these fields are printed BESIDE it so a retired
+    /// id can never silently read as current. `#[serde(default)]` keeps a
+    /// pre-lineage reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predecessor_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_session_id: Option<String>,
     /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
     #[serde(default)]
     pub name: Option<String>,
@@ -3996,7 +4013,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 58);
+        assert_eq!(PROTO_VERSION, 59);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4528,6 +4545,9 @@ mod tests {
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
+                    harness_session_id: None,
+                    predecessor_session_ids: Vec::new(),
+                    forked_from_session_id: None,
                     name: None,
                 }],
             },

@@ -4181,6 +4181,18 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
 /// per-pane URL. The bridge writes `web-<session>.json` at bind; a file whose
 /// port no longer answers is a corpse, not a bridge, so the TCP probe - not
 /// the file's existence - decides liveness.
+/// The first-eight short form of a session id, matching Python's
+/// `fno.harness_identity.canonical_handle` closely enough for DISPLAY (the
+/// resolver never consumes this spelling, so the ses_ case rule that matters
+/// for addressing is not load-bearing here).
+fn short_handle(session_id: &str) -> String {
+    session_id
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_lowercase()
+}
+
 fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
     let path = proto::mux_dir().join(format!("web-{session}.json"));
     let hint = format!(
@@ -5102,10 +5114,31 @@ fn render_reply(
                     let fno = p.fno_id.as_deref().unwrap_or("-");
                     let name = p.name.as_deref().unwrap_or("-");
                     let tab = tab_label(p.tab_name.as_deref(), p.tab_ordinal);
-                    println!(
+                    // (x-dfe7) The current harness session prints BESIDE the
+                    // stable thread id, with the lineage chain named when
+                    // present - a successor's retired id must never read as
+                    // current, and a branch's fork edge stays visible.
+                    let mut line = format!(
                         "{} squad={} tab={} tab_id={} pid={} fno_id={} name={} cwd={}",
                         p.pane_id, p.squad_id, tab, p.tab_id, pid, fno, name, p.cwd
                     );
+                    if let Some(cur) = p.harness_session_id.as_deref() {
+                        line.push_str(&format!(" session={cur}"));
+                    }
+                    if !p.predecessor_session_ids.is_empty() {
+                        line.push_str(&format!(
+                            " pred={}",
+                            p.predecessor_session_ids
+                                .iter()
+                                .map(|id| short_handle(id))
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        ));
+                    }
+                    if let Some(from) = p.forked_from_session_id.as_deref() {
+                        line.push_str(&format!(" forked_from={}", short_handle(from)));
+                    }
+                    println!("{line}");
                 }
             }
             EXIT_OK
@@ -6447,6 +6480,8 @@ mod tests {
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: name.into(),
             cwd: "/tmp/seen".into(),
             exited: false,
@@ -6764,6 +6799,8 @@ mod tests {
             cwd: "/x".into(),
             session_id: session_id.map(str::to_string),
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             exited: false,
             badge: None,
             reason: None,
