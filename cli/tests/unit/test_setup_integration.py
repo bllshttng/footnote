@@ -355,7 +355,7 @@ def _fake_agy_adapter(tmp_path, monkeypatch):
 
 def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path)  # keep the .agent/rules breadcrumb in the tmp tree
+    monkeypatch.chdir(tmp_path)  # keep any workspace writes inside the tmp tree
     adapter = _fake_agy_adapter(tmp_path, monkeypatch)
 
     assert I._agy_is_installed() is False
@@ -369,8 +369,9 @@ def test_agy_install_registers_stop_hook_and_is_installed(tmp_path, monkeypatch)
     assert stop[0]["command"] == str(adapter)
     assert stop[0]["type"] == "command"
     assert I._agy_is_installed() is True
-    # context breadcrumb dropped under the workspace's .agent/rules
-    assert (tmp_path / ".agent" / "rules" / "footnote.md").exists()
+    # No workspace breadcrumb: agy parses AGENTS.md natively, and `.agent/`
+    # singular is not an agy path at all.
+    assert not (tmp_path / ".agent").exists()
 
 
 def test_agy_install_preserves_other_namespace_keys(tmp_path, monkeypatch):
