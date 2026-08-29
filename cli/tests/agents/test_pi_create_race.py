@@ -176,10 +176,10 @@ def test_the_claim_key_is_a_session_key_carrying_cwd():
     different space, is taken by the spawn lane rather than by a person, and is
     released in the same operation.
     """
-    key = create_claim_key("/repo/.claude/worktrees/one", "s-1")
+    key = create_claim_key("/repo/worktrees/one", "s-1")
     assert key.startswith("pi-session:"), key
     assert not key.startswith("node:"), key
-    assert key != create_claim_key("/repo/.claude/worktrees/two", "s-1")
+    assert key != create_claim_key("/repo/worktrees/two", "s-1")
 
 
 def test_a_failed_create_releases_the_claim_instead_of_leaking_the_ttl(

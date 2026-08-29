@@ -129,14 +129,15 @@ def encode_cwd(cwd: Path | str) -> str:
     """pi's on-disk encoding of a working directory.
 
     Every path separator becomes a single ``-``, and the result is fenced with
-    ``--`` at both ends. Derived from three live directories rather than from
-    pi's source::
+    ``--`` at both ends. Derived from live directories rather than from pi's
+    source::
 
         /Users/bb16/code/footnote/footnote  -> --Users-bb16-code-footnote-footnote--
         /private/tmp                        -> --private-tmp--
-        /Users/bb16/.claude/jobs/../piprobe -> --Users-bb16-.claude-jobs-..-piprobe--
 
-    A dot inside a component survives unchanged, as ``.claude`` above shows.
+    A third observed directory, a probe run under a dot-prefixed component,
+    showed that a DOT inside a component survives unchanged: only the
+    separators are rewritten.
 
     Mirrors ``encode_cwd`` in ``crates/fno-agents/src/pi.rs``; a parity test
     pins the two.

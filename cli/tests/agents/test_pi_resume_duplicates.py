@@ -137,10 +137,8 @@ def test_the_cwd_encoding_matches_three_observed_directories():
         == "--Users-bb16-code-footnote-footnote--"
     )
     assert encode_cwd("/private/tmp") == "--private-tmp--"
-    assert (
-        encode_cwd("/Users/bb16/.claude/jobs/15096b9a/tmp/piprobe")
-        == "--Users-bb16-.claude-jobs-15096b9a-tmp-piprobe--"
-    )
+    # A dot-prefixed component survives unchanged; only separators move.
+    assert encode_cwd("/home/u/.local/tmp/piprobe") == "--home-u-.local-tmp-piprobe--"
 
 
 def test_one_id_in_two_worktrees_is_two_sessions(tmp_path, monkeypatch):
@@ -148,7 +146,7 @@ def test_one_id_in_two_worktrees_is_two_sessions(tmp_path, monkeypatch):
     worktree's session - and must not silently look somewhere else."""
     monkeypatch.setenv("PI_HOME", str(tmp_path / "pi-home"))
     canonical = "/repo"
-    worktree = "/repo/.claude/worktrees/feature"
+    worktree = "/repo/worktrees/feature"
     directory = session_dir(worktree)
     directory.mkdir(parents=True, exist_ok=True)
     (directory / f"{STAMPS[0]}_{SESSION_ID}.jsonl").write_text("{}\n")

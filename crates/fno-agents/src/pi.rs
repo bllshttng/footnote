@@ -64,15 +64,16 @@ pub fn pi_sessions_root() -> PathBuf {
 /// pi's on-disk encoding of a working directory: every path separator becomes a
 /// single `-`, and the result is fenced with `--` at both ends.
 ///
-/// Derived from three live directories rather than from pi's source:
+/// Derived from live directories rather than from pi's source:
 ///
 /// ```text
 /// /Users/bb16/code/footnote/footnote  -> --Users-bb16-code-footnote-footnote--
 /// /private/tmp                        -> --private-tmp--
-/// /Users/bb16/.claude/jobs/…/piprobe  -> --Users-bb16-.claude-jobs-…-piprobe--
 /// ```
 ///
-/// A dot in a path component survives unchanged, as `.claude` above shows.
+/// A third observed directory, a probe run under a dot-prefixed component,
+/// showed that a DOT inside a component survives unchanged: only the
+/// separators are rewritten.
 pub fn encode_cwd(cwd: &Path) -> String {
     let raw = cwd.to_string_lossy();
     let body = raw.trim_start_matches('/').replace('/', "-");
@@ -268,16 +269,17 @@ mod tests {
             "--Users-bb16-code-footnote-footnote--"
         );
         assert_eq!(encode_cwd(Path::new("/private/tmp")), "--private-tmp--");
+        // A dot-prefixed component survives unchanged; only separators move.
         assert_eq!(
-            encode_cwd(Path::new("/Users/bb16/.claude/jobs/15096b9a/tmp/piprobe")),
-            "--Users-bb16-.claude-jobs-15096b9a-tmp-piprobe--"
+            encode_cwd(Path::new("/home/u/.local/tmp/piprobe")),
+            "--home-u-.local-tmp-piprobe--"
         );
     }
 
     #[test]
     fn the_claim_key_carries_cwd_so_two_worktrees_never_contend() {
-        let a = create_claim_key(Path::new("/repo/.claude/worktrees/one"), "s-1");
-        let b = create_claim_key(Path::new("/repo/.claude/worktrees/two"), "s-1");
+        let a = create_claim_key(Path::new("/repo/worktrees/one"), "s-1");
+        let b = create_claim_key(Path::new("/repo/worktrees/two"), "s-1");
         assert_ne!(a, b, "one id in two worktrees is two sessions");
         assert!(a.starts_with("pi-session:"), "session key space, not node:");
     }
