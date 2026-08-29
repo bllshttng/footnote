@@ -192,6 +192,16 @@ agent_routes = {}
 # Enable cross-model (codex/gemini) second-opinion review.
 enabled = false
 
+[style]
+# Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.
+pair_budget_words = 80
+
+[style.word_cap]
+# Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in.
+mail = 80
+# Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.
+encounter = 80
+
 [preflight]
 # Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.
 required = false
