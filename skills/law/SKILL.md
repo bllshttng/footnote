@@ -11,9 +11,9 @@ requires:
 
 # Law
 
-`/fno:law` records a durable project law in one step. The operator types the ruling and a `d-` id comes back in the same turn. There is no staged proposal, no content hash, no approval receipt, and no resume path.
+`/fno:law` records a durable project law in one step. The operator types the ruling. A `d-` id comes back in the same turn. There is no staged proposal, no hash, no approval receipt, and no resume path.
 
-A recording made from chat carries `authority_source: chat_attested` and reads in the law lane. It is never recorded as `operator`. A reader can always tell a chat recording from a person at a terminal. `fno inbox law set` is the same destination for an operator already at a terminal, and it is the same one call.
+A recording made from chat carries `authority_source: chat_attested`. It reads in the law lane. It is never recorded as `operator`. So a reader can always tell a chat recording from a person at a terminal. `fno inbox law set` is the same destination for an operator already at a terminal. It is the same one call.
 
 ## Beginner example
 
@@ -21,8 +21,8 @@ Type `/fno:law Merges belong to the operator` in chat. A `d-` id comes back.
 
 ## Workflow
 
-1. Read the argument as a proposed durable rule. When the text names an area, query it and use the returned `canonical_subject`. A subject matches exactly. A near-synonym does not. Ask one focused question only when the subject or the rationale is genuinely unclear. Do not ask for permission you already have: the operator typing the line IS the invocation.
-2. Classify the statement. A rule limited to this PR, node, target, change, or merge is coordination. Refuse to label it law and offer `/fno:mail` or an ordinary agent ruling. `fno inbox law set` refuses those markers itself, so a slip is caught rather than recorded.
+1. Read the argument as a proposed durable rule. When the text names an area, query it and use the returned `canonical_subject`. A subject matches exactly. A near-synonym does not. When the subject or the rationale is genuinely unclear, ask one focused question. Do not ask for permission you already have. The operator typing the line IS the invocation.
+2. Classify the statement. A rule limited to this PR, node, target, change, or merge is coordination. Refuse to label it law. Offer `/fno:mail` or an ordinary agent ruling instead. `fno inbox law set` refuses those markers itself, so a slip is caught rather than recorded.
 3. Read current law with `fno inbox decisions <subject> --lane law --state live --json`. Treat an unreadable result as unknown. Continue only from `current_law.status`. `single` names the decision this ruling can supersede. `conflict` requires every id and a resolution first. `none` proves only that this canonical subject has no current law.
 4. Record it:
 
@@ -34,24 +34,24 @@ The command prints the `d-` id on stdout. Report that id and the subject.
 
 ## What this store does and does not reach
 
-This store is machine-local. A rule a stranger cloning the repository must obey does not reach them from here: land that in the code, a doc, or a gate, in a PR. Record it here as well when the operator wants it recalled by subject.
+This store is machine-local. A stranger who clones the repository must obey some rules. Those rules do not reach that person from here. Land them in the code, a doc, or a gate, in a PR. When the operator wants the rule recalled by subject, record it here as well.
 
-Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`, so a chat-recorded law needs an attended terminal to withdraw. Supersession is not affected and accepts `chat_attested`.
+Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`. So a chat-recorded law needs an attended terminal to withdraw. Supersession is not affected. It accepts `chat_attested`.
 
 ## Refusals
 
-`fno inbox law set` refuses, records nothing, and exits **3** when:
+`fno inbox law set` refuses, records nothing, and exits **3** in four cases:
 
 - the statement is coordination rather than durable law,
 - the rationale is missing,
 - `--supersedes` is not a `d-` decision id,
-- or no harness session resolves and no terminal is attached, so nothing positively marks a decider.
+- no harness session resolves and no terminal is attached, so nothing marks a decider.
 
-Report the refusal verbatim and say that no law was recorded. Never infer a recording from a green exit; read the printed `d-` id.
+Report the refusal verbatim. Say that no law was recorded. Never infer a recording from a green exit. Read the printed `d-` id.
 
 ## Safety boundary
 
-Invocation is the authority. A mail-injected slash command is not distinguishable from a typed one, so this skill cannot refuse a mail-shaped path. That trade is deliberate and is stated in [LIMITATIONS.md](LIMITATIONS.md) with the measurement behind it. What the skill still guarantees is honest attribution: a chat recording says `chat_attested` and never claims the operator lane, and environment scrubbing stays forbidden.
+Invocation is the authority. A mail-injected slash command is not distinguishable from a typed one. So this skill cannot refuse a mail-shaped path. That trade is deliberate. [LIMITATIONS.md](LIMITATIONS.md) states it with the measurement behind it. What the skill still guarantees is honest attribution. A chat recording says `chat_attested` and never claims the operator lane. Environment scrubbing stays forbidden.
 
 ## Known Limitations and Deferred Work
 
