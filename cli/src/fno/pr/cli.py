@@ -168,7 +168,8 @@ def status(
     help=(
         "The sanctioned watcher: poll `fno do pr status` through the "
         "coalescing cache until the PR settles (or turns green with "
-        "--until green), then exit the status verb's own code. N waiters on "
+        "--until green), then exit the status verb's own code. --until review "
+        "wakes when a new review posts on the PR. N waiters on "
         "one PR cost one network read per cache TTL, a rate-limit backoff is "
         "ridden out rather than hammered, and the gh-call count prints at "
         "exit. --timeout (30m default) exits with the last observed code and "
@@ -180,7 +181,8 @@ def status(
 def wait(
     pr_number: int = typer.Argument(..., help="GitHub PR number"),
     until: str = typer.Option(
-        "settled", "--until", help="Exit when: settled (any terminal verdict) or green."
+        "settled", "--until",
+        help="Exit when: settled (any terminal verdict), green, or a new review posts.",
     ),
     timeout: str = typer.Option("30m", "--timeout", help="Max wait, e.g. 30m / 90s / 1h."),
     interval: str = typer.Option("60", "--interval", help="Poll interval in seconds (minimum 5)."),

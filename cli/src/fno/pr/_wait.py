@@ -18,11 +18,19 @@ exits with the LAST observed code and a note - a caller re-arms, exactly as
 it re-armed a bounded hand-rolled loop. A persistent fetch error waits out
 the timeout rather than flapping: one blip recovers, and the cache's backoff
 is already throttling rate-class errors.
+
+``--until review`` wakes when a NEW review posts on the PR: one REST read of
+``pulls/<n>/reviews`` per tick (per_page=100, because gh api fetches ONE page
+and at the default 30 the count saturates), the count captured at the first
+successful read as the baseline, exit 0 the moment it grows, exit 2 at the
+timeout with the last observed count. An unreadable tick is no-answer, never
+"no new review": the wait rides it out so an API blip cannot fake a wake.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -30,6 +38,37 @@ from typing import Callable, Optional
 
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)(s|m|h)?$", re.IGNORECASE)
 _MIN_INTERVAL = 5.0
+_UNTIL = ("settled", "green", "review")
+
+
+def _review_count(pr: str, cwd: Optional[str], slug: str = "") -> Optional[int]:
+    """Reviews on ``pr`` via one REST read, or None when the read fails.
+
+    per_page=100 is load-bearing: gh api fetches ONE page, so at the default
+    30 the count saturates and a 31st review can never wake the wait. The
+    ``owner/repo`` slug comes from the one parser the package already owns
+    (``_base_lineage._repo_slug`` -> ``_ritual._parse_origin_slug``); a caller
+    that resolved it once passes it in so a long wait makes no per-tick git
+    read.
+    """
+    from fno.pr import _proc
+
+    if not slug:
+        from fno.pr._base_lineage import _repo_slug
+
+        slug = _repo_slug(cwd or os.getcwd()) or ""
+        if not slug:
+            return None
+    res = _proc.run(
+        ["gh", "api", f"repos/{slug}/pulls/{pr}/reviews?per_page=100", "--jq", "length"],
+        cwd=cwd,
+    )
+    if not res.ok:
+        return None
+    try:
+        return int(res.stdout.strip())
+    except ValueError:
+        return None
 
 
 def parse_duration(text: str) -> float:
@@ -88,9 +127,14 @@ def wait_status(
     clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """Poll ``cached_status`` until the condition holds or the deadline fires."""
-    if until not in ("settled", "green"):
-        sys.stderr.write("fno do pr wait: --until must be settled or green\n")
+    if until not in _UNTIL:
+        sys.stderr.write(f"fno do pr wait: --until must be one of {'/'.join(_UNTIL)}\n")
         return 2
+    if until == "review":
+        return _wait_review(
+            pr, timeout=timeout, interval=interval, cwd=cwd,
+            sleeper=sleeper, clock=clock,
+        )
     interval = max(_MIN_INTERVAL, interval)
     deadline = clock() + max(0.0, timeout)
     rc: int = 2
@@ -110,6 +154,60 @@ def wait_status(
                 f"{payload.get('verdict')}. Re-arm the wait or read the PR.\n"
             )
             return rc if rc != 0 else 2
+        sleeper(interval)
+
+
+def _wait_review(
+    pr: str,
+    *,
+    timeout: float,
+    interval: float,
+    cwd: Optional[str],
+    sleeper: Callable[[float], None],
+    clock: Callable[[], float],
+    counter: Optional[Callable[..., Optional[int]]] = None,
+) -> int:
+    """Poll the review count until it grows past the first-read baseline."""
+    from fno.pr import _proc
+
+    if counter is None:
+        # Resolved at call time, not as a default argument: tests replace the
+        # module attribute, and a def-time default would keep the real reader.
+        counter = _review_count
+    from fno.pr._base_lineage import _repo_slug
+
+    # Resolve the slug once, not per tick: the replaced shell recipe did the
+    # same, and a 30m wait should not make 30 identical git reads. An
+    # unresolvable slug degrades to "" and the reader retries it per tick, so
+    # a transient failure never wedges the wait.
+    slug = _repo_slug(cwd or os.getcwd()) or ""
+
+    interval = max(_MIN_INTERVAL, interval)
+    deadline = clock() + max(0.0, timeout)
+    baseline: Optional[int] = None
+    last: Optional[int] = None
+    while True:
+        count = counter(pr, cwd, slug)
+        if count is not None:
+            last = count
+            if baseline is None:
+                baseline = count
+            elif count > baseline:
+                sys.stderr.write(
+                    f"wait: {count - baseline} new review(s) on PR {pr} "
+                    f"({baseline} -> {count}).\n"
+                )
+                sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+                return 0
+        now = clock()
+        if now + interval > deadline:
+            observed = "no read succeeded" if last is None else f"last count {last}"
+            sys.stderr.write(
+                f"wait: still no new review after {int(timeout)}s; {observed}. "
+                "Re-arm the wait or read the PR.\n"
+            )
+            sys.stderr.write(f"note: {_proc.GH_CALLS} gh call(s) this invocation\n")
+            return 2
         sleeper(interval)
 
 
@@ -168,7 +266,7 @@ def main(argv: "list[str]") -> int:
                 args.append(a)
             i += 1
     usage = (
-        "usage: fno do pr wait <pr-number> [--until settled|green] "
+        "usage: fno do pr wait <pr-number> [--until settled|green|review] "
         "[--timeout 30m] [--interval 60]\n"
     )
     if unknown:

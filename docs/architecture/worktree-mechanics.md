@@ -36,7 +36,17 @@ Test with a top-level run.
 When `worktrees_base` is set, the two paths still diverge on WHERE. Autonomous dispatch (`fno agents workspace worktree ensure`) stays harness-native unless `policy = "external"`.
 The hook relocates off `worktrees_base` directly.
 
-## The harness-native fallback
+## Claude Code's worktree Bash isolation
+
+With `worktree.bgIsolation: "worktree"`, Claude Code runs a static analyzer over a worktree-isolated session's Bash commands. That setting is Claude Code's default since 2.1.222. This repo sets it in `.claude/settings.local.json`. The analyzer is Claude Code's own code. Footnote cannot widen or narrow it, and its refusal text is fixed. What footnote owns is the command its hooks and skills tell an agent to run. Those must be shapes the analyzer admits.
+
+The predicate was probed live on CC 2.1.251 from a worktree session. When a command holds anything the analyzer cannot statically resolve, it is refused as too complex to verify. The refused constructs: environment-variable expansion (`echo "$VAR"`), command substitution (`$(...)`), arithmetic expansion (`$((n+1))`), and loops (`while`, `for`). The admitted constructs: plain commands, literal local variables (`i=2; echo "$i"`), pipes, `;`/`&&` compounds, redirects, and `bash /abs/path/script.sh` file indirection.
+
+Two facts agents keep getting wrong. The refusal's mention of the redirect is generic wording, not the trigger. The trigger is the construct the analyzer cannot parse. The analyzer is also NOT a path boundary. An absolute-path write outside the worktree runs ungated, including into the canonical checkout. Footnote's own hooks are that boundary (`worktree-write-protect.sh`, `git-protection.py`).
+
+The sanctioned escapes, in order. Read env with `printenv VAR` instead of `echo "$VAR"`. Wait on CI or a review with `fno do pr wait <N> --until settled|review` instead of a hand-rolled poll loop. An inline `while`/`$(...)` watcher is refused, so no fno surface can instruct one. For a genuinely complex one-liner, put it in a file and run `bash <file>`.
+
+
 
 A harness or Codex substrate with no native worktree transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`. That fallback is Footnote's own allocation. It does not inherit an external allocator configured by `worktrees_base`, so a repo that sets the base still lands there under `harness-native`. For that reason `fno agents workspace worktree ensure` requires `--harness` and never guesses the substrate.
 

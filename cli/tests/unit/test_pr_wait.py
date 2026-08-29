@@ -168,3 +168,148 @@ def test_torn_last_json_line_is_not_answered_by_an_older_line(monkeypatch, capsy
     # Never settled on the torn read: the deadline fires with the last code.
     assert rc == 2
     assert "still not settled" in capsys.readouterr().err
+
+
+def test_review_mode_wakes_when_count_grows(monkeypatch, capsys) -> None:
+    """--until review exits 0 the moment the review count rises above the
+    baseline captured at the first successful read."""
+    from fno.pr import _wait
+
+    reads = [3, 3, 5]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 10),
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "new review" in err and "3 -> 5" in err
+
+
+def test_review_mode_timeout_names_last_count(monkeypatch, capsys) -> None:
+    from fno.pr import _wait
+
+    reads = [4, 4]
+    monkeypatch.setattr(
+        _wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0) if reads else 4
+    )
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 28),
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "still no new review" in err and "last count 4" in err
+
+
+def test_review_mode_never_exits_zero_on_an_unreadable_read(monkeypatch, capsys) -> None:
+    """A failed read is no-answer, not zero-reviews: the wait rides it out and
+    the deadline decides. Exiting 0 on an error would wake the session for a
+    review nobody saw."""
+    from fno.pr import _wait
+
+    reads = [None, None]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 28),
+    )
+    assert rc == 2
+    assert "no read succeeded" in capsys.readouterr().err
+
+
+def test_review_mode_baseline_lands_on_first_successful_read(monkeypatch, capsys) -> None:
+    """The first tick fails, the second succeeds and IS the baseline - a later
+    equal count is not growth."""
+    from fno.pr import _wait
+
+    reads = [None, 2, 2]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 10, 28),
+    )
+    assert rc == 2
+    assert "last count 2" in capsys.readouterr().err
+
+
+def test_cli_shape_reaches_review_mode(monkeypatch, capsys) -> None:
+    """The CLI spelling must reach the review path - the x-4eac lesson: unit
+    tests calling wait_status directly while the verb was unreachable."""
+    from fno.pr import _wait
+
+    seen = {}
+
+    def fake_wait(pr, *, until, timeout, interval, cwd=None, sleeper=None, clock=None):
+        seen.update(until=until, pr=pr)
+        return 0
+
+    monkeypatch.setattr(_wait, "wait_status", fake_wait)
+    rc = _wait.main(["9", "--until", "review", "--timeout", "1m", "--interval", "5"])
+    capsys.readouterr()
+    assert rc == 0
+    assert seen == {"until": "review", "pr": "9"}
+
+
+def test_review_count_uses_the_shared_slug_parser(monkeypatch) -> None:
+    """The reader must not carry its own remote-URL parser: the package owns
+    one (``_base_lineage._repo_slug`` -> ``_ritual._parse_origin_slug``), and
+    a second, looser parser here would accept hosts that one rejects."""
+    from fno.pr import _base_lineage, _proc, _wait
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        class _R:
+            ok = True
+            stdout = "7"
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(_base_lineage, "_repo_slug", lambda cwd: "bll/footnote")
+    monkeypatch.setattr(_proc, "run", fake_run)
+    assert _wait._review_count("9", None) == 7
+    assert calls[0][:3] == [
+        "gh", "api", "repos/bll/footnote/pulls/9/reviews?per_page=100",
+    ]
+
+    # An unresolvable slug is no-answer: the wait rides to its bound rather
+    # than guessing a repo.
+    monkeypatch.setattr(_base_lineage, "_repo_slug", lambda cwd: None)
+    calls.clear()
+    assert _wait._review_count("9", None) is None
+    assert calls == []
+
+
+def test_review_wait_resolves_slug_from_cwd_when_none(monkeypatch, tmp_path) -> None:
+    """A cwd of None means THIS process's cwd, not the empty string: the
+    probe helper shells `git remote get-url origin` with the cwd it is given,
+    and "" is not a directory. Caught on the real path after the unit suite
+    passed with a stubbed slug reader."""
+    import subprocess as sp
+
+    from fno.pr import _proc, _wait
+
+    repo = tmp_path / "slugrepo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://github.com/bll/footnote.git"],
+        check=True,
+    )
+    monkeypatch.chdir(repo)
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        class _R:
+            ok = True
+            stdout = "2"
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(_proc, "run", fake_run)
+    assert _wait._review_count("9", None) == 2
+    assert seen["cwd"] is None  # gh ran wherever the process is, a git repo

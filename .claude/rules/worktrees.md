@@ -2,7 +2,7 @@
 
 The single place that says where git worktrees go and what to do after creating one. Loaded every session via `AGENTS.md`. Skill defaults that place worktrees elsewhere lose to this rule.
 
-Hook internals, removal, and the enforcement wiring live in [docs/architecture/worktree-mechanics.md](../../docs/architecture/worktree-mechanics.md). Read it before editing the `WorktreeCreate` hook, where exiting non-zero on the wrong payload shape creates the very worktree you meant to block, and when removing or pruning a worktree or tracing why a location gate fired.
+Read [worktree-mechanics](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, and the worktree Bash isolation map. A non-zero exit on the wrong payload shape creates the very worktree you meant to block, so read it before you edit the `WorktreeCreate` hook. In a worktree, Bash with `$` expansion, `$(...)`, or a loop is refused as too complex. Use `printenv`, fno verbs, or `bash <file>`.
 
 ## The rule
 
