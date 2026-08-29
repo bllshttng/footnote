@@ -304,6 +304,11 @@ fn default_true() -> bool {
 /// the lineage branch merged first.)
 pub const PROTO_VERSION: u32 = 60;
 
+/// The oldest wire version this build can speak. Bumps that only add verbs or
+/// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
+/// shape must move this floor too.
+pub const MIN_COMPAT_PROTO: u32 = 58;
+
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
 /// because a silently cut instruction to a worker is worse than a visible
@@ -2562,14 +2567,13 @@ pub enum Color {
 /// mismatch the message names BOTH versions and how to recover, because the
 /// operator seeing it is mid-upgrade and the server is the stale side.
 pub fn check_attach_version(client_proto: u32, client_build: &str) -> Result<(), String> {
-    if client_proto == PROTO_VERSION {
+    if client_proto >= MIN_COMPAT_PROTO {
         return Ok(());
     }
     Err(format!(
         "protocol version mismatch: client {client_build} speaks v{client_proto}, \
-         server {BUILD_VERSION} speaks v{PROTO_VERSION}. The running server predates \
-         your fno doctor update - stop it (it keeps running across upgrades by design) \
-         and re-run fno to start a fresh one."
+         server {BUILD_VERSION} speaks v{PROTO_VERSION}. The client is below the \
+         compatibility floor v{MIN_COMPAT_PROTO} - update fno and re-run the attach."
     ))
 }
 
@@ -4704,11 +4708,26 @@ mod tests {
     }
 
     #[test]
-    fn proto_version_mismatch_names_both_versions() {
-        let err = check_attach_version(PROTO_VERSION + 1, "9.9.9").unwrap_err();
+    fn compatible_proto_versions_are_accepted() {
+        for version in [
+            MIN_COMPAT_PROTO,
+            MIN_COMPAT_PROTO + 1,
+            PROTO_VERSION,
+            PROTO_VERSION + 1,
+        ] {
+            assert!(
+                check_attach_version(version, BUILD_VERSION).is_ok(),
+                "compatible version {version} should attach"
+            );
+        }
+    }
+
+    #[test]
+    fn proto_version_below_floor_names_both_versions() {
+        let err = check_attach_version(MIN_COMPAT_PROTO - 1, "9.9.9").unwrap_err();
         assert!(err.contains("9.9.9"), "{err}");
         assert!(
-            err.contains(&format!("v{}", PROTO_VERSION + 1)),
+            err.contains(&format!("v{}", MIN_COMPAT_PROTO - 1)),
             "client proto version missing: {err}"
         );
         assert!(
