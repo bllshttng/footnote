@@ -96,7 +96,7 @@ OVERRIDE_NOTE_PREFIX = "override: "
 NO_LANE_NOTE = "no review lane configured"
 
 
-def _pr_author_login(pr_number: int, repo: str) -> Optional[str]:
+def _pr_author_login(pr_number: int, cwd: str) -> Optional[str]:
     """The PR author's login, or None on any read failure. Only read when an
     override label is held (the one consumer), so a healthy PR never pays
     for it."""
@@ -112,13 +112,13 @@ def _pr_author_login(pr_number: int, repo: str) -> Optional[str]:
             kwargs.setdefault("timeout", 30.0)
             return run(cmd, **kwargs)
 
-        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=repo, runner=_bounded)
+        info, _reason = fetch_pr_info_rest(str(pr_number), cwd=cwd, runner=_bounded)
         return str((info or {}).get("author") or "") or None
     except Exception:  # noqa: BLE001 - an unreadable author fails closed below
         return None
 
 
-def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
+def _override_valve(pr_number: int, cwd: str) -> tuple[bool, str, str]:
     """``(valid, note, refusal)`` for the PR's override label.
 
     The one deliberate bypass, with the same author check the approval path
@@ -137,7 +137,7 @@ def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
         # it out would propagate out of coverage_verdict instead.
         from fno.pr import _reviews
 
-        held, actor = _reviews._override_label_actor(pr_number, repo, _reviews.run)
+        held, actor = _reviews._override_label_actor(pr_number, cwd, _reviews.run)
     except Exception:  # noqa: BLE001 - an unreadable label is not an override
         return False, "", ""
     if not held:
@@ -150,7 +150,7 @@ def _override_valve(pr_number: int, repo: str) -> tuple[bool, str, str]:
             "unreadable; refused (an unreadable actor is not an operator "
             "waiver)",
         )
-    author = _pr_author_login(pr_number, repo)
+    author = _pr_author_login(pr_number, cwd)
     if not author:
         return (
             False,
@@ -213,14 +213,14 @@ def covered_conjuncts(
     return True, ""
 
 
-def _repo_root(repo: str) -> Path:
+def _repo_root(cwd: str) -> Path:
     """The repo root ``load_settings_for_repo`` wants. ``_repo_state_dir``
-    already does the ``rev-parse --show-toplevel``, so a ``repo`` that names a
+    already does the ``rev-parse --show-toplevel``, so a ``cwd`` that names a
     subdirectory still resolves to the checkout whose config the gate reads."""
-    return Path(_merge._repo_state_dir(repo)).parent
+    return Path(_merge._repo_state_dir(cwd)).parent
 
 
-def _github_approval_satisfies(repo: str) -> bool:
+def _github_approval_satisfies(cwd: str) -> bool:
     """The resolved flag, read through ``_reviews``' resolver rather than a
     second copy of it: the reachable-paths gate names a config key carried in
     two Python files as a twin, and this gate's whole subject is one rule with
@@ -229,7 +229,7 @@ def _github_approval_satisfies(repo: str) -> bool:
     reading the same checkout this one does."""
     from fno.pr import _reviews
 
-    return _reviews._resolved_github_approval_flag(str(_repo_root(repo)))
+    return _reviews._resolved_github_approval_flag(str(_repo_root(cwd)))
 
 
 def rests_on_self_attestation_alone(
@@ -281,7 +281,7 @@ def rests_on_self_attestation_alone(
     )
 
 
-def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
+def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
     """The refusal when ``config.review.require_corroboration`` is on and the
     coverage row rests on the author's own attestation alone. None when the
     policy is off, the row carries corroboration, or authorship is unmeasured
@@ -294,7 +294,7 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
 
         from fno.config import load_settings_for_repo
 
-        root = _repo_root(repo)
+        root = _repo_root(cwd)
         review = load_settings_for_repo(root).review
         if not getattr(review, "require_corroboration", False):
             return None
@@ -302,7 +302,7 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
         return None
 
     if not rests_on_self_attestation_alone(
-        cov, _github_approval_satisfies(repo)
+        cov, _github_approval_satisfies(cwd)
     ):
         return None
     return (
@@ -314,7 +314,7 @@ def _corroboration_refusal(cov: Optional[dict], repo: str) -> Optional[str]:
 
 
 def coverage_verdict(
-    pr_number: int, repo: str, *, recompute: bool
+    pr_number: int, cwd: str, *, recompute: bool
 ) -> Tuple[int, str, str, str]:
     """Return ``(state, refusal, covered_head, note)``.
 
@@ -328,14 +328,14 @@ def coverage_verdict(
     # configured opts out of coverage entirely. Checked FIRST so neither the
     # head fetch nor the events read runs for a PR nobody configured review
     # for - same order run_merge has always evaluated, one lane probe cheaper.
-    if not _merge._review_lane_configured(repo, pr_number):
+    if not _merge._review_lane_configured(cwd, pr_number):
         return COVERED, "", "", NO_LANE_NOTE
 
     # The head fetch is an instrument, and it can fail. A None head is not
     # "no coverage" - it is "the probe that pins coverage to what would
     # actually merge could not run", and every answer built on it would
     # describe an unknown commit. Refuse to answer rather than guess.
-    head: Optional[str] = _merge._pr_head_oid(pr_number, repo)
+    head: Optional[str] = _merge._pr_head_oid(pr_number, cwd)
     if head is None:
         return UNANSWERED, "", "", "pr head fetch failed"
 
@@ -346,17 +346,17 @@ def coverage_verdict(
     # override waives the review, never the TOCTOU. A label held but REFUSED
     # (author-applied, or an unreadable actor) keeps its refusal for the
     # uncovered answer below, so the operator sees why the valve stayed shut.
-    override_valid, override, override_refusal = _override_valve(pr_number, repo)
+    override_valid, override, override_refusal = _override_valve(pr_number, cwd)
     if override_valid:
         return COVERED, "", head, override
 
-    code_review_required = _merge._code_review_attestation_required(repo, pr_number)
+    code_review_required = _merge._code_review_attestation_required(cwd, pr_number)
     if recompute:
         # run_merge's exact path: the gate read fires the standalone producer
         # once when no usable row describes this head, and every failure inside
         # it degrades to the original row plus a note - a swallow there is the
         # answer of record, not a crash.
-        cov, recompute_note = _merge._review_coverage_for_pr(pr_number, repo, head)
+        cov, recompute_note = _merge._review_coverage_for_pr(pr_number, cwd, head)
     else:
         try:
             from fno.pr._reviews import review_coverage_for_head_row
@@ -364,12 +364,12 @@ def coverage_verdict(
             # One scan yields the row and its pin. The pin describes the stored
             # row, so it rides BOTH surfaces or the two refuse with different
             # sentences for one row.
-            cov, recompute_note = review_coverage_for_head_row(pr_number, repo, head)
+            cov, recompute_note = review_coverage_for_head_row(pr_number, cwd, head)
         except Exception as exc:  # noqa: BLE001 - instrument failure, not absence
             return UNANSWERED, "", "", f"events read raised: {exc}"
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
-    corroboration = _corroboration_refusal(cov, repo)
+    corroboration = _corroboration_refusal(cov, cwd)
 
     # Locked Decision 1: the pass condition is disposition-complete at the
     # head, not clean. The chain read needs the PR's head branch to scope
@@ -379,16 +379,16 @@ def coverage_verdict(
     # On an uncovered row the miss keeps today's refusal: the chain there
     # only ever WIDENS the answer to IMPOSSIBLE, and a guessed branch would
     # fire it on the wrong scope.
-    refs = _merge._pr_base_head_refs(pr_number, repo)
+    refs = _merge._pr_base_head_refs(pr_number, cwd)
     if covered and refs is None:
         return UNANSWERED, "", "", "pr head branch fetch failed"
     chain = attestation_chain(
-        repo, head_branch=refs[1] if refs else "", head=head
+        cwd, head_branch=refs[1] if refs else "", head=head
     )
     disposition_text, disposition_note, disposition_named, disposition_hard = (
-        disposition_refusal(chain, cov, repo)
+        disposition_refusal(chain, cov, cwd)
     )
-    max_rounds = resolved_max_rounds(repo)
+    max_rounds = resolved_max_rounds(cwd)
     # The budget counts BOTH evidence axes: a GitHub-App reviewer's rounds
     # leave no attestation row, so the chain alone reads zero on exactly the
     # lane that spins. The reviews read is paid only where it can change the
@@ -396,7 +396,7 @@ def coverage_verdict(
     # with no open findings keeps the events-only count and skips the
     # paginated read. A read failure keeps the events-only answer.
     if disposition_named or disposition_text or not covered:
-        reviews_payload, reviews_unread = _pr_reviews(pr_number, repo)
+        reviews_payload, reviews_unread = _pr_reviews(pr_number, cwd)
     else:
         reviews_payload, reviews_unread = None, ""
     rounds = rounds_since_last_pass(chain, reviews=reviews_payload)
@@ -428,7 +428,7 @@ def coverage_verdict(
         # defect. A finding the gate cannot file is one it must not wave
         # through, so a filing failure refuses.
         try:
-            filed = file_findings_at_cap(disposition_named, pr_number, repo)
+            filed = file_findings_at_cap(disposition_named, pr_number, cwd)
         except Exception as exc:  # noqa: BLE001 - never drop a finding silently
             return (
                 REFUSED,
@@ -571,7 +571,7 @@ def coverage_verdict(
 
         from fno.review_capability import render_self_review_invocation
 
-        root = _repo_root(repo)
+        root = _repo_root(cwd)
         rendered = render_self_review_invocation(project_root=root)
         # An unsized render (no merge-base against main/master) keeps its
         # `<level>` placeholder - teachable on the orienter surface, but a
@@ -590,7 +590,7 @@ def coverage_verdict(
         refusal = _merge._coverage_refused_reason(
             cov,
             head,
-            _merge._coverage_sources(repo) if cov is None else None,
+            _merge._coverage_sources(cwd) if cov is None else None,
             self_review_hint=hint,
         )
     if override_refusal:
@@ -733,13 +733,13 @@ def attestation_chain(
     return chain
 
 
-def _resolved_categories(repo: str) -> frozenset[str]:
+def _resolved_categories(cwd: str) -> frozenset[str]:
     """The configured allowlist, extended per the shipped default."""
     try:
         from fno.config import load_settings_for_repo
         from fno.review.findings import resolve_nonblocking_categories
 
-        root = _repo_root(repo)
+        root = _repo_root(cwd)
         return resolve_nonblocking_categories(
             getattr(
                 load_settings_for_repo(root).review, "nonblocking_categories", None
@@ -770,7 +770,7 @@ def _hard_finding(primitive: Any) -> bool:
 
 
 def disposition_refusal(
-    chain: list[dict], cov: Optional[dict], repo: str = "."
+    chain: list[dict], cov: Optional[dict], cwd: str = "."
 ) -> Tuple[str, str, list, list]:
     """The refusal when a blocking finding in the chain is non-terminal.
 
@@ -792,7 +792,7 @@ def disposition_refusal(
     """
     if not chain:
         return "", "", [], []
-    allow = _resolved_categories(repo)
+    allow = _resolved_categories(cwd)
     # Latest disposition per finding_key across the chain, plus the round
     # each blocking finding was raised in (a fixed finding is terminal only
     # when a LATER round reviewed the fix delta).
@@ -829,7 +829,7 @@ def disposition_refusal(
     corroborated = not (
         cov is not None
         and rests_on_self_attestation_alone(
-            cov, _github_approval_satisfies(repo)
+            cov, _github_approval_satisfies(cwd)
         )
     )
 
@@ -987,7 +987,7 @@ def rounds_since_last_pass(
     return max(events_rounds, len(counted))
 
 
-def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
+def _pr_reviews(pr_number: int, cwd: str) -> Tuple[Optional[list[dict]], str]:
     """``(reviews, unread_reason)`` for the round budget.
 
     ``unread_reason`` is empty when the read succeeded and names the cause
@@ -1012,16 +1012,20 @@ def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
     """
     from fno.pr._internal_gh import _rest_pages
     from fno.pr._proc import run
-    from fno.pr._rest import _repo_slug
+    from fno.pr._rest import _repo_slug_reason
 
     def _bounded(cmd, **kwargs):
         kwargs.setdefault("timeout", 30.0)
         return run(cmd, **kwargs)
 
     try:
-        slug = _repo_slug(repo, _bounded)
+        slug, slug_reason = _repo_slug_reason(cwd, _bounded)
         if not slug:
-            return None, "repo slug unreadable"
+            # The reason names its own subject. This used to be the fixed
+            # sentence "repo slug unreadable", which is wrong whenever the slug
+            # is the readable thing and the CWD is what does not exist - the
+            # exact case a caller hits by passing `owner/repo` here (x-51f7).
+            return None, slug_reason or "repo slug unreadable"
         # The plain bounded runner, NOT _rest_runner. _rest_runner stamps
         # _quota.delegate_environment(), which strips the quota proxy from
         # PATH so the proxy's own delegate call does not recurse. That is
@@ -1032,7 +1036,7 @@ def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
         rows, reason = _rest_pages(
             f"repos/{slug}/pulls/{pr_number}/reviews",
             "pull reviews",
-            cwd=repo,
+            cwd=cwd,
             runner=_bounded,
         )
         if rows is None:
@@ -1057,12 +1061,12 @@ def _pr_reviews(pr_number: int, repo: str) -> Tuple[Optional[list[dict]], str]:
         return None, f"{type(exc).__name__}: {exc}"
 
 
-def resolved_max_rounds(repo: str) -> int:
+def resolved_max_rounds(cwd: str) -> int:
     """The clamped ``config.review.max_rounds`` for the repo (>= 1)."""
     try:
         from fno.config import load_settings_for_repo
 
-        root = _repo_root(repo)
+        root = _repo_root(cwd)
         value = getattr(load_settings_for_repo(root).review, "max_rounds", None)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
             return value
@@ -1071,7 +1075,7 @@ def resolved_max_rounds(repo: str) -> int:
         return DEFAULT_MAX_ROUNDS
 
 
-def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str]:
+def file_findings_at_cap(keys: list[str], pr_number: int, cwd: str) -> list[str]:
     """File each remaining finding as a backlog node at the round cap.
 
     The operator's ruling on the cap: the PR merges with its remaining
@@ -1088,7 +1092,7 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
     ids: list[str] = []
     for key in keys:
         title = f"review finding filed at round cap: {key}"
-        found = run(["fno", "backlog", "find", title], cwd=repo)
+        found = run(["fno", "backlog", "find", title], cwd=cwd)
         existing = None
         if found.ok:
             for line in found.stdout.splitlines():
@@ -1137,7 +1141,7 @@ def file_findings_at_cap(keys: list[str], pr_number: int, repo: str) -> list[str
                     "than being dropped."
                 ),
             ],
-            cwd=repo,
+            cwd=cwd,
         )
         if not made.ok:
             raise RuntimeError(
@@ -1194,9 +1198,9 @@ def run_coverage_check(
     stderr like every refusal). Callers that cannot import ``fno`` - a
     stdlib-only hook - read the first stderr line and the exit code.
     """
-    repo = cwd or os.getcwd()
+    cwd = cwd or os.getcwd()
     state, refusal, _covered_head, note = coverage_verdict(
-        pr_number, repo, recompute=recompute
+        pr_number, cwd, recompute=recompute
     )
     if state in (REFUSED, IMPOSSIBLE):
         sys.stderr.write(f"{refusal_line(refusal, note)}\n")

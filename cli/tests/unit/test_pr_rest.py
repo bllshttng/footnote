@@ -618,3 +618,46 @@ def test_bare_404_status_is_a_not_found() -> None:
     reason = _rest._rest_reason(Res())
     assert "not found" in reason.lower()
     assert "Check the PR number" in reason
+
+
+def test_repo_slug_reason_names_its_failure_class(tmp_path, monkeypatch):
+    """A bare None could not tell three different failures apart, and the one
+    caller that rendered it said "repo slug unreadable" for all of them.
+
+    That sentence is wrong in subject whenever the SLUG is the readable thing
+    and the CWD is what does not exist - the case a caller hits by passing
+    `owner/repo` into a parameter that takes a path. Both are bare `str`, so
+    nothing static catches it. `isdir` does, before git is spawned (x-51f7).
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, cwd=None):
+        raise AssertionError(f"a non-directory must be refused before any spawn: {cmd}")
+
+    slug, reason = _rest._repo_slug_reason("bllshttng/footnote", never_runs)
+    assert slug is None
+    assert reason == "no such directory: bllshttng/footnote"
+
+    # A real directory with no origin quotes git's own sentence.
+    def no_origin(cmd, cwd=None):
+        return Result(1, "", "error: No such remote 'origin'\n")
+
+    slug, reason = _rest._repo_slug_reason(str(tmp_path), no_origin)
+    assert slug is None
+    assert reason == "error: No such remote 'origin'"
+
+    # A remote that is not GitHub names the url it could not parse.
+    def gitlab(cmd, cwd=None):
+        return Result(0, "git@gitlab.com:owner/repo.git\n", "")
+
+    slug, reason = _rest._repo_slug_reason(str(tmp_path), gitlab)
+    assert slug is None
+    assert reason == "origin is not a github remote: git@gitlab.com:owner/repo.git"
+
+    # The success case carries an EMPTY reason, so a caller reads the pair
+    # rather than inferring success from a missing sentence.
+    def github(cmd, cwd=None):
+        return Result(0, _GH_URL, "")
+
+    assert _rest._repo_slug_reason(str(tmp_path), github) == ("owner/repo", "")
+    assert _rest._repo_slug(str(tmp_path), github) == "owner/repo"

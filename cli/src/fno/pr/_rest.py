@@ -21,9 +21,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 from fno.pr._proc import run
 from fno.pr._ritual import _parse_origin_slug
@@ -124,15 +125,51 @@ _TRANSPORT = re.compile(
 log = logging.getLogger(__name__)
 
 
-def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
-    """`owner/repo` from the git origin remote: local, no API spend."""
+def _repo_slug_reason(
+    cwd: Optional[str], runner: Callable = run
+) -> Tuple[Optional[str], str]:
+    """`(owner/repo, reason)` from the git origin remote: local, no API spend.
+
+    ``reason`` is empty on success and NAMES the failure class otherwise. A
+    bare None could not tell a missing directory from a checkout with no
+    origin from a non-GitHub remote, and the caller that rendered it said
+    "repo slug unreadable" - correct in form, wrong in subject whenever the
+    SLUG is the thing that is perfectly readable and the CWD is what does not
+    exist. That sentence sent a reader through three slug spellings before
+    they looked at the parameter (x-51f7).
+
+    The first argument is a filesystem PATH, never a repo slug, and the two
+    are both bare `str` so a wrong argument is invisible to a type checker.
+    The ``isdir`` refusal is the guard that makes the wrong one impossible to
+    pass quietly, and it reads a filesystem fact rather than guessing at the
+    shape of the string: `owner/repo` is not a directory, so it is refused by
+    name before git is spawned. ``None`` keeps meaning "the process cwd".
+    """
+    if cwd is not None and not os.path.isdir(cwd):
+        return None, f"no such directory: {cwd}"
     try:
         r = runner(["git", "remote", "get-url", "origin"], cwd=cwd)
-    except Exception:
-        return None
+    except Exception as exc:  # noqa: BLE001 - the failure is the answer, not a raise
+        return None, f"git remote get-url origin failed: {type(exc).__name__}: {exc}"
     if not r.ok:
-        return None
-    return _parse_origin_slug(r.stdout.strip())
+        first = next(
+            (ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()), ""
+        )
+        return None, first or "no origin remote"
+    url = r.stdout.strip()
+    slug = _parse_origin_slug(url)
+    if not slug:
+        return None, f"origin is not a github remote: {url or '(empty)'}"
+    return slug, ""
+
+
+def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
+    """`owner/repo` from the git origin remote: local, no API spend.
+
+    The slug-only view of :func:`_repo_slug_reason`, for the callers that have
+    nowhere to put the reason.
+    """
+    return _repo_slug_reason(cwd, runner)[0]
 
 
 def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] = None) -> str:
