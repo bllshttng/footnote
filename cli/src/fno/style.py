@@ -31,6 +31,15 @@ LIST_ITEM_CAP = 20
 PARAGRAPH_CAP = 25
 MESSAGE_WORD_CAP = 80
 
+# Rule 7 applies to a surface read MID-TURN, in the flow of doing something
+# else. That is the whole test, and it is what keeps the set small: a mail body
+# and an encounter's evidence are both read while a reader is mid-task, while a
+# PR body, a node's details, and changed markdown are opened deliberately.
+# Membership decides WHETHER a cap applies; the ``word_cap`` argument decides
+# what the number is. Config may move the number and can never add a surface,
+# so a project cannot cap a surface this module says is uncapped.
+CAPPED_SURFACES = frozenset({"mail", "encounter"})
+
 # Rule 3. Matched lowercase, whole-word. "may" is lowercase-only so the month
 # "May" never fires; the other four carry no capitalized homonym in prose.
 BANNED_MODALS = frozenset({"should", "would", "might", "could"})
@@ -170,14 +179,21 @@ def has_exception(text: str) -> str | None:
     return reason or None
 
 
-def check(text: str, *, surface: str = "mail") -> list[Violation]:
+def check(text: str, *, surface: str = "mail", word_cap: int | None = None) -> list[Violation]:
     """Return every violation found in ``text``.
 
-    Rule 7 is the first surface-scoped rule. Mail carries the 80-word prose cap;
-    PR bodies, comments, and changed markdown do not, because they are not read
-    mid-turn. The text is masked whole, then each line is split into its
-    sentences: a paragraph is one physical line and carries as many sentences
-    as it needs, and rule 6 is what holds that shape.
+    Rule 7 is the first surface-scoped rule. The surfaces in
+    :data:`CAPPED_SURFACES` carry the prose word cap; PR bodies, comments, and
+    changed markdown do not, because they are not read mid-turn. The text is
+    masked whole, then each line is split into its sentences: a paragraph is one
+    physical line and carries as many sentences as it needs, and rule 6 is what
+    holds that shape.
+
+    ``word_cap`` overrides :data:`MESSAGE_WORD_CAP` for this one call. The
+    caller resolves it, because this module promises no filesystem and no state
+    and a config read here would break that promise for every caller. An absent
+    argument keeps the module default, so a caller that never learned about
+    config behaves exactly as it did.
 
     The message cap stays here rather than in ``_run``. ``check_lines`` uses
     ``_run`` for added-lines markdown checks, where a whole-body count would
@@ -185,8 +201,8 @@ def check(text: str, *, surface: str = "mail") -> list[Violation]:
     can count near zero words; the cap covers prose, not a log dump.
     """
     violations = _run(text, None)
-    if surface == "mail":
-        violations.extend(_check_message_length(text))
+    if surface in CAPPED_SURFACES:
+        violations.extend(_check_message_length(text, word_cap or MESSAGE_WORD_CAP))
     return violations
 
 
@@ -444,10 +460,16 @@ def word_count(text: str) -> int:
     return len(_mask(text).split())
 
 
-def _check_message_length(text: str) -> list[Violation]:
+def _check_message_length(text: str, cap: int = MESSAGE_WORD_CAP) -> list[Violation]:
+    """Rule 7 against ``cap``, which the refusal names.
+
+    The number is an argument rather than a module read so the refusal always
+    states the cap actually enforced. A message refused at 40 that reports 80 is
+    a refusal the sender cannot act on.
+    """
     masked = _mask(text)
     count = word_count(text)
-    if count <= MESSAGE_WORD_CAP:
+    if count <= cap:
         return []
     first_line = masked.splitlines()[0].strip() if masked.splitlines() else ""
     return [
@@ -455,7 +477,7 @@ def _check_message_length(text: str) -> list[Violation]:
             7,
             0,
             first_line,
-            f"this message runs {count} words. The cap is {MESSAGE_WORD_CAP} words.",
+            f"this message runs {count} words. The cap is {cap} words.",
         )
     ]
 

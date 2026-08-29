@@ -67,6 +67,14 @@ LIFECYCLE_PAIRS: tuple[Pair, ...] = (
         None,
         "retractions are append-only and have no inverse",
     ),
+    # An edit path would make the record deniable, which is the property the
+    # demand signal exists to prevent. A later correction is a progress note.
+    Pair(
+        "backlog",
+        "encounter",
+        None,
+        "an encounter is a thing that happened and cannot be edited or withdrawn",
+    ),
     # -- existence transitions --
     Pair("backlog", "add", "remove"),
     Pair("backlog", "idea", "remove"),
@@ -96,7 +104,7 @@ KNOWN_COMMANDS: dict[str, frozenset[str]] = {
         "add", "advance", "album", "annotate", "archive", "archive-dedupe-ids",
         "bases", "batch", "board", "capture", "carveout", "collisions", "cost",
         "decide", "decide-reindex", "decide-retract", "decisions", "decompose", "defer",
-        "dispatch-lanes", "done", "epic", "find", "get", "groom",
+        "demand", "dispatch-lanes", "done", "encounter", "epic", "find", "get", "groom",
         "idea", "intake", "join", "lane-fill", "lanes", "maintain", "migrate-difficulty",
         "migrate-priorities", "new",
         "next", "note", "pick", "project-root", "provenance", "queue", "queued",

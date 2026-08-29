@@ -71,7 +71,17 @@ set -euo pipefail
 # 357 each carry one of the four claims: pane and thread are both
 # interactive, a thread hosts no pane until one is made, headless is the
 # only non-interactive substrate, and bg names the same substrate as thread.
-CEILING_BYTES=37181
+#
+# RAISED to 37411, same zero-spare rule, funding the demand-signal pointer in
+# AGENTS.md. Compression ran first and took the line from 317 bytes to 237. The
+# remaining 230 buy the only session-start mention of two new verbs, and this
+# feature dies without one: `fno backlog encounter` is hidden, an agent files an
+# encounter at the moment it hits a wall, and a signal nothing names at session
+# start collects zero encounters. Zero encounters is the state the feature
+# exists to replace, so a pointer nobody reads is the same as no feature.
+# This is the case the corpus header was explicitly NOT aimed at: the overage
+# is two documented verbs, not corpus growth.
+CEILING_BYTES=37411
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.

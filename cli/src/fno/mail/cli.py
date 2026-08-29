@@ -344,10 +344,11 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
     if allow_reason and allow_reason.strip():
         return
     from fno import style
+    from fno.config import load_settings
 
     if style.has_exception(body):
         return
-    violations = style.check(body, surface="mail")
+    violations = style.check(body, surface="mail", word_cap=load_settings().style.word_cap.mail)
     if violations:
         _emit_style_refusal(violations)
         print(style.format_violations(violations), file=sys.stderr)
@@ -366,6 +367,7 @@ def _reserve_budget(
 ):
     """Reserve the authored count after both pair identities are canonical."""
     from fno import style
+    from fno.config import load_settings
     from fno.mail import budget
 
     words = style.word_count(body)
@@ -379,6 +381,7 @@ def _reserve_budget(
             enforce=not exempt,
             sender_key=sender_key,
             recipient_key=recipient_key,
+            cap=load_settings().style.pair_budget_words,
         )
     except budget.BudgetRefused as exc:
         print(

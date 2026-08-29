@@ -3148,10 +3148,204 @@ def cmd_note(
     if not found:
         typer.echo(f"Error: no node resolves to '{task_id}'", err=True)
         raise typer.Exit(code=1)
+    _warn_if_note_is_long(text)
     if json_output:
         typer.echo(json.dumps({"id": task_id, "note": note}, separators=(",", ":")))
     else:
         typer.echo(f"noted {task_id}: {text}")
+
+
+def _warn_if_note_is_long(text: str) -> None:
+    """Advise on a long note. Never refuse one.
+
+    ``progress_notes`` stays uncapped on purpose. It is an agent's only
+    append-only surface on a node, because ``update --details`` REPLACES, and a
+    refusal that destroys measured evidence is the wrong instrument for what is
+    really a volume problem. So this names the count and the cheaper
+    alternative, and lets the note land.
+
+    The multiplier is blunt on purpose: four times the encounter cap fires on
+    the notes that are already a problem and stays quiet on ordinary ones.
+    ponytail: fixed multiplier, make it config if the noise floor moves.
+    """
+    from fno import style
+
+    try:
+        from fno.config import load_settings
+
+        cap = load_settings().style.word_cap.encounter
+    except Exception:  # noqa: BLE001 - an advisory must never break a write
+        cap = style.MESSAGE_WORD_CAP
+    count = style.word_count(text)
+    if count <= cap * 4:
+        return
+    typer.echo(
+        f"note appended ({count} words). Long evidence belongs in a plan doc; "
+        "a note carrying a path is cheaper for every later reader.",
+        err=True,
+    )
+
+
+@cli.command("encounter", hidden=True)
+def cmd_encounter(
+    task_id: str = typer.Argument(..., help="Node id this session hit while doing something else."),
+    evidence: str = typer.Option(
+        ...,
+        "--evidence",
+        "-e",
+        help="What it cost, in a sentence or two. Required, and capped by config.style.word_cap.encounter.",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended record as JSON."),
+) -> None:
+    """Record ONE encounter with this node, from this session, with evidence.
+
+    An encounter is a thing that happened, not an opinion. A poll count of N
+    agents who like a node is unfalsifiable; N distinct sessions that each name
+    what the node cost them is falsifiable against a transcript. That is why
+    evidence is required and why an unprovable identity cannot vote.
+
+    Read the signal with ``fno backlog demand``. This verb never writes rank and
+    never touches a kanban column: the board stays the work order, and demand is
+    a column the operator ranks FROM.
+
+    There is no correction verb:
+    an encounter is a thing that happened and cannot be edited or withdrawn.
+    An edit path would make the record deniable, which is the property this
+    signal exists to prevent. A later correction is a ``fno backlog note``.
+
+    Exit codes are distinct so a probe can tell the refusals apart. 1 evidence
+    (or an unknown node), 3 duplicate, 4 style, 5 unprovable identity. 2 is
+    typer's usage error and is deliberately unused here: an identity refusal
+    sharing a code with a mistyped flag is a refusal nothing can verify.
+    """
+    from fno import style
+    from fno.claims.self_identity import resolve_self_identity
+    from fno.config import load_settings
+    from fno.graph.store import append_encounter
+    from fno.harness_identity import canonical_handle
+
+    evidence = evidence.strip()
+    if not evidence:
+        typer.echo(
+            "Error: an encounter with no evidence is a poll. Name what it cost.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        identity = resolve_self_identity()
+    except Exception:  # noqa: BLE001 - an unresolvable identity is a refusal, not a crash
+        identity = None
+    session_id = getattr(identity, "session_id", None)
+    harness = getattr(identity, "harness", None)
+    if not session_id or not harness:
+        typer.echo(
+            "Error: no provable session identity, so this encounter would not be "
+            "readable back to a transcript. Run `fno whoami` to see what this "
+            "session can prove.",
+            err=True,
+        )
+        raise typer.Exit(code=5)
+
+    # The same escapes every other rule 7 surface honors, because
+    # `docs/style-rules.md` states rule 7 inherits them and a surface that
+    # quietly opts out makes that sentence false. Note what is NOT escapable:
+    # evidence is still REQUIRED above, and identity is still proven above.
+    # The cap is a length policy; those two are the falsifiability contract.
+    if (
+        os.environ.get("FNO_STYLE_ENFORCE") != "0"
+        and not style.has_exception(evidence)
+    ):
+        cap = load_settings().style.word_cap.encounter
+        violations = style.check(evidence, surface="encounter", word_cap=cap)
+        if violations:
+            typer.echo(style.format_violations(violations), err=True)
+            raise typer.Exit(code=4)
+
+    record = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "session_id": session_id,
+        "harness": harness,
+        "fno_id": canonical_handle(session_id),
+        "evidence": evidence,
+    }
+    appended, error, reason = append_encounter(_graph_path(), task_id, record)
+    if not appended:
+        typer.echo(f"Error: {error}", err=True)
+        if reason == "duplicate":
+            typer.echo(
+                "Add a `fno backlog note` instead if there is more to say.",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+        raise typer.Exit(code=1)
+
+    # Counted inside this verb rather than in a helper. The helper was its own
+    # enclosing function, so its graph read had no verb boundary for the
+    # external-backend guard to sit on; here the read rides the guard this
+    # tracker-owned verb already carries.
+    from fno.graph._intake import _find_node
+    from fno.graph.store import read_graph
+
+    try:
+        stored = _find_node(read_graph(_graph_path()), task_id)
+        total = len(stored.get("encounters") or []) if stored else 0
+    except Exception:  # noqa: BLE001 - a receipt count must not fail a landed write
+        total = 0
+    if json_output:
+        typer.echo(
+            json.dumps(
+                {"id": task_id, "encounter": record, "total": total}, separators=(",", ":")
+            )
+        )
+    else:
+        typer.echo(
+            f"encounter recorded on {task_id} "
+            f"(session {canonical_handle(session_id)}, {total} total)"
+        )
+
+
+@cli.command("demand", hidden=True)
+def cmd_demand(
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the rows as JSON."),
+) -> None:
+    """Show where agent encounters and operator priority DISAGREE.
+
+    Sorted by divergence, not by volume. A p0 with many encounters tells you
+    nothing, because you already ranked it. A p3 or a never-dispatched node with
+    many encounters is the whole point of the signal.
+
+    `dispatched` is how many of the encountering sessions were also sent to this
+    node. Read it beside the count: `enc 12, dispatched 12` is one king that
+    fanned out, while `enc 3, dispatched 0` is three sessions that hit the node
+    while doing something else.
+
+    A read, and only a read. It never writes rank and never moves a column; the
+    board stays the work order and this is a column you rank FROM.
+    """
+    from fno.graph.demand import demand_rows, format_rows
+    from fno.graph.store import read_graph
+    from fno.tracker import active_backend_name
+
+    # An encounter is footnote-minted metadata that lives only in the graph, and
+    # `encounter` is already refused under an external backend. So refuse here
+    # too, naming the backend, rather than reading a store that is not the
+    # source of truth and reporting an empty signal as if it were measured.
+    backend = active_backend_name()
+    if backend != "graph":
+        typer.echo(
+            f"fno backlog demand: encounters live in the graph; under the "
+            f"{backend} tracker backend there are none to read.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    rows = demand_rows(read_graph(_graph_path()))
+    if json_output:
+        typer.echo(json.dumps(rows, separators=(",", ":")))
+    else:
+        typer.echo(format_rows(rows))
+
 
 
 @cli.command("update")
@@ -14717,6 +14911,8 @@ _TRACKER_OWNED_VERBS = frozenset(
         "decompose",
         "update",
         "note",
+        # encounter appends to a node's graph record, exactly like note
+        "encounter",
         "remove",
         "migrate-priorities",
         "migrate-difficulty",
@@ -14789,6 +14985,8 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "project-root",
         "board",
         "undispatched",
+        # demand reads encounters and writes nothing
+        "demand",
         # completion works on any backend by design (task 4.1)
         "done",
         # footnote-owned sidecar files, no graph write
