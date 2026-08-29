@@ -85,7 +85,15 @@ def _crowned(court_fn: Callable, rows_fn: Optional[Callable] = None) -> tuple[li
         if not holder or not cwd:
             continue
         root = Path(cwd)
-        manifest = root / ".fno" / "kings" / f"{scope}.md"
+        # The validating helper, never a hand join: a corrupted crown_scope
+        # ("../x", an absolute path) must refuse here, not escape .fno/kings
+        # into a file the ledger would rewrite.
+        try:
+            from fno.king.state import king_manifest_path
+
+            manifest = king_manifest_path(scope, state_root=root / ".fno")
+        except ValueError:
+            continue
         if not manifest.is_file():
             continue
         out.append(
@@ -308,11 +316,23 @@ def _backstop_due(
     by the caller (this only runs when no other trigger fired). The last leg
     of the condition is the ledger itself: no billed wake inside the backstop
     window, so a woken-and-working king is never re-fired by its own backstop.
+
+    A king terminal inside the window also suppresses it, reading the journal
+    rather than trusting the proxy below. The proxy counts ready rows the
+    real board would not count actionable (rows an active worker holds), so a
+    dead-king scope with live workers would otherwise fire a NoWork walk
+    every window and burn the wake ceiling in under a day. A walk that ran
+    and answered is the positive record that it need not run again yet.
     """
-    if _scope_actionable(target.scope, entries, resolver) <= 0:
-        return False
+    from fno.king.state import last_run_is_fresh
     from fno.king.wake import read_wakes
 
+    events = target.root / ".fno" / "events.jsonl"
+    now_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if last_run_is_fresh(events, since_s=backstop_s, now_iso=now_iso):
+        return False
+    if _scope_actionable(target.scope, entries, resolver) <= 0:
+        return False
     stamps = read_wakes(target.manifest, now=now)
     if stamps and (now - stamps[-1]).total_seconds() < backstop_s:
         return False

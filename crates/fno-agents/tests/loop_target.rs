@@ -1614,6 +1614,53 @@ fn loop_king_docstring_names_the_refill_edge_owner_and_what_the_counter_counts()
     );
 }
 
+/// A wake reason without the wake mode is a prompt that lies: the clause
+/// would tell the session it was woken while the walk still runs
+/// failure-retry accounting. Refused as a usage error.
+#[test]
+fn king_wake_reason_without_wake_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    write_stub_driver(&lib_dir, "claude-code", 2, "exit 0");
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--wake-reason",
+            "mail",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(2),
+        "usage error\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("--wake-reason needs --wake"),
+        "names the missing flag: {stderr}"
+    );
+}
+
 /// The board and backstop wake clauses must reach the prompt too, not only
 /// the mail one: each reason arm is a separate literal, and a miss there is
 /// silent under the catch-all arm. Backstop's clause is load-bearing - it is

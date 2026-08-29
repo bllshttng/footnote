@@ -133,7 +133,7 @@ def bill_wake(path: Path, *, now: datetime, keep: int = DEFAULT_KEEP) -> int:
             except OSError:
                 return 0  # no manifest, no ledger to bill; the caller's walk
                 # construction is the error surface for that
-            stamps = [s for s in read_wakes(path, now=now)]
+            stamps = list(read_wakes(path, now=now))
             stamps.append(now.astimezone(timezone.utc))
             stamps = sorted(stamps)[-max(1, keep):]
             joined = ",".join(_format_stamp(s) for s in stamps)

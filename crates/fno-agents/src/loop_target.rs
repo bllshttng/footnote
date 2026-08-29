@@ -395,6 +395,17 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         return Ok(2);
     }
     if let Some(reason) = king_wake_reason.as_deref() {
+        if !king_wake {
+            // A reason without the mode is a prompt that lies: the clause
+            // tells the session it was woken while the walk still runs
+            // failure-retry accounting (ceiling guard and respawn bill).
+            eprintln!(
+                "fno-agents loop run: --wake-reason needs --wake (it names the \
+                 trigger that woke the scope; without --wake the walk is an \
+                 ordinary failure-retry walk and nothing woke it)"
+            );
+            return Ok(2);
+        }
         if !matches!(reason, "mail" | "board" | "backstop") {
             eprintln!(
                 "fno-agents loop run: --wake-reason must be mail|board|backstop, got \

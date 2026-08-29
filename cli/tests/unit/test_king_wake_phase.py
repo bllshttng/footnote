@@ -535,6 +535,53 @@ def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
     assert rec.events == []
 
 
+def test_an_unsafe_crown_scope_is_skipped_not_joined(tmp_path):
+    # A corrupted registry row can carry a traversal or an absolute path as
+    # its crown_scope. The phase must skip the scope, not build a manifest
+    # path outside .fno/kings that the ledger would rewrite.
+    from fno.pr_watch._king_wake import _crowned
+
+    for bad_scope in ("../evil", "/tmp/absolute", "a/b"):
+        crowns = [{"holder": "king-x", "scope": bad_scope, "status": "live"}]
+        targets, _note = _crowned(
+            _court(crowns),
+            lambda: [SimpleNamespace(name="king-x", cwd=str(tmp_path), status="live")],
+        )
+        assert targets == [], f"{bad_scope!r} must not become a target"
+
+
+def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
+    import json as _json
+
+    def prime(manifest):
+        _primed_unchanged(manifest)
+        # A king walk terminated 10 minutes ago: the journal answers "a walk
+        # ran recently", so the proxy's over-count must not re-fire it.
+        events = manifest.parent.parent / "events.jsonl"
+        events.write_text(
+            _json.dumps(
+                {
+                    "ts": "2026-08-29T11:50:00Z",
+                    "type": "loop_terminated",
+                    "source": "walk",
+                    "data": {"driver": "king", "reason": "NoWork", "scope": "epic-x"},
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a walk that answered inside the window suffices"
+    assert rec.events == []
+
+
 # ── the drain loop on the real bus machinery ──────────────────────────────
 #
 # The seams above prove the phase logic; this proves the loop on the real
