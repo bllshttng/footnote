@@ -34,4 +34,5 @@ READABLE_PROVIDERS: tuple[str, ...] = (
     "gemini",
     "agy",
     "opencode",
+    "pi",
 )

@@ -3308,9 +3308,187 @@ fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<
     }
 }
 
-/// `fno-agents attach <name>` -- interactive attach to a running claude agent
-/// or a codex thread (every other harness is refused). Mirrors Python
-/// `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
+/// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
+/// session id, in the row's own cwd.
+///
+/// `None` means this is not a pi thread row and the caller should fall through
+/// to its refusal. `Some(code)` means this function owned the outcome.
+///
+/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
+/// same command. Neither renders anything.
+///
+/// **This is a JOIN, and the cwd is what makes it one.** pi's session store is
+/// cwd-scoped, so the TUI finds the rpc lane's live session only when it runs
+/// in the same directory. Run elsewhere, the same argv CREATES a second
+/// session under one id and says nothing, which is the silent half of this
+/// harness. So the cwd is read off the row and the child is placed in it; a
+/// row with no cwd recorded is refused rather than defaulting to this
+/// process's own directory.
+fn attach_pi_session(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
+    // NOT `is_codex_thread_row`, and the difference is load-bearing. That
+    // predicate excludes a pane-hosted row, which is right for codex (its
+    // thread lives in a daemon, and a pane row's process already has a place)
+    // and wrong for every pi row fno can produce today: the pi spawn lane IS
+    // the pane lane, so gating on it refused every real row with "pi agents
+    // are one-shot", contradicting the docs shipped in the same change.
+    //
+    // pi needs neither exclusion, because a second pi on one session id is a
+    // measured-safe JOIN rather than a rival launch. What it does need is the
+    // PAIR: a session id, and the cwd that scopes it.
+    let session_id = entry
+        .get("harness_session_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    let cwd = entry
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|c| !c.is_empty());
+    let Some(cwd) = cwd else {
+        eprintln!(
+            "fno agents attach: registry row {name:?} records no cwd, and a pi session is \
+the pair (cwd, session id). Attaching from the wrong directory would CREATE a second session \
+under this id rather than joining the live one, so this is refused."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-row-has-no-cwd".to_string())),
+            ],
+        );
+        return Some(13);
+    };
+    if !which_on_path("pi") {
+        eprintln!("pi CLI not on PATH");
+        return Some(14);
+    }
+    // The cwd has to EXIST, and checking it here is what lets the NotFound arm
+    // below mean the binary and only the binary. A pruned worktree is this
+    // fleet's normal lifecycle, and `Command::current_dir` on a missing
+    // directory fails with ErrorKind::NotFound, which that arm would report as
+    // "pi CLI not on PATH" - sending an operator to reinstall pi over a stale
+    // registry row.
+    let cwd_path = Path::new(cwd);
+    if !cwd_path.is_dir() {
+        eprintln!(
+            "fno agents attach: the cwd recorded for {name:?} is gone: {cwd}. A pi session is \
+the pair (cwd, session id), so there is nothing here to attach to."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-row-cwd-missing".to_string())),
+                ("detail", Value::String(cwd.to_string())),
+            ],
+        );
+        return Some(13);
+    }
+
+    // The duplicate refusal, fired at the door where a human reads it. pi's own
+    // behaviour on an ambiguous id is to pick the OLDEST file and print
+    // nothing, which is how three sessions of real work became unreachable.
+    // An `Unknown` reading is NOT a duplicate and never blocks an attach: it
+    // means the store could not be read, and an unreadable store is evidence
+    // of nothing.
+    let lookup = crate::pi::lookup_sessions(cwd_path, session_id);
+    if let Some(refusal) = crate::pi::duplicate_resume_refusal(cwd_path, session_id, &lookup) {
+        eprintln!("fno agents attach: {refusal}");
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                (
+                    "reason",
+                    Value::String("pi-session-id-ambiguous".to_string()),
+                ),
+                ("session_id", Value::String(session_id.to_string())),
+            ],
+        );
+        return Some(13);
+    }
+
+    // An attach during a live CREATE is a second create, not a join, and the
+    // store cannot say so: a session's file appears at the first turn ATTEMPT,
+    // so for the first seconds of a spawn the lookup above reads `None` for a
+    // session that is being made right now. Joining is safe; creating twice is
+    // the silent race this whole lane exists to close, and the only instrument
+    // that sees the window is the claim the spawn holds across it.
+    //
+    // So this reads that claim and refuses while it is held. `Live` and
+    // `Suspect` both mean held: `Suspect` is an unexpired TTL whose holder is
+    // not provably alive, and the acquire path already declines to steal it.
+    // `Free`, `Stale` and `Corrupted` are not evidence of a create in flight
+    // and never block an attach - a refusal on an unreadable claim would fail
+    // closed against the operator over a file that proves nothing.
+    let create_key = crate::pi::create_claim_key(cwd_path, session_id);
+    let (claim_state, claim_record) = crate::claims::status(&create_key, None);
+    if crate::pi::attach_blocked_by_create(claim_state) {
+        let holder = claim_record
+            .as_ref()
+            .map(|r| r.holder.clone())
+            .unwrap_or_else(|| "an unnamed holder".to_string());
+        eprintln!(
+            "fno agents attach: a pi session CREATE is in flight for {session_id:?} in {cwd}, \
+held by {holder}. pi writes its session file at the first turn ATTEMPT, so the store cannot \
+tell a session being made right now from one that is absent, and attaching into that window \
+CREATES a second session under this id rather than joining. Wait for the holder to finish, \
+then attach again."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-create-in-flight".to_string())),
+                ("session_id", Value::String(session_id.to_string())),
+                ("detail", Value::String(holder)),
+            ],
+        );
+        return Some(13);
+    }
+
+    let argv = crate::pi::pi_attach_argv(session_id);
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    command.current_dir(cwd);
+    // Inherit stdio so pi's TUI takes over this terminal; mirror its exit code.
+    match command.status() {
+        Ok(status) => {
+            let exit_code = status.code().unwrap_or(1);
+            append_agents_event(
+                events_path,
+                "agent_attached",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String("pi".to_string())),
+                    ("session_id", Value::String(session_id.to_string())),
+                    ("pi_exit", Value::from(exit_code)),
+                ],
+            );
+            Some(exit_code)
+        }
+        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("pi CLI not on PATH");
+            Some(14)
+        }
+        Err(exc) => {
+            eprintln!("fno agents attach: pi session attach failed: {exc}");
+            Some(1)
+        }
+    }
+}
+
+/// `fno-agents attach <name>` -- interactive attach to a running claude agent,
+/// a codex thread, or a pi session (every other harness is refused). Mirrors
+/// Python `dispatch.attach_agent` + the `cmd_attach` Typer wrapper.
 pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     let mut name: Option<String> = None;
     for a in rest {
@@ -3371,6 +3549,14 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
     // app-server daemon, the same argv the mux viewport runs.
     if harness == "codex" {
         if let Some(code) = attach_codex_thread(entry, &name, &events_path) {
+            return code;
+        }
+    }
+
+    // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
+    // the session its rpc lane is driving.
+    if harness == "pi" {
+        if let Some(code) = attach_pi_session(entry, &name, &events_path) {
             return code;
         }
     }

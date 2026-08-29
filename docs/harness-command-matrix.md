@@ -10,17 +10,17 @@ Messaging note: `send` / `inbox` / `ack` are not direct lifecycle actions. They 
 
 What each harness fundamentally is, from fno's point of view:
 
-| | claude | codex | gemini | agy | opencode |
-|---|---|---|---|---|---|
-| Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless |
-| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) |
-| Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) |
-| Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) |
-| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` |
-| Revive a **dead** session | `spawn --resume <uuid>` (bg lane) or `recover` | no | no | no | no |
-| Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
+| | claude | codex | gemini | agy | opencode | pi |
+|---|---|---|---|---|---|---|
+| Substrates | pane, **thread**, headless | pane, headless | pane, headless | pane, headless | pane, **thread**, headless | pane |
+| Persistent-thread lane (`--substrate thread`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | launch-only (a shared `opencode serve` over HTTP; `ask`/steering unbuilt, so the capability bit reads false and autonomous dispatch defaults to headless until the steering lane ships its own journey test) | no. The transport exists and is tested (`pi --mode rpc`: strict JSONL, typed events, an `id` per request, native `steer` injection, stdin held open because rpc exits on EOF mid-turn with status 0), but no spawn arm drives it yet, so the bit reads false and dispatch keeps pi on `pane`. Same posture as opencode's serve lane, for the same reason. |
+| Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | yes (`opencode run`) | the argv is built (`pi --print`), but no dispatch arm reaches it |
+| Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none captured yet** (a `conversation_id` is parseable in `-p --output-format json`, but no spawn lane records it) | `harness_session_id` (the `ses_` id, captured at spawn) | `harness_session_id`, CALLER-ASSIGNED: fno mints it at spawn and pi adopts it. Never let pi mint one - its default is a UUIDv7 whose head-8 is the same clock bucket that collides two codex short ids. |
+| Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` | `attach` execs pi's own TUI on the same session id, in the row's cwd. It JOINS the live rpc session rather than starting a rival one, measured. |
+| Revive a **dead** session | `spawn --resume <uuid>` (bg lane) or `recover` | no | no | no | no | yes: a fresh process on the same `(cwd, session_id)` pair recalls prior context and prints no creation warning |
+| Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes | yes |
 
-The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+The pane substrate (the default) is the great equalizer: all six harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes. pi is pane-only today, so the pane IS its lane.
 
 A claude re-entry door resolves the row's recorded account and route before launch, on every verb above (`attach`, `resume`, `spawn --resume`, `recover`). A row whose binding evidence is missing or stale refuses with the field named. A claude row can hold two valid session ids after a fork. `recover` is the verb that restores one. With two ids recorded it requires `--session <id>` to name the chosen one. `--print-command` prints the inspection form without launching.
 
@@ -41,6 +41,20 @@ Known limitation: the agy seed receipt is unverified. Until action confirmation 
 - Registry identity: `harness_session_id` = the `ses_` id. Reachability is the existing store-membership probe (serve sessions share the global opencode store).
 - Steering over the API is a filed follow-up: mail inject, ask, peek, resume. Until it lands, the `ask` verb still refuses with the pane-send pointer.
 
+## The pi dual-lane onboarding
+
+`pi --mode rpc` drives and pi's own TUI watches. Both address ONE session. The lanes are mutually exclusive per PROCESS, chosen at exec, never per session. A TUI opened on a session an rpc driver was holding joined it. It rendered that session's own turns and left the session-file count at one.
+
+A pi session is the pair `(cwd, session_id)`. Sessions live at `~/.pi/agent/sessions/<encoded-cwd>/<ISO-timestamp>_<session-id>.jsonl`. The encoding replaces separators with `-` and fences the result with `--`. The id alone addresses nothing. So `attach` runs pi in the ROW's cwd. A row with no cwd recorded is refused rather than attached from the wrong directory.
+
+Appends are safe. Creates are not, and they fail silently. Four simultaneous creates on one id produced four session files 49ms apart. Every process exited 0 and printed "creating a new session with that id". A resume then picked the oldest and named none of the rest. fno serialises the create DECISION with `fno agents claim` on a `pi-session:<cwd>:<id>` key. It releases the claim once the session exists. That key is a SESSION key, not a node key, and the spawn lane takes it rather than a person.
+
+The reader half is separate. A resume whose id resolves to more than one session refuses. It names every session with its timestamp and picks none. Never rank duplicates by content. An empty assistant `content` array marks a turn that was attempted and FAILED.
+
+What ships today is the PANE lane plus the rpc transport as a driver library. `fno agents spawn -H pi` opens a pi TUI in a mux pane with an fno-minted session id, and `fno agents attach` joins that same session. The rpc driver has no spawn arm yet. So mail to a pi worker rides the pane's keystroke path, at a measured 0 ms enter delay. It does not ride the `steer` command the driver implements. Describe the lane that ships, not the one the library will serve.
+
+Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--provider` without `--model` falls through to a Bedrock model. Full contract and the credential rules: [docs/HARNESSES.md](HARNESSES.md).
+
 ## Machine-readable interactive capabilities
 
 Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
@@ -52,12 +66,13 @@ Run `fno agents dispatch capabilities <h> --json` to read one harness without di
 | gemini | unsupported | unsupported (deprecated lane) | unsupported | `gemini --resume <id>` | registry no-op | registry only |
 | agy | unsupported | trust prompt cleared by submit | separate submit after readiness | `agy --conversation <id>` | registry no-op | registry only |
 | opencode | Known picker map: `Enter`, `Right Enter`, `Right Right Enter`. Automatic use requires a fingerprinted picker. | unsupported | unsupported | `opencode --session <ses_id>` | registry no-op | registry only |
+| pi | unsupported, and it is an ABSENCE in pi: it ships no permission popups at all (its own docs say so) and has no bypass flag, so there is nothing to answer. The rpc lane's Extension UI Protocol is a structured round-trip on a different surface. | `idle_status_bar` | **0 ms, MEASURED**: three 6.1KB pastes with zero settle, all submitted, testing the exact shape that broke codex | `pi --session-id <id>` in the SAME cwd (the store is cwd-scoped) | registry no-op | registry only |
 
 `ready` means that the configured manifest rule matched. A painted pane with no positive rule stays `live`. Claude and Codex use different readiness rules.
 
 Session binding has a separate type. Codex tries two oracles in order and waits up to 60 seconds total. First it reads a rollout-fd from the pane's own process tree. Codex 0.148 hands session ownership to a detached `codex app-server --remote-control` daemon that no longer exposes that fd there. So the second oracle reads the app-server's loaded threads for the pane's cwd instead. If neither oracle answers, fno reaps the pane and exits nonzero. `codex exec` (headless) still owns its own rollout and never needs the daemon oracle. The mux grab-work timeout is 75 seconds. A parity test requires 15 seconds more than the longest required binding window.
 
-Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported.
+Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported. pi is `caller-assigned-cwd-scoped`, a strategy of its own. fno mints the id AND pi scopes its lookup by working directory. So the identity is the PAIR and the id alone addresses nothing. A resume from the canonical checkout cannot see a session started in a worktree. On pi that miss is not an error. It CREATES a second session under the same id. See the pi section above.
 
 Permission responses are rule-gated. Without explicit authorization, a matched permission rule reports `blocked`, never `live`. With an authorized action, fno resolves the harness-native keys. It re-reads the prompt fingerprint while it holds the pane writer claim. Then it sends only those keys and waits for the positive ready marker.
 ## Verbs: creating and reviving workers

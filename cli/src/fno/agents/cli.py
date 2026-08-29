@@ -1152,7 +1152,7 @@ def cmd_spawn(
         "--harness",
         "-H",
         help=(
-            "The CLI binary to launch: claude | codex | gemini | opencode | agy "
+            "The CLI binary to launch: claude | codex | gemini | opencode | agy | pi "
             "(optional). Defaults to the invoking harness, then claude. NOTE: -H "
             "no longer means headless; for a one-shot use --substrate headless / "
             "--headless / --once."

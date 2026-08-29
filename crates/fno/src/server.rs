@@ -957,6 +957,14 @@ fn attach_argv_for(
         // socket, and `CODEX_HOME` already decides which socket that is.
         return agents_view::codex_attach_argv(id);
     }
+    if harness == Some("pi") {
+        // (x-c198) No account wrapper and no socket: a pi session is addressed
+        // by the pair (cwd, session id), and the attach pane already spawns in
+        // the row's cwd. That pairing is what makes this a JOIN onto the
+        // session pi's rpc lane is driving rather than a second session under
+        // the same id.
+        return agents_view::pi_attach_argv(id);
+    }
     let base = attach_base(id);
     let Some(dir) = config_dir else {
         return base;

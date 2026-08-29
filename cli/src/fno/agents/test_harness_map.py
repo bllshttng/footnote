@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from fno.harness_names import KNOWN_HARNESSES
 from fno.agents.harness_map import (
     MAP_VERSION,
     DispatchResolveError,
@@ -30,8 +31,12 @@ _REQUIRED_INTERACTIVE_FIELDS = {
 
 
 def test_packaged_contract_is_complete_for_every_known_harness():
-    assert MAP_VERSION == 11
-    assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
+    assert MAP_VERSION == 12
+    # Rendered from KNOWN_HARNESSES rather than spelled out: this test is about
+    # the CONTRACT being complete for every known harness, and a hardcoded set
+    # turns adding one into an unrelated red. The import-time assertion in
+    # harness_map already pins the two together, so this reads the same source.
+    assert set(known_harnesses()) == set(KNOWN_HARNESSES)
     for harness in known_harnesses():
         caps = capabilities(harness)
         assert _REQUIRED_INTERACTIVE_FIELDS <= caps.keys(), harness
@@ -566,8 +571,15 @@ def test_explicit_thread_on_partial_lane_refused_with_the_reason():
 
 
 def test_known_harnesses_covers_readable_set():
-    """The map covers the readable-provider set so US4 can wire opencode."""
-    assert set(known_harnesses()) == {"claude", "codex", "gemini", "agy", "opencode"}
+    """The map covers the readable-provider set, which is the invariant here.
+
+    Asserted as the RELATION between the two rosters rather than as a literal
+    list, so a harness added to both keeps this green and a harness added to
+    only one goes red - which is the drift worth catching.
+    """
+    from fno.agents.harnesses import READABLE_PROVIDERS
+
+    assert set(known_harnesses()) == set(READABLE_PROVIDERS)
 
 
 # --- US3: configurable dispatch verb + brief ------------------------------

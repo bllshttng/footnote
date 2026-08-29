@@ -455,6 +455,7 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "gemini",
     "agy",
     "opencode",
+    "pi",
 )
 
 
@@ -503,6 +504,15 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
             "(toolPermission).",
             exit_code=2,
         )
+    if provider == "pi":
+        raise DispatchAskError(
+            f"pi --permission-mode {mode!r} unmappable, and this is an absence in "
+            "pi rather than a gap in fno: pi ships NO permission popups (its own "
+            "docs say so) and `pi --help` carries no bypass flag, so there is "
+            "nothing to answer and nothing to skip. `--approve` trusts "
+            "project-local FILES, a different axis, and stays an operator choice.",
+            exit_code=2,
+        )
     raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
 
 
@@ -547,11 +557,17 @@ def tier3_pane_tokens(
     if tools:
         if provider == "claude":
             out += ["--allowedTools", tools]
+        elif provider == "pi":
+            # pi's own allowlist flag, spanning built-in, extension and custom
+            # tools in one comma-separated list.
+            out += ["--tools", tools]
         else:
             unsupported("--tools")
     if deny_tools:
         if provider == "claude":
             out += ["--disallowedTools", deny_tools]
+        elif provider == "pi":
+            out += ["--exclude-tools", deny_tools]
         else:
             unsupported("--deny-tools")
     return out
@@ -576,6 +592,12 @@ def effort_tokens(provider: str, value: str) -> list[str]:
         return ["-c", f"model_reasoning_effort={value}"]
     if provider == "opencode":
         return []
+    if provider == "pi":
+        # pi's effort axis is `--thinking <level>`, a first-class flag rather
+        # than a model suffix or a config key: off, minimal, low, medium, high,
+        # xhigh, max. Exact passthrough, like claude's - pi validates the
+        # vocabulary itself, and fno does not keep a second copy of it.
+        return ["--thinking", value]
     raise DispatchAskError(
         f"provider {provider!r} has no reasoning-effort surface; omit --effort",
         exit_code=2,
@@ -1354,6 +1376,46 @@ def build_pane_argv(
             emitted += ["--yolo", "--dangerously-skip-permissions"]
         argv += pane_passthrough_tokens(passthrough, emitted)
         argv += perm
+        return argv
+    if provider == "pi":
+        # pi's WATCHING lane: the plain interactive TUI, never `--mode rpc`
+        # (the two are mutually exclusive per process, chosen at exec). The
+        # pinned `--session-id` is what makes this a JOIN onto a session the
+        # rpc lane may already be driving: measured 2026-08-28, a TUI opened on
+        # a live rpc session rendered that session's own turns and the
+        # session-file count for the id stayed at ONE.
+        #
+        # Opening it on an id that does NOT exist yet is a CREATE, and creates
+        # are the unserialised half (four simultaneous creates on one id
+        # produced four sessions, silently, every process exiting 0). The spawn
+        # lane serialises that decision with
+        # `fno.agents.harnesses.pi.create_decision`; this builder only composes
+        # argv.
+        #
+        # `--provider` AND `--model` both, always: `--provider openai-codex`
+        # without `--model` falls through to a Bedrock model and dies naming an
+        # expired AWS SSO session, which misdirects completely.
+        #
+        # pi ships NO permission popups (its own docs/usage.md says so), so
+        # there is no never-prompt flag to add and `yolo` maps to nothing here.
+        # `--approve` trusts project-local FILES, a different axis, and stays an
+        # operator choice.
+        from fno.agents.harnesses.pi import pi_model, pi_provider
+
+        argv = [*identity, "--provider", pi_provider(), "--model", model or pi_model()]
+        if effort:
+            argv += effort_tokens("pi", effort)
+        if permission_mode:
+            argv += permission_pane_tokens("pi", permission_mode)
+        argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
+        if message:
+            # argv-fence: exempt. Probed on pi 0.84.2: `pi -- --version` PRINTS
+            # the version, so `--` is not an end-of-options marker here and a
+            # fence would be decoration. The seed is a positional and pi offers
+            # no equal-form. fno's DRIVING lane is rpc, where the message rides
+            # a JSON string field that no parser can read as a flag.
+            argv += [message]
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
 
@@ -2364,7 +2426,11 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 #: call a healthy worker a failure; reporting True would be the same unverified
 #: "it's live" this change exists to remove. Their receipts are exactly as
 #: trustworthy as before, and now say so.
-_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode")
+#: pi pins one up front like claude, and its capability row declares the
+#: binding REQUIRED: pi adopts any caller-assigned `--session-id`, and letting
+#: it mint its own would hand the fleet a UUIDv7 whose head-8 is the same clock
+#: bucket that collides two codex short ids.
+_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "pi")
 
 
 def _ensure_agy_folder_trusted(cwd: Path) -> bool:
@@ -3347,6 +3413,14 @@ def dispatch_spawn_pane(
     # unpeekable and its registry row id-less whether it is healthy or a corpse.
     # resolved_monitor was settled above, before the route guard.
     pin_session = provider == "claude" and resolved_monitor != "happy"
+    # (x-c198) pi's id is CALLER-ASSIGNED and fno must never let pi mint one.
+    # pi's own default is a UUIDv7, whose head-8 is the same ~65s clock bucket
+    # that collides two codex short ids, and its capability row declares
+    # `session_binding.required = true`. Dropping the flag here would leave the
+    # row id-less AND hand pi the id, which is both halves of the hazard at
+    # once. The `happy` monitor caveat is claude's alone: it strips a pinned
+    # `--session-id` out of the argv it forwards, and it never wraps pi.
+    pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
     if provider == "agy":
         _ensure_agy_folder_trusted(cwd)
@@ -3546,7 +3620,63 @@ def dispatch_spawn_pane(
         pane_env["FNO_MUX_SHELL_INTEGRATION"] = _shell_integration()
         pane_env["FNO_PROCESS_ADMISSION_MAX"] = str(_process_admission_max())
         pane_env["FNO_MUX_PANE_GROUP_MAX"] = str(_pane_group_max())
-        proc = _run_mux(run_args, runner, env=pane_env)
+        if provider == "pi" and session_uuid:
+            # (x-c198) Launching pi on an id is a CREATE when that id has no
+            # session yet, and concurrent creates on one id are unserialised
+            # and SILENT: four at once produced four sessions, every process
+            # exiting 0 and every file internally perfect, after which a resume
+            # picked the oldest and named none of the rest.
+            #
+            # So the create DECISION is serialised, and only that. Appends are
+            # measured safe and are never locked. The claim is the primitive
+            # that already exists, on a session-id key carrying the cwd, and it
+            # is released the moment the pane exists.
+            #
+            # A fresh uuid4 makes a collision unlikely on THIS path; the claim
+            # is here because the id is not always fresh. A retry, a watchdog
+            # wake, or a king re-dispatching a stalled node is a create on an id
+            # that may already exist, and this fleet does all three.
+            from fno.agents.harnesses.pi import (
+                await_session_created as _pi_await,
+                create_decision as _pi_create,
+            )
+
+            with _pi_create(cwd, session_uuid, holder=f"spawn:{name}"):
+                proc = _run_mux(run_args, runner, env=pane_env)
+                # `mux pane run` returns as soon as the PANE exists, which is
+                # tens of milliseconds. pi reaches session-id adoption at 0.64s
+                # and writes its first session file at about 5s. Releasing the
+                # claim on the pane would hand the whole create decision to an
+                # unguarded window, which is the race this claim exists to
+                # close. So the claim is held until the session provably
+                # exists, or until a bound expires and the wait says so.
+                #
+                # And what it says is RECORDED. A timeout here is not a failure
+                # and must not fail the spawn: the blind window is real, and a
+                # session whose first turn has not been attempted writes no file
+                # at all. But it is not a confirmed create either, and dropping
+                # the reading would leave the one honest outcome this wait can
+                # produce visible to nobody. The event is what a later reader
+                # has when a second create lands on the same id.
+                _pi_lookup = _pi_await(cwd, session_uuid)
+                if _pi_lookup.state not in {"one", "duplicate"}:
+                    from fno.agents import events as _events
+
+                    _events.emit(
+                        "pi_session_create_unconfirmed",
+                        name=name,
+                        harness=provider,
+                        session_id=session_uuid,
+                        cwd=str(cwd),
+                        lookup_state=_pi_lookup.state,
+                        reason=_pi_lookup.reason
+                        or "no session file within the create-settle bound; pi "
+                        "writes one at the first turn ATTEMPT, so this is a "
+                        "create that could not be confirmed, never a create "
+                        "that is known to have failed",
+                    )
+        else:
+            proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None
         recovered = False
         if proc.returncode == _MUX_CONTROL_UNANSWERED:

@@ -144,6 +144,48 @@ pub fn codex_app_server_socket_path() -> std::path::PathBuf {
         .join("app-server-control.sock")
 }
 
+/// (x-c198) The argv that opens pi's OWN interface on `session_id`.
+///
+/// An EXEC target, never a proxy, and the same shape as the codex builder
+/// above: the viewport replaces a pane with a real vendor process and draws
+/// nothing itself. What differs is that pi needs no daemon and no socket. A pi
+/// TUI reaches a live `--mode rpc` session by naming the same id in the same
+/// cwd, measured 2026-08-28: the TUI came up on a session an rpc driver was
+/// holding, rendered that session's own turns, and the session-file count for
+/// the id stayed at ONE.
+///
+/// **The pane's cwd is load-bearing.** pi's session store is cwd-scoped, so
+/// this argv JOINS only when the process runs in the row's own cwd; run
+/// elsewhere it CREATES a second session under the same id, silently. The
+/// viewport already spawns an attach pane in `row.cwd`, which is what makes
+/// this safe.
+///
+/// Both `--provider` and `--model` are pinned: `--provider openai-codex`
+/// without `--model` falls through to a Bedrock model and reports an expired
+/// AWS SSO session, naming the wrong cloud entirely.
+///
+/// Mirrors `fno_agents::pi::pi_attach_argv`, which `fno` never links;
+/// `the_pi_attach_argv_is_identical_in_both_crates` pins the two.
+pub fn pi_attach_argv(session_id: &str) -> Vec<String> {
+    let provider = std::env::var("FNO_PI_PROVIDER")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "openai-codex".to_string());
+    let model = std::env::var("FNO_PI_MODEL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "gpt-5.5".to_string());
+    vec![
+        "pi".to_string(),
+        "--session-id".to_string(),
+        session_id.to_string(),
+        "--provider".to_string(),
+        provider,
+        "--model".to_string(),
+        model,
+    ]
+}
+
 /// (x-6678) The argv that opens codex's OWN interface on `thread_id`.
 ///
 /// An EXEC target, never a proxy. The viewport replaces a pane with a real
@@ -1497,13 +1539,38 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             // The CLI verb's `is_codex_thread_row` reads the raw key the same
             // way, so both doors answer alike.
             && row.get("mux").is_none_or(serde_json::Value::is_null);
+        // (x-c198) A pi THREAD row's attach target is its caller-assigned
+        // session id, which a plain `pi --session-id <id>` JOINS. Same
+        // predicate shape as the codex clause above, and for the same reason:
+        // a pi PANE row already has a place for its process and keeps
+        // navigating to its tab.
+        //
+        // INERT TODAY, deliberately. pi's capability row declares
+        // `thread = false` and pi is out of `SPAWN_HARNESSES`, so every pi row
+        // fno can register is pane-hosted and carries a `mux` key - which means
+        // this predicate is false for every row that exists and the pi arm of
+        // `attach_id` never runs. It is written now so the thread lane inherits
+        // a viewport door rather than a gap, and it starts firing on its own
+        // the day that spawn arm ships. Do not read it as a shipped path.
+        // The RAW `mux` key, not the parsed one, matching the codex clause
+        // above for the reason its comment gives: a PRESENT key means
+        // pane-hosted whether or not it parses into a (session, pane_id) pair,
+        // and a half-written field must not make the viewport drive a row the
+        // CLI verb treats as pane-hosted.
+        let is_pi_thread = harness_name == Some("pi")
+            && row
+                .get("host_mode")
+                .and_then(|v| v.as_str())
+                .unwrap_or("exec")
+                == "interactive"
+            && row.get("mux").is_none_or(serde_json::Value::is_null);
         let attach_id = if is_claude {
             row.get("short_id")
                 .or_else(|| row.get("claude_short_id"))
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
-        } else if is_codex_thread {
+        } else if is_codex_thread || is_pi_thread {
             row.get("harness_session_id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
