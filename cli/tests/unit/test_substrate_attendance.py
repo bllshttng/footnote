@@ -43,6 +43,11 @@ def test_attendance_reads_the_substrate_not_the_mesh_identity():
     # toward skipping a blocking prompt rather than hanging on one.
     assert env_marks_unattended(SPAWNED) is True
     assert ATTENDED_SUBSTRATES == frozenset({"pane"})
+    # FNO_BG is read for its value. Nothing in the tree sets it, so an exported
+    # `FNO_BG=0` came from someone saying "not a bg run".
+    assert env_marks_unattended({"FNO_BG": "1"}) is True
+    assert env_marks_unattended({"FNO_BG": "0"}) is False
+    assert env_marks_unattended({"FNO_BG": "false"}) is False
 
 
 def test_explicit_unattended_flag_outranks_an_attended_substrate():
@@ -125,13 +130,13 @@ def test_init_hands_the_bootstrap_the_substrate_verdict(tmp_path, monkeypatch):
     from fno import target_cli
     from fno.cli import app
 
-    seen: list[dict] = []
+    seen: list[tuple[list, dict]] = []
 
     def fake_run(argv, **kwargs):
         # Stop before the bash writer runs: the env it would have been handed
         # is the whole assertion, and a non-zero code skips init's own
         # post-success side effects.
-        seen.append(dict(kwargs.get("env") or {}))
+        seen.append((list(argv), dict(kwargs.get("env") or {})))
         return subprocess.CompletedProcess(argv, 1)
 
     monkeypatch.setattr(target_cli.subprocess, "run", fake_run)
@@ -145,8 +150,11 @@ def test_init_hands_the_bootstrap_the_substrate_verdict(tmp_path, monkeypatch):
         result = CliRunner().invoke(
             app, ["do", "target", "init", "--input", "some-feature"]
         )
-        assert seen, f"init never reached the bootstrap script: {result.output}"
-        return seen[-1]
+        # Name the call, never take the last one: this patch covers every
+        # subprocess in the run, and init shells out for other reasons too.
+        bootstraps = [env for argv, env in seen if argv and argv[0] == "bash"]
+        assert bootstraps, f"init never reached the bootstrap script: {result.output}"
+        return bootstraps[-1]
 
     pane = _bootstrap_env({**SPAWNED, FNO_AGENT_SUBSTRATE: "pane"})
     assert pane["TARGET_START"] == "1"

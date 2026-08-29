@@ -221,12 +221,13 @@ def detect_session(
 
     if unattended_configured is None:
         unattended_configured = _unattended_in_config()
-    attended = not (env_marks_unattended(environ) or unattended_configured)
+    env_unattended = env_marks_unattended(environ)
+    attended = not (env_unattended or unattended_configured)
 
     stamped = spawned_substrate(environ)
     if stamped:
         substrate = stamped
-    elif env_marks_unattended(environ):
+    elif env_unattended:
         # Spawned, or declared unattended, by a path that stamps no substrate.
         # Naming a guess here is what labelled every headless one-shot a `pane`.
         substrate = "unknown"

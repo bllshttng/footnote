@@ -237,9 +237,13 @@ def env_marks_unattended(env: "Mapping[str, str]") -> bool:
     """
     if (env.get("TARGET_UNATTENDED") or "").strip() == "1":
         return True
-    spawned = (env.get("FNO_AGENT_SELF") or "").strip() or (
+    # FNO_BG is read for its VALUE, not its presence. Nothing in the tree sets
+    # it, so the only way it arrives is an operator or a script exporting it,
+    # and `FNO_BG=0` from one of those means "not a bg run". Presence alone read
+    # that as a spawn.
+    spawned = bool((env.get("FNO_AGENT_SELF") or "").strip()) or (
         env.get("FNO_BG") or ""
-    ).strip()
+    ).strip().lower() in {"1", "true", "yes", "on"}
     if not spawned:
         return False
     return spawned_substrate(env) not in ATTENDED_SUBSTRATES

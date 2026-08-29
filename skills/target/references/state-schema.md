@@ -68,7 +68,7 @@ cross_project: false     # true for cross-project pipeline runs
 scratchpad_path: ""      # path to worktree scratchpad directory (if set)
 ```
 
-`attended` resolves from the substrate the spawner stamped in `FNO_AGENT_SUBSTRATE`. `fno do target init` folds it, and the manifest writer ORs that with `config.unattended.enabled`. A pane is attended. A thread and a headless one-shot are not. An operator's own shell carries no stamp and is attended. A spawned worker whose launcher stamps nothing reads unattended. That is the pre-x-be78 answer, kept as the fallback because it skips a blocking prompt rather than hanging on one. An explicit `TARGET_UNATTENDED=1` wins over all of it. The rule has one home, `harness_identity.env_marks_unattended`.
+`attended` resolves from the substrate the spawner stamped in `FNO_AGENT_SUBSTRATE`. `fno do target init` folds it, and the manifest writer ORs that with `config.unattended.enabled`. A pane is attended. A thread and a headless one-shot are not. An operator's own shell carries no stamp and is attended. A spawned worker whose launcher stamps nothing reads unattended. That is the older answer, kept as the fallback because it skips a blocking prompt rather than hanging on one. An explicit `TARGET_UNATTENDED=1` wins over all of it. The rule has one home, `harness_identity.env_marks_unattended`.
 
 ### Authority grant (omitted unless granted)
 
