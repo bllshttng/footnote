@@ -686,16 +686,34 @@ def test_a_stale_ready_row_with_a_real_plan_still_selects(tmp_path):
     ) is None
 
 
-def test_a_missing_plan_remains_no_hold_signal(tmp_path):
-    """A cross-project or unmounted plan has no declaration to validate here."""
+def test_an_unmounted_plan_root_remains_no_hold_signal(tmp_path):
+    """A cross-project or unmounted plan ROOT (the whole tree absent from
+    this machine) has no declaration to validate here."""
     from datetime import datetime, timezone
 
     from fno.backlog.advance import selection_guards
 
-    node = _ready_row(str(tmp_path / "gone.md"))
+    node = _ready_row(str(tmp_path / "not-mounted" / "gone.md"))
     assert selection_guards(
         node, {node["id"]: node}, datetime.now(timezone.utc)
     ) is None
+
+
+def test_a_missing_plan_under_a_mounted_root_fails_closed(tmp_path):
+    """Round-12 finding 6: a plan file absent while its plan root exists (a
+    stale path, a typo, a mid-fetch checkout) is unreadable plan state, and
+    unreadable plan state must never read as unheld."""
+    from datetime import datetime, timezone
+
+    from fno.backlog.advance import selection_guards
+    from fno.graph.ladder import DispatchHoldState, dispatch_hold
+
+    node = _ready_row(str(tmp_path / "gone.md"))  # tmp_path itself exists
+    hold = dispatch_hold(node)
+    assert hold.state is DispatchHoldState.INVALID
+    assert "missing under its existing plan root" in (hold.detail or "")
+    guard = selection_guards(node, {node["id"]: node}, datetime.now(timezone.utc))
+    assert guard == "dispatch-hold-invalid:x-stale01", guard
 
 
 def test_the_policy_set_is_the_one_selection_uses():
@@ -768,6 +786,45 @@ def test_dispatch_hold_walks_parent_and_contained_owner(tmp_path):
     verdict = dispatch_hold_verdict(child, by_id)
     assert verdict is not None
     assert verdict.guard_reason == "dispatch-hold:x-owner"
+
+
+def test_dispatch_hold_walk_counts_every_dequeue_against_the_cap(tmp_path, monkeypatch):
+    """Round-12 finding 9: reconverging duplicate queue entries must count
+    against the 64-step cap. A graph whose every node fans into one shared
+    grandparent enqueues that grandparent once per child; with the guard
+    firing before the increment, the real iteration count ran far past 64.
+    Force the failure: a monkeypatched dispatch_hold records real calls, and
+    a hold past dequeue #64 must be unreachable even under heavy fan-in."""
+    from fno.graph import ladder
+
+    calls = {"n": 0}
+    real = ladder.dispatch_hold
+
+    def counting(entry):
+        calls["n"] += 1
+        return real(entry)
+
+    monkeypatch.setattr(ladder, "dispatch_hold", counting)
+
+    # 200 unheld middle nodes, each with BOTH parent and contained_in
+    # pointing at one shared root (and one self-loop via each other for
+    # reconvergence): every dequeue after the first wave is a duplicate.
+    rows = [{"id": "x-root", "plan_path": None}]
+    for i in range(200):
+        rows.append(
+            {"id": f"x-mid{i:03d}", "parent": "x-root", "contained_in": "x-root"}
+        )
+    by_id = {row["id"]: row for row in rows}
+    assert ladder.dispatch_hold_verdict(rows[100], by_id) is None
+    assert calls["n"] <= 64, (
+        f"the walk evaluated {calls['n']} nodes - duplicates are escaping the cap"
+    )
+    # Positive control: the same graph with the cap genuinely binding must
+    # still terminate (not hang), and a held root INSIDE the bound is found.
+    held = _held_plan(tmp_path)
+    rows[0]["plan_path"] = str(held)
+    verdict = ladder.dispatch_hold_verdict(rows[1], by_id)
+    assert verdict is not None and verdict.guard_reason == "dispatch-hold:x-root"
 
 
 def test_selection_guards_refuse_held_node_and_held_ancestry(tmp_path):

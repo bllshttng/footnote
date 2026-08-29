@@ -2313,8 +2313,24 @@ def test_selection_guards_blueprinted_plan_is_armed(tmp_path):
     assert adv.selection_guards(node, {"c": node}, now) is None
 
 
-def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
-    # Cross-project and unmounted plan roots carry no declaration to validate.
+def test_selection_guards_unmounted_plan_root_stays_armed(tmp_path):
+    # Cross-project and unmounted plan ROOTS carry no declaration to validate.
+    # (A missing file under an EXISTING root fails closed instead - round-12
+    # finding 6 - and has its own test in test_ladder.py.)
+    now = _gnow()
+    node = {
+        "id": "c",
+        "status": "ready",
+        "plan_path": str(tmp_path / "not-mounted" / "gone.md"),
+        "created_at": now.isoformat(),
+    }
+    assert adv.selection_guards(node, {"c": node}, now) is None
+
+
+def test_selection_guards_missing_plan_file_fails_closed(tmp_path):
+    """Round-12 finding 6: unreadable plan state must never read as unheld.
+    A plan absent while its root exists is a stale path or a mid-fetch
+    checkout, not an unmounted tree - autonomous selection must refuse."""
     now = _gnow()
     node = {
         "id": "c",
@@ -2322,7 +2338,7 @@ def test_selection_guards_missing_plan_file_stays_armed(tmp_path):
         "plan_path": str(tmp_path / "gone.md"),
         "created_at": now.isoformat(),
     }
-    assert adv.selection_guards(node, {"c": node}, now) is None
+    assert adv.selection_guards(node, {"c": node}, now) == "dispatch-hold-invalid:c"
 
 
 def test_selection_guards_dead_ancestor_via_field_not_status():
