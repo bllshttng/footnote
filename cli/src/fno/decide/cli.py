@@ -261,7 +261,8 @@ def _record(
             "operator records one from chat in a single step with "
             "`/fno:law <the ruling>`, which lands in the law lane as "
             "chat_attested and needs no terminal. At a terminal, "
-            "`fno inbox law set <subject> <decision>` is the same one call. "
+            "`fno inbox law set <subject> <decision> --rationale <why>` is the "
+            "same one call. "
             "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
@@ -272,7 +273,8 @@ def _record(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run "
-            "`fno inbox law set <subject> <decision>` from an attended operator "
+            "`fno inbox law set <subject> <decision> --rationale <why>` from an "
+            "attended operator "
             "terminal, or have the operator type `/fno:law <the ruling>` in "
             "chat, which records in one step. Append agent findings with "
             "`fno backlog note <node> <text>`.",

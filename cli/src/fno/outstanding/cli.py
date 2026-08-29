@@ -400,7 +400,8 @@ def clear(
                             "--answer. That close notifies nobody, so tell the "
                             "asker the `d-...` id yourself if they are waiting. "
                             "At a terminal, `fno inbox law set <subject> "
-                            "<decision>` is the same destination in one call."
+                            "<decision> --rationale <why>` is the same "
+                            "destination in one call."
                         )
                     typer.echo(
                         f"outstanding: refused: {exc}. Nothing was closed; "

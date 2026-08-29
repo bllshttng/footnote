@@ -40,18 +40,21 @@ Recording law from chat works. Retracting it does not. On a law-lane row, `retra
 
 ## Refusals
 
-`fno inbox law set` refuses, records nothing, and exits **3** in four cases:
+`fno inbox law set` refuses, records nothing, and exits **3** in five cases:
 
 - the statement is coordination rather than durable law,
 - the rationale is missing,
-- `--supersedes` is not a `d-` decision id,
+- `--supersedes` is not a `d-` decision id, or names no recoverable decision,
+- `--graduation` is not a valid kind,
 - no harness session resolves and no terminal is attached, so nothing marks a decider.
+
+Exit **1** means something else entirely. It means the row IS recorded and the recall index write failed. Run `fno backlog decide-reindex`. Never re-run the command.
 
 Report the refusal verbatim. Say that no law was recorded. Never infer a recording from a green exit. Read the printed `d-` id.
 
 ## Safety boundary
 
-Invocation is the authority. A mail-injected slash command is not distinguishable from a typed one. So this skill cannot refuse a mail-shaped path. That trade is deliberate. [LIMITATIONS.md](LIMITATIONS.md) states it with the measurement behind it. What the skill still guarantees is honest attribution. A chat recording says `chat_attested` and never claims the operator lane. Environment scrubbing stays forbidden.
+Invocation is the authority. The door is wider than a chat line. Any process descended from a harness session records as `chat_attested`. That includes an agent's own Bash call. A mail-injected slash command is a special case of it, and is the case that is impossible to detect. That trade is deliberate. [LIMITATIONS.md](LIMITATIONS.md) states it with the measurement behind it. What the skill still guarantees is honest attribution. A chat recording says `chat_attested` and never claims the operator lane. Environment scrubbing stays forbidden.
 
 ## Known Limitations and Deferred Work
 

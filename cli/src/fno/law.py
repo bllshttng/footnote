@@ -6,15 +6,21 @@ d-e1eec854). The whole ceremony was deleted because it charged for a property it
 it refused the honest headless path at the last step while an attended chat
 approved the same enactment without reading the hash.
 
-WHAT THAT TRADE COSTS, measured rather than assumed. A mail-injected slash
-command is NOT distinguishable from a typed one. Across every transcript in
-this machine's claude project directory, 2173 user turns carrying an
-`<fno_mail>` envelope were recorded with `promptSource: "typed"` and 2439 with
-`origin: {"kind": "human"}`; `fno agents mail send --raw` strips the envelope
-that is the one remaining marker. So an agent that can mail this session can
-mint law here, and no refusal in this module can tell that apart. What survives
-is the honest attribution: a chat recording lands as `chat_attested`, never as
-`operator`, so a reader can always tell it from a person at a terminal.
+WHAT THAT TRADE COSTS, measured rather than assumed, and stated at its real
+WIDTH. `require_marked_caller` answers `chat_attested` off
+`resolve_self_identity`, which walks process ancestry. So the door is not
+"a mail-injected slash command". It is ANY process descended from a harness
+session, including an agent's own Bash call with no user-shaped text anywhere.
+The narrower mail shape is merely the one that is impossible to detect: across
+every transcript in this machine's claude project directory, 2173 user turns
+carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"`
+and 2439 with `origin: {"kind": "human"}`, and `fno agents mail send --raw`
+strips the envelope that is the one remaining marker.
+
+What survives is the honest attribution: a chat recording lands as
+`chat_attested`, never as `operator`, so a reader can always tell it from a
+person at a terminal. Note the asymmetry that buys: a session can mint a law
+row and cannot retract one, because `retract_decision` requires `operator`.
 """
 
 from __future__ import annotations
@@ -66,16 +72,6 @@ def validate_durable_law(
 law_app = typer.Typer(help="Record operator law in one call.")
 
 
-@law_app.callback()
-def _law_callback() -> None:
-    """Keep `set` a named subcommand.
-
-    A single-command Typer app collapses its one command into the group, which
-    would silently rename `fno inbox law set` to `fno inbox law`. The callback
-    is what holds the published spelling in place.
-    """
-
-
 @law_app.command("set")
 def record_command(
     subject: str = typer.Argument(..., help="Subject governed by the law."),
@@ -119,7 +115,11 @@ def record_command(
             authority_source=authority,
             graduation=graduation_data,
         )
-    except InvalidGraduationError as exc:
+    except (InvalidGraduationError, ValueError) as exc:
+        # ValueError is `record_decision` refusing a --supersedes that names no
+        # recoverable decision. It must land on 3 with the rest: exit 1 is the
+        # code reserved for "recorded, index write failed, do NOT re-run", so
+        # letting it escape told a caller the opposite of what happened.
         typer.echo(f"fno law: refused: {exc}. Nothing was recorded.", err=True)
         raise typer.Exit(3) from exc
     except (RefusedAuthorityError, UnattributedAuthorityError) as exc:

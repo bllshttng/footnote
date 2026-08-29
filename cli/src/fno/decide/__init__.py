@@ -361,6 +361,17 @@ def record_decision(
 
     if authority_source == "chat_attested":
         require_marked_caller()
+        # The statement classifier moves down here with the session gate, for
+        # the same reason: `record_decision` is importable, so a check only the
+        # command body ran is a check anything using the library walks around.
+        from fno.law import validate_durable_law
+
+        validate_durable_law(
+            subject=subject or "",
+            decision=decision,
+            rationale=rationale,
+            supersedes=supersedes,
+        )
     else:
         require_operator_session()
     graduation = normalize_graduation(graduation)

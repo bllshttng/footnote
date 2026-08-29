@@ -48,9 +48,19 @@ def _as_chat_session(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _run(args: list[str]):
+    """Invoke through a mounted parent, the way `fno inbox law` reaches it.
+
+    `inbox_app.add_typer(law_app, name="law")` is the real mount, and it always
+    builds a group. Invoking the bare `law_app` instead would test a shape no
+    caller has.
+    """
+    import typer
+
     from fno.law import law_app
 
-    return CliRunner().invoke(law_app, args)
+    parent = typer.Typer()
+    parent.add_typer(law_app, name="law")
+    return CliRunner().invoke(parent, ["law", *args])
 
 
 # ── the acceptance: one call, one d- id ───────────────────────────────────────
@@ -218,6 +228,26 @@ def test_library_refuses_chat_attested_from_an_unmarked_process(
     assert index.read_text() == ""
 
 
+def test_library_refuses_a_coordination_statement_in_the_law_lane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The statement classifier holds below the CLI, like the session gate."""
+    from fno.decide import record_decision
+    from fno.law import LawValidationError
+
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    with pytest.raises(LawValidationError, match="coordination"):
+        record_decision(
+            subject="x-12ba",
+            decision="This PR merges without review",
+            rationale="why",
+            authority_source="chat_attested",
+        )
+    assert index.read_text() == ""
+
+
 def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -264,6 +294,35 @@ def test_require_marked_caller_prefers_the_resolved_session(
     # A terminal is present too, and the session still wins: the row must not
     # claim the operator lane just because someone happened to be at a tty.
     assert decide.require_marked_caller() == "chat_attested"
+
+
+def test_supersedes_naming_no_recoverable_decision_refuses_with_exit_3(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A well-formed id that resolves to nothing must not exit 1.
+
+    Exit 1 is the code reserved for "recorded to the journal, index write
+    failed, do NOT re-run". A caller reading it after a crash concludes the
+    opposite of what happened.
+    """
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+
+    result = _run(
+        [
+            "set",
+            "x-12ba",
+            "Merges belong to the operator",
+            "--rationale",
+            "why",
+            "--supersedes",
+            "d-deadbeef",
+        ]
+    )
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert "not recoverable" in result.output
+    assert index.read_text() == ""
 
 
 def test_supersedes_must_be_a_decision_id(
