@@ -485,6 +485,7 @@ route init	T1	route init	0
 route inventory	T1	route inventory	0	
 route ls	T1	route ls	3
 route set	T1	route set	4
+route settings ls	T1	route settings ls	1
 route unset	T1	route unset	1
 scoreboard	KEEP	scoreboard	13	single-leaf group
 setup cli-hooks	T1	setup cli-hooks	8

@@ -250,6 +250,69 @@ def test_done_no_collision_when_not_done(
     assert entry["status"] == "done"
 
 
+# ---- x-43e4: the done path derives the same cwd guess update does ----
+
+
+def test_done_named_repo_overrides_a_disagreeing_recorded_url(
+    tmp_graph, tmp_ledger, tmp_events, monkeypatch
+):
+    """A named --repo is an assertion: it stamps the url for THAT repo even
+    when the node's recorded pr_url names a different one (the repair flow
+    that previously required locked_mutate_graph)."""
+    _seed(tmp_graph, [{
+        "id": "ab-repo0001",
+        "title": "cross-repo repair",
+        "status": "done",
+        "completed_at": "2026-05-15T10:00:00+00:00",
+        "domain": "code",
+        "pr_number": 5,
+        "pr_url": "https://github.com/real/repo/pull/5",
+    }])
+    _stub_subprocess_no_git(monkeypatch)
+
+    result = runner.invoke(app, ["done", "ab-repo0001", "--pr", "42", "--repo", "other/repo"])
+
+    assert result.exit_code == 0, result.output
+    assert "stamped --repo other/repo" in result.output
+    entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-repo0001")
+    assert entry["pr_url"] == "https://github.com/other/repo/pull/42"
+    assert entry["pr_number"] == 42
+
+
+def test_done_derived_url_refused_when_it_contradicts_the_recorded_repo(
+    tmp_graph, tmp_ledger, tmp_events, monkeypatch
+):
+    """The cwd derivation is a guess; when it names a repo the node's recorded
+    pr_url disagrees with, done must refuse naming both repos and the --repo
+    remedy, leaving the recorded link untouched (x-43e4, x-5764 shape)."""
+    from fno.done import cli as done_cli
+
+    _seed(tmp_graph, [{
+        "id": "ab-repo0002",
+        "title": "cross-repo trap",
+        "status": "done",
+        "completed_at": "2026-05-15T10:00:00+00:00",
+        "domain": "code",
+        "pr_number": 5,
+        "pr_url": "https://github.com/real/repo/pull/5",
+    }])
+    _stub_subprocess_no_git(monkeypatch)
+    monkeypatch.setattr(
+        done_cli,
+        "pr_url_for_repo",
+        lambda pr, cwd=None: f"https://github.com/wrong/repo/pull/{pr}",
+    )
+
+    result = runner.invoke(app, ["done", "ab-repo0002", "--pr", "911"])
+
+    assert result.exit_code != 0
+    assert "wrong/repo" in result.output and "real/repo" in result.output
+    assert "--repo" in result.output
+    entry = next(e for e in _read(tmp_graph) if e["id"] == "ab-repo0002")
+    assert entry["pr_url"] == "https://github.com/real/repo/pull/5"
+    assert entry["pr_number"] == 5
+
+
 # ---- #30: --force-overwrite ----
 
 

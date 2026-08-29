@@ -455,3 +455,147 @@ def env_cmd(
     sys.stdout.write("unset CLAUDE_CODE_OAUTH_TOKEN\n")
     for k in sorted(route):
         sys.stdout.write(f"export {k}={shlex.quote(route[k])}\n")
+
+
+# ---- route-settings overlay files (x-5cc5): what exists, what references it ----
+#
+# The spawn path writes one content-addressed overlay per distinct route under
+# state_dir()/route-settings. The names are digests, so the only way to answer
+# "which file is my session on / is any of them stale" is this read verb.
+
+settings_app = typer.Typer(
+    name="settings",
+    help="Recorded route-settings overlays: ls what exists, what references it.",
+    no_args_is_help=True,
+)
+
+
+@settings_app.command("ls")
+def settings_ls_cmd(
+    prune: bool = typer.Option(
+        False,
+        "--prune",
+        help=(
+            "Delete overlays no registry row references and older than the age "
+            "threshold. Content-addressing makes regeneration free."
+        ),
+    ),
+    age_days: int = typer.Option(
+        14, "--age-days", help="Prune age threshold in days (default 14, minimum 1)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the rows as JSON instead of text."
+    ),
+) -> None:
+    """List every recorded route-settings overlay.
+
+    One row per file: digest name, provider (stamp/base_url match against
+    today's registry), model, haiku tier, a STALE marker naming old -> new
+    when the tier differs from today's provider default, age, and whether a
+    registry row still references it. Never prints file contents: the
+    overlays carry live auth tokens.
+    """
+    import time
+
+    from fno import paths
+    from fno.agents.model_routing import (
+        effective_providers,
+        provider_name_for_route,
+        read_route_settings,
+    )
+    from fno.config import load_settings
+
+    settings = load_settings()
+    if prune and age_days < 1:
+        typer.echo(
+            f"--age-days {age_days} would prune a file a launching spawn may have "
+            "just written but not yet recorded (unreferenced at age 0); the "
+            "minimum is 1 day.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    referenced_paths: "set[str] | None"
+    try:
+        from fno.agents.registry import load_registry
+
+        referenced_paths = {
+            p for p in (getattr(e, "route_settings_path", None) for e in load_registry()) if p
+        }
+    except Exception:  # noqa: BLE001 - unreadable registry degrades the column, never the verb
+        referenced_paths = None
+
+    base_dir = paths.state_dir() / "route-settings"
+    rows: list[dict[str, object]] = []
+    now = time.time()
+    pruned: list[str] = []
+    files = sorted(base_dir.glob("*.json")) if base_dir.is_dir() else []
+    for path in files:
+        # A concurrent prune or manual clean can remove a file between the
+        # glob and this read; that file is not this listing's problem, and one
+        # vanished row must not crash the sweep.
+        try:
+            age = max(0.0, (now - path.stat().st_mtime) / 86400.0)
+        except OSError:
+            continue
+        try:
+            route = read_route_settings(str(path))
+        except Exception:  # noqa: BLE001 - one bad file degrades its row, not the listing
+            route = None
+        pname = provider_name_for_route(route or {}, settings=settings) if route else None
+        stale = ""
+        if route and pname:
+            todays = effective_providers(settings.model_routing)[pname].get("haiku_model")
+            recorded = route.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+            if todays and recorded and str(todays) != recorded:
+                stale = f"{recorded} -> {todays}"
+        referenced = (
+            "?" if referenced_paths is None else ("yes" if str(path) in referenced_paths else "no")
+        )
+        rows.append({
+            "file": path.name,
+            "provider": pname or "-",
+            "model": (route or {}).get("ANTHROPIC_MODEL", "-"),
+            "haiku": (route or {}).get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "-"),
+            "stale": stale or "-",
+            "age_days": round(age, 1),
+            "referenced": referenced,
+        })
+        if prune and referenced == "no" and age >= age_days:
+            try:
+                path.unlink()
+            except OSError as exc:
+                typer.echo(f"warn: could not prune {path}: {exc}", err=True)
+                continue
+            pruned.append(str(path))
+
+    if json_output:
+        typer.echo(json.dumps({"rows": rows, "pruned": pruned}, indent=2))
+        return
+    cols = ("file", "provider", "model", "haiku", "stale", "age_days", "referenced")
+    header = {
+        "file": "FILE",
+        "provider": "PROVIDER",
+        "model": "MODEL",
+        "haiku": "HAIKU",
+        "stale": "STALE",
+        "age_days": "AGE-D",
+        "referenced": "REF",
+    }
+    str_rows = [{c: str(r[c]) for c in cols} for r in rows]
+    widths = {
+        c: max(len(header[c]), *(len(r[c]) for r in str_rows)) if str_rows else len(header[c])
+        for c in cols
+    }
+    typer.echo("  ".join(header[c].ljust(widths[c]) for c in cols).rstrip())
+    for r in str_rows:
+        typer.echo("  ".join(r[c].ljust(widths[c]) for c in cols).rstrip())
+    if prune:
+        for p in pruned:
+            typer.echo(f"pruned {p}")
+        typer.echo(
+            f"{len(pruned)} file(s) pruned (unreferenced, older than {age_days}d); "
+            f"{len(rows) - len(pruned)} kept"
+        )
+
+
+route_app.add_typer(settings_app)
