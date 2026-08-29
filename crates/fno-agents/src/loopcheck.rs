@@ -10960,9 +10960,11 @@ fn bounded_read(
     match run_bounded(bin, args, cwd, timeout) {
         BoundedRun::Completed(out) => Ok(out),
         BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
-        BoundedRun::SpawnFailed(kind) => {
-            Err(GhReadError::unrunnable_spawn(read_name, kind, "spawn failed"))
-        }
+        BoundedRun::SpawnFailed(kind) => Err(GhReadError::unrunnable_spawn(
+            read_name,
+            kind,
+            "spawn failed",
+        )),
         BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
     }
 }
@@ -18070,10 +18072,7 @@ git_bounded();";
     fn probe_reports_spawn_trouble_for_a_busy_text_file() {
         let tmp = tempfile::tempdir().unwrap();
         let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 0\n");
-        let _held = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&gh)
-            .unwrap();
+        let _held = std::fs::OpenOptions::new().write(true).open(&gh).unwrap();
         let outcome = probe_gh_bin(gh.as_os_str(), tmp.path());
         assert_ne!(outcome, GhProbeOutcome::Absent);
         assert_eq!(
