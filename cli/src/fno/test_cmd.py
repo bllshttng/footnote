@@ -451,6 +451,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Provider stderr-merge lint", "cli", "uv run fno-py doctor lint provider-stderr-merge"),
     ("Repo-root shell-out drift guard (clone-only allowlist)", "cli", "uv run fno-py doctor lint shellout-drift"),
     ("Spawn-shape lint (single-line argv guard)", "cli", "uv run fno-py doctor lint spawn-paths"),
+    ("State-roots ratchet (declared root, R4/R5)", "cli", "uv run fno-py doctor lint state-roots"),
     ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py doctor lint menu-caps"),
     ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py doctor lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),

@@ -38,6 +38,7 @@ CHECKS: dict[str, str] = {
     "stale-skill-refs": "stale_skill_refs",
     "retired-commands": "retired_commands",
     "registry": "registry",
+    "state-roots": "state_roots",
 }
 
 
@@ -195,6 +196,358 @@ def _repo_root() -> Path:
     from fno.paths import resolve_repo_root
 
     return resolve_repo_root()
+
+
+
+# ---------------------------------------------------------------------------
+# state-roots: x-3d21 R4 (declared root) + R5 (a cache keyed on nothing)
+# ---------------------------------------------------------------------------
+
+STATE_ROOTS_BASELINE = "scripts/ci/state-roots-baseline.txt"
+
+# Rule A. A `.fno` join in a path-expression position. Python spells it
+# `root / ".fno" / "graph.json"` or `".fno/graph.json"`; Rust spells it
+# `root.join(".fno")`. The token alone is not the finding - it is the finding
+# only when a state FILENAME from the table appears in the same expression,
+# which is why _WINDOW below reads two lines ahead for a chained multi-line
+# join.
+_PY_FNO_JOIN_RE = re.compile(r"""(?:/\s*["']\.fno["']|["']\.fno/)""")
+_RS_FNO_JOIN_RE = re.compile(r"""join\(\s*["']\.fno""")
+_WINDOW = 2
+
+# Rule B. The decorator half. `functools.cache` is `lru_cache(maxsize=None)`
+# with a shorter name and the identical defect, so it is matched too: leaving
+# it out would make the gate blind to the two largest zero-arg caches in the
+# tree (`fno.paths._settings` and `fno.paths.resolve_repo_root`), which is the
+# decorative-guard shape this repo already has a gate for.
+_CACHE_DECORATORS = frozenset({"lru_cache", "cache"})
+
+# Rule B, condition 3: the READ that makes the cache a root selector. This is
+# what keeps the rule narrow. Seventeen lru_cache sites live under
+# cli/src/fno and most are harmless: a blanket ban on zero-arg caching fires
+# on `_gh_executable` (shutil.which), `_codex_cli_version` (a subprocess) and
+# `machine_id` (host identity), none of which touch a state root, and on
+# `_running_from_source`, which is keyed on `Path(__file__)` ON PURPOSE and
+# whose docstring says why. Match the READ, not the decorator.
+_ROOT_READS = frozenset(
+    {
+        "load_settings",
+        # The config candidate chain IS a root read: it walks worktree ->
+        # canonical -> $HOME. Naming it is what makes rule B reach
+        # `load_settings`, the epic's own live R5 specimen, whose body calls
+        # no other name in this set. Without it the rule would run green
+        # against the case it was written for.
+        "_candidate_paths",
+        "resolve_repo_root",
+        "resolve_canonical_repo_root",
+        "resolve_canonical_worktree",
+        "state_dir",
+        "home",  # Path.home()
+        "getcwd",  # os.getcwd()
+        "cwd",  # Path.cwd()
+    }
+)
+
+
+def _state_root_scan_files(repo_root: Path) -> list[Path]:
+    """Production Python and Rust sources in scope for the state-roots rules.
+
+    Tests are excluded by path: a fixture building a path by hand is the point
+    of the fixture. `paths_testing.py` is production-shaped containment for
+    tests and is excluded for the same reason.
+    """
+    out: list[Path] = []
+    for base, suffix in (
+        (repo_root / "cli" / "src" / "fno", ".py"),
+        (repo_root / "crates", ".rs"),
+    ):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.rglob(f"*{suffix}")):
+            rel = path.relative_to(repo_root).as_posix()
+            parts = rel.split("/")
+            if "tests" in parts or "target" in parts:
+                continue
+            if path.name.startswith("test_") or path.name == "paths_testing.py":
+                continue
+            out.append(path)
+    return out
+
+
+def _rust_cfg_test_lines(lines: list[str]) -> set[int]:
+    """1-indexed line numbers inside an inline ``#[cfg(test)]`` module.
+
+    Rust keeps its unit tests in the file they test, so scanning `crates/**`
+    without this exclusion reads every test fixture as a production offence
+    and inflates the baseline past the measured census - which the plan's own
+    kill criterion calls a detector matching prose rather than construction.
+    """
+    inside: set[int] = set()
+    i = 0
+    while i < len(lines):
+        if "#[cfg(test)]" not in lines[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and "{" not in lines[j]:
+            j += 1
+        if j >= len(lines):
+            break
+        depth = 0
+        start = j
+        while j < len(lines):
+            depth += lines[j].count("{") - lines[j].count("}")
+            if depth <= 0:
+                break
+            j += 1
+        for k in range(i, min(j, len(lines) - 1) + 1):
+            inside.add(k + 1)
+        i = max(j, start) + 1
+    return inside
+
+
+def _state_root_path_violations(repo_root: Path) -> list[tuple[str, str, str]]:
+    """Rule A hits as ``(rel_path, filename, message)``.
+
+    The symbol this rule matches, stated where the pattern lives so a green
+    control cannot be aimed at the wrong one: a ``.fno`` JOIN TOKEN (Python
+    ``/ ".fno"`` or ``".fno/``; Rust ``join(".fno``) on a line whose two-line
+    window also names a ``filename`` from ``fno.paths.STATE_FILES``. It
+    deliberately does NOT match ``config.toml``: config has its own documented
+    candidate chain with its own layering rules, that layering is x-79a6's, and
+    folding it in here would fire on sites this gate has no remedy for.
+    """
+    from fno.paths import STATE_FILES
+
+    rows = {row.filename: row for row in STATE_FILES}
+    name_res = {
+        name: re.compile(r"(?<![\w.\-/])" + re.escape(name) + r"(?![\w.\-])")
+        for name in rows
+    }
+    violations: list[tuple[str, str, str]] = []
+    for path in _state_root_scan_files(repo_root):
+        rel = path.relative_to(repo_root).as_posix()
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        join_re = _RS_FNO_JOIN_RE if path.suffix == ".rs" else _PY_FNO_JOIN_RE
+        skip = _rust_cfg_test_lines(lines) if path.suffix == ".rs" else set()
+        for line_no, line in enumerate(lines, 1):
+            if line_no in skip or join_re.search(line) is None:
+                continue
+            # A comment-only line is prose, not construction. The plan's own
+            # kill criterion names a baseline larger than the census as the
+            # sign of a detector matching prose, and this rule's explanatory
+            # comment quotes the very shape it matches.
+            if line.lstrip().startswith(("#", "//", "///", "*")):
+                continue
+            window = "\n".join(lines[line_no - 1 : line_no + _WINDOW])
+            for filename, row in rows.items():
+                if rel in row.owning_modules:
+                    continue
+                if name_res[filename].search(window) is None:
+                    continue
+                owner = row.resolver or (
+                    "NOTHING - this state file has no resolver today, which is "
+                    "itself the finding (fno.paths.STATE_FILES records it as None)"
+                )
+                violations.append(
+                    (
+                        rel,
+                        filename,
+                        f"{rel}:{line_no}: hand-built state path '.fno/{filename}'\n"
+                        f"    This file has ONE resolver: {owner}.\n"
+                        "    A hand-built path consults nothing, so FNO_EVENTS_PATH, a guard, or\n"
+                        "    a refusal cannot reach it by construction (x-3d21 R4).\n"
+                        "    Fix: call the resolver. If you hold a root already, pass it\n"
+                        "    explicitly. If this site cannot move yet, add it to\n"
+                        f"    {STATE_ROOTS_BASELINE} with the node that owns draining it.",
+                    )
+                )
+    return violations
+
+
+def _zero_arg_root_cache_violations(repo_root: Path) -> list[tuple[str, str, str]]:
+    """Rule B hits as ``(rel_path, symbol, message)``.
+
+    An AST check, not a regex, because the decorator and the read are on
+    different lines. Three conditions, all required:
+
+    1. a decorator named ``lru_cache``/``cache`` (bare, called, or
+       ``functools.``-qualified), AND
+    2. a signature declaring ZERO parameters, AND
+    3. a ``Call`` in the body to a state-root resolver named by
+       ``fno.paths.STATE_FILES`` or to one of the root reads in
+       ``_ROOT_READS``.
+    """
+    from fno.paths import STATE_FILES
+
+    resolver_names = {
+        row.resolver.rpartition(".")[2] for row in STATE_FILES if row.resolver
+    }
+    reads = resolver_names | _ROOT_READS
+
+    def _decorator_name(node: ast.expr) -> Optional[str]:
+        target = node.func if isinstance(node, ast.Call) else node
+        if isinstance(target, ast.Name):
+            return target.id
+        if isinstance(target, ast.Attribute):
+            return target.attr
+        return None
+
+    def _called_root_read(fn: ast.AST) -> Optional[str]:
+        for sub in ast.walk(fn):
+            if not isinstance(sub, ast.Call):
+                continue
+            func = sub.func
+            if isinstance(func, ast.Name):
+                name: Optional[str] = func.id
+            elif isinstance(func, ast.Attribute):
+                name = func.attr
+            else:
+                name = None
+            if name in reads:
+                return name
+        return None
+
+    violations: list[tuple[str, str, str]] = []
+    for path in _state_root_scan_files(repo_root):
+        if path.suffix != ".py":
+            continue
+        rel = path.relative_to(repo_root).as_posix()
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, UnicodeDecodeError):
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not any(
+                _decorator_name(dec) in _CACHE_DECORATORS for dec in node.decorator_list
+            ):
+                continue
+            args = node.args
+            if (
+                args.args
+                or args.posonlyargs
+                or args.kwonlyargs
+                or args.vararg
+                or args.kwarg
+            ):
+                continue
+            read = _called_root_read(node)
+            if read is None:
+                continue
+            violations.append(
+                (
+                    rel,
+                    node.name,
+                    f"{rel}:{node.lineno}: {node.name} is a zero-argument cache over a\n"
+                    f"    reader that resolves a state root (calls {read}) (x-3d21 R5).\n"
+                    "    A zero-arg lru_cache is a global keyed on nothing: the first caller in\n"
+                    "    the process fixes the answer for every caller after it, so the result\n"
+                    "    depends on execution order, not on the root each caller declared.\n"
+                    "    Fix: make the root an ARGUMENT so the cache keys on it.\n"
+                    "      @lru_cache(maxsize=8)\n"
+                    f"      def {node.name}_at(root: Path): ...\n"
+                    f"      def {node.name}(): return {node.name}_at(default_root())\n"
+                    "    Two working precedents in this repo: fleet_has_crown_at\n"
+                    "    (cli/src/fno/mail/envelope.py) and x-1571's claim_events_path_with.\n"
+                    "    An autouse cache_clear fixture is containment, not a fix.",
+                )
+            )
+    return violations
+
+
+def _state_roots_findings(repo_root: Path) -> dict[tuple[str, str, str], str]:
+    """Both rules as ``{(rule, rel_path, key): message}``."""
+    found = {
+        ("A", rel, key): msg
+        for rel, key, msg in _state_root_path_violations(repo_root)
+    }
+    found.update(
+        {
+            ("B", rel, key): msg
+            for rel, key, msg in _zero_arg_root_cache_violations(repo_root)
+        }
+    )
+    return found
+
+
+def _read_state_roots_baseline(repo_root: Path) -> set[tuple[str, str, str]]:
+    """Parse the ratchet file into ``{(rule, path, key)}``.
+
+    Keyed on (rule, path, key) rather than on a line number ON PURPOSE. A line
+    number moves on every unrelated edit above it, so a line-keyed baseline
+    churns constantly, and churn teaches people to regenerate the file, which
+    is how a ratchet stops ratcheting. The stated cost: two hand-built paths
+    for the same state file in one module drain as one entry.
+    """
+    path = repo_root / STATE_ROOTS_BASELINE
+    entries: set[tuple[str, str, str]] = set()
+    if not path.is_file():
+        return entries
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        fields = [f.strip() for f in stripped.split("\t") if f.strip()]
+        if len(fields) < 3:
+            continue
+        entries.add((fields[0], fields[1], fields[2]))
+    return entries
+
+
+def state_roots() -> None:
+    """Refuse a hand-built state path and a zero-argument cache over a root read.
+
+    Epic x-3d21 rules that every fno state access resolves against a DECLARED
+    root and that ambient position may never select one. Four of that epic's
+    five specimens were written by people who would have agreed with the rule,
+    which is the whole argument for a machine.
+
+    The gate fails in BOTH directions, and the second is the load-bearing half:
+    a hit not in the baseline is a NEW hand-built path and fails; a baseline
+    entry whose site no longer matches also fails, so a drained exemption
+    cannot rot into a permanent one.
+    """
+    repo_root = _repo_root()
+    findings = _state_roots_findings(repo_root)
+    baseline = _read_state_roots_baseline(repo_root)
+
+    new = sorted(set(findings) - baseline)
+    stale = sorted(baseline - set(findings))
+
+    if new:
+        typer.echo("state-roots: new violations:", err=True)
+        for entry in new:
+            typer.echo(f"  {findings[entry]}", err=True)
+    if stale:
+        typer.echo("state-roots: fixed, remove these baseline lines:", err=True)
+        for rule, rel, key in stale:
+            typer.echo(
+                f"  {rel}\t{key}\t(rule {rule}) no longer matches - delete this line "
+                f"from {STATE_ROOTS_BASELINE}. A drained exemption left in the "
+                "baseline is a permanent one.",
+                err=True,
+            )
+    if new or stale:
+        raise typer.Exit(1)
+    typer.echo(
+        f"state-roots: ok ({len(baseline)} baselined site(s) awaiting their owning node)"
+    )
+
+
+def _dump_state_roots_baseline(repo_root: Path) -> str:
+    """Data lines only, for seeding the ratchet."""
+    return "\n".join(
+        sorted(
+            f"{rule}\t{rel}\t{key}\tunowned\tseeded from the measured census"
+            for rule, rel, key in _state_roots_findings(repo_root)
+        )
+    )
+
 
 
 def flock_pattern(dispatch_path: Optional[Path] = None) -> None:
