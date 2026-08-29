@@ -203,6 +203,16 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_harness_capabilities_fresh.sh
 
+      - name: Events limits table fresh (generated from schema.yaml, not hand-edited)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash scripts/ci/check-events-limits-fresh.sh
+
+      - name: Run events-limits freshness test harness
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: bash tests/ci/test_check_events_limits_fresh.sh
+
       - name: Cargo rustc-wrapper announces its path
         if: ${{ !cancelled() }}
         timeout-minutes: 5

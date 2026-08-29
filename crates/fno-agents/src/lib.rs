@@ -66,6 +66,7 @@ pub mod digest;
 pub mod drift;
 pub mod envelope;
 pub mod events;
+pub mod events_limits;
 pub mod finalize;
 pub mod gc;
 pub mod gemini_ask;
@@ -450,6 +451,69 @@ mod tests {
     // schema enum and the cross-language parity gate, so a new `.emit("foo")`
     // whose kind was never added to the constant would silently drift those
     // surfaces. This test scans every production call site and fails on drift.
+
+    // ── fire the registry check HERE, not only in CI ──────────────────────
+    // `KNOWN_EVENT_KINDS` and `schema.yaml` cannot be generated from each
+    // other: the YAML entry carries description/sources/data/consumers the
+    // const does not have, and the two sets are a deliberate partition. So
+    // this one stays a check; what changes is WHERE it fires. Step 6 of
+    // scripts/check-event-schema-parity.sh needs a built binary and WARNs
+    // when it is absent, so a missing entry surfaced only after a push, which
+    // cost a CI cycle. A unit test costs nothing and fires on the dev machine.
+    #[test]
+    fn known_event_kinds_documented_in_schema_yaml() {
+        use std::collections::BTreeSet;
+
+        let Some(root) = repo_root_for_test() else {
+            return;
+        };
+        let schema_path = root.join("cli/src/fno/events/schema.yaml");
+        if !schema_path.is_file() {
+            // The crates.io tarball case, and only that case: no `cli/` tree
+            // to read. A parse failure below is NOT swallowed the same way.
+            return;
+        }
+        let text = std::fs::read_to_string(&schema_path).expect("read schema.yaml");
+        let parsed: serde_yaml_ng::Value =
+            serde_yaml_ng::from_str(&text).expect("schema.yaml must parse");
+        let documented: BTreeSet<&str> = parsed["event_types"]
+            .as_sequence()
+            .expect("schema.yaml must carry an event_types sequence")
+            .iter()
+            .filter_map(|entry| entry["name"].as_str())
+            .collect();
+
+        let missing: Vec<&str> = KNOWN_EVENT_KINDS
+            .iter()
+            .copied()
+            .filter(|kind| !documented.contains(kind))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "KNOWN_EVENT_KINDS entries missing from cli/src/fno/events/schema.yaml: {}\n\
+             Add an event_types entry for each, or drop the kind from the registry.",
+            missing.join(", ")
+        );
+    }
+
+    /// Repo root for a test that reads across the tree, or `None` off a checkout.
+    fn repo_root_for_test() -> Option<std::path::PathBuf> {
+        let out = std::process::Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let top = String::from_utf8(out.stdout).ok()?;
+        let top = top.trim();
+        if top.is_empty() {
+            None
+        } else {
+            Some(std::path::PathBuf::from(top))
+        }
+    }
 
     #[test]
     fn every_production_emit_kind_is_registered() {
@@ -930,6 +994,15 @@ pub fn emit_schema_json() -> serde_json::Value {
             },
             "additionalProperties": false
         },
-        "event_kinds": KNOWN_EVENT_KINDS
+        "event_kinds": KNOWN_EVENT_KINDS,
+        // Generated from cli/src/fno/events/schema.yaml's limits block by
+        // build.rs. Emitting it makes the value the compiled binary
+        // actually carries observable, so a regenerated file the code never
+        // reads cannot pass for a fix. The parity gate diffs only `envelope`,
+        // `status` and `event_kinds`, so this sibling key perturbs nothing.
+        "limits": {
+            "max_data_bytes": events_limits::max_data_bytes(),
+            "data_size_encoding": events_limits::data_size_encoding()
+        }
     })
 }

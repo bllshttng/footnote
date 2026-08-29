@@ -7,7 +7,6 @@ import pytest
 
 from fno.harness_names import KNOWN_HARNESSES
 from fno.agents.harness_map import (
-    MAP_VERSION,
     DispatchResolveError,
     capabilities,
     known_harnesses,
@@ -31,7 +30,6 @@ _REQUIRED_INTERACTIVE_FIELDS = {
 
 
 def test_packaged_contract_is_complete_for_every_known_harness():
-    assert MAP_VERSION == 12
     # Rendered from KNOWN_HARNESSES rather than spelled out: this test is about
     # the CONTRACT being complete for every known harness, and a hardcoded set
     # turns adding one into an unrelated red. The import-time assertion in

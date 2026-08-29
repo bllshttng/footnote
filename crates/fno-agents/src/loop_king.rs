@@ -48,6 +48,7 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Dispatches allowed per king unit before the walk parks it. The target arm
@@ -194,7 +195,23 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("{fno_id}-w{nanos}")
+    // The clock alone is not a unique key. macOS reports `SystemTime` at
+    // microsecond granularity, so two walks minted in the same tick -- in one
+    // process or in two started together -- got the SAME key, and the resume
+    // guard would then close a unit on a prior reign's verdict. The random
+    // suffix is what makes "never repeats" true; the timestamp stays because it
+    // makes the key sortable and readable.
+    let mut entropy = [0u8; 4];
+    let suffix = if getrandom::fill(&mut entropy).is_ok() {
+        u32::from_le_bytes(entropy)
+    } else {
+        // A pid is constant for the life of the process, so a pid-only fallback
+        // rebuilds the very collision above for two mints in one tick. The
+        // counter is what keeps the fallback unique in-process.
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        std::process::id() ^ SEQ.fetch_add(1, Ordering::Relaxed)
+    };
+    format!("{fno_id}-w{nanos}-{suffix:08x}")
 }
 
 /// The env var carrying [`KingQueue::walk_key`] into the dispatched session.
@@ -418,6 +435,13 @@ mod tests {
         let b = mint_walk_key("k-1");
         assert!(a.starts_with("k-1-w"), "the key names its crown: {a}");
         assert_ne!(a, b, "two invocations must never share a key");
+
+        // Two mints only catch a timestamp-only key when the clock happens to
+        // tick between them, which is how this test passed for a build that
+        // could collide. A tight batch cannot get that luck.
+        let batch: std::collections::BTreeSet<String> =
+            (0..1000).map(|_| mint_walk_key("k-1")).collect();
+        assert_eq!(batch.len(), 1000, "1000 mints must produce 1000 keys");
     }
 
     #[test]

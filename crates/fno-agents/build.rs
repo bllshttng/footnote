@@ -13,9 +13,16 @@
 //! in the crate compiles even when git is unavailable -- e.g. a crates.io
 //! tarball build, where there is no `.git` (the crate is `publish = true`).
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    // Produce the cross-tree copies instead of checking them. Both
+    // run before the env-var work so a build that later fails still leaves the
+    // copies fresh.
+    sync_harness_capabilities();
+    sync_events_limits();
+
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     let dirty = git_dirty();
     // The crates/ subtree rev (last commit touching crates/) is the rev `fno
@@ -94,6 +101,115 @@ fn git_crates_rev() -> Option<String> {
     } else {
         Some(rev)
     }
+}
+
+/// Repo root as a path, or `None` when git is unavailable (crates.io tarball).
+fn repo_root() -> Option<PathBuf> {
+    let top = run("git", &["rev-parse", "--show-toplevel"])?;
+    let top = top.trim();
+    if top.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(top))
+    }
+}
+
+/// Write `bytes` to `path` only when they differ from what is already there.
+///
+/// An unconditional write restamps the mtime on every build, which makes cargo
+/// re-run downstream work forever. Write-on-difference converges.
+fn write_if_different(path: &Path, bytes: &[u8]) {
+    if let Ok(existing) = std::fs::read(path) {
+        if existing == bytes {
+            return;
+        }
+    }
+    if let Err(err) = std::fs::write(path, bytes) {
+        println!(
+            "cargo:warning=fno-agents build: could not write {}: {err}",
+            path.display()
+        );
+    }
+}
+
+/// PRODUCE the Python-side copy of the capability table instead of checking it.
+///
+/// `harness_capabilities.rs` `include_str!`s the canonical TOML, so the Rust
+/// tree owns it; `cli/src/fno/agents/harness_capabilities.toml` is a byte copy
+/// loaded as Python package data. The developer who edits the canonical is the
+/// developer who builds this crate, so the sync happens where the edit happens
+/// and silent drift is impossible. `scripts/ci/check-harness-capabilities-fresh.sh`
+/// stays only as a tripwire for a copy edited by hand.
+///
+/// No-op when `cli/` is absent: that is the `cargo package` / crates.io tarball
+/// case, where the crate must still build (`publish = true`).
+fn sync_harness_capabilities() {
+    println!("cargo:rerun-if-changed=src/harness_capabilities.toml");
+    let canonical = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
+    let Ok(bytes) = std::fs::read(&canonical) else {
+        return;
+    };
+    let Some(root) = repo_root() else { return };
+    let copy = root.join("cli/src/fno/agents/harness_capabilities.toml");
+    if !copy.is_file() {
+        return;
+    }
+    write_if_different(&copy, &bytes);
+}
+
+/// PRODUCE `src/events_limits.toml` from the Python-owned event schema.
+///
+/// `cli/src/fno/events/schema.yaml` is canonical and Python reads its `limits`
+/// block at runtime. Rust used to MIRROR the two scalars as literals in
+/// `verify_evidence.rs`, linked only by a comment; you cannot generate from a
+/// comment. Now the build renders the block into a tracked TOML sibling that
+/// `events_limits.rs` `include_str!`s, so the committed file is what a
+/// crates.io build compiles against and the link is a real dependency edge.
+///
+/// No-op when the schema is absent (tarball case) and on any parse failure: the
+/// committed file is then the value, and `scripts/ci/check-events-limits-fresh.sh`
+/// is the tripwire against a hand edit.
+fn sync_events_limits() {
+    let generated = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/events_limits.toml");
+    let Some(root) = repo_root() else { return };
+    let schema = root.join("cli/src/fno/events/schema.yaml");
+    if !schema.is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={}", schema.display());
+    let Ok(text) = std::fs::read_to_string(&schema) else {
+        return;
+    };
+    let parsed: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&text) {
+        Ok(value) => value,
+        Err(err) => {
+            println!("cargo:warning=fno-agents build: schema.yaml did not parse: {err}");
+            return;
+        }
+    };
+    let limits = &parsed["limits"];
+    let (Some(max_data_bytes), Some(encoding)) = (
+        limits["max_data_bytes"].as_u64(),
+        limits["data_size_encoding"].as_str(),
+    ) else {
+        println!("cargo:warning=fno-agents build: schema.yaml limits block incomplete");
+        return;
+    };
+    write_if_different(
+        &generated,
+        render_events_limits(max_data_bytes, encoding).as_bytes(),
+    );
+}
+
+/// Render the generated `events_limits.toml` body. The CI tripwire renders the
+/// same shape from the same source, so the two can be read against each other.
+fn render_events_limits(max_data_bytes: u64, encoding: &str) -> String {
+    format!(
+        "# GENERATED by crates/fno-agents/build.rs from cli/src/fno/events/schema.yaml.\n\
+         # Do not edit. Change the limits block in schema.yaml and rebuild.\n\
+         max_data_bytes = {max_data_bytes}\n\
+         data_size_encoding = \"{encoding}\"\n"
+    )
 }
 
 /// Run a command, returning trimmed stdout on a zero exit, else `None`.

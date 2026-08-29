@@ -1048,7 +1048,7 @@ pub async fn run(cfg: StreamWorkerConfig) -> Result<(), StreamWorkerError> {
     // `lane: "stream"` distinguishes the stream-json lane, and the extra
     // exit_code/stderr_tail fields are additive. Avoids a new event kind (which
     // would need registering in KNOWN_EVENT_KINDS + events-v3.json +
-    // events-schema.yaml + the cross-language documenting test).
+    // cli/src/fno/events/schema.yaml + the cross-language documenting test).
     let _ = emitter.emit(
         "agent_exited",
         &json!({

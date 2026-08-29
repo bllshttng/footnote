@@ -20,9 +20,7 @@ use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde_json::{json, Value};
 
-// Mirrors cli/src/fno/events/schema.yaml limits.
-const MAX_RECEIPT_DATA_BYTES: usize = 65_536;
-const DATA_SIZE_ENCODING: &str = "compact-json-ascii-v1";
+use crate::events_limits;
 
 // ── shared helpers ────────────────────────────────────────────────────────────
 
@@ -402,7 +400,7 @@ fn receipt_timestamp(value: &Value) -> Option<DateTime<Utc>> {
 }
 
 fn compact_ascii_json_len(value: &Value) -> Option<usize> {
-    if DATA_SIZE_ENCODING != "compact-json-ascii-v1" {
+    if events_limits::data_size_encoding() != "compact-json-ascii-v1" {
         return None;
     }
     serde_json::to_string(value).ok().map(|encoded| {
@@ -442,7 +440,7 @@ fn valid_receipt(event: &Value) -> bool {
         return false;
     };
     if compact_ascii_json_len(data)
-        .map(|encoded_len| encoded_len > MAX_RECEIPT_DATA_BYTES)
+        .map(|encoded_len| encoded_len > events_limits::max_data_bytes())
         .unwrap_or(true)
     {
         return false;
