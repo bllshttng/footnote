@@ -3230,82 +3230,119 @@ fn is_codex_thread_row(entry: &Value) -> bool {
         && entry.get("mux").is_none_or(Value::is_null)
 }
 
-/// (x-6678) Attach to a codex thread by EXEC'ing codex's own TUI against the
-/// shared app-server daemon.
+/// (x-296f) Attach through the harness's OWN declared `interactive_attach`
+/// form, or `None` when it declares none (the caller then keeps its refusal).
 ///
-/// `None` means this is not a codex thread row and the caller should fall
-/// through to its refusal. `Some(code)` means this function owned the outcome.
+/// EXEC, never proxy: this replaces the process, so the terminal's child is
+/// the harness's own TUI and fno renders nothing. The argv is the same one the
+/// mux viewport renders from the declaration - one declaration, two doors,
+/// pinned byte-identical by `attach_argv_matches_the_mux_renderer`.
 ///
-/// One argv builder, two doors: the mux viewport's `Reach::Drive` arm runs the
-/// same command. Neither renders anything.
-fn attach_codex_thread(entry: &Value, name: &str, events_path: &Path) -> Option<i32> {
+/// The row-shape predicate (`is_codex_thread_row`) is load-bearing and kept:
+/// a declared form widens WHICH harnesses can attach, never which row shapes.
+/// A codex PANE row and a one-shot ask row refuse exactly as before.
+fn attach_via_declared_form(
+    harness: &str,
+    entry: &Value,
+    name: &str,
+    events_path: &Path,
+) -> Option<i32> {
     if !is_codex_thread_row(entry) {
         return None;
     }
-    let thread_id = entry
+    let render = |session: Option<&str>, short: Option<&str>| {
+        crate::harness_capabilities::render_session_argv_with_ids(
+            harness,
+            "interactive_attach",
+            session,
+            short,
+        )
+    };
+    // A form takes EXACTLY ONE id, and the renderer refuses the other spelling
+    // rather than ignoring it - so probe with a placeholder to learn whether
+    // this harness declares a form at all, before the row's real (possibly
+    // empty) ids can turn "declares none" and "declares one I cannot fill"
+    // into the same answer.
+    let declares =
+        render(Some("probe-session"), None).is_ok() || render(None, Some("probeid")).is_ok();
+    if !declares {
+        return None;
+    }
+    let session_id = entry
         .get("harness_session_id")
         .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())?;
-
-    // The daemon can be gone by attach time even though it was up at spawn
-    // time (the socket FILE outlives the process that served it), so ensure
-    // it here rather than trusting spawn-time health. A daemon that will not
-    // boot is a refusal naming the boot error, never a silent fallback to the
-    // rendered peek this lane exists to stop using.
-    if let Err(error) = crate::codex_inject::ensure_codex_daemon() {
+        .unwrap_or_default();
+    let short_id = entry
+        .get("short_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let argv = match render(Some(session_id), None).or_else(|_| render(None, Some(short_id))) {
+        Ok(argv) => argv,
+        Err(_) => {
+            // A thread with no turns yet has no session id recorded, and the
+            // harness resolves a session BY the rollout its first turn writes.
+            // Name that rather than handing the operator the vendor's "no
+            // rollout found for thread id" (measured 2026-08-28,
+            // codex-cli 0.149.1).
+            eprintln!(
+                "{harness} worker {} has no session id on file yet; nothing to attach to. \
+                 Follow it instead: fno agents peek {} --follow",
+                py_repr_str(name),
+                name
+            );
+            append_agents_event(
+                events_path,
+                "agent_attach_refused",
+                &[
+                    ("name", Value::String(name.to_string())),
+                    ("provider", Value::String(harness.to_string())),
+                    ("reason", Value::String("no-session-id-yet".to_string())),
+                ],
+            );
+            return Some(13);
+        }
+    };
+    if !which_on_path(&argv[0]) {
+        eprintln!("{} not on PATH", argv[0]);
+        return Some(14);
+    }
+    // A TUI needs a terminal. Without this the exec still happens and the
+    // operator gets the vendor's bare "stdin is not a terminal" with no clue
+    // which command produced it or what to do instead.
+    // SAFETY: isatty performs no I/O and only reads the descriptor's mode.
+    if unsafe { libc::isatty(libc::STDIN_FILENO) } != 1 {
         eprintln!(
-            "fno agents attach: codex app-server daemon unavailable, so there is nothing to \
-             attach to: {error}"
+            "attach needs a terminal ({harness} draws its own interface, and fno never renders \
+             one). From a script, read instead: fno agents peek {name} --follow"
         );
         append_agents_event(
             events_path,
             "agent_attach_refused",
             &[
                 ("name", Value::String(name.to_string())),
-                ("provider", Value::String("codex".to_string())),
-                (
-                    "reason",
-                    Value::String("codex-daemon-unavailable".to_string()),
-                ),
-                ("detail", Value::String(error)),
+                ("provider", Value::String(harness.to_string())),
+                ("reason", Value::String("no-tty".to_string())),
             ],
         );
         return Some(13);
     }
-    if !which_on_path("codex") {
-        eprintln!("codex CLI not on PATH");
-        return Some(14);
-    }
-
-    let argv = crate::codex_inject::codex_attach_argv(thread_id);
-    let mut command = std::process::Command::new(&argv[0]);
-    command.args(&argv[1..]);
-    // Inherit stdio so the codex TUI takes over this terminal; mirror its
-    // exit code.
-    match command.status() {
-        Ok(status) => {
-            let exit_code = status.code().unwrap_or(1);
-            append_agents_event(
-                events_path,
-                "agent_attached",
-                &[
-                    ("name", Value::String(name.to_string())),
-                    ("provider", Value::String("codex".to_string())),
-                    ("thread_id", Value::String(thread_id.to_string())),
-                    ("codex_exit", Value::from(exit_code)),
-                ],
-            );
-            Some(exit_code)
-        }
-        Err(exc) if exc.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("codex CLI not on PATH");
-            Some(14)
-        }
-        Err(exc) => {
-            eprintln!("fno agents attach: codex resume failed: {exc}");
-            Some(1)
-        }
-    }
+    append_agents_event(
+        events_path,
+        "agent_attach_exec",
+        &[
+            ("name", Value::String(name.to_string())),
+            ("provider", Value::String(harness.to_string())),
+            ("session_id", Value::String(session_id.to_string())),
+        ],
+    );
+    // Replace this process: the terminal's child is the harness itself. A
+    // failed pre-exec inside the composed script still runs the attach, which
+    // produces the more specific of the two errors in the terminal the
+    // operator is already looking at.
+    use std::os::unix::process::CommandExt;
+    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
+    Some(1)
 }
 
 /// (x-c198) Attach to a pi session by EXEC'ing pi's own TUI on the same
@@ -3545,23 +3582,30 @@ pub fn run_attach(rest: &[String], home: &AgentsHome) -> i32 {
         .unwrap_or("");
     let events_path = trace_events_path(home);
 
-    // (x-6678) A codex THREAD row execs codex's own interface on the shared
-    // app-server daemon, the same argv the mux viewport runs.
-    if harness == "codex" {
-        if let Some(code) = attach_codex_thread(entry, &name, &events_path) {
+    // (x-296f) A harness whose contract row DECLARES an interactive_attach
+    // form execs it - codex today, whatever a harness declares tomorrow -
+    // still gated on the thread-row shape. One mechanism replaces the old
+    // two: the declared `pre_exec` starts the harness's own service (codex's
+    // `app-server daemon start`) where a separate `ensure_codex_daemon`
+    // pre-flight used to refuse, and its `codex-daemon-unavailable` refusal
+    // event is gone with it. A failed daemon start still runs the attach and
+    // surfaces codex's own more specific error.
+    if harness != "claude" {
+        if let Some(code) = attach_via_declared_form(harness, entry, &name, &events_path) {
             return code;
         }
     }
 
     // (x-c198) A pi row execs pi's own TUI on the same session id, which JOINS
-    // the session its rpc lane is driving.
+    // the session its rpc lane is driving. pi declares no form (its argv
+    // carries env-dependent provider/model), so it keeps its own builder.
     if harness == "pi" {
         if let Some(code) = attach_pi_session(entry, &name, &events_path) {
             return code;
         }
     }
 
-    // Every other non-claude harness refuses attach (claude and a codex
+    // Every other non-claude harness refuses attach (claude and a declared
     // thread are the only rows with a persistent session to attach to).
     // `!= "claude"` instead of an allowlist so a provider added to the roster
     // inherits the refusal rather than falling through to a claude-shaped
@@ -4477,51 +4521,97 @@ mod tests {
         assert!(is_codex_thread_row(&nulled));
     }
 
-    /// AC19-ERR: a codex thread row whose daemon will not boot REFUSES with
-    /// the boot error. It never falls back to the rendered peek, which is the
-    /// path this lane exists to stop using, and it never returns `None` (the
-    /// "not a thread, use the refusal" answer), because that would print a
-    /// message saying codex has no persistent session when it has one.
+    /// AC11-ERR (x-296f): a codex thread row with NO session id on file
+    /// refuses by naming the missing rollout and pointing at `peek --follow`.
+    /// The vendor's bare "no rollout found for thread id" never reaches the
+    /// operator through this door. It never returns `None` (the "not a
+    /// thread, use the refusal" answer), because that would print a message
+    /// saying codex has no persistent session when the row IS a thread.
     #[test]
-    fn a_codex_thread_with_an_unbootable_daemon_refuses_rather_than_falling_back() {
-        let _guard = crate::PATH_TEST_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // A CODEX_HOME with no daemon state and no `codex` reachable to boot
-        // one: ensure_codex_daemon cannot succeed.
-        let home = std::env::temp_dir().join(format!("fno-x6678-noboot-{}", std::process::id()));
+    fn a_codex_thread_row_with_no_session_id_refuses_naming_the_rollout() {
+        let home = std::env::temp_dir().join(format!("fno-x296f-nosess-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
-        let saved_home = std::env::var_os("CODEX_HOME");
-        let saved_path = std::env::var_os("PATH");
-        std::env::set_var("CODEX_HOME", &home);
-        std::env::set_var("PATH", "/nonexistent-x6678");
+        let events = home.join("events.jsonl");
+        let entry = json!({
+            "name": "cx", "harness": "codex", "cwd": "/w",
+            "host_mode": "interactive", "short_id": "",
+        });
 
+        let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
+
+        assert_eq!(outcome, Some(13));
+        let log = std::fs::read_to_string(&events).unwrap_or_default();
+        assert!(
+            log.contains("no-session-id-yet"),
+            "the refusal must name its own reason in the event log: {log}"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// AC11-ERR (x-296f): the same attach with stdin not a terminal refuses
+    /// by naming the terminal requirement, with its own event reason - not
+    /// the vendor's bare "stdin is not a terminal" with no clue which command
+    /// produced it.
+    #[test]
+    fn a_codex_thread_attach_without_a_tty_refuses_naming_the_terminal() {
+        // cargo test runs with stdin detached, so the isatty probe is false
+        // here by construction; the exec path is unreachable in this suite.
+        let home = std::env::temp_dir().join(format!("fno-x296f-notty-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
         let events = home.join("events.jsonl");
         let entry = json!({
             "name": "cx", "harness": "codex", "cwd": "/w",
             "host_mode": "interactive", "short_id": "",
             "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
         });
-        let outcome = attach_codex_thread(&entry, "cx", &events);
 
-        match saved_home {
-            Some(value) => std::env::set_var("CODEX_HOME", value),
-            None => std::env::remove_var("CODEX_HOME"),
-        }
-        match saved_path {
-            Some(value) => std::env::set_var("PATH", value),
-            None => std::env::remove_var("PATH"),
-        }
+        let outcome = attach_via_declared_form("codex", &entry, "cx", &events);
 
-        assert_eq!(
-            outcome,
-            Some(13),
-            "an unbootable daemon is a refusal owned by this path, never a fall-through"
-        );
+        assert_eq!(outcome, Some(13));
         let log = std::fs::read_to_string(&events).unwrap_or_default();
         assert!(
-            log.contains("codex-daemon-unavailable"),
+            log.contains("\"no-tty\""),
             "the refusal must name its own reason in the event log: {log}"
+        );
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// AC12 / AC4 (x-296f): a codex row that is NOT thread-shaped answers
+    /// `None` - the caller keeps its verbatim refusal, exit code included -
+    /// and a harness that declares no form does the same whatever its shape.
+    #[test]
+    fn non_thread_rows_and_undeclaring_harnesses_fall_through_to_the_refusal() {
+        let home = std::env::temp_dir().join(format!("fno-x296f-fall-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let events = home.join("events.jsonl");
+        let thread = json!({
+            "name": "cx", "harness": "codex", "cwd": "/w",
+            "host_mode": "interactive", "short_id": "",
+            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
+        });
+
+        // A pane row: its process already has a place.
+        let mut pane = thread.clone();
+        pane["mux"] = json!({"session": "s", "pane_id": 4});
+        assert_eq!(attach_via_declared_form("codex", &pane, "cx", &events), None);
+        // A one-shot ask row: not a thread either.
+        let ask = json!({
+            "name": "cx-ask", "harness": "codex", "cwd": "/w",
+            "short_id": "",
+            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
+        });
+        assert_eq!(attach_via_declared_form("codex", &ask, "cx", &events), None);
+        // gemini declares nothing: even a thread-shaped row falls through.
+        let gm = json!({
+            "name": "gm", "harness": "gemini", "cwd": "/w",
+            "host_mode": "interactive", "short_id": "",
+            "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295",
+        });
+        assert_eq!(attach_via_declared_form("gemini", &gm, "gm", &events), None);
+        assert_eq!(
+            std::fs::read_to_string(&events).unwrap_or_default(),
+            "",
+            "a fall-through owns no outcome and emits no event"
         );
         std::fs::remove_dir_all(&home).ok();
     }

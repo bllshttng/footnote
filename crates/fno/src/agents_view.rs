@@ -186,19 +186,255 @@ pub fn pi_attach_argv(session_id: &str) -> Vec<String> {
     ]
 }
 
-/// (x-6678) The argv that opens codex's OWN interface on `thread_id`.
+/// (x-296f) The `interactive_attach` argv a harness declares, parsed once from
+/// the capability contract this binary embeds.
 ///
-/// An EXEC target, never a proxy. The viewport replaces a pane with a real
-/// `codex` process and draws nothing itself; anything that read frames here
-/// and painted them would rebuild the rendering layer this lane deleted.
-pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
-    vec![
-        "codex".to_string(),
-        "resume".to_string(),
-        thread_id.to_string(),
-        "--remote".to_string(),
-        format!("unix://{}", codex_app_server_socket_path().display()),
-    ]
+/// The attach form is the ONE place a harness says "here is the command that
+/// opens my own interface on a session." fno renders it and execs it; it never
+/// draws that interface itself. Adding an attach-capable harness is therefore
+/// a contract edit, not a code edit here - which is the shape law d-dbf83820
+/// asks for and the shape a `harness == "claude"` gate quietly broke.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachForm {
+    pub tokens: Vec<String>,
+    /// Which id the form substitutes: `IdKind::Short` for `{short_id}`,
+    /// `IdKind::Session` for `{session_id}`. The contract requires exactly one
+    /// of them on a supported form.
+    pub id_kind: IdKind,
+    /// A command to run before the attach, for a harness whose attach needs a
+    /// service up first (codex: `codex app-server daemon start`). Empty for a
+    /// harness that needs nothing.
+    pub pre_exec: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdKind {
+    Short,
+    Session,
+}
+
+impl AttachForm {
+    /// The form's tokens with its id placeholder filled.
+    ///
+    /// With a `pre_exec`, the result is `sh -c '<pre_exec>; exec <attach>'`.
+    /// Three properties that shape matters for: the `exec` replaces the shell,
+    /// so the pane's child is the harness itself and no fno process sits
+    /// between the terminal and it; a `;` rather than `&&` means a failed
+    /// pre-exec still lets the attach run and produce its OWN named error,
+    /// which is the more specific of the two; and both errors land in the pane
+    /// the operator is already looking at. Same `sh -c ... exec` idiom
+    /// [`crate::server::locate_argv`] already uses.
+    pub fn render(&self, id: &str) -> Vec<String> {
+        let placeholder = match self.id_kind {
+            IdKind::Short => "{short_id}",
+            IdKind::Session => "{session_id}",
+        };
+        let attach: Vec<String> = self
+            .tokens
+            .iter()
+            .map(|token| {
+                if token == placeholder {
+                    id.to_string()
+                } else {
+                    token.clone()
+                }
+            })
+            .collect();
+        if self.pre_exec.is_empty() {
+            return attach;
+        }
+        let script = format!(
+            "{}; exec {}",
+            shell_join(&self.pre_exec),
+            shell_join(&attach)
+        );
+        vec!["sh".to_string(), "-c".to_string(), script]
+    }
+}
+
+/// Single-quote each token for `sh -c`. Every token here comes from the
+/// capability contract or a session id, but quoting is the property that keeps
+/// that true of a contract someone edits later.
+fn shell_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// The bundled capability contract. `fno` does not link `fno-agents` (it shells
+/// the binary), so the table is embedded rather than called for. The two TOML
+/// copies are byte-identical (`check-harness-capabilities-fresh.sh`), so either
+/// embeds the same words.
+const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
+
+/// The attach form `harness` declares, or `None` when it declares none.
+///
+/// Two sources, config first: `[harness.<name>.attach]` in
+/// `$PWD/.fno/config.toml`, else the global `config.toml`, else the bundled
+/// capability contract. That order is the point - it is what lets an operator
+/// teach fno a harness, or CORRECT a bundled form that is wrong, without a
+/// release. The bundled table is measured facts, and measured facts go stale
+/// when a vendor ships (x-244c records places where it already understates
+/// agy's real CLI with nobody able to fix it).
+///
+/// ```toml
+/// [harness.openclaw.attach]
+/// tokens   = ["openclaw", "resume", "{session_id}"]
+/// pre_exec = ["openclaw", "daemon", "start"]   # optional
+/// ```
+///
+/// An unknown harness, an `unsupported` form, and a malformed one all read as
+/// "cannot attach" - a row that cannot be driven falls to Follow or Locate,
+/// which is the safe direction. Read once per process: a config edit takes
+/// effect at the next mux server start.
+///
+/// The merge is ONE `insert` per harness over the map the bundled contract
+/// produced. That placement is load-bearing beyond this lane: a general
+/// per-field override (x-244c) widens this from the attach lane to every
+/// capability field by moving the same merge up a level, not by growing a
+/// second reader beside it.
+pub fn attach_form(harness: &str) -> Option<AttachForm> {
+    static FORMS: std::sync::OnceLock<toml::map::Map<String, toml::Value>> =
+        std::sync::OnceLock::new();
+    let forms = FORMS.get_or_init(|| {
+        // name -> the harness's `interactive_attach` block. The bundled
+        // contract's rows live under `harness.<name>.resume_strategy.forms`;
+        // config overrides use the shallower `harness.<name>.attach`. Both
+        // land in this map as the same shape, so ONE parse path serves both
+        // sources and ONE `insert` is the whole merge.
+        let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
+            caps.get("resume_strategy")?
+                .get("forms")?
+                .get("interactive_attach")
+                .cloned()
+        };
+        let mut forms: toml::map::Map<String, toml::Value> = toml::from_str::<toml::Value>(
+            CAPABILITY_TOML,
+        )
+        .ok()
+        .and_then(|v| {
+            let harnesses = v.get("harness")?.as_table()?.clone();
+            let mut out = toml::map::Map::new();
+            for (name, caps) in &harnesses {
+                if let Some(block) = bundled_block(caps) {
+                    out.insert(name.clone(), block);
+                }
+            }
+            Some(out)
+        })
+        .unwrap_or_default();
+        // Fail-open at every layer: an unreadable file, an unparseable file, a
+        // missing `harness` table and an unparseable block each skip rather
+        // than clearing what was already there. A typo in one harness's block
+        // cannot un-attach a working harness.
+        let mut overridden: std::collections::HashSet<String> = Default::default();
+        for path in config_toml_candidates() {
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
+                continue;
+            };
+            let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
+                continue;
+            };
+            for (name, caps) in harnesses {
+                // First candidate wins per name (project-local over global),
+                // matching the loader's record precedence.
+                if overridden.contains(name) {
+                    continue;
+                }
+                let Some(block) = caps.get("attach") else {
+                    continue;
+                };
+                // A block that does not parse as an attach form is skipped, so
+                // the bundled form (or the safe "cannot attach" for an unknown
+                // name) stays; an explicit kind = "unsupported" override still
+                // lands, because that is a parsable statement.
+                if parse_attach_form(block).is_some() || is_unsupported_block(block) {
+                    forms.insert(name.clone(), block.clone());
+                    overridden.insert(name.clone());
+                }
+            }
+        }
+        forms
+    });
+    parse_attach_form(forms.get(harness)?)
+}
+
+/// Whether a block is an explicit `kind = "unsupported"` statement - the one
+/// parsable way to say "this harness cannot attach", which an override may use
+/// to retire a bundled form.
+fn is_unsupported_block(block: &toml::Value) -> bool {
+    block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
+}
+
+/// The pure half of [`attach_form`]: one attach block (contract row or config
+/// override) into a form. `None` for an unsupported or id-less block, so a
+/// block that cannot address a session is not an attach form. `kind` is
+/// optional here: a config override may carry only `tokens` and `pre_exec`.
+fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
+    if block.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
+        return None;
+    }
+    let tokens: Vec<String> = block
+        .get("tokens")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let (id_kind, placeholder) = if tokens.iter().any(|t| t == "{short_id}") {
+        (IdKind::Short, true)
+    } else if tokens.iter().any(|t| t == "{session_id}") {
+        (IdKind::Session, true)
+    } else {
+        (IdKind::Short, false)
+    };
+    if !placeholder {
+        return None;
+    }
+    let pre_exec: Vec<String> = block
+        .get("pre_exec")
+        .and_then(|p| p.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(AttachForm {
+        tokens,
+        id_kind,
+        pre_exec,
+    })
+}
+
+/// The config files an override layer reads, project-local FIRST then global:
+/// `$PWD/.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling
+/// `config.toml`, else `~/.fno/config.toml`. The same precedence every other
+/// config reader in this file uses.
+fn config_toml_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(pwd) = std::env::var_os("PWD")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        candidates.push(pwd.join(".fno").join("config.toml"));
+    }
+    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(|v| PathBuf::from(v).with_file_name("config.toml"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".fno").join("config.toml"))
+        });
+    if let Some(g) = global {
+        candidates.push(g);
+    }
+    candidates
 }
 
 /// (x-07c2) The dedicated thread-pane tier for a row, from capability only:
@@ -1510,34 +1746,31 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             .or_else(|| row.get("provider"))
             .and_then(|v| v.as_str());
         let is_claude = harness_name == Some("claude");
-        // (x-6678) A codex THREAD row's attach target is its thread id on the
-        // shared app-server daemon, which `codex resume --remote` opens.
-        // Mirrors `is_codex_thread_entry` in the daemon: interactive host
-        // mode, no claude short id, and no pane of its own. A codex PANE row
-        // is excluded on the `mux` clause and keeps navigating to its tab,
-        // where its process already lives.
+        // (x-296f) The ROW-SHAPE half of the old is_codex_thread gate, kept
+        // verbatim and un-gated by harness name. Only a THREAD row may take a
+        // session-id attach target: interactive host mode, no claude short id,
+        // and no pane of its own. A codex PANE row is excluded on the `mux`
+        // clause and keeps navigating to its tab, where its process already
+        // lives; a one-shot ask row (host_mode exec) names a FINISHED exchange
+        // and gains nothing drivable. A declared form widens WHICH harnesses
+        // can attach, never which row shapes.
         //
-        // This is per-harness derivation, not a second harness-name gate:
-        // `thread_reach` still asks only whether an attach form resolved, and
-        // a harness with none (agy, opencode, gemini) yields `None` here and
-        // keeps the tier it has.
-        let is_codex_thread = harness_name == Some("codex")
-            && row
-                .get("host_mode")
-                .and_then(|v| v.as_str())
-                .unwrap_or("exec")
-                == "interactive"
+        // A PRESENT mux key means pane-hosted, whether or not it parses
+        // into a (session, pane_id) pair. `mux` above is the parsed form,
+        // and a half-written `{"session": "s"}` parses to None there; a
+        // row is not promoted to a drivable thread by a malformed field.
+        // The CLI verb's `is_codex_thread_row` reads the raw key the same
+        // way, so both doors answer alike.
+        let is_thread_shape = row
+            .get("host_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("exec")
+            == "interactive"
             && row
                 .get("short_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .is_empty()
-            // A PRESENT mux key means pane-hosted, whether or not it parses
-            // into a (session, pane_id) pair. `mux` above is the parsed form,
-            // and a half-written `{"session": "s"}` parses to None there; a
-            // row is not promoted to a drivable thread by a malformed field.
-            // The CLI verb's `is_codex_thread_row` reads the raw key the same
-            // way, so both doors answer alike.
             && row.get("mux").is_none_or(serde_json::Value::is_null);
         // (x-c198) A pi THREAD row's attach target is its caller-assigned
         // session id, which a plain `pi --session-id <id>` JOINS. Same
@@ -1564,19 +1797,42 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 .unwrap_or("exec")
                 == "interactive"
             && row.get("mux").is_none_or(serde_json::Value::is_null);
-        let attach_id = if is_claude {
-            row.get("short_id")
-                .or_else(|| row.get("claude_short_id"))
+        // (x-296f) The attach target, keyed on the harness's DECLARED attach
+        // form rather than on its name. Which id to read follows the form: a
+        // short jobId where the command takes one (claude, `short_id` since
+        // v9, legacy `claude_short_id` tolerated), the full session id where a
+        // short one would collide (codex, gated on the row-shape predicate
+        // above). A harness declaring no form keeps whatever tier it had -
+        // `thread_reach` still asks only whether an attach id resolved, and a
+        // harness with none (agy, opencode, gemini) yields `None` here.
+        let attach_id = match harness_name.and_then(attach_form) {
+            Some(form) => match form.id_kind {
+                // A short jobId is the harness's own unified identity key:
+                // claude's attach target whether or not the row is
+                // pane-hosted - the pre-declaration claude behavior, now read
+                // off the declaration instead of a name comparison.
+                IdKind::Short => row
+                    .get("short_id")
+                    .or_else(|| row.get("claude_short_id"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                // A full session id addresses a durable thread, and only a
+                // thread-shaped row may take one.
+                IdKind::Session if is_thread_shape => row
+                    .get("harness_session_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string),
+                IdKind::Session => None,
+            },
+            // Harnesses the contract does not cover keep their own arms.
+            None if is_pi_thread => row
+                .get("harness_session_id")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        } else if is_codex_thread || is_pi_thread {
-            row.get("harness_session_id")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-        } else {
-            None
+                .map(str::to_string),
+            None => None,
         };
         // (x-9c5f) The `spawn --resume` uuid for the peek `r` respawn, and the
         // transcript key for the extended table's message tail. Claude rows
@@ -2667,6 +2923,9 @@ mod tests {
                {{"name":"cx-pane","cwd":"/w","status":"live","harness":"codex",
                 "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}",
                 "mux":{{"session":"s","pane_id":4}}}},
+               {{"name":"cx-bad-mux","cwd":"/w","status":"live","harness":"codex",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{uuid}",
+                "mux":{{"session":"s"}}}},
                {{"name":"cx-exec","cwd":"/w","status":"live","harness":"codex",
                 "short_id":"","harness_session_id":"{uuid}"}},
                {{"name":"agy-row","cwd":"/w","status":"live","harness":"agy",
@@ -2694,8 +2953,10 @@ mod tests {
 
         // A codex PANE row keeps navigating to its tab: its process already
         // has a place, and a second view of it is not what selecting the row
-        // means.
+        // means. A PRESENT mux key decides, whether or not it parses: a
+        // half-written `{"session": "s"}` is still a pane row (AC12).
         assert_eq!(get("cx-pane").attach_id, None);
+        assert_eq!(get("cx-bad-mux").attach_id, None);
         // A one-shot exec codex row is not a thread either.
         assert_eq!(get("cx-exec").attach_id, None);
 
@@ -2712,26 +2973,94 @@ mod tests {
         assert_eq!(reach("gm-row"), Reach::Locate);
     }
 
-    /// AC14-HP, AC16-EDGE (x-6678): the codex attach argv execs codex's own
-    /// resume verb against the shared control socket, and honours a relocated
-    /// `CODEX_HOME` instead of hardcoding `~/.codex`.
+    /// AC14-HP, AC16-EDGE (x-6678, x-296f): the viewport renders codex's
+    /// attach from the DECLARATION, not from a hand-built argv. The declared
+    /// form carries a bare `unix://`, so codex resolves `CODEX_HOME` itself
+    /// and fno keeps no socket-path builder to drift against a relocated
+    /// `CODEX_HOME`.
     #[test]
-    fn codex_attach_argv_execs_resume_against_the_control_socket() {
-        let argv = super::codex_attach_argv("01a04546-28b2-7a41-ae4c-892bbeb8e295");
-        assert_eq!(
-            argv[..4],
-            [
-                "codex".to_string(),
-                "resume".to_string(),
-                "01a04546-28b2-7a41-ae4c-892bbeb8e295".to_string(),
-                "--remote".to_string(),
-            ]
+    fn codex_attach_renders_from_the_declaration_with_no_local_socket_builder() {
+        let form = attach_form("codex").expect("codex declares an attach form");
+        let argv = form.render("01a04546-28b2-7a41-ae4c-892bbeb8e295");
+        // Action, then assertion: the daemon pre-exec, then the exec'd TUI.
+        let script = argv.get(2).map(String::as_str).expect("sh -c script");
+        assert!(script.contains("'codex' 'app-server' 'daemon' 'start'"), "{script}");
+        assert!(script.contains("; exec 'codex' 'resume'"), "{script}");
+        assert!(
+            script.contains("'--remote' 'unix://'"),
+            "the bare unix:// leaves CODEX_HOME to codex: {script}"
         );
-        assert_eq!(
-            argv[4],
-            format!("unix://{}", super::codex_app_server_socket_path().display())
+        assert!(
+            !script.contains(".sock"),
+            "fno builds no socket path of its own: {script}"
         );
-        assert_eq!(argv.len(), 5, "the argv is the exec target, nothing more");
+    }
+
+    /// AC5-ERR (x-296f): a malformed attach block is not an attach form, and
+    /// an explicit `kind = "unsupported"` statement is - the two shapes an
+    /// override layer must tell apart so a typo skips a block while a
+    /// deliberate retirement lands.
+    #[test]
+    fn parse_attach_form_refuses_malformed_and_honors_explicit_unsupported() {
+        let idless: toml::Value =
+            toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
+        assert!(parse_attach_form(&idless).is_none(), "an id-less block is not one");
+        let unsupported: toml::Value = toml::from_str(
+            r#"kind = "unsupported"
+tokens = []"#,
+        )
+        .unwrap();
+        assert!(parse_attach_form(&unsupported).is_none());
+        assert!(is_unsupported_block(&unsupported));
+        assert!(!is_unsupported_block(&idless));
+    }
+
+    /// AC1-HP (x-296f), config half: a harness fno has never heard of, declared
+    /// ONLY as a `[harness.<name>.attach]` block, parses into a working form.
+    /// With the id substituted, it renders `sh -c '<pre>; exec <attach>'` and
+    /// reaches Drive - the no-Rust-change path, proven at the pure layer.
+    #[test]
+    fn a_config_declared_harness_parses_into_an_attach_form() {
+        let declared: toml::Value = toml::from_str(
+            r#"
+            tokens   = ["openclaw", "resume", "{session_id}"]
+            pre_exec = ["openclaw", "daemon", "start"]
+        "#,
+        )
+        .unwrap();
+        let form = parse_attach_form(&declared).expect("a config form parses");
+        assert_eq!(form.id_kind, IdKind::Session);
+        assert_eq!(form.pre_exec, ["openclaw", "daemon", "start"]);
+        let rendered = form.render("sess-1");
+        assert_eq!(rendered.first().map(String::as_str), Some("sh"));
+        assert!(rendered
+            .join(" ")
+            .contains("; exec 'openclaw' 'resume' 'sess-1'"));
+
+        // No pre_exec: the argv is the bare command, no shell in the way.
+        let bare: toml::Value =
+            toml::from_str(r#"tokens = ["openclaw", "attach", "{short_id}"]"#).unwrap();
+        let form = parse_attach_form(&bare).unwrap();
+        assert_eq!(form.id_kind, IdKind::Short);
+        assert_eq!(form.render("ab12"), ["openclaw", "attach", "ab12"]);
+
+        // A form that names no id cannot address a session, so it is not one.
+        let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
+        assert!(parse_attach_form(&idless).is_none());
+    }
+
+    /// The override layer's candidate order: project-local first, then a
+    /// different global path - the same precedence every other config reader
+    /// in this file uses.
+    #[test]
+    fn config_candidates_put_the_project_local_file_first() {
+        let candidates = config_toml_candidates();
+        assert!(
+            candidates.len() >= 2,
+            "a project-local and a global candidate: {candidates:?}"
+        );
+        assert!(candidates[0].ends_with(".fno/config.toml"));
+        assert!(candidates[0] != candidates[1]);
     }
 
     #[test]
@@ -4357,19 +4686,24 @@ config_dir = "~/.claude-alt"
         );
     }
 
-    /// The Drive tier rides attach_id presence, and attach_id derives only
-    /// for the harness whose interactive_attach form is supported. Pin BOTH
-    /// halves against the capability contract so a new attach-capable
-    /// harness cannot silently stay Drive-blind.
+    /// (x-296f) Every attach-capable harness in the contract reaches Drive.
+    ///
+    /// This inverts the guard it replaces, which asserted the attach-capable
+    /// set was exactly `["claude"]` and fired the moment codex declared a
+    /// form. That guard was right about the coupling and wrong about the fix:
+    /// the answer is not to add a second harness name in two more places, it
+    /// is for `attach_form` to be the ONE reader of the declaration. So the
+    /// assertion is now a property - declare a form, get a Drive row - and a
+    /// harness added next passes it without touching this file.
     #[test]
-    fn drive_tier_rides_the_only_interactive_attach_harness() {
+    fn every_attach_capable_harness_reaches_drive() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../cli/src/fno/agents/harness_capabilities.toml");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
         let harness = caps.get("harness").expect("harness table");
-        let attach_capable: Vec<&str> = harness
+        let declared: Vec<String> = harness
             .as_table()
             .expect("harness table")
             .keys()
@@ -4385,13 +4719,67 @@ config_dir = "~/.claude-alt"
                 node.and_then(|k| k.as_str())
                     .is_some_and(|k| k != "unsupported")
             })
-            .map(|h| h.as_str())
+            .cloned()
             .collect();
-        assert_eq!(
-            attach_capable,
-            vec!["claude"],
-            "a harness beyond claude gained interactive_attach: the attach_id \
-             gate in derive_rows and the Drive tier must learn it together"
+        assert!(
+            declared.contains(&"claude".to_string())
+                && declared.contains(&"codex".to_string()),
+            "claude and codex both declare an attach form: {declared:?}"
         );
+
+        for name in &declared {
+            let form = attach_form(name)
+                .unwrap_or_else(|| panic!("{name} declares an attach form the reader cannot parse"));
+            let rendered = form.render("ID-UNDER-TEST");
+            let flat = rendered.join(" ");
+            assert!(
+                flat.contains("ID-UNDER-TEST"),
+                "{name}'s attach argv must substitute its id: {rendered:?}"
+            );
+            assert!(
+                !flat.contains('{'),
+                "{name}'s attach argv left a placeholder unrendered: {rendered:?}"
+            );
+            // EXEC, never proxy. A pre_exec form wraps in `sh -c`, and the
+            // attach must be `exec`d so the pane's child is the harness
+            // itself with no fno process between the terminal and it. A shape
+            // that merely RUNS the attach after the pre-exec would leave the
+            // shell as the pane's child and is refused here.
+            if !form.pre_exec.is_empty() {
+                assert_eq!(rendered.first().map(String::as_str), Some("sh"));
+                assert!(
+                    flat.contains("; exec "),
+                    "{name}'s pre_exec form must exec the attach: {rendered:?}"
+                );
+            }
+
+            // A live row on this harness, carrying the id its form takes,
+            // must arrive at Drive. The row shape is the one a Session-kind
+            // form gates on (interactive, no short id, no pane); a Short-kind
+            // row needs none of that.
+            let id_field = match form.id_kind {
+                IdKind::Short => "short_id",
+                IdKind::Session => "harness_session_id",
+            };
+            let raw = format!(
+                r#"{{"agents":[{{"name":"w","cwd":"/tmp","harness":"{name}","{id_field}":"abcd1234","status":"live","host_mode":"interactive","mux":null}}]}}"#
+            );
+            let rows = derive_rows(&raw, 0)
+                .unwrap_or_else(|| panic!("{name} registry fixture parses"));
+            let row = rows.first().unwrap_or_else(|| panic!("{name} row derived"));
+            assert_eq!(
+                row.attach_id.as_deref(),
+                Some("abcd1234"),
+                "{name} declares an attach form, so its row must carry an attach id"
+            );
+            assert_eq!(
+                thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+                Reach::Drive,
+                "{name} carries an attach id, so its thread row must reach Drive"
+            );
+        }
+
+        // A harness that declares none stays where it was.
+        assert!(attach_form("gemini").is_none(), "gemini declares no form");
     }
 }

@@ -16,9 +16,9 @@
 //!
 //! # The rule this module must keep
 //!
-//! fno never renders a harness interface. Viewing a thread is
-//! `codex resume <id> --remote unix://<socket>` EXEC'd in a pane
-//! ([`crate::codex_inject::codex_attach_argv`]); the frames read here drive
+//! fno never renders a harness interface. Viewing a thread is codex's own
+//! declared attach form (`codex resume <id> --remote unix://`, x-296f)
+//! EXEC'd in a pane; the frames read here drive
 //! turns and never paint a screen. A future change that reads frames to draw
 //! something has rebuilt the layer this lane deleted, and the process tree is
 //! how you tell: no `codex app-server` may have `fno-agents-daemon` as its

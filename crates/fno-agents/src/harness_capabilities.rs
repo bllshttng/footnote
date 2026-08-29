@@ -1139,4 +1139,35 @@ mod tests {
         assert!(err.contains("interactive_attach"), "{err}");
         assert!(err.contains("drops its attach id"), "{err}");
     }
+
+    /// AC3 (x-296f): codex's declared attach form renders action-then-assertion
+    /// (`daemon start`, then the TUI), execs so the pane's child is the
+    /// harness, and substitutes the FULL session id - a codex UUIDv7 head-8 is
+    /// a ~65.5s clock bucket and would attach the wrong sibling. Measured
+    /// 2026-08-29 against 0.149.1: session absent from `thread/loaded/list`
+    /// before the resume, present after.
+    #[test]
+    fn codex_declared_attach_renders_daemon_start_then_exec_with_full_session_id() {
+        let contract = HarnessContract::packaged().unwrap();
+        let session = "01a04ea5-a473-7872-8137-49ff3cc214e9";
+        let argv = contract
+            .render_session_argv_with_ids("codex", "interactive_attach", Some(session), None)
+            .unwrap();
+        assert_eq!(argv.first().map(String::as_str), Some("sh"));
+        let script = &argv[2];
+        // The literal "; exec " is the exec-versus-proxy property; assert the
+        // literal, not just the first token.
+        assert!(script.contains("; exec "), "{script}");
+        assert!(script.contains("'codex' 'app-server' 'daemon' 'start'"), "{script}");
+        assert!(script.contains("'--remote' 'unix://'"), "{script}");
+        assert!(script.contains(session), "the FULL session id is substituted: {script}");
+        assert!(!script.contains('{'), "no placeholder left unrendered: {script}");
+        // The short spelling is refused by name: a head-8 cannot address a
+        // codex session.
+        let err = contract
+            .render_session_argv_with_ids("codex", "interactive_attach", None, Some(&session[..8]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("session_id, not a short_id"), "{err}");
+    }
 }

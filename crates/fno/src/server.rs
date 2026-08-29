@@ -934,29 +934,28 @@ fn attach_argv(
     attach_argv_for(Some("claude"), id, account, config_dir)
 }
 
-/// (x-6678) One attach gesture's argv, keyed on the row's HARNESS.
+/// (x-296f) One attach gesture's argv, rendered from the harness's DECLARED
+/// attach form. Each harness gets its own interface, because the viewport execs
+/// that interface rather than rendering one:
 ///
-/// Each harness gets its own interface, because the viewport execs that
-/// interface rather than rendering one:
-///
-/// - claude: `claude attach <id>`, unchanged, account wrapper included.
-/// - codex: `codex resume <thread-id> --remote unix://<control-socket>`, which
-///   opens the real codex TUI on a thread the shared app-server daemon owns.
+/// - a harness whose contract row (or `[harness.<name>.attach]` config
+///   override) declares a form: that form, rendered - `claude attach <id>`,
+///   `sh -c 'codex app-server daemon start; exec codex resume <id> --remote
+///   unix://'`, and whatever a harness declares next. No account wrapper: a
+///   declared non-claude form is addressed by its own endpoint (codex's
+///   control socket via `CODEX_HOME`), and the wrapper is claude's routing.
+/// - pi, whose argv carries env-dependent `--provider`/`--model` no static
+///   form can name: its own builder (x-c198).
 ///
 /// Any other harness falls through to the claude shape, which is what every
 /// caller did before a harness was passed at all; only rows that resolved an
-/// attach id ever reach here, and outside claude only a codex thread row does.
+/// attach id ever reach here.
 fn attach_argv_for(
     harness: Option<&str>,
     id: &str,
     account: Option<&str>,
     config_dir: Option<&std::path::Path>,
 ) -> Vec<String> {
-    if harness == Some("codex") {
-        // No account wrapper: a codex thread is addressed by the control
-        // socket, and `CODEX_HOME` already decides which socket that is.
-        return agents_view::codex_attach_argv(id);
-    }
     if harness == Some("pi") {
         // (x-c198) No account wrapper and no socket: a pi session is addressed
         // by the pair (cwd, session id), and the attach pane already spawns in
@@ -965,8 +964,15 @@ fn attach_argv_for(
         // the same id.
         return agents_view::pi_attach_argv(id);
     }
-    let base = attach_base(id);
-    let Some(dir) = config_dir else {
+    let base = match harness.and_then(agents_view::attach_form) {
+        Some(form) => form.render(id),
+        None => attach_base(id),
+    };
+    // The account wrapper is claude's routing, not a general one: it points a
+    // claude attach at the right ~/.claude daemon. A harness carrying a
+    // config_dir must not inherit a CLAUDE_CONFIG_DIR prefix.
+    let dir = config_dir.filter(|_| harness.is_none_or(|h| h == "claude"));
+    let Some(dir) = dir else {
         return base;
     };
     let mut wrapped = vec![
@@ -14888,9 +14894,10 @@ mod tests {
         );
     }
 
-    /// AC14-HP, AC15-HP (x-6678): the argv builder is keyed on the row's
-    /// HARNESS. A codex thread execs codex's own TUI; claude is byte-identical
-    /// to what it was, account wrapper included.
+    /// AC14-HP, AC15-HP (x-6678, x-296f): the argv builder is keyed on the
+    /// row's DECLARED attach form. A codex thread execs codex's own TUI after
+    /// its daemon pre-exec; claude is byte-identical to what it was, account
+    /// wrapper included.
     #[test]
     fn attach_argv_execs_each_harness_own_interface() {
         set_attach_program(&["claude", "attach"]);
@@ -14912,16 +14919,19 @@ mod tests {
             attach_argv("job1", None, None)
         );
 
-        // AC14: codex. No account wrapper - the control socket, and therefore
-        // CODEX_HOME, is what decides which daemon this reaches.
+        // AC14: codex, rendered from the declaration. No account wrapper - the
+        // control socket, and therefore CODEX_HOME, is what decides which
+        // daemon this reaches; a non-claude harness carrying a config_dir must
+        // not inherit a CLAUDE_CONFIG_DIR prefix.
         let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
+        let form = agents_view::attach_form("codex").expect("codex declares an attach form");
         assert_eq!(
             attach_argv_for(Some("codex"), uuid, Some("readyrule"), Some(dir)),
-            agents_view::codex_attach_argv(uuid)
+            form.render(uuid)
         );
         assert_eq!(
-            agents_view::codex_attach_argv(uuid)[..2],
-            ["codex".to_string(), "resume".to_string()]
+            form.render(uuid)[..2],
+            ["sh".to_string(), "-c".to_string()]
         );
     }
 

@@ -487,6 +487,47 @@ def test_attach_missing_agent_exit2(tmp_path) -> None:
     assert rust.returncode == 2
 
 
+@requires_rust
+def test_attach_codex_thread_headless_names_the_terminal_not_one_shot(tmp_path) -> None:
+    # A codex THREAD row (x-6678 shape: interactive, no short id, no mux) left
+    # the one-shot refusal when its attach form was declared (x-296f). This
+    # run is headless, so the door refuses naming the terminal requirement -
+    # never the vendor's bare "stdin is not a terminal", and never "one-shot",
+    # which is false for a durable thread.
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "cxt", "provider": "codex", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t",
+          "host_mode": "interactive", "harness_session_id": "01a04546-28b2-7a41-ae4c-892bbeb8e295"}],
+    )
+    rust = _run_rust(["attach", "cxt"], agents)
+    assert rust.returncode == 13
+    assert "one-shot" not in rust.stderr
+    assert "terminal" in rust.stderr
+    assert "peek cxt --follow" in rust.stderr
+
+
+@requires_rust
+def test_attach_refuses_gemini_verbatim(tmp_path) -> None:
+    # A harness that declares no attach form keeps its refusal verbatim,
+    # exit code included (AC4-ERR). gemini is the specimen: if its message
+    # ever changes, that is a deliberate edit, never drift.
+    agents = tmp_path / "agents"
+    _seed_registry(
+        agents,
+        [{"name": "gm", "provider": "gemini", "cwd": "/tmp/x", "log_path": "/x/l",
+          "short_id": "", "project_root": "/x", "status": "live", "created_at": "t"}],
+    )
+    rust = _run_rust(["attach", "gm"], agents)
+    expected = (
+        "gemini agents are one-shot; no persistent session to attach to. "
+        "Use 'fno agents logs gm --follow' for live output.\n"
+    )
+    assert rust.stderr == expected
+    assert rust.returncode == 13
+
+
 # --------------------------------------------------------------------------- #
 # logs (codex one-shot file read)
 # --------------------------------------------------------------------------- #

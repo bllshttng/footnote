@@ -239,24 +239,6 @@ pub fn ensure_codex_daemon() -> Result<crate::harness_daemon::EnsureResult, Stri
         .map_err(|error| error.to_string())
 }
 
-/// The argv that opens codex's OWN interface on `thread_id`, pointed at the
-/// shared control socket.
-///
-/// This is an EXEC target, never a proxy: the caller replaces itself with (or
-/// spawns into a pane) a real `codex` process, and fno draws nothing. Anything
-/// that reads frames here and renders them is the layer this lane exists to
-/// delete. The socket path comes from [`codex_app_server_socket_path`], so a
-/// relocated `CODEX_HOME` moves the endpoint with it.
-pub fn codex_attach_argv(thread_id: &str) -> Vec<String> {
-    vec![
-        "codex".to_string(),
-        "resume".to_string(),
-        thread_id.to_string(),
-        "--remote".to_string(),
-        format!("unix://{}", codex_app_server_socket_path().display()),
-    ]
-}
-
 /// Positive Codex app-server health: the control socket must complete the
 /// initialize handshake. Socket existence alone is deliberately insufficient.
 pub fn probe_codex_app_server(socket_path: &Path) -> bool {

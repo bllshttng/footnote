@@ -197,9 +197,30 @@ tokens = ["codex"]
 kind = "subcommand"
 tokens = ["codex", "resume", "{session_id}"]
 
+# `codex resume <id>` execs codex's OWN TUI on a thread the shared app-server
+# daemon holds. fno renders nothing.
+#
+# `pre_exec` starts the daemon and `--remote unix://` asserts that it did.
+# Measured 2026-08-29 against codex-cli 0.149.1 with the marker the vendor
+# itself produces: session 01a0398f (a rollout on disk from 2026-08-25) was
+# ABSENT from `thread/loaded/list` before the resume and PRESENT after, read
+# over an independent connection to the control socket. `unix://` with no path
+# makes codex resolve `CODEX_HOME` itself, so fno never rebuilds a socket path
+# it would only have to keep in step. A BARE `codex resume <id>` also
+# auto-attaches with the daemon up; the flag is kept because it makes the
+# daemon-down case LOUD (a named failure) where a bare resume would silently
+# run a private in-process app-server against a copy of the rollout and hand
+# back a session that looks correct. `daemon start` is a documented no-op when
+# one is already running (measured: `{"status":"alreadyRunning"}` twice in a
+# row), so the pair is cheap on every attach.
+#
+# `{session_id}`, never `{short_id}`: a codex UUIDv7 head-8 is a ~65.5s clock
+# bucket, so siblings spawned in one minute collide and a short id would
+# attach the wrong worker.
 [harness.codex.resume_strategy.forms.interactive_attach]
-kind = "unsupported"
-tokens = []
+kind = "subcommand"
+pre_exec = ["codex", "app-server", "daemon", "start"]
+tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
 
 [harness.codex.resume_strategy.forms.headless_create]
 kind = "subcommand"
