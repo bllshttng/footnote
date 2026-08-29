@@ -49,7 +49,7 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | megawalk | loop | OOTB | wrapper | wrapper | wrapper | wrapper | Recursively invokes `/target`; wrapper must recurse. |
 | megaspec | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Iterative spec refinement within single session. |
 | operator | orchestrator | OOTB | OOTB | OOTB | OOTB | OOTB | Dispatches waves through the driver's subagent primitive. Codex uses project custom agents/`spawn_agent` when available and announces a sequential fallback otherwise. |
-| target | loop | OOTB | wrapper | wrapper | wrapper | OOTB | Emits `<promise>MISSION COMPLETE</promise>`. Claude and Codex continue through native `Stop` hooks; wrapper drivers require external re-invocation. |
+| target | loop | OOTB | wrapper | wrapper | - | OOTB | Emits `<promise>MISSION COMPLETE</promise>`. Whether the loop can CLOSE on a harness is `loop_participation` in the capability table, not this column: claude, codex, and agy fire a native `Stop` hook; opencode closes through the JS plugin fno ships; gemini exposes no boundary and is refused; pi needs a TypeScript extension nobody has written and is refused. See the section below. |
 | target (plan-mode front door) | CC-only | OOTB | - | - | - | - | Native Plan Mode -> `/target` Mode 1. The capture hook fires on Claude Code's `ExitPlanMode` PostToolUse; Gemini/Codex have no such tool, so no sidecar is ever written and `/target` behaves exactly as today (no-op degradation). |
 | target (bg-dispatch `bg`) | CC-only | OOTB | - | - | - | - | `/target bg` dispatches fresh `claude --bg` workers (claude-only lane). Codex build dispatch is a separate prose-brief path through an owned-PTY `pane` or one-shot `headless` spawn; it never masquerades as `claude --bg`. |
 | setup | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Interactive wizard; single conversation. |
@@ -65,6 +65,20 @@ Skills with none of these run stateless and work OOTB on every driver that loads
 | what-if | stateless | OOTB | OOTB | OOTB | OOTB | OOTB | Scenario exploration. |
 
 Row count: every entry under `skills/` at the time of writing.
+
+## Loop participation: which harnesses can close the loop
+
+The driver columns above say whether a skill RUNS. They do not say whether a looping skill can ever STOP.
+
+That answer lives in one machine-readable field, `loop_participation` in `harness_capabilities.toml`, and `docs/harness-command-matrix.md` carries the per-harness evidence. `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation and no loop, however well the harness spawns, resumes, and receives mail.
+
+| Value | Harnesses | What a caller gets |
+|---|---|---|
+| `native` | claude, codex, agy | A shell hook fires at the lifecycle boundary and invokes `loop-check`. |
+| `extension` | opencode (shipped), pi (not written) | No shell hook. The loop closes through a harness-native plugin fno ships. |
+| `none` | gemini | No boundary at all. |
+
+The dispatch seam refuses a `/target` at gemini and at pi, naming the harness and the reason. A one-shot at either still dispatches, because the gate is scoped to the `/target` family. When you need the current answer, read the field rather than this table. The table is prose. The field is the contract.
 
 ## What each status means for the user
 

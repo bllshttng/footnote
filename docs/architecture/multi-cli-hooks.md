@@ -146,7 +146,7 @@ flowchart TD
 | `emit_block()` | `hooks/target-stop-hook.sh` | Platform-specific block/deny output |
 | `emit_allow()` | `hooks/target-stop-hook.sh` | Platform-specific allow output |
 | `session-start.sh` | `hooks/session-start.sh` | Cross-platform SessionStart wrapper |
-| `hooks-gemini.json` | `hooks/hooks-gemini.json` | Gemini CLI hook configuration |
+| (none) | (none) | Gemini CLI wires no footnote hook file. `fno config setup cli-hooks` merges one SessionStart group into `~/.gemini/settings.json` and nothing else, so gemini declares `loop_participation = "none"`. |
 | `hooks-codex.json` | `hooks/hooks-codex.json` | Codex CLI hook configuration |
 | `gemini-extension.json` | repo root | Gemini CLI extension manifest |
 | `.codex-plugin/plugin.json` | repo root | Codex CLI plugin manifest |

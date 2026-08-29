@@ -1,6 +1,6 @@
 # `fno agents`: every verb, per harness
 
-`fno agents` supports five harness CLIs: `claude`, `codex`, `gemini`, `agy` (Antigravity), and `opencode`. Each harness has different substrates, session IDs, and re-entry paths. This page explains the contract. `cli/src/fno/agents/harness_capabilities.toml` is the authoring source. Cargo packages a byte-identical Rust copy. If the copies differ, tests fail.
+`fno agents` supports six harness CLIs: `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode`, and `pi`. Each harness has different substrates, session IDs, and re-entry paths. This page explains the contract. `cli/src/fno/agents/harness_capabilities.toml` is the authoring source. Cargo packages a byte-identical Rust copy. If the copies differ, tests fail.
 
 Two runtimes serve the surface. The **Rust client** (`fno-agents`, the shipped default) intercepts most verbs; **Python** owns a handful (`whoami`, `top`, `peek`, `watch`, plus internal helpers) and is the fallback when no binary is installed (`FNO_AGENTS_RUNTIME=python`). Routing is automatic - you type `fno agents <verb>` either way. Notably, **pane spawns are Python-owned by design**: the mux-hosted back half lives in the Python `cmd_spawn` path, and the router keeps every pane spawn there even when Rust mode is requested - so the default substrate works identically under both runtimes.
 
@@ -19,6 +19,7 @@ What each harness fundamentally is, from fno's point of view:
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | `resume` (`agy --conversation <id>`; no spawn lane records the id yet, so `fno agents resume` on an agy row stops at the missing-session-id refusal) | `resume` | `attach` execs pi's own TUI on the same session id, in the row's cwd. It JOINS the live rpc session rather than starting a rival one, measured. |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) or `recover` | no | no | no | no | yes: a fresh process on the same `(cwd, session_id)` pair recalls prior context and prints no creation warning |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes | yes |
+| Loop participation (`loop_participation`) | `native`. `hooks.json` declares a `Stop` group that runs `target-stop-hook.sh`. | `native`. `codex-hooks.json` declares the same `Stop` adapter. | `none`. Nothing wires a gemini stop boundary. The only gemini hook fno installs is SessionStart. A looping dispatch is refused. | `native`. `agy-target-stop-hook.sh` translates agy's wire format over the same `loop-check`, registered as a `Stop` handler by `fno config setup`. | `extension`. opencode has no shell hook and no exit veto. The loop closes through the JS plugin fno installs, which subscribes to `session.idle` and shells the same `loop-check`. | `extension`, with no artifact yet. pi ships no shell hook surface at all; its extension points are in-process TypeScript extensions. `pi.on("agent_settled")` is the right boundary and fno has not written that extension, so a looping dispatch is refused. |
 
 The pane substrate (the default) is the great equalizer: all six harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes. pi is pane-only today, so the pane IS its lane.
 
@@ -75,6 +76,22 @@ Session binding has a separate type. Codex tries two oracles in order and waits 
 Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported. pi is `caller-assigned-cwd-scoped`, a strategy of its own. fno mints the id AND pi scopes its lookup by working directory. So the identity is the PAIR and the id alone addresses nothing. A resume from the canonical checkout cannot see a session started in a worktree. On pi that miss is not an error. It CREATES a second session under the same id. See the pi section above.
 
 Permission responses are rule-gated. Without explicit authorization, a matched permission rule reports `blocked`, never `live`. With an authorized action, fno resolves the harness-native keys. It re-reads the prompt fingerprint while it holds the pane writer claim. Then it sends only those keys and waits for the positive ready marker.
+### Loop participation
+
+`loop_participation` answers one question the rest of the table cannot: can the fno target loop CLOSE on this harness?
+
+`hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation, which means no loop, however well the harness spawns, resumes, and receives mail. A harness that takes a looping dispatch it cannot close gives you a worker with nothing to stop it. Nothing reports that.
+
+| Member | What it commits the caller to |
+|---|---|
+| `native` | A shell hook fires at the lifecycle boundary and can invoke `loop-check` today. |
+| `extension` | The harness exposes no shell hook. The loop is reachable only through a harness-native plugin fno ships, named by `loop_extension`. An empty `loop_extension` means fno ships none yet. |
+| `none` | No boundary is exposed at all. |
+
+The dispatch seam refuses a `/target` at a `none` harness, and at an `extension` harness whose artifact fno has not written. The refusal names the harness and the reason. A one-shot at the same harness still dispatches, because the gate is scoped to the `/target` family.
+
+The field replaced `stop_hook`, which read `native` on every row and had no consumer. One value across six rows is not a measurement. Each value above was read off the artifact and the wiring that reaches it, and two rows changed.
+
 ## Verbs: creating and reviving workers
 
 | Verb | claude | codex | gemini | agy | opencode | What it does |
