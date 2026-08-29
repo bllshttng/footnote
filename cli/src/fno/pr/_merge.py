@@ -820,7 +820,7 @@ def _find_pr_node_id(
 
     Returns None when nothing resolves unambiguously - a safe skip, never a guess.
     """
-    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+    from fno.graph._reconcile import repo_slug_from_url
 
     url = (pr_url or "").strip()
     if url:
