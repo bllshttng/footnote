@@ -202,6 +202,16 @@ def test_the_table_names_the_node_and_its_counts(tmp_graph):
     assert "p3" in result.output
 
 
+def test_the_row_reports_status_rather_than_a_derived_column(tmp_graph):
+    """The kanban column is derived at render time and is absent from a stored
+    entry, so reading it rendered blank on every row of the live graph."""
+    from fno.graph.demand import demand_rows
+
+    row = demand_rows([_node("zz-0001", "p2", encounters=[_enc("s1")])])[0]
+    assert row["status"] == "ready"
+    assert "column" not in row
+
+
 def test_json_output_carries_the_same_rows(tmp_graph):
     _write(
         tmp_graph,

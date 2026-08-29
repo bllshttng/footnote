@@ -86,7 +86,12 @@ def demand_rows(entries: list[dict]) -> list[dict]:
                 "pri": priority_for(entry),
                 "enc": len(sessions),
                 "dispatched": _dispatched_count(entry, sessions),
-                "column": entry.get("_kanban_column") or "",
+                # `status`, not the kanban column. The column is DERIVED at
+                # render time and is absent from a stored entry, so reading it
+                # here rendered blank on every row of the live graph. Deriving
+                # it would also mean consulting the board's column authority,
+                # which this read must not do.
+                "status": entry.get("status") or "",
                 "title": entry.get("title") or "",
             }
         )
@@ -101,11 +106,14 @@ def format_rows(rows: list[dict]) -> str:
             "no encounters recorded yet. An agent files one with "
             "`fno backlog encounter <node> --evidence \"<what it cost>\"`."
         )
-    header = f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':>3} {'dispatched':>10}  {'column':<10} title"
+    header = (
+        f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':>3} {'dispatched':>10}  "
+        f"{'status':<12} title"
+    )
     lines = [header]
     for row in rows:
         lines.append(
             f"{row['score']:>5}  {row['node']:<8} {row['pri']:<4} {row['enc']:>3} "
-            f"{row['dispatched']:>10}  {row['column']:<10} {row['title']}"
+            f"{row['dispatched']:>10}  {row['status']:<12} {row['title']}"
         )
     return "\n".join(lines)
