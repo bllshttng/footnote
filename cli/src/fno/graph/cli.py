@@ -3271,7 +3271,18 @@ def cmd_encounter(
         )
         raise typer.Exit(code=3)
 
-    total = _encounter_total(task_id)
+    # Counted inside this verb rather than in a helper. The helper was its own
+    # enclosing function, so its graph read had no verb boundary for the
+    # external-backend guard to sit on; here the read rides the guard this
+    # tracker-owned verb already carries.
+    from fno.graph._intake import _find_node
+    from fno.graph.store import read_graph
+
+    try:
+        stored = _find_node(read_graph(_graph_path()), task_id)
+        total = len(stored.get("encounters") or []) if stored else 0
+    except Exception:  # noqa: BLE001 - a receipt count must not fail a landed write
+        total = 0
     if json_output:
         typer.echo(
             json.dumps(
@@ -3305,6 +3316,19 @@ def cmd_demand(
     """
     from fno.graph.demand import demand_rows, format_rows
     from fno.graph.store import read_graph
+    from fno.tracker import active_backend_name
+
+    # An encounter is footnote-minted metadata that lives only in the graph, and
+    # `encounter` is already refused under an external backend. So refuse here
+    # too, naming the backend, rather than reading a store that is not the
+    # source of truth and reporting an empty signal as if it were measured.
+    if active_backend_name() != "graph":
+        typer.echo(
+            f"fno backlog demand: encounters live in the graph; under the "
+            f"{active_backend_name()} tracker backend there are none to read.",
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
     rows = demand_rows(read_graph(_graph_path()))
     if json_output:
@@ -3312,19 +3336,6 @@ def cmd_demand(
     else:
         typer.echo(format_rows(rows))
 
-
-def _encounter_total(task_id: str) -> int:
-    """Encounters now on the node, read back after the write."""
-    from fno.graph._intake import _find_node
-    from fno.graph.store import read_graph
-
-    try:
-        node = _find_node(read_graph(_graph_path()), task_id)
-    except Exception:  # noqa: BLE001 - a receipt count must not fail a landed write
-        return 0
-    if node is None:
-        return 0
-    return len(node.get("encounters") or [])
 
 
 @cli.command("update")

@@ -1012,14 +1012,31 @@ class WordCapBlock(BaseModel):
     One number per surface that is read MID-TURN. The surface set itself lives
     in `fno.style.CAPPED_SURFACES` and is not configurable: a project may move a
     number here, and may never cap a surface the checker says is uncapped.
+
+    Bounds come from a validator, not from `Field(80, ge=1)`. A positional
+    default plus a constraint makes mypy resolve this class's `default_factory`
+    use below as `Callable[[], Never]`, and `fno.config` is held to mypy strict.
+    `MaintainBlock` above is the same shape for the same reason.
     """
 
-    mail: int = Field(80, ge=1)
-    encounter: int = Field(80, ge=1)
+    model_config = ConfigDict(extra="ignore")
+
+    mail: int = 80
+    encounter: int = 80
+
+    @field_validator("mail", "encounter")
+    @classmethod
+    def cap_is_positive(cls, v: int) -> int:
+        """A cap below one refuses every message, including its own refusal."""
+        if v < 1:
+            raise ValueError("config.style.word_cap.<surface> must be >= 1")
+        return v
 
 
 class StyleBlock(BaseModel):
     """Style-checker numbers (nested under 'config.style')."""
+
+    model_config = ConfigDict(extra="ignore")
 
     word_cap: WordCapBlock = Field(default_factory=WordCapBlock)
     # The rolling pair budget is a WINDOW instrument, not a per-text cap, so it
@@ -1028,7 +1045,14 @@ class StyleBlock(BaseModel):
     # word_cap.mail to 200 would still be refused at the 80-word window total,
     # and the refusal would name a number the sender never set. That coupling is
     # why the budget's cap became configurable at all.
-    pair_budget_words: int = Field(80, ge=1)
+    pair_budget_words: int = 80
+
+    @field_validator("pair_budget_words")
+    @classmethod
+    def budget_is_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("config.style.pair_budget_words must be >= 1")
+        return v
 
 
 class ReviewBlock(BaseModel):
