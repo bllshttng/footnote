@@ -10258,7 +10258,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // P2 (ab-098967b4): the dominant loop-yield boundary. Enrich the continue
     // message with a one-line inbox nudge so an autonomous loop surfaces mail.
     let continue_msg = crate::nudge::append_inbox_nudge(
-        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `i=0; while [ $i -lt 30 ]; do fno do pr status <N> 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` - REST, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
+        "continue working; no completion signal. If you are only waiting on an async check (CI/review) with nothing to do, arm a harness-tracked watcher with a hard timeout (e.g. background Bash `fno do pr wait <N> --until settled --timeout=30m` - REST through the coalescing cache, 60s interval, never `gh pr checks --watch`, which spends the shared GraphQL quota; a review wait is `--until review`) and end your turn with `<watching reason=\"ci|review\" pr=\"<N>\" timeout=\"30m\">` - the session idles until the watcher exits instead of re-waking every tick.",
         &cwd,
         &session_id,
     );
@@ -10458,20 +10458,23 @@ fn short_sha(s: &str) -> String {
 fn arm_watch_hint(pr_number: i64, blocker: &str) -> String {
     // The watcher must WAIT on the actual blocker (codex P2): a review wait
     // has CI already green, so a checks watcher returns instantly and the
-    // session just re-blocks. Both recipes poll on REST at a 60s interval:
-    // `gh pr checks --watch` / `gh pr view` are GraphQL, and
-    // a fleet of 60s GraphQL watchers is exactly what exhausts the per-USER
-    // quota the merge guard needs. The CI recipe greps for the POSITIVE
-    // settled marker, never for an absence: a rate-limited read answers
-    // `settled: false`, so an exhausted window keeps the watcher waiting
-    // instead of reading as "nothing pending".
+    // session just re-blocks. Both waits are the sanctioned `fno do pr wait`
+    // verb, one plain command per wait: it polls REST at a 60s interval
+    // (`gh pr checks --watch` / `gh pr view` are GraphQL, and a fleet of 60s
+    // GraphQL watchers is exactly what exhausts the per-USER quota the merge
+    // guard needs), it greps for the POSITIVE settled marker so a
+    // rate-limited read keeps the watcher waiting instead of reading as
+    // "nothing pending", and a plain command is the one shape a
+    // worktree-isolated session's Bash guard always admits - an inline
+    // `while`/`$(...)` loop is refused as "too complex to verify", which
+    // wedged the very turn this hint was trying to unblock.
     let watcher = if blocker == "review" {
         format!(
-            "background Bash `r=$(git config --get remote.origin.url | sed -E 's#.*github.com[:/]##; s#\\.git$##'); n=$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length); i=0; while [ $i -lt 30 ]; do sleep 60; [ \"$(gh api \"repos/$r/pulls/{pr_number}/reviews?per_page=100\" --jq length)\" -gt \"$n\" ] && break; i=$((i+1)); done` (wakes when a new review posts, or after ~30m; per_page=100 because gh api fetches ONE page - at the default 30 the count saturates and a 31st review never wakes it)"
+            "background Bash `fno do pr wait {pr_number} --until review --timeout=30m` (wakes when a new review posts, or after ~30m)"
         )
     } else {
         format!(
-            "background Bash `i=0; while [ $i -lt 30 ]; do fno do pr status {pr_number} 2>/dev/null | grep -q '\"settled\": true' && break; sleep 60; i=$((i+1)); done` (wakes when CI settles - green or red - or after ~30m)"
+            "background Bash `fno do pr wait {pr_number} --until settled --timeout=30m` (wakes when CI settles - green or red - or after ~30m)"
         )
     };
     format!(
@@ -16259,10 +16262,12 @@ mod tests {
         let reason = build_block_reason(&pr, "abc", true, true);
         assert!(reason.contains("<watching"), "got: {reason}");
         assert!(reason.contains("timeout"), "got: {reason}");
-        // The taught watcher is the REST status poll, never the
-        // GraphQL `gh pr checks --watch` this assertion used to pin.
-        assert!(reason.contains("fno do pr status"), "got: {reason}");
+        // The taught watcher is the sanctioned REST wait verb, never the
+        // GraphQL `gh pr checks --watch` and never an inline loop (which a
+        // worktree session's Bash isolation refuses as too complex).
+        assert!(reason.contains("fno do pr wait"), "got: {reason}");
         assert!(!reason.contains("gh pr checks"), "got: {reason}");
+        assert!(!reason.contains("while ["), "got: {reason}");
         assert!(!reason.contains("wait silently"), "got: {reason}");
     }
 
@@ -18471,19 +18476,28 @@ git_bounded();";
     fn unwatched_async_nudge_review_uses_review_aware_watcher() {
         // codex P2: the review-wait watcher must poll REVIEW state, not
         // checks. It must also poll on REST - the GraphQL
-        // reviews read is part of what exhausts the shared quota.
+        // reviews read is part of what exhausts the shared quota. The recipes
+        // are the sanctioned `fno do pr wait` verb, one plain command: an
+        // inline `while`/`$(...)` loop is refused by Claude Code's worktree
+        // Bash isolation, so a worktree session cannot arm the watcher at all.
         let hint = arm_watch_hint(404, "review");
-        assert!(hint.contains("pulls/404/reviews"), "got: {hint}");
-        assert!(hint.contains("gh api"), "got: {hint}");
+        assert!(
+            hint.contains("fno do pr wait 404 --until review"),
+            "got: {hint}"
+        );
         assert!(!hint.contains("gh pr view"), "got: {hint}");
-        assert!(hint.contains("sleep 60"), "got: {hint}");
+        assert!(!hint.contains("while ["), "got: {hint}");
+        assert!(!hint.contains("$("), "got: {hint}");
         // The CI-wait watcher polls the REST status chokepoint for the
         // POSITIVE settled marker, never `gh pr checks --watch` (GraphQL).
         let ci_hint = arm_watch_hint(404, "ci");
-        assert!(ci_hint.contains("fno do pr status 404"), "got: {ci_hint}");
+        assert!(
+            ci_hint.contains("fno do pr wait 404 --until settled"),
+            "got: {ci_hint}"
+        );
         assert!(!ci_hint.contains("gh pr checks"), "got: {ci_hint}");
-        assert!(ci_hint.contains("'\"settled\": true'"), "got: {ci_hint}");
-        assert!(ci_hint.contains("sleep 60"), "got: {ci_hint}");
+        assert!(!ci_hint.contains("while ["), "got: {ci_hint}");
+        assert!(!ci_hint.contains("$("), "got: {ci_hint}");
     }
 
     #[test]
