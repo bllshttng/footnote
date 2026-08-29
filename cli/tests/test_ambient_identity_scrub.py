@@ -31,6 +31,19 @@ from fno.harness_identity import (
 
 ALL_MARKERS = AMBIENT_IDENTITY_ENV
 
+
+def _assert_scrubbed(child_env, lane: str, restamped: dict[str, str]) -> None:
+    """Every ambient marker is gone from the child, except the ones the lane
+    re-mints for itself. For those, absence is the wrong assertion: the value
+    has to be the LANE's, never the parent's."""
+    for marker in ALL_MARKERS:
+        if marker in restamped:
+            assert (
+                child_env[marker] == restamped[marker]
+            ), f"{lane} child did not re-mint {marker}"
+            continue
+        assert marker not in child_env, f"{lane} child inherited identity marker {marker}"
+
 _CHILD_TEST = "test_no_ambient_harness_identity_resolves"
 
 # Both pytest roots. cli/src/fno/ has its own conftest, so a scrub in
@@ -174,11 +187,11 @@ def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None
     bg_envs = [env for argv, env in captured["calls"] if "--bg" in argv]
     assert bg_envs, "no --bg subprocess env was captured"
     child_env = bg_envs[-1]
-    for marker in ALL_MARKERS:
-        if marker == "FNO_HARNESS_NAME":
-            assert child_env[marker] == "claude"
-            continue
-        assert marker not in child_env, f"bg child inherited identity marker {marker}"
+    _assert_scrubbed(
+        child_env,
+        "bg",
+        {"FNO_HARNESS_NAME": "claude", "FNO_AGENT_SUBSTRATE": "thread"},
+    )
 
 
 def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None:
@@ -198,11 +211,11 @@ def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -
     explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
     assert explicit_envs, "headless spawn inherited the parent env with no scrub"
     child_env = explicit_envs[-1]
-    for marker in ALL_MARKERS:
-        if marker == "FNO_HARNESS_NAME":
-            assert child_env[marker] == "claude"
-            continue
-        assert marker not in child_env, f"headless child inherited identity marker {marker}"
+    _assert_scrubbed(
+        child_env,
+        "headless",
+        {"FNO_HARNESS_NAME": "claude", "FNO_AGENT_SUBSTRATE": "headless"},
+    )
 
 
 def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypatch) -> None:
@@ -334,11 +347,11 @@ def test_codex_spawn_scrubs_inherited_codex_identity_set(
 
     child_env = captured["env"]
     assert child_env is not None
-    for marker in ALL_MARKERS:
-        if marker == "FNO_HARNESS_NAME":
-            assert child_env[marker] == "codex"
-            continue
-        assert marker not in child_env, f"codex child inherited identity marker {marker}"
+    _assert_scrubbed(
+        child_env,
+        "codex",
+        {"FNO_HARNESS_NAME": "codex", "FNO_AGENT_SUBSTRATE": "headless"},
+    )
 
 
 def test_scrub_list_covers_the_measured_codex_identity_env() -> None:

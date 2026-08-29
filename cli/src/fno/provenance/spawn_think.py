@@ -57,7 +57,7 @@ from typing import Optional
 from fno import _subprocess_util
 from fno import route_resolve as _route_resolve
 from fno.agents.naming import agent_name
-from fno.harness_identity import resolve_harness_identity
+from fno.harness_identity import env_marks_unattended, resolve_harness_identity
 from fno.provenance.resolver import resolve_transcript
 
 _LOG = logging.getLogger(__name__)
@@ -77,14 +77,12 @@ _ENV_PRESENCE = "FNO_THINK_SPAWN_PRESENCE"
 # Test/CI + force seam for the attended opt-in (B, x-5d51); mirrors _ENV_OVERRIDE.
 # Otherwise read from config.think_spawn.attended (spawn|offer, default offer).
 _ENV_ATTENDED = "FNO_THINK_SPAWN_ATTENDED"
-# Explicit headless markers. A --bg worker may set FNO_BG, but the claude
-# spawn path (harnesses/claude.py) injects FNO_AGENT_SELF into EVERY spawned
-# worker and does NOT set FNO_BG - so a bg worker filing an idea before its
-# target-state manifest exists would otherwise misclassify as attended (codex
-# PR #9). FNO_AGENT_SELF is the reliable "I am a spawned agent, not an operator
-# at the keyboard" signal.
-_ENV_BG = "FNO_BG"
-_ENV_AGENT_SELF = "FNO_AGENT_SELF"
+# The away test is `harness_identity.env_marks_unattended`, shared with target
+# init and the review-capability read. It still catches the bg worker filing an
+# idea before its target-state manifest exists (codex PR #9), because a thread
+# is not an attended substrate. What it no longer does is call every spawned
+# worker away: FNO_AGENT_SELF is set by all three substrates, so on its own it
+# read a pane with an operator watching as headless (x-be78).
 
 # Decision-event kinds (registered in cli/src/fno/events/schema.yaml).
 EVENT_SPAWNED = "think_spawned"
@@ -431,11 +429,11 @@ def classify_presence(
     Primary signal (Locked Decision 3, dependency-free): the attended-vs-
     headless state of the *originating* session.
       1. ``FNO_THINK_SPAWN_PRESENCE`` test/CI override.
-      2. A spawned/headless worker (``FNO_AGENT_SELF`` injected by the claude
-         spawn path, or an explicit ``FNO_BG``) => away. This MUST precede the
-         CLAUDE_CODE_SESSION_ID check below: a bg worker exposes that session id
-         too, so without this a manifest-less bg worker would misclassify as
-         attended (codex PR #9).
+      2. ``harness_identity.env_marks_unattended`` => away: a worker spawned
+         onto a substrate no operator can answer a prompt on. This MUST precede
+         the CLAUDE_CODE_SESSION_ID check below: a bg worker exposes that
+         session id too, so without this a manifest-less bg worker would
+         misclassify as attended (codex PR #9).
       3. This session's OWNED target-state manifest's ``attended`` flag.
       4. An interactive Claude or Codex session identity with no autonomous
          manifest => attended.
@@ -451,9 +449,7 @@ def classify_presence(
     if override in ("attended", "away"):
         return override
 
-    if (environ.get(_ENV_AGENT_SELF) or "").strip() or (
-        environ.get(_ENV_BG) or ""
-    ).strip().lower() in _TRUTHY:
+    if env_marks_unattended(environ):
         return "away"
 
     root = Path(project_root) if project_root is not None else Path.cwd()

@@ -22,6 +22,26 @@ _HARNESS_ENV_WARNED = False
 FNO_HARNESS_NAME = "FNO_HARNESS_NAME"
 FNO_HARNESS_SESSION_ID = "FNO_HARNESS_SESSION_ID"
 
+#: The substrate a spawn launched this session on: ``pane``, ``thread`` or
+#: ``headless``. A session cannot ask which substrate it runs on, so the spawner
+#: has to say. Every other candidate signal is a proxy that lies. All three
+#: substrates set ``FNO_AGENT_SELF``, so reading its presence as "no operator is
+#: watching" mis-stamps the interactive pane default (x-be78), and a tty check
+#: answers about the subprocess rather than about the harness.
+#:
+#: Absent means "no spawn path stamped this": an operator's own shell, or a
+#: worker from a launcher that predates the marker. Absence is never read as a
+#: substrate, only as unknown, so each reader states what it does with unknown.
+#: The name scrubs with the rest of the ambient identity set, so a nested child
+#: that stamps none of its own reads unknown instead of its parent's value.
+FNO_AGENT_SUBSTRATE = "FNO_AGENT_SUBSTRATE"
+
+#: Substrates where an operator can answer a blocking prompt. ``pane`` and
+#: ``thread`` are both attachable, but only the pane is hosted at a fixed place
+#: with a live view, and ``/target bg`` dispatches a thread precisely so it runs
+#: unsupervised.
+ATTENDED_SUBSTRATES: frozenset[str] = frozenset({"pane"})
+
 
 def stamp_child_harness_identity(
     environ: Optional[dict[str, str]],
@@ -29,6 +49,7 @@ def stamp_child_harness_identity(
     session_id: Optional[str] = None,
     *,
     agent_self: Optional[str] = None,
+    substrate: Optional[str] = None,
 ) -> dict[str, str]:
     """Scrub inherited fno stamps, then apply the launcher's owned values."""
     if environ is None:
@@ -42,6 +63,13 @@ def stamp_child_harness_identity(
         environ.pop(key, None)
     environ.pop(FNO_HARNESS_NAME, None)
     environ.pop(FNO_HARNESS_SESSION_ID, None)
+    # Scrub always, stamp only when the caller names one. A launcher that does
+    # not know its substrate leaves the child reading unknown, which is honest;
+    # keeping the parent's value would make the child claim a substrate it is
+    # not on, which is the defect this marker exists to end.
+    environ.pop(FNO_AGENT_SUBSTRATE, None)
+    if substrate:
+        environ[FNO_AGENT_SUBSTRATE] = substrate
     if agent_self:
         environ["FNO_AGENT_SELF"] = agent_self
     environ["FNO_AGENT_HARNESS"] = harness
@@ -166,7 +194,59 @@ AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
     # from it (see SELF_SET_HARNESS_MARKERS above).
     *(marker for marker, _ in SELF_SET_HARNESS_MARKERS),
     *(name for name, _ in _EXTRA_IDENTITY_NAMES),
+    # The substrate stamp is identity, not routing: it says where THIS session
+    # runs. A child that inherits it reports its parent's substrate for life.
+    FNO_AGENT_SUBSTRATE,
 )
+
+
+def spawned_substrate(env: "Mapping[str, str]") -> "Optional[str]":
+    """The substrate a spawn stamped on this session, or ``None`` when unknown.
+
+    ``None`` covers two different worlds, an operator's own shell and a worker
+    from a launcher that never stamped, so it is deliberately not a value.
+    Callers decide what unknown means for them, at the point where they decide.
+    """
+    return (env.get(FNO_AGENT_SUBSTRATE) or "").strip() or None
+
+
+def env_marks_unattended(env: "Mapping[str, str]") -> bool:
+    """Whether the ambient env alone says no operator is at this session.
+
+    One rule, several readers: `fno do target init` folds it into
+    ``TARGET_UNATTENDED`` for the manifest writer, `init-target-state.sh` ORs
+    that with ``config.unattended.enabled``, ``review_capability.detect_session``
+    re-derives it in-session, and ``provenance/spawn_think`` asks the same
+    question about the session filing an idea. They agreed before only by
+    repeating one expression in four places.
+
+    Dependency-free on purpose: spawn_think's presence classifier is a locked
+    decision to stay off config and off tty probes, so this reads env and
+    nothing else.
+
+    An explicit ``TARGET_UNATTENDED=1`` always wins. Otherwise a session is
+    unattended when a spawn stamped it and that spawn's substrate is not one an
+    operator can answer a prompt on. This used to read ``FNO_AGENT_SELF``
+    presence, which every substrate sets, so a pane worker with an operator
+    watching stamped ``attended: false`` (x-be78).
+
+    An UNKNOWN substrate on a spawned worker reads unattended. That is the
+    pre-x-be78 answer, kept deliberately as the fallback: it fails toward
+    skipping a blocking prompt rather than toward hanging on one, and a spawn
+    path that has not learned to stamp is exactly where that matters.
+    """
+    if (env.get("TARGET_UNATTENDED") or "").strip() == "1":
+        return True
+    # FNO_BG is read for its VALUE, not its presence. Nothing in the tree sets
+    # it, so the only way it arrives is an operator or a script exporting it,
+    # and `FNO_BG=0` from one of those means "not a bg run". Presence alone read
+    # that as a spawn.
+    spawned = bool((env.get("FNO_AGENT_SELF") or "").strip()) or (
+        env.get("FNO_BG") or ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if not spawned:
+        return False
+    return spawned_substrate(env) not in ATTENDED_SUBSTRATES
 
 # Name -> harness family for every scrubbed identity name, so a refusal can
 # name the strip set for one whole foreign family: the resolver markers alone
@@ -180,6 +260,11 @@ AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
     **dict(SELF_SET_HARNESS_MARKERS),
     **dict(_EXTRA_IDENTITY_NAMES),
+    # fno's own, like the two above it: the strip remedy must never suggest
+    # deleting it. An unclassified name is skipped there by a fail-closed
+    # default, which reaches the same outcome by accident rather than by saying
+    # which family the name belongs to.
+    FNO_AGENT_SUBSTRATE: "fno",
 }
 
 _RESOLVER_IDENTITY_NAMES: frozenset[str] = frozenset(

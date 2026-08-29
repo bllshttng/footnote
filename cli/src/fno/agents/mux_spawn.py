@@ -1497,11 +1497,19 @@ def _mesh_env_wrapper(
     # the wait for a nested child that will never have a row. Scoping it to the
     # identity makes the stale value self-invalidating instead of requiring every
     # present and future spawn path to remember to unset it.
+    # FNO_AGENT_SUBSTRATE says where this worker runs, because the worker cannot
+    # ask. It is what makes `attended` readable: a pane has an operator's view,
+    # and FNO_AGENT_SELF beside it says only "spawned", which every substrate is
+    # (x-be78). It rides the ambient identity scrub above, so the nested child a
+    # pane worker launches drops this value instead of inheriting `pane`.
+    from fno.harness_identity import FNO_AGENT_SUBSTRATE
+
     pairs = [
         f"FNO_AGENT_SELF={name}",
         f"FNO_AGENT_HARNESS={provider}",
         f"FNO_HARNESS_NAME={provider}",
         f"FNO_AGENT_ROW_PENDING={name}",
+        f"{FNO_AGENT_SUBSTRATE}=pane",
     ]
     if session_id and session_id.strip():
         pairs.append(f"FNO_HARNESS_SESSION_ID={session_id.strip()}")

@@ -252,9 +252,24 @@ def test_unavailable_reviewer_is_not_swapped_for_declare():
 
 
 def test_detect_session_reads_harness_and_substrate():
-    env = {"CLAUDE_CODE_SESSION_ID": "s1", "FNO_BG": "1"}
+    """Substrate is the value the spawner stamped, never a guess (x-be78).
+
+    `FNO_BG` says a spawn happened; it does not name a substrate. The old code
+    read it as `bg` and read `FNO_AGENT_SELF` as `pane`, which labelled every
+    headless one-shot a pane, because all three substrates set that variable.
+    """
+    env = {"CLAUDE_CODE_SESSION_ID": "s1", "FNO_AGENT_SELF": "w", "FNO_BG": "1"}
     s = detect_session(env)
-    assert (s.harness, s.substrate, s.attended) == ("claude", "bg", False)
+    assert (s.harness, s.substrate, s.attended) == ("claude", "unknown", False)
+
+    pane = detect_session({**env, "FNO_AGENT_SUBSTRATE": "pane"})
+    assert (pane.substrate, pane.attended) == ("pane", True)
+
+    thread = detect_session({**env, "FNO_AGENT_SUBSTRATE": "thread"})
+    assert (thread.substrate, thread.attended) == ("thread", False)
+
+    headless = detect_session({**env, "FNO_AGENT_SUBSTRATE": "headless"})
+    assert (headless.substrate, headless.attended) == ("headless", False)
 
 
 def test_unclassifiable_session_is_unverifiable_not_unavailable():
@@ -501,7 +516,9 @@ def test_init_command_refuses_and_prints_the_reason(
     assert "subagent-dispatch" in r.output
     assert "subagent-only" in r.output
     assert "harness=gemini" in r.output
-    assert "substrate=headless" in r.output
+    # TARGET_UNATTENDED says nobody is watching; it does not say which substrate
+    # this runs on, and the refusal must not invent one (x-be78).
+    assert "substrate=unknown" in r.output
     assert "change config.review.reviewers" in r.output
 
 

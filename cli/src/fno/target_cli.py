@@ -1523,17 +1523,15 @@ def init(
     # is claimed (x-e957 task 1.3b).
     _redirect_if_contained(_dispatch_node)
 
+    from fno.review_capability import env_marks_unattended
+
     # Retro-triaged nodes get a dispatch-time dedup check before the shell
     # bootstrap acquires the node claim. Ordinary target inputs return early;
     # probe failures remain fail-open toward dispatch.
     _retro_dispatch_preflight(
         _dispatch_node,
         beastmode=beastmode,
-        unattended=bool(
-            os.environ.get("TARGET_UNATTENDED")
-            or os.environ.get("FNO_AGENT_SELF")
-            or os.environ.get("FNO_BG")
-        ),
+        unattended=env_marks_unattended(os.environ),
     )
 
     # Blast-radius modulation (x-518f): a deterministic blast read on the plan's
@@ -1652,15 +1650,16 @@ def init(
     env = dict(os.environ)
     env["TARGET_START"] = "1"
     # Change D (x-a7be): resolve `attended` from the substrate before the bash
-    # manifest writer runs. A spawned/bg worker has no operator at the keyboard;
-    # the claude spawn path injects FNO_AGENT_SELF into EVERY spawned worker and
-    # a bg thread sets FNO_BG (the spawn_think precedent, codex PR #9). Marking
-    # the run unattended makes init stamp `attended: false`, so the skill
-    # surfaces offers as non-blocking lines instead of a [Y/n] that hangs a
-    # detached session. An explicit TARGET_UNATTENDED always wins.
-    if "TARGET_UNATTENDED" not in env and (
-        env.get("FNO_AGENT_SELF") or env.get("FNO_BG")
-    ):
+    # manifest writer runs. Marking the run unattended makes init stamp
+    # `attended: false`, so the skill surfaces offers as non-blocking lines
+    # instead of a [Y/n] that hangs a detached session.
+    #
+    # The read used to be FNO_AGENT_SELF presence, which is not the substrate:
+    # every spawn substrate injects it, pane included, and pane is the default.
+    # A context-warm pane worker with an operator watching stamped
+    # `attended: false` (x-be78). `env_marks_unattended` reads the substrate the
+    # spawner stamped. An explicit TARGET_UNATTENDED still always wins.
+    if "TARGET_UNATTENDED" not in env and env_marks_unattended(env):
         env["TARGET_UNATTENDED"] = "1"
     if input_:
         env["TARGET_INPUT"] = input_

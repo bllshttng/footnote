@@ -62,11 +62,13 @@ no_deferrals_capture: false  # skip deferrals capture
 
 ```yaml
 has_ui: false            # true iff plan or input involves UI surfaces
-attended: true           # true in interactive sessions; false for unattended/megawalk
+attended: true           # an operator can answer a blocking prompt here
 advisory: false          # true when no_ship: true OR config.advisory: true
 cross_project: false     # true for cross-project pipeline runs
 scratchpad_path: ""      # path to worktree scratchpad directory (if set)
 ```
+
+`attended` resolves from the substrate the spawner stamped in `FNO_AGENT_SUBSTRATE`. `fno do target init` folds it, and the manifest writer ORs that with `config.unattended.enabled`. A pane is attended. A thread and a headless one-shot are not. An operator's own shell carries no stamp and is attended. A spawned worker whose launcher stamps nothing reads unattended. That is the older answer, kept as the fallback because it skips a blocking prompt rather than hanging on one. An explicit `TARGET_UNATTENDED=1` wins over all of it. The rule has one home, `harness_identity.env_marks_unattended`.
 
 ### Authority grant (omitted unless granted)
 

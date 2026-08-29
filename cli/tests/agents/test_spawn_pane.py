@@ -1610,9 +1610,14 @@ def test_mesh_env_wrapper_scrubs_inherited_session_identity() -> None:
         for token in wrapper
         if isinstance(token, str) and "=" in token and not token.startswith("-")
     }
+    # Two names ARE re-assigned, with the wrapper's own values rather than the
+    # parent's: the harness this pane runs, and the substrate it runs on. The
+    # scrub above is what keeps them the wrapper's to state.
     assert "FNO_HARNESS_NAME=claude" in wrapper
+    assert "FNO_AGENT_SUBSTRATE=pane" in wrapper
+    re_minted = {"FNO_HARNESS_NAME", "FNO_AGENT_SUBSTRATE"}
     for name in AMBIENT_IDENTITY_ENV:
-        if name == "FNO_HARNESS_NAME":
+        if name in re_minted:
             continue
         assert name not in assignments, f"identity marker {name} re-exported"
 
