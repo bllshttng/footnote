@@ -610,32 +610,55 @@ class ResolvedAgent:
     shells out with (``claude attach/logs <short>`` etc.); ``None`` when the
     row recorded no short (a pre-heal claude row) so the verb can raise its own
     explicit "no short id on file" error instead of shelling an empty arg.
+
+    ``matched_session_id`` is the exact id on the winning row the token named,
+    set only for a full-session-id match. It separates the two jobs one row's
+    ids serve: delivery consumes the row's CURRENT address regardless of which
+    historical id was named, while exact-id resume keeps the id the caller
+    actually spelled. ``None`` for every name/short/handle match, which by
+    contract selects the current session.
     """
 
     entry: AgentEntry
     matched_by: str  # "name" | "full_session_id" | "short_id" | handle compatibility
+    matched_session_id: Optional[str] = None
 
     @property
     def worker_short_id(self) -> Optional[str]:
         return self.entry.short_id or None
 
 
-def _session_tier(entry: object, token: str) -> Optional[int]:
-    """Delegate generated and legacy address comparison to the identity owner.
+def _session_tier_matched(entry: object, token: str) -> Optional[tuple[int, str]]:
+    """Tier plus the exact id that matched, over one row's identity set.
 
     The one optional related id addresses the row at the same tiers as the
     primary: a fork's full uuid and its canonical handle both resolve, which
-    is what "both ids stay valid forever" means for addressing.
+    is what "both ids stay valid forever" means for addressing. A predecessor
+    id addresses the row at the full tier ONLY: succession retired it, so
+    mail naming A still lands on the row that now answers as B, while A's
+    retired short/handle forms stay retired rather than re-entering the
+    successor's short-address namespace.
     """
     hsid = getattr(entry, "harness_session_id", None)
     if hsid:
         tier = session_handle_tier(token, hsid)
         if tier is not None:
-            return tier
+            return tier, hsid
     related = getattr(entry, "related_session_id", None)
     if related:
-        return session_handle_tier(token, related)
+        tier = session_handle_tier(token, related)
+        if tier is not None:
+            return tier, related
+    for predecessor in getattr(entry, "predecessor_session_ids", None) or []:
+        if session_handle_tier(token, predecessor) == 0:
+            return 0, predecessor
     return None
+
+
+def _session_tier(entry: object, token: str) -> Optional[int]:
+    """Tier-only view of :func:`_session_tier_matched`."""
+    matched = _session_tier_matched(entry, token)
+    return matched[0] if matched else None
 
 
 def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
@@ -682,7 +705,10 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
         raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
     by_full = [e for e in entries if _session_tier(e, token) == 0]
     if by_full:
-        return _one_or_ambiguous(by_full, "full_session_id", token)
+        resolved = _one_or_ambiguous(by_full, "full_session_id", token)
+        matched = _session_tier_matched(resolved.entry, token)
+        resolved.matched_session_id = matched[1] if matched else None
+        return resolved
 
     categories = (
         ("name", [e for e in entries if getattr(e, "name", None) == token]),
@@ -1893,6 +1919,54 @@ def register_existing_session(
     )
 
 
+def _mint_branch_row(
+    entry: AgentEntry, entries: list[AgentEntry], *, session_id: str, stale: str
+) -> AgentEntry:
+    """Clone ``entry`` as an independently addressable branch row for B.
+
+    The one live predecessor keeps its row, name, crown, and every live ref;
+    the branch carries only the new session id: a fresh name under the
+    ``<name>-branch-<handle>`` convention, a distinct ``fno_id`` (the branch's
+    own session id), no crown (authority is not duplicated by a fork), and no
+    transport/lifecycle state copied from A. ``related_session_id`` is cleared
+    too: A's historical ids are A's history, not the branch's.
+    """
+    branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
+    branch_base = branch_name
+    suffix = 2
+    while any(candidate.name == branch_name for candidate in entries):
+        branch_name = f"{branch_base}-{suffix}"
+        suffix += 1
+    branch = replace(
+        entry,
+        name=branch_name,
+        aliases=[],
+        harness_session_id=session_id,
+        predecessor_session_ids=[],
+        forked_from_session_id=stale or None,
+        related_session_id=None,
+        short_id="",
+        messaging_socket_path=None,
+        mcp_channel_id=None,
+        cc_session_id=None,
+        pid=None,
+        pid_start_time=None,
+        log_path="",
+        last_message_at=None,
+        last_reconciled_at=None,
+        inside_leg=None,
+        screen_state=None,
+        exited_at=None,
+        mux=None,
+        crown_level=None,
+        crown_scope=None,
+        crown_grantor=None,
+        fno_id=session_id,
+    )
+    entries.append(branch)
+    return branch
+
+
 def restamp_harness_session_id(
     *,
     name: str,
@@ -1901,6 +1975,7 @@ def restamp_harness_session_id(
     predecessor_reachable: Optional[bool] = None,
     expected_predecessor_session_id: Optional[str] = None,
     registry_path: Optional[Path] = None,
+    transitions: Optional[list] = None,
 ) -> Optional[AgentEntry]:
     """Re-point a spawned worker's row at the session id its harness now uses.
 
@@ -1970,43 +2045,31 @@ def restamp_harness_session_id(
                     raise ValueError(
                         f"branch session {session_id!r} already has a registry row"
                     )
-                branch_name = f"{entry.name}-branch-{canonical_handle(session_id)}"
-                branch_base = branch_name
-                suffix = 2
-                while any(candidate.name == branch_name for candidate in entries):
-                    branch_name = f"{branch_base}-{suffix}"
-                    suffix += 1
-                branch = replace(
-                    entry,
-                    name=branch_name,
-                    aliases=[],
-                    harness_session_id=session_id,
-                    predecessor_session_ids=[],
-                    forked_from_session_id=stale or None,
-                    short_id="",
-                    messaging_socket_path=None,
-                    mcp_channel_id=None,
-                    cc_session_id=None,
-                    pid=None,
-                    pid_start_time=None,
-                    log_path="",
-                    last_message_at=None,
-                    last_reconciled_at=None,
-                    inside_leg=None,
-                    screen_state=None,
-                    exited_at=None,
-                    mux=None,
-                    crown_level=None,
-                    crown_scope=None,
-                    crown_grantor=None,
-                    fno_id=session_id,
+                restamped.append(
+                    _mint_branch_row(entry, entries, session_id=session_id, stale=stale)
                 )
-                entries.append(branch)
-                restamped.append(branch)
+                if transitions is not None:
+                    transitions.append(
+                        {
+                            "name": restamped[-1].name,
+                            "classification": "branch",
+                            "predecessor": stale,
+                            "successor": session_id,
+                        }
+                    )
                 return entries
             if stale and stale not in entry.predecessor_session_ids:
                 entry.predecessor_session_ids.append(stale)
             entry.harness_session_id = session_id
+            if transitions is not None and transition == "succession":
+                transitions.append(
+                    {
+                        "name": entry.name,
+                        "classification": "succession",
+                        "predecessor": stale,
+                        "successor": session_id,
+                    }
+                )
             # A row parked at `spawning` was waiting for exactly this: an id it
             # could not learn at spawn time. The worker has now named itself, so
             # it is addressable and the transition is complete. Without this the
@@ -2054,6 +2117,8 @@ SESSION_OBSERVATION_OUTCOMES = (
     "related",  # a second valid id filled the one optional related slot
     "refused-cap",  # a third distinct id: nothing written, ids named
     "no-row",  # no row under that name for this harness
+    "succession",  # a dead predecessor retired; the primary advanced to B
+    "branch",  # a live predecessor kept its row; B minted its own
 )
 
 
@@ -2063,27 +2128,41 @@ def record_session_observation(
     harness: str,
     session_id: str,
     registry_path: Optional[Path] = None,
+    predecessor_reachable: Optional[bool] = None,
+    expected_predecessor_session_id: Optional[str] = None,
 ) -> tuple[Optional[AgentEntry], str]:
-    """Record ONE SessionStart id observation additively.
+    """Record ONE SessionStart id observation, classified when evidence exists.
 
-    A fork (a transcript carried across under a new id) is ADDITIVE here:
-    both ids stay valid forever on one row, with no lineage graph and no
-    successor protocol. Exactly three cases write or refuse:
+    Without predecessor evidence this is the x-d285 additive recorder: an
+    empty primary accepts its first id (and promotes a ``spawning`` row to
+    ``live``), an id already recorded is a no-op, a second different id fills
+    the ONE optional ``related_session_id`` slot, and a third distinct id
+    refuses the write while naming the two recorded ids.
 
-    - an empty primary field accepts the first id it sees (and promotes a
-      ``spawning`` row to ``live`` - the worker has named itself);
-    - an id already recorded (primary or the related slot) is a no-op;
-    - a second, different id fills the ONE optional ``related_session_id``
-      slot while the primary stays untouched - arrival order decides which
-      id is primary, and reversing it stores the same two ids;
-    - a third distinct id, with both slots already occupied by different
-      ids, refuses the write and names the two recorded ids. The mutation
-    fails closed; the caller decides how loudly to say so.
+    With evidence - a family-1 reachability verdict for the recorded primary
+    A, gathered by the caller BEFORE this call - the second-id case is
+    classified instead of parked:
+
+    - A unreachable with a positive gone basis -> SUCCESSION: the primary
+      advances to B, A is appended once to ``predecessor_session_ids``, and
+      the one row keeps its stable ``fno_id``.
+    - A positively reachable -> BRANCH: A's row is untouched; B is minted as
+      a distinct row with ``forked_from_session_id: A``, its own ``fno_id``,
+      and no inherited crown or claim. Two live workers, two rows.
+    - evidence unknown, absent, or stale (the row's primary moved since the
+      evidence was sampled) -> the additive parking, never a guess.
+
+    The classification is re-decided under the registry lock from the CURRENT
+    primary, with ``expected_predecessor_session_id`` as the
+    compare-and-swap guard. A branch whose session id already owns a row is
+    idempotent when that row is the same fork edge, and refuses (fails
+    closed) otherwise.
 
     Returns ``(entry, outcome)``; ``entry`` is the row after the write for
-    the writing outcomes and ``None`` otherwise. An unreadable registry
-    propagates (the caller's fail-soft boundary), which is the other
-    fails-closed half: no observed state, no write.
+    the writing outcomes (the BRANCH row for a branch) and the pre-write row
+    otherwise. An unreadable registry propagates (the caller's fail-soft
+    boundary), which is the other fails-closed half: no observed state, no
+    write.
     """
     if not name or not session_id or not harness:
         return None, "no-row"
@@ -2115,6 +2194,7 @@ def record_session_observation(
 
     observed: list[AgentEntry] = []
     cap_hit: list[bool] = []
+    classified: list[tuple[str, AgentEntry]] = []
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
         for entry in entries:
@@ -2145,6 +2225,61 @@ def record_session_observation(
                 # pre-read enforces, re-decided under the lock.
                 cap_hit.append(True)
                 return entries
+
+            # Second distinct id, related slot free: classify, but only on
+            # evidence that still describes THIS row's primary. Evidence for
+            # an id the row no longer records classifies nothing - the
+            # additive parking below is the honest outcome for a stale read.
+            classification = None
+            if predecessor_reachable is not None and (
+                expected_predecessor_session_id is None
+                or expected_predecessor_session_id == entry_primary
+            ):
+                classification = classify_session_transition(
+                    entry_primary, session_id, predecessor_reachable
+                )
+            if classification == "succession":
+                if entry_primary not in entry.predecessor_session_ids:
+                    entry.predecessor_session_ids.append(entry_primary)
+                entry.harness_session_id = session_id
+                if entry.status == "spawning":
+                    entry.status = "live"
+                if harness == "claude" and entry.mux is None:
+                    lead = session_id.split("-", 1)[0].lower()
+                    stale_lead = entry_primary.split("-", 1)[0].lower()
+                    if _DERIVED_SHORT_RE.match(lead) and entry.short_id in (
+                        "",
+                        stale_lead,
+                    ):
+                        entry.short_id = lead
+                classified.append(("succession", entry))
+                return entries
+            if classification == "branch":
+                existing = next(
+                    (
+                        candidate
+                        for candidate in entries
+                        if candidate.harness == harness
+                        and candidate.harness_session_id == session_id
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if existing.forked_from_session_id == entry_primary:
+                        classified.append(("branch", existing))
+                        return entries
+                    raise ValueError(
+                        f"branch session {session_id!r} already has a registry row"
+                    )
+                classified.append(
+                    (
+                        "branch",
+                        _mint_branch_row(
+                            entry, entries, session_id=session_id, stale=entry_primary
+                        ),
+                    )
+                )
+                return entries
             entry.related_session_id = session_id
             observed.append(entry)
             return entries
@@ -2153,6 +2288,9 @@ def record_session_observation(
     update_registry(_updater, path=registry_path)
     if cap_hit:
         return row, "refused-cap"
+    if classified:
+        outcome, written = classified[0]
+        return written, outcome
     if not observed:
         # A concurrent observation won the slot between the pre-read and the
         # lock: nothing was written, and the honest outcome is the no-op.

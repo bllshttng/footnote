@@ -293,6 +293,52 @@ def emit_spawn_failed(
 
 
 # ---------------------------------------------------------------------
+# Classified session-id transitions (x-dfe7). Written to the SAME daemon
+# lifecycle log births and deaths use, so a succession is joinable with the
+# predecessor's eventual `agent_row_reaped` from one file - the lineage event
+# must exist before any reap can erase the row it names.
+# ---------------------------------------------------------------------
+KIND_SESSION_TRANSITION_CLASSIFIED = "session_transition_classified"
+KIND_SESSION_TRANSITION_DEFERRED = "session_transition_deferred"
+KIND_SESSION_TRANSITION_ALREADY_APPLIED = "session_transition_already_applied"
+
+
+def emit_session_transition(
+    kind: str,
+    *,
+    name: str,
+    harness: str,
+    predecessor_session_id: str,
+    successor_session_id: str,
+    classification: Optional[str] = None,
+    basis: Optional[str] = None,
+    source: Optional[str] = None,
+) -> None:
+    """Record one classified (or deferred) A->B session transition.
+
+    ``kind`` is one of the ``session_transition_*`` constants above. The
+    record positively names A, B, the classification, and the liveness basis
+    the verdict was read from, so an auditor never has to infer which
+    evidence produced the shape the registry now shows. Best-effort: the
+    underlying envelope write swallows OSError.
+    """
+    data: dict[str, Any] = {
+        "name": name,
+        "harness": harness,
+        "predecessor_session_id": predecessor_session_id,
+        "successor_session_id": successor_session_id,
+        "evidence_at": _utc_now_iso(),
+    }
+    if classification:
+        data["classification"] = classification
+    if basis:
+        data["basis"] = basis
+    if source:
+        data["source"] = source
+    _emit_daemon_envelope(kind, data)
+
+
+# ---------------------------------------------------------------------
 # Phase 5 — MCP channel + streaming event kinds
 # ---------------------------------------------------------------------
 
