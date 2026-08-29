@@ -3514,7 +3514,8 @@ impl Core {
                     predecessor_session_ids: joined_row
                         .map(|a| a.predecessor_session_ids.clone())
                         .unwrap_or_default(),
-                    forked_from_session_id: joined_row.and_then(|a| a.forked_from_session_id.clone()),
+                    forked_from_session_id: joined_row
+                        .and_then(|a| a.forked_from_session_id.clone()),
                 }
             })
             .collect();

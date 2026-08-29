@@ -2343,15 +2343,11 @@ mod tests {
         registry.entries.push(entry);
 
         assert!(
-            registry
-                .find_name_or_full_session_id("session-a")
-                .is_some(),
+            registry.find_name_or_full_session_id("session-a").is_some(),
             "a predecessor full id follows the successor row"
         );
         assert!(
-            registry
-                .find_name_or_full_session_id("session-b")
-                .is_some(),
+            registry.find_name_or_full_session_id("session-b").is_some(),
             "the current session still joins"
         );
     }

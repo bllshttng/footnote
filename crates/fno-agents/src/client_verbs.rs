@@ -4585,7 +4585,10 @@ mod tests {
 
         let e = find_agent_entry(&rows, "e6f78b98-1111-2222-3333-444444444444")
             .expect("predecessor full id resolves");
-        assert_eq!(e["harness_session_id"], "08054b1d-2222-3333-4444-555555555555");
+        assert_eq!(
+            e["harness_session_id"],
+            "08054b1d-2222-3333-4444-555555555555"
+        );
     }
 
     #[test]

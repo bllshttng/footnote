@@ -4186,7 +4186,11 @@ fn view_picker(verb: &str, json: bool, url: bool) -> i32 {
 /// resolver never consumes this spelling, so the ses_ case rule that matters
 /// for addressing is not load-bearing here).
 fn short_handle(session_id: &str) -> String {
-    session_id.chars().take(8).collect::<String>().to_lowercase()
+    session_id
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_lowercase()
 }
 
 fn print_pane_url(verb: &str, session: &str, pane: u64) -> i32 {
