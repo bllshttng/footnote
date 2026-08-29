@@ -452,7 +452,7 @@ def test_codex_one_shot_refuses_a_pinned_account(monkeypatch, tmp_path):
         dsp.dispatch_spawn(
             name="t-once",
             message="hi",
-            provider="codex",
+            harness="codex",
             cwd=tmp_path,
             once=True,
             account_env={"HOME": "/accounts/zai-1/home"},
