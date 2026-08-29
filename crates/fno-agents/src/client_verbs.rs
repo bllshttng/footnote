@@ -1032,12 +1032,40 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 /// back-fills it from a legacy row's per-provider key). This is the ONLY place a
 /// verb touches a session-id field; every session-connecting verb reaches a row via
 /// [`find_agent_entry`] instead of its own name-only `.find`.
+///
+/// This is an EXCEPTION table, not the roster (x-efd7). claude is the one harness
+/// whose transport key differs from its canonical id, so it is the one entry that
+/// changes the answer; every other harness resolves `harness_session_id`, which is
+/// also what [`resume_session_id`] falls back to when this returns `None`. Read it
+/// as "does this harness address differently", never as "is this harness known" --
+/// the second reading is what left pi declaring `interactive_resume` support in
+/// `harness_capabilities.toml` while resume refused it for having no session id.
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
         "codex" | "gemini" | "agy" | "opencode" => Some("harness_session_id"),
         _ => None,
     }
+}
+
+/// The row's resume-target id: its harness transport key when that carries one,
+/// else the canonical `harness_session_id`.
+///
+/// The exact mirror of Python `resume_cli._session_id_for` and the
+/// `AgentEntry.session_id` property, whose fallback this half lacked (x-efd7).
+/// Two rows differing only in `harness` resumed differently: codex reached exec,
+/// pi -- absent from [`session_id_field`] but declaring `interactive_resume`
+/// support in the capability contract -- refused with "no recorded session_id".
+/// Falling back keeps the two rosters from disagreeing for any harness, added
+/// today or later, and it also keeps a claude PANE row resumable: such a row
+/// carries `harness_session_id` and no `short_id` by design.
+fn resume_session_id<'a>(entry: &'a Value, harness: &str) -> &'a str {
+    session_id_field(harness)
+        .and_then(|field| entry.get(field))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| entry.get("harness_session_id").and_then(Value::as_str))
+        .unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------
@@ -2481,10 +2509,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         recorded_cwd.to_string()
     };
     let cwd: &str = &resolved_cwd;
-    let session_id = session_id_field(harness)
-        .and_then(|f| entry.get(f))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let session_id = resume_session_id(entry, harness);
 
     if cwd.is_empty() {
         if !session_id.is_empty() {
