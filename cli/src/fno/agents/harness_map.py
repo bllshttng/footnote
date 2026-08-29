@@ -23,12 +23,13 @@ Verified facts (2026-07-13):
   no steering over the HTTP API), so its bit reads false until the steering
   lane ships with its own unattended journey test; every false-bit harness
   falls back to ``headless`` (Locked Decision 3, HARNESSES.md).
-- stop_hook is native for all THREE dispatchable harnesses: the autonomous
-  target loop's stop-equivalent hook fires under ``claude -p`` (verified),
-  ``codex exec`` (CODEX_THREAD_ID), and ``gemini -p`` natively - so NO dispatch
-  target needs the ``run-target-loop.sh`` wrapper as its floor (that wrapper
-  stays only for the non-dispatch hermes/openclaw drivers). This resolves the
-  US1 verification spike (HARNESSES.md lines 22-23).
+- loop_participation REPLACED stop_hook (2026-08-28). The old field read
+  "native" on every row and had no consumer. The paragraph that stood here
+  recorded a 2026-07-13 verification of THREE harnesses, and six rows ended up
+  carrying the value - the inheritance in writing, in the same file as the
+  field. Each row is now measured against the artifact and the wiring that
+  reaches it; gemini and opencode came out wrong. See the table's own comment
+  for the per-harness evidence.
 """
 from __future__ import annotations
 
@@ -163,6 +164,10 @@ _KEY_TOKENS = {
 }
 _STOP_STRATEGIES = {"claude-short-id", "registry-noop"}
 _REMOVE_STRATEGIES = {"claude-short-id", "codex-session-index", "registry-only"}
+# Whether the fno target loop can CLOSE on a harness. Kept identical to the Rust
+# validator's LOOP_PARTICIPATION so the two runtimes cannot disagree about which
+# contracts are legal. The table's comment carries the per-harness measurement.
+_LOOP_PARTICIPATION = {"native", "extension", "none"}
 
 
 def _contract_error(harness: str, field: str, detail: str) -> "DispatchResolveError":
@@ -187,7 +192,7 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
         )
     required = {
         "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
-        "stop_hook", "command_surface", "permission_response", "resume_strategy",
+        "loop_participation", "command_surface", "permission_response", "resume_strategy",
         "model_switch_strategy",
         "ready_marker", "ready_rule_ids", "send_keys_enter_delay_ms", "submit_keys",
         "stop_strategy", "remove_strategy", "manifest_rules", "session_binding",
@@ -355,6 +360,18 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
                     "model_switch_strategy",
                     "menu_walk needs ordered model and effort targets",
                 )
+        if caps["loop_participation"] not in _LOOP_PARTICIPATION:
+            raise _contract_error(harness, "loop_participation", "unknown member")
+        # Only an `extension` row may name an artifact: a `native` row closes its
+        # loop through a shell hook and a `none` row closes it through nothing.
+        # The converse is legal and load-bearing - an `extension` row with an
+        # EMPTY path is a harness whose extension fno has not written yet, and
+        # :func:`check_loop_participation` refuses a looping dispatch at it.
+        if caps["loop_participation"] != "extension" and caps.get("loop_extension"):
+            raise _contract_error(
+                harness, "loop_extension",
+                "only an extension harness may name a loop artifact",
+            )
         if caps["stop_strategy"] not in _STOP_STRATEGIES:
             raise _contract_error(harness, "stop_strategy", "unknown strategy")
         if caps["remove_strategy"] not in _REMOVE_STRATEGIES:
@@ -419,6 +436,42 @@ def normalize_command(command: str, harness: str) -> str:
             return cmd
         return "/" + prefix + cmd[1:]
     return cmd
+
+
+def check_loop_participation(harness: str, command: str) -> None:
+    """Refuse a LOOPING dispatch at a harness that cannot close a loop.
+
+    ``command`` is judged by its first token against :data:`_TARGET_FAMILY`, the
+    same per-harness /target spellings ``normalize_command`` emits, so a
+    one-shot ``/think`` or a bare ``opencode run`` passes untouched. A harness
+    whose ``loop_participation`` names no reachable boundary would otherwise
+    take the dispatch and produce a worker with nothing to stop it: the hang
+    this field exists to prevent, not a failure anything reports.
+
+    The refusal text carries the fact rather than a code, because a runtime
+    string cannot drift from the behavior it describes the way a doc can.
+    """
+    first = command.split(maxsplit=1)[0] if command.split() else ""
+    if first not in _TARGET_FAMILY:
+        return
+    caps = capabilities(harness)
+    participation = caps["loop_participation"]
+    if participation == "native":
+        return
+    if participation == "extension" and caps.get("loop_extension"):
+        return
+    if participation == "none":
+        why = "no lifecycle boundary invokes loop-check"
+    else:
+        why = (
+            "its loop rides a harness-native extension fno has not written yet, "
+            "so nothing invokes loop-check"
+        )
+    raise DispatchResolveError(
+        f"refused: harness {harness!r} declares loop_participation = "
+        f"{participation!r}, so {why} and the looping command {command!r} would "
+        f"never stop. Dispatch a one-shot instead."
+    )
 
 
 def dispatch_command(harness: str, allow_merge: bool = False) -> str:
@@ -731,6 +784,14 @@ def resolve_dispatch(
     if first_word.startswith("/") and "/" not in first_word[1:]:
         template = normalize_command(template, chosen_harness)
         decision.append(f"command=normalized({chosen_harness})")
+    # The loop gate, at the same choke point every spawn surface resolves
+    # through. It reads a CAPABILITY, never a harness name, and it fires after
+    # normalization so it judges the per-harness /target spelling the worker
+    # will actually receive. Deliberately not at registry load: an alien or
+    # one-shot dispatch must still resolve fine, matching the existing split
+    # where the load gate is a shape check and the dispatch gate is where a
+    # capability is required.
+    check_loop_participation(chosen_harness, template)
     if node_id:
         # `{id}` must appear at least once; a template may reference it more than
         # once (str.replace substitutes every occurrence).
@@ -787,6 +848,7 @@ def resolve_dispatch(
         "ready_marker": caps["ready_marker"],
         "send_keys_enter_delay_ms": caps["send_keys_enter_delay_ms"],
         "submit_keys": list(caps["submit_keys"]),
+        "loop_participation": caps["loop_participation"],
         "stop_strategy": caps["stop_strategy"],
         "remove_strategy": caps["remove_strategy"],
         "session_binding": deepcopy(caps["session_binding"]),

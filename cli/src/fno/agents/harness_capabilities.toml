@@ -2,7 +2,7 @@
 # Edit this file, then resync the copy:
 #   cp crates/fno-agents/src/harness_capabilities.toml cli/src/fno/agents/harness_capabilities.toml
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when the two differ.
-map_version = 12
+map_version = 13
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -10,7 +10,39 @@ resume = "native-session"
 thread = true
 autonomous_pane = false
 route_on_pane = true
-stop_hook = "native"
+# LOOP PARTICIPATION. Can the fno target loop CLOSE on this harness?
+#
+# hooks/target-stop-hook.sh shims `fno-agents loop-check`, which decides stop or
+# allow from external truth. No lifecycle boundary means no loop-check
+# invocation, which means no loop, however well the harness spawns, resumes and
+# receives mail. Three members:
+#
+#   "native"     a shell hook fires at the lifecycle boundary and can invoke
+#                loop-check today
+#   "extension"  the harness exposes no shell hook. The loop is reachable only
+#                through a harness-native plugin fno ships, named by
+#                `loop_extension`. An EMPTY `loop_extension` means fno ships
+#                none yet, so a looping dispatch is refused rather than left to
+#                hang with nothing to stop it
+#   "none"       no boundary is exposed at all; a looping dispatch is refused
+#
+# This field REPLACES `stop_hook`, which read "native" on every row that ever
+# carried it and had zero behavioral consumers. One value across every row is
+# not a measurement. It is one declaration inherited five times, the shape
+# already proved on send_keys_enter_delay_ms, where four of five harnesses
+# carried one unrevisited default and every receipt read delivered while a
+# composer piled up. The provenance was written down beside the old field: a
+# 2026-07-13 docstring verified THREE harnesses and six rows ended up carrying
+# the value.
+#
+# Every value below is measured, per harness, against the artifact and the
+# wiring that reaches it - never against the word "native" in a table. Two of
+# the five inherited rows were wrong.
+#
+# claude, measured 2026-08-28: hooks/hooks.json declares a `Stop` group whose
+# command is hooks/target-stop-hook.sh, which shells loop-check.
+loop_participation = "native"
+loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
 ready_marker = "live_prompt_box"
@@ -106,7 +138,10 @@ resume = "native-thread"
 thread = true
 autonomous_pane = true
 route_on_pane = false
-stop_hook = "native"
+# codex, measured 2026-08-28: hooks/codex-hooks.json declares a `Stop` group
+# whose command is hooks/target-stop-hook.sh, the same adapter claude wires.
+loop_participation = "native"
+loop_extension = ""
 command_surface = "codex-skill"
 ready_marker = "idle_prompt"
 ready_rule_ids = ["idle_prompt"]
@@ -187,7 +222,19 @@ resume = "native-continue"
 thread = false
 autonomous_pane = false
 route_on_pane = false
-stop_hook = "native"
+# gemini, measured 2026-08-28, and the old "native" was WRONG. Nothing in this
+# tree wires a gemini stop boundary. `fno config setup cli-hooks` installs
+# exactly one gemini hook, `install_gemini_hook` in cli/src/fno/setup/cli_hooks.py,
+# and it merges a SessionStart group only. hooks/hooks-gemini.json, named in
+# docs/architecture/multi-cli-hooks.md, does not exist on disk. docs/harnesses/gemini.md
+# lists the SessionStart context hook and no other. No file in hooks/ reaches
+# loop-check under a gemini lifecycle event. The searches: every `loop-check`
+# caller in hooks/ and scripts/ (five files, none gemini), and every gemini
+# installer in cli/src/fno/setup/ (SessionStart only). The CLI is deprecated
+# upstream and `command_surface` already reads "refused", so this is a coherent
+# result rather than a regression; it is recorded plainly instead of inherited.
+loop_participation = "none"
+loop_extension = ""
 command_surface = "refused"
 ready_marker = "unsupported"
 ready_rule_ids = []
@@ -255,7 +302,15 @@ resume = "native-continue"
 thread = false
 autonomous_pane = false
 route_on_pane = false
-stop_hook = "native"
+# agy, measured 2026-08-28: hooks/agy-target-stop-hook.sh is a real adapter that
+# shells the same loop-check, and `fno config setup` registers it in agy's
+# ~/.gemini/config/hooks.json under the `footnote` namespace key as a `Stop`
+# handler (_agy_install in cli/src/fno/setup/integration.py). agy's hooks carry
+# claude-shaped event names over a Gemini-family wire format, so the adapter
+# translates rather than reusing target-stop-hook.sh verbatim; the authority is
+# the same binary.
+loop_participation = "native"
+loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
 ready_marker = "unsupported"
@@ -338,7 +393,16 @@ resume = "native-session"
 thread = false
 autonomous_pane = false
 route_on_pane = false
-stop_hook = "native"
+# opencode, measured 2026-08-28, and the old "native" was WRONG. opencode has no
+# shell hook and no exit veto; its own plugin says so in its header. The loop
+# closes here through a JS plugin fno ships and installs into
+# ~/.config/opencode/plugins/footnote.js, which subscribes to `session.idle`,
+# synthesizes a claude-shaped transcript, shells the same `fno-agents loop-check`,
+# and re-drives the session in-context on a block. That is a working loop, so the
+# honest value is "extension" rather than "none": the boundary exists, it is just
+# an artifact somebody wrote instead of a hook the harness fires.
+loop_participation = "extension"
+loop_extension = "cli/src/fno/setup/assets/opencode/footnote.js"
 command_surface = "slash"
 slash_prefix = "fno:"
 ready_marker = "unsupported"
@@ -457,16 +521,20 @@ resume = "native-session"
 thread = false
 autonomous_pane = false
 route_on_pane = false
-# UNVERIFIED FOR pi, and said so rather than inherited. This field has held one
-# value for every harness that ever carried it, which means it was declared
-# once and copied since; x-2fac is the node that replaces it with a
-# loop-participation declaration answering the question callers actually have.
-# pi is where the inheritance is least defensible: it ships NO shell hook
-# surface at all. Its extension points are TypeScript extensions under
-# ~/.pi/agent/extensions, and whether the autonomous loop can be driven through
-# one is unmeasured. Nothing reads this field today, so the value is inert;
-# when x-2fac lands, pi's answer comes from a measurement rather than from here.
-stop_hook = "native"
+# pi, measured 2026-08-28, replacing the inherited value this row refused to
+# stand behind. pi ships NO shell hook surface at all: nothing invokes a script
+# at a lifecycle boundary. Its extension points are in-process TypeScript
+# extensions under ~/.pi/agent/extensions, and the fno hook contract maps onto
+# them cleanly but as code - the stop gate onto `pi.on("agent_settled")`, whose
+# own definition is no retry, compaction or follow-up left, which is both the
+# right semantics and a positive marker rather than an absence. So pi's answer is
+# "extension", the same member opencode carries. The difference is that fno has
+# not written pi's extension yet, so `loop_extension` is empty and a looping
+# dispatch at pi is REFUSED. That refusal is the point: pi's command_surface is
+# "slash", so a /target would otherwise resolve fine and produce a worker with
+# nothing to stop it.
+loop_participation = "extension"
+loop_extension = ""
 command_surface = "slash"
 slash_prefix = ""
 # Read off a live pi TUI on 2026-08-28, not inherited: the status bar carries

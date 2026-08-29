@@ -22,6 +22,13 @@ const RESUME_KINDS: [&str; 4] = ["flag", "subcommand", "session_flag", "unsuppor
 const MODEL_SWITCH_KINDS: [&str; 3] = ["direct", "menu_walk", "unsupported"];
 const MODEL_SWITCH_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 const STOP_STRATEGIES: [&str; 2] = ["claude-short-id", "registry-noop"];
+/// Whether the fno target loop can CLOSE on a harness. `native` fires a shell
+/// hook at the lifecycle boundary that invokes loop-check; `extension` reaches
+/// loop-check only through a harness-native plugin fno ships (named by
+/// `loop_extension`); `none` exposes no boundary at all. Kept identical to the
+/// Python validator in cli/src/fno/agents/harness_map.py so the two runtimes
+/// cannot disagree about which contracts are legal.
+const LOOP_PARTICIPATION: [&str; 3] = ["native", "extension", "none"];
 const REMOVE_STRATEGIES: [&str; 3] = ["claude-short-id", "codex-session-index", "registry-only"];
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -43,7 +50,13 @@ pub struct HarnessCapabilities {
     pub thread: bool,
     pub autonomous_pane: bool,
     pub route_on_pane: bool,
-    pub stop_hook: String,
+    /// One of [`LOOP_PARTICIPATION`]. Read at the dispatch seam, not at load.
+    pub loop_participation: String,
+    /// The plugin artifact an `extension` harness closes its loop through,
+    /// repo-relative. EMPTY means fno ships none yet, which refuses a looping
+    /// dispatch. `native` and `none` rows carry the empty string.
+    #[serde(default)]
+    pub loop_extension: String,
     pub command_surface: String,
     #[serde(default)]
     pub slash_prefix: String,
@@ -341,6 +354,26 @@ impl HarnessContract {
                 }
             }
             validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
+            if !LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()) {
+                return Err(field_error(
+                    harness,
+                    "loop_participation",
+                    "unknown member",
+                ));
+            }
+            // Only an `extension` row may name an artifact: a `native` row
+            // closes its loop through a shell hook and a `none` row closes it
+            // through nothing, so a path on either is a claim the member
+            // contradicts. The converse is legal and load-bearing - an
+            // `extension` row with an EMPTY path is a harness whose extension
+            // fno has not written yet, and the dispatch seam refuses it.
+            if caps.loop_participation != "extension" && !caps.loop_extension.is_empty() {
+                return Err(field_error(
+                    harness,
+                    "loop_extension",
+                    "only an extension harness may name a loop artifact",
+                ));
+            }
             if !STOP_STRATEGIES.contains(&caps.stop_strategy.as_str()) {
                 return Err(field_error(harness, "stop_strategy", "unknown strategy"));
             }
@@ -660,6 +693,10 @@ mod tests {
             assert_eq!(caps.resume_strategy.forms.len(), 5, "{name}");
             assert!(!caps.model_switch_strategy.kind.is_empty(), "{name}");
             assert!(!caps.submit_keys.is_empty(), "{name}");
+            assert!(
+                LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()),
+                "{name}"
+            );
             assert!(!caps.stop_strategy.is_empty(), "{name}");
             assert!(!caps.remove_strategy.is_empty(), "{name}");
         }
@@ -679,6 +716,71 @@ mod tests {
                 .kind,
             "menu_walk"
         );
+    }
+
+    /// The measured answer, pinned per harness. `stop_hook` read "native" on
+    /// every row for a year because nothing here would have noticed if it
+    /// stopped being true. A uniform table passes this test only if every row
+    /// is uniform on purpose.
+    #[test]
+    fn loop_participation_is_measured_per_harness_and_not_uniform() {
+        let contract = HarnessContract::packaged().unwrap();
+        let value = |h: &str| contract.capabilities(h).unwrap().loop_participation.clone();
+        assert_eq!(value("claude"), "native");
+        assert_eq!(value("codex"), "native");
+        assert_eq!(value("agy"), "native");
+        assert_eq!(value("gemini"), "none");
+        assert_eq!(value("opencode"), "extension");
+        assert_eq!(value("pi"), "extension");
+        let distinct: BTreeSet<String> = contract
+            .harness
+            .values()
+            .map(|caps| caps.loop_participation.clone())
+            .collect();
+        assert!(
+            distinct.len() > 1,
+            "one value across every row is an inherited declaration, not a measurement"
+        );
+        // Only the shipped extension names an artifact; pi's is empty because
+        // fno has not written it, which is what refuses a looping dispatch there.
+        assert!(!contract
+            .capabilities("opencode")
+            .unwrap()
+            .loop_extension
+            .is_empty());
+        assert!(contract
+            .capabilities("pi")
+            .unwrap()
+            .loop_extension
+            .is_empty());
+        assert!(contract
+            .capabilities("claude")
+            .unwrap()
+            .loop_extension
+            .is_empty());
+    }
+
+    #[test]
+    fn an_out_of_enum_loop_participation_is_refused() {
+        let text = CAPABILITY_TOML.replacen(
+            "loop_participation = \"native\"",
+            "loop_participation = \"sometimes\"",
+            1,
+        );
+        let err = HarnessContract::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("loop_participation"), "{err}");
+        assert!(err.contains("claude"), "{err}");
+    }
+
+    #[test]
+    fn a_non_extension_harness_may_not_name_a_loop_artifact() {
+        let text = CAPABILITY_TOML.replacen(
+            "loop_participation = \"native\"\nloop_extension = \"\"",
+            "loop_participation = \"native\"\nloop_extension = \"some/plugin.js\"",
+            1,
+        );
+        let err = HarnessContract::parse(&text).unwrap_err().to_string();
+        assert!(err.contains("loop_extension"), "{err}");
     }
 
     #[test]
