@@ -260,6 +260,11 @@ AMBIENT_IDENTITY_FAMILY: dict[str, str] = {
     **{marker: family for marker, family in LEGACY_HARNESS_SESSION_MARKERS},
     **dict(SELF_SET_HARNESS_MARKERS),
     **dict(_EXTRA_IDENTITY_NAMES),
+    # fno's own, like the two above it: the strip remedy must never suggest
+    # deleting it. An unclassified name is skipped there by a fail-closed
+    # default, which reaches the same outcome by accident rather than by saying
+    # which family the name belongs to.
+    FNO_AGENT_SUBSTRATE: "fno",
 }
 
 _RESOLVER_IDENTITY_NAMES: frozenset[str] = frozenset(
