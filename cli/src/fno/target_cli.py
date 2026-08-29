@@ -597,10 +597,21 @@ def _refuse_dispatch_hold(node: Optional[dict], entries: Optional[list] = None) 
         return
     hold = verdict.hold
     if hold.state is DispatchHoldState.INVALID:
+        # The missing-file sub-case (round-12 finding 6) has no declaration
+        # to fix - its remedy is the same repair the dangling-pointer gate
+        # below names, so say that instead of pointing at a declaration that
+        # does not exist.
+        _missing = "missing under its existing plan root" in (hold.detail or "")
+        _remedy = (
+            "Repair the node with: fno backlog update <id> --plan-path <path>, "
+            "or restore the plan file."
+            if _missing
+            else "fix or remove the declaration, then retry."
+        )
         typer.echo(
             f"fno do target: {verdict.guard_reason}: {hold.detail}. "
-            "The plan cannot prove that dispatch is unheld; fix or remove the "
-            "declaration, then retry. Nothing was claimed.",
+            "The plan cannot prove that dispatch is unheld; "
+            f"{_remedy} Nothing was claimed.",
             err=True,
         )
         raise typer.Exit(code=2)

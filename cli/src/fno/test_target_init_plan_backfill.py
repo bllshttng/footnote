@@ -192,7 +192,11 @@ def test_free_text_input_leaves_plan_empty(stub_exec, monkeypatch, tmp_path):
 def test_dangling_node_plan_refuses_before_manifest_write(
     stub_exec, monkeypatch, tmp_path
 ):
-    """A bound-but-missing plan refuses instead of starting planless."""
+    """A bound-but-missing plan refuses instead of starting planless.
+
+    The dispatch-hold gate fires first on this shape (a missing plan under an
+    existing root reads INVALID, fail-closed) and carries the same repair
+    remedy the dangling-pointer gate names."""
     _graph(monkeypatch, [{"id": "x-39c0", "plan_path": str(tmp_path / "gone.md")}])
     _blast(monkeypatch, False)
 
@@ -200,8 +204,9 @@ def test_dangling_node_plan_refuses_before_manifest_write(
 
     assert res.exit_code == 2
     assert stub_exec == []
-    assert "REFUSING" in res.stderr
-    assert "does not resolve to a readable plan" in res.stderr
+    assert "dispatch-hold-invalid:x-39c0" in res.stderr
+    assert "missing under its existing plan root" in res.stderr
+    assert "refusing to assume unheld" in res.stderr or "cannot prove that dispatch is unheld" in res.stderr
     assert "fno backlog update" in res.stderr
 
 
