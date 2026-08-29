@@ -7,11 +7,15 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Literal, Optional, Union
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, Literal, Optional, Union
 
 import typer
 
 from fno._lazy_group import make_lazy_group_cls
+
+if TYPE_CHECKING:
+    from fno.paths import StateFile
 
 # Mounted as ``fno config accounts``: accounts ARE config
 # (``config.accounts.records``), so the verb path mirrors the config path. This
@@ -592,10 +596,86 @@ def doctor_cmd(
     except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
         pass
     try:
+        _report_state_roots()
+    except Exception:  # noqa: BLE001 - a report, not the diagnostic itself
+        pass
+    try:
         _report_deprecated_auto_merge()
-    except Exception:  # noqa: BLE001 - advisory, same wrap as the two above
+    except Exception:  # noqa: BLE001 - advisory, same wrap as the three above
         pass
     raise typer.Exit(rc)
+
+
+
+def _state_root_selector(row: "StateFile") -> str:
+    """The key that actually decided this row's root, not the one that could have.
+
+    The table's ``selector`` names the candidates in precedence order. When a
+    ``config.paths.*`` override is really in play, ``resolve_source`` says
+    WHICH file set it, so the receipt cannot drift from the loader's own merge
+    semantics - it is reading the loader's answer rather than re-deriving one.
+    """
+    from fno.config import resolve_source
+
+    for token in row.selector.split(","):
+        key = token.strip().removeprefix("else ").strip()
+        if not key.startswith("config."):
+            continue
+        try:
+            decided = resolve_source(key.removeprefix("config."))
+        except Exception:  # noqa: BLE001 - a receipt, not the loader
+            decided = None
+        if decided is not None:
+            return f"{key} (set in {decided[0]})"
+    return row.selector
+
+
+def _report_state_roots() -> None:
+    """Name the root each state class actually resolved, and the key that chose it.
+
+    `fno config get review.max_rounds` answered from the canonical root while
+    the gate resolver answered from the worktree. The diagnostic tool and the
+    runtime disagreed BY CONSTRUCTION and nothing reported the disagreement,
+    so the wrong answer stayed a returned value for as long as anyone looked
+    at it. Asserting that a resolver RETURNS something proves nothing; this
+    prints WHICH root it returned.
+
+    The warning line is the cheapest half and the whole point: whenever the
+    cwd-derived project root differs from the ``--git-common-dir`` canonical
+    one, the two are named side by side. Read-only.
+    """
+    from fno.paths import STATE_FILES, resolve_canonical_repo_root, resolve_repo_root
+
+    typer.echo("")
+    typer.echo("state roots:")
+    typer.echo(f"  {'class':<9}{'file':<17}{'root':<48}selector")
+    for row in STATE_FILES:
+        if row.resolver is None:
+            resolved = "NO RESOLVER - built by hand at every call site"
+        else:
+            module_name, _, attr = row.resolver.rpartition(".")
+            try:
+                resolved = str(getattr(import_module(module_name), attr)())
+            except Exception as exc:  # noqa: BLE001 - a receipt, not the resolver
+                resolved = f"unresolvable ({type(exc).__name__})"
+        # One space minimum: a resolved path longer than the column must not
+        # run into the selector and read as one token.
+        typer.echo(
+            f"  {row.root_class:<9}{row.filename:<17}{resolved:<48} "
+            f"{_state_root_selector(row)}"
+        )
+
+    worktree_root = resolve_repo_root().resolve()
+    canonical_root = resolve_canonical_repo_root().resolve()
+    if worktree_root != canonical_root:
+        typer.echo(
+            f"  WARNING: the project root resolved from cwd ({worktree_root}) differs\n"
+            f"           from the canonical root ({canonical_root}). Project config is\n"
+            "           read from the canonical root, so a key set only in this\n"
+            "           worktree's .fno/settings.yaml is NOT what the loader served,\n"
+            "           and a gate key set only in canonical reads its shipped default\n"
+            "           for any resolver that stays on the worktree root."
+        )
 
 
 def _report_deprecated_auto_merge() -> None:

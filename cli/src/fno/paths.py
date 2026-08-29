@@ -498,17 +498,17 @@ STATE_FILES: tuple[StateFile, ...] = (
         filename="claims",
         # Not in this module, and the table says so rather than pretending
         # otherwise: claims resolve through the claims package.
-        resolver="fno.claims.io.global_claims_root",
+        resolver="fno.claims.io.global_claims_dir",
         root_class="OPERATOR",
         selector="FNO_CLAIMS_ROOT, else $HOME",
         owning_modules=("cli/src/fno/claims/io.py", "crates/fno-agents/src/claims.rs"),
     ),
     StateFile(
         filename="messages.jsonl",
-        resolver="fno.paths.bus_dir",
+        resolver="fno.bus.log.bus_log_path",
         root_class="OPERATOR",
         selector="FNO_BUS_DIR, else config.paths.bus_dir, else config.state_dir",
-        owning_modules=("cli/src/fno/paths.py",),
+        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/bus/log.py"),
     ),
     StateFile(
         filename="briefs",

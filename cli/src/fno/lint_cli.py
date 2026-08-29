@@ -238,6 +238,7 @@ _ROOT_READS = frozenset(
         # no other name in this set. Without it the rule would run green
         # against the case it was written for.
         "_candidate_paths",
+        "global_claims_root",
         "resolve_repo_root",
         "resolve_canonical_repo_root",
         "resolve_canonical_worktree",
