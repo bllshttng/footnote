@@ -95,9 +95,14 @@ def normalize_legacy_no_merge(command: str) -> str:
 
 def is_target_family(message: str) -> bool:
     """True when the message's first token is a /target-family command
-    spelling - the one vocabulary that can carry merge-posture flags."""
-    first = message.split(maxsplit=1)[0] if message else ""
-    return first in _TARGET_FAMILY
+    spelling - the one vocabulary that can carry merge-posture flags.
+
+    A message of only whitespace has no first token. The truthiness guard alone
+    did not catch it, so ``"   "`` indexed an empty list and raised rather than
+    answering False. Split first, then ask.
+    """
+    tokens = message.split(maxsplit=1) if message else []
+    return bool(tokens) and tokens[0] in _TARGET_FAMILY
 
 
 def message_carries_no_merge(message: str) -> bool:

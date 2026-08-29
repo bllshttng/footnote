@@ -158,6 +158,10 @@ def test_a_non_looping_dispatch_is_never_refused(harness):
     check_loop_participation(harness, "/think what breaks here")
     check_loop_participation(harness, "opencode run --command build")
     check_loop_participation(harness, "")
+    # A whitespace-only message has no first token. It used to raise IndexError
+    # out of the shared family test, which three callers reach.
+    check_loop_participation(harness, "   ")
+    check_loop_participation(harness, "\t\n")
 
 
 def test_resolve_dispatch_refuses_a_looping_target_at_pi():
