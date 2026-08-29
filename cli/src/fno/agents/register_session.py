@@ -25,7 +25,10 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional, Sequence
+
+if TYPE_CHECKING:
+    from fno.agents.reachability import Reachability
 
 from fno.agents import events
 from fno.agents.registry import register_existing_session, restamp_harness_session_id
@@ -69,7 +72,7 @@ def _row_exists(name: str, harness: str) -> bool:
         return True
 
 
-def _reading_for_entry(entry: object) -> "object":
+def _reading_for_entry(entry: Any) -> Optional["Reachability"]:
     """One row's family-1 reading, from the entry the caller already holds.
 
     The ONE reachability derivation every agents surface shares
@@ -95,7 +98,7 @@ def _reading_for_entry(entry: object) -> "object":
 
 def _predecessor_reading(
     name: str, harness: str
-) -> tuple[Optional[str], Optional["object"]]:
+) -> tuple[Optional[str], Optional["Reachability"]]:
     """Sample the row's recorded id and its family-1 truth reading.
 
     Returns ``(recorded_session_id, Reachability | None)``; ``None`` reading
@@ -266,7 +269,7 @@ def _restamp(agent_self: str, harness: str, session_id: str, source: str = "") -
     return 0
 
 
-def _verdict_bool(reading: Optional[object]) -> Optional[bool]:
+def _verdict_bool(reading: Optional["Reachability"]) -> Optional[bool]:
     """The classifier's tri-state from one reachability reading.
 
     REACHABLE is True, UNREACHABLE is False, and UNKNOWN (or no reading at
@@ -286,7 +289,7 @@ def _verdict_bool(reading: Optional[object]) -> Optional[bool]:
 
 def _reading_for_transition(
     name: str, harness: str, session_id: str
-) -> tuple[Optional[str], Optional[object]]:
+) -> tuple[Optional[str], Optional["Reachability"]]:
     """Sample family-1 evidence ONLY when the payload could be a transition.
 
     A same-id SessionStart (every healthy restart, every compact) can never
@@ -336,7 +339,7 @@ def _emit_transition_events(
     source: str,
     entry: object,
     outcome: str,
-    reading: Optional[object],
+    reading: Optional["Reachability"],
 ) -> None:
     """Emit the typed transition event for one finished observation.
 
