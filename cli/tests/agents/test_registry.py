@@ -716,7 +716,15 @@ def test_us2_schema_version_is_three() -> None:
     assert SCHEMA_VERSION == 20
 
 
-def test_session_lineage_fields_round_trip() -> None:
+def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
+    # This writes to the DEFAULT registry path, and without per-test isolation
+    # that path is the session-wide test sandbox every other file's
+    # default-path reader also sees. The leftover row (harness_session_id
+    # "session-b") then surfaced as a phantom extra session in four
+    # test_discover.py codex assertions, but only when the two files ran in the
+    # same invocation -- each passed alone, which is what kept it hidden.
+    use_tmpdir(monkeypatch, tmp_path)
+
     from fno.agents.registry import AgentEntry, load_registry, write_registry
 
     entry = AgentEntry(
@@ -1371,25 +1379,67 @@ def test_session_id_property_matches_resume_cli_session_id_for() -> None:
         assert entry.session_id == _session_id_for(entry) == value, provider
 
 
-def test_harness_session_id_fields_covers_known_providers() -> None:
-    """Every dispatchable harness must have a resume-target field mapping.
+def test_every_resumable_harness_resolves_an_identity() -> None:
+    """Every harness that DECLARES resume support must resolve a resume id.
 
-    Guards against adding a provider to KNOWN_PROVIDERS without teaching
-    session_id / _session_id_for how to resolve its resume id (which
-    would silently return None for the new harness). Keyed on the sole
-    HARNESS_SESSION_ID_FIELDS map (x-880e removed the provider alias).
+    The lower bound is the capability contract, because that is what the
+    resume verb's own support check reads. The bound this replaces was
+    KNOWN_PROVIDERS, the Python dispatch set, which is ("claude", "codex") -
+    so pi, gemini, agy and opencode all passed it vacuously and it could not
+    fail when a harness joined the contract without joining the map (x-efd7).
 
-    Containment, not equality: a pane-hostable harness can carry a resume
-    field without a Python dispatch adapter. opencode is exactly that (x-830c) -
-    it resumes via harness_session_id but is driven through the Rust spawn
-    paths, and promoting it into KNOWN_PROVIDERS would leak it into headless/bg
-    Python dispatch that has no opencode codepath. The upper bound stays
-    READABLE_PROVIDERS so a typo'd harness still fails.
+    The live specimen: pi declared interactive_resume support in the
+    contract while nothing taught the identity read about it, so
+    `fno agents resume` answered "supported" and then "no recorded
+    session_id for harness pi" about one row, which `fno agents attach`
+    opened fine off harness_session_id.
+
+    The row shape asserted here is the one every non-claude row actually
+    has: a canonical harness_session_id and no transport key.
+
+    The upper bound stays READABLE_PROVIDERS so a typo'd harness still fails.
     """
-    from fno.agents.harnesses import KNOWN_PROVIDERS, READABLE_PROVIDERS
-    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
+    from fno.agents.harness_map import DispatchResolveError, capabilities, known_harnesses
+    from fno.agents.harnesses import READABLE_PROVIDERS
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, AgentEntry
+    from fno.agents.resume_cli import _session_id_for
 
-    assert set(KNOWN_PROVIDERS) <= set(HARNESS_SESSION_ID_FIELDS)
+    checked = []
+    for harness in known_harnesses():
+        try:
+            form = capabilities(harness)["resume_strategy"]["forms"]["interactive_resume"]
+        except (DispatchResolveError, KeyError, TypeError):
+            continue
+        if form["kind"] == "unsupported":
+            continue
+        entry = AgentEntry(
+            name=f"{harness}-row",
+            harness=harness,
+            cwd="/x",
+            log_path="/tmp/x.log",
+            harness_session_id="canonical-id-1",
+        )
+        assert entry.session_id == "canonical-id-1", (
+            f"harness {harness!r} declares interactive_resume support but its "
+            f"identity read returns nothing for a harness_session_id-only row"
+        )
+        assert _session_id_for(entry) == "canonical-id-1", harness
+        assert harness in HARNESS_SESSION_ID_FIELDS, (
+            f"harness {harness!r} declares interactive_resume support but is "
+            f"absent from HARNESS_SESSION_ID_FIELDS, so register_session "
+            f"raises on it and discovery skips its rows"
+        )
+        checked.append(harness)
+
+    # A positive marker, not an absence. Without this the assertion body could
+    # be skipped entirely by a contract that declared nothing resumable, which
+    # is the exact shape of vacuous pass this test was written to end. The bar
+    # proves the LOOP RAN and nothing more, so it stays well under the six
+    # harnesses that declare support today: pinning it near that count would
+    # turn one legitimate retirement into a failure here, and a gate that cries
+    # about roster churn is one people learn to edit.
+    assert len(checked) >= 2, f"the resumable-harness loop never ran; saw {checked}"
+
     assert set(HARNESS_SESSION_ID_FIELDS) <= set(READABLE_PROVIDERS)
 
 

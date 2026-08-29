@@ -122,12 +122,22 @@ KNOWN_HOST_MODES = frozenset({"exec", "interactive", "attached"})
 # At v10 (x-880e) the legacy per-provider id fields are gone, so codex/gemini
 # resume off the canonical harness_session_id; claude still attaches by the
 # 8-hex jobId in short_id (a distinct transport key, not removed).
+# pi joined at x-efd7. Two consumers reach this map WITHOUT the
+# harness_session_id fallback that AgentEntry.session_id and
+# _session_id_for apply: `register_session` below raises on an unmapped
+# harness, and `discover._discover_from_registry` skips the row. So a
+# harness the capability contract already supports has to be here, not
+# merely rescued by the fallback. Admitting pi puts it exactly where
+# gemini/agy/opencode already sit -- no transcript store of its own, so its
+# rows resolve with truth_state unknown and the shared classify_reachability
+# decides, rather than a new per-harness liveness opinion.
 HARNESS_SESSION_ID_FIELDS = {
     "claude": "short_id",
     "codex": "harness_session_id",
     "gemini": "harness_session_id",
     "agy": "harness_session_id",
     "opencode": "harness_session_id",
+    "pi": "harness_session_id",
 }
 
 # The registry's legacy per-harness session-id keys (x-ec59). Distinct from the

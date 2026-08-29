@@ -1032,12 +1032,40 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 /// back-fills it from a legacy row's per-provider key). This is the ONLY place a
 /// verb touches a session-id field; every session-connecting verb reaches a row via
 /// [`find_agent_entry`] instead of its own name-only `.find`.
+///
+/// This is an EXCEPTION table, not the roster (x-efd7). claude is the one harness
+/// whose transport key differs from its canonical id, so it is the one entry that
+/// changes the answer; every other harness resolves `harness_session_id`, which is
+/// also what [`resume_session_id`] falls back to when this returns `None`. Read it
+/// as "does this harness address differently", never as "is this harness known" --
+/// the second reading is what left pi declaring `interactive_resume` support in
+/// `harness_capabilities.toml` while resume refused it for having no session id.
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
         "codex" | "gemini" | "agy" | "opencode" => Some("harness_session_id"),
         _ => None,
     }
+}
+
+/// The row's resume-target id: its harness transport key when that carries one,
+/// else the canonical `harness_session_id`.
+///
+/// The exact mirror of Python `resume_cli._session_id_for` and the
+/// `AgentEntry.session_id` property, whose fallback this half lacked (x-efd7).
+/// Two rows differing only in `harness` resumed differently: codex reached exec,
+/// pi -- absent from [`session_id_field`] but declaring `interactive_resume`
+/// support in the capability contract -- refused with "no recorded session_id".
+/// Falling back keeps the two rosters from disagreeing for any harness, added
+/// today or later, and it also keeps a claude PANE row resumable: such a row
+/// carries `harness_session_id` and no `short_id` by design.
+fn resume_session_id<'a>(entry: &'a Value, harness: &str) -> &'a str {
+    session_id_field(harness)
+        .and_then(|field| entry.get(field))
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .or_else(|| entry.get("harness_session_id").and_then(Value::as_str))
+        .unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------
@@ -2481,10 +2509,7 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         recorded_cwd.to_string()
     };
     let cwd: &str = &resolved_cwd;
-    let session_id = session_id_field(harness)
-        .and_then(|f| entry.get(f))
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let session_id = resume_session_id(entry, harness);
 
     if cwd.is_empty() {
         if !session_id.is_empty() {
@@ -5169,6 +5194,89 @@ mod tests {
         assert!(result.stderr.contains("one"));
         assert!(result.stderr.contains("two"));
         assert!(!result.stderr.contains("not found"));
+    }
+
+    /// The gate x-efd7 exists to install: the resume roster and the identity
+    /// read are derived from ONE source, so they cannot disagree again.
+    ///
+    /// Keyed on the capability contract because that is what
+    /// `interactive_resume_supported` reads. A hand-kept list is what failed:
+    /// pi declared `interactive_resume` support there while `session_id_field`
+    /// had never heard of it, so resume answered "supported" and then "no
+    /// recorded session_id" about the same row. Every harness that declares
+    /// support must resolve a non-empty identity from a row carrying only
+    /// `harness_session_id` -- the shape every non-claude row actually has.
+    #[test]
+    fn every_resumable_harness_resolves_an_identity() {
+        let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
+        let mut checked = 0usize;
+        for harness in contract.harness.keys() {
+            if !interactive_resume_supported(harness) {
+                continue;
+            }
+            let row = serde_json::json!({
+                "harness": harness,
+                "short_id": "",
+                "harness_session_id": "canonical-id-1",
+            });
+            assert_eq!(
+                resume_session_id(&row, harness),
+                "canonical-id-1",
+                "harness {harness:?} declares interactive_resume support but its \
+                 identity read returns nothing for a harness_session_id-only row"
+            );
+            checked += 1;
+        }
+        // A positive marker, not an absence: a contract that stopped declaring
+        // any resumable harness would otherwise pass this test vacuously, which
+        // is precisely how the Python gate this replaces went green on pi.
+        // The bar proves the LOOP RAN and nothing more, so it stays well under
+        // the six harnesses that declare support today. Pinning it near that
+        // count would turn one legitimate retirement into a failure here, and a
+        // gate that cries about roster churn is one people learn to edit.
+        assert!(
+            checked >= 2,
+            "the resumable-harness loop never ran; contract declared {checked}"
+        );
+    }
+
+    /// Both directions of the fallback, so neither reads as passing by accident.
+    #[test]
+    fn transport_key_wins_and_canonical_id_backstops() {
+        // pi: the x-efd7 repro. Absent from `session_id_field`, so the read has
+        // only the fallback to reach its id with.
+        let pi = serde_json::json!({
+            "harness": "pi",
+            "short_id": "",
+            "harness_session_id": "fno-tui-0001",
+        });
+        assert_eq!(resume_session_id(&pi, "pi"), "fno-tui-0001");
+
+        // claude carrying both: the transport key still wins, so the fallback
+        // can never override a present short_id.
+        let claude = serde_json::json!({
+            "harness": "claude",
+            "short_id": "119e3c52",
+            "harness_session_id": "119e3c52-62bf-43b4-b3c4-3c7ce659f802",
+        });
+        assert_eq!(resume_session_id(&claude, "claude"), "119e3c52");
+
+        // A claude PANE row carries the canonical id and no short_id by design
+        // (x-b84f). It resolves rather than reporting "no session id".
+        let pane = serde_json::json!({
+            "harness": "claude",
+            "short_id": "",
+            "harness_session_id": "119e3c52-62bf-43b4-b3c4-3c7ce659f802",
+        });
+        assert_eq!(
+            resume_session_id(&pane, "claude"),
+            "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
+        );
+
+        // A row carrying neither still resolves to empty, so the callers'
+        // is_empty refusals keep firing.
+        let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
+        assert_eq!(resume_session_id(&bare, "pi"), "");
     }
 
     #[test]
