@@ -939,6 +939,7 @@ def _codex_daemon_candidate(
     baseline_ids: Optional[set[str]],
     *,
     codex_home: Optional[Path] = None,
+    observed: Optional[list] = None,
 ) -> Optional[str]:
     """The single session id the app-server daemon reports as new for ``cwd``.
 
@@ -964,8 +965,25 @@ def _codex_daemon_candidate(
     This is a single-shot read with no cross-call memory; the caller
     (:func:`_make_codex_bind_probe`) is the one that requires the same
     candidate to repeat before trusting it.
+
+    ``observed`` is an out-of-band sink for the CONDITION behind a decline,
+    following the ``oracle_used`` idiom below. Four different states all return
+    the same bare ``None`` here, and a bind window that expires after 60s of
+    them used to report only the clock - which is how four measured failures
+    produced one word and three wrong hypotheses. Written in place
+    (``observed[:] = [...]``) so it always holds the LAST observation rather
+    than growing across a poll. Never a return-value change: ``observed=None``
+    leaves behavior byte-identical for every existing caller.
     """
+
+    def _note(text: str) -> None:
+        if observed is not None:
+            observed[:] = [text]
+
     if baseline_ids is None:
+        # No window length can fix this one: the daemon oracle is disabled for
+        # the whole spawn, so saying so beats any timeout.
+        _note("daemon: no pre-spawn baseline, oracle disabled for this spawn")
         return None
     loaded = (
         _codex_session_ids_loaded(cwd)
@@ -973,10 +991,15 @@ def _codex_daemon_candidate(
         else _codex_session_ids_loaded(cwd, codex_home=codex_home)
     )
     if loaded is None:
+        _note("daemon: app-server unreachable")
         return None
     new_ids = loaded - baseline_ids
     if len(new_ids) == 1:
         return next(iter(new_ids))
+    if not new_ids:
+        _note("daemon: no new codex session for this cwd")
+    else:
+        _note(f"daemon: {len(new_ids)} new codex sessions for this cwd, ambiguous")
     return None
 
 
@@ -991,6 +1014,7 @@ def _make_codex_bind_probe(
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
     oracle_used: Optional[list] = None,
     daemon_codex_home: Optional[Path] = None,
+    condition: Optional[list] = None,
 ) -> Callable[[], Optional[str]]:
     """Build the two-oracle ``bind_probe`` :func:`_await_pane_binding` polls.
 
@@ -1016,6 +1040,11 @@ def _make_codex_bind_probe(
     session there does not by itself prove the pane is still up. Shared with
     ``fno doctor --codex-bind`` so a regression here shows up on the canary,
     not silently.
+
+    ``condition`` is the out-of-band sink carrying WHY a poll declined, so the
+    refusal a blown window raises can name a condition instead of a clock. Each
+    decline overwrites the previous one, so the sink holds the newest
+    observation when the window closes.
     """
     used = oracle_used if oracle_used is not None else []
     last_probe_s = [0.0]
@@ -1023,6 +1052,10 @@ def _make_codex_bind_probe(
 
     def _mark_oracle(name: str) -> None:
         used[:] = [name]
+
+    def _note(text: str) -> None:
+        if condition is not None:
+            condition[:] = [text]
 
     def _probe() -> Optional[str]:
         sid = _backfill_codex_session_id(
@@ -1035,19 +1068,28 @@ def _make_codex_bind_probe(
         if sid:
             _mark_oracle("rollout-fd")
             return sid
+        _note(f"fd: no codex rollout on pane child pid {child_pid}")
         now_s = time.monotonic()
         if now_s - last_probe_s[0] < _CODEX_DAEMON_PROBE_INTERVAL_S:
+            # A rate-limit skip is not an observation, so the fd note above
+            # stands as the newest thing anything actually looked at.
             return None
         last_probe_s[0] = now_s
         candidate = _codex_daemon_candidate(
-            cwd, daemon_baseline_ids, codex_home=daemon_codex_home
+            cwd,
+            daemon_baseline_ids,
+            codex_home=daemon_codex_home,
+            observed=condition,
         )
         if candidate is None or candidate != prev_candidate[0]:
+            if candidate is not None:
+                _note(f"daemon: candidate {candidate} awaiting a repeat probe")
             prev_candidate[0] = candidate
             return None
         # The same single candidate repeated - trust it, unless the mux has
         # just told us the pane itself is already gone.
         if _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S) is False:
+            _note("daemon: candidate dropped, pane already gone")
             return None
         _mark_oracle("daemon")
         return candidate
@@ -2274,6 +2316,16 @@ class PaneBinding:
     reason: str
     #: Retained pane scrollback, "" when nothing was captured.
     tail: str
+    #: Seconds actually spent waiting - measured, never the configured window.
+    elapsed_s: float = 0.0
+    #: The window this wait was granted, so the refusal can print the ratio.
+    window_s: float = 0.0
+    #: Bind-probe ticks completed.
+    polls: int = 0
+    #: The last condition an oracle reported; "" when none was recorded.
+    #: Populated on the BOUND path too: a field that only ever appears on a
+    #: failure cannot be told apart from an instrument that never ran.
+    condition: str = ""
 
 
 def _read_pane_tail(
@@ -2310,6 +2362,7 @@ def _await_pane_binding(
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     sleep: Optional[Callable] = None,
     label: str = "the worker",
+    condition_sink: Optional[list] = None,
 ) -> PaneBinding:
     """Wait out the gap between "a pane exists" and "a worker reached its provider".
 
@@ -2344,6 +2397,12 @@ def _await_pane_binding(
 
     Provider-agnostic by construction (``bind_probe`` is the only provider-aware
     part), though only the codex route is wired onto it today.
+
+    ``condition_sink`` is the list the caller also handed ``bind_probe``'s
+    factory: the probe writes the newest decline condition into it, and this
+    wait reads it onto every outcome. That is what lets a blown window report
+    what it OBSERVED rather than only how long it waited - the defect four
+    measured `binding-window-expired` failures had in common.
     """
     naptime = sleep or time.sleep
     window = max(window_s if window_s is not None else _binding_window_s(), 0.0)
@@ -2352,8 +2411,24 @@ def _await_pane_binding(
     tail = ""
     announced = False
     first_pass = True
+    polls = 0
     last_alive: Optional[bool] = None
+
+    def _out(sid: Optional[str], alive: Optional[bool], reason: str) -> PaneBinding:
+        """Every exit carries what the wait measured, bound or not."""
+        return PaneBinding(
+            sid,
+            alive,
+            reason,
+            tail,
+            elapsed_s=time.monotonic() - started,
+            window_s=window,
+            polls=polls,
+            condition=(condition_sink[0] if condition_sink else ""),
+        )
+
     while True:
+        polls += 1
         sid = bind_probe()
         if sid:
             # pane_alive True: the rollout-fd oracle can only read the id from
@@ -2362,12 +2437,12 @@ def _await_pane_binding(
             # that answers is detached from the pane - so a probe wired to
             # that oracle (see _make_codex_bind_probe) must verify liveness
             # itself before returning a candidate here.
-            return PaneBinding(sid, True, "", tail)
+            return _out(sid, True, "")
         # Deadline before the tail read as well: evidence is best-effort, and a
         # slow mux must not buy itself another bounded probe past the ceiling.
         # The first pass is exempt for the same reason as below - one full look.
         if not first_pass and time.monotonic() >= deadline:
-            return PaneBinding(None, last_alive, "binding-window-expired", tail)
+            return _out(None, last_alive, "binding-window-expired")
         # Keep the newest NON-EMPTY read: a TUI that has not painted yet reads
         # empty, and a later empty read must not erase real earlier evidence.
         fresh = _read_pane_tail(mux, runner)
@@ -2385,16 +2460,16 @@ def _await_pane_binding(
             # last_alive, not None: the previous tick may have OBSERVED the pane
             # up 0.75s ago, and reporting "the mux could not answer" would throw
             # away a real observation.
-            return PaneBinding(None, last_alive, "binding-window-expired", tail)
+            return _out(None, last_alive, "binding-window-expired")
         first_pass = False
         alive = _mux_pane_alive(mux, runner, timeout=_PROBE_TIMEOUT_S)
         last_alive = alive if alive is not None else last_alive
         if alive is False:
-            return PaneBinding(None, False, "pane-died-before-binding", tail)
+            return _out(None, False, "pane-died-before-binding")
         # Checked AFTER a full probe, so a zero or negative window still buys
         # exactly one look rather than skipping the loop entirely.
         if time.monotonic() >= deadline:
-            return PaneBinding(None, alive, "binding-window-expired", tail)
+            return _out(None, alive, "binding-window-expired")
         if not announced and time.monotonic() - started >= _BINDING_ANNOUNCE_S:
             announced = True
             print(
@@ -2403,6 +2478,58 @@ def _await_pane_binding(
                 file=sys.stderr,
             )
         naptime(_BINDING_POLL_S)
+
+
+def _live_agent_count(registry_path: Optional[Path] = None) -> Optional[int]:
+    """Non-terminal registry rows, or None when the registry could not be read.
+
+    None and 0 are different answers and the caller prints them differently: a
+    refusal that says "0 live agents" when it actually failed to read is the
+    absence-as-outcome trap, which is exactly the class of lie this whole change
+    is removing from the bind lane.
+    """
+    try:
+        from fno.agents.registry import TERMINAL_STATUSES
+
+        rows = load_registry(path=registry_path) if registry_path else load_registry()
+        return sum(1 for r in rows if r.status not in TERMINAL_STATUSES)
+    except Exception:  # noqa: BLE001 -- a flight recorder never fails its subject
+        return None
+
+
+def _bind_failure_diagnostic(
+    binding: Optional[PaneBinding], registry_path: Optional[Path] = None
+) -> str:
+    """What the bind wait MEASURED, as one sentence for a refusal message.
+
+    ``None`` yields "", because the no-child-pid arm never ran a bind wait and
+    measured nothing. Printing "waited 0.0s" there would fabricate a reading,
+    which is the same defect as the clock this replaces.
+
+    Replaces the ``fno doctor --codex-bind`` pointer these refusals used to
+    carry. That probe binds a canary in a fresh scratch cwd with its own
+    baseline, so it cannot observe a cwd-scoped ambiguity or a missing
+    pre-spawn baseline - two of the conditions that actually stop a spawn. It
+    read green at 3.39s and again at 0.92s while four spawns died, so pointing
+    an operator at it told them the lane was healthy while their work was
+    failing. A green control aimed at a path the failure does not take is not
+    evidence.
+
+    Every clause here is a measurement or an observation. Nothing in it is a
+    hypothesis about the cause: this lane produced three confident wrong causes
+    precisely because it reported nothing it had actually seen.
+    """
+    if binding is None:
+        return ""
+    parts = [
+        f"waited {binding.elapsed_s:.1f}s of a {binding.window_s:.1f}s window "
+        f"across {binding.polls} poll(s)",
+        f"last observed: {binding.condition or 'nothing recorded'}",
+    ]
+    live = _live_agent_count(registry_path)
+    if live is not None:
+        parts.append(f"{live} live agent(s)")
+    return "; ".join(parts) + ". "
 
 
 #: The statuses whose death was PROVED by a probe, and therefore the only ones
@@ -3942,6 +4069,11 @@ def dispatch_spawn_pane(
             from fno.agents.harness_map import capabilities
 
             binding_caps = capabilities(provider)["session_binding"]
+            # None on the no-pid arm below, which never runs a bind wait and so
+            # measured nothing. Refusals downstream must guard on it rather than
+            # print zeros: a fabricated "waited 0.0s" is the same lie as the
+            # clock this change removes.
+            binding: Optional[PaneBinding] = None
             # child_pid reads the id race-free from the pane's open rollout. A
             # pid-less row (_lookup_child_pid best-effort miss) is left id-less:
             # the id is what routes the row into reconcile's mux branch, and a
@@ -3955,6 +4087,11 @@ def dispatch_spawn_pane(
                 # attempts=1 inside the fd half: the binding loop owns the
                 # retry, because it also watches for the pane dying BETWEEN
                 # probes - which a bare retry loop cannot see.
+                #
+                # One list, handed to BOTH: the probe writes the newest decline
+                # condition into it and the wait reads it onto the outcome, so
+                # a blown window can name what it saw instead of only the clock.
+                bind_condition: list = []
                 binding = _await_pane_binding(
                     {"session": session, "pane_id": pane_id},
                     _make_codex_bind_probe(
@@ -3965,10 +4102,12 @@ def dispatch_spawn_pane(
                         daemon_baseline_ids=codex_daemon_baseline_ids,
                         mux={"session": session, "pane_id": pane_id},
                         runner=runner,
+                        condition=bind_condition,
                     ),
                     runner=runner,
                     window_s=binding_window_s,
                     label="codex",
+                    condition_sink=bind_condition,
                 )
                 session_uuid = binding.session_id
                 pane_alive = binding.pane_alive
@@ -3997,12 +4136,19 @@ def dispatch_spawn_pane(
             if session_uuid is None:
                 from fno.agents import events as _events
 
+                # The measurement rides the DURABLE event, not only stderr: a
+                # reaped spawn's stderr is gone with the scrollback, and four
+                # of these failures left nothing a later session could read.
                 _events.emit(
                     "agent_session_id_uncaptured",
                     name=name,
                     harness=provider,
                     cwd=str(cwd),
                     reason="no unique codex rollout for this cwd after spawn",
+                    elapsed_s=(round(binding.elapsed_s, 3) if binding else None),
+                    window_s=(binding.window_s if binding else None),
+                    polls=(binding.polls if binding else None),
+                    condition=(binding.condition if binding else ""),
                 )
                 # binding-window-expired is a soft miss, not a dead end: the
                 # pane is confirmed live, only codex's own id has not shown up
@@ -4021,10 +4167,10 @@ def dispatch_spawn_pane(
                         raise DispatchAskError(
                             f"agent {name!r} required {provider} session binding "
                             f"({unbound_reason or 'not-captured'}); pane {pane_id} reaped, "
-                            "no registry row written. Diagnose the lane with "
-                            "'fno doctor --codex-bind'; spawn with --substrate "
-                            "headless meanwhile (headless owns its own session "
-                            "and is unaffected)",
+                            "no registry row written. "
+                            f"{_bind_failure_diagnostic(binding, registry_path)}"
+                            "Spawn with --substrate headless meanwhile (headless "
+                            "owns its own session and is unaffected)",
                             exit_code=1,
                         )
                     raise DispatchAskError(
@@ -4558,10 +4704,10 @@ def dispatch_spawn_pane(
                         )
                     raise DispatchAskError(
                         f"agent {name!r} required {provider} session binding "
-                        f"({unbound_reason}); {cleanup_detail}. Diagnose the lane with "
-                        "'fno doctor --codex-bind'; spawn with --substrate "
-                        "headless meanwhile (headless owns its own session "
-                        "and is unaffected)",
+                        f"({unbound_reason}); {cleanup_detail}. "
+                        f"{_bind_failure_diagnostic(binding, registry_path)}"
+                        "Spawn with --substrate headless meanwhile (headless "
+                        "owns its own session and is unaffected)",
                         exit_code=1,
                     )
                 raise DispatchAskError(

@@ -1159,3 +1159,241 @@ def test_production_codex_binding_never_keys_on_rollout_mtime(monkeypatch) -> No
         )
         is None
     )
+
+
+# ---------------------------------------------------------------------------
+# x-1595: a blown bind window reports the CONDITION it observed, never only
+# the clock.
+#
+# Four codex pane spawns died at `binding-window-expired` on 2026-08-27/28.
+# The word names a CLOCK; the real condition was never reported, so three
+# confident causes (machine load, a source-ahead registry schema, a dead shared
+# daemon) were each built on circumstance and each died against its own
+# control. The refusal also routed the operator to `fno doctor --codex-bind`,
+# which binds a canary in a scratch cwd with its own baseline and read green at
+# 3.39s and 0.92s while the spawns were dying: a green control aimed at a path
+# the failure does not take is not evidence.
+# ---------------------------------------------------------------------------
+
+
+def test_daemon_candidate_names_the_disabled_oracle() -> None:
+    """The one condition no window length can fix, so it must be SAID.
+
+    A missing pre-spawn baseline disables the daemon oracle for the whole
+    spawn. Waiting 60s or 600s produces the same nothing.
+    """
+    seen: list = []
+    assert (
+        mux_spawn._codex_daemon_candidate(Path("/w/proj"), None, observed=seen) is None
+    )
+    assert seen == ["daemon: no pre-spawn baseline, oracle disabled for this spawn"]
+
+
+def test_daemon_candidate_names_an_unreachable_app_server(monkeypatch) -> None:
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: None)
+    seen: list = []
+    assert (
+        mux_spawn._codex_daemon_candidate(Path("/w/proj"), set(), observed=seen) is None
+    )
+    assert seen == ["daemon: app-server unreachable"]
+
+
+def test_daemon_candidate_names_ambiguity_and_counts_it(monkeypatch) -> None:
+    """Two or more new ids for one cwd is a sibling racing in, not a timeout."""
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: {"a", "b", "c"}
+    )
+    seen: list = []
+    assert (
+        mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
+    )
+    assert seen == ["daemon: 2 new codex sessions for this cwd, ambiguous"]
+
+
+def test_daemon_candidate_distinguishes_nothing_new_from_ambiguous(monkeypatch) -> None:
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: {"a"})
+    seen: list = []
+    assert (
+        mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen) is None
+    )
+    assert seen == ["daemon: no new codex session for this cwd"]
+
+
+def test_the_sink_holds_the_newest_observation_only(monkeypatch) -> None:
+    """Written in place, so a 60s poll cannot grow it without bound."""
+    loaded = iter([None, {"a"}])
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: next(loaded)
+    )
+    seen: list = []
+    mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
+    mux_spawn._codex_daemon_candidate(Path("/w/proj"), {"a"}, observed=seen)
+    assert seen == ["daemon: no new codex session for this cwd"]
+
+
+def test_window_expiry_reports_what_it_measured() -> None:
+    sink = ["daemon: no new codex session for this cwd"]
+    out = _await_pane_binding(
+        MUX,
+        lambda: None,
+        runner=_runner(wait_rc=WAIT_ALIVE),
+        sleep=_no_sleep,
+        window_s=0.0,
+        condition_sink=sink,
+    )
+    assert out.reason == "binding-window-expired"
+    assert out.window_s == 0.0
+    assert out.polls >= 1
+    assert out.elapsed_s > 0.0
+    assert out.condition == "daemon: no new codex session for this cwd"
+
+
+def test_a_bound_wait_also_reports_its_measurement(monkeypatch) -> None:
+    """The positive control for the instrument itself.
+
+    A measurement that appears only on a failure cannot be told apart from one
+    that never ran, so the success path carries it too.
+    """
+    probe = _codex_probe(monkeypatch, candidate=SID)
+    out = _await_pane_binding(
+        MUX,
+        probe,
+        runner=_runner(),
+        sleep=_no_sleep,
+        window_s=999.0,
+        condition_sink=[],
+    )
+    assert out.session_id == SID
+    assert out.polls >= 1
+    assert out.elapsed_s > 0.0
+    assert out.window_s == 999.0
+
+
+def test_the_probe_records_the_fd_oracle_miss(monkeypatch) -> None:
+    """A rate-limited tick still says something true: the fd oracle looked and
+    found no rollout. Only a tick that ACTUALLY consulted the daemon may
+    overwrite that with a daemon condition.
+    """
+    sink: list = []
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: {"a"})
+    probe = mux_spawn._make_codex_bind_probe(
+        cwd=Path("/w/proj"),
+        spawn_started_ms=0,
+        child_pid=4242,
+        codex_sessions_dir=None,
+        daemon_baseline_ids={"a"},
+        mux=MUX,
+        runner=_runner(),
+        condition=sink,
+    )
+    # Tick one runs the daemon half, which owns the condition.
+    assert probe() is None
+    assert sink == ["daemon: no new codex session for this cwd"]
+    # Now widen the interval. The rate limit is `monotonic() - last_probe_s[0]`,
+    # and tick one just set last_probe_s to NOW, so this is deterministic on any
+    # host. Do NOT instead widen the interval before tick one: last_probe_s
+    # starts at 0.0 and `time.monotonic()` is time since BOOT, so on a
+    # freshly-booted CI runner tick one is rate-limited too and the assertion
+    # above flips. That is a real measured failure, not a hypothetical: this
+    # test read green on a long-uptime laptop and red on a GitHub runner.
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 3600.0)
+    # Tick two is inside the interval, so the fd note is the newest thing
+    # anything actually looked at.
+    assert probe() is None
+    assert sink == ["fd: no codex rollout on pane child pid 4242"]
+
+
+def test_the_probe_records_a_candidate_awaiting_its_repeat(monkeypatch) -> None:
+    """The stability gate is a real reason to still be waiting, and saying so
+    is the difference between "nearly bound" and "nothing is happening"."""
+    sink: list = []
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
+    monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
+    monkeypatch.setattr(mux_spawn, "_codex_daemon_candidate", lambda *a, **k: SID)
+    probe = mux_spawn._make_codex_bind_probe(
+        cwd=Path("/w/proj"),
+        spawn_started_ms=0,
+        child_pid=4242,
+        codex_sessions_dir=None,
+        daemon_baseline_ids=set(),
+        mux=MUX,
+        runner=_runner(),
+        condition=sink,
+    )
+    assert probe() is None
+    assert sink == [f"daemon: candidate {SID} awaiting a repeat probe"]
+
+
+def test_the_diagnostic_carries_the_elapsed_measurement(monkeypatch) -> None:
+    # The registry read is stubbed rather than left live: a unit test that
+    # reaches the machine's real agent registry reports a number nobody in this
+    # file controls, and its own pass would then depend on fleet state.
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *_a, **_kw: [])
+    binding = mux_spawn.PaneBinding(
+        None,
+        True,
+        "binding-window-expired",
+        "",
+        elapsed_s=60.04,
+        window_s=60.0,
+        polls=78,
+        condition="daemon: 3 new codex sessions for this cwd, ambiguous",
+    )
+    line = mux_spawn._bind_failure_diagnostic(binding)
+    assert "waited 60.0s of a 60.0s window across 78 poll(s)" in line
+    assert "last observed: daemon: 3 new codex sessions for this cwd, ambiguous" in line
+    assert "0 live agent(s)" in line, "a readable registry reports its count"
+
+
+def test_the_diagnostic_survives_an_unreadable_registry(monkeypatch) -> None:
+    """A flight recorder never fails the thing it records."""
+
+    def boom(*_a, **_kw):
+        raise OSError("registry unreadable")
+
+    monkeypatch.setattr(mux_spawn, "load_registry", boom)
+    binding = mux_spawn.PaneBinding(
+        None, True, "binding-window-expired", "", elapsed_s=1.0, window_s=60.0, polls=2
+    )
+    line = mux_spawn._bind_failure_diagnostic(binding)
+    assert "waited 1.0s of a 60.0s window" in line
+    assert "live agent" not in line, "an unreadable registry must not report a count"
+
+
+def test_an_unrecorded_condition_is_said_not_omitted(monkeypatch) -> None:
+    """Silence about the condition is itself the finding this node measured."""
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *_a, **_kw: [])
+    binding = mux_spawn.PaneBinding(
+        None, True, "binding-window-expired", "", elapsed_s=1.0, window_s=60.0, polls=2
+    )
+    assert "last observed: nothing recorded" in mux_spawn._bind_failure_diagnostic(
+        binding
+    )
+
+
+def test_a_wait_that_never_ran_reports_no_measurement() -> None:
+    """The no-child-pid arm measured nothing; "waited 0.0s" would be a lie."""
+    assert mux_spawn._bind_failure_diagnostic(None) == ""
+
+
+def test_neither_refusal_routes_to_the_probe_that_cannot_see_the_failure() -> None:
+    """The node's stated acceptance, asserted on the ROUTING, not the wording.
+
+    Two paired assertions on purpose: an absence alone has three explanations,
+    so the positive marker (each refusal interpolates the diagnostic) is what
+    makes the absence of the probe pointer mean anything.
+    """
+    source = textwrap.dedent(inspect.getsource(mux_spawn.dispatch_spawn_pane))
+    refusals = [
+        ast.unparse(node)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Raise) and "session binding" in ast.unparse(node)
+    ]
+    measured = [t for t in refusals if "_bind_failure_diagnostic" in t]
+    assert len(measured) >= 2, (
+        "every required-binding refusal must report what the wait measured"
+    )
+    for text in refusals:
+        assert "fno doctor --codex-bind" not in text
