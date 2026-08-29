@@ -25,7 +25,7 @@ _NO_CFG: dict = {}
 _REQUIRED_INTERACTIVE_FIELDS = {
     "permission_response", "resume_strategy", "model_switch_strategy", "ready_marker",
     "send_keys_enter_delay_ms", "submit_keys", "stop_strategy", "remove_strategy",
-    "session_binding",
+    "session_binding", "loop_participation",
 }
 
 
