@@ -536,6 +536,7 @@ def bg_create(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> ProviderResult:
     """Invoke ``claude --bg`` for a brand-new supervisor session.
 
@@ -556,6 +557,10 @@ def bg_create(
             ``--model <m>`` to the ``claude --bg`` argv; unset leaves it as
             today. Orthogonal to ``role``: the argv pin beats a role's env
             model, which is the right precedence (node pin is more specific).
+        sandbox_settings: Optional sandbox settings block composed into the
+            same ``--settings`` file as the route/scrub floor (one flag, one
+            file). ``None`` leaves the argv byte-identical to an unsandboxed
+            spawn.
 
     Returns:
         :class:`ProviderResult` with ``session_id_out`` set to the parsed
@@ -592,7 +597,9 @@ def bg_create(
     # Computed once here because the settings-file float below needs the
     # answer before _build_argv; the spawn_env scrub rescans on its own.
     _incoherent = incoherent_model_env()
-    settings_path = route_settings_path_for(route_env, account_env)
+    settings_path = route_settings_path_for(
+        route_env, account_env, sandbox=sandbox_settings
+    )
     # Without a route/account there is no settings file, so an env-only scrub
     # of the model vars below is decorative for `claude --bg`: the serving
     # session is forked by the claude daemon with the DAEMON's own env

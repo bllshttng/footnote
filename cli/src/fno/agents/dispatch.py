@@ -1587,6 +1587,7 @@ def _claude_create_path(
     succession: bool = False,
     succession_caller_name: Optional[str] = None,
     route_provider: Optional[str] = None,
+    sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1729,7 +1730,9 @@ def _claude_create_path(
     from fno.agents.model_routing import route_settings_path_for
 
     route_settings_path = (
-        route_settings_path_for(route_env, account_env) if route_env else None
+        route_settings_path_for(route_env, account_env, sandbox=sandbox_settings)
+        if (route_env or sandbox_settings)
+        else None
     )
 
     # x-42c5, review fix: pop FNO_SPAWN_TRIGGER BEFORE bg_create, not after.
@@ -1756,6 +1759,7 @@ def _claude_create_path(
             tools=tools,
             deny_tools=deny_tools,
             account_env=account_env,
+            sandbox_settings=sandbox_settings,
         )
     except claude_mod.ProviderSubprocessError as exc:
         # Only a never-executed claude proves no supervisor exists. A timeout or
@@ -2472,7 +2476,7 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     from fno.agents.model_routing import RouteRestoreError, read_route_settings
 
     try:
-        return read_route_settings(path)
+        restored = read_route_settings(path)
     except RouteRestoreError as exc:
         raise DispatchAskError(
             f"agent {entry.name!r} was launched on the route recorded at {path}, "
@@ -2480,6 +2484,13 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
             f"default account; re-spawn with an explicit --route/-P to choose one.",
             exit_code=2,
         ) from exc
+    # A sandbox-only settings file carries the auth-scrub floor and NO route.
+    # Restoring its floor as a "route" would relaunch the worker with empty
+    # credentials against the default endpoint - the wrong-billing shape this
+    # path exists to refuse. No BASE_URL means there was never a route.
+    if not restored.get("ANTHROPIC_BASE_URL"):
+        return None
+    return restored
 
 
 def _picked_headroom_note(account_id: str) -> str:
@@ -2687,6 +2698,7 @@ def dispatch_spawn(
     succession: bool = False,
     route_provider: Optional[str] = None,
     provider_gate: object | None = None,
+    sandbox_settings: Optional[Mapping[str, object]] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -3048,6 +3060,30 @@ def dispatch_spawn(
                 row_launch_account = getattr(account_source, "launch_account", None)
             elif not resume_session_id:
                 row_launch_account = effective_launch_account or "default"
+            if resume_session_id and source_row is not None and not sandbox_settings:
+                from fno.agents.model_routing import read_recorded_sandbox_block
+
+                # x-companion to the route restore: a relaunched worker comes
+                # back under the SAME OS jail, read from the row's recorded
+                # settings file. Unreadable means a warning, never a refused
+                # revive - the route side owns refusal; this side must not
+                # turn a missing jail into a dead lane.
+                recorded_sandbox = read_recorded_sandbox_block(
+                    getattr(source_row, "route_settings_path", None)
+                )
+                if recorded_sandbox:
+                    sandbox_settings = recorded_sandbox
+                    print(
+                        f"sandbox: restored from {source_row.route_settings_path} "
+                        f"(recorded when {source_row.name!r} launched)",
+                        file=sys.stderr,
+                    )
+                elif getattr(source_row, "route_settings_path", None):
+                    print(
+                        f"sandbox: no sandbox block in {source_row.route_settings_path}; "
+                        f"{source_row.name!r} relaunches unsandboxed",
+                        file=sys.stderr,
+                    )
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
@@ -3211,6 +3247,7 @@ def dispatch_spawn(
                         deny_tools=deny_tools,
                         account_env=account_env,
                         launch_account=row_launch_account,
+                        sandbox_settings=sandbox_settings,
                         crown_level=crown_level,
                         crown_scope=crown_scope,
                         succession=succession,

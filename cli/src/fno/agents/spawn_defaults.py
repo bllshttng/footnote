@@ -114,6 +114,9 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         "--at",
         # x-4342: the sessions-row phase names a phase, not a prompt word.
         "--session-phase",
+        # The join call site's per-worker policy file: its PATH is a value,
+        # never a prompt word.
+        "--sandbox-write-policy",
     }
 )
 
