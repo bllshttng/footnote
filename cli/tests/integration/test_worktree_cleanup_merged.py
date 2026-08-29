@@ -970,3 +970,35 @@ def test_deleted_upstream_with_unpushed_work_is_still_refused(repo: Path):
 
     assert "1 archived" not in r.stdout, diag
     assert wt.exists(), "a worktree carrying unmerged work must survive" + diag
+
+
+def test_deleted_upstream_archives_without_origin_head(repo: Path):
+    """`refs/remotes/origin/HEAD` is optional, and a cleared upstream leaves the
+    default-ref lookup with no baseline. The branch still tracked a remote, so
+    the missing baseline is a refusal, and a fully merged worktree survives.
+
+    The deletion has to outlive the script's own fetch. Deleting the local ref
+    alone does not: git restores it on the next fetch, so an earlier version of
+    this test asserted the absence, watched the fetch undo it, and passed while
+    measuring nothing. Pointing the REMOTE's HEAD at a ref that does not exist
+    is what makes the absence survive.
+    """
+    wt = _add_merged_with_deleted_upstream(repo, "nohead")
+    origin_git = repo.parent / "origin.git"
+    subprocess.run(
+        ["git", "-C", str(origin_git), "symbolic-ref", "HEAD", "refs/heads/gone"],
+        check=True, capture_output=True,
+    )
+    _git(repo, "remote", "set-head", "origin", "--delete")
+    _git(repo, "fetch", "origin")
+    assert (
+        _git(repo, "rev-parse", "--verify", "--quiet", "origin/HEAD", check=False).returncode
+        != 0
+    ), "the absence must survive a fetch, or this test measures nothing"
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert "1 archived" in r.stdout, diag
+    assert "no upstream and no resolvable remote HEAD" not in r.stderr, diag
+    assert not wt.exists(), "worktree dir should be gone" + diag

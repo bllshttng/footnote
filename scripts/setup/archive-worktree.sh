@@ -242,6 +242,20 @@ measure_strict_state() {
       if [[ -n "$FORCE_FIRST_REMOTE" ]]; then
         FORCE_DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FORCE_FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
       fi
+      # `<remote>/HEAD` is optional. A fetch usually restores a missing one, but
+      # it cannot when the REMOTE's own HEAD is unresolvable, and then a fully
+      # merged worktree is refused for want of a baseline it never needed: the
+      # --merged sweep that calls this already proved the tip is in origin/main.
+      # Name the conventional default branches and take whichever RESOLVES, so
+      # this is a lookup, not a guess. A repo with neither still refuses.
+      if [[ -z "$FORCE_DEFAULT_REF" && -n "$FORCE_FIRST_REMOTE" ]]; then
+        for _candidate in "$FORCE_FIRST_REMOTE/main" "$FORCE_FIRST_REMOTE/master"; do
+          if git -C "$TARGET" rev-parse --verify --quiet "$_candidate" >/dev/null 2>&1; then
+            FORCE_DEFAULT_REF="$_candidate"
+            break
+          fi
+        done
+      fi
     fi
     if [[ -n "$FORCE_DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$FORCE_DEFAULT_REF" >/dev/null; then
       if ! FORCE_AHEAD="$(git -C "$TARGET" rev-list --count "$FORCE_DEFAULT_REF"..HEAD 2>/dev/null)" || [[ ! "$FORCE_AHEAD" =~ ^[0-9]+$ ]]; then
