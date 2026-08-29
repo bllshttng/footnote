@@ -4209,7 +4209,20 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
     // purpose (nobody waits); the on-done hook still emits the event, and a
     // first follow-up ask STEERS into the seed turn instead of blocking
     // behind it (the daemon.rs:4077 mutex shape this replaces).
-    if !seed.trim().is_empty() {
+    //
+    // A seedless spawn takes WARMUP_SEED rather than no turn at all (x-296f).
+    // `thread/start` records a thread id but writes no rollout, and a harness
+    // resolves a session to attach BY that rollout, so a worker with no turn
+    // is a worker the operator cannot open: `codex resume` answers "no rollout
+    // found for thread id <id>" (measured 2026-08-28, codex-cli 0.149.1).
+    // One cheap turn buys attachability from the first second of a worker's
+    // life, which is the window in which someone is most likely to look.
+    let seed = if seed.trim().is_empty() {
+        WARMUP_SEED.to_string()
+    } else {
+        seed
+    };
+    {
         let seed_name = name.to_string();
         let submitted = handle.submit(seed).await;
         if submitted.is_err() {
@@ -4253,6 +4266,12 @@ async fn spawn_codex_thread_lane(ctx: &Ctx, req: &Request, name: &str, cwd: &Pat
         }),
     )
 }
+
+/// (x-296f) The turn a seedless codex thread spawn takes so a rollout exists
+/// and the worker is attachable immediately. Deliberately trivial: it must
+/// cost one small turn and leave a transcript line an operator reads as
+/// startup rather than as work someone asked for.
+const WARMUP_SEED: &str = "Reply with the single word: ready.";
 
 /// A Codex thread row startup recovery may auto-resume: it needs a full
 /// durable identity AND a status that was non-terminal when the daemon died.
@@ -16290,6 +16309,97 @@ done
                 .filter(|e| e["type"] == "agent_ask_done")
                 .count();
             assert_eq!(done, 1, "one shared turn must emit one event: {events:?}");
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// AC10 (x-296f): a SEEDLESS codex thread spawn takes the warmup turn, so
+    /// a rollout exists and the worker is attachable from its first seconds.
+    /// The positive marker is the fake daemon's own received frame: a
+    /// `turn/start` carrying the warmup text. `thread/start` alone writes no
+    /// rollout and a harness resolves a session BY that rollout, so without
+    /// the warmup the first attach dies with "no rollout found for thread id".
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_seedless_codex_thread_spawn_takes_the_warmup_turn() {
+        let behavior = crate::codex_fake_daemon::Behavior::quick();
+        let received = std::sync::Arc::clone(&behavior.received);
+        with_fake_codex_daemon(behavior, async {
+            let home = tmp_home("codex-warmup");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            // Seedless: the spawn request carries no message at all.
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+            // The seed submit is async in the actor; wait for the frame rather
+            // than racing it.
+            let turns: Vec<serde_json::Value> = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let turns: Vec<serde_json::Value> = received
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .iter()
+                        .filter(|f| f["method"] == "turn/start")
+                        .cloned()
+                        .collect();
+                    if !turns.is_empty() || std::time::Instant::now() >= deadline {
+                        break turns;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            };
+            assert_eq!(
+                turns.len(),
+                1,
+                "a seedless spawn takes exactly one warmup turn: {turns:?}"
+            );
+            assert_eq!(
+                turns[0]["params"]["input"][0]["text"], WARMUP_SEED,
+                "the warmup is the seed that was submitted: {turns:?}"
+            );
+
+            ctx.codex_threads.lock().await.remove("t");
+            std::fs::remove_dir_all(home.root()).ok();
+        })
+        .await;
+    }
+
+    /// The warmup must not double-submit behind a real seed: a spawn that
+    /// carries a prompt drives exactly that prompt, verbatim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_seeded_codex_thread_spawn_drives_its_own_seed_only() {
+        let behavior = crate::codex_fake_daemon::Behavior::quick();
+        let received = std::sync::Arc::clone(&behavior.received);
+        with_fake_codex_daemon(behavior, async {
+            let home = tmp_home("codex-real-seed");
+            let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent"));
+            let spawned = spawn_codex_thread_for_test(&ctx, &home, "do the actual work").await;
+            assert!(spawned.result().is_some(), "spawn failed: {spawned:?}");
+
+            let turns: Vec<serde_json::Value> = {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                loop {
+                    let turns: Vec<serde_json::Value> = received
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .iter()
+                        .filter(|f| f["method"] == "turn/start")
+                        .cloned()
+                        .collect();
+                    if !turns.is_empty() || std::time::Instant::now() >= deadline {
+                        break turns;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            };
+            assert_eq!(turns.len(), 1, "one seed, one turn: {turns:?}");
+            assert_eq!(
+                turns[0]["params"]["input"][0]["text"], "do the actual work",
+                "a real seed passes through verbatim: {turns:?}"
+            );
+
             ctx.codex_threads.lock().await.remove("t");
             std::fs::remove_dir_all(home.root()).ok();
         })
