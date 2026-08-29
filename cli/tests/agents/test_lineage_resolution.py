@@ -196,6 +196,37 @@ def test_resume_by_name_keeps_the_current_session() -> None:
     )
 
 
+def test_claude_exact_predecessor_resume_uses_the_resume_form_not_attach() -> None:
+    """Attach follows the row's live session by transport key and can never
+    reopen a retired id, so an exact predecessor match switches claude to the
+    resume form with the full id the caller named."""
+    from fno.agents.resume_cli import resume_logic
+
+    entry = _Row(
+        name="alpha",
+        harness="claude",
+        cwd="/path/to/workdir",
+        short_id="08054b1d",
+        harness_session_id=B,
+        predecessor_session_ids=[A],
+    )
+    res = resume_logic(
+        name=A,
+        print_command=True,  # the argv contract without a live wake
+        registry_loader=lambda: [entry],
+        path_checker=lambda _bin: True,
+        cwd_checker=lambda _c: True,
+        claim_fn=lambda _s: None,
+        emit_event=lambda kind, **kw: None,
+        execvp=lambda *_a, **_k: None,
+    )
+    assert res.exit_code == 0
+    assert res.exec_argv[:1] == ["claude"]
+    assert res.exec_argv[-2:] == ["--resume", A], (
+        "the exact predecessor id is the resume target, never attach"
+    )
+
+
 # ---------------------------------------------------------------------------
 # AC7: the list row states both identity axes
 # ---------------------------------------------------------------------------

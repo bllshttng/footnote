@@ -57,10 +57,16 @@ def _ask_line(findings) -> str:
     return first.clear_command
 
 
-def already_asked(root: Path, key: str) -> "str | None":
+def already_asked(root: Path, key: str, *, marker: str = MARKER) -> "str | None":
+    """The id of the open question carrying ``[<marker>:<key>]``, else None.
+
+    One shared dedupe fold for every durable question emitter: a marker key
+    asked once stays asked, and a second emitter with its own marker reuses
+    this fold rather than growing a second copy of it.
+    """
     from fno.outstanding.core import read_open_questions
 
-    needle = f"[{MARKER}:{key}]"
+    needle = f"[{marker}:{key}]"
     for question in read_open_questions(root):
         if needle in question.question:
             return question.id

@@ -69,18 +69,37 @@ def _row_exists(name: str, harness: str) -> bool:
         return True
 
 
+def _reading_for_entry(entry: object) -> "object":
+    """One row's family-1 reading, from the entry the caller already holds.
+
+    The ONE reachability derivation every agents surface shares
+    (``resolve_session_truth`` for the transcript evidence,
+    ``registry_falsifier`` for the row's own falsifier - a mux row's pane,
+    otherwise its pid/exit record), re-deriving neither. Returns ``None``
+    when the evidence is unavailable, which classifies as deferred - never
+    as death.
+    """
+    from fno.agents.reachability import classify_reachability, registry_falsifier
+    from fno.agents.session_truth import resolve_session_truth
+
+    try:
+        truth = resolve_session_truth(entry.name)
+        return classify_reachability(
+            truth_state=truth.get("state"),
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(entry),
+        )
+    except Exception:
+        return None
+
+
 def _predecessor_reading(
     name: str, harness: str
 ) -> tuple[Optional[str], Optional["object"]]:
     """Sample the row's recorded id and its family-1 truth reading.
 
-    Returns ``(recorded_session_id, Reachability | None)``. The reading is
-    the ONE reachability derivation every agents surface shares
-    (``resolve_session_truth`` for the transcript evidence,
-    ``registry_falsifier`` for the row's own falsifier - a mux row's pane,
-    otherwise its pid/exit record), re-deriving neither. ``None`` reading
-    means the evidence is unavailable, which classifies as deferred - never
-    as death.
+    Returns ``(recorded_session_id, Reachability | None)``; ``None`` reading
+    means the evidence is unavailable.
     """
     from fno.agents.registry import load_registry
 
@@ -99,19 +118,7 @@ def _predecessor_reading(
     if entry is None or not entry.harness_session_id:
         return None, None
 
-    from fno.agents.reachability import classify_reachability, registry_falsifier
-    from fno.agents.session_truth import resolve_session_truth
-
-    try:
-        truth = resolve_session_truth(entry.name)
-        reading = classify_reachability(
-            truth_state=truth.get("state"),
-            age_s=truth.get("last_activity_age_s"),
-            falsifier=registry_falsifier(entry),
-        )
-    except Exception:
-        return entry.harness_session_id, None
-    return entry.harness_session_id, reading
+    return entry.harness_session_id, _reading_for_entry(entry)
 
 
 def _predecessor_observation(
@@ -306,7 +313,8 @@ def _reading_for_transition(
     primary = entry.harness_session_id or ""
     if not primary or primary == session_id:
         return None, None
-    return _predecessor_reading(name, harness)
+    # The row is in hand; the reading derives from it without a second load.
+    return primary, _reading_for_entry(entry)
 
 
 def _predecessor_of_outcome(entry: object, outcome: str, successor: str) -> Optional[str]:
@@ -404,10 +412,9 @@ _BRANCH_QUESTION_MARKER = "session-transition-branch"
 
 
 def _branch_question_open(root, key: str) -> bool:
-    from fno.outstanding.core import read_open_questions
+    from fno.agents.stale_escalate import already_asked
 
-    needle = f"[{_BRANCH_QUESTION_MARKER}:{key}]"
-    return any(needle in question.question for question in read_open_questions(root))
+    return already_asked(root, key, marker=_BRANCH_QUESTION_MARKER) is not None
 
 
 def _record_branch_question(

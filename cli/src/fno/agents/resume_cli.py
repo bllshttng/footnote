@@ -835,15 +835,15 @@ def resume_logic(
     # for a not-yet-backfilled row); harness == provider on every current row.
     harness = getattr(entry, "harness", None)
     cwd = cwd_override or getattr(entry, "cwd", None)
-    session_id = _session_id_for(entry)
+    current_session_id = _session_id_for(entry)
     # An explicit full predecessor uuid selects the EXACT historical session,
     # not the row's current one (x-dfe7): delivery follows the successor, but
     # resume was handed A and A is what it must reopen. Only a full-id match
     # carries matched_session_id, so a name or short address always keeps the
     # current session.
     matched = getattr(resolved, "matched_session_id", None)
-    if matched and session_id and matched != session_id:
-        session_id = matched
+    exact = bool(matched and current_session_id and matched != current_session_id)
+    session_id = matched if exact else current_session_id
 
     if not cwd:
         if session_id:
@@ -893,7 +893,15 @@ def resume_logic(
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
     from fno.agents.harness_map import DispatchResolveError, capabilities
 
-    form_lane = "interactive_attach" if harness == "claude" else "interactive_resume"
+    # Exact-historical resume switches the claude lane from ATTACH (which
+    # follows the row's live session by transport key) to RESUME with the
+    # full id the caller actually named - attach can never reopen a retired
+    # session, so honoring the exact match there would silently lie.
+    form_lane = (
+        "interactive_resume"
+        if (exact or harness != "claude")
+        else "interactive_attach"
+    )
     try:
         resume_form = capabilities(harness or "?")["resume_strategy"]["forms"][form_lane]
         resume_supported = resume_form["kind"] != "unsupported"
@@ -917,7 +925,7 @@ def resume_logic(
             ),
         )
 
-    if harness == "claude":
+    if harness == "claude" and not exact:
         argv = _build_attach_argv(getattr(entry, "short_id", "") or "")
     else:
         argv = _build_resume_argv(harness or "?", session_id, cwd)

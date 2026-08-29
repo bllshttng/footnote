@@ -237,8 +237,8 @@ def _main(monkeypatch, tmp_path: Path, session_id: str, reading, name: str):
     if reading is not None:
         monkeypatch.setattr(
             register_session,
-            "_predecessor_reading",
-            lambda observed_name, harness: (BIRTH, reading),
+            "_reading_for_entry",
+            lambda entry: reading,
         )
     return register_session.main([
         "--harness", "claude",
@@ -397,8 +397,8 @@ def test_measured_clear_specimen_classifies_as_succession(
 
     monkeypatch.setattr(
         register_session,
-        "_predecessor_reading",
-        lambda name, harness: (a, _reading("unreachable", "exit-recorded")),
+        "_reading_for_entry",
+        lambda entry: _reading("unreachable", "exit-recorded"),
     )
     assert register_session.main([
         "--harness", "claude",
@@ -443,8 +443,8 @@ def test_measured_specimen_with_a_live_a_flips_to_branch(
 
     monkeypatch.setattr(
         register_session,
-        "_predecessor_reading",
-        lambda name, harness: (a, _reading("reachable", "transcript")),
+        "_reading_for_entry",
+        lambda entry: _reading("reachable", "transcript"),
     )
     assert register_session.main([
         "--harness", "claude",
