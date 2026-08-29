@@ -1613,3 +1613,67 @@ fn loop_king_docstring_names_the_refill_edge_owner_and_what_the_counter_counts()
         "the counter doc must say what it counts"
     );
 }
+
+/// The board and backstop wake clauses must reach the prompt too, not only
+/// the mail one: each reason arm is a separate literal, and a miss there is
+/// silent under the catch-all arm. Backstop's clause is load-bearing - it is
+/// what tells a periodic re-check that an unchanged board is a legitimate
+/// NoWork exit rather than a failure to find work.
+#[test]
+fn king_wake_reason_board_and_backstop_clauses_reach_the_prompt() {
+    for (reason, needle) in [
+        ("board", "board changed while this scope had no king"),
+        ("backstop", "unchanged board is a legitimate NoWork exit"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let lib_dir = dir.path().join("lib");
+        let dump = dir.path().join("clause-dump.txt");
+        write_stub_driver(
+            &lib_dir,
+            "claude-code",
+            3,
+            &format!("env > {}; exit 0", dump.display()),
+        );
+        let bin_dir = dir.path().join("bin");
+        write_stub_binary(&bin_dir, "claude", "exit 0");
+        write_stub_fno_board(&bin_dir, 2);
+        write_king_manifest(dir.path(), "epic-x", "k-9331", 0, 4);
+
+        let (stdout, stderr, _code) = run_verb(
+            &[
+                "loop",
+                "run",
+                "--driver",
+                "king",
+                "--scope",
+                "epic-x",
+                "--wake",
+                "--wake-reason",
+                reason,
+                "--driver-lib-dir",
+                lib_dir.to_str().unwrap(),
+                "--cwd",
+                dir.path().to_str().unwrap(),
+                "--max-iterations",
+                "2",
+            ],
+            &[
+                ("PATH", &path_with(&bin_dir)),
+                (
+                    "FNO_AGENTS_HOME",
+                    &dir.path().join("agents").display().to_string(),
+                ),
+            ],
+        );
+
+        assert!(
+            dump.exists(),
+            "an actionable board must dispatch\nstdout={stdout}\nstderr={stderr}"
+        );
+        let env_dump = fs::read_to_string(&dump).unwrap();
+        assert!(
+            env_dump.contains(needle),
+            "the {reason} clause must reach the prompt: {env_dump}"
+        );
+    }
+}
