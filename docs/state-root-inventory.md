@@ -82,6 +82,7 @@ One file per session, per day, or per throttle window.
 | `.eval-sweep-stamp` | `scripts/lib/eval-sweep-throttle.sh` | throttle window |
 | `.preflight-receipt-locks/` | `scripts/ci/preflight.sh` | live lock dirs |
 | `mail-hold/<handle>.json` | `fno/mail/hold.py` via `paths.state_dir()` | one file per held session; deleted by the release timer, by `fno agents mail hold --off`, and by the turn-boundary tidy in `fno agents mail notify-self` |
+| `route-settings/<sha16>.json` | `agents/model_routing.py::_write_settings_env_file` via `paths.state_dir()` (content-addressed, 0600, carries a live auth token) | one file per distinct route overlay, shared by every session on that route; a resume re-resolves provider-default tiers (`refresh_provider_default_tiers`), so a moved default yields a new file rather than a served stale one; files no registry row references and older than 14 days are pruned by `fno config route settings ls --prune` |
 | `locks/github-graphql-quota.lock` | `pr/_quota.py` via `paths.graphql_quota_lock()` | permanent empty sidecar; flock lives only for the probe-plus-command critical section |
 | `bin/github-cli/gh`, `gh.pre-fno` | `setup/github_cli.py` via `paths.github_cli_proxy_dir()` | permanent proxy; one backup is retained only when an unrelated wrapper was present |
 
@@ -114,7 +115,6 @@ If you are cleaning up an install and hit one of these, find the writer first. I
 | `registry.json.lock` | 3 months, 0 bytes | The agents registry moved to `agents/registry.json`. |
 | `keepalive.log` | 6 weeks | No writer found. |
 | `fno-mode.sh` | 4 weeks | No writer found. A shell script living in the state root. |
-| `zai-claude-settings.json` | 3 weeks | No writer. Referenced only by a test fixture. |
 | `.env` | 3 weeks | No writer. Read it before deleting it and treat it as hostile: it can hold a credential. Never echo its contents into a log, a receipt, a fixture, or a PR body. |
 | `evals.md` | 5 weeks | No writer found. |
 | `SUMMARY.md` | 5 months | Flagged "investigate" by a 2026-04-22 audit and still present. |
