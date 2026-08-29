@@ -1,6 +1,6 @@
 # The decision record
 
-A ruling stated in chat dies with the context. Weeks later, the operator asks, "there was this thing we discussed, what happened with that?" This page explains recording, storage, shipped design law, and current-law queries.
+A ruling stated in chat dies with the context. Weeks later, the operator asks, "there was this thing we discussed, what happened with that?" This page explains recording, storage, and current-law queries.
 
 ## The verb
 
@@ -25,7 +25,7 @@ Both are explicit on purpose. Automatic classification of "was that a ruling?" i
 
 ## Authority lanes
 
-Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. A row in the checked-in repository catalog is also `law`, because code review is the authority event that promotes design law into the product. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
+Every read derives an authority lane in the engine. `operator` authority is `law`. Agent and crown authority are both `coord`. `beastmode` authority is `grant`. The human list leads with `LAW`, `coord`, or `grant`, and `--lane law|coord|grant|unattributed` filters at that same engine seam.
 
 `--authority` takes exactly four values: `operator`, `crown`, `agent`, `beastmode`. Anything else is refused on the write path, and nothing is recorded. Pass `crown` for a king ruling inside its own crown scope. That value exists because three rows on disk carry invented `crown-l1` and `crown-l2-<node>` spellings. Kings wrote them because no correct value existed. The scope belongs on the crown row, so the value carries no suffix.
 
@@ -67,7 +67,7 @@ The split closes that without deleting the honest case. An agent relaying a real
 
 A decision id is a lookup key. `fno backlog decisions d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
 
-A subject is matched exactly, casefolded, and never guessed. There is no alias table. The checked-in repository catalog that declared one was deleted on 2026-08-29. So `handoff` no longer reaches `target-self-handoff`, and the honest answer is `none`. Do not add a fuzzy matcher in its place. A miss is a statement about the query. A wrong guess is a statement about the world, and that is the worse failure.
+A subject is matched exactly, casefolded, and never guessed. There is no alias table. The checked-in repository catalog that declared one is deleted. So `handoff` no longer reaches `target-self-handoff`, and the honest answer is `none`. Do not add a fuzzy matcher in its place. A miss is a statement about the query. A wrong guess is a statement about the world, and that is the worse failure.
 
 Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
 
@@ -93,7 +93,6 @@ It does NOT ask for a retry. The durable event has already landed by then, so a 
 
 A failed PROJECTION does not fail the command at all. Both durable stores already hold the decision by then, so the ruling is recorded and recoverable. Only the node view is missing, and the command says which decision id it is.
 
-The repository catalog is read-only to `fno backlog decide`. A repository change adds or revises design law through normal code review. The reader composes catalog rows with the local index by decision id. It uses reviewed content and keeps machine-local audit fields. Project policy can structurally supersede a repository default. The existing operator-law guard still applies.
 
 ## Why the index is separate from the global journal
 
@@ -110,13 +109,13 @@ So the index is its own file, it never rotates, and it holds nothing else. It ca
 
 ## The subject convention
 
-When a node exists, use its id. Otherwise use `pr-<n>` or a catalog canonical subject. A checked-in alias is accepted. Durable design work must use the canonical spelling so a new synonym does not split history.
+When a node exists, use its id. Otherwise use `pr-<n>` or the canonical subject the standing query returns. Durable design work must use that exact spelling so a new synonym does not split history.
 
 The reader takes every subject the writer takes. That is the defect this page was written for. The writer accepted free text while the reader resolved a graph node first, so a ruling about `pr-923` was written, receipted, and lost.
 
 Both sides expand, not just the query. A subject that names a node answers to every spelling of that node: the id, the slug, any case. The operator records under whatever was in front of them. The receipt then prints the canonical id as the way back. A reader that expands only the query sends them to a command that returns nothing.
 
-A subject that names no node and no catalog alias matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
+A subject that names no node matches itself and nothing more. A decision about `pr-92` never answers a query for `pr-921`.
 
 A decision with no subject at all is reachable only through `fno backlog decisions` with no `--subject`. When the question names no node, that is what `fno outstanding clear --answer` writes.
 
@@ -124,7 +123,7 @@ A decision with no subject at all is reachable only through `fno backlog decisio
 
 `--supersedes <decision-id>` overturns an earlier ruling. The older row stays and is marked `[superseded by ...]`, because a reader of an overturned decision must be able to tell it is not current.
 
-The graph projection stamps that mark at write time under the lock. The index and repository catalog are append-only histories from the reader's perspective, so the reader derives `superseded_by` from the combined rows it scanned. Catalog validation refuses a missing target or supersession cycle.
+The graph projection stamps that mark at write time under the lock. The index is an append-only history from the reader's perspective, so the reader derives `superseded_by` from the rows it scanned.
 
 ## Backfill
 
@@ -140,7 +139,7 @@ The index remains append-only. A retraction is a new `decision_retracted` event,
 
 Every row carries a derived lifecycle: `live`, `expired`, `superseded`, `retracted`, or `unscoped`. Human output leads with that marker, and JSON includes `lifecycle`, reason, and any positive closure evidence. `--state live|expired|superseded|retracted|unscoped|all` filters the same projection. If a coord row is stamped to a node, it expires only after that node's graph entry has positive closure evidence. If a repository-scoped PR row exists, it expires only after its exact graph binding is marked merged. Missing, ambiguous, or unreadable closure evidence is `unscoped`, never live. Law does not expire because a node or PR closes.
 
-The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and catalog damage is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
+The standing query is law-only and lifecycle-filtered: `fno backlog decisions <topic> --lane law --state live`. JSON adds the canonical subject and a `current_law.status` of `single`, `conflict`, or `none`. Human output prints `CURRENT LAW`, `LAW CONFLICT`, or `NO CURRENT LAW`. Only `single` is an actionable current answer. Conflict never chooses the newest, and a damaged index is a nonzero read failure rather than `none`. A live coord row, an expired coord row, superseded or retracted law, and an unattributed row cannot authorize an outward or irreversible action.
 
 ## Review and export
 
