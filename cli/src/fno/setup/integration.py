@@ -253,15 +253,6 @@ def _opencode_install() -> IntegrationResult:
 # install (uv/curl) carries no hooks/, so it degrades to a "manual" finish rather
 # than wiring a path that does not exist.
 
-_AGY_CONTEXT_STUB = """\
-# footnote
-
-This project uses the footnote delivery pipeline. See AGENTS.md for the full
-context. Quick start: `fno help` for the CLI verbs, `/fno:target` to take a
-feature from idea to a shipped PR.
-"""
-
-
 def _agy_hooks_json() -> Path:
     return Path.home() / ".gemini" / "config" / "hooks.json"
 
@@ -284,23 +275,6 @@ def _agy_crown_adapter_path() -> "Optional[Path]":
 
     p = resolve_plugin_script("hooks/agy-crown-inject.sh")
     return p if p.is_file() else None
-
-
-def _agy_install_context() -> None:
-    # agy reads .agent/rules in the workspace. Drop a small breadcrumb in the
-    # current project so an agy session surfaces footnote's entry points. Best-
-    # effort: a write failure must never fail the hook install, and an existing
-    # file is left untouched. (Whether agy ALSO reads AGENTS.md natively is an
-    # open probe - this .agent/rules path works regardless.)
-    try:
-        rules = Path.cwd() / ".agent" / "rules"
-        dest = rules / "footnote.md"
-        if dest.exists():
-            return
-        rules.mkdir(parents=True, exist_ok=True)
-        dest.write_text(_AGY_CONTEXT_STUB, encoding="utf-8")
-    except OSError:
-        pass
 
 
 def _agy_is_installed() -> bool:
@@ -385,7 +359,6 @@ def _agy_install() -> IntegrationResult:
         hooks.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     except OSError as exc:
         return IntegrationResult("agy", label, "failed", note=str(exc))
-    _agy_install_context()
     return IntegrationResult("agy", label, "installed", note=f"Stop hook -> {hooks}")
 
 

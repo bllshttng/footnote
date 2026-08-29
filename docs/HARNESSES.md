@@ -61,6 +61,16 @@ The reader half is separate and outlives the fix: when one id resolves to more t
 
 **tmux note.** pi prints its own warning when `extended-keys` is off: modified Enter keys collapse to plain Enter. Plain Enter is `\r` and submits, which is all fno's submit path needs, so this only matters for a human wanting a newline without submitting. `set -g extended-keys on` in `~/.tmux.conf` fixes it.
 
+## Antigravity plugin packaging
+
+The `scripts/install/agy-plugin.sh` bundle ships exactly `plugin.json`, `skills/`, and `agents/`, and nothing else; the script stages that allowlist into a temp directory and installs the staging copy, because handing `agy plugin install` the repo root deep-copies it with symlinks dereferenced (a 9.1 GB corrupt half-copy when measured against agy 1.1.16 on 2026-08-20).
+
+Hooks are not bundled. `fno config setup` already registers the Stop and PreInvocation adapters in `~/.gemini/config/hooks.json` under a `footnote` key, so a `hooks.json` inside the bundle would register the same adapters a second time and double-fire the stop gate.
+
+agy 1.1.16 stages installed plugins at `~/.gemini/config/plugins/<name>/`, not the `~/.gemini/antigravity-cli/plugins/` path its CLI reference documents; the install script checks both, config first, and verifies success by grepping `agy plugin list` for the plugin name rather than by checking that a file landed.
+
+The root `plugin.json` validates against a published schema with `additionalProperties: false` over `name` and `description`, so the manifest can carry no version and no permissions block; permissions live only in `~/.gemini/antigravity-cli/settings.json`, and `scripts/release/sync-version.sh` accordingly leaves the root manifest out of `JSON_MANIFESTS` while tracking every other release manifest.
+
 ## Official CLI documentation
 
 | CLI | Docs |

@@ -81,7 +81,7 @@ Run the bundled installer from the repository root:
 bash scripts/install/agy-plugin.sh
 ```
 
-The script validates the root `plugin.json`, installs Footnote, and verifies the staged manifest.
+The script validates the root `plugin.json`, installs a staged allowlist payload (manifest, `skills/`, `agents/`), and verifies success by checking that `agy plugin list` names Footnote. If a stale install stage larger than 100 MB exists, the script refuses and names the `rm -rf` line to run first.
 
 When installation needs more time, set `AGY_PLUGIN_INSTALL_TIMEOUT_S=120`.
 
