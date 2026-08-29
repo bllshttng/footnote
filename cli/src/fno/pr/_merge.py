@@ -836,6 +836,24 @@ def _find_pr_node_id(
     our_slug = repo_slug_from_url(url)
     if our_slug is None:
         return None
+    uniq = _repo_scoped_number_matches(entries, pr_number, our_slug)
+    return uniq[0] if len(uniq) == 1 else None
+
+
+def _repo_scoped_number_matches(
+    entries: List[dict], pr_number: int, our_slug: str
+) -> List[str]:
+    """Every node id whose PR number matches *pr_number* in *our_slug's* repo.
+
+    The deduped candidate list ``_find_pr_node_id`` resolves from: a url-less
+    same-number node is accepted as best-effort (its repo cannot be proven
+    foreign), which is why ambiguity is a real state and not a corruption.
+    ``_find_pr_node_id`` collapses >1 candidates to None (a safe skip for its
+    callers); the hold path must NOT collapse them (round-12 finding 2) and
+    reads this list directly.
+    """
+    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+
     matches: list[str] = []
     for e in entries:
         nid = e.get("id")
@@ -854,8 +872,7 @@ def _find_pr_node_id(
             if node_slug is None or node_slug.lower() == our_slug.lower():
                 matches.append(nid)
             break
-    uniq = list(dict.fromkeys(matches))
-    return uniq[0] if len(uniq) == 1 else None
+    return list(dict.fromkeys(matches))
 
 
 def _reconcile_merged_pr_node(pr_number: int, cwd: str = "") -> None:

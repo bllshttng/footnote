@@ -1,6 +1,7 @@
 """One plan-level hold reader shared by every PR merge path."""
 from __future__ import annotations
 
+import sys
 from typing import Optional
 
 from fno.graph.ladder import DispatchHoldState, DispatchHoldVerdict, dispatch_hold_verdict
@@ -189,6 +190,28 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
     ref_node_id: Optional[str] = None
     if stamped:
         ref_node_id = _find_pr_node_id(entries, pr_number, pr_ctx.url or "")
+        if ref_node_id is None:
+            # _find_pr_node_id collapses ambiguity to None - a safe skip for
+            # reconcile, but here None reads as "no binding" and lets the
+            # merge proceed even if one of the ambiguous candidates carries an
+            # active hold (round-12 finding 2). Surface the candidates and
+            # fail closed, the policy this module applies everywhere else.
+            from fno.graph._reconcile import repo_slug_from_url
+
+            our_slug = repo_slug_from_url(pr_ctx.url or "")
+            if our_slug is not None:
+                from fno.pr._merge import _repo_scoped_number_matches
+
+                ambiguous = _repo_scoped_number_matches(
+                    entries, pr_number, our_slug
+                )
+                if len(ambiguous) > 1:
+                    raise HoldLookupError(
+                        f"PR {pr_number} maps ambiguously to graph nodes "
+                        f"{', '.join(ambiguous)} with no discriminating pr_url; "
+                        "refusing to assume unheld; disambiguate the entries' "
+                        "pr_url and retry"
+                    )
 
     candidate_ids: list[str] = []
     if ref_node_id is not None:
@@ -218,17 +241,63 @@ def hold_for_pr(pr_number: int, cwd: str) -> Optional[DispatchHoldVerdict]:
 
 
 def merge_hold_reason(pr_number: int, cwd: str) -> Optional[str]:
-    """A human-readable refusal shared by sanctioned and direct merge paths."""
+    """A human-readable refusal shared by sanctioned and direct merge paths.
+
+    A returned reason ALSO disarms any armed GitHub ``--auto`` merge for the
+    PR (round-12 finding 3): the queue fires server-side with no re-check, so
+    a hold added after arming was silently ignored. Refusal and disarm agree -
+    if this path refuses to assume the PR unheld, the queued merge must not
+    assume it either. Recovery from a wrong disarm is one re-arm.
+    """
     try:
         verdict = hold_for_pr(pr_number, cwd)
     except HoldLookupError as exc:
+        _disarm_queued_auto_merge(pr_number, cwd, f"dispatch-hold-invalid: {exc}")
         return f"dispatch-hold-invalid: {exc}; refusing to assume unheld"
     if verdict is None:
         return None
     hold = verdict.hold
     if hold.state is DispatchHoldState.INVALID:
+        _disarm_queued_auto_merge(pr_number, cwd, f"{verdict.guard_reason}: {hold.detail}")
         return f"{verdict.guard_reason}: {hold.detail}; refusing to assume unheld"
+    _disarm_queued_auto_merge(pr_number, cwd, f"{verdict.guard_reason}: {hold.reason}")
     return (
         f"{verdict.guard_reason}: {hold.reason}; set_by={hold.set_by}; "
         f"release_when={hold.release_when}; review_on={hold.review_on}"
     )
+
+
+def _disarm_queued_auto_merge(pr_number: int, cwd: str, why: str) -> None:
+    """Best-effort ``gh pr merge <n> --disable-auto`` when a hold is seen.
+
+    The stacked-base guard closed its identical TOCTOU window with a CI
+    workflow because base lineage is visible to GitHub; a plan hold is not,
+    so the closure has to be local - at every reader that refuses. Fires only
+    on a positive hold/invalid verdict, never on an unheld read. Any failure
+    (no gh, network, gh error) logs one note and returns: the refusal above
+    stands regardless, and the operator can re-arm once the hold clears.
+    """
+    from fno.pr import _merge
+    from fno.pr._proc import ToolMissing
+
+    try:
+        result = _merge.run(
+            ["gh", "pr", "merge", str(pr_number), "--disable-auto"],
+            cwd=cwd,
+            timeout=15,
+        )
+    except ToolMissing:
+        return
+    except Exception as exc:  # noqa: BLE001 - disarm is best-effort, never fatal
+        print(f"hold: auto-merge disarm probe failed for PR {pr_number}: {exc}", file=sys.stderr)
+        return
+    if result.ok:
+        print(
+            f"hold: disabled an armed auto-merge for PR {pr_number} ({why}); "
+            "re-arm with `gh pr merge "
+            f"{pr_number} --auto` once the hold clears",
+            file=sys.stderr,
+        )
+    # A non-zero exit includes "auto-merge not enabled" - nothing armed, so
+    # silence is correct there; any other failure already cost the operator
+    # nothing the refusal did not.
