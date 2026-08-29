@@ -186,6 +186,9 @@ _RUNNER_PASSTHROUGH = (
     # run. It needs no real HOME: pi is a subprocess and inherits the sandboxed
     # one, so it writes its sessions where the assertion reads them.
     "FNO_PI_LIVE",
+    # opt-in live grok journey. The live test restores real HOME because Grok's
+    # credential lives under ~/.grok, while its cwd remains an isolated fixture.
+    "FNO_GROK_LIVE",
 )
 
 # Toolchain CACHES, not state fno reads. Sandboxing HOME relocates them, which
