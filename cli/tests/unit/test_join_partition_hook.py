@@ -37,7 +37,14 @@ def _write_policy(
 
 
 def _run(payload: dict, *, worker: str = "", cwd: str | None = None):
-    env = {"PATH": "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin", "HOME": str(Path.home())}
+    # Inherit the running env's PATH: the guard's judged half runs through
+    # `uv run`, which CI keeps on a toolcache path a hardcoded /usr/bin list
+    # would hide (observed live: the hook then fails open and the deny tests
+    # read as approvals).
+    import os
+
+    env = dict(os.environ)
+    env["HOME"] = str(Path.home())
     if worker:
         env["FNO_WORKER_NAME"] = worker
     proc = subprocess.run(
