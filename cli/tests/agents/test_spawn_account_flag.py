@@ -431,3 +431,31 @@ def test_codex_thread_client_env_unsealed_without_a_home_overlay(
     env = captured["env"]
     assert env["HOME"] == "/real/home"
     assert "FNO_AGENTS_HOME" not in env
+
+
+def test_codex_one_shot_refuses_a_pinned_account(monkeypatch, tmp_path):
+    """A lane that cannot carry the overlay refuses instead of launching.
+
+    _codex_create_path takes no account_env, and cmd_spawn exports only
+    PROVENANCE_KEYS to os.environ for one-shots, so a resolved overlay would
+    reach nothing here. Launching anyway would bill the ambient account
+    silently, which is the failure both account flags are fail-closed against.
+    """
+    from fno.agents import dispatch as dsp
+
+    def boom(**kw):
+        pytest.fail("must not create a codex agent on the ambient account")
+
+    monkeypatch.setattr(dsp, "_codex_create_path", boom)
+
+    with pytest.raises(dsp.DispatchAskError) as exc:
+        dsp.dispatch_spawn(
+            name="t-once",
+            message="hi",
+            provider="codex",
+            cwd=tmp_path,
+            once=True,
+            account_env={"HOME": "/accounts/zai-1/home"},
+        )
+    assert "one-shot" in str(exc.value)
+    assert "--substrate thread" in str(exc.value)
