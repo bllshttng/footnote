@@ -555,6 +555,14 @@ retries = 2
 enabled = false
 # Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work.
 autonomous_merge = false
+# Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false.
+wake_enabled = false
+# Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived reign.
+wake_ceiling = 32
+# Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm.
+wake_debounce_seconds = 900
+# Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement.
+wake_backstop_seconds = 1800
 
 [accounts]
 # Name of the account record currently active for provider rotation.
