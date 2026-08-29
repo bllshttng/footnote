@@ -688,6 +688,11 @@ def test_flag_off_is_byte_identical(tmp_path, monkeypatch):
     for call in calls:
         assert "--sandbox-write-policy" not in call["cmd"]
     assert all(lane["sandbox"] == "off" for lane in receipt["lanes"].values())
+    # Byte-identical covers the brief too: no section placeholder, no
+    # triple blank line where the write-partition paragraph would sit.
+    brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
+    assert "write partitions" not in brief
+    assert "\n\n\n" not in brief
 
 
 def test_flag_off_argv_matches_the_historical_shape(tmp_path, monkeypatch):

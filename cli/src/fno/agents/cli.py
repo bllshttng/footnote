@@ -2294,6 +2294,9 @@ def cmd_spawn(
 
     # The write policy resolves BEFORE the substrate branch so a pane spawn
     # refuses instead of silently dropping the enforcement it was handed.
+    # Claude-only for the same reason: the sandbox block composes into the
+    # claude --settings payload, so another harness would take the flag and
+    # enforce nothing - the exact partial-jail this option exists to prevent.
     sandbox_settings: dict[str, object] | None = None
     if sandbox_write_policy:
         if substrate == "pane" and not once:
@@ -2301,6 +2304,14 @@ def cmd_spawn(
                 "--sandbox-write-policy needs the thread substrate: a pane "
                 "spawn's --settings slot is reserved by the mux hook server, "
                 "so a pane cannot carry the OS write allowlist.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if provider != "claude":
+            print(
+                f"--sandbox-write-policy composes into the claude --settings "
+                f"payload; provider {provider!r} would carry the flag and "
+                f"enforce nothing. Drop the flag or spawn claude.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

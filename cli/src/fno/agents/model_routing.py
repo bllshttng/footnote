@@ -1081,6 +1081,28 @@ def materialize_model_scrub_settings(dropped: Sequence[str]) -> str:
     return _write_settings_env_file({name: "" for name in dropped})
 
 
+def read_recorded_sandbox_block(path: Optional[str]) -> Optional[dict[str, object]]:
+    """Read the ``sandbox`` block a recorded settings file carried, or None.
+
+    The revive-side twin of :func:`load_sandbox_write_policy`: a relaunched
+    worker must come back under the SAME OS jail it ran under, or the revive
+    is partial enforcement that reads as enforcement. Unreadable or missing
+    means None - the caller revives unrouted-side-safe and says so, never
+    silently.
+    """
+    import json
+    from pathlib import Path
+
+    if not path:
+        return None
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        block = payload.get("sandbox") if isinstance(payload, dict) else None
+    except (OSError, ValueError):
+        return None
+    return block if isinstance(block, dict) else None
+
+
 def load_sandbox_write_policy(path: str) -> dict[str, object]:
     """Read a ``--sandbox-write-policy`` file and return its ``sandbox`` block.
 

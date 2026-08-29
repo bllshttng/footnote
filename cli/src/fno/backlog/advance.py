@@ -2482,15 +2482,24 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
                 "set; a joined worker that races the whole set undoes the "
                 "partition this table encodes.\n"
             )
-        (brief_dir / f"{node_id}.md").write_text(
+        brief_text = (
             f"# Joiner brief: {node_id}\n\n"
             f"lead and mail hub: {lead}\n"
             f"{band_table}\n"
-            f"{_sandbox_brief_section(node_id, worker_bands, policies, sandbox_on)}\n"
+        )
+        sandbox_section = _sandbox_brief_section(
+            node_id, worker_bands, policies, sandbox_on
+        )
+        if sandbox_section:
+            # Appended only when present: with the flag off (or no enforced
+            # band) the brief stays byte-identical to the historical shape.
+            brief_text += f"{sandbox_section}\n"
+        brief_text += (
             f"Before dispatching any worker, claim ONE ready task via "
             f"`fno backlog task update {node_id} <task> --status in_progress` "
             f"(the waves.md 3e step; your roster name binds the holder).\n"
         )
+        (brief_dir / f"{node_id}.md").write_text(brief_text)
         # The per-worker policy file is written BEFORE any spawn: both
         # enforcement layers (the Edit/Write guard and the sandbox block the
         # session reads at start) must see it from the worker's first tool
