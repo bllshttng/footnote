@@ -2180,9 +2180,51 @@ fn covered_head_from_event(cwd: &Path) -> Option<String> {
     latest.filter(|s| !s.is_empty())
 }
 
-fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> Option<String> {
+/// One outcome vocabulary for every `arm_auto_merge` guard probe (round-12
+/// finding 4). The two probes previously embedded opposite failure
+/// philosophies with no shared shape - base-lineage-check armed on ANY non-3
+/// exit, dispatch_hold refused on ANY non-success - so a copy-pasted third
+/// probe inherited whichever accident it was pasted next to. Every probe
+/// classifies into this enum; each call site then states, in one named
+/// projection, what Inconclusive means for it.
+#[derive(Debug, Clone, PartialEq)]
+enum ProbeOutcome {
+    /// The probe ran and answered "do not arm". Carries the refusal reason.
+    Refused(String),
+    /// The probe ran and cleared.
+    Clear,
+    /// The probe could not evaluate (missing binary, timeout, signal death,
+    /// an exit outside the probe's vocabulary). Carries the diagnostic for
+    /// the log line. NEVER maps to Clear.
+    Inconclusive(String),
+}
+
+impl ProbeOutcome {
+    /// Fail-CLOSED projection: an unevaluated hold probe refuses to assume
+    /// unheld. This is the dispatch-hold arm's deliberate choice.
+    fn fail_closed(self) -> Option<String> {
+        match self {
+            ProbeOutcome::Refused(reason) | ProbeOutcome::Inconclusive(reason) => Some(reason),
+            ProbeOutcome::Clear => None,
+        }
+    }
+
+    /// Fail-OPEN projection: an unevaluated lineage probe arms anyway, with a
+    /// breadcrumb. Refusing on an unevaluated probe would turn a gh hiccup
+    /// into auto-merge silently never working, which reads exactly like
+    /// nobody having opted in. This is the base-lineage arm's deliberate
+    /// choice - the opposite of `fail_closed`, stated by name.
+    fn fail_open(self) -> Option<String> {
+        match self {
+            ProbeOutcome::Refused(reason) => Some(reason),
+            ProbeOutcome::Clear | ProbeOutcome::Inconclusive(_) => None,
+        }
+    }
+}
+
+fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> ProbeOutcome {
     if success {
-        return None;
+        return ProbeOutcome::Clear;
     }
     // A moved verb spelling prints one teaching line to stderr ("fno X is
     // now fno Y"). It is not a refusal reason: kept, it would lead the
@@ -2199,7 +2241,7 @@ fn classify_dispatch_hold_probe(success: bool, stdout: &[u8], stderr: &[u8]) -> 
         stripped.as_bytes()
     };
     let message = String::from_utf8_lossy(detail).trim().to_string();
-    Some(if message.is_empty() {
+    ProbeOutcome::Refused(if message.is_empty() {
         "dispatch hold state unreadable; refusing to assume unheld".to_string()
     } else {
         message
@@ -2212,8 +2254,12 @@ fn dispatch_hold_refusal(cwd: &Path, number: u64) -> Option<String> {
         .current_dir(cwd)
         .output()
     {
+        // fail_closed: the hold probe's deliberate Inconclusive policy -
+        // though this classifier only ever yields Clear or Refused, a spawn
+        // failure below is the inconclusive case, and it refuses too.
         Ok(output) => {
             classify_dispatch_hold_probe(output.status.success(), &output.stdout, &output.stderr)
+                .fail_closed()
         }
         Err(error) => Some(format!(
             "dispatch hold check unavailable ({error}); refusing to assume unheld"
@@ -2250,30 +2296,32 @@ fn arm_auto_merge(cwd: &Path) -> (bool, Option<String>) {
     // `check-plan-rung-authority.sh` ratchets a per-file identifier count over
     // production Rust, so each extra access here fails CI with a message about
     // plan frontmatter that has nothing to do with this code.
-    match Command::new("fno")
+    let lineage = match Command::new("fno")
         .args(["do", "pr", "base-lineage-check", pr_arg.as_str()])
         .current_dir(cwd)
         .output()
     {
         Ok(o) => match o.status.code() {
-            Some(3) => {
-                eprintln!(
-                    "finalize: auto-merge NOT armed for PR {number}: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                );
-                return (false, Some("stale base".to_string()));
-            }
-            Some(0) => {}
-            // Includes None (killed by a signal): unevaluated, so arm anyway.
-            other => eprintln!(
-                "finalize: stacked-base probe inconclusive for PR {number} (exit {other:?}); \
-                 arming anyway: {}",
+            // Includes None (killed by a signal): unevaluated.
+            Some(0) => ProbeOutcome::Clear,
+            Some(3) => ProbeOutcome::Refused(String::from_utf8_lossy(&o.stderr).trim().to_string()),
+            other => ProbeOutcome::Inconclusive(format!(
+                "exit {other:?}: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
-            ),
+            )),
         },
-        Err(e) => eprintln!(
-            "finalize: stacked-base probe unavailable for PR {number} ({e}); arming anyway"
-        ),
+        Err(e) => ProbeOutcome::Inconclusive(format!("spawn error: {e}")),
+    };
+    // fail_open: the lineage probe's deliberate Inconclusive policy, the
+    // named opposite of the hold probe's fail_closed above.
+    if let Some(reason) = lineage.clone().fail_open() {
+        eprintln!("finalize: auto-merge NOT armed for PR {number}: {reason}");
+        return (false, Some("stale base".to_string()));
+    }
+    if let ProbeOutcome::Inconclusive(diag) = &lineage {
+        eprintln!(
+            "finalize: stacked-base probe inconclusive for PR {number} ({diag}); arming anyway"
+        );
     }
     let strategy = crate::agents_config::auto_merge_strategy(cwd);
     // No --delete-branch here (x-9d11): the flag's LOCAL delete attempt is the
@@ -3338,14 +3386,19 @@ mod tests {
 
     #[test]
     fn dispatch_hold_probe_fails_closed_on_every_non_success() {
-        assert_eq!(classify_dispatch_hold_probe(true, b"unheld", b""), None);
+        assert_eq!(
+            classify_dispatch_hold_probe(true, b"unheld", b""),
+            ProbeOutcome::Clear
+        );
         assert_eq!(
             classify_dispatch_hold_probe(false, b"", b"dispatch-hold:x-owner"),
-            Some("dispatch-hold:x-owner".to_string())
+            ProbeOutcome::Refused("dispatch-hold:x-owner".to_string())
         );
         assert_eq!(
             classify_dispatch_hold_probe(false, b"", b""),
-            Some("dispatch hold state unreadable; refusing to assume unheld".to_string())
+            ProbeOutcome::Refused(
+                "dispatch hold state unreadable; refusing to assume unheld".to_string()
+            )
         );
     }
 
@@ -3361,7 +3414,7 @@ mod tests {
                 b"",
                 b"fno pr hold-check is now fno do pr hold-check\ndispatch-hold:x-owner\n"
             ),
-            Some("dispatch-hold:x-owner".to_string())
+            ProbeOutcome::Refused("dispatch-hold:x-owner".to_string())
         );
         assert_eq!(
             classify_dispatch_hold_probe(
@@ -3369,7 +3422,33 @@ mod tests {
                 b"",
                 b"fno pr hold-check is now fno do pr hold-check\n"
             ),
-            Some("dispatch hold state unreadable; refusing to assume unheld".to_string())
+            ProbeOutcome::Refused(
+                "dispatch hold state unreadable; refusing to assume unheld".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn probe_outcome_projections_state_their_inconclusive_policy() {
+        // Round-12 finding 4: the two guard probes disagree on failure
+        // philosophy BY NAME now, not by accident of which inline match was
+        // copy-pasted. Refused refuses under both; Clear clears under both;
+        // Inconclusive is the deliberate divergence under test.
+        let refused = ProbeOutcome::Refused("stale base".to_string());
+        assert_eq!(refused.clone().fail_closed().as_deref(), Some("stale base"));
+        assert_eq!(refused.fail_open().as_deref(), Some("stale base"));
+        assert_eq!(ProbeOutcome::Clear.fail_closed(), None);
+        assert_eq!(ProbeOutcome::Clear.fail_open(), None);
+        let inconclusive = ProbeOutcome::Inconclusive("exit 4: unknown".to_string());
+        assert_eq!(
+            inconclusive.clone().fail_closed().as_deref(),
+            Some("exit 4: unknown"),
+            "the hold probe refuses on an unevaluated read"
+        );
+        assert_eq!(
+            inconclusive.fail_open(),
+            None,
+            "the lineage probe arms on an unevaluated read"
         );
     }
 

@@ -1058,11 +1058,9 @@ fn append_blocked_event(
     if let Some(n) = node {
         env["node"] = serde_json::json!(n);
     }
-    if let Err(error) = crate::claims::append_event_line(
-        project_events,
-        &env,
-        std::time::Duration::from_secs(2),
-    ) {
+    if let Err(error) =
+        crate::claims::append_event_line(project_events, &env, std::time::Duration::from_secs(2))
+    {
         eprintln!(
             "loop-check: blocked write to {} failed (non-fatal): {error}",
             project_events.display()
@@ -1070,11 +1068,9 @@ fn append_blocked_event(
         return false;
     }
     if project_events != global_events {
-        if let Err(error) = crate::claims::append_event_line(
-            global_events,
-            &env,
-            std::time::Duration::from_secs(2),
-        ) {
+        if let Err(error) =
+            crate::claims::append_event_line(global_events, &env, std::time::Duration::from_secs(2))
+        {
             eprintln!(
                 "loop-check: blocked mirror to {} failed (non-fatal): {error}",
                 global_events.display()
@@ -16172,14 +16168,30 @@ mod tests {
         };
         std::fs::write(&path, mk("run-a", "missing dependency")).unwrap();
         // Same run + reason -> already emitted.
-        assert!(blocked_distress_already_emitted(&path, "run-a", "missing dependency"));
+        assert!(blocked_distress_already_emitted(
+            &path,
+            "run-a",
+            "missing dependency"
+        ));
         // Different reason on the same run -> not a duplicate.
-        assert!(!blocked_distress_already_emitted(&path, "run-a", "other wall"));
+        assert!(!blocked_distress_already_emitted(
+            &path,
+            "run-a",
+            "other wall"
+        ));
         // Same reason on a different run -> not a duplicate.
-        assert!(!blocked_distress_already_emitted(&path, "run-b", "missing dependency"));
+        assert!(!blocked_distress_already_emitted(
+            &path,
+            "run-b",
+            "missing dependency"
+        ));
         // A missing log is an honest no, not a corrupted yes.
         let absent = tmp.path().join("absent.jsonl");
-        assert!(!blocked_distress_already_emitted(&absent, "run-a", "missing dependency"));
+        assert!(!blocked_distress_already_emitted(
+            &absent,
+            "run-a",
+            "missing dependency"
+        ));
     }
 
     #[test]
@@ -16212,7 +16224,13 @@ mod tests {
             "the global mirror carries the identical row"
         );
         // A second fire with the same (run, reason) appends nothing anywhere.
-        assert!(!append_blocked_event(&project, &global, "run-a", Some("x-77a0"), &d));
+        assert!(!append_blocked_event(
+            &project,
+            &global,
+            "run-a",
+            Some("x-77a0"),
+            &d
+        ));
         assert_eq!(
             std::fs::read_to_string(&project).unwrap().lines().count(),
             1,
@@ -16224,7 +16242,10 @@ mod tests {
             evidence: None,
         };
         assert!(append_blocked_event(&project, &global, "run-a", None, &d2));
-        assert_eq!(std::fs::read_to_string(&project).unwrap().lines().count(), 2);
+        assert_eq!(
+            std::fs::read_to_string(&project).unwrap().lines().count(),
+            2
+        );
     }
 
     #[test]
@@ -16239,7 +16260,11 @@ mod tests {
         };
         assert!(append_blocked_event(&project, &global, "run-a", None, &d));
         let row: serde_json::Value = serde_json::from_str(
-            std::fs::read_to_string(&project).unwrap().lines().next().unwrap(),
+            std::fs::read_to_string(&project)
+                .unwrap()
+                .lines()
+                .next()
+                .unwrap(),
         )
         .unwrap();
         let capped: String = "x".repeat(BLOCKED_DATA_STR_CAP);
