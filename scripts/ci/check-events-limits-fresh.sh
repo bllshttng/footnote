@@ -17,44 +17,10 @@
 # Exit codes: 0 fresh, 1 diverged, 2 misuse (a file is missing / unparseable).
 set -euo pipefail
 
-MODE="committed"
-for arg in "$@"; do
-  case "$arg" in
-    --write) MODE="write" ;;
-    --worktree) MODE="worktree" ;;
-    -h|--help)
-      sed -n '2,17p' "${BASH_SOURCE[0]}"
-      exit 0
-      ;;
-    *)
-      echo "ERROR: unknown argument: $arg" >&2
-      echo "usage: $(basename "${BASH_SOURCE[0]}") [--write|--worktree]" >&2
-      exit 2
-      ;;
-  esac
-done
-
-# Same defensive root resolution as check-harness-capabilities-fresh.sh: a bare
-# $(git rev-parse ...) can propagate rc=128 under inherit_errexit.
-REPO_ROOT=""
-if git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
-  REPO_ROOT="$git_root"
-fi
-if [[ -z "$REPO_ROOT" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  candidate="$SCRIPT_DIR"
-  while [[ "$candidate" != "/" && "$candidate" != "." ]]; do
-    if [[ -e "$candidate/.git" ]]; then
-      REPO_ROOT="$candidate"
-      break
-    fi
-    candidate="$(dirname "$candidate")"
-  done
-fi
-if [[ -z "$REPO_ROOT" ]]; then
-  echo "ERROR: not in a git repo (git rev-parse failed and no .git found via script-dir walk-up)" >&2
-  exit 2
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gate-fresh-common.sh"
+gate_parse_mode "$@"
+gate_resolve_repo_root
+MODE="$GATE_MODE"
 
 SCHEMA_REL="cli/src/fno/events/schema.yaml"
 GENERATED_REL="crates/fno-agents/src/events_limits.toml"
@@ -150,7 +116,7 @@ fi
 ACTUAL="$GENERATED"
 SCOPE="worktree"
 if [[ "$MODE" == "committed" ]]; then
-  if git -C "$REPO_ROOT" show "HEAD:$GENERATED_REL" > "$TMPDIR_GATE/actual" 2>/dev/null; then
+  if gate_committed_blob "$GENERATED_REL" "$TMPDIR_GATE/actual"; then
     ACTUAL="$TMPDIR_GATE/actual"
     SCOPE="committed"
   else

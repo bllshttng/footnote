@@ -18,48 +18,10 @@
 # Exit codes: 0 fresh, 1 diverged, 2 misuse (a file is missing).
 set -euo pipefail
 
-MODE="committed"
-for arg in "$@"; do
-  case "$arg" in
-    --write) MODE="write" ;;
-    --worktree) MODE="worktree" ;;
-    -h|--help)
-      sed -n '2,18p' "${BASH_SOURCE[0]}"
-      exit 0
-      ;;
-    *)
-      echo "ERROR: unknown argument: $arg" >&2
-      echo "usage: $(basename "${BASH_SOURCE[0]}") [--write|--worktree]" >&2
-      exit 2
-      ;;
-  esac
-done
-
-# Resolve REPO_ROOT defensively. The naive $(git rev-parse ...) inside
-# command substitution can propagate git's rc=128 silently when bash is
-# running with inherit_errexit (seen on GitHub Actions ubuntu-latest with
-# bash 5.x). The explicit `if ! ...; then` form contains the failure
-# regardless of inherit_errexit semantics.
-REPO_ROOT=""
-if git_root=$(git rev-parse --show-toplevel 2>/dev/null); then
-  REPO_ROOT="$git_root"
-fi
-if [[ -z "$REPO_ROOT" ]]; then
-  # Fallback: walk up from script location looking for .git
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  candidate="$SCRIPT_DIR"
-  while [[ "$candidate" != "/" && "$candidate" != "." ]]; do
-    if [[ -e "$candidate/.git" ]]; then
-      REPO_ROOT="$candidate"
-      break
-    fi
-    candidate="$(dirname "$candidate")"
-  done
-fi
-if [[ -z "$REPO_ROOT" ]]; then
-  echo "ERROR: not in a git repo (git rev-parse failed and no .git found via script-dir walk-up)" >&2
-  exit 2
-fi
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/gate-fresh-common.sh"
+gate_parse_mode "$@"
+gate_resolve_repo_root
+MODE="$GATE_MODE"
 
 CANONICAL_REL="crates/fno-agents/src/harness_capabilities.toml"
 COPY_REL="cli/src/fno/agents/harness_capabilities.toml"
@@ -93,8 +55,8 @@ if [[ "$MODE" == "committed" ]]; then
   # Degrade to the worktree when either blob is absent at HEAD (an unborn
   # branch, or a file not yet tracked). A repo with nothing committed has no
   # committed drift to find, and silently passing would be worse than saying so.
-  if git -C "$REPO_ROOT" show "HEAD:$CANONICAL_REL" > "$TMPDIR_GATE/canonical" 2>/dev/null \
-    && git -C "$REPO_ROOT" show "HEAD:$COPY_REL" > "$TMPDIR_GATE/copy" 2>/dev/null; then
+  if gate_committed_blob "$CANONICAL_REL" "$TMPDIR_GATE/canonical" \
+    && gate_committed_blob "$COPY_REL" "$TMPDIR_GATE/copy"; then
     LEFT="$TMPDIR_GATE/canonical"
     RIGHT="$TMPDIR_GATE/copy"
     SCOPE="committed"
