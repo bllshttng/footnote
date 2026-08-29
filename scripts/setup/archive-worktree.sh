@@ -189,6 +189,30 @@ measure_strict_state() {
     FORCE_UNPUSHED_REASON="remote refs not verifiable (fetch --all --prune failed)"
   fi
   FORCE_UPSTREAM="$(git -C "$TARGET" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || true)"
+  # An upstream NAME is not an upstream REF. A merged PR's head branch is
+  # deleted on the remote, so `fetch --prune` drops the ref while the branch
+  # config keeps pointing at it, and rev-parse echoes the literal `@{u}` on
+  # stdout rather than failing - which `|| true` cannot catch. Comparing
+  # against that string errors, and the caller reads the error as "unpushed
+  # state not verifiable" and refuses to remove. Deleted-upstream is the NORMAL
+  # state for every worktree the --merged sweep selects, so the refusal fired on
+  # 122 of 132 candidates while the disk it was meant to reclaim sat at 1.9 GB.
+  #
+  # Clearing an unresolvable name drops through to the remote-default-branch
+  # comparison below, which asks the better question anyway: a HEAD already
+  # contained in origin/main has nothing unpushed, whatever ref used to track it.
+  #
+  # The strictness the name carried is kept separately. `-n $FORCE_UPSTREAM` is
+  # also what makes an unverifiable reason a refusal rather than a warning
+  # below, and "this branch tracks a remote" stays true when the ref is pruned.
+  # Clearing the name alone would quietly downgrade that refusal.
+  FORCE_UPSTREAM_TRACKED=0
+  if [[ -n "$FORCE_UPSTREAM" ]]; then
+    FORCE_UPSTREAM_TRACKED=1
+    if ! git -C "$TARGET" rev-parse --verify --quiet "$FORCE_UPSTREAM" >/dev/null 2>&1; then
+      FORCE_UPSTREAM=""
+    fi
+  fi
   if [[ "$FORCE_REMOTE_REFRESH_OK" -eq 0 ]]; then
     :
   elif [[ "$BRANCH" == "(detached)" ]]; then
@@ -218,6 +242,20 @@ measure_strict_state() {
       if [[ -n "$FORCE_FIRST_REMOTE" ]]; then
         FORCE_DEFAULT_REF="$(git -C "$TARGET" symbolic-ref --quiet "refs/remotes/$FORCE_FIRST_REMOTE/HEAD" 2>/dev/null | sed 's|^refs/remotes/||' || true)"
       fi
+      # `<remote>/HEAD` is optional. A fetch usually restores a missing one, but
+      # it cannot when the REMOTE's own HEAD is unresolvable, and then a fully
+      # merged worktree is refused for want of a baseline it never needed: the
+      # --merged sweep that calls this already proved the tip is in origin/main.
+      # Name the conventional default branches and take whichever RESOLVES, so
+      # this is a lookup, not a guess. A repo with neither still refuses.
+      if [[ -z "$FORCE_DEFAULT_REF" && -n "$FORCE_FIRST_REMOTE" ]]; then
+        for _candidate in "$FORCE_FIRST_REMOTE/main" "$FORCE_FIRST_REMOTE/master"; do
+          if git -C "$TARGET" rev-parse --verify --quiet "$_candidate" >/dev/null 2>&1; then
+            FORCE_DEFAULT_REF="$_candidate"
+            break
+          fi
+        done
+      fi
     fi
     if [[ -n "$FORCE_DEFAULT_REF" ]] && git -C "$TARGET" rev-parse --verify --quiet "$FORCE_DEFAULT_REF" >/dev/null; then
       if ! FORCE_AHEAD="$(git -C "$TARGET" rev-list --count "$FORCE_DEFAULT_REF"..HEAD 2>/dev/null)" || [[ ! "$FORCE_AHEAD" =~ ^[0-9]+$ ]]; then
@@ -233,7 +271,7 @@ measure_strict_state() {
     fi
   fi
   if [[ -n "$FORCE_UNPUSHED_REASON" ]]; then
-    if [[ "$FORCE" -eq 1 || "$DELETE_BRANCH" -eq 1 || "$BRANCH" == "(detached)" || -n "$FORCE_UPSTREAM" ]]; then
+    if [[ "$FORCE" -eq 1 || "$DELETE_BRANCH" -eq 1 || "$BRANCH" == "(detached)" || "$FORCE_UPSTREAM_TRACKED" -eq 1 ]]; then
       echo "archive-worktree: unpushed state not verifiable at $TARGET: $FORCE_UNPUSHED_REASON" >&2
       echo "    Refusing removal until remote state is verifiable." >&2
       exit 2
