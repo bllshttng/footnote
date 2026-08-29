@@ -310,21 +310,20 @@ pub fn attach_form(harness: &str) -> Option<AttachForm> {
                 .get("interactive_attach")
                 .cloned()
         };
-        let mut forms: toml::map::Map<String, toml::Value> = toml::from_str::<toml::Value>(
-            CAPABILITY_TOML,
-        )
-        .ok()
-        .and_then(|v| {
-            let harnesses = v.get("harness")?.as_table()?.clone();
-            let mut out = toml::map::Map::new();
-            for (name, caps) in &harnesses {
-                if let Some(block) = bundled_block(caps) {
-                    out.insert(name.clone(), block);
-                }
-            }
-            Some(out)
-        })
-        .unwrap_or_default();
+        let mut forms: toml::map::Map<String, toml::Value> =
+            toml::from_str::<toml::Value>(CAPABILITY_TOML)
+                .ok()
+                .and_then(|v| {
+                    let harnesses = v.get("harness")?.as_table()?.clone();
+                    let mut out = toml::map::Map::new();
+                    for (name, caps) in &harnesses {
+                        if let Some(block) = bundled_block(caps) {
+                            out.insert(name.clone(), block);
+                        }
+                    }
+                    Some(out)
+                })
+                .unwrap_or_default();
         // Fail-open at every layer: an unreadable file, an unparseable file, a
         // missing `harness` table and an unparseable block each skip rather
         // than clearing what was already there. A typo in one harness's block
@@ -2984,7 +2983,10 @@ mod tests {
         let argv = form.render("01a04546-28b2-7a41-ae4c-892bbeb8e295");
         // Action, then assertion: the daemon pre-exec, then the exec'd TUI.
         let script = argv.get(2).map(String::as_str).expect("sh -c script");
-        assert!(script.contains("'codex' 'app-server' 'daemon' 'start'"), "{script}");
+        assert!(
+            script.contains("'codex' 'app-server' 'daemon' 'start'"),
+            "{script}"
+        );
         assert!(script.contains("; exec 'codex' 'resume'"), "{script}");
         assert!(
             script.contains("'--remote' 'unix://'"),
@@ -3002,9 +3004,11 @@ mod tests {
     /// deliberate retirement lands.
     #[test]
     fn parse_attach_form_refuses_malformed_and_honors_explicit_unsupported() {
-        let idless: toml::Value =
-            toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
-        assert!(parse_attach_form(&idless).is_none(), "an id-less block is not one");
+        let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
+        assert!(
+            parse_attach_form(&idless).is_none(),
+            "an id-less block is not one"
+        );
         let unsupported: toml::Value = toml::from_str(
             r#"kind = "unsupported"
 tokens = []"#,
@@ -4722,14 +4726,14 @@ config_dir = "~/.claude-alt"
             .cloned()
             .collect();
         assert!(
-            declared.contains(&"claude".to_string())
-                && declared.contains(&"codex".to_string()),
+            declared.contains(&"claude".to_string()) && declared.contains(&"codex".to_string()),
             "claude and codex both declare an attach form: {declared:?}"
         );
 
         for name in &declared {
-            let form = attach_form(name)
-                .unwrap_or_else(|| panic!("{name} declares an attach form the reader cannot parse"));
+            let form = attach_form(name).unwrap_or_else(|| {
+                panic!("{name} declares an attach form the reader cannot parse")
+            });
             let rendered = form.render("ID-UNDER-TEST");
             let flat = rendered.join(" ");
             assert!(
@@ -4764,8 +4768,8 @@ config_dir = "~/.claude-alt"
             let raw = format!(
                 r#"{{"agents":[{{"name":"w","cwd":"/tmp","harness":"{name}","{id_field}":"abcd1234","status":"live","host_mode":"interactive","mux":null}}]}}"#
             );
-            let rows = derive_rows(&raw, 0)
-                .unwrap_or_else(|| panic!("{name} registry fixture parses"));
+            let rows =
+                derive_rows(&raw, 0).unwrap_or_else(|| panic!("{name} registry fixture parses"));
             let row = rows.first().unwrap_or_else(|| panic!("{name} row derived"));
             assert_eq!(
                 row.attach_id.as_deref(),

@@ -1770,9 +1770,7 @@ fn gc_sweep_impl_with_node_cascade(
             // gets neither - its harness_session_id names a FINISHED exchange
             // - which is why the term keys on row shape and must never widen
             // to "has a session id".
-            liveness_surface: e.pid.is_some()
-                || !e.short_id.is_empty()
-                || is_codex_thread_entry(e),
+            liveness_surface: e.pid.is_some() || !e.short_id.is_empty() || is_codex_thread_entry(e),
             transcript_fresh,
             harness_session_gone,
             dormant_done,
@@ -10715,10 +10713,8 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let rollout = home.root().join("rollout-cx-thread.jsonl");
         std::fs::write(&rollout, "{}\n").unwrap();
         state::update_registry(&home.registry_json(), |r| {
-            r.entries.push(codex_thread_row(
-                "cx-thread",
-                Some(exited_at.as_str()),
-            ));
+            r.entries
+                .push(codex_thread_row("cx-thread", Some(exited_at.as_str())));
         })
         .unwrap();
 

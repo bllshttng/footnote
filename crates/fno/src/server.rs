@@ -14929,10 +14929,7 @@ mod tests {
             attach_argv_for(Some("codex"), uuid, Some("readyrule"), Some(dir)),
             form.render(uuid)
         );
-        assert_eq!(
-            form.render(uuid)[..2],
-            ["sh".to_string(), "-c".to_string()]
-        );
+        assert_eq!(form.render(uuid)[..2], ["sh".to_string(), "-c".to_string()]);
     }
 
     #[test]

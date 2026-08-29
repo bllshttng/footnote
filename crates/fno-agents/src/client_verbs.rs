@@ -4593,7 +4593,10 @@ mod tests {
         // A pane row: its process already has a place.
         let mut pane = thread.clone();
         pane["mux"] = json!({"session": "s", "pane_id": 4});
-        assert_eq!(attach_via_declared_form("codex", &pane, "cx", &events), None);
+        assert_eq!(
+            attach_via_declared_form("codex", &pane, "cx", &events),
+            None
+        );
         // A one-shot ask row: not a thread either.
         let ask = json!({
             "name": "cx-ask", "harness": "codex", "cwd": "/w",

@@ -14,7 +14,9 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_global_config(tag: &str, body: &str, f: impl FnOnce()) {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let dir = std::env::temp_dir().join(format!("fno-x296f-{tag}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let config = dir.join("config.toml");
@@ -35,32 +37,36 @@ fn with_global_config(tag: &str, body: &str, f: impl FnOnce()) {
 /// reaches Drive. No Rust change, no release.
 #[test]
 fn a_config_declared_harness_reaches_drive_from_config_alone() {
-    with_global_config("ac1", r#"
+    with_global_config(
+        "ac1",
+        r#"
 [harness.openclaw.attach]
 tokens = ["openclaw", "resume", "{session_id}"]
 pre_exec = ["openclaw", "daemon", "start"]
-"#, || {
-        let form = fno::agents_view::attach_form("openclaw")
-            .expect("a harness declared in config alone gains an attach form");
-        let rendered = form.render("sess-9");
-        assert_eq!(rendered.first().map(String::as_str), Some("sh"));
-        assert!(
-            rendered
-                .join(" ")
-                .contains("; exec 'openclaw' 'resume' 'sess-9'"),
-            "action, then exec'd assertion: {rendered:?}"
-        );
+"#,
+        || {
+            let form = fno::agents_view::attach_form("openclaw")
+                .expect("a harness declared in config alone gains an attach form");
+            let rendered = form.render("sess-9");
+            assert_eq!(rendered.first().map(String::as_str), Some("sh"));
+            assert!(
+                rendered
+                    .join(" ")
+                    .contains("; exec 'openclaw' 'resume' 'sess-9'"),
+                "action, then exec'd assertion: {rendered:?}"
+            );
 
-        let raw = r#"{"agents":[{"name":"ocw","cwd":"/tmp","harness":"openclaw",
+            let raw = r#"{"agents":[{"name":"ocw","cwd":"/tmp","harness":"openclaw",
             "host_mode":"interactive","short_id":"",
             "harness_session_id":"sess-9","status":"live"}]}"#;
-        let rows = fno::agents_view::derive_rows(raw, 0).expect("fixture parses");
-        let row = rows.first().unwrap();
-        assert_eq!(row.attach_id.as_deref(), Some("sess-9"));
-        assert_eq!(
-            fno::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
-            fno::proto::Reach::Drive,
-            "declared in config alone, so its row reaches Drive"
-        );
-    });
+            let rows = fno::agents_view::derive_rows(raw, 0).expect("fixture parses");
+            let row = rows.first().unwrap();
+            assert_eq!(row.attach_id.as_deref(), Some("sess-9"));
+            assert_eq!(
+                fno::agents_view::thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+                fno::proto::Reach::Drive,
+                "declared in config alone, so its row reaches Drive"
+            );
+        },
+    );
 }

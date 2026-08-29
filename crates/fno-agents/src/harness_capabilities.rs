@@ -1087,7 +1087,10 @@ mod tests {
             script.starts_with("'codex' 'app-server' 'daemon' 'start'; exec "),
             "{script}"
         );
-        assert!(script.ends_with("'codex' 'resume' 'SESS' '--remote' 'unix://'"), "{script}");
+        assert!(
+            script.ends_with("'codex' 'resume' 'SESS' '--remote' 'unix://'"),
+            "{script}"
+        );
     }
 
     #[test]
@@ -1158,10 +1161,19 @@ mod tests {
         // The literal "; exec " is the exec-versus-proxy property; assert the
         // literal, not just the first token.
         assert!(script.contains("; exec "), "{script}");
-        assert!(script.contains("'codex' 'app-server' 'daemon' 'start'"), "{script}");
+        assert!(
+            script.contains("'codex' 'app-server' 'daemon' 'start'"),
+            "{script}"
+        );
         assert!(script.contains("'--remote' 'unix://'"), "{script}");
-        assert!(script.contains(session), "the FULL session id is substituted: {script}");
-        assert!(!script.contains('{'), "no placeholder left unrendered: {script}");
+        assert!(
+            script.contains(session),
+            "the FULL session id is substituted: {script}"
+        );
+        assert!(
+            !script.contains('{'),
+            "no placeholder left unrendered: {script}"
+        );
         // The short spelling is refused by name: a head-8 cannot address a
         // codex session.
         let err = contract

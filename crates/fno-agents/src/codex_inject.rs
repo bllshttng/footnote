@@ -567,8 +567,9 @@ async fn review_start_round_trip(
     delivery: ReviewDelivery,
     request_in_flight: &mut bool,
 ) -> Result<(String, String), ReviewStartError> {
-    let (mut sink, mut stream) =
-        connect_app_server(sock).await.map_err(ReviewStartError::Reason)?;
+    let (mut sink, mut stream) = connect_app_server(sock)
+        .await
+        .map_err(ReviewStartError::Reason)?;
     *request_in_flight = true;
     sink.send(Message::Text(
         review_start_request_json(thread_id, target, delivery).into(),
@@ -1236,8 +1237,9 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
-    let (mut sink, mut stream) =
-        connect_app_server(sock).await.map_err(ReviewStartError::Reason)?;
+    let (mut sink, mut stream) = connect_app_server(sock)
+        .await
+        .map_err(ReviewStartError::Reason)?;
 
     sink.send(Message::Text(
         turn_start_request_json(thread_id, text).into(),

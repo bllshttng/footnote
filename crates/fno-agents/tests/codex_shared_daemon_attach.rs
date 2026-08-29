@@ -75,8 +75,8 @@ fn codex_home_guard() -> std::sync::MutexGuard<'static, ()> {
 fn attach_argv_matches_the_mux_renderer() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../cli/src/fno/agents/harness_capabilities.toml");
-    let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let raw =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
     let harness = caps.get("harness").expect("harness table");
     let uuid = "01a04546-28b2-7a41-ae4c-892bbeb8e295";
@@ -111,8 +111,12 @@ fn attach_argv_matches_the_mux_renderer() {
         // The CLI door, over the same packaged contract fno-agents embeds,
         // asked in the spelling the contract declares.
         let cli = match (declares, tokens_takes_short) {
-            (true, Some(true)) => render_session_argv_with_ids(name, "interactive_attach", None, Some(uuid)),
-            (true, Some(false)) => render_session_argv_with_ids(name, "interactive_attach", Some(uuid), None),
+            (true, Some(true)) => {
+                render_session_argv_with_ids(name, "interactive_attach", None, Some(uuid))
+            }
+            (true, Some(false)) => {
+                render_session_argv_with_ids(name, "interactive_attach", Some(uuid), None)
+            }
             _ => render_session_argv_with_ids(name, "interactive_attach", None, None),
         };
         // The viewport door.
