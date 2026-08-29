@@ -974,6 +974,34 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
+def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
+    """Footprint's attribution as numbers: ``(fleet_cores, capacity_cores)``.
+
+    The governor and the refusal text must read ONE instrument. Before
+    x-7c0f the numbers existed only inside the explanation string, which is
+    how a gate came to print `0.79/12.00 cores` in the same breath as a
+    refusal decided on something else.
+
+    ``None`` means unreadable, which is never headroom (see x-e040: this
+    sensor goes blind under exactly the load it exists to measure).
+    """
+    try:
+        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
+
+        reading, _error = cause_reading()
+        if reading is None:
+            return None
+        capacity = float(_cpu_capacity_cores())
+        fleet = float(reading.fleet_cpu_cores)
+        if capacity <= 0 or not all(
+            math.isfinite(v) and v >= 0 for v in (fleet, capacity)
+        ):
+            return None
+        return fleet, capacity
+    except Exception:
+        return None
+
+
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
@@ -1007,15 +1035,41 @@ def _footprint_cause_evidence() -> Optional[str]:
         return None
 
 
-def _check_load_ceiling(max_load_per_cpu: float) -> None:
-    """Refuse (never queue) above the CPU ceiling (x-3f84 W3).
+def _check_load_ceiling(
+    max_load_per_cpu: float,
+    max_fleet_cpu_share: float = 0.5,
+    hard_max_load_per_cpu: float = 40.0,
+) -> None:
+    """Refuse (never queue) when the FLEET is the reason the box is loaded.
 
-    The ceiling is `max_load_per_cpu x cpu count` on the 1-min loadavg, so one
-    number ports across machines without an edit. Measured motivation: load 309
-    on 12 CPUs while the RAM floor held ten times its margin - the one machine
-    guard was reading the one resource that was never scarce. Same contract as
-    :func:`_check_ram_floor`: <= 0 disables, unreadable skips, refuse never
-    queues.
+    Three thresholds, because the honest question needs two instruments:
+
+    1. ``max_load_per_cpu x cpus`` is a TRIGGER. Below it the gate admits
+       without probing, so the common path costs no subprocess.
+    2. Above the trigger the gate asks footprint whose CPU this is and
+       refuses only when the fleet holds more than ``max_fleet_cpu_share``
+       of capacity.
+    3. ``hard_max_load_per_cpu x cpus`` refuses regardless of attribution.
+
+    WHY (x-7c0f, measured twice). This check refused on the 1-min load
+    average while printing footprint's contradicting attribution in the same
+    refusal: `load 127.6 exceeds ... 96.0` beside `attributes 0.79/12.00
+    cores (6.6% capacity)`. Load average counts runnable PLUS blocked
+    processes, so it is not a CPU measure and belongs to nobody. On
+    2026-08-29 the three largest consumers on the refusing box were desktop
+    applications, and killing one unscoped ripgrep moved the 1-min load from
+    374 to 179 with no agent stopped. A gate that refuses beside its own
+    contradicting measurement teaches an operator to reach for --force,
+    which is how a guard becomes a formality.
+
+    Step 3 exists because a pure fleet-share governor would admit onto a box
+    already thrashing from foreign work. Keep the backstop well above the
+    trigger; :func:`AgentsBlock` defaults are 8 and 40.
+
+    Same contract as :func:`_check_ram_floor` otherwise: ``max_load_per_cpu
+    <= 0`` disables, unreadable LOAD skips (fail open, the platform may have
+    no getloadavg at all). Unreadable ATTRIBUTION refuses (fail closed): an
+    unknown share is not evidence of headroom.
     """
     if max_load_per_cpu <= 0:
         return
@@ -1030,17 +1084,49 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
     # available_parallelism, so the two gates compute the same ceiling on a
     # constrained host instead of a 4x disagreement).
     cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1
-    ceiling = max_load_per_cpu * cpus
-    if load1 > ceiling:
+    trigger = max_load_per_cpu * cpus
+    if load1 <= trigger:
+        return
+
+    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
         _warn(
-            f"spawn-gate: 1-min load {load1:.1f} exceeds max_load_per_cpu "
-            f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
+            f"spawn-gate: 1-min load {load1:.1f} exceeds the absolute machine "
+            f"backstop hard_max_load_per_cpu {hard_max_load_per_cpu:g} x {cpus} "
+            f"cpus = {hard_max_load_per_cpu * cpus:.1f}; refusing to spawn "
+            f"whoever caused it (--force to bypass)"
+        )
+        raise GateRefused(EXIT_LOAD_REFUSED)
+
+    reading = _fleet_cpu_reading()
+    if reading is None:
+        _warn(
+            f"spawn-gate: 1-min load {load1:.1f} is over the "
+            f"max_load_per_cpu trigger {max_load_per_cpu:g} x {cpus} cpus = "
+            f"{trigger:.1f} and fleet CPU attribution unavailable; refusing to "
             f"spawn (--force to bypass)"
+        )
+        raise GateRefused(EXIT_LOAD_REFUSED)
+
+    fleet, capacity = reading
+    share = fleet / capacity
+    if share > max_fleet_cpu_share:
+        _warn(
+            f"spawn-gate: the fleet holds {fleet:.2f}/{capacity:.2f} cores "
+            f"({share * 100:.1f}% of capacity), over the "
+            f"max_fleet_cpu_share ceiling {max_fleet_cpu_share * 100:.1f}%; "
+            f"refusing to spawn (--force to bypass)"
         )
         # No evidence probe here: it costs seconds of ps/lsof, and this check
         # runs inside the held gate mutex. The caller releases first, then
         # gathers (see run_gate).
         raise GateRefused(EXIT_LOAD_REFUSED)
+
+    _warn(
+        f"spawn-gate: 1-min load {load1:.1f} is high but only "
+        f"{fleet:.2f}/{capacity:.2f} cores ({share * 100:.1f}%) are attributed "
+        f"to the fleet, so the load is not attributed to the fleet; admitting "
+        f"the spawn"
+    )
 
 
 def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) -> int:
@@ -1153,11 +1239,14 @@ def run_gate(
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
         max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
+        max_fleet_cpu_share = float(agents_cfg.max_fleet_cpu_share)
+        hard_max_load_per_cpu = float(agents_cfg.hard_max_load_per_cpu)
         # A real attribute read, not a getattr fallback: a missing field must
         # fail loudly here rather than silently uncapping every provider.
         limits = dict(agents_cfg.provider_limits)
     except Exception:
         cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
+        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
         # The same budget the built-in table carries, coerced through the same
         # model so this fail-safe path cannot disagree with the configured one
         # about zai's caps.
@@ -1325,7 +1414,11 @@ def run_gate(
                     guard.release()
                     raise
                 try:
-                    _check_load_ceiling(max_load_per_cpu)
+                    _check_load_ceiling(
+                        max_load_per_cpu,
+                        max_fleet_cpu_share,
+                        hard_max_load_per_cpu,
+                    )
                 except GateRefused:
                     # The refusal is decided; release the mutex BEFORE the
                     # cause probe so queued spawners (and --no-wait callers)

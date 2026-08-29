@@ -30,6 +30,18 @@ def _isolated_world(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_live_footprint(monkeypatch):
+    """Attribution is stubbed idle unless a test asks otherwise.
+
+    Since x-7c0f the gate consults fleet CPU attribution above the load
+    trigger, and that read is a subprocess against the real machine. Left
+    unstubbed these tests refuse or admit according to what the developer's
+    box happens to be doing.
+    """
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.1, 12.0))
+
+
 def _write_roster(tmp_path, workers: dict) -> None:
     roster = {"proto": 1, "supervisorPid": 1, "workers": workers}
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
@@ -318,7 +330,16 @@ class TestRamFloor:
         assert "skipping the floor check" in capsys.readouterr().err
 
 
-def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_load_per_cpu=0.0):
+def _settings(
+    monkeypatch,
+    *,
+    max_live=3,
+    min_free_gb=0.0,
+    max_lanes=None,
+    max_load_per_cpu=0.0,
+    max_fleet_cpu_share=0.5,
+    hard_max_load_per_cpu=40.0,
+):
     """Point run_gate at fixed knobs without touching real settings."""
 
     class _D:
@@ -334,6 +355,11 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_l
     a.max_live = max_live
     a.min_free_gb = min_free_gb
     a.max_load_per_cpu = max_load_per_cpu  # 0 = the CPU guard stays off in tests
+    # run_gate reads these as REAL attributes (x-7c0f). A fake settings object
+    # missing one drops the whole config block into its fail-safe branch, which
+    # silently discards max_live as well - the failure looks like a cap bug.
+    a.max_fleet_cpu_share = max_fleet_cpu_share
+    a.hard_max_load_per_cpu = hard_max_load_per_cpu
     a.provider_limits = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
@@ -442,6 +468,8 @@ class TestRunGate:
             lambda: mutex_held_when_probed.append("spawn-gate" in released) or None,
             raising=False,
         )
+        # The fleet owns the box, so the load trigger becomes a refusal.
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
@@ -459,6 +487,9 @@ class TestRunGate:
         )
         monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        # 309 on 12 cpus is over the factor-8 trigger; the fleet owning 9 of
+        # 12 cores is what turns that into a refusal (x-7c0f).
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
@@ -476,13 +507,16 @@ class TestRunGate:
             lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
             raising=False,
         )
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
         error = capsys.readouterr().err
-        assert "1-min load 309.0 exceeds" in error
+        # The refusal names the FLEET's cores now, not the machine's load: it
+        # could not say whose load it was refusing until x-7c0f.
+        assert "the fleet holds 9.00/12.00 cores" in error
         assert "footprint attributes 1.86/12.00 cores" in error
 
     def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
@@ -497,6 +531,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "_footprint_cause_evidence", lambda: None, raising=False
         )
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
@@ -504,7 +539,9 @@ class TestRunGate:
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
         error = capsys.readouterr().err
         assert "footprint cause unavailable; load refusal unchanged" in error
-        assert "1-min load 309.0 exceeds" in error
+        # The refusal itself still names its own numbers even when the extra
+        # explanation cannot be gathered.
+        assert "the fleet holds 9.00/12.00 cores" in error
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)

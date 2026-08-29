@@ -3,7 +3,13 @@
 The measured emergency: load 309 on 12 CPUs while the RAM floor held ten
 times its margin. The one machine guard read the one resource that was never
 scarce; this is the dimension beside it. Same contract as the RAM floor:
-refuse never queues, <= 0 disables, unreadable skips."""
+refuse never queues, <= 0 disables, unreadable skips.
+
+x-7c0f changed what the factor MEANS. It is now the load at which the gate
+consults fleet CPU attribution, not a refusal on its own, so every test here
+that crosses the line must say whose CPU it is. The governor's own contract
+lives in test_fleet_load_governor.py.
+"""
 from __future__ import annotations
 
 import pytest
@@ -24,6 +30,22 @@ def _load(load1: float):
     return lambda: (load1, 0.0, 0.0)
 
 
+@pytest.fixture(autouse=True)
+def _no_live_footprint(monkeypatch):
+    """No unit test probes the real machine.
+
+    Before x-7c0f nothing here stubbed footprint because nothing consulted
+    it; the tests then read this box live and asserted against whatever it
+    happened to be doing. Default to a fleet holding almost nothing, so a
+    test that wants a refusal has to ask for one.
+    """
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.1, 12.0))
+
+
+def _fleet_owns(monkeypatch, cores: float, capacity: float = 12.0):
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (cores, capacity))
+
+
 def test_disabled_ceiling_never_fires(monkeypatch):
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
     spawn_gate._check_load_ceiling(0)  # no raise
@@ -31,13 +53,19 @@ def test_disabled_ceiling_never_fires(monkeypatch):
 
 
 def test_over_ceiling_refuses_with_numbers(monkeypatch, capsys):
-    """The refusal names the factor, the cpu count, the ceiling, and --force."""
+    """The refusal names the fleet's cores, the ceiling, and --force.
+
+    Since x-7c0f the numbers are the fleet's, not the machine's: the old
+    assertion on `309` and `96` described a refusal that could not say whose
+    load it was refusing.
+    """
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(309.0))
+    _fleet_owns(monkeypatch, 9.0)  # 75% of capacity, over the 50% default
     with pytest.raises(spawn_gate.GateRefused) as ei:
         spawn_gate._check_load_ceiling(8.0)
     assert ei.value.code == spawn_gate.EXIT_LOAD_REFUSED == 79
     err = capsys.readouterr().err
-    assert "309" in err and "12 cpus" in err and "96" in err
+    assert "9.00" in err and "12.00" in err and "75.0%" in err
     assert "--force" in err
 
 
@@ -59,11 +87,12 @@ def test_ceiling_scales_with_cpu_count(monkeypatch):
     """One factor ports across machines: the same load flips verdicts either
     side of the per-cpu line as the cpu count changes."""
     monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(20.0))
+    _fleet_owns(monkeypatch, 7.0, capacity=8.0)  # 87.5%: over the share
     _set_cpus(monkeypatch, 8)
     with pytest.raises(spawn_gate.GateRefused):
-        spawn_gate._check_load_ceiling(2.0)  # 20 > 2 x 8
+        spawn_gate._check_load_ceiling(2.0)  # 20 > 2 x 8: consults, refuses
     _set_cpus(monkeypatch, 16)
-    spawn_gate._check_load_ceiling(2.0)  # 20 <= 2 x 16: passes
+    spawn_gate._check_load_ceiling(2.0)  # 20 <= 2 x 16: never consults
 
 
 def _set_cpus(monkeypatch, n):
