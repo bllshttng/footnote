@@ -16621,9 +16621,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: None,
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: None,
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
@@ -20230,9 +20230,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -20310,9 +20310,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -20394,9 +20394,9 @@ mod tests {
         let live_row = RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "live-codex".into(),
             cwd: "/tmp".into(),
@@ -24060,6 +24060,8 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
@@ -24168,6 +24170,8 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
@@ -24238,6 +24242,8 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
