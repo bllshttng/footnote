@@ -241,6 +241,16 @@ FIELD_META: dict[str, Meta] = {
     ),
     "review.agent_routes": Meta("never", "Opt-in per-agent harness/provider/model routes for named sigma sessions."),
     "review.cross_model.enabled": Meta("advanced", "Enable cross-model (codex/gemini) second-opinion review."),
+    # --- config.style.* ---
+    "style.word_cap.mail": Meta(
+        "advanced", "Masked-word cap for style rule 7 on a mail body (default 80). The refusal names the number enforced here, not the built-in.",
+    ),
+    "style.word_cap.encounter": Meta(
+        "advanced", "Masked-word cap for the evidence on a `fno backlog encounter` vote (default 80). Over-length evidence is refused, never truncated.",
+    ),
+    "style.pair_budget_words": Meta(
+        "advanced", "Rolling per-pair mail word budget inside the 10-minute window (default 80). Raise it alongside style.word_cap.mail: a higher per-message cap that leaves this at 80 refuses the very message the cap now permits.",
+    ),
     # --- config.preflight.* ---
     "preflight.required": Meta(
         "advanced", "Require a full local preflight receipt before opening a PR. Default false: CI is the merge gate and preflight is an opt-in rehearsal.",

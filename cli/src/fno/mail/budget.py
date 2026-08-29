@@ -25,8 +25,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-# Both values are fixed policy, not configuration. A per-project override would
-# let the noisiest fleet raise its own cap.
+# CAP is the default, not the whole policy. It moved under config
+# (`style.pair_budget_words`) because it is coupled to the per-message rule 7
+# cap: a project that raises `style.word_cap.mail` and cannot raise this one is
+# refused at the window total for a message the per-message cap now permits, and
+# the refusal names a number nobody set. The old comment here said a per-project
+# override "would let the noisiest fleet raise its own cap", which is true and
+# is now the operator's call to make in one visible place rather than a silent
+# floor. WINDOW_SECONDS stays fixed policy: nothing is coupled to it.
 CAP = 80
 WINDOW_SECONDS = 600
 
@@ -40,12 +46,13 @@ class BudgetRefused(Exception):
         pair: str,
         running: int,
         current: int,
+        cap: int = CAP,
     ) -> None:
         self.pair = pair
         self.running = running
         self.current = current
         self.projected = running + current
-        self.cap = CAP
+        self.cap = cap
         self.window_seconds = WINDOW_SECONDS
         super().__init__(self.marker())
 
@@ -194,6 +201,7 @@ def reserve(
     enforce: bool = True,
     sender_key: Optional[str] = None,
     recipient_key: Optional[str] = None,
+    cap: int = CAP,
 ) -> Reservation:
     """Charge ``words`` to the pair, refusing when the projection breaks the cap.
 
@@ -235,11 +243,11 @@ def reserve(
                 reset_by = reset_id
             entries = kept
         running = sum(e["words"] for e in entries)
-        if enforce and running + words > CAP:
+        if enforce and running + words > cap:
             # Refused attempts never consume budget: the pruned ledger is still
             # written back so an expired window is not re-read on the next send.
             _store(path, pair, entries)
-            raise BudgetRefused(pair=pair, running=running, current=words)
+            raise BudgetRefused(pair=pair, running=running, current=words, cap=cap)
         entries.append(
             {
                 "id": msg_id,

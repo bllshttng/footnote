@@ -1006,6 +1006,31 @@ def resolved_optional_apps(review: "ReviewBlock") -> list[str]:
     return resolved
 
 
+class WordCapBlock(BaseModel):
+    """Per-surface masked-word caps for style rule 7.
+
+    One number per surface that is read MID-TURN. The surface set itself lives
+    in `fno.style.CAPPED_SURFACES` and is not configurable: a project may move a
+    number here, and may never cap a surface the checker says is uncapped.
+    """
+
+    mail: int = Field(80, ge=1)
+    encounter: int = Field(80, ge=1)
+
+
+class StyleBlock(BaseModel):
+    """Style-checker numbers (nested under 'config.style')."""
+
+    word_cap: WordCapBlock = Field(default_factory=WordCapBlock)
+    # The rolling pair budget is a WINDOW instrument, not a per-text cap, so it
+    # is a sibling of word_cap rather than one of its surfaces. It moves WITH
+    # the per-message cap or it silently binds first: a project that raises
+    # word_cap.mail to 200 would still be refused at the 80-word window total,
+    # and the refusal would name a number the sender never set. That coupling is
+    # why the budget's cap became configurable at all.
+    pair_budget_words: int = Field(80, ge=1)
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -4041,6 +4066,7 @@ class ConfigBlock(BaseModel):
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
+    style: StyleBlock = Field(default_factory=StyleBlock)
     preflight: PreflightBlock = Field(default_factory=PreflightBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     context: ContextBlock = Field(default_factory=ContextBlock)
