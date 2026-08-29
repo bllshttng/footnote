@@ -464,6 +464,49 @@ pub(crate) fn mux_restore_hold_workers(cwd: &Path) -> bool {
         .unwrap_or(true)
 }
 
+/// (x-7b5e) What startup restore does with worker members. `hold` is the
+/// shipped default: named held panes, resume on focus. `idle` leaves every
+/// member an idle row. `resume` additionally runs the bulk restore driver at
+/// startup, bringing each member back through its own harness.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MuxRestorePolicy {
+    #[default]
+    Hold,
+    Idle,
+    Resume,
+}
+
+/// The legacy bool spelling mapped onto the policy it meant before the third
+/// state existed.
+pub(crate) fn policy_from_hold_workers(hold: bool) -> MuxRestorePolicy {
+    if hold {
+        MuxRestorePolicy::Hold
+    } else {
+        MuxRestorePolicy::Idle
+    }
+}
+
+/// Resolve `[mux.restore] policy` (hold | idle | resume). A `policy` key
+/// outranks the legacy `hold_workers` bool; an out-of-enum value falls back
+/// to the SAFE state and says so on stderr, so a mistyped value can neither
+/// silently respawn workers nor silently idle them.
+pub(crate) fn mux_restore_policy(cwd: &Path) -> MuxRestorePolicy {
+    if let Some(value) = config_nested_str(cwd, "mux", "restore", "policy") {
+        return match value.as_str() {
+            "hold" => MuxRestorePolicy::Hold,
+            "idle" => MuxRestorePolicy::Idle,
+            "resume" => MuxRestorePolicy::Resume,
+            other => {
+                eprintln!(
+                    "fno mux: mux.restore.policy {other:?} is not hold|idle|resume; using hold"
+                );
+                MuxRestorePolicy::Hold
+            }
+        };
+    }
+    policy_from_hold_workers(mux_restore_hold_workers(cwd))
+}
+
 /// A TOP-LEVEL key (no section) read from the EXPLICIT tier only: `$FNO_CONFIG`
 /// (sole candidate) else the global config. The mux resolves its state root
 /// through this, deliberately NOT through the project tier below: one

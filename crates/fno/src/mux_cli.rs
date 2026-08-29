@@ -2888,8 +2888,9 @@ genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a pro
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
-the agent panel, and selecting it resumes the session through its own harness (claude --resume / \
-codex resume). Restore never respawns it. A run without --worker records no member.";
+the agent panel, and selecting it resumes the session through its own harness. Startup restore \
+holds (default) or idles it by policy; `fno mux workspace restore` respawns it on demand. A run \
+without --worker records no member.";
 
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args

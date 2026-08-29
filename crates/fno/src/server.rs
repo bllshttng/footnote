@@ -1436,6 +1436,41 @@ fn set_hold_workers(value: bool) {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Test override for the three-state startup restore policy (x-7b5e),
+    /// outranking the legacy `set_hold_workers` bool. `None` (the default)
+    /// falls through to the bool override, then to the real config ladder.
+    static RESTORE_POLICY_OVERRIDE:
+        std::cell::RefCell<Option<crate::digest_overlay::MuxRestorePolicy>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_restore_policy(policy: crate::digest_overlay::MuxRestorePolicy) {
+    RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(policy));
+}
+
+#[cfg(test)]
+struct RestorePolicyGuard;
+
+#[cfg(test)]
+impl Drop for RestorePolicyGuard {
+    fn drop(&mut self) {
+        RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// The startup restore policy read from the config ladder. Free fn so the
+/// test override arm and the production arm share one defaulting path.
+fn restore_policy_now() -> crate::digest_overlay::MuxRestorePolicy {
+    std::env::current_dir()
+        .ok()
+        .as_deref()
+        .map(crate::digest_overlay::mux_restore_policy)
+        .unwrap_or(crate::digest_overlay::MuxRestorePolicy::Hold)
+}
+
+#[cfg(test)]
 struct HoldWorkersGuard;
 
 #[cfg(test)]
@@ -6649,8 +6684,18 @@ impl Core {
         let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
         if resumed > 0 {
             self.push_layout(true);
-            // The same zero-inclusive summary the held-restore prints, so an
-            // attached client sees the world change and its counts.
+        }
+        if !dry_run {
+            // Every refusal reaches the attached clients by name (AC5-ERR),
+            // and a zero-inclusive summary answers "did restore do anything"
+            // without reading a pane count.
+            for row in rows.iter().filter(|r| r.outcome == "refused") {
+                self.notice_all(format!(
+                    "workspace restore: {} could not be resumed: {}",
+                    row.member,
+                    row.reason.as_deref().unwrap_or("no reason given"),
+                ));
+            }
             let focused = rows.iter().filter(|r| r.outcome == "focused").count();
             let refused = rows.iter().filter(|r| r.outcome == "refused").count();
             self.notice_all(format!(
@@ -7677,23 +7722,24 @@ impl Core {
         }
         let mut pruned_workers = 0usize;
         #[cfg(test)]
-        let hold_workers = HOLD_WORKERS_OVERRIDE.with(|slot| {
-            slot.borrow().unwrap_or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .as_deref()
-                    .map(crate::digest_overlay::mux_restore_hold_workers)
-                    .unwrap_or(true)
+        let policy = RESTORE_POLICY_OVERRIDE.with(|slot| {
+            if let Some(p) = slot.borrow().as_ref().copied() {
+                return p;
+            }
+            HOLD_WORKERS_OVERRIDE.with(|slot| {
+                slot.borrow()
+                    .map(crate::digest_overlay::policy_from_hold_workers)
+                    .unwrap_or_else(|| restore_policy_now())
             })
         });
         #[cfg(not(test))]
-        let hold_workers = {
-            std::env::current_dir()
-                .ok()
-                .as_deref()
-                .map(crate::digest_overlay::mux_restore_hold_workers)
-                .unwrap_or(true)
-        };
+        let policy = restore_policy_now();
+        // (x-7b5e) The one knob, three states. `hold` is today's default:
+        // named held panes, resume on focus. `idle` leaves every member an
+        // idle row. `resume` walks the same idle path here and then runs the
+        // bulk driver at the end, so startup never silently respawns unless
+        // the operator asked for exactly that (AC4-EDGE).
+        let hold_workers = policy == crate::digest_overlay::MuxRestorePolicy::Hold;
         let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
             Ok(receipts) => (receipts, None),
             Err(error) => {
@@ -8166,6 +8212,15 @@ impl Core {
             self.notice_all(format!(
                 "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
             ));
+        }
+        // (x-7b5e) policy = resume: the walk deliberately left every member
+        // idle; the bulk driver now brings each back through its own
+        // harness's declared form. The reply end is dropped on purpose - at
+        // startup the report reaches the operator through the notices the
+        // driver emits, not through a control connection.
+        if policy == crate::digest_overlay::MuxRestorePolicy::Resume {
+            let (tx, _rx) = oneshot::channel::<ServerMsg>();
+            self.workspace_restore_start(false, None, tx);
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -19425,6 +19480,117 @@ mod tests {
         assert_eq!(err.0, err_code::BAD_REQUEST);
         assert!(core.panes.is_empty(), "no pane spawned");
         assert!(core.session.squads.is_empty(), "no squad minted");
+    }
+
+    #[test]
+    fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
+        // (x-7b5e) The widened knob, both new states. `resume` walks the same
+        // idle path as hold and THEN runs the bulk driver, so the stored
+        // workers come back through their own harness at startup. `idle`
+        // spawns nothing and claims no harness process - the explicit
+        // opt-out. The default stays byte-identical (the pinning test above).
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let names = ["t-codex-one", "t-codex-two"];
+        let rows_for = || -> Vec<RegistryAgent> {
+            [
+                ("t-codex-one", "codex-session-one"),
+                ("t-codex-two", "codex-session-two"),
+            ]
+            .iter()
+            .map(|(n, sid)| {
+                let mut row = exited_claude_row(n, None);
+                row.harness = Some("codex".into());
+                row.harness_session_id = Some((*sid).into());
+                row
+            })
+            .collect()
+        };
+        let seed = |scratch: &str| {
+            let s = StoreScratch::new(scratch);
+            let origin = s.dir.join("repo");
+            std::fs::create_dir_all(&origin).unwrap();
+            crate::squad_store::upsert(
+                "",
+                &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+                &[origin.to_string_lossy().into_owned()],
+                &[
+                    crate::squad_store::StoredMember {
+                        attach_id: String::new(),
+                        tombstone: false,
+                        tab_name: None,
+                        cwd: None,
+                        worker: Some("t-codex-one".into()),
+                        harness: Some("codex".into()),
+                        harness_session_id: Some("codex-session-one".into()),
+                    },
+                    crate::squad_store::StoredMember {
+                        attach_id: String::new(),
+                        tombstone: false,
+                        tab_name: None,
+                        cwd: None,
+                        worker: Some("t-codex-two".into()),
+                        harness: Some("codex".into()),
+                        harness_session_id: Some("codex-session-two".into()),
+                    },
+                ],
+            )
+            .unwrap();
+            s
+        };
+
+        // policy = resume: the driver runs at the end of restore and each
+        // member is resumed through the (overridden) harness form.
+        let _s1 = seed("restore-resume");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.agents = rows_for();
+        let _known = KnownWorkersGuard;
+        set_known_workers(&names);
+        {
+            let _policy = RestorePolicyGuard;
+            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Resume);
+            core.restore_squads(24, 80, 999);
+        }
+        assert_eq!(
+            core.worker_pane.len(),
+            2,
+            "the bulk driver resumed both stored workers: {:?}",
+            core.worker_pane
+        );
+        let resumed: Vec<u64> = core.worker_pane.values().flatten().copied().collect();
+        assert_eq!(resumed.len(), 2, "one pane per resumed member");
+        for pid in resumed {
+            core.reap_pane(pid);
+        }
+
+        // policy = idle: the same members restore as idle rows and nothing
+        // claims a harness process.
+        let _s2 = seed("restore-policy-idle");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.agents = rows_for();
+        let _known2 = KnownWorkersGuard;
+        set_known_workers(&names);
+        {
+            let _policy = RestorePolicyGuard;
+            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Idle);
+            core.restore_squads(24, 80, 999);
+        }
+        assert!(
+            core.worker_pane.is_empty(),
+            "idle policy claims no harness process"
+        );
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members,
+            vec!["t-codex-one".to_string(), "t-codex-two".to_string()],
+            "both worker members stay as idle rows"
+        );
     }
 
     #[test]
