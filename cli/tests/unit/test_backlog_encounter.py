@@ -84,13 +84,19 @@ def probe(tmp_path: Path):
     graph = state / "graph.json"
     graph.write_text('{"entries": []}\n', encoding="utf-8")
 
-    def run(*args: str, session_id: str = SESSION_A, harness: str = "claude"):
+    def run(
+        *args: str,
+        session_id: str = SESSION_A,
+        harness: str = "claude",
+        extra_env: dict | None = None,
+    ):
         env = dict(os.environ)
         env["FNO_CONFIG"] = str(settings)
         env["FNO_REPO_ROOT"] = str(tmp_path)
         env["PROBE_SESSION_ID"] = session_id
         env["PROBE_HARNESS"] = harness
         env.pop("FNO_STYLE_ENFORCE", None)
+        env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, "-c", _PROBE, *args],
             capture_output=True,
@@ -203,6 +209,55 @@ def test_a_configured_encounter_cap_is_the_one_enforced(probe):
     assert result.returncode == 4, result.stderr
     assert "20" in result.stderr
     assert _encounters(probe) == []
+
+
+def test_the_style_kill_switch_reaches_this_surface(probe):
+    """`docs/style-rules.md` says rule 7 inherits the existing escapes.
+
+    A surface that quietly opts out makes that sentence false. What stays
+    unescapable is the falsifiability contract: evidence is still required and
+    identity is still proven, whatever this switch says.
+    """
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        _words(120),
+        extra_env={"FNO_STYLE_ENFORCE": "0"},
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(_encounters(probe)) == 1
+
+
+def test_the_kill_switch_does_not_escape_evidence_or_identity(probe):
+    """The positive control for the test above: the switch is a LENGTH escape."""
+    _seed(probe, _node())
+    empty = probe(
+        "backlog", "encounter", "zz-0001", "--evidence", "  ",
+        extra_env={"FNO_STYLE_ENFORCE": "0"},
+    )
+    assert empty.returncode == 1, empty.stderr
+    anonymous = probe(
+        "backlog", "encounter", "zz-0001", "--evidence", "hit a wall.",
+        session_id="", extra_env={"FNO_STYLE_ENFORCE": "0"},
+    )
+    assert anonymous.returncode == 5, anonymous.stderr
+    assert _encounters(probe) == []
+
+
+def test_a_style_exception_line_also_escapes_the_cap(probe):
+    _seed(probe, _node())
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--evidence",
+        "style-exception: pasted a measured table\n" + _words(120),
+    )
+    assert result.returncode == 0, result.stderr
+    assert len(_encounters(probe)) == 1
 
 
 def test_one_session_votes_once(probe):
@@ -354,13 +409,15 @@ def test_append_encounter_names_the_existing_timestamp(tmp_path, monkeypatch):
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
 
     first = {"ts": "2026-08-29T05:00:00+00:00", "session_id": SESSION_A, "evidence": "one."}
-    appended, error = append_encounter(graph, "zz-0001", first)
+    appended, error, reason = append_encounter(graph, "zz-0001", first)
     assert appended is True
     assert error is None
+    assert reason is None
 
     second = {"ts": "2026-08-29T06:00:00+00:00", "session_id": SESSION_A, "evidence": "two."}
-    appended, error = append_encounter(graph, "zz-0001", second)
+    appended, error, reason = append_encounter(graph, "zz-0001", second)
     assert appended is False
+    assert reason == "duplicate"
     assert error is not None
     assert "2026-08-29T05:00:00+00:00" in error
 
@@ -378,7 +435,28 @@ def test_append_encounter_reports_a_missing_node(tmp_path, monkeypatch):
 
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
 
-    appended, error = append_encounter(graph, "zz-0001", {"ts": "x", "session_id": SESSION_A})
+    appended, error, reason = append_encounter(graph, "zz-0001", {"ts": "x", "session_id": SESSION_A})
     assert appended is False
+    assert reason == "missing"
     assert error is not None
     assert "zz-0001" in error
+
+
+def test_a_reason_symbol_not_prose_picks_the_exit_code(tmp_path, monkeypatch):
+    """A caller matching the error WORDING breaks the first time it improves."""
+    from fno.graph.store import append_encounter
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    import fno.graph._constants as gc
+
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+
+    appended, error, reason = append_encounter(graph, "zz-0001", {"ts": "x"})
+    assert appended is False
+    assert reason == "unidentified"
+    assert "session_id" in error
+
+    # The collapse this guards: without the refusal, one anonymous record
+    # matches every later anonymous record and blocks all of them.
+    assert json.loads(graph.read_text(encoding="utf-8"))["entries"][0].get("encounters") is None

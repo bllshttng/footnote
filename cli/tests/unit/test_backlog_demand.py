@@ -231,3 +231,25 @@ def test_an_empty_signal_says_so_and_exits_clean(tmp_graph):
     result = runner.invoke(app, ["backlog", "demand"])
     assert result.exit_code == 0, result.output
     assert json.loads(runner.invoke(app, ["backlog", "demand", "--json"]).output) == []
+
+
+def test_demand_refuses_under_an_external_tracker_backend(tmp_graph, monkeypatch):
+    """Encounters are footnote-minted and live only in the graph.
+
+    Reading the graph under another backend would report an unmeasured zero as
+    if it were measured, which is the failure this signal exists to replace.
+    """
+    _write(tmp_graph, _node("zz-0001", "p3", encounters=[_enc("s1")]))
+    monkeypatch.setenv("FNO_TRACKER_BACKEND", "github")
+    result = runner.invoke(app, ["backlog", "demand"])
+    assert result.exit_code == 1, result.output
+    assert "github" in result.output
+
+
+def test_demand_reads_normally_on_the_graph_backend(tmp_graph, monkeypatch):
+    """Positive control: the refusal above is the BACKEND, not a broken read."""
+    _write(tmp_graph, _node("zz-0001", "p3", encounters=[_enc("s1")]))
+    monkeypatch.delenv("FNO_TRACKER_BACKEND", raising=False)
+    result = runner.invoke(app, ["backlog", "demand"])
+    assert result.exit_code == 0, result.output
+    assert "zz-0001" in result.output

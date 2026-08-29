@@ -1168,32 +1168,48 @@ def append_progress_note(
     return result["found"], result["plan_path"]
 
 
-def append_encounter(path: Path, node_id: str, record: dict) -> "tuple[bool, str | None]":
+def append_encounter(
+    path: Path, node_id: str, record: dict
+) -> "tuple[bool, str | None, str | None]":
     """Append one encounter, refusing a second from the same session.
 
-    Returns ``(appended, error)``. The duplicate error names the existing
-    record's timestamp: a session that already voted needs to know WHEN, so it
-    can decide whether to add a progress note instead of arguing with a gate.
+    Returns ``(appended, error, reason)``. ``reason`` is one of ``"missing"``,
+    ``"duplicate"``, or ``"unidentified"``, and it exists so a caller picks an
+    exit code from a symbol rather than by matching this function's prose. A
+    caller keying control flow on the wording of ``error`` breaks silently the
+    first time the wording improves.
+
+    The duplicate error names the existing record's timestamp: a session that
+    already voted needs to know WHEN, so it can decide whether to add a progress
+    note instead of arguing with a gate.
 
     The duplicate scan is a linear walk comparing ``session_id``. The list is
     per node and small, so an index would be a second store to keep true.
     """
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
 
-    result: dict[str, object] = {"appended": False, "error": None}
+    result: dict[str, object] = {"appended": False, "error": None, "reason": None}
+
+    session_id = record.get("session_id")
+    if not session_id:
+        # Without this the duplicate scan collapses: every session-id-less
+        # record matches every other one, so the FIRST anonymous encounter
+        # would silently block all the rest.
+        return False, "an encounter with no session_id is not readable back to a transcript", "unidentified"
 
     def mutator(entries: list[dict]) -> list[dict]:
         node = _find_node(entries, node_id)
         if node is None:
             result["error"] = f"no node resolves to '{node_id}'"
+            result["reason"] = "missing"
             return entries
-        session_id = record.get("session_id")
         for existing in node.get("encounters") or []:
             if existing.get("session_id") == session_id:
                 result["error"] = (
                     f"session {session_id} already recorded an encounter on "
                     f"{node.get('id', node_id)} at {existing.get('ts')}"
                 )
+                result["reason"] = "duplicate"
                 return entries
         node.setdefault("encounters", []).append(dict(record))
         result["appended"] = True
@@ -1201,7 +1217,12 @@ def append_encounter(path: Path, node_id: str, record: dict) -> "tuple[bool, str
 
     locked_mutate_graph(path, mutator)
     error = result["error"]
-    return bool(result["appended"]), error if isinstance(error, str) else None
+    reason = result["reason"]
+    return (
+        bool(result["appended"]),
+        error if isinstance(error, str) else None,
+        reason if isinstance(reason, str) else None,
+    )
 
 
 def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | None]:

@@ -3247,11 +3247,20 @@ def cmd_encounter(
         )
         raise typer.Exit(code=5)
 
-    cap = load_settings().style.word_cap.encounter
-    violations = style.check(evidence, surface="encounter", word_cap=cap)
-    if violations:
-        typer.echo(style.format_violations(violations), err=True)
-        raise typer.Exit(code=4)
+    # The same escapes every other rule 7 surface honors, because
+    # `docs/style-rules.md` states rule 7 inherits them and a surface that
+    # quietly opts out makes that sentence false. Note what is NOT escapable:
+    # evidence is still REQUIRED above, and identity is still proven above.
+    # The cap is a length policy; those two are the falsifiability contract.
+    if (
+        os.environ.get("FNO_STYLE_ENFORCE") != "0"
+        and not style.has_exception(evidence)
+    ):
+        cap = load_settings().style.word_cap.encounter
+        violations = style.check(evidence, surface="encounter", word_cap=cap)
+        if violations:
+            typer.echo(style.format_violations(violations), err=True)
+            raise typer.Exit(code=4)
 
     record = {
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -3260,16 +3269,16 @@ def cmd_encounter(
         "fno_id": canonical_handle(session_id),
         "evidence": evidence,
     }
-    appended, error = append_encounter(_graph_path(), task_id, record)
+    appended, error, reason = append_encounter(_graph_path(), task_id, record)
     if not appended:
         typer.echo(f"Error: {error}", err=True)
-        if error and "no node resolves" in error:
-            raise typer.Exit(code=1)
-        typer.echo(
-            "Add a `fno backlog note` instead if there is more to say.",
-            err=True,
-        )
-        raise typer.Exit(code=3)
+        if reason == "duplicate":
+            typer.echo(
+                "Add a `fno backlog note` instead if there is more to say.",
+                err=True,
+            )
+            raise typer.Exit(code=3)
+        raise typer.Exit(code=1)
 
     # Counted inside this verb rather than in a helper. The helper was its own
     # enclosing function, so its graph read had no verb boundary for the
@@ -3322,10 +3331,11 @@ def cmd_demand(
     # `encounter` is already refused under an external backend. So refuse here
     # too, naming the backend, rather than reading a store that is not the
     # source of truth and reporting an empty signal as if it were measured.
-    if active_backend_name() != "graph":
+    backend = active_backend_name()
+    if backend != "graph":
         typer.echo(
             f"fno backlog demand: encounters live in the graph; under the "
-            f"{active_backend_name()} tracker backend there are none to read.",
+            f"{backend} tracker backend there are none to read.",
             err=True,
         )
         raise typer.Exit(code=1)
