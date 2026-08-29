@@ -284,8 +284,13 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
                 lane == "interactive_attach"
                 and kind != "unsupported"
                 and "{short_id}" not in tokens
+                and "{session_id}" not in tokens
             ):
-                raise _contract_error(harness, "resume_strategy", f"{lane} drops short id")
+                # An attach form must name the id its harness's own attach
+                # command takes: claude's short jobId, or a full session id
+                # where a short one would collide (a codex UUIDv7 head-8 is a
+                # ~65.5s bucket).
+                raise _contract_error(harness, "resume_strategy", f"{lane} drops its attach id")
             if lane.endswith("resume") and kind != "unsupported" and "{session_id}" not in tokens:
                 raise _contract_error(harness, "resume_strategy", f"{lane} drops session id")
         model_switch = caps["model_switch_strategy"]

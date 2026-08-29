@@ -61,7 +61,7 @@ A	fno_process_admission_max	py=cli/src/fno/agents/mux_spawn.py;rs=crates/fno/src
 A	fno_spawn_gate=0 operator bypass	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin
 A	from-name must not be empty	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	github_approval_satisfies	py=cli/src/fno/pr/_reviews.py;rs=crates/fno-agents/src/loopcheck.rs	# protocol: both gates re-derive coverage from the same config key
-A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# data
+A	harness_capabilities.toml	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs|crates/fno/src/agents_view.rs	# data: the third copy is the fno crate's include_str! embed, gated by check-harness-capabilities-fresh.sh
 A	holder must be non-empty	py=cli/src/fno/claims/core.py;rs=crates/fno-agents/src/claims.rs	# msg-twin
 A	claim pid must be positive	py=cli/src/fno/claims/types.py;rs=crates/fno-agents/src/claims.rs	# msg-twin: Python and Rust claim parsers must reject non-positive anchors identically
 A	codex_companion_session_id	py=cli/src/fno/harness_identity.py;rs=crates/fno-agents/src/claims.rs	# protocol: the shared Python/Rust ambient scrub inventory must remove this Codex marker on every spawn path
@@ -112,6 +112,7 @@ A	the child falls back to its account's own default.	py=cli/src/fno/agents/model
 A	the child receives that route's own model instead.	py=cli/src/fno/agents/model_routing.py;rs=crates/fno-agents/src/model_env_scrub.rs	# msg-twin
 A	truth-live-inject-failed	py=cli/src/fno/agents/dispatch.py|cli/src/fno/agents/harnesses/claude.py;rs=crates/fno-agents/src/claude_ask.rs	# msg-twin
 A	{brevity_marker}{brevity_instruction}{brevity_end_marker}	py=cli/src/fno/agents/spawn_payload.py;rs=crates/fno-agents/src/spawn_payload.rs	# protocol: schemas/spawn-brevity.json plus Python and Rust parity tests pin both runtime carriers
+A	{lane} drops its attach id	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# msg-twin: both validators enforce one attach-id contract over the same table, twinned like the session-binding vocabularies
 A	{ts} {kind} {sender} -> {recipient} rid={rid} caller={ck}	py=cli/src/fno/agents/trace_cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	fleet_percent_measured_cpu	py=cli/src/fno/doctor_footprint.py;rs=crates/fno-agents/src/spawn_gate.rs	# protocol
 A	spawn-gate: footprint cause unavailable; load refusal unchanged	py=cli/src/fno/agents/spawn_gate.py;rs=crates/fno-agents/src/spawn_gate.rs	# msg-twin

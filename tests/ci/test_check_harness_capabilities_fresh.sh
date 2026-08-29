@@ -31,13 +31,15 @@ trap 'rm -rf "$TMP"' EXIT
 REPO="$TMP/repo"
 CANONICAL_DIR="$REPO/crates/fno-agents/src"
 COPY_DIR="$REPO/cli/src/fno/agents"
+COPY_DIR2="$REPO/crates/fno/src"
 
-mkdir -p "$CANONICAL_DIR" "$COPY_DIR"
+mkdir -p "$CANONICAL_DIR" "$COPY_DIR" "$COPY_DIR2"
 (cd "$REPO" && git init -q)
 
 # T01: identical files exit 0
 printf 'map_version = 10\n' > "$CANONICAL_DIR/harness_capabilities.toml"
 cp "$CANONICAL_DIR/harness_capabilities.toml" "$COPY_DIR/harness_capabilities.toml"
+cp "$CANONICAL_DIR/harness_capabilities.toml" "$COPY_DIR2/harness_capabilities.toml"
 
 out="$(cd "$REPO" && bash "${GATE}" 2>&1)" && rc=0 || rc=$?
 [[ "$rc" -eq 0 ]] || fail "T01: expected rc=0, got $rc: $out"
@@ -55,6 +57,7 @@ pass "T02 divergent files fail (rc=1), naming paths and cp command"
 
 # Restore matching state
 cp "$CANONICAL_DIR/harness_capabilities.toml" "$COPY_DIR/harness_capabilities.toml"
+cp "$CANONICAL_DIR/harness_capabilities.toml" "$COPY_DIR2/harness_capabilities.toml"
 
 # T03: missing copy exits 2
 rm -f "$COPY_DIR/harness_capabilities.toml"
@@ -79,8 +82,9 @@ pass "T04 missing canonical exits 2"
 # fail. Needs real commits, so this scenario builds its own repo.
 REPO2="$TMP/repo2"
 CANONICAL_DIR2="$REPO2/crates/fno-agents/src"
-COPY_DIR2="$REPO2/cli/src/fno/agents"
-mkdir -p "$CANONICAL_DIR2" "$COPY_DIR2"
+COPY_A_DIR2="$REPO2/cli/src/fno/agents"
+COPY_B_DIR2="$REPO2/crates/fno/src"
+mkdir -p "$CANONICAL_DIR2" "$COPY_A_DIR2" "$COPY_B_DIR2"
 (
   cd "$REPO2"
   git init -q
@@ -89,11 +93,13 @@ mkdir -p "$CANONICAL_DIR2" "$COPY_DIR2"
 )
 printf 'map_version = 10\n' > "$CANONICAL_DIR2/harness_capabilities.toml"
 # The committed copy carries a hand edit the canonical never had.
-printf 'map_version = 10\n# hand edit\n' > "$COPY_DIR2/harness_capabilities.toml"
+printf 'map_version = 10\n# hand edit\n' > "$COPY_A_DIR2/harness_capabilities.toml"
+cp "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_B_DIR2/harness_capabilities.toml"
 (cd "$REPO2" && git add -A && git commit -q -m "committed drift")
 
-# Simulate the build: the producer overwrites the WORKTREE copy.
-cp "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_DIR2/harness_capabilities.toml"
+# Simulate the build: the producer overwrites the WORKTREE copies.
+cp "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_A_DIR2/harness_capabilities.toml"
+cp "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_B_DIR2/harness_capabilities.toml"
 
 out="$(cd "$REPO2" && bash "${GATE}" 2>&1)" && rc=0 || rc=$?
 [[ "$rc" -eq 1 ]] || fail "T05: expected rc=1 on committed drift, got $rc: $out"
@@ -107,11 +113,13 @@ out="$(cd "$REPO2" && bash "${GATE}" --worktree 2>&1)" && rc=0 || rc=$?
 pass "T05b --worktree passes on the resynced worktree"
 
 # T06: --write resyncs a divergent copy and exits 0.
-printf '# hand edit\n' >> "$COPY_DIR2/harness_capabilities.toml"
+printf '# hand edit\n' >> "$COPY_A_DIR2/harness_capabilities.toml"
 out="$(cd "$REPO2" && bash "${GATE}" --write 2>&1)" && rc=0 || rc=$?
 [[ "$rc" -eq 0 ]] || fail "T06: expected rc=0 from --write, got $rc: $out"
-cmp -s "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_DIR2/harness_capabilities.toml" \
-  || fail "T06: --write left the copy divergent"
+cmp -s "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_A_DIR2/harness_capabilities.toml" \
+  || fail "T06: --write left the cli copy divergent"
+cmp -s "$CANONICAL_DIR2/harness_capabilities.toml" "$COPY_B_DIR2/harness_capabilities.toml" \
+  || fail "T06: --write left the fno-crate copy divergent"
 pass "T06 --write resyncs the copy"
 
 pass "all scenarios passed"
