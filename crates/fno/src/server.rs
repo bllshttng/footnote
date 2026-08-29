@@ -1116,150 +1116,21 @@ struct DeclaredResumeForm {
     tokens: Vec<String>,
 }
 
-/// The bundled capability contract, embedded for the same reason
-/// `agents_view::attach_form` (x-296f) embeds it: `fno` does not link
-/// `fno-agents`, and an in-process read has no second binary to go stale.
-/// The two TOML copies are byte-identical
-/// (`check-harness-capabilities-fresh.sh`), so either embeds the same words.
-const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
-
 /// (x-7b5e) The `interactive_resume` form `harness` declares, or `None` when
-/// it declares none. The exact-shape twin of `agents_view::attach_form`
-/// (x-296f): two sources, config first - `[harness.<name>.resume]` in
-/// `$PWD/.fno/config.toml`, else the global `config.toml`, else the bundled
-/// contract - so an operator can teach fno a resume form, or correct a
-/// bundled one, without a release. An unknown harness, an `unsupported` form,
-/// and a malformed one all read as "cannot resume", the safe direction. Read
-/// once per process; a config edit takes effect at the next mux server start.
-///
-/// Deliberately a twin and not a shared helper: the attach reader lands on
-/// its own branch (x-296f), and this node owns resume. The standing ruling
-/// (2026-08-29): the twin does not ship permanently - once the two branches
-/// reconcile, this copy collapses into a form-kind parameter on
-/// `agents_view::attach_form`, the ONE reader its own doc comment promises
-/// (x-244c owns that generalization). Until then this twin is the
-/// transitional state, marked so nobody mistakes it for the destination.
+/// it declares none. A thin view over [`agents_view::resume_form`] - the ONE
+/// reader of the declared capability table, shared with the attach lane by a
+/// form-kind parameter as its doc comment promised - so a seventh harness,
+/// and an operator override (`[harness.<name>.resume]` in config), needs no
+/// Rust change here. An unknown harness, an `unsupported` form, and a
+/// malformed one all read as "cannot resume", the safe direction.
 fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
     #[cfg(test)]
     if let Some(map) = DECLARED_RESUME_FORMS.with(|p| p.borrow().clone()) {
         return map.get(harness).cloned().flatten();
     }
-    static FORMS: std::sync::OnceLock<toml::map::Map<String, toml::Value>> =
-        std::sync::OnceLock::new();
-    let forms = FORMS.get_or_init(|| {
-        let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
-            caps.get("resume_strategy")?
-                .get("forms")?
-                .get("interactive_resume")
-                .cloned()
-        };
-        let mut forms: toml::map::Map<String, toml::Value> =
-            toml::from_str::<toml::Value>(CAPABILITY_TOML)
-                .ok()
-                .and_then(|v| {
-                    let harnesses = v.get("harness")?.as_table()?.clone();
-                    let mut out = toml::map::Map::new();
-                    for (name, caps) in &harnesses {
-                        if let Some(block) = bundled_block(caps) {
-                            out.insert(name.clone(), block);
-                        }
-                    }
-                    Some(out)
-                })
-                .unwrap_or_default();
-        // Fail-open at every layer, exactly as the attach reader: an
-        // unreadable file, an unparseable file, a missing `harness` table and
-        // an unparseable block each skip rather than clearing what was
-        // already there.
-        let mut overridden: std::collections::HashSet<String> = Default::default();
-        for path in config_toml_candidates() {
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
-                continue;
-            };
-            let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
-                continue;
-            };
-            for (name, caps) in harnesses {
-                // First candidate wins per name (project-local over global),
-                // matching the loader's record precedence.
-                if overridden.contains(name) {
-                    continue;
-                }
-                let Some(block) = caps.get("resume") else {
-                    continue;
-                };
-                // A block that does not parse as a resume form is skipped, so
-                // the bundled form (or the safe "cannot resume" for an unknown
-                // name) stays; an explicit kind = "unsupported" override still
-                // lands, because that is a parsable statement.
-                if parse_resume_form(block).is_some() || is_unsupported_block(block) {
-                    forms.insert(name.clone(), block.clone());
-                    overridden.insert(name.clone());
-                }
-            }
-        }
-        forms
-    });
-    parse_resume_form(forms.get(harness)?)
-}
-
-/// Whether a block is an explicit `kind = "unsupported"` statement - the one
-/// parsable way to say "this harness cannot resume", which an override may
-/// use to retire a bundled form.
-fn is_unsupported_block(block: &toml::Value) -> bool {
-    block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
-}
-
-/// The pure half of [`declared_resume_form`]: one resume block (contract row
-/// or config override) into a form. `None` for an unsupported or unfillable
-/// block, so a block that cannot address a session is not a resume form. A
-/// resume lane fills exactly `{session_id}` - the contract validator refuses
-/// any other placeholder in a resume lane at parse - so a block naming
-/// anything else reads as declaring nothing.
-fn parse_resume_form(block: &toml::Value) -> Option<DeclaredResumeForm> {
-    if is_unsupported_block(block) {
-        return None;
-    }
-    let tokens: Vec<String> = block
-        .get("tokens")?
-        .as_array()?
-        .iter()
-        .map(|v| v.as_str().map(str::to_string))
-        .collect::<Option<Vec<_>>>()?;
-    if tokens.is_empty() || !tokens.iter().any(|t| t == "{session_id}") {
-        return None;
-    }
-    Some(DeclaredResumeForm { tokens })
-}
-
-/// The config files an override layer reads, project-local FIRST then global:
-/// `$PWD/.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling
-/// `config.toml`, else `~/.fno/config.toml`. The same precedence every other
-/// config reader uses - the byte-twin of `agents_view`'s (x-296f) until the
-/// two readers merge into one.
-fn config_toml_candidates() -> Vec<std::path::PathBuf> {
-    let mut candidates = Vec::new();
-    if let Some(pwd) = std::env::var_os("PWD")
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-    {
-        candidates.push(pwd.join(".fno").join("config.toml"));
-    }
-    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
-        .filter(|v| !v.is_empty())
-        .map(|v| std::path::PathBuf::from(v).with_file_name("config.toml"))
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .map(|h| h.join(".fno").join("config.toml"))
-        });
-    if let Some(g) = global {
-        candidates.push(g);
-    }
-    candidates
+    agents_view::resume_form(harness).map(|form| DeclaredResumeForm {
+        tokens: form.tokens,
+    })
 }
 
 /// (x-7b5e) Test override pinning one harness's declared resume availability
