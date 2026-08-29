@@ -486,3 +486,36 @@ def test_an_unheld_verdict_never_disarms(tmp_path, monkeypatch, _record_disable_
     _graph(tmp_path, monkeypatch, plan_body="---\nstatus: ready\n---\n")
     assert _hold.merge_hold_reason(42, str(tmp_path)) is None
     assert _record_disable_auto == []
+
+
+def test_a_failed_disarm_is_surfaced_not_silenced(tmp_path, monkeypatch, capsys):
+    """Codex round on PR 1282: a nonzero disable-auto exit covers both the
+    benign nothing-armed case and the dangerous auth/permission failure where
+    the queue STAYS armed. gh's own output is the only discriminator, so the
+    note must carry it."""
+    from fno.pr._proc import Result
+
+    import fno.pr._merge as merge_mod
+
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body=(
+            "---\nstatus: ready\ndispatch_hold:\n"
+            "  reason: Blocking finding\n  release_when: Finding fixed\n"
+            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        ),
+    )
+    monkeypatch.setattr(
+        merge_mod,
+        "run",
+        lambda cmd, **k: Result(
+            returncode=1, stdout="", stderr="gh: authentication failed"
+        ),
+    )
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold:x-5a5c" in reason
+    err = capsys.readouterr().err
+    assert "returned nonzero" in err
+    assert "authentication failed" in err
+    assert "may still exist" in err

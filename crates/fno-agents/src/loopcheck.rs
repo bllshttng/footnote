@@ -973,6 +973,37 @@ fn extract_help_distress(text: &str) -> Option<HelpDistress> {
     None
 }
 
+/// The NEWEST assistant entry's text from a transcript, or None. The
+/// distress parse's transcript-only fallback (agy / opencode stop hooks carry
+/// no `last_assistant_message` payload). Newest-entry-only mirrors the
+/// intent read's newest-entry rule for `watching`: an older entry's distress
+/// was handled at its own stop.
+fn newest_assistant_text(transcript_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(transcript_path).ok()?;
+    for line in content.lines().rev() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let role = val
+            .pointer("/message/role")
+            .or_else(|| val.get("role"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if role != "assistant" {
+            continue;
+        }
+        let text = extract_assistant_text(&val);
+        if !text.is_empty() {
+            return Some(text);
+        }
+    }
+    None
+}
+
 /// True when the project log already carries a `blocked` row for this run
 /// with this reason. The stop hook re-fires on every turn end, so without
 /// this a session whose newest message still carries the same distress would
@@ -1039,11 +1070,14 @@ fn append_blocked_event(
     node: Option<&str>,
     distress: &HelpDistress,
 ) -> bool {
-    if blocked_distress_already_emitted(project_events, run, &distress.reason) {
-        return false;
-    }
     let cap = |s: &str| -> String { s.chars().take(BLOCKED_DATA_STR_CAP).collect() };
     let reason = cap(&distress.reason);
+    // Dedup on the CAPPED reason (codex round on PR 1282): the stored row
+    // carries the capped value, so comparing the raw one missed on every
+    // >500-char distress and re-emitted on each stop.
+    if blocked_distress_already_emitted(project_events, run, &reason) {
+        return false;
+    }
     let mut data = serde_json::json!({"reason": reason});
     if let Some(ev) = distress.evidence.as_deref() {
         data["evidence"] = serde_json::json!(cap(ev));
@@ -8664,14 +8698,21 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // no-gh mode), because it is a side channel that must fire once per stop
     // regardless of how the stop itself is decided. The node id is resolved
     // here once; the review-findings scan below reuses the same binding.
+    // NEWEST entry only on the transcript fallback (mirroring the intent
+    // read's newest-entry rule for watching): a distress in an older entry
+    // was handled at that entry's own stop, and re-reading it here would
+    // re-fire it. The fallback matters because the agy and opencode stop
+    // hooks are transcript-only invocations - `last_assistant_message` is
+    // always absent there (codex round on PR 1282) - and the emitter must
+    // not silently not exist on those harnesses.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
     });
-    if let Some(distress) = last_assistant_message
-        .as_deref()
-        .and_then(extract_help_distress)
-    {
+    let distress_text: Option<String> = last_assistant_message
+        .clone()
+        .or_else(|| newest_assistant_text(&transcript_path));
+    if let Some(distress) = distress_text.as_deref().and_then(extract_help_distress) {
         emit_help_distress_blocked(
             &project_events,
             &global_events,
@@ -16285,6 +16326,38 @@ mod tests {
         .unwrap();
         let capped: String = "x".repeat(BLOCKED_DATA_STR_CAP);
         assert_eq!(row["data"]["reason"], serde_json::json!(capped));
+        // Dedup joins on the CAPPED value (codex round on PR 1282): the
+        // stored row carries the capped reason, so comparing the raw one
+        // missed on every re-fire of the same oversized distress.
+        assert!(!append_blocked_event(&project, &global, "run-a", None, &d));
+        assert_eq!(
+            std::fs::read_to_string(&project).unwrap().lines().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn newest_assistant_text_reads_the_newest_entry_only() {
+        // The transcript-only fallback (agy / opencode stop hooks carry no
+        // last_assistant_message payload): the distress parse must still see
+        // the newest assistant text, and only the newest.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("t.jsonl");
+        let older = serde_json::json!({
+            "message": {"role": "assistant", "content": "<help reason=\"old wall\">"}
+        });
+        let newer = serde_json::json!({
+            "message": {"role": "assistant", "content": "still working"}
+        });
+        let user = serde_json::json!({"message": {"role": "user", "content": "go"}});
+        std::fs::write(&path, format!("{older}\n{user}\n{newer}\n")).unwrap();
+        assert_eq!(
+            newest_assistant_text(&path).as_deref(),
+            Some("still working"),
+            "the NEWEST assistant entry wins, not the newest distress-bearing one"
+        );
+        let absent = tmp.path().join("absent.jsonl");
+        assert_eq!(newest_assistant_text(&absent), None);
     }
 
     #[test]

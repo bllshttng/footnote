@@ -298,6 +298,18 @@ def _disarm_queued_auto_merge(pr_number: int, cwd: str, why: str) -> None:
             f"{pr_number} --auto` once the hold clears",
             file=sys.stderr,
         )
-    # A non-zero exit includes "auto-merge not enabled" - nothing armed, so
-    # silence is correct there; any other failure already cost the operator
-    # nothing the refusal did not.
+    else:
+        # A non-zero exit includes the benign "auto-merge not enabled"
+        # (nothing armed) AND the dangerous auth/network/permission failure
+        # (something armed, disarm NOT landed) - gh's own output is the only
+        # thing that distinguishes them, so surface it (codex round on PR
+        # 1282). One note, never fatal: the refusal above stands, but the
+        # operator must be able to see the queue may still be armed.
+        tail = (result.stderr or result.stdout or "").strip().splitlines()
+        detail = tail[-1] if tail else f"exit {result.returncode}"
+        print(
+            f"hold: auto-merge disarm for PR {pr_number} returned nonzero "
+            f"({detail}); an armed queue entry may still exist - re-run "
+            "`gh pr merge --disable-auto` by hand if auth or network failed",
+            file=sys.stderr,
+        )

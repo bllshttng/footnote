@@ -819,6 +819,17 @@ def test_dispatch_hold_walk_counts_every_dequeue_against_the_cap(tmp_path, monke
     assert calls["n"] <= 64, (
         f"the walk evaluated {calls['n']} nodes - duplicates are escaping the cap"
     )
+    # Enqueue-time dedup (codex round on PR 1282): with every queue slot a
+    # unique node, no id may be evaluated twice even under full fan-in.
+    evaluated = []
+
+    def recording(entry):
+        evaluated.append(entry["id"])
+        return real(entry)
+
+    monkeypatch.setattr(ladder, "dispatch_hold", recording)
+    assert ladder.dispatch_hold_verdict(rows[100], by_id) is None
+    assert len(evaluated) == len(set(evaluated)), "duplicate evaluations burn the cap"
     # Positive control: the same graph with the cap genuinely binding must
     # still terminate (not hang), and a held root INSIDE the bound is found.
     held = _held_plan(tmp_path)
