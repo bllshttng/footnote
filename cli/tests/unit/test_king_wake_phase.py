@@ -533,3 +533,79 @@ def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
 
     assert rec.dispatches == [], "a quiet board is a NoWork king, not a wake"
     assert rec.events == []
+
+
+# ── the drain loop on the real bus machinery ──────────────────────────────
+#
+# The seams above prove the phase logic; this proves the loop on the real
+# bus, cursor, and ledger: a message lands for an absent king, the phase
+# wakes, the respawned session's drain verb advances the cursor, and the
+# next phase pass finds no mail and wakes nothing. No fake readers.
+
+
+def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeypatch):
+    from fno.bus.cursor import advance_cursor, read_cursor, scan_unread
+    from fno.bus.log import Envelope, append
+
+    monkeypatch.setenv("FNO_BUS_DIR", str(tmp_path / "bus"))
+    rec = _Recorder()
+    root = tmp_path / "proj"
+    root.mkdir()
+    manifest = root / ".fno" / "kings" / "epic-x.md"
+    write_manifest(
+        manifest,
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
+    )
+    crowns = [{"holder": "king-x", "scope": "epic-x", "status": "live"}]
+
+    # A worker mails the absent king: addressed to its reply handle.
+    waking = Envelope.new(
+        from_="worker-a",
+        to="aa11bb22",
+        kind="note",
+        body="merge landed for x-1, board refilled",
+        to_kind="name",
+    )
+    append(waking)
+
+    # Positive control inside the same run: the reader sees the row.
+    assert len(scan_unread("aa11bb22")) == 1, "the reader must see the waking row"
+
+    summary = run_king_wake(
+        _settings(),
+        emit=rec.emit,
+        now=datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc),
+        court_fn=_court(crowns),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=scan_unread,
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == [("epic-x", "mail")], f"woke: {rec.dispatches}"
+
+    # The respawned session drains: the ack verb advances the cursor.
+    assert advance_cursor("aa11bb22", waking.id) is True
+    assert read_cursor("aa11bb22") == waking.id, "the cursor names the waking id"
+
+    # Next tick: no undrained mail, no board, nothing actionable -> no wake.
+    rec2 = _Recorder()
+    run_king_wake(
+        _settings(),
+        emit=rec2.emit,
+        now=datetime(2026, 8, 29, 12, 30, 0, tzinfo=timezone.utc),
+        court_fn=_court(crowns),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=scan_unread,
+        entries_fn=lambda: [],
+        dispatch_fn=rec2.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec2.dispatches == [], "a drained inbox must not wake again"
+    assert rec2.events == []
