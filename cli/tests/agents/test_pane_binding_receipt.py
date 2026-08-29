@@ -1275,7 +1275,7 @@ def test_the_probe_records_the_fd_oracle_miss(monkeypatch) -> None:
     overwrite that with a daemon condition.
     """
     sink: list = []
-    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 999.0)
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 0.0)
     monkeypatch.setattr(mux_spawn, "_backfill_codex_session_id", lambda *a, **k: None)
     monkeypatch.setattr(mux_spawn, "_codex_session_ids_loaded", lambda *a, **k: {"a"})
     probe = mux_spawn._make_codex_bind_probe(
@@ -1288,10 +1288,17 @@ def test_the_probe_records_the_fd_oracle_miss(monkeypatch) -> None:
         runner=_runner(),
         condition=sink,
     )
-    # Tick one is never rate-limited (the interval clock starts at zero), so
-    # the daemon half runs and owns the condition.
+    # Tick one runs the daemon half, which owns the condition.
     assert probe() is None
     assert sink == ["daemon: no new codex session for this cwd"]
+    # Now widen the interval. The rate limit is `monotonic() - last_probe_s[0]`,
+    # and tick one just set last_probe_s to NOW, so this is deterministic on any
+    # host. Do NOT instead widen the interval before tick one: last_probe_s
+    # starts at 0.0 and `time.monotonic()` is time since BOOT, so on a
+    # freshly-booted CI runner tick one is rate-limited too and the assertion
+    # above flips. That is a real measured failure, not a hypothetical: this
+    # test read green on a long-uptime laptop and red on a GitHub runner.
+    monkeypatch.setattr(mux_spawn, "_CODEX_DAEMON_PROBE_INTERVAL_S", 3600.0)
     # Tick two is inside the interval, so the fd note is the newest thing
     # anything actually looked at.
     assert probe() is None
