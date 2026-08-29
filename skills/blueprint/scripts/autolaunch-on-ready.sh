@@ -289,9 +289,16 @@ if [[ "$claim_rc" -ne 0 || -z "$claim_json" ]]; then
   echo "parked $node reason=\"claim read failed (rc=$claim_rc) - not launched\""
   exit 0
 fi
-claim_state="$(printf '%s' "$claim_json" | jq -r '.state // ""' 2>/dev/null || true)"
+# An unparsable read is not evidence of freedom either: a banner line ahead of
+# the JSON or a schema change yields no .state, and dispatching over a
+# possibly-held node on that is the exact duplicate this gate exists to stop.
+claim_state="$(printf '%s' "$claim_json" | jq -r '.state // ""' 2>/dev/null)"; state_rc=$?
+if [[ "$state_rc" -ne 0 || -z "$claim_state" ]]; then
+  echo "parked $node reason=\"claim read unparsable (jq rc=$state_rc) - not launched\""
+  exit 0
+fi
 claim_holder="$(printf '%s' "$claim_json" | jq -r '.holder // ""' 2>/dev/null || true)"
-if [[ -n "$claim_state" && "$claim_state" != "free" ]]; then
+if [[ "$claim_state" != "free" ]]; then
   echo "already-running $node reason=\"node:$node claim held (state=$claim_state holder=${claim_holder:-unknown}); the structural handoff at the blueprint-to-do boundary is skills/target/scripts/handoff.sh, not a second worker\""
   exit 0
 fi
@@ -344,6 +351,10 @@ fi
 # shellcheck disable=SC1091
 [[ -f "$REPO_ROOT/scripts/lib/with-timeout.sh" ]] && source "$REPO_ROOT/scripts/lib/with-timeout.sh"
 _wait="${FNO_AUTOLAUNCH_TIMEOUT:-180}"
+case "$_wait" in '' | *[!0-9]*)
+  echo "parked $node reason=\"FNO_AUTOLAUNCH_TIMEOUT must be a bare integer seconds (got '$_wait') - not launched\""
+  exit 0 ;;
+esac
 if declare -F with_timeout >/dev/null 2>&1; then
   out="$(with_timeout "$_wait" bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"; dispatch_rc=$?
 else

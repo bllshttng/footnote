@@ -101,6 +101,7 @@ case "$sub $verb" in
   "claim status")
     key="${3:-}"; id="${key#node:}"
     [[ -f "$S/claim_err" ]] && exit 1          # simulate a probe crash (nonzero, no stdout)
+    [[ -f "$S/claim_garbage" ]] && { echo "note: claim service moved; see docs"; exit 0; }  # banner text, rc 0
     printf '{"state":"%s","holder":"target-session:holder-%s"}\n' \
       "$(cat "$S/claim_$id" 2>/dev/null || echo free)" "$id" ;;
   "claim acquire")
@@ -254,7 +255,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -857,8 +858,8 @@ out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
 echo "$out" | grep -q -- "--cwd <fno agents workspace worktree ensure>" \
   && pass "AC1-HP: dry-run hint carries the ensure placeholder" \
   || fail "AC1-HP: dry-run hint wrong: $out"
-echo "$out" | grep -q "cwd=<fno agents workspace worktree ensure>" \
-  && pass "AC1-HP: dry-run cwd= is the ensure placeholder" \
+echo "$out" | grep -q "cwd=<fno-worktree-ensure>" \
+  && pass "AC1-HP: dry-run cwd= is the space-free ensure placeholder" \
   || fail "AC1-HP: dry-run cwd= token wrong: $out"
 if echo "$out" | grep -q "/resolved/root\|/recorded/other"; then
   fail "AC1-HP: dry-run receipt still claims a recorded cwd as the landing dir: $out"
@@ -1019,12 +1020,13 @@ last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_r
   && pass "isolation: the node's recorded root fed worktree ensure" \
   || fail "isolation: ensure got repo '$last_repo', want $NODE_REPO"
 
-# The dry-run receipt never claims the recorded cwd as the landing directory.
+# The dry-run receipt never claims the recorded cwd as the landing directory,
+# and the placeholder stays space-free so a field-splitting parser keeps working.
 reset_mock; set_status ab-bbbb1111 ready
 set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
 out="$(bash "$DISPATCH" --dry-run ab-bbbb1111 2>&1)"
-echo "$out" | grep -q "cwd=<fno agents workspace worktree ensure>" \
-  && pass "dry-run: receipt carries the ensure placeholder, not a recorded cwd" \
+echo "$out" | grep -q "cwd=<fno-worktree-ensure>" \
+  && pass "dry-run: receipt carries the space-free ensure placeholder" \
   || fail "dry-run: cwd= wrong: $out"
 if echo "$out" | grep -qF "$NODE_REPO"; then
   fail "dry-run: receipt still names the recorded repo as the landing dir: $out"
@@ -1086,6 +1088,17 @@ echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read failed (rc=1)' \
 [[ "$(ask_count)" -eq 0 ]] \
   && pass "holder: failed claim read launches nothing" \
   || fail "holder: failed read still spawned: $(ask_count)"
+
+# A read that exits 0 but yields no parsable .state is not evidence of freedom.
+reset_mock; set_status ab-cccc1111 ready
+: > "$MOCKSTATE/claim_garbage"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
+echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read unparsable' \
+  && pass "holder: unparsable claim read parks, never dispatches" \
+  || fail "holder: unparsable read failed open: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "holder: unparsable claim read launches nothing" \
+  || fail "holder: unparsable read still spawned: $(ask_count)"
 
 echo ""
 echo "--- autolaunch frontmatter reader is robust ---"
@@ -1150,6 +1163,18 @@ out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=2 GATE=true bash "$AUTOLAUNCH" 
 echo "$out" | grep -q "^auto-launched ab-aaaa1111 " \
   && pass "bound: immediate launch still auto-launches" \
   || fail "bound: immediate launch bounded out: $out"
+
+# A non-integer ceiling parks with its own named reason, not the wildcard
+# "unexpected dispatch output" - and never reaches the (sleeping) dispatch.
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
+reset_mock; set_status ab-aaaa1111 ready
+out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=3m GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
+echo "$out" | grep -q 'parked ab-aaaa1111 reason="FNO_AUTOLAUNCH_TIMEOUT must be a bare integer' \
+  && pass "bound: non-integer ceiling parks with the reason named" \
+  || fail "bound: non-integer ceiling misreported: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "bound: non-integer ceiling never reaches the dispatch" \
+  || fail "bound: non-integer ceiling still dispatched: $(ask_count)"
 
 echo ""
 echo "================================"

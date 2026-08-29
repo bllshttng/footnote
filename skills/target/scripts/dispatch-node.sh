@@ -785,9 +785,10 @@ for id in "${NODES[@]}"; do
     # recorded as cwd: the recorded cwd is almost always the canonical checkout
     # root, and the receipt must not claim it as the landing directory. The real
     # worktree path is only known once ensure runs, so preview the ensure hint on
-    # both arms (the placeholder stays space-free and machine-parseable).
+    # both arms. cwd= keeps a space-free placeholder so the receipt stays
+    # machine-parseable; the quoted hint carries the readable form.
     cwd_hint="--cwd <fno agents workspace worktree ensure> "
-    dry_cwd="<fno agents workspace worktree ensure>"
+    dry_cwd="<fno-worktree-ensure>"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
