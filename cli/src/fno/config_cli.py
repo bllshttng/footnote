@@ -619,6 +619,12 @@ def _state_root_selector(row: "StateFile") -> str:
 
     for token in row.selector.split(","):
         key = token.strip().removeprefix("else ").strip()
+        # Drop a trailing parenthetical note. Without this the registry row -
+        # the only one that carries one - hands resolve_source a key ending in
+        # "(Rust runtime home: FNO_AGENTS_HOME)", gets None, and silently
+        # never names its deciding file. A receipt whose whole job is naming
+        # the decider must not have one row that structurally cannot.
+        key = key.split("(", 1)[0].strip()
         if not key.startswith("config."):
             continue
         try:

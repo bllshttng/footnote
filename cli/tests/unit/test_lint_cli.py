@@ -1184,6 +1184,56 @@ def test_state_roots_rule_a_fires_on_a_multi_line_join(tmp_path: Path) -> None:
     ]
 
 
+def test_state_roots_rule_a_fires_on_the_combined_literal(tmp_path: Path) -> None:
+    """`".fno/graph.json"` as ONE literal, in both languages.
+
+    The control the first cut of this rule did not have. Every other fixture
+    here writes the SEPARATED form (`/ ".fno" / "graph.json"`), so a filename
+    pattern that rejected the slash the `.fno/` token supplies passed all of
+    them while matching none of the combined form - a green control aimed at
+    the wrong symbol. It hid a live production site in `spawn_gate.rs`.
+    """
+    py = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
+    py.parent.mkdir(parents=True)
+    py.write_text('p = root / ".fno/graph.json"\n', encoding="utf-8")
+    rs = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    rs.parent.mkdir(parents=True)
+    rs.write_text('let p = root.join(".fno/claims");\n', encoding="utf-8")
+
+    from fno.lint_cli import _state_root_path_violations
+
+    hit = {(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)}
+
+    assert ("cli/src/fno/new_writer.py", "graph.json") in hit
+    assert ("crates/fno-agents/src/new_writer.rs", "claims") in hit
+
+
+def test_state_roots_rule_a_only_skips_a_cfg_test_MOD(tmp_path: Path) -> None:
+    """`#[cfg(test)]` on a `thread_local!`, an `fn` or an `if` is NOT a module.
+
+    108 of this tree's 207 occurrences are one of those, and three sit inside a
+    comment or a string literal. Scanning forward from any of them to the next
+    brace dropped 94,161 Rust lines from the gate's reach.
+    """
+    source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "#[cfg(test)]\n"
+        "thread_local! {\n"
+        "    static X: u8 = 0;\n"
+        "}\n"
+        '// a comment mentioning #[cfg(test)] must not open a region\n'
+        'let p = root.join(".fno").join("graph.json");\n',
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert [(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)] == [
+        ("crates/fno-agents/src/new_writer.rs", "graph.json")
+    ]
+
+
 def test_state_roots_rule_a_fires_on_a_rust_join(tmp_path: Path) -> None:
     source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
     source.parent.mkdir(parents=True)
@@ -1321,12 +1371,23 @@ def test_state_roots_rule_b_fires_on_the_live_load_settings_specimen() -> None:
 
 
 def test_state_roots_baseline_covers_the_whole_live_census() -> None:
-    """The shipped tree is clean: every live finding is baselined, none is stale."""
+    """The shipped tree is clean: every live finding is baselined, none is stale.
+
+    Both set differences are empty when the scan finds NOTHING, so the two
+    assertions alone pass vacuously - the absence-only shape this repo's own
+    pitfall corpus forbids. The positive markers come first: the scan must
+    reach both languages and both rules before its emptiness means anything.
+    """
     from fno.lint_cli import _read_state_roots_baseline, _state_roots_findings
 
     root = _real_repo_root()
     findings = set(_state_roots_findings(root))
     baseline = _read_state_roots_baseline(root)
+
+    assert len(baseline) > 50, "the ratchet lost its census"
+    assert any(rule == "A" and rel.endswith(".rs") for rule, rel, _ in findings)
+    assert any(rule == "A" and rel.endswith(".py") for rule, rel, _ in findings)
+    assert ("B", "cli/src/fno/config/__init__.py", "load_settings") in findings
 
     assert findings - baseline == set()
     assert baseline - findings == set()

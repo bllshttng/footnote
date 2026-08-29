@@ -276,26 +276,41 @@ def _state_root_scan_files(repo_root: Path) -> list[Path]:
 
 
 def _rust_cfg_test_lines(lines: list[str]) -> set[int]:
-    """1-indexed line numbers inside an inline ``#[cfg(test)]`` module.
+    """1-indexed line numbers inside an inline ``#[cfg(test)] mod`` block.
 
     Rust keeps its unit tests in the file they test, so scanning `crates/**`
-    without this exclusion reads every test fixture as a production offence
-    and inflates the baseline past the measured census - which the plan's own
-    kill criterion calls a detector matching prose rather than construction.
+    without this exclusion reads every test fixture as a production offence.
+
+    ONLY a `mod` boundary counts, and the attribute must open its own line.
+    A first cut of this scanned forward from any `#[cfg(test)]` to the next
+    brace anywhere in the file, which dropped 94,161 of the ~140k Rust lines
+    in scope: 108 of the 207 occurrences in this tree annotate a
+    `thread_local!`, a single `fn`, an `if` branch or a bare `{`, and three
+    of them sit inside a comment or a string literal in `lib.rs`. It hid a
+    real production site (`spawn_gate.rs`, a hand-built `.fno/claims`) and
+    left the Rust half of rule A reading as covered while it was blind.
+
+    Braces inside strings and comments still miscount, which is why the
+    boundary is narrow: a `mod tests {` line is the one shape where that
+    risk is bounded by convention rather than by a Rust parser.
     """
     inside: set[int] = set()
     i = 0
     while i < len(lines):
-        if "#[cfg(test)]" not in lines[i]:
+        stripped = lines[i].strip()
+        if stripped != "#[cfg(test)]":
             i += 1
             continue
-        j = i
+        head = lines[i + 1].strip() if i + 1 < len(lines) else ""
+        if not head.startswith(("mod ", "pub mod ", "pub(crate) mod ")):
+            i += 1
+            continue
+        j = i + 1
         while j < len(lines) and "{" not in lines[j]:
             j += 1
         if j >= len(lines):
             break
         depth = 0
-        start = j
         while j < len(lines):
             depth += lines[j].count("{") - lines[j].count("}")
             if depth <= 0:
@@ -303,7 +318,7 @@ def _rust_cfg_test_lines(lines: list[str]) -> set[int]:
             j += 1
         for k in range(i, min(j, len(lines) - 1) + 1):
             inside.add(k + 1)
-        i = max(j, start) + 1
+        i = j + 1
     return inside
 
 
@@ -321,8 +336,15 @@ def _state_root_path_violations(repo_root: Path) -> list[tuple[str, str, str]]:
     from fno.paths import STATE_FILES
 
     rows = {row.filename: row for row in STATE_FILES}
+    # The lookbehind must NOT exclude "/". An earlier cut did, and it made the
+    # rule blind to the combined `".fno/<file>"` literal - the very shape
+    # `_PY_FNO_JOIN_RE` and `_RS_FNO_JOIN_RE` match - because the `.fno/` token
+    # supplies the slash that then blocked the filename. Every fixture control
+    # used the separated form, so all of them passed green over a dead half.
+    # It hid a live production site: crates/fno-agents/src/spawn_gate.rs builds
+    # `root.join(".fno/claims")`.
     name_res = {
-        name: re.compile(r"(?<![\w.\-/])" + re.escape(name) + r"(?![\w.\-])")
+        name: re.compile(r"(?<![\w.\-])" + re.escape(name) + r"(?![\w.\-])")
         for name in rows
     }
     violations: list[tuple[str, str, str]] = []
@@ -493,8 +515,11 @@ def _read_state_roots_baseline(repo_root: Path) -> set[tuple[str, str, str]]:
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
-        fields = [f.strip() for f in stripped.split("\t") if f.strip()]
-        if len(fields) < 3:
+        # Do NOT drop empty columns before indexing: an empty owner field
+        # would shift `reason` into `key` and silently baseline a tuple
+        # nothing in the tree matches, which then reads as a stale entry.
+        fields = [f.strip() for f in stripped.split("\t")]
+        if len(fields) < 3 or not all(fields[:3]):
             continue
         entries.add((fields[0], fields[1], fields[2]))
     return entries

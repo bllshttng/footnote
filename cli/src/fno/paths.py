@@ -537,14 +537,6 @@ STATE_FILES: tuple[StateFile, ...] = (
 )
 
 
-def state_file_for(filename: str) -> Optional[StateFile]:
-    """Return the :class:`StateFile` row named ``filename``, or None."""
-    for row in STATE_FILES:
-        if row.filename == filename:
-            return row
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Typed path accessors
 # ---------------------------------------------------------------------------
