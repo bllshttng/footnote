@@ -484,6 +484,10 @@ medium_ratio = 0.25
 # Workspace -> project topology map (config.work.workspaces.<slug>.projects[]). A project entry may carry a `worktree` key (never|harness-native|external) overriding config.worktree.policy.
 workspaces = {}
 
+[join]
+# Enforce a per-joiner write partition on `fno backlog join`: one switch over BOTH layers (the sandbox denyWrite of peer bands' surfaces plus the state-dir allowWrite, composed into the worker's --settings, and the Edit/Write guard). An overlapping or unevaluated band is never narrowed; the node holder is never sandboxed.
+sandbox = false
+
 [worktree]
 # Global worktree-isolation policy (never|harness-native|external); default harness-native. `never` launches code payloads in place (e.g. an Obsidian vault checkout). A per-project work.workspaces.<slug>.projects[].worktree key overrides it.
 # policy = <unset>   # optional; no default
