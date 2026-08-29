@@ -1017,6 +1017,7 @@ const BLOCKED_DATA_STR_CAP: usize = 500;
 fn emit_help_distress_blocked(
     project_events: &Path,
     global_events: &Path,
+    cwd: &Path,
     run: &str,
     node: Option<&str>,
     distress: &HelpDistress,
@@ -1024,7 +1025,7 @@ fn emit_help_distress_blocked(
     if !append_blocked_event(project_events, global_events, run, node, distress) {
         return;
     }
-    push_blocked_to_parent(run, node, &distress.reason);
+    push_blocked_to_parent(cwd, run, node, &distress.reason);
 }
 
 /// Append the deduped `blocked` envelope to both logs. Returns whether a row
@@ -1080,12 +1081,14 @@ fn append_blocked_event(
     true
 }
 
-/// Push leg, mirroring finalize's `push_run_summary_to_parent` line for line
-/// (a missing `fno` / no spawn lineage is a silent skip; the events.jsonl row
-/// already landed independently).
-fn push_blocked_to_parent(run: &str, node: Option<&str>, reason: &str) {
-    let mut cmd = std::process::Command::new("fno");
-    cmd.args([
+/// Push leg, mirroring finalize's `push_run_summary_to_parent` (a missing
+/// `fno` / no spawn lineage is a silent skip; the events.jsonl row already
+/// landed independently). Routed through `bounded_read` - the one bounded
+/// transport every `fno` child reachable from the stop decision uses - so a
+/// wedged `fno` cannot hang the fire (self-review finding: an unbounded
+/// `.output()` here had exactly that shape).
+fn push_blocked_to_parent(cwd: &Path, run: &str, node: Option<&str>, reason: &str) {
+    let mut args: Vec<&str> = vec![
         "doctor",
         "event",
         "push-parent",
@@ -1095,12 +1098,24 @@ fn push_blocked_to_parent(run: &str, node: Option<&str>, reason: &str) {
         run,
         "--reason",
         reason,
-    ]);
+    ];
     if let Some(n) = node {
-        cmd.args(["--node", n]);
+        args.push("--node");
+        args.push(n);
     }
-    if let Err(e) = cmd.output() {
-        eprintln!("loop-check: blocked parent push skipped (non-fatal): {e}");
+    match bounded_read(
+        std::ffi::OsStr::new("fno"),
+        &args,
+        cwd,
+        "blocked_parent_push",
+        std::time::Duration::from_secs(15),
+    ) {
+        // The push's own exit status is not load-bearing (the resolver exits
+        // 0 on a no-lineage skip), and a timeout means the push MAY have
+        // fired - either way the durable row already landed, which is the
+        // record every reader joins on.
+        Ok(_) => {}
+        Err(error) => log_bounded_read_error("blocked parent push skipped (non-fatal)", &error),
     }
 }
 
@@ -8660,6 +8675,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         emit_help_distress_blocked(
             &project_events,
             &global_events,
+            &cwd,
             &session_id,
             node_id.as_deref(),
             &distress,

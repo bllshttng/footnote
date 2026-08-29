@@ -695,7 +695,7 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
         return (0, "")
 
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", _setup_hook)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
     result = runner.invoke(app, ["do", "target", "start", "x-nev"])
@@ -741,7 +741,7 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
     )
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
     result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
@@ -790,7 +790,7 @@ def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
         {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7", "band": "low"},
     ])
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "low"}
     )
@@ -813,7 +813,7 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
 
     monkeypatch.chdir(fake_root)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda _p: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
@@ -947,7 +947,7 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
     )
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda n: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-nev"])
@@ -1150,7 +1150,7 @@ def test_target_start_refuses_node_when_graph_unreadable(tmp_path, monkeypatch):
         return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
     monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
 
     result = runner.invoke(app, ["do", "target", "start", "x-5a5c"])
     assert result.exit_code == 2, result.output
@@ -1419,7 +1419,7 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_git_out", lambda *a, **k: str(tmp_path))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_codex_desktop_handoff_policy", lambda r: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-261c"])

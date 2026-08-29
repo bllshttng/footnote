@@ -2080,7 +2080,7 @@ def _wt_name(node: str) -> str:
     return s[:60].strip("-") or "target"
 
 
-def _resolve_node_id(node: str) -> str:
+def _resolve_node_id(node: str, entries: Optional[list] = None) -> str:
     """Resolve a slug / bare-hex input to its canonical backlog node id.
 
     ``fno do target init`` only derives the node id (and thus the node claim) from
@@ -2090,14 +2090,19 @@ def _resolve_node_id(node: str) -> str:
     claims its node. A non-match (free-text feature input) returns the arg
     unchanged - init accepts text - so this only ever upgrades a resolvable id,
     never blocks one. Best-effort: any load/resolve error falls through to raw.
+    ``entries`` lets a caller hand in the graph rows it already read, so a
+    verb that resolves AND gates off the graph pays one read, not two
+    (round-12 finding 10); ``None`` reads it here as before.
     """
     try:
-        from fno.graph.fuzzy import resolve_node
-        from fno.graph.load import load_graph
-        from fno.paths import graph_json
+        if entries is None:
+            from fno.graph.load import load_graph
+            from fno.paths import graph_json
 
-        data = load_graph(graph_json())
-        entries = data if isinstance(data, list) else []
+            data = load_graph(graph_json())
+            entries = data if isinstance(data, list) else []
+        from fno.graph.fuzzy import resolve_node
+
         match = resolve_node(node, entries)
         node_id = getattr(match, "id", None)
         if getattr(match, "kind", "none") == "exact" and node_id:
@@ -3247,17 +3252,17 @@ def start(
         raise typer.Exit(code=1)
     repo_root = Path(repo_root_s)
     fno = _resolve_fno_cmd()
-    # Resolve a slug/hex input to its canonical id so init claims the node (a raw
-    # slug would write graph_node_id: null and skip the claim) - both the
-    # worktree name and `init --input` then use the canonical id.
-    node = _resolve_node_id(node)
-    # One graph read shared by the find and the hold gate (round-12 finding
-    # 10); an unreadable graph on a node-shaped argument refuses - the old
-    # best-effort _find_node returned None and the hold gate silently
-    # skipped. Feature text (no node shape) keeps its proceed path.
+    # One graph read feeds the slug resolution, the find, and the hold gate
+    # (round-12 finding 10). An unreadable graph on a node-shaped argument
+    # refuses - the old best-effort _find_node returned None and the hold gate
+    # silently skipped. Feature text (no node shape) keeps its proceed path.
     _start_entries = _graph_entries_or_none()
     if _start_entries is None and _input_may_name_a_node(node):
         _refuse_unreadable_graph_hold("start")
+    # Resolve a slug/hex input to its canonical id so init claims the node (a raw
+    # slug would write graph_node_id: null and skip the claim) - both the
+    # worktree name and `init --input` then use the canonical id.
+    node = _resolve_node_id(node, entries=_start_entries or [])
     _start_node = next(
         (
             e
