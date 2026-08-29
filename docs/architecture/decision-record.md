@@ -67,7 +67,7 @@ The split closes that without deleting the honest case. An agent relaying a real
 
 A decision id is a lookup key. `fno backlog decisions d-1a2b3c4d` returns that decision whatever subject it was filed under, and `--json` says `matched_by: "decision_id"` so a machine reader is never confused about which key answered.
 
-Repository design law declares a canonical subject and explicit aliases in `docs/architecture/decisions.yaml`. The reader canonicalizes both the query and recorded local subjects through that table. An alias is exact and one-to-one: `handoff` reaches `target-self-handoff` only because the catalog declares it, never because a fuzzy matcher guessed.
+A subject is matched exactly, casefolded, and never guessed. There is no alias table. The checked-in repository catalog that declared one was deleted on 2026-08-29. So `handoff` no longer reaches `target-self-handoff`, and the honest answer is `none`. Do not add a fuzzy matcher in its place. A miss is a statement about the query. A wrong guess is a statement about the world, and that is the worse failure.
 
 Every read of a subject also scans for near misses and names them with their counts. Without that scan, a ruling filed under the free-text subject `force-push policy` stays invisible to `--subject force-push`.
 
@@ -79,14 +79,13 @@ The fixed cutover is `2026-08-21T00:00:00Z`, chosen to safely postdate every row
 
 There is no new recording gate, and none is needed. `crates/fno-agents/src/loopcheck.rs` already holds a session that closed its own question with an answer and emitted no matching decision. Its refusal already names the verb. That gate is starved, not missing: only two `operator_question` events exist across 194,109 events.
 
-## Three local stores plus shipped design law
+## Three local stores
 
 | Store | What it is for | Path |
 |---|---|---|
 | Project journal | Durability and the project audit trail | `<canonical-repo>/.fno/events.jsonl` |
 | Decision index | Local project-policy recall | `~/.fno/decisions.jsonl` via `paths.decisions_jsonl()` |
 | Graph projection | The node view, for anyone reading the node | the subject node's `decisions` array |
-| Repository catalog | Reviewed design law that every clone inherits | `docs/architecture/decisions.yaml` |
 
 One `fno backlog decide` call writes the journal, then the index, then the projection. A failed index write is not a success: the command exits 1, because a write the operator cannot read back is worse than a refusal.
 
