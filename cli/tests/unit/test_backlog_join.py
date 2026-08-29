@@ -158,6 +158,14 @@ def _wire(monkeypatch, tmp_path, plan_text, *, claim_state="live", worktree=True
     monkeypatch.setattr(
         advance, "_transcript_recently_active", lambda sid: False
     )
+    # Config is a seam like the registry: join reads join.sandbox through
+    # load_settings, whose real body shells out (git worktree list) and would
+    # land in the subprocess recorder. Default model = feature off.
+    from fno.config import SettingsModel
+
+    monkeypatch.setattr(
+        "fno.config.load_settings", lambda *a, **k: SettingsModel()
+    )
 
     class _Proc:
         returncode = 0
@@ -175,7 +183,7 @@ def test_join_spawns_width_minus_one_workers_with_lead_hub(tmp_path, monkeypatch
     """AC1-HP: three disjoint parallel tasks -> two joiners, first is lead."""
     calls = _wire(monkeypatch, tmp_path, PARALLEL_PLAN)
     receipt = join_node("x-8d1d", 3)
-    shapeless = {"band": "", "harness": None, "model": None}
+    shapeless = {"band": "", "harness": None, "model": None, "sandbox": "off"}
     assert receipt == {
         "node": "x-8d1d",
         "worktree": str(tmp_path / "wt"),
@@ -442,10 +450,13 @@ def test_join_spawns_one_worker_per_distinct_band(tmp_path, monkeypatch):
     assert receipt["lead"] == "j-x-8d1d-1"
     assert picked == ["high", "medium", "low"]
     assert receipt["lanes"] == {
-        "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x"},
+        "j-x-8d1d-1": {"band": "high", "harness": "claude", "model": "glm-x",
+                       "sandbox": "off"},
         "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+                       "sandbox": "off",
                        "grid": "declined"},
-        "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm"},
+        "j-x-8d1d-3": {"band": "low", "harness": "claude", "model": "glm-sm",
+                       "sandbox": "off"},
     }
     for call, name in zip(calls, receipt["spawned"]):
         cmd = call["cmd"]
@@ -488,10 +499,13 @@ def test_grid_declined_spawns_default_lane_and_records_it(tmp_path, monkeypatch)
         assert "--model" not in call["cmd"]
     assert receipt["lanes"] == {
         "j-x-8d1d-1": {"band": "high", "harness": None, "model": None,
+                       "sandbox": "off",
                        "grid": "declined"},
         "j-x-8d1d-2": {"band": "medium", "harness": None, "model": None,
+                       "sandbox": "off",
                        "grid": "declined"},
         "j-x-8d1d-3": {"band": "low", "harness": None, "model": None,
+                       "sandbox": "off",
                        "grid": "declined"},
     }
 
@@ -606,3 +620,131 @@ def test_task_holder_missing_registry_keeps_session_id(tmp_path, monkeypatch):
     )
     holder, why = resolve_task_holder({})
     assert (holder, why) == (sid, "")
+
+
+# ---------------------------------------------------------------------------
+# The sandbox write-policy layer (join.sandbox, default off)
+# ---------------------------------------------------------------------------
+
+# Two bands whose surfaces are disjoint: both can be narrowed. Wave 1 carries
+# three declared-empty blockers so width is 3 and both bands get a joiner.
+SANDBOX_PLAN = """---
+title: sandboxed
+status: ready
+---
+
+## Execution Strategy
+
+```yaml
+execution_mode: mixed
+waves:
+  - wave: 1
+    mode: parallel
+    difficulty: high
+    tasks: ['1.1', '1.2', '1.3']
+  - wave: 2
+    mode: parallel
+    difficulty: medium
+    tasks: ['2.1']
+tasks:
+  - id: '1.1'
+    title: a
+    surface: ['src/high_a.py']
+    blocked_by: []
+  - id: '1.2'
+    title: b
+    surface: ['src/high_b.py']
+    blocked_by: []
+  - id: '1.3'
+    title: c
+    surface: ['src/high_c.py']
+    blocked_by: []
+  - id: '2.1'
+    title: d
+    surface: ['cli/src/fno/med_a.py']
+    blocked_by: []
+```
+"""
+
+SHARED_SURFACE_PLAN = SANDBOX_PLAN.replace("['cli/src/fno/med_a.py']", "['src/high_a.py']")
+
+
+def _settings(monkeypatch, sandbox: bool) -> None:
+    """Pin join.sandbox (never this machine's real config) and the band grid,
+    whose live answer depends on the machine's routing config."""
+    from fno.config import SettingsModel
+
+    model = SettingsModel(join={"sandbox": sandbox})
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: model)
+    monkeypatch.setattr(advance, "_grid_lane_for", lambda *_a, **_k: (None, None))
+
+
+def test_flag_off_is_byte_identical(tmp_path, monkeypatch):
+    """AC6-EDGE: no policy dir, no spawn flag, every lane reports off."""
+    _settings(monkeypatch, False)
+    calls = _wire(monkeypatch, tmp_path, SANDBOX_PLAN)
+    receipt = join_node("x-8d1d", 5)
+    assert not (tmp_path / "wt" / ".fno" / "join-partition").exists()
+    for call in calls:
+        assert "--sandbox-write-policy" not in call["cmd"]
+    assert all(lane["sandbox"] == "off" for lane in receipt["lanes"].values())
+
+
+def test_flag_off_argv_matches_the_historical_shape(tmp_path, monkeypatch):
+    """Byte-identical means byte-identical: the whole argv after the
+    interpreter, not merely a passing run."""
+    _settings(monkeypatch, False)
+    calls = _wire(monkeypatch, tmp_path, SANDBOX_PLAN)
+    join_node("x-8d1d", 5)
+    plan = tmp_path / "plan.md"
+    assert calls[0]["cmd"][1:] == [
+        "agents", "spawn", "--substrate", "thread",
+        "--harness", "claude",
+        "--cwd", str(tmp_path / "wt"), "--name", "j-x-8d1d-1",
+        f"/fno:execute waves {plan}",
+    ]
+
+
+def test_flag_on_enforced_writes_policy_and_flags_spawn(tmp_path, monkeypatch):
+    """Both layers see the policy from the first tool call: the file is
+    written BEFORE the spawn and the spawn carries its path."""
+    calls = _wire(monkeypatch, tmp_path, SANDBOX_PLAN)
+    _settings(monkeypatch, True)  # after _wire: _wire pins the default model
+    receipt = join_node("x-8d1d", 5)
+    policy_dir = tmp_path / "wt" / ".fno" / "join-partition"
+    for name, lane in receipt["lanes"].items():
+        assert lane["sandbox"] == "enforced"
+        policy_path = policy_dir / f"{name}.json"
+        assert policy_path.exists()
+        policy = json.loads(policy_path.read_text())
+        peers = (
+            ["cli/src/fno/med_a.py"] if lane["band"] == "high"
+            else ["src/high_a.py", "src/high_b.py", "src/high_c.py"]
+        )
+        assert policy["deny_edit"] == peers
+        from fno.paths import state_dir
+
+        assert str(state_dir()) == policy["sandbox"]["filesystem"]["allowWrite"][0]
+        # The OS layer denies the peer set, resolved against the worktree.
+        deny = policy["sandbox"]["filesystem"]["denyWrite"]
+        assert deny == [str((tmp_path / "wt" / p).resolve()) for p in peers]
+        cmd = next(c["cmd"] for c in calls if c["cmd"][c["cmd"].index("--name") + 1] == name)
+        assert cmd[cmd.index("--sandbox-write-policy") + 1] == str(policy_path)
+    # The brief names the worker's file set, so a refusal reads as a reason.
+    brief = (tmp_path / "wt" / ".fno" / "join-briefs" / "x-8d1d.md").read_text()
+    assert "src/high_a.py" in brief and "cli/src/fno/med_a.py" in brief
+
+
+def test_flag_on_overlapping_refuses_to_narrow_but_spawns(tmp_path, monkeypatch):
+    """AC4-EDGE: shared surface -> verdict overlapping on every lane, no
+    policy file, no sandbox flag, and the join still spawns."""
+    calls = _wire(monkeypatch, tmp_path, SHARED_SURFACE_PLAN)
+    _settings(monkeypatch, True)  # after _wire: _wire pins the default model
+    receipt = join_node("x-8d1d", 5)
+    assert not (tmp_path / "wt" / ".fno" / "join-partition").exists()
+    for call in calls:
+        assert "--sandbox-write-policy" not in call["cmd"]
+    assert all(
+        lane["sandbox"] == "overlapping" for lane in receipt["lanes"].values()
+    )
+    assert len(calls) == len(receipt["spawned"])

@@ -2665,6 +2665,26 @@ def _coerce_affirmative(v: object, default: bool) -> bool:
     return False
 
 
+class JoinBlock(BaseModel):
+    """`fno backlog join` behavior (config.join.*).
+
+    ``sandbox`` is ONE switch over BOTH enforcement layers of the per-joiner
+    write partition (the OS allowlist composed into the worker's --settings
+    and the Edit/Write guard): partial enforcement that reads as enforcement
+    is the failure mode the feature exists to prevent, so they are not
+    separately toggleable. Default off; a config error degrades toward off.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    sandbox: bool = False
+
+    @field_validator("sandbox", mode="before")
+    @classmethod
+    def _coerce_sandbox(cls, v: object) -> object:
+        return v if isinstance(v, bool) else False
+
+
 class AutoMergeBlock(BaseModel):
     """Auto-merge settings (nested under 'config.auto_merge').
 
@@ -4058,6 +4078,7 @@ class ConfigBlock(BaseModel):
     health_monitor: HealthMonitorBlock = Field(default_factory=HealthMonitorBlock)
     collision: CollisionBlock = Field(default_factory=CollisionBlock)
     work: WorkBlock = Field(default_factory=WorkBlock)
+    join: JoinBlock = Field(default_factory=JoinBlock)
     worktree: WorktreeBlock = Field(default_factory=WorktreeBlock)
     model_routing: ModelRoutingBlock = Field(default_factory=ModelRoutingBlock)
     mux: MuxBlock = Field(default_factory=MuxBlock)

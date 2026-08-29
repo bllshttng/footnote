@@ -2298,6 +2298,62 @@ def _plan_wave_bands(plan_path: Path) -> list[str]:
     return _bands_from_graph(_plan_task_graph(plan_path))
 
 
+def _sandbox_brief_section(
+    node_id: str,
+    worker_bands: list[str],
+    policies: dict,
+    sandbox_on: bool,
+) -> str:
+    """The brief paragraph naming each worker's file set, so a refused write
+    reads as a reason and not as a broken machine."""
+    if not sandbox_on:
+        return ""
+    lines: list[str] = ["write partitions (join.sandbox is ON):"]
+    any_policy = False
+    for k, band in enumerate(worker_bands, start=1):
+        pol = policies.get(band)
+        verdict = pol.verdict if pol else "unevaluated"
+        if pol is not None and pol.verdict == "enforced":
+            any_policy = True
+            lines.append(
+                f"- j-{node_id}-{k} (band {band}) may write: "
+                f"{', '.join(pol.allow_write or ())}. A write outside it is "
+                f"refused at the Edit/Write layer and by the OS sandbox."
+            )
+        else:
+            lines.append(
+                f"- j-{node_id}-{k} (band {band or 'unbanded'}) is NOT "
+                f"narrowed ({verdict}); the sandbox layer is off for it."
+            )
+    return "\n".join(lines) if any_policy else ""
+
+
+def _sandbox_block(worktree: Path, policy: JoinWritePolicy) -> dict:
+    """The claude sandbox settings block for one band's rendered policy.
+
+    The workspace itself is writable under the sandbox by default (verified
+    live 2026-08-28 with one headless sandboxed session), so the per-band
+    separation rides ``denyWrite`` of the peer bands' surfaces - denyWrite
+    wins over both allowWrite and the workspace default. allowWrite only
+    opens what a joiner legitimately needs OUTSIDE the worktree: the global
+    fno state dir (graph, claims ledger, mail), plus the worktree infra
+    roots as a belt for setups where the workspace default does not apply.
+    """
+    from fno import paths
+
+    root = Path(worktree).resolve()
+    return {
+        "enabled": True,
+        "filesystem": {
+            "allowWrite": [
+                str(paths.state_dir()),
+                *(str(root / r) for r in INFRA_WRITE_ROOTS),
+            ],
+            "denyWrite": [str(root / d) for d in (policy.deny_edit or ())],
+        },
+    }
+
+
 def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dict:
     """Spawn width-bounded joiners into a held node's worktree (x-8d1d).
 
@@ -2322,7 +2378,9 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
 
     Returns the receipt ``{"node", "worktree", "width", "spawned", "lead",
     "lanes"}`` - ``lanes`` maps each spawned name to its ``band``/``harness``/
-    ``model`` (plus ``"grid": "declined"`` when the grid declined that band
+    ``model``/``sandbox`` (``enforced`` | ``overlapping`` | ``unevaluated`` |
+    ``off``, from ``config.join.sandbox`` and the plan's band partition; plus
+    ``"grid": "declined"`` when the grid declined that band
     and the joiner rides the caller's default lane). Raises JoinRefuse (exit
     2/3/4/5) on a precondition failure and SpawnError when the lead spawn
     itself fails; a non-lead spawn failure warns to stderr and shrinks
@@ -2367,8 +2425,9 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         )
     try:
         plan_path = resolve_plan_path(str(plan_raw))
-        width = _plan_parallel_width(plan_path)
-        bands = _plan_wave_bands(plan_path)
+        graph = _plan_task_graph(plan_path)
+        width = _width_from_graph(graph)
+        bands = _bands_from_graph(graph)
     except ValueError as exc:
         raise JoinRefuse(4, f"{node_id} plan task graph unsolvable: {str(exc)[:140]}") from exc
     except Exception as exc:  # noqa: BLE001 - an unreadable plan is no plan to join
@@ -2386,6 +2445,14 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
     else:
         count = min(max(1, workers), width - 1)
         worker_bands = [""] * count
+    # One switch covers BOTH enforcement layers (the OS allowlist and the
+    # Edit/Write guard): partial enforcement that reads as enforcement is the
+    # failure mode this feature exists to prevent, so they are not separately
+    # toggleable. An overlapping or unevaluated band is never narrowed (LD2).
+    from fno.config import load_settings
+
+    sandbox_on = bool(load_settings().join.sandbox)
+    policies = render_join_write_policy(graph, worker_bands) if sandbox_on else {}
 
     lead = f"j-{node_id}-1"
     # The joiner brief rides a FILE, not only TARGET_BRIEF: a daemon-forked
@@ -2419,10 +2486,35 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             f"# Joiner brief: {node_id}\n\n"
             f"lead and mail hub: {lead}\n"
             f"{band_table}\n"
+            f"{_sandbox_brief_section(node_id, worker_bands, policies, sandbox_on)}\n"
             f"Before dispatching any worker, claim ONE ready task via "
             f"`fno backlog task update {node_id} <task> --status in_progress` "
             f"(the waves.md 3e step; your roster name binds the holder).\n"
         )
+        # The per-worker policy file is written BEFORE any spawn: both
+        # enforcement layers (the Edit/Write guard and the sandbox block the
+        # session reads at start) must see it from the worker's first tool
+        # call, and a Bash write refused without the file would read as a
+        # broken machine rather than a partition.
+        policy_dir = Path(worktree) / ".fno" / "join-partition"
+        for k, band in enumerate(worker_bands, start=1):
+            pol = policies.get(band)
+            if pol is None or pol.verdict != "enforced":
+                continue
+            name = f"j-{node_id}-{k}"
+            policy_dir.mkdir(parents=True, exist_ok=True)
+            (policy_dir / f"{name}.json").write_text(
+                json.dumps(
+                    {
+                        "worker": name,
+                        "band": band,
+                        "verdict": "enforced",
+                        "allow_write": list(pol.allow_write or ()),
+                        "deny_edit": list(pol.deny_edit or ()),
+                        "sandbox": _sandbox_block(worktree, pol),
+                    }
+                )
+            )
     except OSError as exc:
         raise SpawnError(f"join cannot write the joiner brief: {str(exc)[:160]}") from exc
     spawned: list[str] = []
@@ -2452,6 +2544,8 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
         # mismatch the spawn refuses.
         lane_h: Optional[str] = None
         lane_m: Optional[str] = None
+        pol = policies.get(band) if sandbox_on else None
+        enforced = pol is not None and pol.verdict == "enforced"
         if band:
             grid_h, grid_m = _grid_lane_for(
                 {
@@ -2475,6 +2569,14 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             # x-571f shape: an explicit model rides as a spawn flag.
             *(("--model", lane_m or model) if (lane_m or model) else ()),
             "--cwd", worktree, "--name", name,
+            *(
+                (
+                    "--sandbox-write-policy",
+                    str(Path(worktree) / ".fno" / "join-partition" / f"{name}.json"),
+                )
+                if enforced
+                else ()
+            ),
             f"/fno:execute waves {plan_path}",
         ]
         spawn_env = {**os.environ, "TARGET_BRIEF": brief}
@@ -2496,7 +2598,18 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
             print(f"join: spawn {name} failed: {detail}", file=sys.stderr)
             continue
         spawned.append(name)
-        lanes[name] = {"band": band, "harness": lane_h, "model": lane_m}
+        lanes[name] = {
+            "band": band,
+            "harness": lane_h,
+            "model": lane_m,
+            # enforced | overlapping | unevaluated | off: a run that could
+            # not narrow says so rather than looking like a run that did.
+            "sandbox": (
+                pol.verdict if pol is not None else "unevaluated"
+            )
+            if sandbox_on
+            else "off",
+        }
         if band and lane_h is None:
             lanes[name]["grid"] = "declined"
     return {

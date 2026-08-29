@@ -70,6 +70,13 @@ FIELD_META: dict[str, Meta] = {
         default_source="default",
     ),
     # --- config.sandbox.* ---
+    # --- config.join.* ---
+    "join.sandbox": Meta(
+        "advanced",
+        "Enforce a per-joiner write partition on `fno backlog join`: one switch over BOTH layers (the OS allowlist composed into the worker's --settings and the Edit/Write guard). An overlapping or unevaluated band is never narrowed; the node holder is never sandboxed.",
+        question="When workers join a held node, sandbox each joiner to its own band's files?",
+        default_source="default",
+    ),
     "sandbox.on_unavailable": Meta(
         "advanced",
         "When a headless harness has no confinement backend: refuse before spawn (default) or explicitly warn and continue unconfined.",
