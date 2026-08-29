@@ -3697,9 +3697,9 @@ def cmd_update(
                     f"--repo {repo!r} is not an owner/name slug "
                     "(expected <owner>/<repo>, e.g. bllshttng/footnote)"
                 )
-            url = pr_url_from_slug(repo.strip(), number)
+            url: Optional[str] = pr_url_from_slug(repo.strip(), number)
             typer.echo(f"note: stamped --repo {repo.strip()} {url}", err=True)
-            return url
+            return url  # type: ignore[return-value]
         slug_cwd = derived_cwd_for_update or cwd or _node_before_update().get("cwd")
         url = pr_url_for_repo(number, slug_cwd)
         if url is None:
