@@ -1886,7 +1886,7 @@ def test_cmd_spawn_parses_pr_watch_headless_json_argv(
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="",
             reply='{"is_error": false}',
         )

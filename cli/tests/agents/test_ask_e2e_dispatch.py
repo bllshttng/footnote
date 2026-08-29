@@ -234,7 +234,7 @@ def test_spawn_once_python_vs_rust_parity(
     py_result = dispatch_spawn(
         name="parity-agent",
         message="hi",
-        provider=provider,
+        harness=provider,
         cwd=cwd,
         once=True,
         timeout=10,
@@ -303,7 +303,7 @@ def test_ask_unknown_agent_python_vs_rust_parity(tmp_path: Path, monkeypatch) ->
     cwd = tmp_path / "workdir"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as excinfo:
-        dispatch_ask(name="ghost-agent", message="hi", provider="codex", cwd=cwd, timeout=10)
+        dispatch_ask(name="ghost-agent", message="hi", harness="codex", cwd=cwd, timeout=10)
     assert excinfo.value.exit_code == UNKNOWN_AGENT_EXIT_CODE
 
     rs_home = tmp_path / "rs-home"
@@ -419,7 +419,7 @@ def test_codex_spawn_once_fake_provider_exit_propagates(tmp_path: Path, monkeypa
         dispatch_spawn(
             name="parity-agent",
             message="hi",
-            provider="codex",
+            harness="codex",
             cwd=cwd,
             once=True,
             timeout=10,
@@ -516,7 +516,7 @@ def test_ask_followup_python_vs_rust_parity(provider, tmp_path: Path, monkeypatc
 
     for k, v in env_for(_SESSION_ID, followup_reply).items():
         monkeypatch.setenv(k, v)
-    py_fu = dispatch_ask(name="fu-agent", message="again", provider=None, cwd=cwd, timeout=10)
+    py_fu = dispatch_ask(name="fu-agent", message="again", harness=None, cwd=cwd, timeout=10)
     py_stdout = py_fu.reply or ""  # followup -> reply verbatim, no trailing newline
 
     # --- Rust path: separate home seeded by COPYING the Python-written

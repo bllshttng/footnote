@@ -287,7 +287,7 @@ def test_composed_receipt_names_live_credential_and_payer(monkeypatch, runner):
         return dispatch.SpawnResult(
             kind="created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="abcd1234",
         )
 

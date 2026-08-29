@@ -974,7 +974,7 @@ fn validate_effort_for_spawn(
     }
     if matches!(provider, "gemini" | "agy") {
         return Err(format!(
-            "provider {} has no reasoning-effort surface; omit --effort",
+            "harness {} has no reasoning-effort surface; omit --effort",
             provider
         ));
     }

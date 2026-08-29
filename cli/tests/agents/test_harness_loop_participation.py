@@ -192,4 +192,4 @@ def test_the_direct_spawn_seam_still_calls_the_gate():
     catches the call being dropped.
     """
     source = (REPO_ROOT / "cli/src/fno/agents/cli.py").read_text()
-    assert "check_loop_participation(provider, message)" in source
+    assert "check_loop_participation(harness, message)" in source

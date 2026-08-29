@@ -152,7 +152,7 @@ def test_ac1_hp_mcp_send_succeeds_when_probe_true(tmp_path: Path, monkeypatch) -
     result = dispatch_ask(
         name="mcp-worker",
         message="hi via mcp",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )
@@ -198,7 +198,7 @@ def test_ac1_err_mcp_send_failure_demotes_to_socket(tmp_path: Path, monkeypatch)
     result = dispatch_ask(
         name="mcp-worker",
         message="hi",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )
@@ -247,7 +247,7 @@ def test_mcp_truth_routing_gap_never_stamps_orphaned(tmp_path: Path, monkeypatch
 
     with pytest.raises(DispatchAskError) as exc_info:
         dispatch_ask(
-            name="mcp-worker", message="hi", provider="claude",
+            name="mcp-worker", message="hi", harness="claude",
             cwd=tmp_path, timeout=30,
         )
 
@@ -286,7 +286,7 @@ def test_ac3_hp_probe_raises_demotes_to_socket(tmp_path: Path, monkeypatch) -> N
     result = dispatch_ask(
         name="mcp-worker",
         message="hi",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )
@@ -335,7 +335,7 @@ def test_probe_returns_false_demotes_with_not_registered(tmp_path: Path, monkeyp
     result = dispatch_ask(
         name="mcp-worker",
         message="hi",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )
@@ -372,7 +372,7 @@ def test_socket_only_agent_never_probes_mcp(tmp_path: Path, monkeypatch) -> None
     result = dispatch_ask(
         name="socket-worker",
         message="hi",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )

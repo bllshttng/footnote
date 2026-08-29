@@ -156,7 +156,7 @@ class TestSpawnSeam:
     ) -> None:
         seen = self._capture_create(monkeypatch)
         dispatch_mod.dispatch_spawn(
-            name="w1", message="hi", provider="claude", cwd=armed
+            name="w1", message="hi", harness="claude", cwd=armed
         )
         assert seen["account_env"]["CLAUDE_CONFIG_DIR"] == str(armed / "claude-main")
 
@@ -172,7 +172,7 @@ class TestSpawnSeam:
         monkeypatch.setattr(dispatch_mod, "_pick_account_env", _never)
         explicit = {"CLAUDE_CONFIG_DIR": str(armed / "claude-alt")}
         dispatch_mod.dispatch_spawn(
-            name="w2", message="hi", provider="claude", cwd=armed,
+            name="w2", message="hi", harness="claude", cwd=armed,
             account_env=explicit,
         )
         assert seen["account_env"] == explicit
@@ -245,7 +245,7 @@ class TestRoutedSpawnsAreNotPicked:
         gate = run_gate("w3", "bg", route_provider="zai")
         try:
             dispatch_mod.dispatch_spawn(
-                name="w3", message="hi", provider="claude", cwd=armed,
+                name="w3", message="hi", harness="claude", cwd=armed,
                 route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
                 provider_gate=gate,
             )

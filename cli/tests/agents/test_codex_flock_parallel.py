@@ -119,7 +119,7 @@ def _codex_worker(
         dispatch_ask(
             name=name,
             message=message,
-            provider="codex",
+            harness="codex",
             cwd=_P(home),
             timeout=10,
         )

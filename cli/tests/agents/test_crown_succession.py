@@ -81,7 +81,7 @@ def _spawn_heir(name: str = "heir", *, succeed: bool = False):
     return dispatch_spawn(
         name=name,
         message="reign",
-        provider="claude",
+        harness="claude",
         cwd=Path("/tmp"),
         crown_level=2,
         crown_scope=SCOPE,
@@ -307,7 +307,7 @@ def _spawn_over(scope: str, name: str = "heir"):
     return dispatch_spawn(
         name=name,
         message="reign",
-        provider="claude",
+        harness="claude",
         cwd=Path("/tmp"),
         crown_level=level,
         crown_scope=scope,

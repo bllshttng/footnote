@@ -388,7 +388,7 @@ def test_an_explicit_account_composes_with_a_restored_route(
         dispatch_spawn(
             name="router",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
             account_env={"CLAUDE_CONFIG_DIR": "/cfg"},
@@ -421,7 +421,7 @@ def test_a_legacy_routed_row_without_provider_refuses_relaunch(
         dispatch_spawn(
             name="router",
             message="go",
-            provider=harness,
+            harness=harness,
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
@@ -441,7 +441,7 @@ def test_a_restored_route_without_prior_provider_admission_refuses(
         dispatch_spawn(
             name="router",
             message="go",
-            provider=harness,
+            harness=harness,
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
@@ -464,7 +464,7 @@ def test_direct_resume_refuses_an_incomplete_forward_registry(
         dispatch_spawn(
             name="router",
             message="go",
-            provider=harness,
+            harness=harness,
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
@@ -501,7 +501,7 @@ def test_cli_resume_gates_the_recorded_provider_before_dispatch(
         return SpawnResult(
             kind="created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="new12345",
         )
 
@@ -550,7 +550,7 @@ def test_a_role_that_resolves_to_nothing_still_restores_the_route(
         dispatch_spawn(
             name="router",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
             role="a-role-that-resolves-to-nothing",
@@ -590,7 +590,7 @@ def test_a_renamed_relaunch_of_the_same_transcript_still_restores(
         dispatch_spawn(
             name="a-different-name",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
@@ -630,7 +630,7 @@ def test_the_account_picker_never_fires_on_a_revive(tmp_path, monkeypatch, capsy
         dispatch_spawn(
             name="router",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
         )
@@ -988,7 +988,7 @@ def test_matrix_spawn_resume_inherits_the_recorded_account(tmp_path, monkeypatch
     result = dispatch.dispatch_spawn(
         name="router",
         message="go",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         resume_session_id="sess-1",
         route_provider="zai",
@@ -1042,7 +1042,7 @@ def test_matrix_bg_fresh_spawn_routed_row_stamps_the_picked_account(
     result = dispatch.dispatch_spawn(
         name="fresh-routed",
         message="go",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
     )
     assert result.kind == "created"
@@ -1066,7 +1066,7 @@ def test_matrix_bg_fresh_spawn_default_control_stamps_default(
     result = dispatch.dispatch_spawn(
         name="fresh-default",
         message="go",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
     )
     assert result.kind == "created"
@@ -1102,7 +1102,7 @@ def test_matrix_spawn_resume_default_control_inherits_default(
     result = dispatch.dispatch_spawn(
         name="plain-row",
         message="go",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         resume_session_id="sess-1",
     )
@@ -1173,7 +1173,7 @@ def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
         dispatch_spawn(
             name="router",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
             route_provider="zai",
@@ -1209,7 +1209,7 @@ def test_a_restored_route_composes_under_managed_marker(
         dispatch_spawn(
             name="router",
             message="go",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             resume_session_id="sess-1",
             route_provider="zai",

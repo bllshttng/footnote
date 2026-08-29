@@ -2119,7 +2119,7 @@ def _claude_create_path(
 def dispatch_ask(
     name: str,
     message: str,
-    provider: Optional[str],
+    harness: Optional[str],
     cwd: Path,
     timeout: Optional[int] = None,
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
@@ -2238,7 +2238,7 @@ def dispatch_ask(
             # select_provider also calls load_registry internally; guard the
             # same OSError / RegistryVersionError class.
             try:
-                chosen = select_provider(name=name, requested_provider=provider)
+                chosen = select_provider(name=name, requested_provider=harness)
             except ProviderMismatchError as exc:
                 raise DispatchAskError(str(exc), exit_code=2) from exc
             except ValueError as exc:
@@ -2295,7 +2295,7 @@ def dispatch_ask(
                         # (claude's --bg has no equivalent flag). Emit a
                         # single-line stderr note and continue normally.
                         print(
-                            "--yolo has no effect for provider 'claude'",
+                            "--yolo has no effect for harness 'claude'",
                             file=sys.stderr,
                         )
                     if existing.harness == "claude":
@@ -2328,12 +2328,12 @@ def dispatch_ask(
                         )
                     if existing.harness == "gemini":
                         raise DispatchAskError(
-                            "provider 'gemini' is retired; route this work to agy "
-                            "or a maintained claude/codex provider",
+                            "harness 'gemini' is retired; route this work to agy "
+                            "or a maintained claude/codex harness",
                             exit_code=2,
                         )
                     raise DispatchAskError(
-                        f"follow-up for provider {existing.harness!r} is not implemented",
+                        f"follow-up for harness {existing.harness!r} is not implemented",
                         exit_code=2,
                     )
             finally:
@@ -2696,7 +2696,7 @@ def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[st
 def dispatch_spawn(
     name: str,
     message: str,
-    provider: str,
+    harness: str,
     cwd: Path,
     once: bool = False,
     timeout: Optional[int] = None,
@@ -2772,7 +2772,7 @@ def dispatch_spawn(
     # x-d285: a picked overlay names its account id so the minted row records
     # WHICH account it rides; an explicit launch_account from the caller wins.
     effective_launch_account = launch_account
-    if account_env is None and provider == "claude" and not resume_session_id:
+    if account_env is None and harness == "claude" and not resume_session_id:
         picked_overlay = _pick_account_overlay(role=role, route_env=route_env)
         if picked_overlay is not None:
             account_env = picked_overlay.env
@@ -2780,7 +2780,7 @@ def dispatch_spawn(
 
     launch_role = role
     resolved_providers: list[str] = []
-    if provider == "claude" and (role is not None or route_env):
+    if harness == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
             resolve_spawn_route,
@@ -2806,13 +2806,13 @@ def dispatch_spawn(
             route_provider = resolved_provider
         launch_role = None
 
-    if provider == "claude" and route_env and not resolved_providers:
+    if harness == "claude" and route_env and not resolved_providers:
         raise DispatchAskError(
             "pre-resolved route has no bound model-provider identity; refusing "
             "because its provider cap cannot be evaluated; no worker launched",
             exit_code=2,
         )
-    if provider == "claude" and route_env and route_provider is None:
+    if harness == "claude" and route_env and route_provider is None:
         raise DispatchAskError(
             "resolved route has no model-provider axis; refusing to launch because "
             "its provider cap cannot be evaluated; no worker launched",
@@ -2846,7 +2846,7 @@ def dispatch_spawn(
 
     try:
         check_spawn_tier_remap(
-            provider,
+            harness,
             model,
             role=launch_role,
             route_env=route_env,
@@ -2857,7 +2857,7 @@ def dispatch_spawn(
     # Same seam, same reason as the tier-remap check above: a permission-pinned
     # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
     # approvals, so warn on every reachable path, not just the CLI seam.
-    emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
+    emit_env_scrub_warning(harness, permission_pinned=bool(permission_mode or yolo))
 
     # Crown eligibility, checked HERE rather than only at the CLI seam: this
     # function is the in-process entry point too, and only the claude bg branch
@@ -2894,10 +2894,10 @@ def dispatch_spawn(
                 "exits after one answer. Use the pane or bg substrate.",
                 exit_code=2,
             )
-        if provider != "claude":
+        if harness != "claude":
             raise DispatchAskError(
-                f"--crown on the bg substrate is claude-only; got provider "
-                f"{provider!r}. Use --substrate pane, which maps every provider.",
+                f"--crown on the bg substrate is claude-only; got harness "
+                f"{harness!r}. Use --substrate pane, which maps every harness.",
                 exit_code=2,
             )
 
@@ -2906,12 +2906,12 @@ def dispatch_spawn(
 
     # 2. Harness validation. The thread/headless accept-set is separate from
     # the narrower ask vocabulary and the wider pane-hostable set.
-    _check_spawn_harness(provider)
+    _check_spawn_harness(harness)
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
-            message = normalize_command(message, provider)
+            message = normalize_command(message, harness)
         except DispatchResolveError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
         effective_message = message
@@ -2921,7 +2921,7 @@ def dispatch_spawn(
     message = enrich_spawn_payload(message)
 
     if output_format is not None and (
-        provider != "claude" or not headless or output_format != "json"
+        harness != "claude" or not headless or output_format != "json"
     ):
         raise DispatchAskError(
             "--output-format supports only 'json' on claude headless spawns",
@@ -2930,16 +2930,16 @@ def dispatch_spawn(
 
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
-    if provider == "claude" and once and not headless:
+    if harness == "claude" and once and not headless:
         raise DispatchAskError(
-            "--once is not supported for provider 'claude' "
+            "--once is not supported for harness 'claude' "
             "(claude peers are persistent bg threads; use plain spawn)",
             exit_code=2,
         )
 
     # 3b. Codex thread spawns are held by the Rust app-server lane. The Python
     # runtime delegates there instead of silently downgrading to a one-shot.
-    if provider == "codex" and not once:
+    if harness == "codex" and not once:
         unsupported = next(
             (
                 flag
@@ -3026,7 +3026,7 @@ def dispatch_spawn(
             # uuid) instead of refused. Every other same-name case stays
             # fail-closed (live row, uuid mismatch, no --resume).
             existing = next((e for e in entries if e.name == name), None)
-            revive = existing is not None and _is_revival(existing, provider, resume_session_id)
+            revive = existing is not None and _is_revival(existing, harness, resume_session_id)
             if existing is not None and not revive:
                 raise DispatchAskError(
                     f"agent {name!r} already exists; "
@@ -3181,7 +3181,7 @@ def dispatch_spawn(
             # dispatch on the same thread.
             ctx_for_dispatch = build_context(
                 to_name=name,
-                to_provider=provider,
+                to_provider=harness,
                 transport="direct-cli",
                 from_name_override=from_name,
             )
@@ -3194,12 +3194,12 @@ def dispatch_spawn(
                 _emit_ev(
                     "agent_ask_started",
                     name=name,
-                    provider=provider,
+                    provider=harness,
                     yolo=yolo,
                 )
 
                 # 4b. claude plain spawn.
-                if provider == "claude":
+                if harness == "claude":
                     if headless:
                         from fno.agents.harnesses import claude as claude_mod
 
@@ -3294,7 +3294,7 @@ def dispatch_spawn(
                 # only), so delegation drops nothing; role, resume, and crown
                 # have no carrier on the serve row yet, so they are refused
                 # here rather than silently lost.
-                if provider == "opencode":
+                if harness == "opencode":
                     if once or headless:
                         raise DispatchAskError(
                             "opencode one-shot spawns run through the Rust "
@@ -3336,7 +3336,7 @@ def dispatch_spawn(
                     )
 
                 # 4c. codex --once: create + exchange + teardown.
-                if provider == "codex":
+                if harness == "codex":
                     # This lane threads no account overlay: _codex_create_path
                     # takes none, and cmd_spawn exports only PROVENANCE_KEYS to
                     # os.environ for one-shots, so a resolved overlay would reach
@@ -3369,8 +3369,8 @@ def dispatch_spawn(
                     )
                 else:
                     raise DispatchAskError(
-                        "provider 'gemini' is retired; route this work to agy "
-                        "or a maintained claude/codex provider",
+                        "harness 'gemini' is retired; route this work to agy "
+                        "or a maintained claude/codex harness",
                         exit_code=2,
                     )
 
@@ -3381,14 +3381,14 @@ def dispatch_spawn(
                     update_registry(lambda es: [e for e in es if e.name != name])
                     # Teardown receipt on stderr (AC2-UI).
                     print(
-                        f"once: {name} ({provider}/{session_or_short_id}) torn down",
+                        f"once: {name} ({harness}/{session_or_short_id}) torn down",
                         file=sys.stderr,
                     )
                 except (OSError, RegistryVersionError) as exc:
                     # AC2-FR: loud warning, row stays visible, exit 0 still.
                     print(
                         f"fno agents spawn: warning: teardown failed for {name!r} "
-                        f"({provider}/{session_or_short_id}): {exc}. "
+                        f"({harness}/{session_or_short_id}): {exc}. "
                         f"Peer leaked -- the exchange finished, so nothing is "
                         f"lost; clean up the dead row via 'fno agents rm {name}'",
                         file=sys.stderr,
@@ -3397,7 +3397,7 @@ def dispatch_spawn(
                 return SpawnResult(
                     kind="once",
                     name=name,
-                    provider=provider,
+                    provider=harness,
                     short_id=session_or_short_id,
                     reply=create_result.reply,
                     effective_message=effective_message,
@@ -3930,7 +3930,7 @@ def stop_agent(
 
             if existing.harness != "claude":
                 raise DispatchAskError(
-                    f"stop for provider {existing.harness!r} is not implemented",
+                    f"stop for harness {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
 
@@ -4350,7 +4350,7 @@ def rm_agent(
                 )
             elif existing.harness != "gemini":
                 raise DispatchAskError(
-                    f"rm for provider {existing.harness!r} is not implemented",
+                    f"rm for harness {existing.harness!r} is not implemented",
                     exit_code=2,
                 )
             # gemini: registry-only. No teardown arm -- the provider is
@@ -5491,7 +5491,7 @@ def attach_agent(name: str) -> AttachResult:
 
     if existing.harness != "claude":
         raise DispatchAskError(
-            f"attach for provider {existing.harness!r} is not implemented",
+            f"attach for harness {existing.harness!r} is not implemented",
             exit_code=2,
         )
 
@@ -7794,7 +7794,7 @@ def wake_and_deliver(
         result = dispatch_spawn(
             name=spawn_name,
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
-            provider="claude",
+            harness="claude",
             cwd=cwd or Path.cwd(),
             resume_session_id=session_uuid,
             route_provider=route_provider,

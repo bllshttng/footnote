@@ -286,7 +286,7 @@ def test_dispatch_spawn_refuses_a_crown_it_cannot_stamp(tmp_path: Path, monkeypa
         dispatch_spawn(
             name="codex-king",
             message="reign",
-            provider="codex",
+            harness="codex",
             cwd=tmp_path,
             crown_level=1,
             crown_scope="epic-x",
@@ -303,7 +303,7 @@ def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch) ->
         dispatch_spawn(
             name="one-shot-king",
             message="reign",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             headless=True,
             crown_level=1,
@@ -346,7 +346,7 @@ def test_dispatch_spawn_refuses_invalid_crown_values(
         dispatch_spawn(
             name="bad-king",
             message="reign",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             crown_level=level,
             crown_scope=scope,
