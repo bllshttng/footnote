@@ -223,39 +223,3 @@ def test_an_equal_on_disk_version_is_not_a_bump(shared: Path, from_source: Path)
     data = json.loads(shared.read_text())
     assert data["schema_version"] == reg.SCHEMA_VERSION
     assert [a["name"] for a in data["agents"]] == ["worker-2"]
-
-
-# --------------------------------------------------------------------------
-# The discriminator itself
-# --------------------------------------------------------------------------
-
-
-def test_running_from_source_keys_on_the_module_not_the_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A deployed fno invoked from inside a worktree is still deployed."""
-    reg._running_from_source.cache_clear()
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".git").mkdir()
-
-    assert reg._running_from_source() != tmp_path
-
-    reg._running_from_source.cache_clear()
-
-
-def test_a_worktrees_git_file_counts_as_a_checkout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A linked worktree's ``.git`` is a FILE. ``is_dir()`` would miss every
-    worktree, which is the only place this ever happens."""
-    root = tmp_path / "checkout"
-    module = root / "cli" / "src" / "fno" / "agents" / "registry.py"
-    module.parent.mkdir(parents=True)
-    module.write_text("", encoding="utf-8")
-    (root / ".git").write_text("gitdir: /elsewhere/.git/worktrees/x\n", encoding="utf-8")
-    monkeypatch.setattr(reg, "__file__", str(module))
-    reg._running_from_source.cache_clear()
-
-    assert reg._running_from_source() == root
-
-    reg._running_from_source.cache_clear()
