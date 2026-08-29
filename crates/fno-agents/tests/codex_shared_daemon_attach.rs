@@ -73,8 +73,7 @@ fn codex_home_guard() -> std::sync::MutexGuard<'static, ()> {
 /// the wrong thing from one door.
 #[test]
 fn attach_argv_matches_the_mux_renderer() {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../cli/src/fno/agents/harness_capabilities.toml");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
     let raw =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");

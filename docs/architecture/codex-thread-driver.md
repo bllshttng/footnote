@@ -111,7 +111,7 @@ The frames the driver reads drive turns. They never paint a screen. Read that as
 - No `codex app-server` has `fno-agents-daemon` as its parent. Read every hit's parent positively. Never count app-servers: a count of one is also what a broken daemon plus one orphan looks like.
 - No `fno` process READS OR WRITES the bytes between a viewer terminal and `codex`. In the mux viewport the pane's own process is `codex`, with no children. The composed `exec` is load-bearing. It replaces the shell, so the pane's child is `codex` itself with no fno process in between. The `;` rather than `&&` is load-bearing too. A failed pre-exec still runs the attach. That yields the more specific error, in the pane the operator is already looking at.
 
-A change that reads frames here to draw something has rebuilt the rendering layer this lane deleted, merely relocated into a pane. Both doors read ONE declaration now (x-296f): the contract's `interactive_attach` row, overridable per harness. `fno` never links `fno-agents`. The test `attach_argv_matches_the_mux_renderer` links both crates and pins the two doors byte-identical for every harness the contract declares.
+A change that reads frames here to draw something has rebuilt the rendering layer this lane deleted, merely relocated into a pane. Both doors read ONE declaration now: the contract's `interactive_attach` row, overridable per harness. `fno` never links `fno-agents`. The test `attach_argv_matches_the_mux_renderer` links both crates and pins the two doors byte-identical for every harness the contract declares.
 
 ### The attach is a declaration, and an operator can correct it
 

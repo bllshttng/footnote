@@ -264,10 +264,10 @@ fn shell_join(tokens: &[String]) -> String {
 }
 
 /// The bundled capability contract. `fno` does not link `fno-agents` (it shells
-/// the binary), so the table is embedded rather than called for. The two TOML
-/// copies are byte-identical (`check-harness-capabilities-fresh.sh`), so either
-/// embeds the same words.
-const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
+/// the binary), so the table is embedded rather than called for. The three TOML
+/// copies are byte-identical (`check-harness-capabilities-fresh.sh`); this one
+/// lives inside the crate so the packaged package builds standalone.
+const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 
 /// The attach form `harness` declares, or `None` when it declares none.
 ///
@@ -4702,7 +4702,7 @@ config_dir = "~/.claude-alt"
     #[test]
     fn every_attach_capable_harness_reaches_drive() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../cli/src/fno/agents/harness_capabilities.toml");
+            .join("src/harness_capabilities.toml");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
