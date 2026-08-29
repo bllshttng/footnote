@@ -580,7 +580,7 @@ def _run_codex(
     from fno.harness_identity import stamp_child_harness_identity
 
     spawn_env = stamp_child_harness_identity(
-        spawn_env, "codex", bound_session_id, agent_self=agent_self
+        spawn_env, "codex", bound_session_id, agent_self=agent_self, substrate="headless"
     )
 
     try:

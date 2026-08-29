@@ -1344,6 +1344,11 @@ pub(crate) const AMBIENT_IDENTITY_NAMES: &[&str] = &[
     "FNO_AGENT_HARNESS",
     "FNO_AGENT_PROVIDER",
     "FNO_AGENT_SESSION",
+    // Where the session runs, stamped by the spawn path that knows (x-be78).
+    // The ask lanes below launch one-shot children and stamp no substrate, so
+    // this entry is the whole job here: without the scrub, a child of a pane
+    // worker inherits `pane` and reads as attended for the rest of its life.
+    "FNO_AGENT_SUBSTRATE",
     FNO_HARNESS_NAME,
     FNO_HARNESS_SESSION_ID,
     "CODEX_THREAD_ID",
@@ -2981,6 +2986,7 @@ mod tests {
         let mut command = std::process::Command::new("sh");
         command.env("CODEX_THREAD_ID", "parent");
         command.env("FNO_AGENT_SELF", "parent");
+        command.env("FNO_AGENT_SUBSTRATE", "pane");
         command.env(FNO_HARNESS_NAME, "parent");
         stamp_command_env(
             &mut command,
@@ -3017,6 +3023,9 @@ mod tests {
             Some("11111111-1111-4111-8111-111111111111")
         );
         assert!(!values.contains_key("CODEX_THREAD_ID"));
+        // These ask lanes stamp no substrate of their own, so the parent's must
+        // go: a child that keeps `pane` reads as attended for life (x-be78).
+        assert!(!values.contains_key("FNO_AGENT_SUBSTRATE"));
 
         let mut unowned = std::process::Command::new("sh");
         unowned.env("FNO_AGENT_SELF", "parent");
