@@ -814,12 +814,13 @@ def resume_logic(
     )
 
     try:
-        entry = resolve_agent_across_sources(
+        resolved = resolve_agent_across_sources(
             entries,
             name,
             scope_cwd=cwd_override or os.getcwd(),
             cross_project=cross_project,
-        ).entry
+        )
+        entry = resolved.entry
     except AgentResolutionError as exc:
         return ResumeResult(
             exit_code=13,
@@ -835,6 +836,14 @@ def resume_logic(
     harness = getattr(entry, "harness", None)
     cwd = cwd_override or getattr(entry, "cwd", None)
     session_id = _session_id_for(entry)
+    # An explicit full predecessor uuid selects the EXACT historical session,
+    # not the row's current one (x-dfe7): delivery follows the successor, but
+    # resume was handed A and A is what it must reopen. Only a full-id match
+    # carries matched_session_id, so a name or short address always keeps the
+    # current session.
+    matched = getattr(resolved, "matched_session_id", None)
+    if matched and session_id and matched != session_id:
+        session_id = matched
 
     if not cwd:
         if session_id:
