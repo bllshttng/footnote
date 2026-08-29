@@ -31,7 +31,11 @@ from fno.config import (
     resolvable_reviewers,
     ReviewerDescriptor,
 )
-from fno.harness_identity import resolve_harness_identity
+from fno.harness_identity import (
+    env_marks_unattended,
+    resolve_harness_identity,
+    spawned_substrate,
+)
 
 # Harnesses that can dispatch subagents at all, for a REGISTRY reviewer that
 # declares `requires: subagent-dispatch`. No built-in uses the value anymore
@@ -54,7 +58,7 @@ class SessionCapability:
     """What this session can do, as far as the environment will admit."""
 
     harness: str  # claude | codex | gemini | unknown
-    substrate: str  # bg | headless | pane | interactive
+    substrate: str  # pane | thread | headless | interactive | unknown
     attended: bool
     #: the model provider this session bills, from the route stamp a spawn
     #: writes (`FNO_ROUTE_PROVIDER`). "unknown" for a session fno did not
@@ -189,8 +193,10 @@ def detect_session(
 ) -> SessionCapability:
     """Read harness + substrate from the ambient environment.
 
-    Substrate is derived from the dispatch env a spawner sets, because a session
-    has no direct way to ask which substrate it was launched on.
+    Substrate is the value the spawner stamped, because a session has no way to
+    ask which substrate it was launched on. It used to be guessed from markers
+    that do not carry it - ``FNO_AGENT_SELF`` meant `pane`, which labelled every
+    headless one-shot a pane - and is now read verbatim or reported `unknown`.
 
     `attended` must match the manifest's own derivation
     (`hooks/helpers/init-target-state.sh`: `TARGET_UNATTENDED=1` OR
@@ -213,19 +219,17 @@ def detect_session(
     # READ-ONLY (x-20f1 LD5): branches to name this harness's review verb.
     harness = resolve_harness_identity(environ).harness or "unknown"
 
-    bg = bool(environ.get("FNO_BG"))
-    unattended_flag = environ.get("TARGET_UNATTENDED") == "1"
-    spawned = bool(environ.get("FNO_AGENT_SELF"))
     if unattended_configured is None:
         unattended_configured = _unattended_in_config()
-    attended = not (bg or unattended_flag or spawned or unattended_configured)
+    attended = not (env_marks_unattended(environ) or unattended_configured)
 
-    if bg:
-        substrate = "bg"
-    elif unattended_flag:
-        substrate = "headless"
-    elif spawned:
-        substrate = "pane"
+    stamped = spawned_substrate(environ)
+    if stamped:
+        substrate = stamped
+    elif env_marks_unattended(environ):
+        # Spawned, or declared unattended, by a path that stamps no substrate.
+        # Naming a guess here is what labelled every headless one-shot a `pane`.
+        substrate = "unknown"
     else:
         substrate = "interactive"
 
