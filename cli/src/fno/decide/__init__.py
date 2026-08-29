@@ -396,6 +396,20 @@ def record_decision(
             and provenance.authority_source not in {"operator", "chat_attested"}
         ):
             raise RefusedAuthorityError(provenance.decided_by, origin)
+        # A chat recording may retire ITS OWN kind, never the operator's.
+        #
+        # One-step recording is what the operator asked for. Retiring a row a
+        # person stood behind is a different act, and supersession IS retiring
+        # it: every reader that filters `--state live` stops seeing the old row.
+        # Without this line the retract guard below is decorative, because a
+        # session that cannot retract an operator row could still supersede it
+        # into invisibility.
+        if (
+            superseded_row is not None
+            and provenance.authority_source == "chat_attested"
+            and str(superseded_row.get("authority_source") or "") == "operator"
+        ):
+            raise RefusedAuthorityError(provenance.decided_by, origin)
 
     if _decision_lane({"authority_source": provenance.authority_source}) == "coord":
         expiry_ref = _derive_coord_expiry_ref(subject, expiry_ref)

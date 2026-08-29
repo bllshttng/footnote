@@ -257,12 +257,14 @@ def _record(
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record decisions. Decisions are operator-authored. The "
-            "operator records one from chat in a single step with "
-            "`/fno:law <the ruling>`, which lands in the law lane as "
-            "chat_attested and needs no terminal. At a terminal, "
-            "`fno inbox law set <subject> <decision> --rationale <why>` is the "
-            "same one call. "
+            "cannot record decisions HERE. The law door is open to it and "
+            "the terms are narrow, so read them before you use it: "
+            "`fno inbox law set <subject> <decision> --rationale <why>` "
+            "(the operator types `/fno:law <the ruling>` for the same "
+            "thing) records a chat_attested row, never an operator row, "
+            "and it cannot supersede the operator's own law. That door is "
+            "for a durable rule the OPERATOR asked for. It is not a way to "
+            "route your own ruling around this refusal. "
             "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,

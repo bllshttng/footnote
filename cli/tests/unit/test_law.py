@@ -274,6 +274,97 @@ def test_attended_terminal_probe_records_where_the_unmarked_process_did_not(
     assert rows[0]["data"]["authority_source"] == "operator"
 
 
+# ── a chat recording may retire its own kind, never the operator's ───────────
+
+
+def _seed_law_row(index: Path, decision_id: str, authority: str) -> None:
+    """Write one live law-lane row straight into the index the reader uses."""
+    index.write_text(
+        index.read_text()
+        + json.dumps(
+            {
+                "type": "operator_decision",
+                "ts": "2026-08-29T19:00:00+00:00",
+                "data": {
+                    "decision_id": decision_id,
+                    "subject": "x-12ba",
+                    "decision": "Merges belong to the operator",
+                    "authority_source": authority,
+                    "decided_by": "operator" if authority == "operator" else "9ede2d7b",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_chat_recording_cannot_supersede_an_operator_law_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Supersession IS retirement for every reader that filters live state.
+
+    Without this refusal the retract guard is decorative: a session that cannot
+    retract an operator row could still supersede it into invisibility.
+    """
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    _seed_law_row(index, "d-0ad0ad0a", "operator")
+    before = index.read_text()
+
+    result = _run(
+        [
+            "set",
+            "x-12ba",
+            "Merges belong to whoever asks",
+            "--rationale",
+            "why",
+            "--supersedes",
+            "d-0ad0ad0a",
+        ]
+    )
+
+    assert result.exit_code == LAW_REFUSED_EXIT, result.output
+    assert index.read_text() == before
+
+
+def test_chat_recording_can_supersede_another_chat_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The make-it-fail control, and the supersede happy path.
+
+    Same call, same session, the superseded row's authority is the only thing
+    that changed. It records and stamps `superseded_by` on the prior row. So the
+    refusal above is the operator-authority guard firing, not supersession being
+    broken outright.
+    """
+    from fno.decide import list_decisions
+
+    index = _isolate(tmp_path, monkeypatch)
+    _as_chat_session(monkeypatch)
+    _seed_law_row(index, "d-c4a7c4a7", "chat_attested")
+
+    result = _run(
+        [
+            "set",
+            "x-12ba",
+            "Merges belong to whoever asks",
+            "--rationale",
+            "why",
+            "--supersedes",
+            "d-c4a7c4a7",
+        ]
+    )
+
+    assert result.exit_code == LAW_RECORDED_EXIT, result.output
+    new_id = result.output.strip().splitlines()[-1]
+    assert new_id.startswith("d-")
+
+    _, rows, _ = list_decisions("x-12ba", limit=None, lane="law")
+    prior = next(r for r in rows if r.get("decision_id") == "d-c4a7c4a7")
+    assert prior.get("superseded_by") == new_id
+
+
 # ── authority resolution reads the session, never a caller-supplied value ─────
 
 

@@ -36,7 +36,7 @@ The command prints the `d-` id on stdout. Report that id and the subject.
 
 This store is machine-local. A stranger who clones the repository must obey some rules. Those rules do not reach that person from here. Land them in the code, a doc, or a gate, in a PR. When the operator wants the rule recalled by subject, record it here as well.
 
-Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`. So a chat-recorded law needs an attended terminal to withdraw. Supersession is not affected. It accepts `chat_attested`.
+Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`. So a chat-recorded law needs an attended terminal to withdraw. Supersession follows the same line. A chat recording can supersede another `chat_attested` row. It cannot supersede an `operator` row. Every live-state reader then stops seeing the operator's law.
 
 ## Refusals
 

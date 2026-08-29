@@ -3323,8 +3323,10 @@ def test_decide_refusal_names_the_chat_door(
 ):
     """The refusal must name a surface the refused caller can actually reach.
 
-    An agent session has no terminal, so `fno inbox law set` alone points it at a
-    door it cannot open. `/fno:law` is the one it can.
+    `/fno:law` is the spelling an operator types, and naming it is what stopped
+    the stall in specimen d-796ed205. Since the one-step collapse the agent can
+    reach `fno inbox law set` itself, so the refusal also has to state the terms
+    that door records under, which the assertions below cover.
     """
     from types import SimpleNamespace
 
