@@ -2511,7 +2511,7 @@ def join_node(node_id: str, workers: int, *, model: Optional[str] = None) -> dic
                         "verdict": "enforced",
                         "allow_write": list(pol.allow_write or ()),
                         "deny_edit": list(pol.deny_edit or ()),
-                        "sandbox": _sandbox_block(worktree, pol),
+                        "sandbox": _sandbox_block(Path(worktree), pol),
                     }
                 )
             )
