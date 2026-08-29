@@ -1180,36 +1180,58 @@ impl Drop for ResumeProgramGuard {
 }
 
 /// (x-d401) The session id a pane-run argv resumes: the token after
-/// `--resume` (claude's flag form) or `resume` (codex's subcommand form).
-/// Anchored past the `env(1)` wrapper to a `claude`/`codex` command, so an
-/// argument that merely mentions the token (`grep --resume file`) never
-/// parses as a resume target. `None` for a shell pane or a run with no
+/// The session id a pane argv is resuming, derived from the SAME declared
+/// resume form the resume spawn builds: the argv's command names a harness
+/// the capability table gives a form, the argv carries that form's literal
+/// tokens in order (extra flags tolerated between them), and the token in
+/// the `{session_id}` slot is the target. Anchored past the `env(1)`
+/// wrapper, so an argument that merely mentions the token (`grep --resume
+/// file`) never parses as a resume target, and a harness the table gives no
+/// form never parses at all. `None` for a shell pane or a run with no
 /// resume form. The row-to-pane join: `row_resume_disposition_in_session`
 /// reads it so a pane visibly running a session makes `BackendNotLive`
-/// unreachable for that session's row.
+/// unreachable for that session's row - for EVERY declared harness, not
+/// just the two this function once hardcoded.
 fn resume_target_from_argv(argv: &[String]) -> Option<String> {
     let start = env_assignments_start(argv).unwrap_or(0);
     let rest = &argv[start..];
     // The command is the first non-assignment token (same scan as
-    // `cmd_from_argv`); only the two harnesses owning a resume form parse.
+    // `cmd_from_argv`); only a harness whose declared form parses.
     let cmd_idx = rest.iter().position(|a| !a.contains('='))?;
     let base = rest[cmd_idx].rsplit('/').next().unwrap_or(&rest[cmd_idx]);
-    if base != "claude" && base != "codex" {
+    let form = declared_resume_form(base)?;
+    let placeholder = form.tokens.iter().position(|t| t == "{session_id}")?;
+    if placeholder < 2 {
+        // Without a literal anchor between the command and the id slot
+        // (`foo --resume <id>`-shaped), any first argument would read as a
+        // session id. Refusing to guess is the safe direction.
         return None;
     }
-    let tokens = &rest[cmd_idx + 1..];
-    tokens
-        .iter()
-        .position(|t| t == "--resume" || t == "resume")
-        .and_then(|i| tokens.get(i + 1))
+    // Walk the form's pre-placeholder literals against the argv in order,
+    // tolerating extra flags between them. tokens[0] is the harness command
+    // itself, already matched by `base`; when the LAST literal lands on an
+    // argv token, the next argv token sits in the placeholder slot.
+    let mut arg = cmd_idx + 1;
+    for literal in &form.tokens[1..placeholder] {
+        loop {
+            let candidate = rest.get(arg)?;
+            if candidate == literal {
+                break;
+            }
+            arg += 1;
+        }
+        arg += 1;
+    }
+    rest.get(arg)
         // A FLAG is not a session id. `codex resume --last` resumes the most
-        // recent session without naming it, so the token after `resume` is
-        // `--last` and storing it yields a join key matching no row. The junk
-        // value is harmless; the MISS is not. `pane_resumes_session` is what
-        // keeps a row non-resumable while a pane runs that session, so a pane
-        // started this way leaves its row still offered as resumable, and one
-        // tap opens a SECOND WRITER on a live rollout. That is not
-        // theoretical: it happened in this branch's own review round.
+        // recent session without naming it, so the token in the placeholder
+        // slot is `--last` and storing it yields a join key matching no row.
+        // The junk value is harmless; the MISS is not. `pane_resumes_session`
+        // is what keeps a row non-resumable while a pane runs that session,
+        // so a pane started this way leaves its row still offered as
+        // resumable, and one tap opens a SECOND WRITER on a live rollout.
+        // That is not theoretical: it happened in this branch's own review
+        // round.
         .filter(|sid| !sid.is_empty() && !sid.contains('=') && !sid.starts_with('-'))
         .cloned()
 }
@@ -6493,9 +6515,33 @@ impl Core {
     ) {
         const RESTORE_CLIENT: u64 = u64::MAX;
         let candidates = self.restore_candidates(harness.as_deref());
+        // A worker NAME the store holds more than once (distinct sessions,
+        // one display name - a supported state) refuses up front instead of
+        // reaching resume_one: the second twin would find the first one's
+        // pane through the name-only map and report "focused" while its own
+        // session was never restored.
+        let mut name_counts: HashMap<String, usize> = HashMap::new();
+        for (name, _) in &candidates {
+            *name_counts.entry(name.clone()).or_default() += 1;
+        }
         let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
         let mut rows = Vec::with_capacity(candidates.len());
         for (name, member) in candidates {
+            if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                rows.push(RestoreRow {
+                    member: name,
+                    harness: member.harness.clone(),
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(
+                        "member name is ambiguous in the store; resume by exact session id".into(),
+                    ),
+                    notice: None,
+                });
+                continue;
+            }
             let harness_name = member.harness.clone();
             // A claude member without a resolvable plan refuses here instead
             // of firing a stray off-loop resolution from the bulk path; the
@@ -20617,6 +20663,35 @@ mod tests {
             None,
             "a shell pane has no resume target"
         );
+        // The detector is the DECLARED form, not a harness-name list: every
+        // harness the table gives a form parses, so a live pane running one
+        // keeps its row non-resumable exactly as claude/codex panes do.
+        assert_eq!(
+            resume_target_from_argv(&argv(&["gemini", "--resume", "gem-1234"])),
+            Some("gem-1234".into()),
+            "a declared flag form beyond the old two parses"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["agy", "--conversation", "agy-5678"])),
+            Some("agy-5678".into()),
+            "a session_flag form parses"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["gemini", "chat", "not-a-target"])),
+            None,
+            "an argv that never walks the form's literals parses nothing"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&[
+                "env",
+                "FNO_AGENT_SELF=peer",
+                "opencode",
+                "--session",
+                "oc-90ab"
+            ])),
+            Some("oc-90ab".into()),
+            "the env(1) wrapper is skipped for every declared form"
+        );
     }
 
     #[test]
@@ -23899,6 +23974,59 @@ mod tests {
                 ServerMsg::WorkspaceRestored { .. }
             ),
             "a post-attach restore must not be refused"
+        );
+    }
+
+    #[test]
+    fn workspace_restore_refuses_duplicated_worker_names_up_front() {
+        // Two stored members may share one display name with distinct session
+        // identities (a supported store state). The bulk path refuses both by
+        // name instead of letting the second twin find the first one's pane
+        // through the name-only map and report "focused" while its own
+        // session was never restored.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-dup");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![
+                stored_worker("twin", "codex", "codex-session-one", &cwd.to_string_lossy()),
+                stored_worker("twin", "codex", "codex-session-two", &cwd.to_string_lossy()),
+            ],
+        );
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 2, "both twins report");
+        for row in &rows {
+            assert_eq!(row.outcome, "refused");
+            assert!(
+                row.reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("ambiguous")),
+                "the refusal names the ambiguity: {:?}",
+                row.reason
+            );
+        }
+        assert!(
+            core.worker_pane.is_empty(),
+            "the guard refuses before any spawn: {:?}",
+            core.worker_pane
         );
     }
 

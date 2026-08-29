@@ -10865,7 +10865,7 @@ async fn attach_and_run(
                 | ServerMsg::LayoutGrafted { .. }
                 | ServerMsg::TabLocation { .. }
                 | ServerMsg::TabClosed { .. }
-                // (v59, x-7b5e) Bulk restore answers a one-shot `fno mux
+                // (v60, x-7b5e) Bulk restore answers a one-shot `fno mux
                 // workspace restore` control connection, never an attached
                 // client.
                 | ServerMsg::WorkspaceRestored { .. },
@@ -11295,7 +11295,7 @@ async fn attach_and_run(
                     | ServerMsg::LayoutGrafted { .. }
                     | ServerMsg::TabLocation { .. }
                     | ServerMsg::TabClosed { .. }
-                    // (v59, x-7b5e) Bulk restore answers a one-shot control
+                    // (v60, x-7b5e) Bulk restore answers a one-shot control
                     // connection only.
                     | ServerMsg::WorkspaceRestored { .. }) => {}
                 Ok(ServerMsg::Copy { text }) => {

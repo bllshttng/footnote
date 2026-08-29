@@ -211,7 +211,7 @@ fn wait_for_raw_frame(
             | Ok(ServerMsg::LayoutGrafted { .. })
             | Ok(ServerMsg::TabLocation { .. })
             | Ok(ServerMsg::TabClosed { .. })
-            // (v59, x-7b5e) Bulk restore answers a one-shot control
+            // (v60, x-7b5e) Bulk restore answers a one-shot control
             // connection, never the spine's attached client.
             | Ok(ServerMsg::WorkspaceRestored { .. }) => {}
             Ok(ServerMsg::Bye { reason }) => panic!("unexpected Bye: {reason}"),

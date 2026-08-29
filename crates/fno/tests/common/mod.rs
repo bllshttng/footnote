@@ -856,7 +856,7 @@ impl FakeClient {
             | ServerMsg::LayoutGrafted { .. }
             | ServerMsg::TabLocation { .. }
             | ServerMsg::TabClosed { .. }
-            // (v59, x-7b5e) Bulk restore answers a one-shot control
+            // (v60, x-7b5e) Bulk restore answers a one-shot control
             // connection, never an attached client.
             | ServerMsg::WorkspaceRestored { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
