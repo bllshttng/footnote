@@ -219,6 +219,10 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `status_fanout.retries` | int | `2` | advanced | Retry budget per webhook dispatch before drop/short-circuit. |
 | `king.enabled` | bool | `false` | advanced | Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false. |
 | `king.autonomous_merge` | bool | `false` | advanced | Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work. |
+| `king.wake_enabled` | bool | `false` | advanced | Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false. |
+| `king.wake_ceiling` | int | `32` | advanced | Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived reign. |
+| `king.wake_debounce_seconds` | int | `900` | advanced | Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm. |
+| `king.wake_backstop_seconds` | int | `1800` | advanced | Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement. |
 | `accounts.active` | str (optional) | _(none)_ | never | Name of the account record currently active for provider rotation. |
 | `accounts.auto_switch` | bool | `false` | never | Swap to a failover account automatically when the active one is locked out. |
 | `accounts.active_combo` | str (optional) | _(none)_ | never | Name of the combo currently driving provider rotation. |
