@@ -183,3 +183,108 @@ def test_rust_probe_budget_exceeds_the_python_measurement_budget():
         f"budget {python_budget}s, or the Rust gate refuses on a loaded box "
         f"where the Python gate admits"
     )
+
+
+class TestReviewRoundOne:
+    """The findings from the self-review of this branch, each pinned.
+
+    Every one is a way the gate could still lie or disagree with its twin,
+    which is the defect class the branch exists to remove.
+    """
+
+    def test_attribution_is_prefetched_outside_the_gate_mutex(self, monkeypatch):
+        """The expensive read must not happen while the gate mutex is held.
+
+        The reading is a `ps` snapshot behind a multi-second deadline, and the
+        mutex serializes every spawner on the machine. Holding it across that
+        read punishes concurrent `--no-wait` spawners with
+        `no_wait_mutex_held` for no reason of their own, and it does so
+        exactly on a loaded box, which is when contention is worst.
+        """
+        _load(monkeypatch, 127.6)
+
+        def boom():
+            raise AssertionError("took its own reading despite a prefetched one")
+
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", boom)
+        # A prefetched reading is used as-is; nothing is read here.
+        _check(prefetched=(0.79, 12.0))
+
+        with pytest.raises(spawn_gate.GateRefused):
+            _check(prefetched=(9.0, 12.0))
+
+    def test_prefetch_only_reads_inside_the_deciding_band(self, monkeypatch):
+        """Below the trigger and above the backstop, the verdict needs no read."""
+        calls = []
+        monkeypatch.setattr(
+            spawn_gate, "_fleet_cpu_reading", lambda: calls.append(1) or (0.1, 12.0)
+        )
+
+        _load(monkeypatch, 24.0)  # under the trigger: admits without asking
+        assert spawn_gate._prefetch_fleet_reading(TRIGGER, HARD) is spawn_gate._NOT_PREFETCHED
+
+        _load(monkeypatch, 600.0)  # over the backstop: refuses without asking
+        assert spawn_gate._prefetch_fleet_reading(TRIGGER, HARD) is spawn_gate._NOT_PREFETCHED
+
+        assert calls == [], "read attribution outside the band where it decides"
+
+        _load(monkeypatch, 127.6)  # in the band: the read is what decides
+        assert spawn_gate._prefetch_fleet_reading(TRIGGER, HARD) == (0.1, 12.0)
+        assert calls == [1]
+
+    def test_unreadable_prefetch_is_not_confused_with_no_prefetch(self, monkeypatch):
+        """`None` is a real reading and must still fail closed.
+
+        The sentinel exists because "unreadable" and "not supplied" are
+        different, and collapsing them would silently turn a failed read into
+        a fresh one inside the mutex.
+        """
+        _load(monkeypatch, 127.6)
+        monkeypatch.setattr(
+            spawn_gate,
+            "_fleet_cpu_reading",
+            lambda: pytest.fail("re-read a reading that was already taken"),
+        )
+        with pytest.raises(spawn_gate.GateRefused):
+            _check(prefetched=None)
+
+    def test_backstop_at_or_below_the_trigger_restores_the_defaults(self):
+        """One config line must not silently restore the old defect.
+
+        A backstop at or below the trigger means every load that would have
+        been attributed is refused blindly instead. Four docstrings said so
+        and nothing enforced it.
+        """
+        from fno.config import AgentsBlock
+
+        for trigger, hard in ((2.5, 2.5), (50.0, 40.0), (8.0, 4.0)):
+            a = AgentsBlock(max_load_per_cpu=trigger, hard_max_load_per_cpu=hard)
+            assert (a.max_load_per_cpu, a.hard_max_load_per_cpu) == (8.0, 40.0)
+
+        # A disabled backstop is coherent, not incoherent: the governor is
+        # then the only ceiling, which is a choice an operator can make.
+        off = AgentsBlock(max_load_per_cpu=8.0, hard_max_load_per_cpu=0)
+        assert (off.max_load_per_cpu, off.hard_max_load_per_cpu) == (8.0, 0.0)
+
+        ok = AgentsBlock(max_load_per_cpu=1.0, hard_max_load_per_cpu=2.0)
+        assert (ok.max_load_per_cpu, ok.hard_max_load_per_cpu) == (1.0, 2.0)
+
+    def test_non_finite_never_disarms_a_machine_guard(self):
+        """`nan` loses every comparison and `inf` wins every one.
+
+        Either way the ceiling stops refusing while still reading as
+        configured, which is worse than a value that is merely wrong. All
+        four sibling knobs shared the hole, so all four are checked.
+        """
+        from fno.config import AgentsBlock
+
+        fields = {
+            "min_free_gb": 4.0,
+            "max_load_per_cpu": 8.0,
+            "max_fleet_cpu_share": 0.5,
+            "hard_max_load_per_cpu": 40.0,
+        }
+        for name, default in fields.items():
+            for bad in ("nan", "inf", "-inf", "NaN", float("nan"), float("inf")):
+                got = getattr(AgentsBlock(**{name: bad}), name)
+                assert got == default, f"{name}={bad!r} coerced to {got}, not {default}"

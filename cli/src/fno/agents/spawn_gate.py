@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Optional
+from typing import Any, Literal, NoReturn, Optional, cast
 from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
@@ -1048,10 +1048,90 @@ def _refusal_with_cause_stated() -> GateRefused:
     return refusal
 
 
+#: `_check_load_ceiling` takes its own attribution reading when the caller
+#: has not already taken one. `None` is a real reading ("unreadable"), so the
+#: "not supplied" case needs a value that cannot be confused with it.
+_NOT_PREFETCHED: object = object()
+
+
+def _load_cpus() -> int:
+    """The CPU denominator for the trigger and the backstop.
+
+    Footprint's capacity reading, which is the minimum of the affinity count,
+    the host count and the cgroup quota. Two reasons it is worth the import
+    over a bare `process_cpu_count`:
+
+    the Rust gate uses `available_parallelism`, which IS quota-aware, so an
+    affinity-only count here made the two runtimes compute different triggers
+    from one config on a quota-constrained container (2-of-32 cores gives 16
+    against 256);
+
+    and the share comparison already divides by this exact number, so a
+    different denominator for the trigger meant one check answering a
+    question the other was not asking.
+
+    It reads affinity and a cgroup file, never `ps`, so the cheap path stays
+    cheap. Falls back rather than raising: a guard must not brick the spawn
+    primitive because an import moved.
+    """
+    try:
+        from fno.doctor_footprint import _cpu_capacity_cores
+
+        return int(_cpu_capacity_cores()) or 1
+    except Exception:
+        return getattr(os, "process_cpu_count", os.cpu_count)() or 1
+
+
+def _needs_attribution(
+    load1: float, cpus: int, max_load_per_cpu: float, hard_max_load_per_cpu: float
+) -> bool:
+    """True only in the band where the verdict depends on WHOSE CPU it is.
+
+    Below the trigger the gate admits without asking, and above the backstop
+    it refuses without asking. Only between them does attribution decide, and
+    only there is the expensive read worth taking.
+    """
+    if max_load_per_cpu <= 0:
+        return False
+    if load1 <= max_load_per_cpu * cpus:
+        return False
+    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
+        return False
+    return True
+
+
+def _prefetch_fleet_reading(
+    max_load_per_cpu: float, hard_max_load_per_cpu: float
+) -> object:
+    """Take the attribution reading OUTSIDE the gate mutex, when needed at all.
+
+    The reading is a `ps` snapshot behind a multi-second deadline, and the gate
+    mutex serializes every spawner on the machine. Taking it inside the lock
+    made a loaded box hold the mutex for seconds, which is exactly when
+    contention is worst: concurrent `--no-wait` spawners then refuse with
+    `no_wait_mutex_held` for no reason of their own. The measurement is
+    identical outside the lock, and it is a SAMPLE either way; the RAM floor
+    re-reads on dequeue for the same reason.
+
+    Returns `_NOT_PREFETCHED` when the band does not need attribution, so the
+    caller stays free to decide from load alone.
+    """
+    try:
+        load1 = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return _NOT_PREFETCHED
+    if not _needs_attribution(
+        load1, _load_cpus(), max_load_per_cpu, hard_max_load_per_cpu
+    ):
+        return _NOT_PREFETCHED
+    return _fleet_cpu_reading()
+
+
 def _check_load_ceiling(
     max_load_per_cpu: float,
     max_fleet_cpu_share: float = 0.5,
     hard_max_load_per_cpu: float = 40.0,
+    prefetched: object = _NOT_PREFETCHED,
 ) -> None:
     """Refuse (never queue) when the FLEET is the reason the box is loaded.
 
@@ -1093,10 +1173,7 @@ def _check_load_ceiling(
         # at all (the Rust gate cfg-guards the same case).
         _warn("spawn-gate: could not read load average; skipping the load check")
         return
-    # Affinity/cgroup-aware where available (mirrors the Rust gate's
-    # available_parallelism, so the two gates compute the same ceiling on a
-    # constrained host instead of a 4x disagreement).
-    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    cpus = _load_cpus()
     trigger = max_load_per_cpu * cpus
     if load1 <= trigger:
         return
@@ -1110,7 +1187,13 @@ def _check_load_ceiling(
         )
         raise GateRefused(EXIT_LOAD_REFUSED)
 
-    reading = _fleet_cpu_reading()
+    # run_gate prefetches this outside the gate mutex; a direct caller (and
+    # every unit test) still gets the read on demand.
+    reading = (
+        _fleet_cpu_reading()
+        if prefetched is _NOT_PREFETCHED
+        else cast("Optional[tuple[float, float]]", prefetched)
+    )
     if reading is None:
         _warn(
             f"spawn-gate: 1-min load {load1:.1f} is over the "
@@ -1326,6 +1409,12 @@ def run_gate(
     mutex_blocked_since: Optional[float] = None
 
     while True:
+        # Before the mutex, never inside it: this can cost seconds and the
+        # mutex serializes every spawner on the machine. Re-taken each pass so
+        # a spawn that queued does not decide on a reading from minutes ago.
+        prefetched_fleet = _prefetch_fleet_reading(
+            max_load_per_cpu, hard_max_load_per_cpu
+        )
         try:
             acquired = (
                 _acquire_gate_mutex(holder, fail_closed=True)
@@ -1434,6 +1523,7 @@ def run_gate(
                         max_load_per_cpu,
                         max_fleet_cpu_share,
                         hard_max_load_per_cpu,
+                        prefetched=prefetched_fleet,
                     )
                 except GateRefused as refusal:
                     # The refusal is decided; release the mutex BEFORE the
