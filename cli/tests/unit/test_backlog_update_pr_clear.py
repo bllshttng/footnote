@@ -520,3 +520,120 @@ def test_blueprint_stamp_does_not_refire_on_a_rebind(tmp_graph, monkeypatch, tmp
 
     assert result.exit_code == 0, result.output
     assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
+
+
+# ---- x-43e4: a cwd-derived url is a guess; it never overrides recorded
+# truth silently, and --repo turns the stamp into an assertion ----
+
+
+def test_derived_stamp_refused_when_it_contradicts_the_recorded_repo(tmp_graph, monkeypatch):
+    """The x-5764 shape: the node's PR lives in another repo, the cwd
+    derivation names the wrong one, and PR numbers collide across repos - so
+    the guess would hand reconcile merge evidence for an unrelated PR. The
+    refusal names both repos and the assertion flag, and the graph is left
+    untouched."""
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/wrong/repo/pull/{pr}"
+    )
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "pr_number": 5, "pr_url": "https://github.com/real/repo/pull/5",
+    }])
+
+    result = runner.invoke(app, ["backlog", "update", "ab-00000001", "--pr-number", "911"])
+
+    assert result.exit_code != 0
+    assert "wrong/repo" in result.output and "real/repo" in result.output
+    assert "--repo" in result.output
+    node = _first(tmp_graph)
+    assert node["pr_url"] == "https://github.com/real/repo/pull/5"
+    assert node["pr_number"] == 5
+
+
+def test_named_repo_overrides_a_disagreeing_recorded_url(tmp_graph, monkeypatch):
+    """The repair flow: an asserted --repo may re-point a node whose recorded
+    pr_url names a different repo. Refusing guesses is only safe because this
+    assertion path exists (the x-5764 repair needed locked_mutate_graph)."""
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/wrong/repo/pull/{pr}"
+    )
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "pr_number": 5, "pr_url": "https://github.com/real/repo/pull/5",
+    }])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-number", "911", "--repo", "other/repo",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "stamped --repo other/repo" in result.output
+    node = _first(tmp_graph)
+    assert node["pr_url"] == "https://github.com/other/repo/pull/911"
+    assert node["pr_number"] == 911
+
+
+def test_first_derived_stamp_discloses_the_derived_url_by_name(tmp_graph, monkeypatch):
+    """A first stamp cannot contradict recorded truth (there is none), so it
+    proceeds - but the guess is disclosed by name on every derivation."""
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/guess/repo/pull/{pr}"
+    )
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, ["backlog", "update", "ab-00000001", "--pr-number", "77"])
+
+    assert result.exit_code == 0, result.output
+    assert "derived --pr-url https://github.com/guess/repo/pull/77" in result.output
+    assert _first(tmp_graph)["pr_url"] == "https://github.com/guess/repo/pull/77"
+
+
+def test_repo_flag_rejects_a_non_slug(tmp_graph):
+    """A malformed --repo must refuse naming the value, never build a url
+    repo_slug_from_url cannot round-trip."""
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-number", "911", "--repo", "noslash",
+    ])
+
+    assert result.exit_code != 0
+    assert "noslash" in result.output
+    assert _first(tmp_graph).get("pr_number") is None
+
+
+def test_repo_and_pr_url_together_are_refused(tmp_graph):
+    """Both flags answer 'which repo'; picking one silently would turn a
+    stated assertion back into a guess picker."""
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--pr-number", "911",
+        "--repo", "a/b", "--pr-url", "https://github.com/c/d/pull/911",
+    ])
+
+    assert result.exit_code != 0
+    assert _first(tmp_graph).get("pr_url") is None
+
+
+def test_add_pr_cross_repo_derivation_is_not_refused(tmp_graph, monkeypatch):
+    """additional_prs are cross-repo by design (a multi-repo feature ships a
+    PR per repo), so the disagree guard must not fire on --add-pr."""
+    import fno.graph._reconcile as rec
+    monkeypatch.setattr(
+        rec, "pr_url_for_repo", lambda pr, cwd=None: f"https://github.com/wrong/repo/pull/{pr}"
+    )
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "pr_number": 5, "pr_url": "https://github.com/real/repo/pull/5",
+    }])
+
+    result = runner.invoke(app, ["backlog", "update", "ab-00000001", "--add-pr", "88"])
+
+    assert result.exit_code == 0, result.output
+    assert _first(tmp_graph)["additional_prs"] == [
+        {"number": 88, "url": "https://github.com/wrong/repo/pull/88"}
+    ]

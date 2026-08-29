@@ -154,6 +154,20 @@ def pr_url_from_slug(slug: str, pr: int) -> str:
     return f"https://github.com/{slug}/pull/{pr}"
 
 
+_REPO_SLUG_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+
+
+def is_repo_slug(value: str) -> bool:
+    """True for a bare ``owner/repo`` slug, the shape ``--repo`` accepts.
+
+    ``repo_slug_from_url`` answers a different question (it parses a full PR
+    url), so a caller letting the operator NAME a repo needs its own shape
+    check: a url, a bare repo name, or a slug with a third segment must refuse
+    rather than build a url ``repo_slug_from_url`` cannot round-trip.
+    """
+    return bool(_REPO_SLUG_RE.match((value or "").strip()))
+
+
 def pr_url_for_repo(
     pr: int,
     cwd: Optional[str] = None,

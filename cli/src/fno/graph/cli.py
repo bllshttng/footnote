@@ -3368,6 +3368,16 @@ def cmd_update(
     ),
     pr_number: Optional[str] = typer.Option(None, "--pr-number", help="PR number. 'null' clears."),
     pr_url: Optional[str] = typer.Option(None, "--pr-url", help="PR URL. 'null' clears."),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help=(
+            "owner/name of the repo the PR lives in, when that differs from the "
+            "cwd checkout. A cwd-derived url is a guess; naming the repo makes "
+            "the stamp an assertion, which is also what lets it override a "
+            "recorded pr_url that names a different repo (x-43e4)."
+        ),
+    ),
     priority: Optional[str] = typer.Option(None, "--priority", "-p", help="New priority"),
     blocks_everything: bool = typer.Option(
         False, "--blocks-everything", help="Acknowledge that p0 blocks all downstream work."
@@ -3655,8 +3665,10 @@ def cmd_update(
     # number can attribute a foreign PR. Resolve here (subprocess I/O stays out
     # of the graph lock) and fail closed when the repo will not resolve.
     from fno.graph._reconcile import (
+        is_repo_slug,
         pr_number_from_url,
         pr_url_for_repo,
+        pr_url_from_slug,
         repo_slug_from_url,
     )
 
@@ -3675,7 +3687,19 @@ def cmd_update(
         typer.echo(f"Error: {msg}", err=True)
         raise typer.Exit(code=2)
 
-    def _resolve_or_refuse(number: int, label: str) -> str:
+    def _resolve_or_refuse(number: int, label: str, *, primary: bool = False) -> str:
+        # A named --repo is an assertion: build the url from it and say so. It
+        # is the one legal way to override a recorded pr_url that names another
+        # repo (the x-5764 repair shape), so it applies before any derivation.
+        if repo is not None:
+            if not is_repo_slug(repo):
+                _refuse(
+                    f"--repo {repo!r} is not an owner/name slug "
+                    "(expected <owner>/<repo>, e.g. bllshttng/footnote)"
+                )
+            url = pr_url_from_slug(repo.strip(), number)
+            typer.echo(f"note: stamped --repo {repo.strip()} {url}", err=True)
+            return url
         slug_cwd = derived_cwd_for_update or cwd or _node_before_update().get("cwd")
         url = pr_url_for_repo(number, slug_cwd)
         if url is None:
@@ -3684,6 +3708,23 @@ def cmd_update(
                 "unattributable pr_number. Fix with either `gh auth login` or "
                 f"`{label} https://github.com/<owner>/<repo>/pull/{number}`."
             )
+        # A cwd-derived url is a guess. On the primary PR ref it must not
+        # overwrite recorded truth that names a different repo: PR numbers
+        # collide across repos, so the guess would hand reconcile merge
+        # evidence for an unrelated PR (x-43e4). Name the repo to assert the
+        # move; --add-pr is exempt because additional_prs are cross-repo by
+        # design (multi-repo features ship a PR per repo).
+        if primary:
+            recorded = repo_slug_from_url(_node_before_update().get("pr_url"))
+            derived = repo_slug_from_url(url)
+            if recorded and derived and recorded.lower() != derived.lower():
+                _refuse(
+                    f"derived {label} {url} names repo {derived}, but this node's "
+                    f"recorded pr_url names {recorded} - refusing to re-stamp a "
+                    "cross-repo move on a cwd derivation. Assert it with "
+                    f"--repo {derived} (or a full {label} url), or clear the link "
+                    "with --pr-number null first."
+                )
         typer.echo(f"note: derived {label} {url}", err=True)
         return url  # type: ignore[return-value]
 
@@ -3702,6 +3743,14 @@ def cmd_update(
 
     clearing_number = pr_number is not None and pr_number.lower() == "null"
     clearing_url = pr_url is not None and pr_url.lower() == "null"
+
+    # --repo and an explicit url both answer "which repo"; taking one silently
+    # over the other would turn a stated assertion back into a guess picker.
+    if repo is not None:
+        if pr_url is not None and not clearing_url:
+            _refuse("--repo and --pr-url both name a repo; pass one, not both")
+        if add_pr_url is not None:
+            _refuse("--repo and --add-pr-url both name a repo; pass one, not both")
 
     # Shape-check any url the caller supplies, on every path: an unparseable
     # url carries no repo slug, so it is url-less in every way that matters.
@@ -3731,7 +3780,7 @@ def cmd_update(
                 "url-less pr_number. Clear both, or supply a url."
             )
         if pr_url is None:
-            derived_pr_url = _resolve_or_refuse(int(pr_number), "--pr-url")
+            derived_pr_url = _resolve_or_refuse(int(pr_number), "--pr-url", primary=True)
     elif clearing_url and not clearing_number and _node_before_update().get("pr_number"):
         # Clearing the url alone strands the pr_number the node already carries.
         _refuse(
@@ -9593,6 +9642,16 @@ def cmd_done(
         "--pr-url",
         help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
     ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help=(
+            "owner/name of the repo the PR lives in, when that differs from the "
+            "cwd checkout. Naming the repo makes the stamp an assertion rather "
+            "than a cwd derivation, which is also what lets it override a "
+            "recorded pr_url naming a different repo (x-43e4)."
+        ),
+    ),
     link: Optional[str] = typer.Option(
         None,
         "--link",
@@ -9661,6 +9720,7 @@ def cmd_done(
         or force_overwrite
         or pr is not None
         or pr_url is not None
+        or repo is not None
         or link is not None
         or note is not None
     )
@@ -9720,6 +9780,7 @@ def cmd_done(
             query=task_id,
             pr=pr,
             pr_url=pr_url,
+            repo=repo,
             link=link,
             note=note,
             backfill=backfill,

@@ -48,9 +48,11 @@ from fno.events import (
     ValidationError as _ValidationError,
 )
 from fno.graph._reconcile import (
+    is_repo_slug,
     node_pr_refs,
     pr_number_from_url,
     pr_url_for_repo,
+    pr_url_from_slug,
     query_pr_merge_state,
     repo_slug_from_url,
     render_merge_evidence_failure,
@@ -385,6 +387,16 @@ def done_command(
         "--pr-url",
         help="PR URL. Derived from the repo when omitted; supply it when the repo slug cannot be resolved.",
     ),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help=(
+            "owner/name of the repo the PR lives in, when that differs from the "
+            "cwd checkout. Naming the repo makes the stamp an assertion rather "
+            "than a cwd derivation, which is also what lets it override a "
+            "recorded pr_url naming a different repo (x-43e4)."
+        ),
+    ),
     link: Optional[str] = typer.Option(
         None,
         "--link",
@@ -679,6 +691,19 @@ def done_command(
     # I/O stays out of the graph lock.
     pr_url_to_write: Optional[str] = None
     if pr is not None:
+        if pr_url is not None and repo is not None:
+            typer.echo(
+                "fno backlog done: --repo and --pr-url both name a repo; pass one, not both",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if repo is not None and not is_repo_slug(repo):
+            typer.echo(
+                f"fno backlog done: --repo {repo!r} is not an owner/name slug "
+                "(expected <owner>/<repo>, e.g. bllshttng/footnote)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         if pr_url is not None:
             if repo_slug_from_url(pr_url) is None:
                 typer.echo(
@@ -696,8 +721,35 @@ def done_command(
                 )
                 raise typer.Exit(code=2)
             pr_url_to_write = pr_url
+        elif repo is not None:
+            # A named repo is an assertion: it outranks the current-branch
+            # lookup (itself a cwd-shaped guess when the PR lives elsewhere)
+            # and may override a recorded pr_url naming another repo.
+            pr_url_to_write = pr_url_from_slug(repo.strip(), pr)
+            typer.echo(
+                f"note: stamped --repo {repo.strip()} {pr_url_to_write}", err=True
+            )
+        elif auto_url:
+            pr_url_to_write = auto_url
         else:
-            pr_url_to_write = auto_url or pr_url_for_repo(pr, node.get("cwd"))
+            pr_url_to_write = pr_url_for_repo(pr, node.get("cwd"))
+            # The cwd derivation is a guess; on a node whose recorded pr_url
+            # names another repo it would re-stamp a cross-repo move silently
+            # and PR numbers collide across repos (x-43e4). Refuse the guess,
+            # keep the assertion path open.
+            if pr_url_to_write is not None:
+                recorded = repo_slug_from_url(node.get("pr_url"))
+                derived = repo_slug_from_url(pr_url_to_write)
+                if recorded and derived and recorded.lower() != derived.lower():
+                    typer.echo(
+                        f"fno backlog done: derived {pr_url_to_write} names repo "
+                        f"{derived}, but this node's recorded pr_url names "
+                        f"{recorded} - refusing to re-stamp a cross-repo move on "
+                        f"a cwd derivation. Assert it with --repo {derived} (or "
+                        "a full --pr-url url).",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
         # Fail closed: a url-less pr_number names no repo, and PR numbers
         # collide across repos, so a bare number can attribute a foreign PR.
         if pr_url_to_write is None:
@@ -877,6 +929,11 @@ def _cli_callback(
     query: Optional[str] = typer.Argument(None),
     pr: Optional[int] = typer.Option(None, "--pr-number", "--pr", "-p"),
     pr_url: Optional[str] = typer.Option(None, "--pr-url"),
+    repo: Optional[str] = typer.Option(
+        None,
+        "--repo",
+        help="owner/name of the repo the PR lives in, when it differs from the cwd checkout.",
+    ),
     link: Optional[str] = typer.Option(None, "--link", "--url", "-l"),
     note: Optional[str] = typer.Option(None, "--note", "-m"),
     backfill: bool = typer.Option(False, "--backfill"),
@@ -892,6 +949,7 @@ def _cli_callback(
         query=query,
         pr=pr,
         pr_url=pr_url,
+        repo=repo,
         link=link,
         note=note,
         backfill=backfill,
