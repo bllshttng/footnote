@@ -759,8 +759,10 @@ def tick() -> None:
         set_tick_phase("king_wake")
         # The guard is the first statement, before the import: this module is
         # on the launchd hot path and the wake phase pulls the bus and the
-        # harness layer, which an unarmed tick must not pay for.
-        if getattr(settings.king, "wake_enabled", False):
+        # harness layer, which an unarmed tick must not pay for. The double
+        # getattr matches the phase's own read: a settings stub with no king
+        # block at all (the tick's test harnesses) must read as unarmed.
+        if getattr(getattr(settings, "king", None), "wake_enabled", False):
             try:
                 from fno.pr_watch._king_wake import run_king_wake
 
