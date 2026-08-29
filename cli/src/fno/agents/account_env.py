@@ -103,8 +103,7 @@ SECRET_ROUTE_VARS = (
 # entry is enough to name the axis. Footnote reads it in three resolvers --
 # the home-anchored state root in fno.paths (locks dir, agents dir, and
 # state_dir's expanduser), `$HOME/.fno/agents` (crates/fno-agents/src/paths.rs),
-# and
-# `$FNO_CLAIMS_ROOT, else $HOME` (crates/fno-agents/src/claims.rs) -- while a
+# and `$FNO_CLAIMS_ROOT, else $HOME` (crates/fno-agents/src/claims.rs). Meanwhile a
 # non-claude oauth_dir record's overlay is exactly `{HOME: <account_dir>/home}`
 # (adapters/providers/dispatch.py `_env_for_oauth`). A wrapper handed that
 # overlay writes its registry row, its claim and its events into the account's
