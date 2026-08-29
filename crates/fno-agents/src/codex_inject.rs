@@ -333,18 +333,31 @@ async fn connect_app_server_unbounded(
 ) -> Result<(AppServerSink, AppServerStream), &'static str> {
     let conn = UnixStream::connect(socket_path)
         .await
-        .map_err(|_| "connect-failed")?;
+        .map_err(|error| connect_refused_reason(&error))?;
     let ws = tokio_tungstenite::client_async("ws://localhost/rpc", conn)
         .await
         .map_err(|_| "handshake-failed")?;
     let (mut sink, mut stream) = ws.0.split();
     sink.send(Message::Text(initialize_request_json().into()))
         .await
-        .map_err(|_| "send-failed")?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
+        .map_err(|_| "io-error")?;
+    // The id-matched frame is not automatically a successful handshake. A
+    // daemon that refuses `initialize` (protocol or version skew) answers with
+    // an `error` on the same id, and treating the id match as success is worse
+    // than a bad message: `probe_codex_app_server` runs this same helper, so
+    // the refusing daemon would report healthy, never be rebooted, and every
+    // later call would fail naming something else.
+    let response = read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    if serde_json::from_str::<serde_json::Value>(&response)
+        .ok()
+        .and_then(|frame| frame.get("error").cloned())
+        .is_some_and(|error| !error.is_null())
+    {
+        return Err("initialize-refused");
+    }
     sink.send(Message::Text(initialized_notification_json().into()))
         .await
-        .map_err(|_| "send-failed")?;
+        .map_err(|_| "io-error")?;
     Ok((sink, stream))
 }
 
@@ -572,21 +585,8 @@ async fn review_start_round_trip(
     delivery: ReviewDelivery,
     request_in_flight: &mut bool,
 ) -> Result<(String, String), ReviewStartError> {
-    let conn = UnixStream::connect(sock)
-        .await
-        .map_err(|e| ReviewStartError::Reason(connect_refused_reason(&e)))?;
-    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
-        Ok((ws, _resp)) => ws,
-        Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
-    };
-    let (mut sink, mut stream) = ws.split();
-    sink.send(Message::Text(initialize_request_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
-    sink.send(Message::Text(initialized_notification_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
+    let (mut sink, mut stream) =
+        connect_app_server(sock).await.map_err(ReviewStartError::Reason)?;
     *request_in_flight = true;
     sink.send(Message::Text(
         review_start_request_json(thread_id, target, delivery).into(),
@@ -1254,23 +1254,8 @@ pub async fn run_loaded_thread_discovery() -> i32 {
 /// The connect + initialize handshake + `turn/start` round-trip. Split out so
 /// [`deliver_via_codex_daemon`] can wrap it in a total timeout.
 async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewStartError> {
-    let conn = UnixStream::connect(sock)
-        .await
-        .map_err(|e| ReviewStartError::Reason(connect_refused_reason(&e)))?;
-    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
-        Ok((ws, _resp)) => ws,
-        Err(_) => return Err(ReviewStartError::Reason("handshake-failed")),
-    };
-    let (mut sink, mut stream) = ws.split();
-
-    sink.send(Message::Text(initialize_request_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
-
-    sink.send(Message::Text(initialized_notification_json().into()))
-        .await
-        .map_err(|_| ReviewStartError::Reason("io-error"))?;
+    let (mut sink, mut stream) =
+        connect_app_server(sock).await.map_err(ReviewStartError::Reason)?;
 
     sink.send(Message::Text(
         turn_start_request_json(thread_id, text).into(),
@@ -1282,22 +1267,7 @@ async fn inject(sock: &Path, thread_id: &str, text: &str) -> Result<(), ReviewSt
 }
 
 async fn discover(sock: &Path) -> Result<Vec<LoadedThread>, &'static str> {
-    let conn = UnixStream::connect(sock)
-        .await
-        .map_err(|e| connect_refused_reason(&e))?;
-    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
-        Ok((ws, _resp)) => ws,
-        Err(_) => return Err("handshake-failed"),
-    };
-    let (mut sink, mut stream) = ws.split();
-
-    sink.send(Message::Text(initialize_request_json().into()))
-        .await
-        .map_err(|_| "io-error")?;
-    read_until_id(&mut stream, &serde_json::json!("init")).await?;
-    sink.send(Message::Text(initialized_notification_json().into()))
-        .await
-        .map_err(|_| "io-error")?;
+    let (mut sink, mut stream) = connect_app_server(sock).await?;
 
     let mut ids = Vec::new();
     let mut seen_ids = HashSet::new();
@@ -1872,6 +1842,35 @@ mod tests {
     fn classify_delivered_on_result_turn_id() {
         let raw = r#"{"id":1,"result":{"turn":{"id":"turn-abc","status":"inProgress"}}}"#;
         assert_eq!(classify_turn_start_response(raw), Ok(()));
+    }
+
+    /// AC8 (x-296f defect 2): a daemon that REFUSES `initialize` must not read
+    /// healthy. The id-matched frame is not automatically a successful
+    /// handshake: protocol or version skew answers with an `error` on the same
+    /// id, and the discarded response let `probe_codex_app_server` report
+    /// HEALTHY, `ensure_codex_daemon` never reboot it, and every later call
+    /// fail naming something else. Positive markers: the helper names the
+    /// refusal (`initialize-refused`, not just any error), and the probe reads
+    /// unhealthy against the same socket.
+    #[tokio::test]
+    async fn an_initialize_error_frame_reads_unhealthy_naming_the_refusal() {
+        let _guard = crate::PATH_TEST_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let daemon = crate::codex_fake_daemon::FakeDaemon::start(
+            crate::codex_fake_daemon::Behavior::quick().with_refused_initialize(),
+        );
+
+        let reason = connect_app_server(&daemon.socket_path()).await.err();
+        assert_eq!(
+            reason,
+            Some("initialize-refused"),
+            "the helper must name the refusal, not lose it in a generic error"
+        );
+        assert!(
+            !probe_codex_app_server(&daemon.socket_path()),
+            "a daemon that refuses initialize is not healthy"
+        );
     }
 
     #[test]

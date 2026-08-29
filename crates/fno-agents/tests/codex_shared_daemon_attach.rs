@@ -172,8 +172,9 @@ async fn a_missing_control_socket_fails_the_same_way_for_both_callers() {
     let absent = Path::new("/tmp/x6678-no-such-app-server-control.sock");
     assert_eq!(
         connect_app_server(absent).await.err(),
-        Some("connect-failed"),
-        "the driver's connect must name the missing socket"
+        Some("no-daemon"),
+        "the driver's connect must name the missing socket with the same \
+         token every other call site reports"
     );
     assert!(
         !probe_codex_app_server(absent),

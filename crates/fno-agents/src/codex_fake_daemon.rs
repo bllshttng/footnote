@@ -65,6 +65,11 @@ pub struct Behavior {
     /// Emit a `turn/completed` for a turn NOBODY drives, this far into a turn.
     /// The stray-completion wedge.
     pub stray_completion_after: Option<Duration>,
+    /// Answer `initialize` with an `error` frame on the matching id: the
+    /// protocol/version skew shape a refusing real daemon produces
+    /// (codex offered 0.149.1 to 0.150.1 on the machine x-296f was measured
+    /// on). A client that treats the id match as success reads HEALTHY here.
+    pub refuse_initialize: bool,
     /// Every request frame this fake received, in arrival order.
     ///
     /// The fake models no sandbox and deliberately never will: whether the
@@ -85,6 +90,7 @@ impl Default for Behavior {
             interrupt: Interrupt::Refuse,
             event_frames: 0,
             stray_completion_after: None,
+            refuse_initialize: false,
             received: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -135,6 +141,11 @@ impl Behavior {
 
     pub fn with_stray_completion_after(mut self, after: Duration) -> Self {
         self.stray_completion_after = Some(after);
+        self
+    }
+
+    pub fn with_refused_initialize(mut self) -> Self {
+        self.refuse_initialize = true;
         self
     }
 }
@@ -309,6 +320,9 @@ async fn serve(conn: UnixStream, behavior: Behavior) {
         }
         let id = msg.get("id").cloned().unwrap_or(Value::Null);
         let reply = match msg.get("method").and_then(Value::as_str) {
+            Some("initialize") if behavior.refuse_initialize => json!({"id": id, "error": {
+                "message": "initialize refused: client protocol newer than daemon"
+            }}),
             Some("initialize") => json!({"id": id, "result": {}}),
             Some("initialized") => continue,
             Some("thread/start") | Some("thread/resume") => json!({"id": id, "result": {
