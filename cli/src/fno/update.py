@@ -451,17 +451,15 @@ def _live_mux_sessions(
 def stale_mux_servers(
     runner: "Callable[..., subprocess.CompletedProcess[str]]" = subprocess.run,
 ) -> list[str]:
-    """Live mux sessions on a STALE WIRE VERSION: the running server predates the
-    installed binary's ``PROTO_VERSION``, so a new client's handshake is rejected
-    and the server is already unreachable (the fix is `fno agents restart`, which now
-    auto-cuts these over). The precise signal is the ``stale`` field
+    """Live mux sessions on a wire below the compatibility floor. The precise signal is the ``stale`` field
     ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85); a
     pre-sidecar server has no ``.ver`` and reads as stale, so the check works
     across the very upgrade that introduces it. This replaces the old
     ``socket mtime < binary mtime`` heuristic, which flagged EVERY server after
     any reinstall (a wire-agnostic false alarm). Best-effort and advisory: any
     missing binary / non-zero exit / unparseable JSON yields ``[]``. `fno doctor`
-    renders this; `fno doctor update` nudges on it; `fno agents restart` auto-restarts it."""
+    renders this; `fno doctor update` nudges on it; `fno agents restart` auto-restarts
+    pane-less rows and spares rows with live panes unless ``--mux`` is explicit."""
     fno = _cargo_installed_mux() or shutil.which("fno")
     if not fno:
         return []
@@ -504,6 +502,21 @@ def _read_source_wire_version(source: Path) -> Optional[int]:
         return None
     match = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
     return int(match.group(1)) if match else None
+
+
+def _read_source_wire_floor(source: Path) -> Optional[int]:
+    """Parse the source checkout's compatibility floor, falling back to its
+    protocol version for sources that predate the floor declaration."""
+    proto_path = source.parent / "crates" / "fno" / "src" / "proto.rs"
+    try:
+        text = proto_path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    floor = re.search(r"^pub const MIN_COMPAT_PROTO: u32 = (\d+);", text, re.MULTILINE)
+    if floor:
+        return int(floor.group(1))
+    version = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
+    return int(version.group(1)) if version else None
 
 
 def _live_mux_rows(
@@ -689,7 +702,8 @@ def update_readiness(
     update_ready = bool(installed_rev and source_rev and installed_rev != source_rev)
 
     source_wire = _read_source_wire_version(resolved_source) if resolved_source else None
-    if resolved_source is not None and source_wire is None:
+    source_floor = _read_source_wire_floor(resolved_source) if resolved_source else None
+    if resolved_source is not None and (source_wire is None or source_floor is None):
         degraded.append("source PROTO_VERSION unreadable")
 
     live_rows = _live_mux_rows(runner)
@@ -701,8 +715,12 @@ def update_readiness(
     else:
         wire_bump = (
             True
-            if source_wire is None
-            else any(r.get("wire_version") != source_wire for r in live_rows)
+            if source_floor is None
+            else any(
+                not isinstance(r.get("wire_version"), int)
+                or r["wire_version"] < source_floor
+                for r in live_rows
+            )
         )
 
     shells = sum(int(r.get("panes") or 0) for r in live_rows)
@@ -1108,13 +1126,14 @@ def _refresh_rust_bins(source: Path, *, force: bool = False, dry_run: bool = Fal
         outcome = "refreshed"
 
     # Best-effort mux advisory: a long-running mux server keeps speaking the OLD
-    # proto after this refresh (the mux deliberately survives a reinstall), which
-    # silently blocks agent dispatch until restarted. Nothing else nudges for it.
+    # proto after this refresh. Pane-hosting servers are spared by default;
+    # pane-less servers are auto-restarted, and --mux is the force-kill lever.
     for sess in stale_mux_servers():
         typer.echo(
             f"fno doctor update: note: mux server '{sess}' speaks an OLD wire version"
-            " (a new client can't attach it); run 'fno agents restart' to auto-cut it"
-            " over (ends that session's panes)",
+            " (a new client can't attach it); run 'fno agents restart' to heal"
+            " pane-less servers, or use 'fno agents restart --mux' to force-kill"
+            " and end live panes",
             err=True,
         )
 

@@ -1,8 +1,7 @@
 """Unit tests for the running-mux-server staleness detector (x-e6dd, x-1a85).
 
-`stale_mux_servers()` flags LIVE mux sessions on a stale WIRE VERSION - the
-running server predates the installed binary's PROTO_VERSION, so a new client's
-handshake is rejected. The precise signal is the ``stale`` field
+`stale_mux_servers()` flags LIVE mux sessions below the compatibility floor.
+The precise signal is the ``stale`` field
 ``fno mux ls --json`` computes from each server's ``.ver`` sidecar (x-1a85),
 which replaced the older ``socket mtime < binary mtime`` heuristic (a
 wire-agnostic false alarm that fired after every reinstall). The mux ls call is

@@ -2335,11 +2335,12 @@ def test_update_refreshes_the_groom_agent_too(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _write_proto_version(repo_root: Path, version: int) -> None:
+def _write_proto_version(repo_root: Path, version: int, floor: int | None = None) -> None:
     proto_dir = repo_root / "crates" / "fno" / "src"
     proto_dir.mkdir(parents=True, exist_ok=True)
+    floor_line = f"pub const MIN_COMPAT_PROTO: u32 = {floor};\n" if floor is not None else ""
     (proto_dir / "proto.rs").write_text(
-        f"pub const PROTO_VERSION: u32 = {version};\n", encoding="utf-8"
+        f"pub const PROTO_VERSION: u32 = {version};\n{floor_line}", encoding="utf-8"
     )
 
 
@@ -2350,6 +2351,7 @@ def _readiness_env(
     installed_rev: str = "aaa1111",
     source_rev: str = "bbb2222",
     source_wire: int = 47,
+    source_floor: int | None = None,
 ) -> Path:
     """Wire installed/source revs + a fake source checkout's proto.rs. Returns
     the source (``cli/``) dir the resolver will see."""
@@ -2357,7 +2359,7 @@ def _readiness_env(
 
     src = tmp_path / "cli"
     src.mkdir()
-    _write_proto_version(tmp_path, source_wire)
+    _write_proto_version(tmp_path, source_wire, source_floor)
 
     monkeypatch.setattr(doctor, "_read_marker", lambda: installed_rev)
     monkeypatch.setattr(doctor, "_resolve_source", lambda source: src)
@@ -2401,6 +2403,21 @@ def test_update_readiness_no_bump_wire_unchanged(monkeypatch, tmp_path) -> None:
     assert result["degraded"] is None
     assert "survive" in result["guidance"]
     assert "14" in result["guidance"]
+
+
+def test_update_readiness_compatible_older_wire_is_not_a_bump(monkeypatch, tmp_path) -> None:
+    """A server below the current version but at the compatibility floor does
+    not make an update destructive."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    runner = _make_runner(
+        mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 59}]
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["wire"]["bump"] is False
+    assert result["shells_ended"] == 0
+    assert "wire unchanged" in result["guidance"]
 
 
 def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_path) -> None:
