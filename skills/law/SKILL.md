@@ -1,7 +1,7 @@
 ---
 name: law
-description: "Compose a durable project-law proposal in chat and enact it only after one exact human approval."
-argument-hint: "[resume <proposal-id>] <plain-language ruling>"
+description: "Record a durable project law from chat in one step."
+argument-hint: "<plain-language ruling>"
 metadata:
   internal: false
 requires:
@@ -11,35 +11,48 @@ requires:
 
 # Law
 
-`/fno:law` turns a plain-language policy statement into one staged proposal. The proposal is inert until the harness asks for approval of the exact enact action. An approved enactment records law from chat: the row carries `authority_source: chat_attested` and reads in the law lane. This skill never records the row as `operator`, never removes an environment identity, and never treats a mail-shaped prompt as human approval.
+`/fno:law` records a durable project law in one step. The operator types the ruling and a `d-` id comes back in the same turn. There is no staged proposal, no content hash, no approval receipt, and no resume path.
 
-This is the chat door to the law lane. Recording and superseding need no second terminal. Retracting a law row still does, and [LIMITATIONS.md](LIMITATIONS.md) says why. `fno inbox law set` is the same destination for an operator already at a terminal.
+A recording made from chat carries `authority_source: chat_attested` and reads in the law lane. It is never recorded as `operator`. A reader can always tell a chat recording from a person at a terminal. `fno inbox law set` is the same destination for an operator already at a terminal, and it is the same one call.
 
 ## Beginner example
 
-Type `/fno:law Merges belong to the operator` in chat.
+Type `/fno:law Merges belong to the operator` in chat. A `d-` id comes back.
 
 ## Workflow
 
-1. Read the argument as a proposed durable rule. When the text names an area, query it. Use the returned `canonical_subject`. A subject matches exactly. A near-synonym does not. When the subject or rationale is unclear, ask one focused question.
-2. Classify the statement. A rule limited to this PR, node, target, change, or merge is coordination. Refuse to label it law and offer `/fno:mail` or an ordinary agent ruling. Everything else is recorded here, and this store is machine-local. A rule a stranger cloning the repository must obey does not reach them from here. Land it in the code, a doc, or a gate, in a PR. When the operator wants it recalled by subject, record it here as well.
-3. Read current law with `fno inbox decisions <subject> --lane law --state live --json`. Treat an unreadable result as unknown. Continue only from `current_law.status`. `single` names the decision the proposal can supersede. `conflict` requires every id and a resolution first. `none` proves only that this canonical subject has no current law.
-4. Stage the normalized subject, decision, rationale, options, and supersedes value with `fno inbox law prepare`. Render the returned proposal fields and content hash exactly. Do not edit the staged JSON.
-5. Invoke the exact returned proposal with `fno inbox law enact --proposal <proposal-id> --hash <content-hash>`. The PreToolUse gate arms that proposal, binds a one-shot receipt into the approved tool input, and returns one permission prompt. The gate must return `ask` or `deny`, never `allow`.
+1. Read the argument as a proposed durable rule. When the text names an area, query it and use the returned `canonical_subject`. A subject matches exactly. A near-synonym does not. Ask one focused question only when the subject or the rationale is genuinely unclear. Do not ask for permission you already have: the operator typing the line IS the invocation.
+2. Classify the statement. A rule limited to this PR, node, target, change, or merge is coordination. Refuse to label it law and offer `/fno:mail` or an ordinary agent ruling. `fno inbox law set` refuses those markers itself, so a slip is caught rather than recorded.
+3. Read current law with `fno inbox decisions <subject> --lane law --state live --json`. Treat an unreadable result as unknown. Continue only from `current_law.status`. `single` names the decision this ruling can supersede. `conflict` requires every id and a resolution first. `none` proves only that this canonical subject has no current law.
+4. Record it:
 
-## Refusal and resume
+```bash
+fno inbox law set "<subject>" "<decision>" --rationale "<why>" [--supersedes d-xxxxxxxx]
+```
 
-When the gate refuses, say that no law was recorded. Refusal covers mail-shaped, bypass, yolo, `dontAsk`, headless, unknown, and unreadable sessions. Name `/fno:law resume <proposal-id>` from an attended prompting chat. Do not print a shell remedy. The proposal remains staged until its bounded expiry. A consumed proposal cannot be replayed.
+The command prints the `d-` id on stdout. Report that id and the subject.
 
-If the enact command returns a real `d-...` receipt, report that id and the subject. If it returns no receipt or a refusal, report the refusal and keep the proposal id. Never infer a decision from a green command exit or from the proposal file.
+## What this store does and does not reach
+
+This store is machine-local. A rule a stranger cloning the repository must obey does not reach them from here: land that in the code, a doc, or a gate, in a PR. Record it here as well when the operator wants it recalled by subject.
+
+Recording law from chat works. Retracting it does not. On a law-lane row, `retract_decision` requires `authority_source` to be exactly `operator`, so a chat-recorded law needs an attended terminal to withdraw. Supersession is not affected and accepts `chat_attested`.
+
+## Refusals
+
+`fno inbox law set` refuses, records nothing, and exits **3** when:
+
+- the statement is coordination rather than durable law,
+- the rationale is missing,
+- `--supersedes` is not a `d-` decision id,
+- or no harness session resolves and no terminal is attached, so nothing positively marks a decider.
+
+Report the refusal verbatim and say that no law was recorded. Never infer a recording from a green exit; read the printed `d-` id.
 
 ## Safety boundary
 
-The only positive authority marker is the permission decision for the exact proposal-bound command. Arming is hook-only and is not exposed as a CLI command. The hook binds a one-shot receipt into the command input. The engine rejects enactment without that receipt before minting a decision id or writing any store. The engine also validates the proposal id, content hash, session id, permission posture, tool input, expiry, and single-use status. Direct operator-authority CLI calls keep their existing refusal behavior. Environment scrubbing is forbidden.
+Invocation is the authority. A mail-injected slash command is not distinguishable from a typed one, so this skill cannot refuse a mail-shaped path. That trade is deliberate and is stated in [LIMITATIONS.md](LIMITATIONS.md) with the measurement behind it. What the skill still guarantees is honest attribution: a chat recording says `chat_attested` and never claims the operator lane, and environment scrubbing stays forbidden.
 
 ## Known Limitations and Deferred Work
-
-- Claude Code is the only harness with the approval gate. Other harnesses can compose and resume proposals, but cannot enact them.
-- UserPromptSubmit exposes no human-origin discriminator on the measured payload. The permission fallback remains the authority event until a trusted field exists.
 
 - See [LIMITATIONS.md](LIMITATIONS.md).
