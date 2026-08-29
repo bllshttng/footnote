@@ -168,3 +168,93 @@ def test_torn_last_json_line_is_not_answered_by_an_older_line(monkeypatch, capsy
     # Never settled on the torn read: the deadline fires with the last code.
     assert rc == 2
     assert "still not settled" in capsys.readouterr().err
+
+
+def test_review_mode_wakes_when_count_grows(monkeypatch, capsys) -> None:
+    """--until review exits 0 the moment the review count rises above the
+    baseline captured at the first successful read."""
+    from fno.pr import _wait
+
+    reads = [3, 3, 5]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 10),
+    )
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "new review" in err and "3 -> 5" in err
+
+
+def test_review_mode_timeout_names_last_count(monkeypatch, capsys) -> None:
+    from fno.pr import _wait
+
+    reads = [4, 4]
+    monkeypatch.setattr(
+        _wait, "_review_count", lambda pr, cwd=None: reads.pop(0) if reads else 4
+    )
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 28),
+    )
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "still no new review" in err and "last count 4" in err
+
+
+def test_review_mode_never_exits_zero_on_an_unreadable_read(monkeypatch, capsys) -> None:
+    """A failed read is no-answer, not zero-reviews: the wait rides it out and
+    the deadline decides. Exiting 0 on an error would wake the session for a
+    review nobody saw."""
+    from fno.pr import _wait
+
+    reads = [None, None]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 28),
+    )
+    assert rc == 2
+    assert "no read succeeded" in capsys.readouterr().err
+
+
+def test_review_mode_baseline_lands_on_first_successful_read(monkeypatch, capsys) -> None:
+    """The first tick fails, the second succeeds and IS the baseline - a later
+    equal count is not growth."""
+    from fno.pr import _wait
+
+    reads = [None, 2, 2]
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    rc = _wait.wait_status(
+        "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
+        clock=_Clock(0, 10, 28),
+    )
+    assert rc == 2
+    assert "last count 2" in capsys.readouterr().err
+
+
+def test_cli_shape_reaches_review_mode(monkeypatch, capsys) -> None:
+    """The CLI spelling must reach the review path - the x-4eac lesson: unit
+    tests calling wait_status directly while the verb was unreachable."""
+    from fno.pr import _wait
+
+    seen = {}
+
+    def fake_wait(pr, *, until, timeout, interval, cwd=None, sleeper=None, clock=None):
+        seen.update(until=until, pr=pr)
+        return 0
+
+    monkeypatch.setattr(_wait, "wait_status", fake_wait)
+    rc = _wait.main(["9", "--until", "review", "--timeout", "1m", "--interval", "5"])
+    capsys.readouterr()
+    assert rc == 0
+    assert seen == {"until": "review", "pr": "9"}
+
+
+def test_repo_slug_strips_both_remote_spellings() -> None:
+    from fno.pr import _wait
+
+    assert _wait._slug_from_url("https://github.com/bll/footnote.git") == "bll/footnote"
+    assert _wait._slug_from_url("git@github.com:bll/footnote.git") == "bll/footnote"
+    assert _wait._slug_from_url("ssh://git@github.com/bll/footnote") == "bll/footnote"
+    assert _wait._slug_from_url("not-a-url") == ""
