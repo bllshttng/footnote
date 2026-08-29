@@ -5196,6 +5196,85 @@ mod tests {
         assert!(!result.stderr.contains("not found"));
     }
 
+    /// The gate x-efd7 exists to install: the resume roster and the identity
+    /// read are derived from ONE source, so they cannot disagree again.
+    ///
+    /// Keyed on the capability contract because that is what
+    /// `interactive_resume_supported` reads. A hand-kept list is what failed:
+    /// pi declared `interactive_resume` support there while `session_id_field`
+    /// had never heard of it, so resume answered "supported" and then "no
+    /// recorded session_id" about the same row. Every harness that declares
+    /// support must resolve a non-empty identity from a row carrying only
+    /// `harness_session_id` -- the shape every non-claude row actually has.
+    #[test]
+    fn every_resumable_harness_resolves_an_identity() {
+        let contract = crate::harness_capabilities::HarnessContract::packaged().unwrap();
+        let mut checked = 0usize;
+        for harness in contract.harness.keys() {
+            if !interactive_resume_supported(harness) {
+                continue;
+            }
+            let row = serde_json::json!({
+                "harness": harness,
+                "short_id": "",
+                "harness_session_id": "canonical-id-1",
+            });
+            assert_eq!(
+                resume_session_id(&row, harness),
+                "canonical-id-1",
+                "harness {harness:?} declares interactive_resume support but its \
+                 identity read returns nothing for a harness_session_id-only row"
+            );
+            checked += 1;
+        }
+        // A positive marker, not an absence: a contract that stopped declaring
+        // any resumable harness would otherwise pass this test vacuously, which
+        // is precisely how the Python gate this replaces went green on pi.
+        assert!(
+            checked >= 5,
+            "expected the contract to declare several resumable harnesses, saw {checked}"
+        );
+    }
+
+    /// Both directions of the fallback, so neither reads as passing by accident.
+    #[test]
+    fn transport_key_wins_and_canonical_id_backstops() {
+        // pi: the x-efd7 repro. Absent from `session_id_field`, so the read has
+        // only the fallback to reach its id with.
+        let pi = serde_json::json!({
+            "harness": "pi",
+            "short_id": "",
+            "harness_session_id": "fno-tui-0001",
+        });
+        assert_eq!(resume_session_id(&pi, "pi"), "fno-tui-0001");
+
+        // claude carrying both: the transport key still wins, so the fallback
+        // can never override a present short_id.
+        let claude = serde_json::json!({
+            "harness": "claude",
+            "short_id": "119e3c52",
+            "harness_session_id": "119e3c52-62bf-43b4-b3c4-3c7ce659f802",
+        });
+        assert_eq!(resume_session_id(&claude, "claude"), "119e3c52");
+
+        // A claude PANE row carries the canonical id and no short_id by design
+        // (x-b84f). It resolves rather than reporting "no session id".
+        let pane = serde_json::json!({
+            "harness": "claude",
+            "short_id": "",
+            "harness_session_id": "119e3c52-62bf-43b4-b3c4-3c7ce659f802",
+        });
+        assert_eq!(
+            resume_session_id(&pane, "claude"),
+            "119e3c52-62bf-43b4-b3c4-3c7ce659f802"
+        );
+
+        // A row carrying neither still resolves to empty, so the callers'
+        // is_empty refusals keep firing.
+        let bare = serde_json::json!({ "harness": "pi", "short_id": "" });
+        assert_eq!(resume_session_id(&bare, "pi"), "");
+    }
+
     #[test]
     fn session_id_field_and_resume_argv_match_python() {
         assert_eq!(session_id_field("claude"), Some("short_id"));
