@@ -78,7 +78,7 @@ That answer lives in one machine-readable field, `loop_participation` in `harnes
 | `extension` | opencode (shipped), pi (not written) | No shell hook. The loop closes through a harness-native plugin fno ships. |
 | `none` | gemini | No boundary at all. |
 
-The dispatch seam refuses a `/target` at gemini and at pi, naming the harness and the reason. A one-shot at either still dispatches, because the gate is scoped to the `/target` family. Read the field rather than this table when you need the current answer; the table is prose and the field is the contract.
+The dispatch seam refuses a `/target` at gemini and at pi, naming the harness and the reason. A one-shot at either still dispatches, because the gate is scoped to the `/target` family. When you need the current answer, read the field rather than this table. The table is prose. The field is the contract.
 
 ## What each status means for the user
 

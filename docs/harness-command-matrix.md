@@ -80,7 +80,7 @@ Permission responses are rule-gated. Without explicit authorization, a matched p
 
 `loop_participation` answers one question the rest of the table cannot: can the fno target loop CLOSE on this harness?
 
-`hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation, which means no loop, however well the harness spawns, resumes, and receives mail. A harness that takes a looping dispatch it cannot close gives you a worker that runs forever with nothing to stop it, and nothing reports that.
+`hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop or allow from external truth. No lifecycle boundary means no `loop-check` invocation, which means no loop, however well the harness spawns, resumes, and receives mail. A harness that takes a looping dispatch it cannot close gives you a worker with nothing to stop it. Nothing reports that.
 
 | Member | What it commits the caller to |
 |---|---|
