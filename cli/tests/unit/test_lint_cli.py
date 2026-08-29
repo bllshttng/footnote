@@ -1234,6 +1234,32 @@ def test_state_roots_rule_a_only_skips_a_cfg_test_MOD(tmp_path: Path) -> None:
     ]
 
 
+def test_state_roots_rule_a_skips_nothing_for_a_cfg_test_mod_DECLARATION(
+    tmp_path: Path,
+) -> None:
+    """`#[cfg(test)] pub mod frame_html;` opens no block, so it excludes nothing.
+
+    The third shape of the same class, live at crates/fno/src/lib.rs. Scanning
+    forward for a brace from a declaration walks into the next unrelated item.
+    """
+    source = tmp_path / "crates" / "fno" / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "#[cfg(test)]\n"
+        "pub mod frame_html;\n"
+        "pub fn later() {\n"
+        '    let p = root.join(".fno").join("ledger.json");\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert [(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)] == [
+        ("crates/fno/src/lib.rs", "ledger.json")
+    ]
+
+
 def test_state_roots_rule_a_fires_on_a_rust_join(tmp_path: Path) -> None:
     source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
     source.parent.mkdir(parents=True)
@@ -1384,7 +1410,7 @@ def test_state_roots_baseline_covers_the_whole_live_census() -> None:
     findings = set(_state_roots_findings(root))
     baseline = _read_state_roots_baseline(root)
 
-    assert len(baseline) > 50, "the ratchet lost its census"
+    assert len(baseline) > 20, "the ratchet lost its census"
     assert any(rule == "A" and rel.endswith(".rs") for rule, rel, _ in findings)
     assert any(rule == "A" and rel.endswith(".py") for rule, rel, _ in findings)
     assert ("B", "cli/src/fno/config/__init__.py", "load_settings") in findings

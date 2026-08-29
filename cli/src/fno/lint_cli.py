@@ -305,6 +305,13 @@ def _rust_cfg_test_lines(lines: list[str]) -> set[int]:
         if not head.startswith(("mod ", "pub mod ", "pub(crate) mod ")):
             i += 1
             continue
+        # `#[cfg(test)] pub mod frame_html;` declares an EXTERNAL module and
+        # opens no block (crates/fno/src/lib.rs). Scanning forward for a brace
+        # from there walks into the next unrelated item and excludes it. A
+        # declaration excludes nothing.
+        if head.endswith(";"):
+            i += 1
+            continue
         j = i + 1
         while j < len(lines) and "{" not in lines[j]:
             j += 1
