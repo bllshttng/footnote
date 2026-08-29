@@ -113,7 +113,9 @@ case "$autonomy_enabled" in true|True|TRUE|1|yes|on) ;; *) exit 0 ;; esac
 # (codex P2 on PR #492).
 _FM_BODY="$(read_frontmatter "$PLAN_PATH")"; _FM_RC=$?
 if [[ "$_FM_RC" -ne 0 ]]; then
-  echo "autolaunch-failed - reason=\"plan frontmatter read failed (rc=$_FM_RC: unterminated '---' block) - not launched\""
+  _fm_why="unterminated '---' block"
+  [[ "$_FM_RC" -eq 2 ]] && _fm_why="unreadable file"
+  echo "autolaunch-failed - reason=\"plan frontmatter read failed (rc=$_FM_RC: $_fm_why) - not launched\""
   exit 0
 fi
 _FRONTMATTER="$_FM_BODY"
