@@ -141,3 +141,45 @@ def test_backstop_stays_well_above_the_trigger():
 
     a = AgentsBlock()
     assert a.hard_max_load_per_cpu > a.max_load_per_cpu * 4
+
+
+def test_rust_probe_budget_exceeds_the_python_measurement_budget():
+    """The two runtimes must not disagree about admission on a slow box.
+
+    Both gates refuse when fleet attribution is unreadable, so whichever one
+    gives up first refuses first. Python calls `cause_reading` IN PROCESS and
+    spends its whole budget measuring. Rust runs the same reading as a
+    subprocess, so its budget must also cover spawning the CLI and importing
+    it. Equal numbers therefore do NOT mean equal behaviour: they make the
+    Rust gate time out first, and since this node a timeout REFUSES rather
+    than merely losing the explanation.
+
+    Read from the Rust source because there is no shared constant to import.
+    A cheap string read is worth more than an untested comment, and this
+    fails loudly if either budget moves.
+    """
+    import inspect
+    import re
+    from pathlib import Path
+
+    from fno import doctor_footprint
+
+    python_budget = inspect.signature(
+        doctor_footprint.cause_reading
+    ).parameters["timeout"].default
+    assert python_budget == 5.0
+
+    rust = Path(__file__).resolve().parents[3] / "crates/fno-agents/src/spawn_gate.rs"
+    source = rust.read_text()
+    match = re.search(
+        r"const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs\((\d+)\)",
+        source,
+    )
+    assert match, "FOOTPRINT_PROBE_BUDGET missing or renamed in the Rust gate"
+    rust_budget = int(match.group(1))
+
+    assert rust_budget > python_budget, (
+        f"Rust probe budget {rust_budget}s must exceed the Python measurement "
+        f"budget {python_budget}s, or the Rust gate refuses on a loaded box "
+        f"where the Python gate admits"
+    )

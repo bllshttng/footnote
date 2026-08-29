@@ -447,8 +447,14 @@ class TestRunGate:
         self, monkeypatch, capsys
     ):
         """The cause probe costs seconds of ps/lsof; it must not run inside the
-        held gate mutex (queued spawners would stall behind evidence)."""
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        held gate mutex (queued spawners would stall behind evidence).
+
+        Driven through the BACKSTOP, the one refusal that still gathers cause:
+        the attribution-aware branches already printed their own sample.
+        """
+        _settings(
+            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
+        )
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
@@ -468,8 +474,6 @@ class TestRunGate:
             lambda: mutex_held_when_probed.append("spawn-gate" in released) or None,
             raising=False,
         )
-        # The fleet owns the box, so the load trigger becomes a refusal.
-        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
@@ -494,7 +498,13 @@ class TestRunGate:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
 
-    def test_over_load_reports_fleet_cause_evidence(self, monkeypatch, capsys):
+    def test_share_refusal_prints_one_sample_not_two(self, monkeypatch, capsys):
+        """A share refusal names its own numbers and appends no second sample.
+
+        The evidence line is a SEPARATE footprint read taken after the mutex
+        drops, so it disagrees with the sample the gate decided on. Printing
+        both is the exact defect x-7c0f removed, in miniature.
+        """
         _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
@@ -517,31 +527,61 @@ class TestRunGate:
         # The refusal names the FLEET's cores now, not the machine's load: it
         # could not say whose load it was refusing until x-7c0f.
         assert "the fleet holds 9.00/12.00 cores" in error
-        assert "footprint attributes 1.86/12.00 cores" in error
+        assert "1.86/12.00" not in error
 
-    def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
-        self, monkeypatch, capsys
-    ):
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+    def test_backstop_refusal_reports_fleet_cause_evidence(self, monkeypatch, capsys):
+        """The backstop is the one branch that refuses without attribution.
+
+        It never read footprint, so the evidence line is the only thing that
+        can say whose load it just refused.
+        """
+        _settings(
+            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
+        )
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
         monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         monkeypatch.setattr(
-            spawn_gate, "_footprint_cause_evidence", lambda: None, raising=False
+            spawn_gate,
+            "_footprint_cause_evidence",
+            lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
+            raising=False,
         )
-        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
         error = capsys.readouterr().err
-        assert "footprint cause unavailable; load refusal unchanged" in error
-        # The refusal itself still names its own numbers even when the extra
-        # explanation cannot be gathered.
-        assert "the fleet holds 9.00/12.00 cores" in error
+        assert "absolute machine backstop" in error
+        assert "footprint attributes 1.86/12.00 cores" in error
+
+    def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
+        self, monkeypatch, capsys
+    ):
+        """Unreadable attribution refuses, and says so without a second probe."""
+        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+
+        def _no_second_probe():
+            raise AssertionError("re-probed footprint after it just failed")
+
+        monkeypatch.setattr(
+            spawn_gate, "_footprint_cause_evidence", _no_second_probe, raising=False
+        )
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: None)
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        assert "attribution unavailable" in capsys.readouterr().err
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)

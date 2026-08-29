@@ -1035,6 +1035,19 @@ def _footprint_cause_evidence() -> Optional[str]:
         return None
 
 
+def _refusal_with_cause_stated() -> GateRefused:
+    """A load refusal that already printed the attribution it decided on.
+
+    :func:`run_gate` appends a footprint cause line to a load refusal, taken
+    from a SECOND, independent sample. That is honest only when the refusal
+    itself could not say whose CPU this is (the backstop). Marking the two
+    attribution-aware branches keeps one refusal reading one sample.
+    """
+    refusal = GateRefused(EXIT_LOAD_REFUSED)
+    refusal.cause_stated = True  # type: ignore[attr-defined]
+    return refusal
+
+
 def _check_load_ceiling(
     max_load_per_cpu: float,
     max_fleet_cpu_share: float = 0.5,
@@ -1105,7 +1118,9 @@ def _check_load_ceiling(
             f"{trigger:.1f} and fleet CPU attribution unavailable; refusing to "
             f"spawn (--force to bypass)"
         )
-        raise GateRefused(EXIT_LOAD_REFUSED)
+        # The attribution read just failed, so run_gate's evidence probe would
+        # fail the same way one sample later. Nothing to add.
+        raise _refusal_with_cause_stated()
 
     fleet, capacity = reading
     share = fleet / capacity
@@ -1116,10 +1131,11 @@ def _check_load_ceiling(
             f"max_fleet_cpu_share ceiling {max_fleet_cpu_share * 100:.1f}%; "
             f"refusing to spawn (--force to bypass)"
         )
-        # No evidence probe here: it costs seconds of ps/lsof, and this check
-        # runs inside the held gate mutex. The caller releases first, then
-        # gathers (see run_gate).
-        raise GateRefused(EXIT_LOAD_REFUSED)
+        # This refusal already names the sample it decided on, so run_gate must
+        # not append a SECOND, independently taken attribution beside it: two
+        # samples seconds apart disagree, and a refusal printing numbers it did
+        # not decide on is the whole defect x-7c0f removed.
+        raise _refusal_with_cause_stated()
 
     _warn(
         f"spawn-gate: 1-min load {load1:.1f} is high but only "
@@ -1419,15 +1435,20 @@ def run_gate(
                         max_fleet_cpu_share,
                         hard_max_load_per_cpu,
                     )
-                except GateRefused:
+                except GateRefused as refusal:
                     # The refusal is decided; release the mutex BEFORE the
                     # cause probe so queued spawners (and --no-wait callers)
                     # never sit behind seconds of evidence gathering.
                     guard.release()
-                    _warn(
-                        _footprint_cause_evidence()
-                        or "spawn-gate: footprint cause unavailable; load refusal unchanged"
-                    )
+                    # Only the backstop refuses without reading attribution, so
+                    # it is the only branch this line can inform. Adding it to
+                    # a refusal that already named its own sample would print
+                    # two disagreeing measurements in one refusal.
+                    if not getattr(refusal, "cause_stated", False):
+                        _warn(
+                            _footprint_cause_evidence()
+                            or "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                        )
                     raise
                 try:
                     _check_king_share(c, cap, caller_session=caller_session)

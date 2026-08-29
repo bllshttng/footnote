@@ -575,20 +575,27 @@ pub fn run_gate(
                     guard.release();
                     return Err(code);
                 }
-                if let Err(code) =
+                if let Err((code, cause_stated)) =
                     check_load_ceiling(load_ceiling, fleet_cpu_share, hard_load_ceiling)
                 {
                     // The refusal is decided; drop the mutex BEFORE the cause
                     // probe so queued spawners (and --no-wait callers) never
                     // sit behind seconds of evidence gathering.
                     guard.release();
-                    eprintln!(
-                        "{}",
-                        footprint_cause_evidence().unwrap_or_else(|| {
-                            "spawn-gate: footprint cause unavailable; load refusal unchanged"
-                                .to_string()
-                        })
-                    );
+                    // Only the backstop refuses without reading attribution, so
+                    // it is the only branch this line can inform. This probe is
+                    // a SECOND, independent sample: beside a refusal that
+                    // already named its own it would print two disagreeing
+                    // measurements, which is the defect x-7c0f removed.
+                    if !cause_stated {
+                        eprintln!(
+                            "{}",
+                            footprint_cause_evidence().unwrap_or_else(|| {
+                                "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                                    .to_string()
+                            })
+                        );
+                    }
                     return Err(code);
                 }
                 if substrate == "headless" {
@@ -768,6 +775,10 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
     ))
 }
 
+/// Wall-clock budget for the out-of-process footprint probe: the Python
+/// twin's 5s measurement budget plus an allowance for interpreter startup.
+const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
+
 fn footprint_cli_binary() -> Option<&'static str> {
     ["fno", "fno-py"]
         .into_iter()
@@ -790,7 +801,15 @@ fn footprint_cause_raw() -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 5s of MEASUREMENT plus 3s of interpreter start, and the two halves are
+    // why this is not the 5s its Python twin passes to `cause_reading`.
+    // Python spends its whole budget measuring; this budget also has to cover
+    // spawning `fno doctor footprint` and importing it. Matching the numbers
+    // would make the Rust gate time out first on a loaded box, and since
+    // x-7c0f a timeout REFUSES rather than merely losing the explanation. Two
+    // admission gates disagreeing about the same machine is the defect beside
+    // the one this check fixes.
+    let deadline = Instant::now() + FOOTPRINT_PROBE_BUDGET;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
@@ -839,11 +858,15 @@ fn footprint_cause_raw() -> Option<String> {
 /// refuses (fail closed): an unknown share is not evidence of headroom.
 /// The Python twin in `cli/src/fno/agents/spawn_gate.py` is the same
 /// contract; the two gates must not disagree about admission.
+///
+/// The error carries `(exit code, cause_stated)`. `cause_stated` means the
+/// refusal already printed the attribution sample it decided on, so the
+/// caller must not append a second, independently taken one.
 fn check_load_ceiling(
     max_load_per_cpu: f64,
     max_fleet_cpu_share: f64,
     hard_max_load_per_cpu: f64,
-) -> Result<(), i32> {
+) -> Result<(), (i32, bool)> {
     if max_load_per_cpu <= 0.0 {
         return Ok(());
     }
@@ -868,7 +891,9 @@ fn check_load_ceiling(
              hard_max_load_per_cpu {hard_max_load_per_cpu} x {cpus} cpus = {backstop:.1}; \
              refusing to spawn whoever caused it (--force to bypass)"
         );
-        return Err(EXIT_LOAD_REFUSED);
+        // The one branch that never reads attribution, so the caller's cause
+        // probe is the only thing that can say whose load this was.
+        return Err((EXIT_LOAD_REFUSED, false));
     }
 
     let trigger = max_load_per_cpu * cpus as f64;
@@ -880,7 +905,9 @@ fn check_load_ceiling(
                  {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and fleet CPU attribution \
                  unavailable; refusing to spawn (--force to bypass)"
             );
-            return Err(EXIT_LOAD_REFUSED);
+            // The attribution read just failed; the caller's probe reads the
+            // same instrument and would fail the same way one sample later.
+            return Err((EXIT_LOAD_REFUSED, true));
         }
     };
     let share = fleet / capacity;
@@ -892,7 +919,8 @@ fn check_load_ceiling(
              capacity), over the max_fleet_cpu_share ceiling {ceil_pct:.1}%; refusing to \
              spawn (--force to bypass)"
         );
-        return Err(EXIT_LOAD_REFUSED);
+        // This refusal already named the sample it decided on.
+        return Err((EXIT_LOAD_REFUSED, true));
     }
     let pct = share * 100.0;
     eprintln!(
