@@ -968,5 +968,5 @@ def test_deleted_upstream_with_unpushed_work_is_still_refused(repo: Path):
     r = _sweep(repo, "--apply")
     diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
 
-    assert "0 archived" in r.stdout or "archived" not in r.stdout, diag
+    assert "1 archived" not in r.stdout, diag
     assert wt.exists(), "a worktree carrying unmerged work must survive" + diag
