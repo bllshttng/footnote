@@ -1895,9 +1895,12 @@ def test_failover_dispatches_next_provider(iso, monkeypatch):
     res = adv.advance(project="fno", events_path=iso)
 
     assert res.decision == "dispatched"
-    # --provider is the HARNESS (never the record id); the account rides extra_env.
+    # --provider is the HARNESS (never the record id); the account rides
+    # --dispatch-account as a RECORD ID, and its credentials never touch this
+    # wrapper's env (x-c33e).
     assert captured["provider"] == "claude"
-    assert captured["extra_env"] == {"CLAUDE_CONFIG_DIR": "/acct/ccr"}
+    assert captured["dispatch_account"] == "ccr"
+    assert "extra_env" not in captured
     evs = _events(iso)
     assert [e["type"] for e in evs] == ["dispatch_failover", "advance_dispatched"]
     fo = evs[0]["data"]
@@ -1924,7 +1927,8 @@ def test_failover_cross_harness_threads_harness(iso, monkeypatch):
 
     assert res.decision == "dispatched"
     assert captured["provider"] == "codex" and captured["harness"] == "codex"
-    assert captured["extra_env"] == {"CODEX_HOME": "/acct/codex"}
+    assert captured["dispatch_account"] == "codex-acct"
+    assert "extra_env" not in captured
     evs = _events(iso)
     assert evs[0]["data"]["to"] == "codex-acct" and evs[0]["data"]["harness_to"] == "codex"
 
@@ -2039,8 +2043,9 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
 
 
 def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
-    """AC6-CON: one node + config + quota fixture -> the same destination record,
-    harness, and credential overlay on advance AND dispatch."""
+    """AC6-CON: one node + config + quota fixture -> the same destination record
+    and harness on advance AND dispatch, each staging the credential at its own
+    launch boundary."""
     env = {"CODEX_HOME": "/acct/codex"}
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("codex-acct", "codex", env))
@@ -2057,7 +2062,14 @@ def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
 
     assert verdict["outcome"] == "launched"
     assert adv_captured["provider"] == disp_captured["provider"] == "codex"
-    assert adv_captured["extra_env"] == disp_captured["account_env"] == env
+    # Same destination RECORD on both launchers. They carry it differently on
+    # purpose: advance names the record on argv and lets the spawn front door
+    # stage the overlay at the launch boundary, while dispatch spawns the pane
+    # itself and hands the overlay straight to that seam. Neither puts the
+    # credential on a footnote wrapper's own environment (x-c33e).
+    assert adv_captured["dispatch_account"] == "codex-acct"
+    assert disp_captured["launch_account"] == "codex-acct"
+    assert disp_captured["account_env"] == env
     # Codex takes its own command surface, never a raw claude slash verb.
     assert disp_captured["message"] == f"$fno:target --no-merge {DISPATCH_NODE['id']}"
     # Both launchers leave one post-spawn cutover receipt naming the same
@@ -2544,3 +2556,87 @@ def test_filed_specimen_names_remain_byte_for_byte():
     assert adv._worker_agent_name("x-8096", "path-consolidation-wave-0-delegate") == (
         "target-x-8096-path-consolidation-wave-0-dele"
     )
+
+
+# ---------------------------------------------------------------------------
+# x-c33e: a credential overlay must never move footnote's own state root
+# ---------------------------------------------------------------------------
+
+
+def test_cutover_account_rides_argv_not_the_wrapper_env(monkeypatch):
+    """A quota cutover names its destination RECORD on argv.
+
+    The credential never touches this wrapper's environment. A non-claude
+    oauth_dir record's overlay is a HOME override, and footnote resolves its own
+    state root off HOME, so merging it here would file the worker's registry row
+    and claim under the account's home where nothing looks.
+    """
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["env"] = kw.get("env")
+        return _FakeProc(0, _CODEX_THREAD_RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    monkeypatch.setenv("HOME", "/real/home")
+    adv._spawn_worker(
+        "ab-2222aaaa",
+        "/w",
+        provider="codex",
+        harness="codex",
+        dispatch_account="zai-cutover-1",
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--dispatch-account") + 1] == "zai-cutover-1"
+    # The positive marker: the wrapper's HOME is the REAL one, not the account's.
+    assert captured["env"]["HOME"] == "/real/home"
+
+
+def test_spawn_worker_omits_the_carrier_when_not_a_cutover(monkeypatch):
+    """Byte-identical to before for every non-cutover dispatch."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker("ab-2222aaaa", "/w")
+    assert "--dispatch-account" not in captured["cmd"]
+
+
+def test_spawn_worker_refuses_a_state_root_key_in_extra_env(monkeypatch):
+    """The trap graduates to a refusal that names the carrier.
+
+    Nothing in the tree passes HOME here any more; this guard is what stops the
+    next caller re-introducing the strand, which was silent - the worker starts
+    fine, it is only unfindable.
+    """
+
+    def fake_run(cmd, **kw):
+        pytest.fail("must not spawn with a state-root override on the wrapper")
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    with pytest.raises(adv.SpawnError) as exc:
+        adv._spawn_worker(
+            "ab-2222aaaa", "/w", extra_env={"HOME": "/accounts/zai-1/home"}
+        )
+    assert "HOME" in str(exc.value)
+    assert "--dispatch-account" in str(exc.value)
+
+
+def test_spawn_worker_still_accepts_a_non_state_root_extra_env(monkeypatch):
+    """The refusal is keyed on the state root, not on extra_env as such."""
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["env"] = kw.get("env")
+        return _FakeProc(0, _RECEIPT)
+
+    monkeypatch.setattr(adv.subprocess, "run", fake_run)
+    adv._spawn_worker(
+        "ab-2222aaaa", "/w", extra_env={"ANTHROPIC_BASE_URL": "https://x"}
+    )
+    assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://x"

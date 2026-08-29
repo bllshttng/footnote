@@ -13,8 +13,10 @@ import pytest
 import yaml
 
 from fno.agents.account_env import (
+    STATE_ROOT_ENV_KEYS,
     AccountResolutionError,
     resolve_account_overlay,
+    seal_state_root,
 )
 
 
@@ -269,3 +271,56 @@ def test_mesh_env_wrapper_sets_block_cap(monkeypatch) -> None:
     # Non-claude providers are not touched.
     argv = _mesh_env_wrapper("w3", "codex", None, ["codex", "hi"])
     assert not any(str(a).startswith("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=") for a in argv)
+
+
+# ---------------------------------------------------------------------------
+# x-c33e: seal_state_root - forwarding a credential HOME without moving ours
+# ---------------------------------------------------------------------------
+
+
+def test_seal_pins_our_roots_when_home_moves(monkeypatch) -> None:
+    """The harness credential follows the override; footnote's roots do not."""
+    monkeypatch.setenv("HOME", "/real/home")
+    monkeypatch.delenv("FNO_AGENTS_HOME", raising=False)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+
+    sealed = seal_state_root({"HOME": "/accounts/zai-1/home"})
+
+    assert sealed["HOME"] == "/accounts/zai-1/home"
+    assert sealed["FNO_AGENTS_HOME"] == "/real/home/.fno/agents"
+    assert sealed["FNO_CLAIMS_ROOT"] == "/real/home"
+
+
+def test_seal_is_a_noop_without_a_home_move(monkeypatch) -> None:
+    """A claude overlay moves CLAUDE_CONFIG_DIR, never HOME: nothing to pin."""
+    monkeypatch.setenv("HOME", "/real/home")
+    sealed = seal_state_root({"CLAUDE_CONFIG_DIR": "/real/home/.claude-alt"})
+    assert sealed == {"CLAUDE_CONFIG_DIR": "/real/home/.claude-alt"}
+
+
+def test_seal_is_a_noop_when_home_is_unchanged(monkeypatch) -> None:
+    monkeypatch.setenv("HOME", "/real/home")
+    sealed = seal_state_root({"HOME": "/real/home", "X": "1"})
+    assert sealed == {"HOME": "/real/home", "X": "1"}
+
+
+def test_seal_never_overrides_an_explicit_pin(monkeypatch) -> None:
+    """A caller who meant to redirect a root is not second-guessed."""
+    monkeypatch.setenv("HOME", "/real/home")
+    sealed = seal_state_root(
+        {"HOME": "/accounts/zai-1/home", "FNO_CLAIMS_ROOT": "/sandbox"}
+    )
+    assert sealed["FNO_CLAIMS_ROOT"] == "/sandbox"
+
+
+def test_seal_does_not_mutate_its_input(monkeypatch) -> None:
+    monkeypatch.setenv("HOME", "/real/home")
+    src = {"HOME": "/accounts/zai-1/home"}
+    seal_state_root(src)
+    assert src == {"HOME": "/accounts/zai-1/home"}
+
+
+def test_home_is_a_state_root_key() -> None:
+    """The set names the axis; a future key gets added here, not at a call site."""
+    assert "HOME" in STATE_ROOT_ENV_KEYS
+    assert "CLAUDE_CONFIG_DIR" not in STATE_ROOT_ENV_KEYS

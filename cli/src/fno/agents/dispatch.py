@@ -1496,8 +1496,12 @@ def _codex_thread_spawn(
     ``account_env``/``route_env`` overlay the client subprocess environment.
     They reach the app-server child only when this client also lazy-starts the
     daemon (the child inherits the daemon's env); a warm daemon keeps its own.
+    Footnote's own state roots are pinned around the overlay by
+    ``seal_state_root`` so a credential HOME never moves them.
     """
     import json
+
+    from fno.agents.account_env import seal_state_root
 
     from fno import rust_binary
 
@@ -1531,6 +1535,13 @@ def _codex_thread_spawn(
     for overlay in (route_env, account_env):
         if overlay:
             env.update(overlay)
+    # This client IS a footnote process, and a non-claude oauth_dir overlay is a
+    # HOME override, so without the seal the client's own registry read and the
+    # daemon child's claim would resolve under the account's home and go
+    # unfindable (x-c33e). Unlike the spawn front door there is no argv carrier
+    # here: the env is the only channel to the app-server child, so the override
+    # stays and footnote's roots are pinned around it.
+    env = seal_state_root(env)
     try:
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
     except subprocess.TimeoutExpired as exc:
