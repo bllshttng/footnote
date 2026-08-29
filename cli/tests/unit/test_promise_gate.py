@@ -526,7 +526,12 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     from fno.cli import app
 
     assert CliRunner().invoke(app, ["backlog", "done", "ab-d1"]).exit_code == 0
-    assert CliRunner().invoke(app, ["done", "ab-d2", "--pr", "42"]).exit_code == 0
+    # --repo o/r: the node's recorded pr_url already names o/r, and a cwd
+    # derivation from this checkout would name a different repo - refused as a
+    # guess since x-43e4. Naming the repo asserts the stamp instead.
+    assert (
+        CliRunner().invoke(app, ["done", "ab-d2", "--pr", "42", "--repo", "o/r"]).exit_code == 0
+    )
     # reconcile: stub the scan to mark x-d3 closeable.
     import fno.graph._reconcile as rec
 

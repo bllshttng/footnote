@@ -284,7 +284,12 @@ def test_ac2_hp_revive_restores_the_recorded_route(tmp_path, monkeypatch) -> Non
     # floor as empty strings, which means "unset" only to claude reading a
     # settings FILE - replaying it as process env would hand the revived worker
     # an ANTHROPIC_API_KEY="" the original launch never had.
-    assert got == ROUTE_ENV
+    # The one key that does NOT replay verbatim is the provider-DEFAULT haiku
+    # tier: it re-resolves against today's registry (x-5cc5), so the fixture's
+    # glm-5.2 comes back as the current zai default.
+    from fno.agents.model_routing import DEFAULT_ZAI_HAIKU_MODEL
+
+    assert got == {**ROUTE_ENV, "ANTHROPIC_DEFAULT_HAIKU_MODEL": DEFAULT_ZAI_HAIKU_MODEL}
 
 
 def test_ac3_err_revive_refuses_when_the_route_file_is_gone(tmp_path, monkeypatch) -> None:
@@ -394,10 +399,14 @@ def test_an_explicit_account_composes_with_a_restored_route(
     assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/cfg"}, "account survives"
     # The restored route reaches the launch carrying its provider stamp: the
     # relaunch re-binds the provider, and that binding is what a running worker
-    # reads to name its own account (x-c703).
+    # reads to name its own account (x-c703). The haiku tier is the one key
+    # refreshed to today's provider default rather than replayed (x-5cc5).
+    from fno.agents.model_routing import DEFAULT_ZAI_HAIKU_MODEL
+
     assert seen["route_env"] == {
         **ROUTE_ENV,
         "FNO_ROUTE_PROVIDER": "zai",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": DEFAULT_ZAI_HAIKU_MODEL,
     }, "and the restored route rides with it"
 
 
