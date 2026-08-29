@@ -77,20 +77,15 @@ def test_hooks_json_command_paths_resolve() -> None:
         pytest.fail("hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
-def test_law_authority_gate_uses_project_python_environment() -> None:
-    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
-    commands = [
-        hook["command"]
-        for registration in data["hooks"]["PreToolUse"]
-        if registration.get("matcher") == "Bash"
-        for hook in registration.get("hooks", [])
-        if "law-authority-gate.py" in hook.get("command", "")
-    ]
+def test_no_law_authority_gate_is_registered() -> None:
+    """Ruling d-e1eec854 retired the staged-law approval gate.
 
-    assert commands == [
-        'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
-        '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
-    ]
+    A registration left behind would shell a file that no longer exists on every
+    Bash call, so the absence is asserted rather than assumed.
+    """
+    text = HOOKS_JSON.read_text(encoding="utf-8")
+    assert "law-authority-gate" not in text
+    assert not (REPO_ROOT / "hooks" / "law-authority-gate.py").exists()
 
 
 def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
@@ -243,22 +238,6 @@ def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
         assert not any("worktree-harness-guard" in command for command in commands), (
             f"{config_path.name} still blocks sessions by harness ownership"
         )
-
-
-def test_claude_registers_one_law_authority_gate_on_bash() -> None:
-    data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
-    registrations = [
-        registration
-        for registration in data["hooks"]["PreToolUse"]
-        if registration.get("matcher") == "Bash"
-        and any(
-            hook.get("command")
-            == 'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
-            '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
-            for hook in registration.get("hooks", [])
-        )
-    ]
-    assert len(registrations) == 1
 
 
 def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> None:
@@ -534,11 +513,6 @@ def test_bg_process_guard_wired_beside_git_protection_on_both_harnesses() -> Non
             f"python3 ${{{root_var}}}/hooks/git-protection.py",
             f"python3 ${{{root_var}}}/{guard}",
         ]
-        if path == HOOKS_JSON:
-            expected.append(
-                'uv run --project "${CLAUDE_PLUGIN_ROOT}/cli/pyproject.toml" python3 '
-                '"${CLAUDE_PLUGIN_ROOT}/hooks/law-authority-gate.py"'
-            )
         assert commands == expected, (
             f"{path.name} PreToolUse {matcher!r} chain drifted: {commands}"
         )
