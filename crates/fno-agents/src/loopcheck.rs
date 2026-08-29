@@ -8599,11 +8599,14 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     // outcome is emitted as an event row so what it concluded is observable.
     let gh_bin = &parsed.gh_bin;
     let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
+    // Type is deliberately NOT "loop_check": read_prior_fires treats every
+    // loop_check row for this session as a fire observation, and a probe row
+    // with no fingerprint would break the no-progress streak on each fire.
+    // The probe is its own observable, not a fire decision.
     emit(
-        "loop_check",
+        "gh_probe",
         serde_json::json!({
             "session_id": session_id,
-            "gate": "gh_probe",
             "outcome": gh_probe.outcome_str(),
             "detail": gh_probe.detail_str(),
         }),
