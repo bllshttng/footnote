@@ -24,8 +24,6 @@ pass() { printf '[events-limits-fresh-test] PASS: %s\n' "$*"; }
 [[ -f "${GATE}" ]] || fail "gate script not found at ${GATE}"
 bash -n "${GATE}" || fail "gate script failed bash -n"
 
-python3 -c "import yaml" 2>/dev/null || fail "PyYAML unavailable; the gate cannot project schema.yaml"
-
 TMP=$(mktemp -d -t events-limits-test-XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -61,7 +59,9 @@ TOMLEOF
 }
 
 commit_all() {
-  (cd "$REPO" && git add -A && git commit -q -m "$1")
+  # --allow-empty: a scenario that restores the previous content has nothing to
+  # commit, and a non-zero rc there would kill the run under `set -e`.
+  (cd "$REPO" && git add -A && git commit -q --allow-empty -m "$1")
 }
 
 # T01: the generated file matches the projection.
@@ -107,5 +107,38 @@ out="$(cd "$REPO" && bash "${GATE}" 2>&1)" && rc=0 || rc=$?
 [[ "$rc" -eq 2 ]] || fail "T04: expected rc=2, got $rc: $out"
 echo "$out" | grep -q "missing" || fail "T04: missing error message expected: $out"
 pass "T04 missing schema exits 2"
+
+# T06: the gate runs on an interpreter with no site-packages.
+#
+# The guards job installs a bare interpreter, and an earlier revision of this
+# gate imported PyYAML: it exited 2 with "PyYAML unavailable" on every PR.
+# `python3 -S` skips site-packages, which is where PyYAML lives, so this
+# reproduces that environment rather than asserting the absence of an import.
+write_schema 65536
+write_generated 65536
+commit_all "fresh again"
+SHIM="$TMP/python3-nosite"
+cat > "$SHIM" <<'SHIMEOF'
+#!/usr/bin/env bash
+exec python3 -S "$@"
+SHIMEOF
+chmod +x "$SHIM"
+"$SHIM" -c "import yaml" 2>/dev/null \
+  && fail "T06: the shim still imports yaml; it does not reproduce the bare interpreter"
+out="$(cd "$REPO" && PYTHON3="$SHIM" bash "${GATE}" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 0 ]] || fail "T06: expected rc=0 on a site-free interpreter, got $rc: $out"
+echo "$out" | grep -q "events limits table fresh" || fail "T06: missing fresh message: $out"
+pass "T06 gate projects the limits block with no site-packages"
+
+# T07: a limits block the reader cannot parse refuses (rc=2), never passes.
+cat > "$SCHEMA" <<'YAMLEOF'
+limits:
+  max_data_bytes: 65536
+  this line is not a key
+YAMLEOF
+out="$(cd "$REPO" && bash "${GATE}" 2>&1)" && rc=0 || rc=$?
+[[ "$rc" -eq 2 ]] || fail "T07: expected rc=2 on an unreadable block, got $rc: $out"
+echo "$out" | grep -q "unreadable line in the limits block" || fail "T07: refusal not named: $out"
+pass "T07 an unreadable limits block refuses instead of mis-reading"
 
 pass "all scenarios passed"

@@ -48,6 +48,7 @@ use std::io::Write;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Dispatches allowed per king unit before the walk parks it. The target arm
@@ -201,14 +202,16 @@ pub(crate) fn mint_walk_key(fno_id: &str) -> String {
     // suffix is what makes "never repeats" true; the timestamp stays because it
     // makes the key sortable and readable.
     let mut entropy = [0u8; 4];
-    if getrandom::fill(&mut entropy).is_err() {
-        entropy = (std::process::id()).to_le_bytes();
-    }
-    format!("{fno_id}-w{nanos}-{}", hex4(entropy))
-}
-
-fn hex4(bytes: [u8; 4]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    let suffix = if getrandom::fill(&mut entropy).is_ok() {
+        u32::from_le_bytes(entropy)
+    } else {
+        // A pid is constant for the life of the process, so a pid-only fallback
+        // rebuilds the very collision above for two mints in one tick. The
+        // counter is what keeps the fallback unique in-process.
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        std::process::id() ^ SEQ.fetch_add(1, Ordering::Relaxed)
+    };
+    format!("{fno_id}-w{nanos}-{suffix:08x}")
 }
 
 /// The env var carrying [`KingQueue::walk_key`] into the dispatched session.
