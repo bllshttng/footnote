@@ -490,3 +490,23 @@ fn every_table_row_names_a_path_that_exists() {
         }
     }
 }
+
+/// Positive marker that the shared make_script publishes exec-ready
+/// scripts: the returned path must run immediately, with no sleep, probe,
+/// or retry, and carry its full body. Fails if write-in-place publication
+/// ever comes back (the ETXTBSY/ENOEXEC mock flake family).
+#[test]
+fn make_script_publishes_an_immediately_executable_script() {
+    let dir = TempDir::new().unwrap();
+    let script = make_script(dir.path(), "mock-echo", "echo exec-ready-$$.ok");
+    let out = std::process::Command::new(&script)
+        .arg("--version")
+        .output()
+        .expect("exec right after make_script must succeed");
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("exec-ready-"),
+        "body must be complete at first exec, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
