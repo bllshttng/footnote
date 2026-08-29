@@ -1319,7 +1319,11 @@ def test_the_probe_records_a_candidate_awaiting_its_repeat(monkeypatch) -> None:
     assert sink == [f"daemon: candidate {SID} awaiting a repeat probe"]
 
 
-def test_the_diagnostic_carries_the_elapsed_measurement() -> None:
+def test_the_diagnostic_carries_the_elapsed_measurement(monkeypatch) -> None:
+    # The registry read is stubbed rather than left live: a unit test that
+    # reaches the machine's real agent registry reports a number nobody in this
+    # file controls, and its own pass would then depend on fleet state.
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *_a, **_kw: [])
     binding = mux_spawn.PaneBinding(
         None,
         True,
@@ -1333,6 +1337,7 @@ def test_the_diagnostic_carries_the_elapsed_measurement() -> None:
     line = mux_spawn._bind_failure_diagnostic(binding)
     assert "waited 60.0s of a 60.0s window across 78 poll(s)" in line
     assert "last observed: daemon: 3 new codex sessions for this cwd, ambiguous" in line
+    assert "0 live agent(s)" in line, "a readable registry reports its count"
 
 
 def test_the_diagnostic_survives_an_unreadable_registry(monkeypatch) -> None:
@@ -1350,8 +1355,9 @@ def test_the_diagnostic_survives_an_unreadable_registry(monkeypatch) -> None:
     assert "live agent" not in line, "an unreadable registry must not report a count"
 
 
-def test_an_unrecorded_condition_is_said_not_omitted() -> None:
+def test_an_unrecorded_condition_is_said_not_omitted(monkeypatch) -> None:
     """Silence about the condition is itself the finding this node measured."""
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *_a, **_kw: [])
     binding = mux_spawn.PaneBinding(
         None, True, "binding-window-expired", "", elapsed_s=1.0, window_s=60.0, polls=2
     )

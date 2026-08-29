@@ -1751,6 +1751,13 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_SESSION", "main")
+
+    from fno.agents import events as _events
+
+    emitted: list = []
+    monkeypatch.setattr(
+        _events, "emit", lambda name_, **kw: emitted.append((name_, kw))
+    )
     # x-85fe: pin canonical == caller so this node-less spawn does NOT move to
     # the canonical root (AC1-EDGE no-op) -- the receipt/redirect note would
     # otherwise drift when run from a linked worktree. This test checks the pane
@@ -1773,6 +1780,18 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     # test_pane_binding_receipt.py.
     assert "fno doctor --codex-bind" not in result.output
     assert fake_runner.kill_calls
+    # x-1595: the measurement rides the DURABLE event too. A reaped spawn's
+    # stderr goes with the scrollback, and four of these failures left nothing a
+    # later session could read. This arm ran no bind wait, so the values are the
+    # honest None/"" rather than a fabricated "waited 0.0s" -- the assertion is
+    # that the four keys are CARRIED, which is what a later reader needs.
+    uncaptured = [
+        kw
+        for name_, kw in emitted
+        if name_ == "agent_session_id_uncaptured" and kw.get("harness") == "codex"
+    ]
+    assert uncaptured, "the unbound codex spawn emitted no uncaptured event"
+    assert set(uncaptured[-1]) >= {"elapsed_s", "window_s", "polls", "condition"}
 
 
 def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
