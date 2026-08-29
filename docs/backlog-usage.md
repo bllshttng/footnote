@@ -73,6 +73,26 @@ fno backlog update <id> --related x-bbbb       # affinity edge, symmetric
 
 When a PR opens outside the Footnote PR path, repair its node with `fno backlog update <id> --locked-by <worker> --pr-number <n>`. This command binds the owner and primary PR together. `--add-pr` records only an additional PR and can leave a ready node offered for dispatch. A bare `--pr-number` removes the node from ready but leaves its owner unknown. The update receipt rereads the stored row and reports its owner, PR, and status.
 
+## Demand signal: what the agents keep hitting
+
+Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstanding ask` means "I need a decision". `fno king escalate` means "the board is stalled". The `<help>` tag means "I am stuck". None of them means "this keeps costing me". `fno backlog encounter` is the one that does.
+
+```bash
+fno backlog encounter <id> --evidence "cost two wrong diagnoses before I found the real seam."
+fno backlog demand                 # the divergence table
+fno backlog demand --json          # the same rows, for a groom pass or a king
+```
+
+An encounter is a thing that HAPPENED, not a preference. Agents have no preferences, they have contexts. A poll count of N agents who like a node is unfalsifiable; N distinct sessions that each name what the node cost them is falsifiable against a transcript. So evidence is required, it is capped by `config.style.word_cap.encounter` (80 words by default), and over-length evidence is refused rather than truncated.
+
+One session votes once per node. A second attempt is refused, not silently dropped, and the refusal names the timestamp of the vote already on file so the caller can add a `fno backlog note` instead. A session whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
+
+`demand` sorts by DIVERGENCE, not by volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. The `dispatched` column is how many of the encountering sessions were also sent to that node: `enc 12, dispatched 12` is one king that fanned out, while `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
+
+`demand` is a READ. It never writes `rank`, never touches `_kanban_column`, and never reorders anything. The board stays the work order and demand is a column you rank FROM, by hand, with `fno backlog rank`.
+
+An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path would make the record deniable. A later correction is a progress note.
+
 ## Moving cards
 
 ### Between columns

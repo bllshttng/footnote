@@ -1,6 +1,6 @@
 # House style for agent-authored text
 
-Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on mail, PR bodies, comments, and changed markdown. Rule 7 runs on mail only.
+Agent text is re-read by every recipient on every turn. It must read once. A machine checks seven rules at the tool boundary. Rules 1 to 6 run on mail, PR bodies, comments, and changed markdown. Rule 7 runs on mail and on the evidence of a backlog encounter, and its number is config-driven per surface.
 
 ## The house style
 
@@ -37,15 +37,23 @@ The house style above is the standard a person writes to. The list below is the 
 4. No contractions. Write "do not", not "don't".
 5. If a sentence carries "if" or "when", that word starts the sentence.
 6. A paragraph is one physical line. A newline starts the next block.
-7. Mail prose is 80 masked words or fewer. This rule does not run on PR bodies, comments, or changed markdown.
+7. Mail prose and encounter evidence are 80 masked words or fewer, or whatever `config.style.word_cap.<surface>` sets. This rule does not run on PR bodies, comments, changed markdown, or progress notes.
 
-## Rule 7 caps mail prose
+## Rule 7 caps what a reader meets mid-turn
 
 The cap counts words after the same masking pass as rules 1 to 6. Code, paths, flags, and fenced blocks do not count. A pasted 200-line log therefore counts near zero and passes. The cap targets prose, not the full message size.
 
 Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reason, or pass `--style-exception`. The refusal is written to stderr, so it is not charged the mail cap.
 
-The send boundary also caps each canonical sender-recipient pair at 80 masked words in a rolling 10-minute window. Any inbound `send` from that recipient resets the pair to zero. Self-sends and non-send audit or migration rows do not reset it. A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send but still records and reserves the real word count. A refused attempt does not reserve words.
+The send boundary also caps each canonical sender-recipient pair at `config.style.pair_budget_words` masked words, 80 by default, in a rolling 10-minute window. Any inbound `send` from that recipient resets the pair to zero. Self-sends and non-send audit or migration rows do not reset it. A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send but still records and reserves the real word count. A refused attempt does not reserve words. Raise `pair_budget_words` alongside `word_cap.mail`: a higher per-message cap that leaves the window at 80 refuses the very message the cap now permits.
+
+### Which surfaces take the cap, and why progress notes do not
+
+The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
+
+`progress_notes` is deliberately UNCAPPED, and the reason is worth stating rather than rediscovering. A note is read when a person opens a node, not mid-turn. It is also an agent's only append-only surface on a node, because `update --details` replaces rather than appends, so a refusal there leaves measured evidence nowhere to land that does not overwrite somebody else's writing. The 76,346 words of notes measured on 2026-08-29 are a volume problem on an artifact surface, and a refusal that destroys evidence is the wrong instrument for a volume problem. `fno backlog note` therefore prints one advisory line naming the word count and the cheaper alternative, and appends the note.
+
+The surface set lives in `fno.style.CAPPED_SURFACES` and is not configurable. Config moves a number; it can never add a surface the checker says is uncapped.
 
 ## Relay concision starts before refusal
 

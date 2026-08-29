@@ -3285,6 +3285,34 @@ def cmd_encounter(
         )
 
 
+@cli.command("demand", hidden=True)
+def cmd_demand(
+    json_output: bool = typer.Option(False, "--json", "-J", help="Emit the rows as JSON."),
+) -> None:
+    """Show where agent encounters and operator priority DISAGREE.
+
+    Sorted by divergence, not by volume. A p0 with many encounters tells you
+    nothing, because you already ranked it. A p3 or a never-dispatched node with
+    many encounters is the whole point of the signal.
+
+    `dispatched` is how many of the encountering sessions were also sent to this
+    node. Read it beside the count: `enc 12, dispatched 12` is one king that
+    fanned out, while `enc 3, dispatched 0` is three sessions that hit the node
+    while doing something else.
+
+    A read, and only a read. It never writes rank and never moves a column; the
+    board stays the work order and this is a column you rank FROM.
+    """
+    from fno.graph.demand import demand_rows, format_rows
+    from fno.graph.store import read_graph
+
+    rows = demand_rows(read_graph(_graph_path()))
+    if json_output:
+        typer.echo(json.dumps(rows, separators=(",", ":")))
+    else:
+        typer.echo(format_rows(rows))
+
+
 def _encounter_total(task_id: str) -> int:
     """Encounters now on the node, read back after the write."""
     from fno.graph._intake import _find_node
@@ -14936,6 +14964,8 @@ _FOOTNOTE_OWNED_VERBS = frozenset(
         "project-root",
         "board",
         "undispatched",
+        # demand reads encounters and writes nothing
+        "demand",
         # completion works on any backend by design (task 4.1)
         "done",
         # footnote-owned sidecar files, no graph write
