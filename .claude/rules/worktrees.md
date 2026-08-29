@@ -2,7 +2,7 @@
 
 The single place that says where git worktrees go and what to do after creating one. Loaded every session via `AGENTS.md`. Skill defaults that place worktrees elsewhere lose to this rule.
 
-Hook internals, removal, and the enforcement wiring live in [docs/architecture/worktree-mechanics.md](../../docs/architecture/worktree-mechanics.md). Read it before editing the `WorktreeCreate` hook, where exiting non-zero on the wrong payload shape creates the very worktree you meant to block, and when removing or pruning a worktree or tracing why a location gate fired.
+Read [docs/architecture/worktree-mechanics.md](../../docs/architecture/worktree-mechanics.md) for hook internals, removal, enforcement wiring, and the Claude Code worktree Bash isolation map. When you edit the `WorktreeCreate` hook, read it first. A non-zero exit on the wrong payload shape creates the very worktree you meant to block. When you remove or prune a worktree, or trace why a location gate fired, read it too. Inside a worktree session, a Bash command holding `$VAR` expansion, `$(...)`, `$(( ))`, or a loop is refused as too complex. Plain commands run, including `bash <file>` and absolute-path writes. Footnote's own hooks gate those writes, not the analyzer. Use `printenv`, fno verbs, or file indirection. Never inline a watcher loop.
 
 ## The rule
 
