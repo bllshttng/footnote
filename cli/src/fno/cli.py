@@ -145,7 +145,7 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     ),
     "law": (
         "fno.law:law_app",
-        "Compose and enact human-approved project law (now `fno inbox law`).",
+        "Record durable project law in one call (now `fno inbox law`).",
         {"hidden": True},
     ),
     "resume": (
