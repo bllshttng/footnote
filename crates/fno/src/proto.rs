@@ -2261,6 +2261,18 @@ pub struct PaneInfo {
     /// direction of `where` (Locked Decision 6).
     #[serde(default)]
     pub fno_id: Option<String>,
+    /// (x-dfe7) The joined row's classified lineage: the CURRENT harness
+    /// session the row answers as, the succession chain it retired (oldest
+    /// first), and the fork edge of a parallel branch. `fno_id` stays the
+    /// stable thread join; these fields are printed BESIDE it so a retired
+    /// id can never silently read as current. `#[serde(default)]` keeps a
+    /// pre-lineage reader wire-tolerant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub predecessor_session_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from_session_id: Option<String>,
     /// (v51, x-588a) The pane's spawn-captured `FNO_AGENT_SELF` identity.
     #[serde(default)]
     pub name: Option<String>,
@@ -4528,6 +4540,9 @@ mod tests {
                     tab_name: None,
                     tab_ordinal: Some(1),
                     fno_id: None,
+                    harness_session_id: None,
+                    predecessor_session_ids: Vec::new(),
+                    forked_from_session_id: None,
                     name: None,
                 }],
             },

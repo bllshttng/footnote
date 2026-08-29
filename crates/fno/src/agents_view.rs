@@ -38,6 +38,14 @@ pub struct RegistryAgent {
     /// (x-d865) The harness session id (claude/codex uuid), an accepted
     /// alternate spelling for `where` resolution. `None` when absent.
     pub harness_session_id: Option<String>,
+    /// (x-dfe7) Classified lineage, read straight off the registry row:
+    /// the succession chain this row's current session retired (oldest
+    /// first) and the fork edge of a parallel branch. Empty/`None` for a
+    /// row never re-minted and never forked - the dominant case. Rendered
+    /// so a stable thread id and the CURRENT session cannot disagree
+    /// invisibly.
+    pub predecessor_session_ids: Vec<String>,
+    pub forked_from_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
     /// In-TTL inside-leg badge; `None` = liveness-only. Never a scraped guess.
@@ -1715,6 +1723,22 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+        let predecessor_session_ids = row
+            .get("predecessor_session_ids")
+            .and_then(|v| v.as_array())
+            .map(|ids| {
+                ids.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let forked_from_session_id = row
+            .get("forked_from_session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         out.push(RegistryAgent {
             name: name.to_string(),
             cwd: cwd.to_string(),
@@ -1726,6 +1750,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 .map(str::to_string),
             session_id,
             harness_session_id,
+            predecessor_session_ids,
+            forked_from_session_id,
             exited,
             badge,
             reason,
@@ -1810,6 +1836,8 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
         foreign.push(RegistryAgent {
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             harness: Some("claude".to_string()),
             name: w.name.clone(),
             cwd: w.cwd.clone(),
@@ -3561,6 +3589,8 @@ config_dir = "~/.claude-alt"
             spawned_by_session: None,
             session_id: None,
             harness_session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
             name: name.into(),
             cwd: "/w".into(),
             exited,

@@ -22,6 +22,8 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         spawned_by_session: None,
         session_id: None,
         harness_session_id: Some(session_id.into()),
+        predecessor_session_ids: Vec::new(),
+        forked_from_session_id: None,
         name: worker.into(),
         cwd: "/repo/worktree".into(),
         harness: Some(harness.into()),

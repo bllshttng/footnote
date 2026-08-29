@@ -6214,6 +6214,16 @@ where
                     // through unchanged; observed_model remains transcript truth.
                     "effort": e.effort,
                     "harness_session_id": e.harness_session_id,
+                    // The two identity axes plus classified lineage (x-dfe7),
+                    // mirroring Python's serialize_entry: `thread_id` is the
+                    // stable fno identity, `current_session_id` the address
+                    // delivery follows now, and the predecessor chain / fork
+                    // edge are the retained history. Emitted as separate keys
+                    // so a renderer cannot present a retired id as current.
+                    "thread_id": e.fno_id,
+                    "current_session_id": e.harness_session_id,
+                    "predecessor_session_ids": e.predecessor_session_ids,
+                    "forked_from_session_id": e.forked_from_session_id,
                     "short_id": short_id,
                     "session_id": session_id,
                     "address": address,
