@@ -81,7 +81,12 @@ set -euo pipefail
 # exists to replace, so a pointer nobody reads is the same as no feature.
 # This is the case the corpus header was explicitly NOT aimed at: the overage
 # is two documented verbs, not corpus growth.
-CEILING_BYTES=37411
+# Raised by 400 for the workspace-restore pointer (verb bullet + deep-dive
+# list entry), same shape as the prescribed-verbs raise above: a hidden verb
+# (`fno mux workspace restore`) with no session-start mention collects zero
+# use, and reboot recovery is exactly the moment no agent is reading docs.
+# 352 measured, the rest is the rounding the zero-spare rule below demands.
+CEILING_BYTES=37811
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
