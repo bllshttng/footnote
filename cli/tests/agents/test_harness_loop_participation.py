@@ -49,6 +49,57 @@ def test_the_table_is_not_uniform():
     assert len(values) > 1, values
 
 
+# A field allowed to hold one value on every row, with the reason it is a
+# measured result rather than an inherited default. Empty today, and adding to
+# it is the moment to prove the uniformity rather than assume it.
+UNIFORM_BY_MEASUREMENT: dict[str, str] = {}
+
+
+def test_no_capability_field_is_uniform_across_every_harness():
+    """The guard for the defect this node closed, aimed at the NEXT field.
+
+    ``stop_hook`` held one value for six harnesses because nothing would have
+    noticed a second one was needed, and ``send_keys_enter_delay_ms`` held one
+    default across four before that. A field with one distinct value has not
+    been measured for any row. ``scripts/diagnostics/capability-honesty-sweep.py``
+    prints the same pass with two more the uniformity check cannot see.
+    """
+    import json
+    import tomllib
+
+    table = tomllib.loads(
+        (REPO_ROOT / "crates/fno-agents/src/harness_capabilities.toml").read_text()
+    )
+    rows = table["harness"]
+
+    def flatten(prefix, value, out):
+        if isinstance(value, dict):
+            for key, sub in value.items():
+                flatten(f"{prefix}.{key}" if prefix else key, sub, out)
+        else:
+            out[prefix] = json.dumps(value, sort_keys=True)
+
+    flat = {}
+    for harness, caps in rows.items():
+        collected: dict[str, str] = {}
+        flatten("", caps, collected)
+        flat[harness] = collected
+
+    fields = {key for row in flat.values() for key in row}
+    # Non-vacuity: an empty field set would make the assertion below pass while
+    # measuring nothing, which is the absence-reads-as-success trap.
+    assert len(flat) == len(KNOWN_HARNESSES)
+    assert len(fields) > 30, len(fields)
+    uniform = {
+        field
+        for field in fields
+        if len({flat[h].get(field, "<absent>") for h in flat}) == 1
+    }
+    assert uniform <= set(UNIFORM_BY_MEASUREMENT), sorted(
+        uniform - set(UNIFORM_BY_MEASUREMENT)
+    )
+
+
 def test_a_declared_loop_extension_exists_on_disk():
     """An ``extension`` row's artifact is the thing that closes its loop.
 
