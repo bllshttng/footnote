@@ -6,6 +6,7 @@ import json
 import shutil
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -105,6 +106,16 @@ def test_AC4_LIVE_gate_is_explicitly_preserved_by_hermetic_runner():
     from fno.hermetic import _RUNNER_PASSTHROUGH
 
     assert "FNO_GROK_LIVE" in _RUNNER_PASSTHROUGH
+
+
+def test_AC7_EVIDENCE_grok_paste_fixture_records_measured_submit_trials():
+    fixture = Path(__file__).parent / "fixtures" / "grok-paste-trials.txt"
+    assert fixture.is_file(), "the measured Grok pane fixture is missing"
+    text = fixture.read_text(encoding="utf-8")
+    assert "payload_bytes=6330" in text
+    assert "payload_lines=42" in text
+    assert "paste_to_enter_delay_ms=200" in text
+    assert "trial 3 SUBMITTED" in text
 
 
 @pytest.mark.skipif(
