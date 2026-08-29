@@ -326,10 +326,10 @@ def _backstop_due(
     """
     from fno.king.state import last_run_is_fresh
     from fno.king.wake import read_wakes
+    from fno.outstanding.core import events_path
 
-    events = target.root / ".fno" / "events.jsonl"
     now_iso = now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if last_run_is_fresh(events, since_s=backstop_s, now_iso=now_iso):
+    if last_run_is_fresh(events_path(target.root), since_s=backstop_s, now_iso=now_iso):
         return False
     if _scope_actionable(target.scope, entries, resolver) <= 0:
         return False
@@ -410,10 +410,16 @@ def run_king_wake(
         unread_fn = scan_unread
     if entries_fn is None:
         def entries_fn() -> list:  # noqa: F811 - lazy default, loaded once below
+            # Backend-switched, mirroring the tick's own board read: under an
+            # external tracker backend there is no graph to hash, and a stale
+            # graph.json must not drive a board-change trigger.
             from fno.graph.store import read_graph
             from fno.paths import graph_json
+            from fno.tracker import active_backend_name
 
             try:
+                if active_backend_name() != "graph":
+                    return []
                 return read_graph(graph_json())
             except Exception:  # noqa: BLE001 - an unreadable graph is no signal
                 return []
