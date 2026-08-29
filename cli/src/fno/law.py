@@ -74,6 +74,24 @@ def validate_durable_law(
 law_app = typer.Typer(help="Record operator law in one call.")
 
 
+@law_app.callback()
+def _law_callback() -> None:
+    """Hold `set` as a named subcommand on BOTH mounts.
+
+    Not dead code, and the round-1 review's read that it was rested on the
+    wrong mount. `inbox_app.add_typer(law_app, name="law")` builds a group
+    either way, so `fno inbox law set` survives without this. The deprecated
+    root `fno law` shim goes through the lazy-loader table instead, and there
+    a single-command app collapses its one command into the group.
+
+    Measured, not reasoned about: deleting this callback makes the verb ratchet
+    report `law` added and `law set` removed against
+    `scripts/ci/verb-baseline.txt`. The callback is what keeps the two mounts
+    spelling the verb the same way.
+    """
+
+
+
 @law_app.command("set")
 def record_command(
     subject: str = typer.Argument(..., help="Subject governed by the law."),
