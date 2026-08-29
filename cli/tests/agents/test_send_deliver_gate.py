@@ -883,7 +883,16 @@ def test_detach_stdio_reports_partial_dup_failure_and_closes_source(monkeypatch)
         patch.setattr(dispatch_mod.os, "close", lambda fd: closed.append(fd))
         assert dispatch_mod._detach_stdio() is False
     assert duplicated == [0, 1, 2]
-    assert closed == [9]
+    # `dispatch_mod.os` IS the global os module, so this patch records EVERY
+    # close in the process for the length of the block, not only the ones
+    # _detach_stdio makes. A gc pass finalizing a file object left open by an
+    # earlier test lands its fd here and fails an exact-equality assertion on
+    # an fd this test never chose. Measured in CI 2026-08-29: [25, 28, 9]
+    # against [9], on a shard whose only change was an unrelated test going
+    # green and freeing the traceback that had been holding those files.
+    # So assert what _detach_stdio did with the fd this test controls.
+    assert closed.count(9) == 1
+    assert closed[-1] == 9
 
 
 def test_background_relay_stdio_detach_failure_exits_without_relay(monkeypatch) -> None:
