@@ -481,7 +481,7 @@ def settings_ls_cmd(
         ),
     ),
     age_days: int = typer.Option(
-        14, "--age-days", help="Prune age threshold in days (default 14)."
+        14, "--age-days", help="Prune age threshold in days (default 14, minimum 1)."
     ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the rows as JSON instead of text."
@@ -506,6 +506,14 @@ def settings_ls_cmd(
     from fno.config import load_settings
 
     settings = load_settings()
+    if prune and age_days < 1:
+        typer.echo(
+            f"--age-days {age_days} would prune a file a launching spawn may have "
+            "just written but not yet recorded (unreferenced at age 0); the "
+            "minimum is 1 day.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     referenced_paths: "set[str] | None"
     try:
         from fno.agents.registry import load_registry
@@ -522,7 +530,13 @@ def settings_ls_cmd(
     pruned: list[str] = []
     files = sorted(base_dir.glob("*.json")) if base_dir.is_dir() else []
     for path in files:
-        age = max(0.0, (now - path.stat().st_mtime) / 86400.0)
+        # A concurrent prune or manual clean can remove a file between the
+        # glob and this read; that file is not this listing's problem, and one
+        # vanished row must not crash the sweep.
+        try:
+            age = max(0.0, (now - path.stat().st_mtime) / 86400.0)
+        except OSError:
+            continue
         try:
             route = read_route_settings(str(path))
         except Exception:  # noqa: BLE001 - one bad file degrades its row, not the listing
@@ -547,7 +561,11 @@ def settings_ls_cmd(
             "referenced": referenced,
         })
         if prune and referenced == "no" and age >= age_days:
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError as exc:
+                typer.echo(f"warn: could not prune {path}: {exc}", err=True)
+                continue
             pruned.append(str(path))
 
     if json_output:

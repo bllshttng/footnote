@@ -1280,6 +1280,25 @@ def read_route_settings(path: str) -> dict[str, str]:
     return route
 
 
+def _match_provider(
+    route: Mapping[str, str], providers: dict[str, dict[str, Optional[str]]]
+) -> Optional[str]:
+    """The provider name for a route within an ALREADY-BUILT providers map.
+
+    The match itself (stamp first, else base_url) lives here once so the
+    restore re-resolution and the ``config route settings ls`` rendering can
+    never disagree; callers that own a map call this and never rebuild it.
+    """
+    base = (route.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    named = (route.get(ROUTE_PROVIDER_ENV) or "").strip()
+    if named and named in providers:
+        return named
+    for name, record in providers.items():
+        if base and str(record.get("base_url") or "").rstrip("/") == base:
+            return name
+    return None
+
+
 def provider_name_for_route(
     route: Mapping[str, str],
     *,
@@ -1292,15 +1311,7 @@ def provider_name_for_route(
     about which provider a file belongs to. None when neither the
     ``FNO_ROUTE_PROVIDER`` stamp nor the base_url matches today's registry.
     """
-    base = (route.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
-    named = (route.get(ROUTE_PROVIDER_ENV) or "").strip()
-    providers = effective_providers(_routing_block(settings))
-    if named and named in providers:
-        return named
-    for name, record in providers.items():
-        if base and str(record.get("base_url") or "").rstrip("/") == base:
-            return name
-    return None
+    return _match_provider(route, effective_providers(_routing_block(settings)))
 
 
 def refresh_provider_default_tiers(
@@ -1334,7 +1345,8 @@ def refresh_provider_default_tiers(
     default moved, or nothing recorded to refresh, returns ``(route, None)``.
     """
     refreshed = dict(route)
-    pname = provider_name_for_route(route, settings=settings)
+    providers = effective_providers(_routing_block(settings))
+    pname = _match_provider(route, providers)
     if pname is None:
         base = (route.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
         named = (route.get(ROUTE_PROVIDER_ENV) or "").strip()
@@ -1343,7 +1355,7 @@ def refresh_provider_default_tiers(
             f"recorded {missing} is not in today's provider registry; "
             "replaying recorded tiers verbatim"
         )
-    record = effective_providers(_routing_block(settings))[pname]
+    record = providers[pname]
     todays = record.get("haiku_model")
     recorded = refreshed.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
     if not todays or not recorded or str(todays) == recorded:

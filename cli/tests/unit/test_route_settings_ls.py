@@ -134,3 +134,19 @@ def test_prune_refuses_to_act_when_the_registry_cannot_be_read(tmp_path, monkeyp
     assert result.exit_code == 0, result.output
     assert old.exists()
     assert "?" in result.output  # the unknown-reference column is disclosed
+
+
+def test_prune_refuses_an_age_floor_below_one_day(tmp_path, monkeypatch):
+    """--age-days 0 would prune a file a launching spawn just wrote but has
+    not yet recorded (unreferenced at age 0). Refused naming the minimum; the
+    file is untouched."""
+    overlays = _pin(tmp_path, monkeypatch, referenced=[])
+    fresh = _overlay(overlays, "gg77", haiku="glm-4.7", mtime_days_ago=0.0)
+
+    result = runner.invoke(
+        app, ["config", "route", "settings", "ls", "--prune", "--age-days", "0"]
+    )
+
+    assert result.exit_code != 0
+    assert "minimum is 1 day" in result.output
+    assert fresh.exists()

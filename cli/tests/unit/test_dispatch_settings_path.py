@@ -172,3 +172,59 @@ def test_default_settings_path_project_local_wins_over_global(
     assert result == local_settings, (
         f"Expected project-local {local_settings} to win over global, got {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# x-5cc5: the restore seam re-resolves the provider-DEFAULT tier. The helper
+# is unit-tested in test_model_routing.py; THIS test pins the call site, so a
+# merge that resolves toward the old verbatim-replay body goes red instead of
+# silently regressing to stale-tier resumes.
+# ---------------------------------------------------------------------------
+
+
+def test_restore_route_for_relaunch_refreshes_a_stale_default_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import json
+    from types import SimpleNamespace
+
+    # The autouse _isolate fixture points FNO_REPO_ROOT at an empty tmp_path
+    # and clears the load_settings cache, so the seam resolves the BUILT-IN
+    # provider registry (zai haiku glm-4.7), not this machine's config.
+    from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
+
+    recorded = tmp_path / "route.json"
+    recorded.write_text(
+        json.dumps({
+            "env": {
+                "ANTHROPIC_BASE_URL": DEFAULT_ZAI_BASE_URL,
+                "ANTHROPIC_AUTH_TOKEN": "zk-secret",
+                "ANTHROPIC_MODEL": "glm-5.3",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+                "FNO_ROUTE_PROVIDER": "zai",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    from fno.agents.dispatch import restore_route_for_relaunch
+
+    restored = restore_route_for_relaunch(
+        SimpleNamespace(route_settings_path=str(recorded), name="row-x")
+    )
+
+    assert restored is not None
+    assert restored["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    # Operator-chosen keys replay verbatim through the seam.
+    assert restored["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
+    assert restored["ANTHROPIC_MODEL"] == "glm-5.3"
+    err = capsys.readouterr().err
+    assert "glm-4.5-air" in err and "glm-4.7" in err and "zai" in err
+
+
+def test_restore_route_for_relaunch_returns_none_without_a_recorded_path() -> None:
+    from types import SimpleNamespace
+
+    from fno.agents.dispatch import restore_route_for_relaunch
+
+    assert restore_route_for_relaunch(SimpleNamespace(route_settings_path=None, name="row-y")) is None
