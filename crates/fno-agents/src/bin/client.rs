@@ -1055,7 +1055,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     }
 
     // Resolve provider: explicit --provider > invoking-harness inference >
-    // builtin `claude` (mirrors Python's resolve_dispatch_provider). A missing
+    // builtin `claude` (mirrors Python's resolve_dispatch_harness). A missing
     // flag no longer exits 2 -- that was the bg/headless split-brain vs pane,
     // which already infers via the Python re-exec.
     let provider = match provider_param {

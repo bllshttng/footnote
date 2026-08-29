@@ -68,9 +68,9 @@ def resolve_target_coordinate(
     )
     harness = _flag_value(resolved, "--harness", "-H")
     if not harness:
-        from fno.dispatch_flags import resolve_dispatch_provider
+        from fno.dispatch_flags import resolve_dispatch_harness
 
-        harness = resolve_dispatch_provider(None, env=env)[0]
+        harness = resolve_dispatch_harness(None, env=env)[0]
     route = _flag_value(resolved, "--route")
     provider = _flag_value(resolved, "--provider", "-P")
     route_model: Optional[str] = None

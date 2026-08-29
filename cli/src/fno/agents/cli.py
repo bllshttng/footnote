@@ -1548,7 +1548,7 @@ def cmd_spawn(
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
+        resolve_dispatch_harness,
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
@@ -1602,19 +1602,20 @@ def cmd_spawn(
         route_spelling = f"--provider {vendor} --model {model}"
         route, model = f"{vendor}/{model}", None
 
-    # --provider is optional: resolve it (explicit > invoking harness > claude)
-    # and reject an empty --model before anything spawns. `provider` is a
-    # concrete string from here down; the provider-name set is validated
-    # substrate-aware further in.
+    # --harness is optional: resolve it (explicit > invoking harness > claude)
+    # and reject an empty --model before anything spawns. Every rung of that
+    # chain is a harness, which is why the resolver is spelled for that axis.
+    # The value is a concrete string from here down; the harness-name set is
+    # validated substrate-aware further in.
     try:
-        provider, provider_source = resolve_dispatch_provider(provider)
+        provider, harness_source = resolve_dispatch_harness(provider)
         model = reject_empty_model(model)
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
     # Provenance rides the pane receipt's harness_source field below (the
-    # default substrate) - it is the HARNESS axis's provenance, so it must not
-    # be named provider_*, which now holds the vendor. The bg/once stdout
+    # default substrate) - it is the HARNESS axis's provenance, so it is not
+    # named provider_*, which now holds the vendor. The bg/once stdout
     # receipts stay byte-parity-locked with the Rust client, so they don't
     # carry it.
 
@@ -2383,7 +2384,7 @@ def cmd_spawn(
                 "name": pane_result.name,
                 "short_id": pane_result.short_id,
                 "harness": pane_result.provider,
-                "harness_source": provider_source,
+                "harness_source": harness_source,
                 "status": pane_result.status,
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,

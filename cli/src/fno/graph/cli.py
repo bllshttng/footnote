@@ -10470,16 +10470,22 @@ def cmd_advance(
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
+        resolve_dispatch_harness,
     )
     from fno.backlog.advance import advance as _advance
     from fno.backlog.advance import advance_dependents as _advance_deps
 
-    # Validate the dispatch pins before any spawn; provider is resolved only when
+    # Validate the dispatch pins before any spawn; the pin is resolved only when
     # given so an absent pin lets the spawn path keep its per-node/default choice.
+    # This verb's `--provider` reaches a harness-axis resolver, so `flag=` keeps
+    # the refusal naming the flag the operator typed rather than the axis.
     try:
         model = reject_empty_model(model)
-        provider = resolve_dispatch_provider(provider)[0] if provider is not None else None
+        provider = (
+            resolve_dispatch_harness(provider, flag="--provider")[0]
+            if provider is not None
+            else None
+        )
     except DispatchFlagError as exc:
         typer.echo(f"advance: {exc}", err=True)
         raise typer.Exit(code=2)

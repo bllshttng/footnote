@@ -1338,7 +1338,7 @@ fn client_spawn_substrate_bg_agy_hard_errors_pointing_to_headless() {
 
 /// x-9112: `spawn --substrate bg` without --provider no longer exits 2 with a
 /// "provider is required" error - it INFERS the invoking harness, mirroring
-/// Python's resolve_dispatch_provider (and the pane arm). Proven deterministically
+/// Python's resolve_dispatch_harness (and the pane arm). Proven deterministically
 /// here via a single CODEX_SESSION_ID marker: inference resolves codex, which then
 /// reaches the Codex thread lane. Other harness markers are removed so the
 /// ambient session running the test suite can't make the env ambiguous.

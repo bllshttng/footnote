@@ -503,7 +503,7 @@ def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
     # config model=opus (a claude alias), provider unset; an explicit -p codex
     # retargets the spawn. The claude model must NOT ride onto codex, and a
     # stderr line names the config model, its implied provider, and the resolved
-    # one. env={} => resolve_dispatch_provider infers claude as the implied.
+    # one. env={} => resolve_dispatch_harness infers claude as the implied.
     err = io.StringIO()
     out = _inject(["spawn", "-H", "codex", "w"], err=err, env={}, model="opus")
     assert out.count("--model") == 0  # no --model opus injected
@@ -513,16 +513,16 @@ def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
 
 
 def test_ac5_fr_provider_resolution_failure_degrades_open(monkeypatch):
-    # If resolve_dispatch_provider raises, the model default must degrade to
+    # If resolve_dispatch_harness raises, the model default must degrade to
     # injecting nothing rather than aborting the spawn.
     import fno.dispatch_flags as pr
 
     def _boom(*_a, **_k):
         raise RuntimeError("resolution exploded")
 
-    monkeypatch.setattr(pr, "resolve_dispatch_provider", _boom)
+    monkeypatch.setattr(pr, "resolve_dispatch_harness", _boom)
     err = io.StringIO()
-    # provider unset so the model branch must call resolve_dispatch_provider.
+    # provider unset so the model branch must call resolve_dispatch_harness.
     out = _inject(["spawn", "-H", "codex", "w"], err=err, env={}, model="opus")
     assert out.count("--model") == 0  # nothing injected
     assert out[-1] == "w"  # spawn not aborted; positional preserved
