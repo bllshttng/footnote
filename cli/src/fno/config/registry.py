@@ -73,7 +73,7 @@ FIELD_META: dict[str, Meta] = {
     # --- config.join.* ---
     "join.sandbox": Meta(
         "advanced",
-        "Enforce a per-joiner write partition on `fno backlog join`: one switch over BOTH layers (the OS allowlist composed into the worker's --settings and the Edit/Write guard). An overlapping or unevaluated band is never narrowed; the node holder is never sandboxed.",
+        "Enforce a per-joiner write partition on `fno backlog join`: one switch over BOTH layers (the sandbox denyWrite of peer bands' surfaces plus the state-dir allowWrite, composed into the worker's --settings, and the Edit/Write guard). An overlapping or unevaluated band is never narrowed; the node holder is never sandboxed.",
         question="When workers join a held node, sandbox each joiner to its own band's files?",
         default_source="default",
     ),
