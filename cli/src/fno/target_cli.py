@@ -355,27 +355,78 @@ _SOURCE_PR_URL_RE = re.compile(
 _GH_PREFLIGHT_TIMEOUT_S = 30.0
 
 
-def _resolve_dispatch_node(
-    input_: Optional[str], plan_path: Optional[str]
-) -> Optional[dict]:
-    """Resolve only an exact node/plan reference for the retro gate.
+def _graph_entries_or_none() -> Optional[list]:
+    """One graph read a resolver and the hold gate share (round-12 finding 10).
 
-    Free-text target inputs return ``None`` without reading GitHub. Exact
-    matching keeps ordinary target init behavior cheap and avoids title/fuzzy
-    guesses at the claim boundary.
+    ``load_graph`` is not free, and init()/start() were paying it twice per
+    invocation - once in the node resolver, again inside
+    ``_refuse_dispatch_hold``'s own read. Returns ``None`` on any read
+    failure so the CALLER decides the failure policy: the hold gates refuse
+    when the input names a node (an unreadable graph must not silently skip
+    the check, the fail-open the resolver used to swallow), while the
+    containment check keeps its documented fail-open.
     """
-    tokens = (input_ or "").split()
-    node_tokens = {tok.lower() for tok in tokens if _TARGET_NODE_TOKEN_RE.fullmatch(tok)}
     try:
         from fno.graph.load import load_graph
         from fno.paths import graph_json
 
         graph = load_graph(graph_json())
-    except Exception:  # noqa: BLE001 - the dispatch gate is fail-open
+    except Exception:  # noqa: BLE001 - policy belongs to the caller
         return None
     if not isinstance(graph, list):
         return None
-    entries = [entry for entry in graph if isinstance(entry, dict)]
+    return [entry for entry in graph if isinstance(entry, dict)]
+
+
+def _input_may_name_a_node(text: Optional[str]) -> bool:
+    """True when an input's SHAPE can name a backlog node: a canonical
+    ``<prefix>-<hex>`` token, a bare hex id, or a kebab slug - the shapes
+    ``fuzzy.resolve_node`` accepts. Spaced free text and single words cannot
+    name one, so an unreadable graph stays proceed-able for them."""
+    if not text:
+        return False
+    for tok in text.split():
+        if _TARGET_NODE_TOKEN_RE.fullmatch(tok):
+            return True
+        if re.fullmatch(r"[0-9a-fA-F]{4,8}", tok) or re.fullmatch(
+            r"[a-z0-9]+(-[a-z0-9]+)+", tok
+        ):
+            return True
+    return False
+
+
+def _refuse_unreadable_graph_hold(what: str) -> None:
+    """A named dispatch against an unreadable graph refuses (round-12
+    finding 10): the hold state cannot be read, and failing to read it must
+    not read as unheld. Free-text inputs never reach this."""
+    typer.echo(
+        f"fno do target {what}: dispatch-hold-invalid: backlog graph is "
+        "unreadable; refusing to assume unheld. Nothing was claimed. Fix or "
+        "restore graph.json and retry.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
+def _resolve_dispatch_node(
+    input_: Optional[str],
+    plan_path: Optional[str],
+    entries: Optional[list] = None,
+) -> Optional[dict]:
+    """Resolve only an exact node/plan reference for the retro gate.
+
+    Free-text target inputs return ``None`` without reading GitHub. Exact
+    matching keeps ordinary target init behavior cheap and avoids title/fuzzy
+    guesses at the claim boundary. ``entries`` lets a caller hand in the graph
+    it already read (the hold gate reads it once and shares - round-12
+    finding 10); ``None`` reads it here as before.
+    """
+    tokens = (input_ or "").split()
+    node_tokens = {tok.lower() for tok in tokens if _TARGET_NODE_TOKEN_RE.fullmatch(tok)}
+    if entries is None:
+        entries = _graph_entries_or_none()
+        if entries is None:
+            return None
 
     if node_tokens:
         matches = [
@@ -505,13 +556,16 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     raise typer.Exit(code=2)
 
 
-def _refuse_dispatch_hold(node: Optional[dict]) -> None:
-    """Refuse a named dispatch when its plan ancestry carries a hold."""
+def _refuse_dispatch_hold(node: Optional[dict], entries: Optional[list] = None) -> None:
+    """Refuse a named dispatch when its plan ancestry carries a hold.
+
+    ``entries`` is the caller's already-read graph rows (round-12 finding 10:
+    init/start resolve the node and hold-check it off ONE read). ``None`` -
+    only for callers with no resolution step of their own - reads here.
+    """
     if not isinstance(node, dict):
         return
     from fno.graph.ladder import DispatchHoldState, dispatch_hold_verdict
-    from fno.graph.store import read_graph
-    from fno.paths import graph_json
     from fno.tracker import active_backend_name
 
     if active_backend_name() != "graph":
@@ -520,15 +574,19 @@ def _refuse_dispatch_hold(node: Optional[dict]) -> None:
         # of truth, so there is no plan hold to enforce here.
         return
 
-    try:
-        entries = read_graph(graph_json())
-    except Exception as exc:  # noqa: BLE001 - an unreadable hold world refuses
-        typer.echo(
-            f"fno do target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
-            f"backlog graph is unreadable ({exc}); refusing to assume unheld.",
-            err=True,
-        )
-        raise typer.Exit(code=2)
+    if entries is None:
+        from fno.graph.store import read_graph
+        from fno.paths import graph_json
+
+        try:
+            entries = read_graph(graph_json())
+        except Exception as exc:  # noqa: BLE001 - an unreadable hold world refuses
+            typer.echo(
+                f"fno do target: dispatch-hold-invalid:{node.get('id', 'unknown')}: "
+                f"backlog graph is unreadable ({exc}); refusing to assume unheld.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
     by_id = {
         entry.get("id"): entry
         for entry in entries
@@ -1242,11 +1300,14 @@ def check_contained() -> None:
 @target_app.command("check-dispatch-hold", hidden=True)
 def check_dispatch_hold() -> None:
     """Fail-closed hold check for the direct shell bootstrap path."""
-    node = _resolve_dispatch_node(
-        os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
-    )
+    _input = os.environ.get("TARGET_INPUT")
+    _plan = os.environ.get("TARGET_PLAN_PATH")
     try:
-        _refuse_dispatch_hold(node)
+        entries = _graph_entries_or_none()
+        if entries is None and (_input_may_name_a_node(_input) or _plan):
+            _refuse_unreadable_graph_hold("check-dispatch-hold")
+        node = _resolve_dispatch_node(_input, _plan, entries=entries or [])
+        _refuse_dispatch_hold(node, entries=entries)
     except typer.Exit as exc:
         if exc.exit_code != 2:
             raise
@@ -1513,11 +1574,22 @@ def init(
         typer.echo(f"fno do target init: {exc}", err=True)
         raise typer.Exit(code=2)
 
-    # Resolved once and shared: both gates below want the same exact-match node,
-    # and the resolver reads the whole graph.
-    _dispatch_node = _resolve_dispatch_node(input_, plan_path)
+    # Resolved once and shared: both gates below want the same exact-match
+    # node, and the graph is read ONCE for all of them (round-12 finding 10).
+    # An unreadable graph on a NAMED dispatch refuses here - the resolver's
+    # old fail-open swallowed the read failure before the hold gate could see
+    # it, silently skipping the check exactly when nothing could prove the
+    # plan unheld. Free text keeps its proceed path.
+    _dispatch_entries = _graph_entries_or_none()
+    if _dispatch_entries is None and (
+        _input_may_name_a_node(input_) or plan_path
+    ):
+        _refuse_unreadable_graph_hold("init")
+    _dispatch_node = _resolve_dispatch_node(
+        input_, plan_path, entries=_dispatch_entries or []
+    )
 
-    _refuse_dispatch_hold(_dispatch_node)
+    _refuse_dispatch_hold(_dispatch_node, entries=_dispatch_entries)
 
     # A named contained node is redirected to its delivery unit before anything
     # is claimed (x-e957 task 1.3b).
@@ -3179,8 +3251,22 @@ def start(
     # slug would write graph_node_id: null and skip the claim) - both the
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
-    _start_node = _find_node(node)
-    _refuse_dispatch_hold(_start_node)
+    # One graph read shared by the find and the hold gate (round-12 finding
+    # 10); an unreadable graph on a node-shaped argument refuses - the old
+    # best-effort _find_node returned None and the hold gate silently
+    # skipped. Feature text (no node shape) keeps its proceed path.
+    _start_entries = _graph_entries_or_none()
+    if _start_entries is None and _input_may_name_a_node(node):
+        _refuse_unreadable_graph_hold("start")
+    _start_node = next(
+        (
+            e
+            for e in (_start_entries or [])
+            if isinstance(e, dict) and e.get("id") == node
+        ),
+        None,
+    )
+    _refuse_dispatch_hold(_start_node, entries=_start_entries)
     # Redirect a contained node BEFORE `worktree ensure` (sigma). `init` catches
     # it too, but by then this verb has already created the worktree and branch,
     # so the operator got a refusal saying "Nothing was claimed" next to an
