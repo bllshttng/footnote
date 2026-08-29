@@ -464,12 +464,18 @@ def test_a_wrong_handover_holder_cannot_take_a_live_claim(monkeypatch, tmp_path)
         "node:N", "target-session:incumbent", ttl_ms=3_600_000,
         pid=os.getpid(), root=tmp_path,
     )
+    # Pin the intruder to a pid DIFFERENT from the incumbent's. An omitted
+    # --pid resolves the ambient harness session, which on an identity-less CI
+    # runner degrades to this same process: the intruder then reacquires the
+    # claim as its own pid (legal) and the refusal under test never fires.
+    # getppid() is alive and distinct inside a pytest worker.
     r = runner.invoke(
         claims_cli,
         [
             "acquire", "node:N",
             "--holder", "target-session:intruder",
             "--ttl", "2h",
+            "--pid", str(os.getppid()),
             "--handover-from", "spawn-handover:t-guessed",
         ],
     )
@@ -480,6 +486,8 @@ def test_a_wrong_handover_holder_cannot_take_a_live_claim(monkeypatch, tmp_path)
 def test_handover_from_with_no_claim_on_disk_acquires_normally(monkeypatch, tmp_path):
     """Every hand-started run and every spawn whose claim failed lands here."""
     _route_to(monkeypatch, tmp_path)
+    import os
+
     from fno.claims.cli import cli as claims_cli
     from fno.claims.core import claim_status
 
@@ -489,6 +497,11 @@ def test_handover_from_with_no_claim_on_disk_acquires_normally(monkeypatch, tmp_
             "acquire", "node:N",
             "--holder", "target-session:sid-2",
             "--ttl", "2h",
+            # Pinned for the same reason as the wrong-holder test: the ambient
+            # session-pid resolution this would otherwise exercise differs per
+            # environment, and the subject here is the handover decline, not
+            # pid defaulting.
+            "--pid", str(os.getpid()),
             "--handover-from", "spawn-handover:t-never-was",
         ],
     )
