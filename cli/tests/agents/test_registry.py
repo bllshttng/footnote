@@ -1433,8 +1433,12 @@ def test_every_resumable_harness_resolves_an_identity() -> None:
 
     # A positive marker, not an absence. Without this the assertion body could
     # be skipped entirely by a contract that declared nothing resumable, which
-    # is the exact shape of vacuous pass this test was written to end.
-    assert len(checked) >= 5, f"expected several resumable harnesses, saw {checked}"
+    # is the exact shape of vacuous pass this test was written to end. The bar
+    # proves the LOOP RAN and nothing more, so it stays well under the six
+    # harnesses that declare support today: pinning it near that count would
+    # turn one legitimate retirement into a failure here, and a gate that cries
+    # about roster churn is one people learn to edit.
+    assert len(checked) >= 2, f"the resumable-harness loop never ran; saw {checked}"
 
     assert set(HARNESS_SESSION_ID_FIELDS) <= set(READABLE_PROVIDERS)
 

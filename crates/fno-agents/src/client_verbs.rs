@@ -5230,9 +5230,13 @@ mod tests {
         // A positive marker, not an absence: a contract that stopped declaring
         // any resumable harness would otherwise pass this test vacuously, which
         // is precisely how the Python gate this replaces went green on pi.
+        // The bar proves the LOOP RAN and nothing more, so it stays well under
+        // the six harnesses that declare support today. Pinning it near that
+        // count would turn one legitimate retirement into a failure here, and a
+        // gate that cries about roster churn is one people learn to edit.
         assert!(
-            checked >= 5,
-            "expected the contract to declare several resumable harnesses, saw {checked}"
+            checked >= 2,
+            "the resumable-harness loop never ran; contract declared {checked}"
         );
     }
 
