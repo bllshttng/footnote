@@ -125,6 +125,23 @@ _TRANSPORT = re.compile(
 log = logging.getLogger(__name__)
 
 
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redact_userinfo(text: str) -> str:
+    """``scheme://user:secret@host`` -> ``scheme://***@host``.
+
+    A remote URL reaches an operator-facing sentence, and that sentence is
+    published: it rides the coverage note into the `fno/review-coverage`
+    commit status on GitHub, and into `.fno/events.jsonl`. A CI-shaped clone
+    carries its token in the userinfo (`https://x-access-token:ghs_...@host/
+    owner/repo.git`), and such a remote reaches the non-GitHub arm precisely
+    BECAUSE its host is not github.com - so the credential is exactly what
+    would be posted. Redact before interpolating, never after.
+    """
+    return _URL_USERINFO.sub("***@", text)
+
+
 def _repo_slug_reason(
     cwd: Optional[str], runner: Callable = run
 ) -> Tuple[Optional[str], str]:
@@ -155,21 +172,44 @@ def _repo_slug_reason(
         first = next(
             (ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()), ""
         )
-        return None, first or "no origin remote"
+        return None, _redact_userinfo(first) or "no origin remote"
     url = r.stdout.strip()
     slug = _parse_origin_slug(url)
     if not slug:
-        return None, f"origin is not a github remote: {url or '(empty)'}"
+        return None, (
+            f"origin is not a github remote: {_redact_userinfo(url) or '(empty)'}"
+        )
     return slug, ""
 
 
 def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
     """`owner/repo` from the git origin remote: local, no API spend.
 
-    The slug-only view of :func:`_repo_slug_reason`, for the callers that have
-    nowhere to put the reason.
+    The slug-only view of :func:`_repo_slug_reason`, for the two callers that
+    have nowhere to put the reason (``_cache`` degrades to an uncached read,
+    and the tests' own probes). Every caller that RENDERS a refusal goes
+    through :func:`_slug_or_reason` instead, so the sentence an operator reads
+    names its own subject.
     """
     return _repo_slug_reason(cwd, runner)[0]
+
+
+def _slug_or_reason(
+    cwd: Optional[str], runner: Callable = run, repo: Optional[str] = None
+) -> Tuple[Optional[str], str]:
+    """``(slug, sentence)`` for the callers that render a refusal.
+
+    ``repo``, when a caller already holds a slug, short-circuits the git read.
+    The sentence keeps its old opening so an operator recognises it, and gains
+    the subject it never had: "could not resolve owner/repo: no such
+    directory: <cwd>" says which of the two halves failed.
+    """
+    if repo:
+        return repo, ""
+    slug, why = _repo_slug_reason(cwd, runner)
+    if slug:
+        return slug, ""
+    return None, f"could not resolve owner/repo: {why}"
 
 
 def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] = None) -> str:
@@ -277,9 +317,9 @@ def fetch_pr_info_rest(
     """Fetch state, head, base, and mergeability with one REST request."""
     if not str(pr).strip().isdigit():
         return None, f"REST reader needs a numeric PR number, got {pr!r}"
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
 
     pulls = runner(["gh", "api", f"repos/{slug}/pulls/{pr}"], cwd=cwd)
     if not pulls.ok:
@@ -341,9 +381,9 @@ def fetch_pr_file_paths_rest(
     """Fetch every changed-file path from the paginated REST files endpoint."""
     if not str(pr).strip().isdigit():
         return None, f"REST file reader needs a numeric PR number, got {pr!r}"
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
 
     paths: list[str] = []
     # GitHub exposes at most 3,000 files for this endpoint. A full final page
@@ -382,9 +422,9 @@ def resolve_current_pr_number_rest(
     *, cwd: Optional[str] = None, runner: Callable = run, repo: Optional[str] = None
 ) -> "tuple[Optional[int], str]":
     """Resolve the current branch's PR with the REST pulls-list endpoint."""
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug or "/" not in slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason or f"not an owner/repo slug: {slug}"
     branch = runner(["git", "branch", "--show-current"], cwd=cwd)
     if not branch.ok or not branch.stdout.strip():
         return None, "could not resolve the current git branch"
@@ -423,9 +463,9 @@ def fetch_pr_rest(
     failure class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
-    slug = _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
     info, reason = fetch_pr_info_rest(pr, cwd=cwd, runner=runner, repo=slug)
     if info is None:
         return None, reason

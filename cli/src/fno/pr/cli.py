@@ -278,9 +278,9 @@ def list_cmd(
     if state not in {"open", "closed", "all"}:
         typer.echo(json.dumps({"error": "--state must be open, closed, or all"}))
         raise typer.Exit(code=2)
-    slug = repo or _rest._repo_slug(os.getcwd())
+    slug, slug_reason = _rest._slug_or_reason(os.getcwd(), repo=repo)
     if not slug:
-        typer.echo(json.dumps({"error": "could not resolve owner/repo"}))
+        typer.echo(json.dumps({"error": slug_reason}, separators=(",", ":")))
         raise typer.Exit(code=4)
     rows, reason = _rest.list_prs_rest(slug, state=state, cwd=os.getcwd(), details=True)
     if rows is None:

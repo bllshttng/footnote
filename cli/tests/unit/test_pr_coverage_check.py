@@ -2435,3 +2435,28 @@ def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
     )
     rendered = f"{refusal} {note}"
     assert "reviews read unavailable: gh: 403 secondary rate limit" in rendered, rendered
+
+
+def test_coverage_verdict_refuses_a_non_directory_at_the_door(monkeypatch, tmp_path):
+    """The guard belongs at the gate's entry, not three probes deep.
+
+    Every probe below takes the same cwd, and the head fetch is the first to
+    trip on a bad one. It drops its reason and answers None, so the verb used
+    to report "pr head fetch failed": true of the probe, silent about the
+    argument that broke it. That is the wrong-subject sentence this gate
+    exists to stop printing (x-51f7). UNANSWERED, never REFUSED - a gate that
+    cannot read its own inputs has not judged the PR.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, **kwargs):
+        raise AssertionError(f"no probe may run on a bad cwd: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", never_runs)
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        1264, "bllshttng/footnote", recompute=False
+    )
+    assert state == _coverage_gate.UNANSWERED
+    assert note == "no such directory: bllshttng/footnote"
+    assert refusal == "" and head == ""
+    assert "pr head fetch failed" not in note

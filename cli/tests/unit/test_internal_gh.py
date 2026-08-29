@@ -58,7 +58,9 @@ def _runner(calls: list[list[str]]):
 
 def test_metadata_uses_one_rest_pull_and_no_graphql(monkeypatch):
     calls: list[list[str]] = []
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "discretionary",
         ["pr", "view", "930", "--json", "state,number,headRefOid,mergeable"],
@@ -72,7 +74,9 @@ def test_metadata_uses_one_rest_pull_and_no_graphql(monkeypatch):
 
 def test_checks_translate_rest_rollup_to_gh_bucket_shape(monkeypatch):
     calls: list[list[str]] = []
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "discretionary",
         ["pr", "checks", "930", "--json", "name,state,bucket,startedAt,workflow"],
@@ -122,7 +126,9 @@ def test_coverage_review_read_composes_rest_evidence(monkeypatch):
             )
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     monkeypatch.setattr(
         _internal_gh._quota,
         "execute_graphql",
@@ -180,7 +186,9 @@ def test_coverage_review_read_preserves_refusal_body_byte_for_byte(monkeypatch):
             )
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "coverage",
         ["pr", "view", "930", "--json", "reviews,comments"],
@@ -200,7 +208,9 @@ def test_coverage_review_read_empty_collections_are_known_empty(monkeypatch):
             return Result(0, "[]", "")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "coverage",
         ["pr", "view", "930", "--json", "reviews,comments"],
@@ -229,7 +239,9 @@ def test_coverage_review_read_paginates_both_collections(monkeypatch):
             return Result(0, json.dumps([{"id": 100, "user": {"login": "last"}}]), "")
         raise AssertionError(cmd)
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "coverage",
         ["pr", "view", "930", "--json", "reviews,comments"],
@@ -256,7 +268,9 @@ def test_coverage_review_read_fails_when_either_collection_fails(
             return Result(1, "", f"{failed_collection} unavailable")
         return Result(0, "[]", "")
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "coverage",
         ["pr", "view", "930", "--json", "reviews,comments"],
@@ -276,7 +290,9 @@ def test_coverage_review_read_fails_on_malformed_collection(monkeypatch):
             return Result(0, "{}", "")
         return Result(0, "[]", "")
 
-    monkeypatch.setattr(_internal_gh._rest, "_repo_slug", lambda cwd, runner: "o/r")
+    monkeypatch.setattr(
+        _internal_gh._rest, "_slug_or_reason", lambda cwd, runner, repo=None: ("o/r", "")
+    )
     result = _internal_gh.execute(
         "coverage",
         ["pr", "view", "930", "--json", "reviews,comments"],

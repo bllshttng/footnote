@@ -324,6 +324,17 @@ def coverage_verdict(
     configured or no row survives. ``note`` names a recompute outcome on
     REFUSED, or the dead probe on UNANSWERED.
     """
+    # The second argument is a CWD, and it is threaded into every probe below.
+    # Hand it a repo slug and the FIRST probe to notice is the head fetch,
+    # which drops its reason and answers None, so the verb reports "pr head
+    # fetch failed" - true of the probe, silent about the argument that broke
+    # it, and exactly the wrong-subject sentence this gate learned to stop
+    # printing (x-51f7). Refuse at the door, before any probe has a chance to
+    # misattribute it. UNANSWERED, not REFUSED: a gate that cannot read its
+    # own inputs has not judged the PR.
+    if cwd and not os.path.isdir(cwd):
+        return UNANSWERED, "", "", f"no such directory: {cwd}"
+
     # The guard's own short circuit: a stock install with no review lane
     # configured opts out of coverage entirely. Checked FIRST so neither the
     # head fetch nor the events read runs for a PR nobody configured review

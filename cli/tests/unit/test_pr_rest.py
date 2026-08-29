@@ -661,3 +661,47 @@ def test_repo_slug_reason_names_its_failure_class(tmp_path, monkeypatch):
 
     assert _rest._repo_slug_reason(str(tmp_path), github) == ("owner/repo", "")
     assert _rest._repo_slug(str(tmp_path), github) == "owner/repo"
+
+
+def test_repo_slug_reason_redacts_credentials_in_the_remote_url():
+    """The reason is PUBLISHED: it rides the coverage note into the
+    `fno/review-coverage` commit status and into .fno/events.jsonl.
+
+    A CI-shaped clone carries its token in the url's userinfo, and such a
+    remote reaches the non-GitHub arm precisely BECAUSE its host is not
+    github.com - so the credential is exactly what would get posted.
+    """
+    def token_remote(cmd, cwd=None):
+        return Result(0, "https://x-access-token:ghs_SECRET@ghe.internal/o/r.git\n", "")
+
+    _slug, reason = _rest._repo_slug_reason(".", token_remote)
+    assert reason == "origin is not a github remote: https://***@ghe.internal/o/r.git"
+    assert "ghs_SECRET" not in reason
+
+    # git's own stderr can quote the url too, so the same redaction guards it.
+    def failing_remote(cmd, cwd=None):
+        return Result(1, "", "fatal: https://u:p@ghe.internal/o/r.git not found\n")
+
+    _slug, reason = _rest._repo_slug_reason(".", failing_remote)
+    assert reason == "fatal: https://***@ghe.internal/o/r.git not found"
+
+
+def test_slug_or_reason_gives_every_rendering_caller_the_subject(tmp_path, monkeypatch):
+    """The refusal the REST readers print keeps its opening and gains its
+    subject. Without this the five callers that discard the reason blame the
+    remote for a cwd that never existed."""
+    monkeypatch.chdir(tmp_path)
+    slug, reason = _rest._slug_or_reason("bllshttng/footnote")
+    assert slug is None
+    assert reason == "could not resolve owner/repo: no such directory: bllshttng/footnote"
+
+    # A caller that already holds a slug short-circuits the git read entirely.
+    def never_runs(cmd, cwd=None):
+        raise AssertionError(f"a held slug must not spawn git: {cmd}")
+
+    assert _rest._slug_or_reason(None, never_runs, "owner/repo") == ("owner/repo", "")
+
+    # And it reaches the reader an operator actually calls.
+    info, reason = _rest.fetch_pr_info_rest("42", cwd="bllshttng/footnote")
+    assert info is None
+    assert reason == "could not resolve owner/repo: no such directory: bllshttng/footnote"
