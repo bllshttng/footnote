@@ -355,11 +355,7 @@ impl HarnessContract {
             }
             validate_model_switch_strategy(harness, &caps.model_switch_strategy)?;
             if !LOOP_PARTICIPATION.contains(&caps.loop_participation.as_str()) {
-                return Err(field_error(
-                    harness,
-                    "loop_participation",
-                    "unknown member",
-                ));
+                return Err(field_error(harness, "loop_participation", "unknown member"));
             }
             // Only an `extension` row may name an artifact: a `native` row
             // closes its loop through a shell hook and a `none` row closes it

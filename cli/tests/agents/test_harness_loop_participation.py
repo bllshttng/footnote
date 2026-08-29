@@ -172,3 +172,20 @@ def test_resolve_dispatch_still_resolves_a_looping_target_at_claude():
     resolved = resolve_dispatch(harness="claude", node_id="x-1")
     assert resolved["command"].startswith("/target")
     assert resolved["loop_participation"] == "native"
+
+
+def test_the_direct_spawn_seam_still_calls_the_gate():
+    """`fno agents spawn` never reaches resolve_dispatch, by its own comment.
+
+    Guarding only the resolver would have covered every path but the one
+    operators use most to launch a target worker. The spawn seam already
+    re-applies the merge-posture vocabulary for the same reason, and the loop
+    gate rides beside it.
+
+    This asserts the CALL is present, which is weaker than driving the CLI. It
+    is here because a spawn invocation in a unit test would move directories and
+    reach a mux; the refusal itself was measured against the live verb, and this
+    catches the call being dropped.
+    """
+    source = (REPO_ROOT / "cli/src/fno/agents/cli.py").read_text()
+    assert "check_loop_participation(provider, message)" in source

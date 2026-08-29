@@ -16,7 +16,7 @@ which is why one sweep is not enough:
      a harness-NAMED implementation in the source, which is also the shape the
      capability-mirror law forbids.
 
-So this prints three passes. A finding is a candidate, not a verdict: pair a
+So this prints four passes. A finding is a candidate, not a verdict: pair a
 negative claim with the identifier that contradicts it, then go read both.
 
     python3 scripts/diagnostics/capability-honesty-sweep.py
@@ -188,12 +188,15 @@ def main() -> int:
         for lineno, line in enumerate(text.splitlines(), 1):
             if literal.search(line):
                 listed += 1
-                findings += 1
                 print(f"  {rel}:{lineno}: {line.strip()[:110]}")
     if not listed:
         print("  none.")
 
-    print(f"\n{findings} candidate(s). Read each before you believe it.")
+    print(f"\n{findings} candidate(s) from passes 1-3, {listed} list(s) in "
+          f"pass 4. Read each before you believe it.")
+    # Pass 4 counts separately: most of its hits are accepted roster
+    # constants, so folding them in buried the three real candidates in a
+    # number that read like sixty-two problems.
     return 0
 
 

@@ -14,7 +14,7 @@ spawns, or touches the network. Claims and spawning stay in the launchers.
 Per-environment override: ``config.dispatch`` (harness / substrate / command)
 overlays the built-in defaults; the map itself is the versioned in-tree table.
 
-Verified facts (2026-07-13):
+Verified facts, each dated where it differs from the 2026-07-13 spike:
 - permission_bypass tokens mirror the provider adapters (claude.py,
   codex.py, gemini.py) - the flag a headless/bg worker needs so it never wedges
   on an approval prompt (the concrete cause of the manual-approve pain).
@@ -441,9 +441,9 @@ def normalize_command(command: str, harness: str) -> str:
 def check_loop_participation(harness: str, command: str) -> None:
     """Refuse a LOOPING dispatch at a harness that cannot close a loop.
 
-    ``command`` is judged by its first token against :data:`_TARGET_FAMILY`, the
-    same per-harness /target spellings ``normalize_command`` emits, so a
-    one-shot ``/think`` or a bare ``opencode run`` passes untouched. A harness
+    ``command`` is judged by :func:`is_target_family`, the same vocabulary the
+    merge-posture carrier judges, so a one-shot ``/think`` or a bare
+    ``opencode run`` passes untouched. A harness
     whose ``loop_participation`` names no reachable boundary would otherwise
     take the dispatch and produce a worker with nothing to stop it: the hang
     this field exists to prevent, not a failure anything reports.
@@ -451,8 +451,7 @@ def check_loop_participation(harness: str, command: str) -> None:
     The refusal text carries the fact rather than a code, because a runtime
     string cannot drift from the behavior it describes the way a doc can.
     """
-    first = command.split(maxsplit=1)[0] if command.split() else ""
-    if first not in _TARGET_FAMILY:
+    if not is_target_family(command):
         return
     caps = capabilities(harness)
     participation = caps["loop_participation"]
@@ -464,8 +463,8 @@ def check_loop_participation(harness: str, command: str) -> None:
         why = "no lifecycle boundary invokes loop-check"
     else:
         why = (
-            "its loop rides a harness-native extension fno has not written yet, "
-            "so nothing invokes loop-check"
+            "its loop rides a harness-native extension fno has not written yet "
+            "and nothing invokes loop-check"
         )
     raise DispatchResolveError(
         f"refused: harness {harness!r} declares loop_participation = "

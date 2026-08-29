@@ -2028,6 +2028,8 @@ def cmd_spawn(
     # migrated to the flag (receipts show the effective message), and the env
     # arm stays scoped to the family: prose and other verbs arm nothing.
     from fno.agents.harness_map import (
+        DispatchResolveError,
+        check_loop_participation,
         is_target_family,
         message_carries_no_merge,
         normalize_legacy_no_merge,
@@ -2036,6 +2038,18 @@ def cmd_spawn(
     message = normalize_legacy_no_merge(message)
     if prov_env is not None and message_carries_no_merge(message):
         prov_env["TARGET_NO_MERGE"] = "1"
+
+    # The loop gate, on the same message and for the same reason as the carrier
+    # above. resolve_dispatch runs this check too, and the comment three lines
+    # up is why it is not enough: a direct spawn never reaches that resolver, so
+    # the guard would have covered every path but the one operators use most. A
+    # harness that cannot close a loop takes the /target and runs forever with
+    # nothing to stop it, and no instrument reports that.
+    try:
+        check_loop_participation(provider, message)
+    except DispatchResolveError as exc:
+        print(str(exc), file=sys.stderr)
+        raise typer.Exit(code=2)
 
     # x-4342: the sessions row a node-bearing spawn opens. An explicit
     # --session-phase is the operator's label and wins; empty infers from the
