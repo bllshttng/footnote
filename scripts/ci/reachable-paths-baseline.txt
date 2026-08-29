@@ -83,6 +83,7 @@ A	menu_walk needs ordered model and effort targets	py=cli/src/fno/agents/harness
 A	no active drive authority	py=cli/src/fno/agents/cli.py;rs=crates/fno-agents/src/client_verbs.rs	# msg-twin
 A	once: {name} ({provider}/{session_or_short_id}) torn down	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/codex_ask.rs|crates/fno-agents/src/gemini_ask.rs	# msg-twin
 A	one-shot-provider-no-persistent-session	py=cli/src/fno/agents/dispatch.py;rs=crates/fno-agents/src/client_verbs.rs	# protocol
+A	only an extension harness may name a loop artifact	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol: both validators enforce one closed loop_participation contract, so the refusal has to read the same in either runtime
 A	operator_question_closed	py=cli/src/fno/events/__init__.py|cli/src/fno/outstanding/core.py;rs=crates/fno-agents/src/loopcheck.rs|crates/fno-agents/src/needs.rs	# protocol
 A	postmortem_corrections_log	py=cli/src/fno/hermetic.py;rs=crates/fno-agents/src/finalize.rs	# protocol
 A	preassigned-or-session-start	py=cli/src/fno/agents/harness_map.py;rs=crates/fno-agents/src/harness_capabilities.rs	# protocol
