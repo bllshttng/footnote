@@ -528,6 +528,10 @@ FIELD_META: dict[str, Meta] = {
     # --- config.king.* (the king loop; both default false) ---
     "king.enabled": Meta("advanced", "Arm the king loop: hold a king session open while its board names work it can shrink. Defaults false."),
     "king.autonomous_merge": Meta("advanced", "Let the king merge a green mergeable PR. Defaults false; until set, a mergeable PR is reported and never counted as the king's own work."),
+    "king.wake_enabled": Meta("advanced", "Arm the pr-watch tick's wake phase: respawn a king whose holder is gone when mail, a board change, or the timer backstop calls for it. Needs the pr-watcher LaunchAgent loaded (RunAtLoad is false by design). Defaults false."),
+    "king.wake_ceiling": Meta("advanced", "Wakes allowed per scope per ROLLING 24h (default 32, ~1.5x the worst measured day). Never a lifetime constant: a lifetime cap strands a long-lived reign."),
+    "king.wake_debounce_seconds": Meta("advanced", "Minimum gap between billed wakes (default 900): a king woken inside the window is still working under its own in-session arm."),
+    "king.wake_backstop_seconds": Meta("advanced", "Timer-backstop interval (default 1800). An approximation of the mail and board-change triggers, kept so a missed event cannot strand a scope forever; the interval is a policy choice, not a measurement."),
     # --- config.accounts.* (account rotation; managed by `fno config accounts`) ---
     "accounts.active": Meta("never", "Name of the account record currently active for provider rotation."),
     "accounts.auto_switch": Meta("never", "Swap to a failover account automatically when the active one is locked out."),
