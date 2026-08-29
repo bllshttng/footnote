@@ -63,7 +63,7 @@ Run `fno agents dispatch capabilities <h> --json` to read one harness without di
 | Harness | Permission response | Positive ready rule | Paste submission | Interactive resume | `stop` | `rm` harness cleanup |
 |---|---|---|---|---|---|---|
 | claude | `permission_prompt`: `1` once, `2` always, `3` deny | `live_prompt_box` | separate Enter after 800 ms | `claude attach <short_id>` | `claude stop <short_id>` | `claude rm <short_id>` <!-- retired-ok: a reference table of what each harness teardown invokes, not steps to run. --> |
-| codex | `approval_prompt`: `1` once, `2` always, `3` deny | `idle_prompt` | **unsupported until a successful pane-submit fixture is pinned** | `codex resume <thread_id>`. Headless: `codex exec resume <thread_id>` | registry no-op | remove the thread from `session_index.jsonl` |
+| codex | `approval_prompt`: `1` once, `2` always, `3` deny | `idle_prompt` | **unsupported until a successful pane-submit fixture is pinned** | Interactive attach (declared, x-296f): `sh -c 'codex app-server daemon start; exec codex resume <thread_id> --remote unix://'`, full session id never a head-8. Interactive resume headless: `codex exec resume <thread_id>` | registry no-op | remove the thread from `session_index.jsonl` |
 | gemini | unsupported | unsupported (deprecated lane) | unsupported | `gemini --resume <id>` | registry no-op | registry only |
 | agy | unsupported | trust prompt cleared by submit | separate submit after readiness | `agy --conversation <id>` | registry no-op | registry only |
 | opencode | Known picker map: `Enter`, `Right Enter`, `Right Right Enter`. Automatic use requires a fingerprinted picker. | unsupported | unsupported | `opencode --session <ses_id>` | registry no-op | registry only |

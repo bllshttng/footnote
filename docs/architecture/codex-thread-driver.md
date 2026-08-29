@@ -100,18 +100,53 @@ A private app-server owns no control socket. `codex agents`, `codex resume`, `co
 
 ### Exec, never proxy
 
-Viewing a thread is `codex resume <thread-id> --remote unix://<control-socket>`, EXEC'd in a pane. The frames the driver reads drive turns. They never paint a screen. Read that as a hard boundary rather than a preference. A screenshot cannot tell an exec from a proxy, and the process tree can:
+Viewing a thread is codex's DECLARED attach form, EXEC'd in a pane:
+
+```
+sh -c 'codex app-server daemon start; exec codex resume <session-id> --remote unix://'
+```
+
+The frames the driver reads drive turns. They never paint a screen. Read that as a hard boundary rather than a preference. A screenshot cannot tell an exec from a proxy, and the process tree can:
 
 - No `codex app-server` has `fno-agents-daemon` as its parent. Read every hit's parent positively. Never count app-servers: a count of one is also what a broken daemon plus one orphan looks like.
-- No `fno` process READS OR WRITES the bytes between a viewer terminal and `codex`. In the mux viewport the pane's own process is `codex`, with no children. From `fno agents attach` the verb stays as a waiting parent with stdio inherited. That is the shape the claude attach has always had. Measured 2026-08-28: pane 3181 `fno-agents attach`, child 3190 `codex resume <id> --remote unix://...`. A waiting parent is not a proxy. A parent that copies frames is.
+- No `fno` process READS OR WRITES the bytes between a viewer terminal and `codex`. In the mux viewport the pane's own process is `codex`, with no children. The composed `exec` is load-bearing. It replaces the shell, so the pane's child is `codex` itself with no fno process in between. The `;` rather than `&&` is load-bearing too. A failed pre-exec still runs the attach. That yields the more specific error, in the pane the operator is already looking at.
 
-A change that reads frames here to draw something has rebuilt the rendering layer this lane deleted, merely relocated into a pane. `crates/fno/src/agents_view.rs` and `crates/fno-agents/src/client_verbs.rs` build that argv independently, because `fno` never links `fno-agents`. The test `the_attach_argv_is_identical_in_both_crates` links both and pins them byte-for-byte.
+A change that reads frames here to draw something has rebuilt the rendering layer this lane deleted, merely relocated into a pane. Both doors read ONE declaration now (x-296f): the contract's `interactive_attach` row, overridable per harness. `fno` never links `fno-agents`. The test `attach_argv_matches_the_mux_renderer` links both crates and pins the two doors byte-identical for every harness the contract declares.
+
+### The attach is a declaration, and an operator can correct it
+
+`crates/fno-agents/src/harness_capabilities.toml` (and its byte-identical `cli/` copy) declares the argv:
+
+```toml
+[harness.codex.resume_strategy.forms.interactive_attach]
+kind = "subcommand"
+pre_exec = ["codex", "app-server", "daemon", "start"]
+tokens = ["codex", "resume", "{session_id}", "--remote", "unix://"]
+```
+
+An operator can override it per harness without a release, in `.fno/config.toml`, project-local first, then global:
+
+```toml
+[harness.openclaw.attach]
+tokens   = ["openclaw", "resume", "{session_id}"]
+pre_exec = ["openclaw", "daemon", "start"]   # optional
+```
+
+`attach_form` in `crates/fno/src/agents_view.rs` is the ONE reader. Fail-open at every layer. An unreadable file, an unparseable file and an unparseable block each skip rather than clearing what was there. A typo cannot un-attach a working harness. An explicit `kind = "unsupported"` block is the one parsable way to retire a form. Config is read once per mux-server process. An edit takes effect at the next start.
+
+Three facts a future change is likely to get wrong, all measured:
+
+- **A bare `codex resume <id>` auto-attaches to a running daemon.** The marker: absent from `thread/loaded/list` before the resume, present after. Measured 2026-08-29 on 0.149.1. So `--remote unix://` is not what reaches the daemon. It is the assertion that the daemon is there. Against a daemon that is DOWN, the flag fails by name. A bare resume instead runs a private in-process app-server against a copy of the rollout. It hands back a session that looks correct.
+- **`thread/resume` resolves a session BY its rollout, and `thread/start` writes none.** A turnless thread cannot be opened. That is why a seedless codex spawn takes one warmup turn (`WARMUP_SEED` in `daemon.rs`). It is also why a thread row with no session id on file refuses by naming the rollout. The vendor's bare "no rollout found for thread id" never passes through.
+- **Detaching kills nothing.** The thread lives in the shared daemon. Closing the pane or exiting `codex resume` ends a viewer, not a worker.
 
 ### The daemon is ensured at every use, not once at spawn
 
 The control socket FILE outlives the process that bound it, so an `exists()` probe reads healthy against a daemon dead for a day. Read the pid from `~/.codex/app-server-daemon/app-server.pid`, probe that pid, use its `processStartTime` as an incarnation token, and require the `initialize` handshake to return. `codex_inject::probe_codex_app_server` does exactly that.
 
-Spawn-time health does not survive to attach time either. A shared daemon measured up at 00:46 on 2026-08-27 was gone by 15:48 while a private child spawned at 15:10 still ran. So `ensure_codex_daemon()` runs before the driver connects AND before an attach execs. A daemon that will not boot is a refusal naming the boot error, never a silent fallback to a rendered transcript.
+The handshake answer is CHECKED, not just matched. A daemon that refuses `initialize` answers with an `error` frame on the matching id. That is the protocol-skew shape: codex offered 0.149.1 to 0.150.1 on the machine this was measured on. Treating the id match as success let a refusing daemon read healthy, never be rebooted, and fail every later call naming something else. It now reads unhealthy, so `ensure_codex_daemon` reboots it.
+
+Spawn-time health does not survive to attach time either, and the attach no longer runs its own ensure: the declared `pre_exec` is the mechanism. When a daemon is already running, `codex app-server daemon start` is a documented no-op (measured: `{"status":"alreadyRunning"}` twice in a row), so the pair is cheap on every attach. A daemon that will not start surfaces codex's own error in the pane the operator is looking at. A driver connect still goes through `ensure_codex_daemon()` first.
 
 **`codex app-server proxy --sock <path>` is unreliable.** It accepted frames and returned nothing against a confirmed-live daemon, twice, with no stderr. Do not build a transport on it. The WebSocket lane to that same socket answered on the first try.
 
