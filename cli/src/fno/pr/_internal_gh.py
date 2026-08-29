@@ -170,9 +170,11 @@ def _coverage_reviews(
     number, reason = _pr_number(args, cwd=cwd, runner=rest_runner)
     if number is None:
         return Result(1, "", reason)
-    slug = _option(args, "--repo") or _rest._repo_slug(cwd, rest_runner)
+    slug, slug_reason = _rest._slug_or_reason(
+        cwd, rest_runner, _option(args, "--repo")
+    )
     if not slug:
-        return Result(1, "", "could not resolve owner/repo from `git remote get-url origin`")
+        return Result(1, "", slug_reason)
     info, reason = _rest.fetch_pr_info_rest(
         str(number), cwd=cwd, runner=rest_runner, repo=slug
     )

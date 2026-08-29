@@ -618,3 +618,139 @@ def test_bare_404_status_is_a_not_found() -> None:
     reason = _rest._rest_reason(Res())
     assert "not found" in reason.lower()
     assert "Check the PR number" in reason
+
+
+def test_repo_slug_reason_names_its_failure_class(tmp_path, monkeypatch):
+    """A bare None could not tell three different failures apart, and the one
+    caller that rendered it said "repo slug unreadable" for all of them.
+
+    That sentence is wrong in subject whenever the SLUG is the readable thing
+    and the CWD is what does not exist - the case a caller hits by passing
+    `owner/repo` into a parameter that takes a path. Both are bare `str`, so
+    nothing static catches it. `isdir` does, before git is spawned (x-51f7).
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, cwd=None):
+        raise AssertionError(f"a non-directory must be refused before any spawn: {cmd}")
+
+    slug, reason = _rest._repo_slug_reason("bllshttng/footnote", never_runs)
+    assert slug is None
+    assert reason == "no such directory: bllshttng/footnote"
+
+    # A real directory with no origin quotes git's own sentence.
+    def no_origin(cmd, cwd=None):
+        return Result(1, "", "error: No such remote 'origin'\n")
+
+    slug, reason = _rest._repo_slug_reason(str(tmp_path), no_origin)
+    assert slug is None
+    assert reason == "error: No such remote 'origin'"
+
+    # A remote that is not GitHub names the url it could not parse.
+    def gitlab(cmd, cwd=None):
+        return Result(0, "git@gitlab.com:owner/repo.git\n", "")
+
+    slug, reason = _rest._repo_slug_reason(str(tmp_path), gitlab)
+    assert slug is None
+    assert reason == "origin is not a github remote: git@gitlab.com:owner/repo.git"
+
+    # The success case carries an EMPTY reason, so a caller reads the pair
+    # rather than inferring success from a missing sentence.
+    def github(cmd, cwd=None):
+        return Result(0, _GH_URL, "")
+
+    assert _rest._repo_slug_reason(str(tmp_path), github) == ("owner/repo", "")
+    assert _rest._repo_slug(str(tmp_path), github) == "owner/repo"
+
+
+def test_repo_slug_reason_redacts_credentials_in_the_remote_url():
+    """The reason is PUBLISHED: it rides the coverage note into the
+    `fno/review-coverage` commit status and into .fno/events.jsonl.
+
+    A CI-shaped clone carries its token in the url's userinfo, and such a
+    remote reaches the non-GitHub arm precisely BECAUSE its host is not
+    github.com - so the credential is exactly what would get posted.
+    """
+    def token_remote(cmd, cwd=None):
+        return Result(0, "https://x-access-token:ghs_SECRET@ghe.internal/o/r.git\n", "")
+
+    _slug, reason = _rest._repo_slug_reason(".", token_remote)
+    assert reason == "origin is not a github remote: https://***@ghe.internal/o/r.git"
+    assert "ghs_SECRET" not in reason
+
+    # git's own stderr can quote the url too, so the same redaction guards it.
+    def failing_remote(cmd, cwd=None):
+        return Result(1, "", "fatal: https://u:p@ghe.internal/o/r.git not found\n")
+
+    _slug, reason = _rest._repo_slug_reason(".", failing_remote)
+    assert reason == "fatal: https://***@ghe.internal/o/r.git not found"
+
+
+def test_slug_or_reason_gives_every_rendering_caller_the_subject(tmp_path, monkeypatch):
+    """The refusal the REST readers print keeps its opening and gains its
+    subject. Without this the five callers that discard the reason blame the
+    remote for a cwd that never existed."""
+    monkeypatch.chdir(tmp_path)
+    slug, reason = _rest._slug_or_reason("bllshttng/footnote")
+    assert slug is None
+    assert reason == "could not resolve owner/repo: no such directory: bllshttng/footnote"
+
+    # A caller that already holds a slug short-circuits the git read entirely.
+    def never_runs(cmd, cwd=None):
+        raise AssertionError(f"a held slug must not spawn git: {cmd}")
+
+    assert _rest._slug_or_reason(None, never_runs, "owner/repo") == ("owner/repo", "")
+
+    # And it reaches the reader an operator actually calls.
+    info, reason = _rest.fetch_pr_info_rest("42", cwd="bllshttng/footnote")
+    assert info is None
+    assert reason == "could not resolve owner/repo: no such directory: bllshttng/footnote"
+
+
+def test_cwd_refusal_names_which_of_the_three_facts_isdir_hid(tmp_path, monkeypatch):
+    """`isdir` is false for a missing path, an existing non-directory, and an
+    unreadable one. Asserting "no such directory" for all three is the same
+    wrong-subject defect, relocated - the path in the message plainly exists.
+    """
+    import os
+
+    from fno.pr import _rest as R
+
+    assert R._cwd_refusal(None) == ""
+    assert R._cwd_refusal(str(tmp_path)) == ""
+
+    missing = tmp_path / "gone"
+    assert R._cwd_refusal(str(missing)) == f"no such directory: {missing}"
+
+    a_file = tmp_path / "origin.txt"
+    a_file.write_text("not a directory\n")
+    assert R._cwd_refusal(str(a_file)) == f"not a directory: {a_file}"
+
+    def denied(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "stat", denied)
+    assert R._cwd_refusal(str(tmp_path)) == (
+        f"cannot stat: {tmp_path} (Permission denied)"
+    )
+
+
+def test_cwd_refusal_rejects_the_empty_string_that_crashes_a_spawn():
+    """subprocess reads "" as a path, not as "the current directory", so it
+    raises. The two guards disagreed about it once: one tested `is not None`
+    and the other tested truthiness, and "" walked through the gap into every
+    probe. One implementation, one answer."""
+    assert _rest._cwd_refusal("") == (
+        "empty cwd: pass a directory or None, never an empty string"
+    )
+
+
+def test_published_refusal_hides_the_account_name_in_a_local_path(tmp_path, monkeypatch):
+    """The refusal rides the coverage note into a GitHub commit status. It
+    redacts a token in one clause, so interpolating a home directory raw in
+    the next is an oversight, not a policy."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    reason = _rest._cwd_refusal(str(tmp_path / "code" / "proj"))
+    assert reason == "no such directory: ~/code/proj"
+    assert str(tmp_path) not in reason

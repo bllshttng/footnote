@@ -2182,7 +2182,9 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
         raise AssertionError(f"unexpected shell call: {cmd}")
 
     monkeypatch.setattr("fno.pr._proc.run", fake_run)
-    monkeypatch.setattr("fno.pr._rest._repo_slug", lambda cwd, runner=None: "o/r")
+    monkeypatch.setattr(
+        "fno.pr._rest._repo_slug_reason", lambda cwd, runner=None: ("o/r", "")
+    )
     reviews, unread = _coverage_gate._pr_reviews(42, "/repo")
     assert unread == "", unread
     oids = [r["commit"]["oid"] for r in reviews]
@@ -2200,6 +2202,67 @@ def test_pr_reviews_parses_paginated_rest_and_maps_fields(monkeypatch):
     rows, unread = _coverage_gate._pr_reviews(42, "/repo")
     assert rows is None
     assert unread, "a failed reviews read must name its cause, not answer a bare None"
+
+
+def test_round_count_equals_the_distinct_reviewed_commits_read_from_a_cwd(
+    monkeypatch, tmp_path
+):
+    """The MEASUREMENT, end to end from a cwd: N distinct reviewed commits
+    read off a real directory make the gate's round count exactly N.
+
+    This is the composition the argument confusion broke (x-51f7), so it is
+    asserted as one chain rather than as two green units: `_pr_reviews` takes
+    a CWD, resolves the slug from that checkout's origin, and its payload
+    feeds `rounds_since_last_pass`. Three reviews land on two distinct
+    commits and a fourth on a third, so the answer is 3 and not the row count.
+    """
+    from fno.pr._proc import Result
+
+    page = [
+        {"state": "COMMENTED", "submitted_at": "2026-08-26T11:00:00Z", "commit_id": "aaa"},
+        {"state": "COMMENTED", "submitted_at": "2026-08-26T11:05:00Z", "commit_id": "aaa"},
+        {"state": "CHANGES_REQUESTED", "submitted_at": "2026-08-26T12:00:00Z", "commit_id": "bbb"},
+        {"state": "APPROVED", "submitted_at": "2026-08-26T13:00:00Z", "commit_id": "ccc"},
+    ]
+
+    def fake_run(cmd, **kwargs):
+        joined = " ".join(str(c) for c in cmd)
+        if "get-url" in joined:
+            return Result(0, "git@github.com:bllshttng/footnote.git\n", "")
+        if "pulls/1264" in joined:
+            return Result(0, json.dumps(page), "")
+        raise AssertionError(f"unexpected shell call: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", fake_run)
+    reviews, unread = _coverage_gate._pr_reviews(1264, str(tmp_path))
+    assert unread == "", unread
+    assert len(reviews) == 4, reviews
+    assert _coverage_gate.rounds_since_last_pass([], reviews=reviews) == 3
+
+
+def test_a_slug_passed_where_a_cwd_belongs_names_the_missing_directory(
+    monkeypatch, tmp_path
+):
+    """The regression: `_pr_reviews` takes a CWD, and a repo slug handed to it
+    must refuse by naming the directory, never by blaming the slug.
+
+    Both are bare `str`, so the wrong argument is invisible at the call site.
+    The old fixed sentence "repo slug unreadable" was correct in form and
+    wrong in subject: the slug was perfectly readable and the directory was
+    what did not exist. It cost a reader three slug spellings (x-51f7). The
+    refusal now names the missing directory, and it fires before git is
+    spawned, so a wrong argument cannot reach a subprocess at all.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, **kwargs):
+        raise AssertionError(f"a slug must be refused before any spawn: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", never_runs)
+    rows, unread = _coverage_gate._pr_reviews(1264, "bllshttng/footnote")
+    assert rows is None
+    assert unread == "no such directory: bllshttng/footnote", unread
+    assert "repo slug unreadable" not in unread
 
 
 def test_past_the_cap_the_spent_budget_discharges_the_obligation(monkeypatch, tmp_path):
@@ -2372,3 +2435,54 @@ def test_a_failed_reviews_read_is_not_rendered_as_a_measured_zero(
     )
     rendered = f"{refusal} {note}"
     assert "reviews read unavailable: gh: 403 secondary rate limit" in rendered, rendered
+
+
+def test_coverage_verdict_refuses_a_non_directory_at_the_door(monkeypatch, tmp_path):
+    """The guard belongs at the gate's entry, not three probes deep.
+
+    Every probe below takes the same cwd, and the head fetch is the first to
+    trip on a bad one. It drops its reason and answers None, so the verb used
+    to report "pr head fetch failed": true of the probe, silent about the
+    argument that broke it. That is the wrong-subject sentence this gate
+    exists to stop printing (x-51f7). UNANSWERED, never REFUSED - a gate that
+    cannot read its own inputs has not judged the PR.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, **kwargs):
+        raise AssertionError(f"no probe may run on a bad cwd: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", never_runs)
+    state, refusal, head, note = _coverage_gate.coverage_verdict(
+        1264, "bllshttng/footnote", recompute=False
+    )
+    assert state == _coverage_gate.UNANSWERED
+    assert note == "no such directory: bllshttng/footnote"
+    assert refusal == "" and head == ""
+    assert "pr head fetch failed" not in note
+
+
+def test_coverage_verdict_and_the_slug_read_share_one_cwd_guard(monkeypatch, tmp_path):
+    """The empty string is the seam two copies of a guard disagree on.
+
+    A first pass wrote the gate's own `if cwd and not isdir(cwd)` beside
+    `_repo_slug_reason`'s `cwd is not None`, so "" passed the gate and reached
+    every probe as a subprocess cwd - which raises rather than meaning "here".
+    Both now call `_rest._cwd_refusal`, so they cannot answer differently.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, **kwargs):
+        raise AssertionError(f"no probe may run on an empty cwd: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", never_runs)
+    state, _refusal, _head, note = _coverage_gate.coverage_verdict(
+        1264, "", recompute=False
+    )
+    assert state == _coverage_gate.UNANSWERED
+    assert note == "empty cwd: pass a directory or None, never an empty string"
+
+    # And the same sentence, from the slug read the gate feeds.
+    from fno.pr._rest import _repo_slug_reason
+
+    assert _repo_slug_reason("")[1] == note

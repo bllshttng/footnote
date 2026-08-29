@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import stat
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
 from fno.pr._proc import run
 from fno.pr._ritual import _parse_origin_slug
@@ -124,15 +126,137 @@ _TRANSPORT = re.compile(
 log = logging.getLogger(__name__)
 
 
-def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
-    """`owner/repo` from the git origin remote: local, no API spend."""
+_URL_USERINFO = re.compile(r"(?<=://)[^/@\s]+@")
+
+
+def _redact_userinfo(text: str) -> str:
+    """``scheme://user:secret@host`` -> ``scheme://***@host``.
+
+    A remote URL reaches an operator-facing sentence, and that sentence is
+    published: it rides the coverage note into the `fno/review-coverage`
+    commit status on GitHub, and into `.fno/events.jsonl`. A CI-shaped clone
+    carries its token in the userinfo (`https://x-access-token:ghs_...@host/
+    owner/repo.git`), and such a remote reaches the non-GitHub arm precisely
+    BECAUSE its host is not github.com - so the credential is exactly what
+    would be posted. Redact before interpolating, never after.
+    """
+    return _URL_USERINFO.sub("***@", text)
+
+
+def _home_relative(path: str) -> str:
+    """``/Users/someone/code/x`` -> ``~/code/x``.
+
+    Same reason as :func:`_redact_userinfo`: this text is published to a
+    GitHub commit status. A local absolute path carries the account name,
+    which nothing downstream needs to act on the refusal. Redacting a token
+    in one clause and interpolating a home directory raw in the next is not a
+    policy, it is an oversight.
+    """
+    home = os.path.expanduser("~")
+    if home and home != os.sep and (path == home or path.startswith(home + os.sep)):
+        return "~" + path[len(home):]
+    return path
+
+
+def _cwd_refusal(cwd: Optional[str]) -> str:
+    """Empty when ``cwd`` names a usable directory, the named reason otherwise.
+
+    ONE implementation, called both here and at ``coverage_verdict``'s door,
+    because two copies of a guard are two chances to disagree about the empty
+    string - which is what a first pass did.
+
+    ``isdir`` is false for three distinct facts, and a message that asserts
+    one of them is the same wrong-subject defect this module is fixing: an
+    existing regular file and an unreadable parent both deserve their own
+    sentence, not "no such directory: <a path that exists>".
+    """
+    if cwd is None:
+        return ""
+    if cwd == "":
+        # subprocess reads "" as a path, not as "the current directory", so it
+        # raises rather than defaulting. Never let it reach a spawn.
+        return "empty cwd: pass a directory or None, never an empty string"
+    shown = _home_relative(cwd)
+    try:
+        mode = os.stat(cwd).st_mode
+    except FileNotFoundError:
+        return f"no such directory: {shown}"
+    except OSError as exc:
+        return f"cannot stat: {shown} ({exc.strerror})"
+    if not stat.S_ISDIR(mode):
+        return f"not a directory: {shown}"
+    return ""
+
+
+def _repo_slug_reason(
+    cwd: Optional[str], runner: Callable = run
+) -> Tuple[Optional[str], str]:
+    """`(owner/repo, reason)` from the git origin remote: local, no API spend.
+
+    ``reason`` is empty on success and NAMES the failure class otherwise. A
+    bare None could not tell a missing directory from a checkout with no
+    origin from a non-GitHub remote, and the caller that rendered it said
+    "repo slug unreadable" - correct in form, wrong in subject whenever the
+    SLUG is the thing that is perfectly readable and the CWD is what does not
+    exist. That sentence sent a reader through three slug spellings before
+    they looked at the parameter (x-51f7).
+
+    The first argument is a filesystem PATH, never a repo slug, and the two
+    are both bare `str` so a wrong argument is invisible to a type checker.
+    The ``isdir`` refusal is the guard that makes the wrong one impossible to
+    pass quietly, and it reads a filesystem fact rather than guessing at the
+    shape of the string: `owner/repo` is not a directory, so it is refused by
+    name before git is spawned. ``None`` keeps meaning "the process cwd".
+    """
+    bad_cwd = _cwd_refusal(cwd)
+    if bad_cwd:
+        return None, bad_cwd
     try:
         r = runner(["git", "remote", "get-url", "origin"], cwd=cwd)
-    except Exception:
-        return None
+    except Exception as exc:  # noqa: BLE001 - the failure is the answer, not a raise
+        return None, f"git remote get-url origin failed: {type(exc).__name__}: {exc}"
     if not r.ok:
-        return None
-    return _parse_origin_slug(r.stdout.strip())
+        first = next(
+            (ln.strip() for ln in (r.stderr or "").splitlines() if ln.strip()), ""
+        )
+        return None, _redact_userinfo(first) or "no origin remote"
+    url = r.stdout.strip()
+    slug = _parse_origin_slug(url)
+    if not slug:
+        return None, (
+            f"origin is not a github remote: {_redact_userinfo(url) or '(empty)'}"
+        )
+    return slug, ""
+
+
+def _repo_slug(cwd: Optional[str], runner: Callable = run) -> Optional[str]:
+    """`owner/repo` from the git origin remote: local, no API spend.
+
+    The slug-only view of :func:`_repo_slug_reason`, for the two callers that
+    have nowhere to put the reason (``_cache`` degrades to an uncached read,
+    and the tests' own probes). Every caller that RENDERS a refusal goes
+    through :func:`_slug_or_reason` instead, so the sentence an operator reads
+    names its own subject.
+    """
+    return _repo_slug_reason(cwd, runner)[0]
+
+
+def _slug_or_reason(
+    cwd: Optional[str], runner: Callable = run, repo: Optional[str] = None
+) -> Tuple[Optional[str], str]:
+    """``(slug, sentence)`` for the callers that render a refusal.
+
+    ``repo``, when a caller already holds a slug, short-circuits the git read.
+    The sentence keeps its old opening so an operator recognises it, and gains
+    the subject it never had: "could not resolve owner/repo: no such
+    directory: <cwd>" says which of the two halves failed.
+    """
+    if repo:
+        return repo, ""
+    slug, why = _repo_slug_reason(cwd, runner)
+    if slug:
+        return slug, ""
+    return None, f"could not resolve owner/repo: {why}"
 
 
 def _rest_reason(res, *, runner: Optional[Callable] = None, cwd: Optional[str] = None) -> str:
@@ -240,9 +364,9 @@ def fetch_pr_info_rest(
     """Fetch state, head, base, and mergeability with one REST request."""
     if not str(pr).strip().isdigit():
         return None, f"REST reader needs a numeric PR number, got {pr!r}"
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
 
     pulls = runner(["gh", "api", f"repos/{slug}/pulls/{pr}"], cwd=cwd)
     if not pulls.ok:
@@ -304,9 +428,9 @@ def fetch_pr_file_paths_rest(
     """Fetch every changed-file path from the paginated REST files endpoint."""
     if not str(pr).strip().isdigit():
         return None, f"REST file reader needs a numeric PR number, got {pr!r}"
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
 
     paths: list[str] = []
     # GitHub exposes at most 3,000 files for this endpoint. A full final page
@@ -345,9 +469,9 @@ def resolve_current_pr_number_rest(
     *, cwd: Optional[str] = None, runner: Callable = run, repo: Optional[str] = None
 ) -> "tuple[Optional[int], str]":
     """Resolve the current branch's PR with the REST pulls-list endpoint."""
-    slug = repo or _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner, repo)
     if not slug or "/" not in slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason or f"not an owner/repo slug: {slug}"
     branch = runner(["git", "branch", "--show-current"], cwd=cwd)
     if not branch.ok or not branch.stdout.strip():
         return None, "could not resolve the current git branch"
@@ -386,9 +510,9 @@ def fetch_pr_rest(
     failure class otherwise; `(None, reason)` must reach the caller as a loud
     `verdict: error`, never as an absent answer.
     """
-    slug = _repo_slug(cwd, runner)
+    slug, slug_reason = _slug_or_reason(cwd, runner)
     if not slug:
-        return None, "could not resolve owner/repo from `git remote get-url origin`"
+        return None, slug_reason
     info, reason = fetch_pr_info_rest(pr, cwd=cwd, runner=runner, repo=slug)
     if info is None:
         return None, reason
