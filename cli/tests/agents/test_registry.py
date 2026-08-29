@@ -716,7 +716,15 @@ def test_us2_schema_version_is_three() -> None:
     assert SCHEMA_VERSION == 20
 
 
-def test_session_lineage_fields_round_trip() -> None:
+def test_session_lineage_fields_round_trip(tmp_path: Path, monkeypatch) -> None:
+    # This writes to the DEFAULT registry path, and without per-test isolation
+    # that path is the session-wide test sandbox every other file's
+    # default-path reader also sees. The leftover row (harness_session_id
+    # "session-b") then surfaced as a phantom extra session in four
+    # test_discover.py codex assertions, but only when the two files ran in the
+    # same invocation -- each passed alone, which is what kept it hidden.
+    use_tmpdir(monkeypatch, tmp_path)
+
     from fno.agents.registry import AgentEntry, load_registry, write_registry
 
     entry = AgentEntry(
