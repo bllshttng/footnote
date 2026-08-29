@@ -1759,8 +1759,20 @@ fn gc_sweep_impl_with_node_cascade(
             owns_worktree,
             exited_at,
             // A one-shot ask carries neither pid nor short_id: no worker can be
-            // hiding behind an identity that was never recorded.
-            liveness_surface: e.pid.is_some() || !e.short_id.is_empty(),
+            // hiding behind an identity that was never recorded. A codex
+            // THREAD row is the third shape, and it is the opposite case: it
+            // owns no pid BY DESIGN (the shared daemon's pid is not the
+            // worker's to hold), so counting shapes alone would leave the arm
+            // below reaping a live, resumable thread on shape alone. Its
+            // identity IS probeable (thread/loaded/list), and a probe that
+            // comes back empty corroborates through harness_session_gone, so
+            // the row gets a surface AND a way off the board. A one-shot ask
+            // gets neither - its harness_session_id names a FINISHED exchange
+            // - which is why the term keys on row shape and must never widen
+            // to "has a session id".
+            liveness_surface: e.pid.is_some()
+                || !e.short_id.is_empty()
+                || is_codex_thread_entry(e),
             transcript_fresh,
             harness_session_gone,
             dormant_done,
@@ -10648,6 +10660,118 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         // The row itself is untouched (still on disk, unstamped-differently).
         let reg = state::load_registry(&home.registry_json()).unwrap();
         assert!(reg.entries.iter().any(|e| e.name == "stuck"));
+    }
+
+    // A codex THREAD row (the x-6678 shape): harness codex, interactive host,
+    // no claude short id, no pane of its own - the row that owns no pid by
+    // design, because the shared daemon's pid is not the worker's to hold.
+    fn codex_thread_row(name: &str, exited_at: Option<&str>) -> RegistryEntry {
+        let mut row = ask_row(name, exited_at);
+        row.harness = Some("codex".into());
+        row.host_mode = Some(state::HOST_MODE_INTERACTIVE.into());
+        row
+    }
+
+    /// A stopped codex thread row whose rollout still exists must NOT be
+    /// corroborated-removable. PR 1255 correctly stopped recording a pid on
+    /// this row shape, which silently emptied `liveness_surface` for every
+    /// thread row and left `removal_is_corroborated` true on the
+    /// `!liveness_surface` arm alone: reapable with no probe, no transcript
+    /// read and no session check, while the thread is alive and resumable on
+    /// the daemon and the row is the only pointer back to it. The store probe
+    /// here answers the way codex's own rollout store does for a LIVE thread
+    /// (the session exists, the transcript is fresh), so the ONLY thing that
+    /// could reap this row is the missing-liveness arm.
+    #[test]
+    fn gc_sweep_keeps_a_stopped_codex_thread_row_whose_rollout_still_exists() {
+        let home = tmp_home("gc-codex-thread");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        // Fresh mtime: inside the 1h grace, so transcript_fresh reads true.
+        let rollout = home.root().join("rollout-cx-thread.jsonl");
+        std::fs::write(&rollout, "{}\n").unwrap();
+        state::update_registry(&home.registry_json(), |r| {
+            r.entries.push(codex_thread_row(
+                "cx-thread",
+                Some(exited_at.as_str()),
+            ));
+        })
+        .unwrap();
+
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|e: &state::RegistryEntry| match e.harness_session_id.as_deref() {
+                Some("cx-thread-sess") => Some(vec![rollout.clone()]),
+                _ => None,
+            },
+            &|_| None,
+        );
+
+        assert!(
+            !summary.reaped.contains(&"cx-thread".to_string()),
+            "a live codex thread's row is the only pointer back to the resumable session; {:?}",
+            summary.reaped
+        );
+        assert_eq!(
+            summary.kept_uncorroborated,
+            vec!["cx-thread".to_string()],
+            "kept, and the diagnostic names why"
+        );
+        let reg = state::load_registry(&home.registry_json()).unwrap();
+        assert!(
+            reg.entries.iter().any(|e| e.name == "cx-thread"),
+            "the row itself stays on disk"
+        );
+    }
+
+    /// The liveness term keys on ROW SHAPE, never on "has a session id". A
+    /// codex ONE-SHOT ask (host_mode exec) records a `harness_session_id`
+    /// naming a FINISHED exchange; widening the term there hands it a surface
+    /// nothing probes, which strands it instead of reaping it.
+    #[test]
+    fn gc_sweep_still_reaps_a_codex_one_shot_ask_row_despite_a_session_id() {
+        let home = tmp_home("gc-codex-ask");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let (y, mo, d, h, mi, s) = civil(now - 2 * 3600);
+        let exited_at = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{s:02}Z");
+        state::update_registry(&home.registry_json(), |r| {
+            let mut e = ask_row("cx-ask-done", Some(exited_at.as_str()));
+            e.harness = Some("codex".into());
+            e.host_mode = Some(state::HOST_MODE_EXEC.into());
+            r.entries.push(e);
+        })
+        .unwrap();
+
+        // Past grace, short of the backstop horizon, and the ONLY corroboration
+        // is the row's own store answering that the session is gone from it.
+        let summary = gc_sweep_impl(
+            &home,
+            &emitter,
+            &|_| Duration::from_secs(3600),
+            false,
+            &no_tails,
+            &|_| Some(Vec::new()),
+            &|_| None,
+        );
+
+        assert_eq!(
+            summary.reaped,
+            vec!["cx-ask-done".to_string()],
+            "a finished one-shot ask with a session id must stay reapable"
+        );
     }
 
     // -- The harness-store corroboration seam (AC1 / AC3 / AC5) -------------
