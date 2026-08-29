@@ -265,6 +265,60 @@ def _store_board_hash(target: CrownTarget, digest: str) -> None:
     tmp.replace(sidecar)
 
 
+#: The undispatched columns a backstop counts as actionable. Not full parity
+#: with the king board's actionable count (which also reads claims and PRs):
+#: this only decides whether a periodic re-check is WORTH a wake, and a wrong
+#: positive costs one debounced wake that terminates NoWork.
+_ACTIONABLE_COLUMNS = frozenset({"ready", "next"})
+
+
+def _scope_actionable(scope: str, entries: list, resolver: Optional[Callable] = None) -> int:
+    """Scope rows in an undispatched column at a king-worked priority."""
+    from fno.king.board import KING_PRIORITIES, compile_scope_ids
+
+    kwargs = {"resolve": resolver} if resolver is not None else {}
+    try:
+        ids = compile_scope_ids(scope, entries, **kwargs)
+    except Exception:  # noqa: BLE001 - an uncompilable scope has nothing to re-check
+        return 0
+    return sum(
+        1
+        for row in entries
+        if isinstance(row, dict)
+        and str(row.get("id") or "") in ids
+        and str(row.get("_kanban_column") or "") in _ACTIONABLE_COLUMNS
+        and str(row.get("priority") or "") in KING_PRIORITIES
+    )
+
+
+def _backstop_due(
+    target: CrownTarget,
+    entries: list,
+    *,
+    now: datetime,
+    backstop_s: int,
+    resolver: Optional[Callable] = None,
+) -> bool:
+    """Whether the timer backstop should fire for this scope.
+
+    The backstop is an APPROXIMATION of the mail and board-change triggers,
+    kept so a missed event cannot strand a scope forever: it fires mostly on
+    unchanged boards, and the interval is a policy choice, not a measurement -
+    do not read 1800 as derived. No mail and no board change are established
+    by the caller (this only runs when no other trigger fired). The last leg
+    of the condition is the ledger itself: no billed wake inside the backstop
+    window, so a woken-and-working king is never re-fired by its own backstop.
+    """
+    if _scope_actionable(target.scope, entries, resolver) <= 0:
+        return False
+    from fno.king.wake import read_wakes
+
+    stamps = read_wakes(target.manifest, now=now)
+    if stamps and (now - stamps[-1]).total_seconds() < backstop_s:
+        return False
+    return True
+
+
 def _dispatch_walk(
     target: CrownTarget, reason: str, binary: str
 ) -> None:
@@ -352,6 +406,7 @@ def run_king_wake(
 
     ceiling = int(getattr(cfg, "wake_ceiling", 32) or 32)
     debounce_s = int(getattr(cfg, "wake_debounce_seconds", 900) or 900)
+    backstop_s = int(getattr(cfg, "wake_backstop_seconds", 1800) or 1800)
 
     targets, note = _crowned(court_fn, rows_fn)
     summary: dict[str, Any] = {
@@ -379,8 +434,16 @@ def run_king_wake(
             )
             if changed:
                 reason = "board"
+            elif _backstop_due(
+                target,
+                entries,
+                now=now,
+                backstop_s=backstop_s,
+                resolver=scope_resolver,
+            ):
+                reason = "backstop"
         if reason is None:
-            continue  # the timer backstop lands here in its own task
+            continue
         verdict = should_wake_fn(
             target.manifest, now=now, ceiling=ceiling, debounce_s=debounce_s
         )

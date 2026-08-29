@@ -241,7 +241,11 @@ def test_the_ceiling_question_dedupes_on_its_marker(tmp_path):
 
 
 def test_no_mail_and_no_trigger_spawns_nothing_but_ran(tmp_path):
-    rec, summary, _ = _run(tmp_path, unread=lambda address: [])
+    rec, summary, _ = _run(
+        tmp_path,
+        unread=lambda address: [],
+        extra={"entries_fn": lambda: []},
+    )
 
     assert rec.dispatches == []
     assert rec.events == []
@@ -317,6 +321,9 @@ _BOARD_A = [
         "priority": "p1",
     }
 ]
+#: Same row at p2: hash-visible but below the king's priorities, so these
+#: fixtures isolate the board lane without the timer backstop firing on them.
+_BOARD_A_QUIET = [dict(_BOARD_A[0], priority="p2")]
 #: Same row, priority moved: a change the hash must see.
 _BOARD_A_REPRIORITIZED = [dict(_BOARD_A[0], priority="p0")]
 #: One row added: the refill case this trigger exists for.
@@ -353,11 +360,14 @@ def test_first_observation_stores_the_hash_and_wakes_nothing(tmp_path):
     rec, _summary, manifest = _run(
         tmp_path,
         unread=lambda a: [],
-        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+        extra={
+            "entries_fn": lambda: _BOARD_A_QUIET,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
     )
 
     assert rec.dispatches == [], "a first observation is not a change"
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
 
 
 def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
@@ -385,19 +395,22 @@ def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
     def prime(manifest):
         _store_board_hash(
             _SidecarTarget(manifest),
-            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+            _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER),
         )
 
     rec, _summary, manifest = _run(
         tmp_path,
         unread=lambda a: [],
         pre=prime,
-        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+        extra={
+            "entries_fn": lambda: _BOARD_A_QUIET,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
     )
 
     assert rec.dispatches == [], "no mail and no change means no wake"
     assert rec.events == []
-    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A_QUIET, _PROJECT_RESOLVER)
 
 
 def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_path):
@@ -451,4 +464,72 @@ def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
     )
 
     assert rec.dispatches == []
+    assert rec.events == []
+
+
+# ── the timer backstop ────────────────────────────────────────────────────
+
+_BOARD_QUIET = [
+    {
+        "id": "x-1",
+        "project": "proj",
+        "status": "done",
+        "_kanban_column": "done",
+        "priority": "p1",
+    }
+]
+
+
+def _primed_unchanged(manifest):
+    """Store the current board's hash: mail empty, board unchanged."""
+    _store_board_hash(
+        _SidecarTarget(manifest), _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+    )
+
+
+def test_the_backstop_fires_when_no_event_did(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=_primed_unchanged,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [("epic-x", "backstop")], (
+        "actionable work, no event, no recent wake: the re-check fires"
+    )
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["reason"] == "backstop"
+
+
+def test_the_backstop_waits_out_its_window(tmp_path):
+    def prime(manifest):
+        _primed_unchanged(manifest)
+        bill_wake(manifest, now=NOW - timedelta(minutes=10))
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a wake 10m ago is inside the 1800s window"
+    assert rec.events == []
+
+
+def test_the_backstop_skips_a_scope_with_nothing_actionable(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest), _board_hash("epic-x", _BOARD_QUIET, _PROJECT_RESOLVER)
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_QUIET, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a quiet board is a NoWork king, not a wake"
     assert rec.events == []
