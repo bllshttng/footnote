@@ -504,3 +504,29 @@ These questions need separate fields. A worker can be reachable while it advance
 A reading about one artifact is not a verdict about the agent. A missing transcript file proves only that the file is missing. Both axes must return `unknown` for this case. They must never report death, refusal, or parking from this absence.
 
 When evidence is absent or unreadable, each falsifier in `reachability.py` returns `None`. `classify_progress` applies the same rule to the transcript model. Only classifiers in `reachability.py` can answer these axes. A reader must not derive liveness or progress from file existence.
+
+## The join write partition: one policy, two enforcement layers
+
+`fno backlog join` spawns several workers into ONE shared worktree. The plan's own partition says who owns which file. `join.sandbox` (default off) enforces that partition per joiner at two layers.
+
+The partition is not recomputed here. `render_join_write_policy` runs `collision.partition` at BAND grain: one item per wave band, paths equal to the union of that band's task surfaces. A band that lands in a singleton group and owns at least one usable path is narrowed. Anything else is never narrowed. The receipt says which: every lane reports `sandbox: enforced | overlapping | unevaluated | off`. A run that failed to narrow never looks like a run that did.
+
+The node holder is never sandboxed. Join fires while the holder is already running. The band is the assignment axis, not the task. A joiner pulls one ready task at a time inside its band, so its allowlist must cover everything the band can ever hand it. That is why the policy renders once from the band's union, never per claim.
+
+One JSON artifact per worker lives at `<worktree>/.fno/join-partition/<worker>.json`, written BEFORE the spawn. It carries the band, the `deny_edit` peer list, and the `sandbox` settings block. One artifact drives both layers. The spawn CLI's `--sandbox-write-policy` hands that same file to the worker. Its `sandbox` block composes into the ONE `--settings` file the session reads. There is only one `--settings` flag. A second file silently drops the first, so the sandbox block joins the route and auth floor under one content address.
+
+**The OS layer is denyWrite, not allowWrite.** Verified live with a headless sandboxed session on this machine, 2026-08-28. A sandboxed session's own workspace (the git worktree) is writable by default. An allowlist of worktree-relative paths narrows nothing. `filesystem.denyWrite` wins over both `allowWrite` and that workspace default. So the per-band separation names the PEER bands' surfaces, as absolute paths, in `denyWrite`. `allowWrite` opens only what a joiner legitimately needs OUTSIDE the worktree. That is the global fno state dir (graph, claims, mail), plus the worktree infra roots as a belt. The refusal below is verbatim from the live two-band proof. A medium-band joiner Bash-wrote a high-band file:
+
+```
+(eval):1: operation not permitted: proof/high-a.md
+```
+
+The same run proved the jail livable. The joiner wrote its OWN band's file, committed, ran the repository test command, and took a task claim. All succeeded.
+
+**The tool layer is a PreToolUse guard.** `hooks/join-partition-write-guard.sh` runs on Edit and Write. Its first check is one stat of `<cwd>/.fno/join-partition/`. Absent means approve with zero Python, because the hook fires on every Edit in every session. Inside a joined worktree it resolves the worker name through `resolve_task_holder`: the env export first, then the spawn-time roster binding. The answer is cached per session id. ONE denied target denies the whole call: safe siblings cannot launder an unsafe one. A target that will not resolve physically is unknown, not safe. A resolved name with no policy file is never jailed. That name is the holder, and the holder is not sandboxed. A pane-substrate joiner gets the hook layer but not the OS layer, because `mux_spawn` reserves `--settings` for its hook server. That is why `join_node` spawns threads only. The same live proof drove a jailed joiner's Write at the tool layer. Verbatim:
+
+```
+join partition: 'proof/high-a.md' belongs to band 'high', not your band 'medium'. Edit only your own band's files; a Bash write there is refused by the sandbox too.
+```
+
+An overlapping or unevaluated band is never narrowed. Two bands sharing a file cannot be separated by any allowlist. A band whose tasks declare no parseable surface has nothing to name. A partial jail that reads as enforcement is the failure this feature exists to prevent. Such workers spawn with no sandbox block, and their lane says so.
