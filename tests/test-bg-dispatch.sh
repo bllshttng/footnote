@@ -101,6 +101,7 @@ case "$sub $verb" in
   "claim status")
     key="${3:-}"; id="${key#node:}"
     [[ -f "$S/claim_err" ]] && exit 1          # simulate a probe crash (nonzero, no stdout)
+    [[ -f "$S/claim_garbage" ]] && { echo "note: claim service moved; see docs"; exit 0; }  # banner text, rc 0
     printf '{"state":"%s","holder":"target-session:holder-%s"}\n' \
       "$(cat "$S/claim_$id" 2>/dev/null || echo free)" "$id" ;;
   "claim acquire")
@@ -115,6 +116,22 @@ case "$sub $verb" in
     cat "$S/agents_list.json" 2>/dev/null || echo '{"agents":[]}' ;;
   "agents rm")
     printf 'rm %s\n' "${3:-}" >> "$S/rm.log"; echo "removed ${3:-}" ;;
+  "agents workspace"|"workspace worktree")
+    # worktree ensure under test: the isolation the launcher routes BOTH
+    # node-cwd and no-cwd dispatches through. repo_ensure.log records the
+    # --repo root so a test asserts WHICH root fed the isolation, not just
+    # that some worktree came back. ensure_fail -> refusal (nonzero, no
+    # output); ensure_policy_never -> policy=never, returns the repo root.
+    repo=""; name=""; _prev=""
+    for a in "$@"; do
+      [[ "$_prev" == "--repo" ]] && repo="$a"
+      [[ "$_prev" == "--name" ]] && name="$a"
+      _prev="$a"
+    done
+    printf '%s\n' "$repo" >> "$S/repo_ensure.log"
+    [[ -f "$S/ensure_fail" ]] && exit 1
+    [[ -f "$S/ensure_policy_never" ]] && { printf '%s\n' "$repo"; exit 0; }
+    printf '%s/worktrees/%s\n' "$repo" "$name" ;;
   "agents spawn")
     spawn_node=""; _prev=""
     for a in "$@"; do
@@ -238,7 +255,7 @@ set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2"
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
 set_resolved_cwd() { echo "$2" > "$MOCKSTATE/resolved_cwd_$1"; }
 set_pr() { echo "$2" > "$MOCKSTATE/pr_$1"; }   # node carries an open (unmerged) PR
-reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err 2>/dev/null || true; }
+reset_mock() { rm -f "$MOCKSTATE"/status_* "$MOCKSTATE"/claim_* "$MOCKSTATE"/cwd_* "$MOCKSTATE"/resolved_cwd_* "$MOCKSTATE"/pr_* "$MOCKSTATE"/ask.log "$MOCKSTATE"/ask.fail "$MOCKSTATE"/ask_collision "$MOCKSTATE"/ready.json "$MOCKSTATE"/claim_err "$MOCKSTATE"/claim_garbage "$MOCKSTATE"/ready_err "$MOCKSTATE"/get_err "$MOCKSTATE"/ask_noid "$MOCKSTATE"/reserve_held "$MOCKSTATE"/agents_list.json "$MOCKSTATE"/agents_list_err "$MOCKSTATE"/agents_list_garbage "$MOCKSTATE"/rm.log "$MOCKSTATE"/resolve_fail "$MOCKSTATE"/resolve_pair "$MOCKSTATE"/verb_* "$MOCKSTATE"/slug_* "$MOCKSTATE"/cfg_auto_merge "$MOCKSTATE"/cfg_auto_merge_err "$MOCKSTATE"/repo_ensure.log "$MOCKSTATE"/ensure_fail "$MOCKSTATE"/ensure_policy_never 2>/dev/null || true; }
 ask_count()  { [[ -f "$MOCKSTATE/ask.log" ]] && wc -l < "$MOCKSTATE/ask.log" | tr -d ' ' || echo 0; }
 
 echo "=============================================="
@@ -615,15 +632,34 @@ grep -q -- "--cwd /tmp/example-pipeline" "$MOCKSTATE/ask.log" \
 echo ""
 echo "--- ab-77b691dc: canonical-default dispatch (--fresh / --here) ---"
 
-# ---- AC1: a node with NO recorded cwd defaults to --fresh (canonical main),
-#      so a dispatch from a linked worktree never inherits that worktree ----
+# ---- AC1: a node with NO recorded cwd isolates through worktree ensure off
+#      the canonical root, so a dispatch from a linked worktree never inherits
+#      that worktree (the ensure-failure fallback is asserted below) ----
 reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
 # no set_cwd / set_resolved_cwd -> empty node cwd
 bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
-if grep -q -- "--fresh" "$MOCKSTATE/ask.log" && ! grep -q -- "--cwd" "$MOCKSTATE/ask.log"; then
-  pass "AC1: no node cwd -> dispatch defaults to --fresh (no --cwd)"
+_gcd="$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd -P)"
+_expect_root=""
+[[ -n "$_gcd" ]] && _expect_root="$(dirname "$_gcd")"
+# sed, not tail: the rtk wrapper on this machine silently empties tail -1.
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+if [[ -n "$_expect_root" && "$last_repo" == "$_expect_root" ]] \
+   && grep -q -- "--cwd $_expect_root/worktrees/" "$MOCKSTATE/ask.log" \
+   && ! grep -q -- "--fresh" "$MOCKSTATE/ask.log"; then
+  pass "AC1: no node cwd -> ensured worktree off the canonical root, no --fresh"
 else
-  fail "AC1: expected --fresh, no --cwd: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+  fail "AC1: no-cwd isolation wrong: repo '$last_repo' want '$_expect_root': $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+fi
+
+# ---- AC1: an ensure failure falls back to --fresh - a no-cwd node has no
+#      recorded cwd to fall back to, and the dispatch is never blocked ----
+reset_mock; set_status ab-aaaa1111 ready; set_claim ab-aaaa1111 free
+: > "$MOCKSTATE/ensure_fail"
+bash "$DISPATCH" ab-aaaa1111 >/dev/null 2>&1
+if grep -q -- "--fresh" "$MOCKSTATE/ask.log" && ! grep -q -- "--cwd" "$MOCKSTATE/ask.log"; then
+  pass "AC1: ensure failure -> --fresh fallback, dispatch not blocked"
+else
+  fail "AC1: ensure-failure fallback wrong: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 fi
 
 # ---- AC2: --here opts out -> neither --fresh nor --cwd (inherit caller cwd) ----
@@ -810,25 +846,52 @@ echo ""
 echo "--- US1 - _resolved_cwd authority (node-cwd-authority, ab-c0f92987) ---"
 
 # ---- AC1-HP: _resolved_cwd present -> dispatch uses it over raw cwd ----
+# The dry-run receipt no longer claims a landing directory: both non-here arms
+# isolate through worktree ensure, whose real path is only known once it runs,
+# so the preview prints the ensure hint. WHICH root feeds the ensure is still
+# the authority question; the real-launch probe below asserts it on
+# repo_ensure.log (the mock records every --repo it was handed).
 reset_mock; set_status ab-aaaa1111 ready
 set_resolved_cwd ab-aaaa1111 /resolved/root
 set_cwd ab-aaaa1111 /recorded/other
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-echo "$out" | grep -q -- "--cwd /resolved/root" \
-  && pass "AC1-HP: dry-run command uses _resolved_cwd, not raw cwd" \
-  || fail "AC1-HP: _resolved_cwd not used in dry-run command: $out"
-echo "$out" | grep -q "cwd=/resolved/root" \
-  && pass "AC1-HP: dry-run line contains cwd= token with resolved value" \
-  || fail "AC1-HP: dry-run line missing cwd= token: $out"
+echo "$out" | grep -q -- "--cwd <fno agents workspace worktree ensure>" \
+  && pass "AC1-HP: dry-run hint carries the ensure placeholder" \
+  || fail "AC1-HP: dry-run hint wrong: $out"
+echo "$out" | grep -q "cwd=<fno-worktree-ensure>" \
+  && pass "AC1-HP: dry-run cwd= is the space-free ensure placeholder" \
+  || fail "AC1-HP: dry-run cwd= token wrong: $out"
+if echo "$out" | grep -q "/resolved/root\|/recorded/other"; then
+  fail "AC1-HP: dry-run receipt still claims a recorded cwd as the landing dir: $out"
+else
+  pass "AC1-HP: dry-run receipt claims no location ensure has not chosen"
+fi
+# Real launch: the ensure mock records its --repo; _resolved_cwd must win, and
+# the worker lands in the worktree ensure returned.
+out_real="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+[[ "$last_repo" == "/resolved/root" ]] \
+  && pass "AC1-HP: real dispatch feeds _resolved_cwd to worktree ensure" \
+  || fail "AC1-HP: ensure got repo '$last_repo', want /resolved/root"
+grep -q -- "--cwd /resolved/root/worktrees/" "$MOCKSTATE/ask.log" 2>/dev/null \
+  && pass "AC1-HP: worker spawns into the ensured worktree under the resolved root" \
+  || fail "AC1-HP: spawn cwd wrong: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
 
 # ---- AC1-EDGE: no _resolved_cwd (stale fno) -> falls back to raw cwd ----
 reset_mock; set_status ab-aaaa1111 ready
 set_cwd ab-aaaa1111 /recorded/other
-# no set_resolved_cwd: mock emits only cwd field
+# no set_resolved_cwd: mock emits only cwd field. The dry-run preview prints the
+# ensure hint on every non-here arm; the raw-cwd authority is asserted on the
+# ensure mock's record of the real launch below.
 out="$(bash "$DISPATCH" --dry-run ab-aaaa1111 2>&1)"
-echo "$out" | grep -q -- "--cwd /recorded/other" \
-  && pass "AC1-EDGE: stale-fno fallback (no _resolved_cwd) uses raw cwd" \
-  || fail "AC1-EDGE: stale-fno fallback wrong: $out"
+echo "$out" | grep -q -- "--cwd <fno agents workspace worktree ensure>" \
+  && pass "AC1-EDGE: stale-fno dry-run carries the ensure hint" \
+  || fail "AC1-EDGE: stale-fno dry-run wrong: $out"
+out_real="$(bash "$DISPATCH" ab-aaaa1111 2>&1)"
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+[[ "$last_repo" == "/recorded/other" ]] \
+  && pass "AC1-EDGE: stale-fno fallback feeds raw cwd to worktree ensure" \
+  || fail "AC1-EDGE: ensure got repo '$last_repo', want /recorded/other"
 
 # ---- AC1-UI: launched and dry-run lines contain a cwd= token ----
 reset_mock; set_status ab-aaaa1111 ready
@@ -931,6 +994,187 @@ if true; then
 else
   fail "x-3218 bridge unreachable: no cli venv at $VENV_PY"
 fi
+
+echo ""
+echo "--- node-cwd dispatch isolates through worktree ensure ---"
+
+NODE_REPO="$TMP/noderepo"
+mkdir -p "$NODE_REPO/scripts/setup"
+printf '#!/usr/bin/env bash\nmkdir -p "$WORKTREE" && : > "$WORKTREE/.setup-ran"\n' > "$NODE_REPO/scripts/setup/setup-worktree.sh"
+chmod +x "$NODE_REPO/scripts/setup/setup-worktree.sh"
+
+# A node-cwd dispatch lands in the ensured worktree, runs the state-linking
+# setup, and never spawns --cwd <node repo> directly (the recorded cwd is
+# almost always canonical main, where /target's location gate refuses).
+reset_mock; set_status ab-bbbb1111 ready
+set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
+out="$(bash "$DISPATCH" ab-bbbb1111 2>&1)"
+spawn_cwd="$(sed -n 's/.*--cwd \([^ ]*\).*/\1/p' "$MOCKSTATE/ask.log" 2>/dev/null | head -1)"
+if [[ -n "$spawn_cwd" && "$spawn_cwd" == "$NODE_REPO/worktrees/"* && -f "$spawn_cwd/.setup-ran" ]]; then
+  pass "isolation: node-cwd dispatch spawns into the ensured worktree with state linked"
+else
+  fail "isolation: spawn cwd '$spawn_cwd' is not a set-up ensured worktree: $out"
+fi
+last_repo="$(cat "$MOCKSTATE/repo_ensure.log" 2>/dev/null)"; last_repo="${last_repo//$'\n'/}"
+[[ "$last_repo" == "$NODE_REPO" ]] \
+  && pass "isolation: the node's recorded root fed worktree ensure" \
+  || fail "isolation: ensure got repo '$last_repo', want $NODE_REPO"
+
+# The dry-run receipt never claims the recorded cwd as the landing directory,
+# and the placeholder stays space-free so a field-splitting parser keeps working.
+reset_mock; set_status ab-bbbb1111 ready
+set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
+out="$(bash "$DISPATCH" --dry-run ab-bbbb1111 2>&1)"
+echo "$out" | grep -q "cwd=<fno-worktree-ensure>" \
+  && pass "dry-run: receipt carries the space-free ensure placeholder" \
+  || fail "dry-run: cwd= wrong: $out"
+if echo "$out" | grep -qF "$NODE_REPO"; then
+  fail "dry-run: receipt still names the recorded repo as the landing dir: $out"
+else
+  pass "dry-run: receipt claims no location the real run may not use"
+fi
+
+# ensure failure never blocks the dispatch: the node's own recorded cwd is the
+# fallback landing (the worker's /target start self-isolates from there).
+reset_mock; set_status ab-bbbb1111 ready
+set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
+: > "$MOCKSTATE/ensure_fail"
+out="$(bash "$DISPATCH" ab-bbbb1111 2>&1)"
+echo "$out" | grep -q "^launched ab-bbbb1111 " \
+  && pass "ensure-failure: dispatch still launches" \
+  || fail "ensure-failure: dispatch blocked: $out"
+grep -q -- "--cwd $NODE_REPO " "$MOCKSTATE/ask.log" 2>/dev/null \
+  && pass "ensure-failure: fallback landing is the node's recorded cwd" \
+  || fail "ensure-failure: ask.log lacks the node-cwd fallback: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+
+# policy=never returns the repo root: launch in place, setup skipped (it would
+# link shared state INTO the canonical checkout).
+reset_mock; set_status ab-bbbb1111 ready
+set_resolved_cwd ab-bbbb1111 "$NODE_REPO"
+: > "$MOCKSTATE/ensure_policy_never"
+out="$(bash "$DISPATCH" ab-bbbb1111 2>&1)"
+grep -q -- "--cwd $NODE_REPO " "$MOCKSTATE/ask.log" 2>/dev/null \
+  && pass "policy-never: worker launches at the repo root" \
+  || fail "policy-never: spawn cwd wrong: $(cat "$MOCKSTATE/ask.log" 2>/dev/null)"
+[[ ! -f "$NODE_REPO/.setup-ran" ]] \
+  && pass "policy-never: setup-worktree.sh not run against the repo root" \
+  || fail "policy-never: setup ran against the repo root"
+
+echo ""
+echo "--- autolaunch holder gate reads the live claim ---"
+
+# A live node claim parks the launch as already-running; the sanctioned
+# structural handoff is named instead of a second worker.
+reset_mock; set_status ab-cccc1111 ready; set_claim ab-cccc1111 live
+mkplan "$TMP/plan-claimed.md" ab-cccc1111
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
+echo "$out" | grep -q '^already-running ab-cccc1111 .*claim held' \
+  && pass "holder: live claim reported as already-running" \
+  || fail "holder: live claim not reported: $out"
+echo "$out" | grep -q "handoff.sh" \
+  && pass "holder: the sanctioned handoff path is named in the reason" \
+  || fail "holder: reason omits handoff.sh: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "holder: no worker spawned over a live claim" \
+  || fail "holder: spawned over a live claim: $(ask_count)"
+
+# A failed claim read parks honestly with the rc, like the ready-gate does.
+reset_mock; set_status ab-cccc1111 ready
+: > "$MOCKSTATE/claim_err"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
+echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read failed (rc=1)' \
+  && pass "holder: failed claim read parks with the rc named" \
+  || fail "holder: failed read mishandled: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "holder: failed claim read launches nothing" \
+  || fail "holder: failed read still spawned: $(ask_count)"
+
+# A read that exits 0 but yields no parsable .state is not evidence of freedom.
+reset_mock; set_status ab-cccc1111 ready
+: > "$MOCKSTATE/claim_garbage"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-claimed.md" 2>&1)"
+echo "$out" | grep -q '^parked ab-cccc1111 reason="claim read unparsable' \
+  && pass "holder: unparsable claim read parks, never dispatches" \
+  || fail "holder: unparsable read failed open: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "holder: unparsable claim read launches nothing" \
+  || fail "holder: unparsable read still spawned: $(ask_count)"
+
+echo ""
+echo "--- autolaunch frontmatter reader is robust ---"
+
+# CRLF frontmatter still resolves the claimed node.
+reset_mock; set_status ab-dddd1111 ready
+printf -- '---\r\ntitle: t\r\nclaims: ab-dddd1111\r\n---\r\n# t\r\n' > "$TMP/plan-crlf.md"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-crlf.md" 2>&1)"
+echo "$out" | grep -q "^auto-launched ab-dddd1111 " \
+  && pass "frontmatter: CRLF plan resolves its claimed node" \
+  || fail "frontmatter: CRLF plan broke resolution: $out"
+
+# A stray --- inside the body is not the closing fence; the frontmatter node
+# wins over a body look-alike (the decoy is ready, so a wrong pick would launch).
+reset_mock; set_status ab-eeee1111 ready; set_status ab-99999999 ready
+printf -- '---\ntitle: t\nclaims: ab-eeee1111\n---\nbody\n---\nclaims: ab-99999999\n---\n# t\n' > "$TMP/plan-stray.md"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-stray.md" 2>&1)"
+echo "$out" | grep -q "^auto-launched ab-eeee1111 " \
+  && pass "frontmatter: body fence ignored, frontmatter node launched" \
+  || fail "frontmatter: stray body fence mishandled: $out"
+
+# An unterminated block is a named read failure on stdout, never a silent skip.
+reset_mock; set_status ab-ffff7777 ready
+printf -- '---\ntitle: t\nclaims: ab-ffff7777\n' > "$TMP/plan-unterminated.md"
+out="$(GATE=true bash "$AUTOLAUNCH" "$TMP/plan-unterminated.md" 2>&1)"
+echo "$out" | grep -q '^autolaunch-failed - reason="plan frontmatter read failed' \
+  && pass "frontmatter: unterminated block named as a read failure" \
+  || fail "frontmatter: unterminated block silent: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "frontmatter: unterminated block launches nothing" \
+  || fail "frontmatter: unterminated block spawned: $(ask_count)"
+
+echo ""
+echo "--- autolaunch bounds the queued dispatch wait ---"
+
+# A fake plugin tree: the gate sources with-timeout.sh and dispatches
+# skills/target/scripts/dispatch-node.sh from REPO_ROOT, so both are stubbed
+# there while the gate script itself stays the real one under test.
+QREPO="$TMP/queuerepo"
+mkdir -p "$QREPO/scripts/lib" "$QREPO/skills/target/scripts"
+cp "$REPO_ROOT/scripts/lib/with-timeout.sh" "$QREPO/scripts/lib/with-timeout.sh"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
+chmod +x "$QREPO/skills/target/scripts/dispatch-node.sh"
+
+# A dispatch still queued at the bound parks with the ceiling named, quickly.
+reset_mock; set_status ab-aaaa1111 ready
+mkplan "$TMP/plan-q.md" ab-aaaa1111
+t0=$(date +%s)
+out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=2 GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
+dt=$(( $(date +%s) - t0 ))
+echo "$out" | grep -q 'parked ab-aaaa1111 reason="dispatch still queued after 2s' \
+  && pass "bound: queued dispatch parks with the ceiling named" \
+  || fail "bound: no queue park: $out"
+[[ "$dt" -le 8 ]] \
+  && pass "bound: park landed near the ceiling (${dt}s)" \
+  || fail "bound: park took ${dt}s"
+
+# A dispatch that launches immediately is not bounded out.
+printf '#!/usr/bin/env bash\necho "launched ab-aaaa1111 name=x session=y cwd=/z hint=h"\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
+reset_mock; set_status ab-aaaa1111 ready
+out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=2 GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
+echo "$out" | grep -q "^auto-launched ab-aaaa1111 " \
+  && pass "bound: immediate launch still auto-launches" \
+  || fail "bound: immediate launch bounded out: $out"
+
+# A non-integer ceiling parks with its own named reason, not the wildcard
+# "unexpected dispatch output" - and never reaches the (sleeping) dispatch.
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$QREPO/skills/target/scripts/dispatch-node.sh"
+reset_mock; set_status ab-aaaa1111 ready
+out="$(REPO_ROOT="$QREPO" FNO_AUTOLAUNCH_TIMEOUT=3m GATE=true bash "$AUTOLAUNCH" "$TMP/plan-q.md" 2>&1)"
+echo "$out" | grep -q 'parked ab-aaaa1111 reason="FNO_AUTOLAUNCH_TIMEOUT must be a bare integer' \
+  && pass "bound: non-integer ceiling parks with the reason named" \
+  || fail "bound: non-integer ceiling misreported: $out"
+[[ "$(ask_count)" -eq 0 ]] \
+  && pass "bound: non-integer ceiling never reaches the dispatch" \
+  || fail "bound: non-integer ceiling still dispatched: $(ask_count)"
 
 echo ""
 echo "================================"

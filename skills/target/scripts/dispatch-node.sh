@@ -49,15 +49,17 @@
 #
 # Invariants (Failure Modes section of the plan):
 #   - Provider + substrate come from `fno agents dispatch resolve` (the x-4d85
-#     harness-capability map), NOT a hardcode (x-567d). claude resolves to `bg`
-#     (the DETACHED `claude --bg` thread, x-2c27: auto-worktrees, runs unattended,
-#     shows in `claude agents`); every other harness resolves to `headless` (a
-#     one-shot that runs to completion) with a loud fallback event. The default
-#     is never `pane` (x-3ab8's owned-PTY default would stall a fire-and-forget
-#     dispatch at a placement prompt). NEVER `--bare`/`-p` for the bg lane (those
-#     force the API-credit pool and strip skills/hooks); `bg` is the subscription
-#     `claude --bg` lane. An unresolvable harness hard-fails loudly (AC2-ERR),
-#     never a silent claude default.
+#     harness-capability map), NOT a hardcode (x-567d). Measured against the
+#     resolver: claude and codex resolve to a native interactive `thread` (the
+#     DETACHED `claude --bg` thread, x-2c27: auto-worktrees, runs unattended,
+#     shows in `claude agents`; `bg` is a deprecated alias of that same thread);
+#     opencode and agy have no journey-proven thread driver yet and degrade to
+#     `headless` (a one-shot that runs to completion) with a loud fallback event.
+#     The default is never `pane` (x-3ab8's owned-PTY default would stall a
+#     fire-and-forget dispatch at a placement prompt). NEVER `--bare`/`-p` for
+#     the thread lane (those force the API-credit pool and strip skills/hooks);
+#     claude's thread is the subscription `claude --bg` lane. An unresolvable
+#     harness hard-fails loudly (AC2-ERR), never a silent claude default.
 #   - A failed dispatch is surfaced and leaves the node `ready`/re-dispatchable;
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
@@ -778,15 +780,15 @@ for id in "${NODES[@]}"; do
   # never reaches this path.
   cwd_hint=""
   dry_cwd="$(pwd)"
-  if [[ -n "$node_cwd" ]]; then
-    cwd_hint="--cwd $node_cwd "
-    dry_cwd="$node_cwd"
-  elif [[ "$HERE" -eq 0 ]]; then
-    # cwd= must stay a real, space-free path so the receipt is machine-parseable
-    # (the conductor worktree path is not known until ensure runs, so preview the
-    # canonical root the --fresh fallback would use); the hint carries the intent.
+  if [[ "$HERE" -eq 0 ]]; then
+    # Both non-here arms isolate through worktree ensure now, whatever the node
+    # recorded as cwd: the recorded cwd is almost always the canonical checkout
+    # root, and the receipt must not claim it as the landing directory. The real
+    # worktree path is only known once ensure runs, so preview the ensure hint on
+    # both arms. cwd= keeps a space-free placeholder so the receipt stays
+    # machine-parseable; the quoted hint carries the readable form.
     cwd_hint="--cwd <fno agents workspace worktree ensure> "
-    dry_cwd="${CANONICAL_ROOT:-$(pwd)}"
+    dry_cwd="<fno-worktree-ensure>"
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -873,30 +875,41 @@ for id in "${NODES[@]}"; do
   # it (deterministic isolation, x-73ca), falling back to --fresh on any ensure
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
-  if [[ -n "$node_cwd" ]]; then
-    spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
-  elif [[ "$HERE" -eq 0 ]]; then
+  if [[ "$HERE" -eq 0 ]]; then
     wt=""
+    # BOTH node-cwd and no-cwd dispatches isolate through ensure now. The old
+    # node-cwd arm skipped ensure entirely and spawned --cwd "$node_cwd" - and
+    # the recorded node cwd is almost always the canonical checkout root, where
+    # /target's location gate refuses to init, so the worker died at its own
+    # first gate. The repo root fed to ensure is the node's cwd when recorded,
+    # canonical otherwise; --here stays the only way to inherit the caller cwd.
+    _ensure_repo="${node_cwd:-$CANONICAL_ROOT}"
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
     # so forward it as --harness: a claude bg dispatch lands harness-native at
     # <repo>/.claude/worktrees/, a non-native harness degrades to external.
-    [[ -n "$CANONICAL_ROOT" ]] && wt="$( (fno agents workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null || fno workspace worktree ensure --repo "$CANONICAL_ROOT" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null) )"
+    [[ -n "$_ensure_repo" ]] && wt="$( (fno agents workspace worktree ensure --repo "$_ensure_repo" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null || fno workspace worktree ensure --repo "$_ensure_repo" --name "$agent_name" --harness "$DISPATCH_PROVIDER" 2>/dev/null) )"
     if [[ -n "$wt" ]]; then
       # policy=never returns the repo root: launch in place, but SKIP setup - it
       # links shared state INTO the canonical checkout (Locked Decision 4: guard
       # worktree-only side effects on path == repo root). Compare physical paths
-      # (ensure prints the resolved root; CANONICAL_ROOT is not phys-resolved).
+      # (ensure prints the resolved root; the repo root is not phys-resolved).
       _wt_phys="$(cd "$wt" 2>/dev/null && pwd -P || printf '%s' "$wt")"
-      _root_phys="$(cd "$CANONICAL_ROOT" 2>/dev/null && pwd -P || printf '%s' "$CANONICAL_ROOT")"
+      _root_phys="$(cd "$_ensure_repo" 2>/dev/null && pwd -P || printf '%s' "$_ensure_repo")"
       if [[ "$_wt_phys" != "$_root_phys" ]]; then
         # Link gitignored shared state into the new worktree (footnote-ecosystem
         # only; absent -> skip). Caller-side because the verb is package code and
         # may not shell out to a repo-root script (shellout-drift gate).
-        _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
-        [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
+        _wt_setup="$_ensure_repo/scripts/setup/setup-worktree.sh"
+        [[ -f "$_wt_setup" ]] && CANONICAL="$_ensure_repo" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       fi
       spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
+    elif [[ -n "$node_cwd" ]]; then
+      # ensure failed: the node's recorded cwd is the best remaining landing (the
+      # worker's /target start self-isolates from there). Never block a dispatch
+      # on an ensure failure.
+      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      launch_cwd="$node_cwd"
     else
       spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a

@@ -4,10 +4,11 @@
 #   B. hooks/helpers/init-target-state.sh child claim-wait (AC2-FR + AC4-FR)
 #
 # Tests:
-#  1. Caller-is-holder: sandbox with matching target-state.md -> parked caller-is-holder;
-#     dispatch-node.sh NEVER invoked.
-#  2. Not-holder (no manifest): gate ON + ready -> dispatch stub invoked (today's behavior).
-#  3. Manifest present but DIFFERENT node -> blind spawn proceeds (not the holder of THIS node).
+#  1. Live-claim holder gate: a held node:<id> claim -> already-running, handoff
+#     named; dispatch-node.sh NEVER invoked (the caller's manifest is not read).
+#  2. Free claim (no manifest): gate ON + ready -> dispatch stub invoked.
+#  3. Manifest present and MATCHING but claim free -> dispatch proceeds (the
+#     gate is claim-driven; a manifest alone never parks).
 #  4. Claim-wait positive: init-target-state.sh + delegated event + acquire retries -> success,
 #     .target-cancelled NEVER created.
 #  5. Claim-wait timeout: acquire always rc=1 + delegated event -> RESULT: BLOCKED printed,
@@ -150,6 +151,16 @@ case "$subcmd1 $subcmd2" in
     printf '{"status":"ready","id":"%s"}\n' "${3:-unknown}"
     exit 0
     ;;
+  "claim status")
+    # The live-claim holder gate reads this. A marker file next to CALL_LOG
+    # simulates a held claim; default free so dispatch scenarios proceed.
+    if [ -f "$(dirname "$CALL_LOG")/claim-held" ]; then
+      printf '{"state":"held","holder":"target-session:holder-other"}\n'
+    else
+      printf '{"state":"free","holder":""}\n'
+    fi
+    exit 0
+    ;;
   *)
     exit 0
     ;;
@@ -160,13 +171,30 @@ ABIEOF
   # Stub jq
   cat > "$sbx/stub-bin/jq" <<'JQEOF'
 #!/usr/bin/env bash
-# Minimal jq stub: handle -r '.status // "unknown"'
+# Minimal jq stub: the filters autolaunch-on-ready.sh uses. Pure bash string
+# ops, no subprocesses, so the stub cannot be broken by a wrapped sed/grep.
 input="$(cat)"
-if printf '%s' "$input" | grep -q '"status":"ready"'; then
-  echo "ready"
-else
-  echo "unknown"
-fi
+filter="${2:-}"
+case "$filter" in
+  '.status // "unknown"')
+    if printf '%s' "$input" | grep -q '"status":"ready"'; then
+      echo "ready"
+    else
+      echo "unknown"
+    fi
+    ;;
+  '.state // ""')
+    out="${input#*\"state\":\"}"
+    echo "${out%%\"*}"
+    ;;
+  '.holder // ""')
+    out="${input#*\"holder\":\"}"
+    echo "${out%%\"*}"
+    ;;
+  *)
+    echo "unknown"
+    ;;
+esac
 exit 0
 JQEOF
   chmod +x "$sbx/stub-bin/jq"
@@ -231,14 +259,16 @@ run_autolaunch() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 1: Caller-is-holder - matching target-state.md -> parked, no dispatch
+# Test 1: Live-claim holder gate - held node claim -> already-running, no dispatch
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Test 1: caller-is-holder gate ---"
+echo "--- Test 1: live-claim holder gate ---"
 SBX1="$(make_autolaunch_sandbox t1)"
 LOG1="$SBX1/call-log"
 
-# Write a target-state.md with graph_node_id matching NODE_ID
+# A live node:<id> claim means a worker already owns this node. The claim, not
+# the caller's manifest, is ownership truth: the sandbox keeps a MATCHING
+# target-state.md and the gate must not need it.
 cat > "$SBX1/.fno/target-state.md" <<EOF
 ---
 session_id: ${SESSION_ID}
@@ -250,10 +280,12 @@ graph_node_id: ${NODE_ID}
 target_claim_key: "node:${NODE_ID}"
 target_claim_holder: "target-session:${SESSION_ID}"
 EOF
+: > "$SBX1/claim-held"
 
 OUT1="$(run_autolaunch "$SBX1" "$SBX1/plan.md")"
-check_contains "T1: parked line present" "parked" "$OUT1"
-check_contains "T1: caller-is-holder reason" "caller-is-holder" "$OUT1"
+check_contains "T1: already-running line present" "already-running" "$OUT1"
+check_contains "T1: held-claim reason" "claim held" "$OUT1"
+check_contains "T1: sanctioned handoff named" "handoff.sh" "$OUT1"
 check_log_absent "T1: dispatch-node.sh NOT invoked" "$LOG1" "dispatch-node.sh"
 
 # ---------------------------------------------------------------------------
@@ -270,13 +302,15 @@ check_contains "T2: auto-launched line present" "auto-launched" "$OUT2"
 check_log_present "T2: dispatch-node.sh was invoked" "$LOG2" "dispatch-node.sh"
 
 # ---------------------------------------------------------------------------
-# Test 3: Manifest present but DIFFERENT node -> blind spawn proceeds
+# Test 3: Manifest present and MATCHING but claim free -> dispatch proceeds
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Test 3: manifest with different node -> blind spawn ---"
+echo "--- Test 3: manifest alone never parks ---"
 SBX3="$(make_autolaunch_sandbox t3)"
 LOG3="$SBX3/call-log"
 
+# The gate is claim-driven: even a manifest naming THIS node must not park the
+# launch when the live claim is free (a manifest is an init-time snapshot).
 DIFFERENT_NODE="ab-ffffffff"
 cat > "$SBX3/.fno/target-state.md" <<EOF
 ---
@@ -285,7 +319,7 @@ created_at: 2026-06-05T12:00:00Z
 plan_path: "plan.md"
 ---
 # Target Session State
-graph_node_id: ${DIFFERENT_NODE}
+graph_node_id: ${NODE_ID}
 target_claim_key: "node:${DIFFERENT_NODE}"
 target_claim_holder: "target-session:${SESSION_ID}"
 EOF
@@ -293,7 +327,6 @@ EOF
 OUT3="$(run_autolaunch "$SBX3" "$SBX3/plan.md")"
 check_contains "T3: auto-launched line present" "auto-launched" "$OUT3"
 check_log_present "T3: dispatch-node.sh was invoked" "$LOG3" "dispatch-node.sh"
-check_not_contains "T3: no caller-is-holder parked" "caller-is-holder" "$OUT3"
 
 # ---------------------------------------------------------------------------
 # Test 7: graph_node_id resolution (lean single-doc blueprint, no claims:)
@@ -791,7 +824,7 @@ chmod 000 "$SBX13I/plan.md"
 
 OUT13I="$(GRAPH_JSON_FIXTURE="$SBX13I/graph.json" run_autolaunch "$SBX13I" "$SBX13I/plan.md")"
 chmod 644 "$SBX13I/plan.md"
-check_contains "T13i: parked on a failed provenance read" "plan provenance read failed" "$OUT13I"
+check_contains "T13i: failed on a named frontmatter read failure" "plan frontmatter read failed" "$OUT13I"
 check_log_absent "T13i: dispatch-node.sh NOT invoked" "$LOG13I" "dispatch-node.sh"
 fi
 

@@ -16,6 +16,8 @@
 # Output (exactly one decision line when the gate is ON; never silent):
 #   auto-launched   <node> name=target-<id>-<slug> session=<sid> hint="fno agents logs ..."
 #   parked          <node> reason="<status> (not up-next)"
+#   parked          <node> reason="dispatch still queued after <N>s (fleet likely
+#                   at config.agents.max_live) ..." (FNO_AUTOLAUNCH_TIMEOUT bound)
 #   already-running <node> reason="..."
 #   autolaunch-failed <node> reason="..."
 # When the gate is OFF, or no backlog node can be resolved from the plan: silent exit 0.
@@ -38,6 +40,35 @@ fi
 # and skills/target/scripts/dispatch-node.sh.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || (cd "$SCRIPT_DIR/../../.." && pwd))}"
+
+# read_frontmatter FILE -> prints the YAML frontmatter body (between the opening
+# and closing --- fences), CR-stripped, one line per line; prints nothing and
+# exits 0 when the file has no frontmatter at all (line 1 is not exactly ---).
+# Exits 1 on an UNTERMINATED block and 2 on an unreadable file. Ported from
+# scripts/metrics/register-task.py. The fence-counting awk this replaces read a
+# stray --- inside the body as the closing fence and read an unterminated block
+# as empty - and empty meant "no node declared", so a malformed plan read as a
+# plan with nothing to launch and exited 0 silently.
+read_frontmatter() {
+  python3 - "$1" <<'PYEOF'
+import sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        lines = f.read().decode("utf-8", "replace").split("\n")
+except OSError:
+    sys.exit(2)
+lines = [ln[:-1] if ln.endswith("\r") else ln for ln in lines]
+if not lines or lines[0] != "---":
+    sys.exit(0)
+body = []
+for ln in lines[1:]:
+    if ln == "---":
+        print("\n".join(body))
+        sys.exit(0)
+    body.append(ln)
+sys.exit(1)
+PYEOF
+}
 
 # 1. Gate: opt-in, default OFF, back-compatible (no key => off). Mirrors the
 #    config.target.dedupe_dead_duplicates pattern (stale-owner.sh). Source
@@ -80,11 +111,14 @@ case "$autonomy_enabled" in true|True|TRUE|1|yes|on) ;; *) exit 0 ;; esac
 # as prose, and a whole-file grep would treat that as authoritative and dispatch
 # a stale/unrelated node instead of falling through to the plan_path lookup
 # (codex P2 on PR #492).
-_FRONTMATTER="$(awk '
-  NR==1 && $0 !~ /^---[[:space:]]*$/ { exit }   # no frontmatter block at all
-  /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
-  fence==1 { print }
-' "$PLAN_PATH" 2>/dev/null)"
+_FM_BODY="$(read_frontmatter "$PLAN_PATH")"; _FM_RC=$?
+if [[ "$_FM_RC" -ne 0 ]]; then
+  _fm_why="unterminated '---' block"
+  [[ "$_FM_RC" -eq 2 ]] && _fm_why="unreadable file"
+  echo "autolaunch-failed - reason=\"plan frontmatter read failed (rc=$_FM_RC: $_fm_why) - not launched\""
+  exit 0
+fi
+_FRONTMATTER="$_FM_BODY"
 # The accepted id shape is the config-free NODE_ID_BODY liberal format check
 # (fno.graph._constants: <prefix><hex>, prefix a 1-8 char letter-led token, hex
 # 4-8 wide). It matches a configured `x-8af8` and the legacy `ab-<8hex>` alike -
@@ -239,26 +273,34 @@ if [[ "$status" != "ready" ]]; then
   exit 0
 fi
 
-# 4. Caller-is-holder gate (absorbs cv-60186ad3, plan sec 2.4).
-#    If the invoking session's target-state.md has graph_node_id == this node,
-#    we ARE the live worker on this node. Blind-spawning a second worker would
-#    violate the one-worker-per-node invariant, so continue in this session.
+# 4. Live-claim holder gate (absorbs cv-60186ad3). The claim, not a manifest:
+#    `fno claim status node:<id>` cross-checks the roster precisely so `free`
+#    cannot be read two ways, and it needs neither the invoking session's cwd
+#    nor the plugin root. The manifest read this replaces derived REPO_ROOT
+#    from THIS SCRIPT's location, so a /target session running its blueprint
+#    phase from a worktree kept its manifest at its own cwd while the gate read
+#    a different file - and blind-spawned a duplicate worker onto the node that
+#    session already owned.
 #
-#    Degrade safely: if the manifest is unreadable for any reason, fall through
-#    to today's blind-spawn behavior (absence of evidence of holding != holding).
-_MANIFEST="${REPO_ROOT}/.fno/target-state.md"
-if [[ -f "$_MANIFEST" ]]; then
-  _MANIFEST_NODE="$(awk '
-    BEGIN{fm=0;count=0}
-    /^---/{count++;if(count==2){fm=0;next}else{fm=1;next}}
-    !fm && /^graph_node_id:/{print;exit}
-  ' "$_MANIFEST" 2>/dev/null \
-    | sed "s/^graph_node_id:[[:space:]]*//" | tr -d '"' | tr -d "'" \
-    | tr -d ' ' || true)"
-  if [[ -n "$_MANIFEST_NODE" && "$_MANIFEST_NODE" == "$node" ]]; then
-    echo "parked $node reason=\"caller-is-holder: continue in this session; not blind-spawning a duplicate\""
-    exit 0
-  fi
+#    A read failure is not evidence of freedom: park honestly and name the rc,
+#    the way the ready-gate above does. Step 3 already proved fno and jq exist.
+claim_json="$(fno claim status "node:$node" --json 2>/dev/null)"; claim_rc=$?
+if [[ "$claim_rc" -ne 0 || -z "$claim_json" ]]; then
+  echo "parked $node reason=\"claim read failed (rc=$claim_rc) - not launched\""
+  exit 0
+fi
+# An unparsable read is not evidence of freedom either: a banner line ahead of
+# the JSON or a schema change yields no .state, and dispatching over a
+# possibly-held node on that is the exact duplicate this gate exists to stop.
+claim_state="$(printf '%s' "$claim_json" | jq -r '.state // ""' 2>/dev/null)"; state_rc=$?
+if [[ "$state_rc" -ne 0 || -z "$claim_state" ]]; then
+  echo "parked $node reason=\"claim read unparsable (jq rc=$state_rc) - not launched\""
+  exit 0
+fi
+claim_holder="$(printf '%s' "$claim_json" | jq -r '.holder // ""' 2>/dev/null || true)"
+if [[ "$claim_state" != "free" ]]; then
+  echo "already-running $node reason=\"node:$node claim held (state=$claim_state holder=${claim_holder:-unknown}); the structural handoff at the blueprint-to-do boundary is skills/target/scripts/handoff.sh, not a second worker\""
+  exit 0
 fi
 
 # 4b. A native-plan-mode plan belongs to the /target front door, never to a bg
@@ -271,24 +313,15 @@ fi
 #     plan states its own provenance - no correlation guesswork, and nothing here
 #     depends on locating the session's sidecar. Frontmatter only: a `source:` line
 #     in a doc BODY is prose, never authority.
-#     A plan-mode plan reaches here via the plan_path tier, which resolves the node
-#     from the graph WITHOUT opening the plan, so an unreadable plan is not screened
-#     out by an earlier exit: capture awk's rc and park on a failed read the way the
-#     ready-gate above parks on a failed status read, rather than letting "could not
-#     read" masquerade as "not a plan-mode plan" and dispatch.
-_PLAN_FM="$(awk '
-  NR==1 && $0 !~ /^---[[:space:]]*$/ { exit }
-  /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
-  fence==1 && /^source:[[:space:]]/ { print; exit }
-' "$PLAN_PATH" 2>/dev/null)"
-_FM_RC=$?
-if [[ "$_FM_RC" -ne 0 ]]; then
-  echo "parked $node reason=\"plan provenance read failed (rc=$_FM_RC) - not launched\""
-  exit 0
-fi
+#     A plan-mode plan can reach here via the plan_path tier, which resolves the
+#     node from the graph WITHOUT opening the plan. The frontmatter body was read
+#     once at the top through read_frontmatter, which already parked on a failed
+#     or unterminated read, so "could not read" cannot masquerade as "not a
+#     plan-mode plan" here.
 # Strip quotes like the graph_node_id read above: this frontmatter is round-tripped
 # by /blueprint, and a quoted scalar must not read as a different provenance.
-_PLAN_SOURCE="$(printf '%s\n' "$_PLAN_FM" \
+_PLAN_SOURCE="$(printf '%s\n' "$_FM_BODY" \
+  | grep -E '^source:[[:space:]]' | head -1 \
   | sed -E 's/^source:[[:space:]]*//; s/[[:space:]]*$//' | tr -d '"' | tr -d "'")"
 if [[ "$_PLAN_SOURCE" == "claude-plan-mode" ]]; then
   echo "parked $node reason=\"plan-mode-front-door-owns-it: /target executes this plan on the human's [y/N]; run 'target bg $node' to dispatch it unsupervised on purpose\""
@@ -307,7 +340,31 @@ if [[ ! -f "$DISPATCH" ]]; then
   exit 0
 fi
 
-out="$(bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"; dispatch_rc=$?
+# Bound the wait. The spawn gate inside dispatch-node.sh queues at
+# config.agents.max_live and only gives up at 600s, and the command substitution
+# here makes that whole wait silent - on /blueprint's last action. with_timeout
+# (scripts/lib/with-timeout.sh, the one wall-clock bound for shelling out) caps
+# it and reports the GNU convention 124 on a fired bound, so the caller gets a
+# decision line instead of silence. A queued spawn that later succeeds creates a
+# worker whose node:<id> claim makes the holder gate above park any retry, so
+# the bound never produces a duplicate.
+# shellcheck disable=SC1091
+[[ -f "$REPO_ROOT/scripts/lib/with-timeout.sh" ]] && source "$REPO_ROOT/scripts/lib/with-timeout.sh"
+_wait="${FNO_AUTOLAUNCH_TIMEOUT:-180}"
+case "$_wait" in '' | *[!0-9]*)
+  echo "parked $node reason=\"FNO_AUTOLAUNCH_TIMEOUT must be a bare integer seconds (got '$_wait') - not launched\""
+  exit 0 ;;
+esac
+if declare -F with_timeout >/dev/null 2>&1; then
+  out="$(with_timeout "$_wait" bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"; dispatch_rc=$?
+else
+  echo "autolaunch: dispatch bound not armed (scripts/lib/with-timeout.sh unavailable); waiting unbounded" >&2
+  out="$(bash "$DISPATCH" ${DRY:+$DRY} "$node" 2>&1)"; dispatch_rc=$?
+fi
+if [[ "$dispatch_rc" -eq 124 ]]; then
+  echo "parked $node reason=\"dispatch still queued after ${_wait}s (fleet likely at config.agents.max_live); node stays ready - re-dispatch with '/target bg $node'\""
+  exit 0
+fi
 # skipped-contested is in this list because a wedge used to fall through to the
 # wildcard below and be reported as "unexpected dispatch output" - the refusal
 # blamed the instrument instead of naming the node nobody can build.
