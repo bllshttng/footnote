@@ -96,6 +96,13 @@ regex = "1"
 # unsafe-libyaml (pure Rust), no C toolchain.
 serde_yaml_ng = "0.10"
 
+[build-dependencies]
+# build.rs projects the `limits` block of cli/src/fno/events/schema.yaml into
+# src/events_limits.toml. Same crate the library already depends on,
+# so the compile is cached; a hand-rolled indented-block reader would be a
+# third spelling of the datum.
+serde_yaml_ng = "0.10"
+
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
