@@ -101,8 +101,9 @@ SECRET_ROUTE_VARS = (
 # credential. A third question, distinct from the two sets above: "which values
 # are safe to hand a process that is itself footnote?" Only HOME today, and one
 # entry is enough to name the axis. Footnote reads it in three resolvers --
-# `Path.home() / ".fno"` (fno.paths: locks, agents dir, and state_dir's
-# expanduser), `$HOME/.fno/agents` (crates/fno-agents/src/paths.rs), and
+# the home-anchored state root in fno.paths (locks dir, agents dir, and
+# state_dir's expanduser), `$HOME/.fno/agents` (crates/fno-agents/src/paths.rs),
+# and
 # `$FNO_CLAIMS_ROOT, else $HOME` (crates/fno-agents/src/claims.rs) -- while a
 # non-claude oauth_dir record's overlay is exactly `{HOME: <account_dir>/home}`
 # (adapters/providers/dispatch.py `_env_for_oauth`). A wrapper handed that
