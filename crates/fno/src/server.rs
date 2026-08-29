@@ -42,8 +42,7 @@ use crate::proto::{
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
     PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
     RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
-    TabLayout,
-    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -1102,16 +1101,10 @@ thread_local! {
     static RESUME_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
     /// Test override for the declared resume forms (see
-    /// [`declared_resume_form`]). `None` (the default) reads the repo's
-    /// canonical capability TOML directly: a unit test cannot reach a real
-    /// `fno-agents` binary deterministically, so the seed applies the same
-    /// usability rules to the same file the production renderer reads, and
-    /// the shell path stays production-only.
+    /// [`declared_resume_form`]). `None` (the default) reads the same bundled
+    /// contract the production reader parses, so tests and prod walk one code
+    /// path and an override is only needed for the negative arms.
     static DECLARED_RESUME_FORMS:
-        std::cell::RefCell<Option<HashMap<String, Option<DeclaredResumeForm>>>> =
-        const { std::cell::RefCell::new(None) };
-    /// Per-thread memo for the TOML seed above; the file is read once.
-    static TEST_RESUME_FORM_SEED:
         std::cell::RefCell<Option<HashMap<String, Option<DeclaredResumeForm>>>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -1123,127 +1116,163 @@ struct DeclaredResumeForm {
     tokens: Vec<String>,
 }
 
-/// The usability rules of the renderer (`fno-agents resume-argv`) applied
-/// locally: a form exists, is not `unsupported`, carries tokens, and names
-/// no placeholder the caller cannot fill.
-fn declared_resume_form_usable(kind: &str, tokens: &[String]) -> Option<DeclaredResumeForm> {
-    if kind == "unsupported" || tokens.is_empty() {
-        return None;
-    }
-    for token in tokens {
-        if token.starts_with('{') && token.ends_with('}') && token != "{session_id}" {
-            return None;
-        }
-    }
-    Some(DeclaredResumeForm {
-        tokens: tokens.to_vec(),
-    })
-}
+/// The bundled capability contract, embedded for the same reason
+/// `agents_view::attach_form` (x-296f) embeds it: `fno` does not link
+/// `fno-agents`, and an in-process read has no second binary to go stale.
+/// The two TOML copies are byte-identical
+/// (`check-harness-capabilities-fresh.sh`), so either embeds the same words.
+const CAPABILITY_TOML: &str = include_str!("../../../cli/src/fno/agents/harness_capabilities.toml");
 
-/// (x-7b5e) The declared `interactive_resume` form for one harness, or `None`
-/// when the table declares nothing usable for it. Production shells
-/// `fno-agents resume-argv <harness>` once per harness and caches the answer
-/// for the process lifetime - `fno` never links `fno-agents` (its Cargo.toml
-/// records that boundary) and never re-implements the renderer, so the table
-/// stays the single source and a seventh harness needs no Rust change. A
-/// failed read (missing binary, unparseable body) is cached as "nothing
-/// usable" too: this server already degrades the same way for every other
-/// fno-agents shellout, and the honest reason travels through the refusal
-/// messages instead of a second fallback copy of claude/codex arms.
+/// (x-7b5e) The `interactive_resume` form `harness` declares, or `None` when
+/// it declares none. The exact-shape twin of `agents_view::attach_form`
+/// (x-296f): two sources, config first - `[harness.<name>.resume]` in
+/// `$PWD/.fno/config.toml`, else the global `config.toml`, else the bundled
+/// contract - so an operator can teach fno a resume form, or correct a
+/// bundled one, without a release. An unknown harness, an `unsupported` form,
+/// and a malformed one all read as "cannot resume", the safe direction. Read
+/// once per process; a config edit takes effect at the next mux server start.
+///
+/// Deliberately a twin and not a shared helper: the attach reader lands on
+/// its own branch (x-296f), and this node owns resume. The standing ruling
+/// (2026-08-29): the twin does not ship permanently - once the two branches
+/// reconcile, this copy collapses into a form-kind parameter on
+/// `agents_view::attach_form`, the ONE reader its own doc comment promises
+/// (x-244c owns that generalization). Until then this twin is the
+/// transitional state, marked so nobody mistakes it for the destination.
 fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
     #[cfg(test)]
-    {
-        if let Some(map) = DECLARED_RESUME_FORMS.with(|p| p.borrow().clone()) {
-            return map.get(harness).cloned().flatten();
-        }
-        TEST_RESUME_FORM_SEED.with(|p| {
-            let mut seed = p.borrow_mut();
-            if seed.is_none() {
-                *seed = Some(test_resume_form_seed());
-            }
-            seed.as_ref()
-                .and_then(|map| map.get(harness))
+    if let Some(map) = DECLARED_RESUME_FORMS.with(|p| p.borrow().clone()) {
+        return map.get(harness).cloned().flatten();
+    }
+    static FORMS: std::sync::OnceLock<toml::map::Map<String, toml::Value>> =
+        std::sync::OnceLock::new();
+    let forms = FORMS.get_or_init(|| {
+        let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
+            caps.get("resume_strategy")?
+                .get("forms")?
+                .get("interactive_resume")
                 .cloned()
-                .flatten()
-        })
-    }
-    #[cfg(not(test))]
-    {
-        static CACHE: std::sync::OnceLock<
-            std::sync::Mutex<HashMap<String, Option<DeclaredResumeForm>>>,
-        > = std::sync::OnceLock::new();
-        let mut cache = CACHE
-            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-            .lock()
-            .ok()?;
-        if let Some(cached) = cache.get(harness) {
-            return cached.clone();
+        };
+        let mut forms: toml::map::Map<String, toml::Value> =
+            toml::from_str::<toml::Value>(CAPABILITY_TOML)
+                .ok()
+                .and_then(|v| {
+                    let harnesses = v.get("harness")?.as_table()?.clone();
+                    let mut out = toml::map::Map::new();
+                    for (name, caps) in &harnesses {
+                        if let Some(block) = bundled_block(caps) {
+                            out.insert(name.clone(), block);
+                        }
+                    }
+                    Some(out)
+                })
+                .unwrap_or_default();
+        // Fail-open at every layer, exactly as the attach reader: an
+        // unreadable file, an unparseable file, a missing `harness` table and
+        // an unparseable block each skip rather than clearing what was
+        // already there.
+        let mut overridden: std::collections::HashSet<String> = Default::default();
+        for path in config_toml_candidates() {
+            let Ok(body) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
+                continue;
+            };
+            let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
+                continue;
+            };
+            for (name, caps) in harnesses {
+                // First candidate wins per name (project-local over global),
+                // matching the loader's record precedence.
+                if overridden.contains(name) {
+                    continue;
+                }
+                let Some(block) = caps.get("resume") else {
+                    continue;
+                };
+                // A block that does not parse as a resume form is skipped, so
+                // the bundled form (or the safe "cannot resume" for an unknown
+                // name) stays; an explicit kind = "unsupported" override still
+                // lands, because that is a parsable statement.
+                if parse_resume_form(block).is_some() || is_unsupported_block(block) {
+                    forms.insert(name.clone(), block.clone());
+                    overridden.insert(name.clone());
+                }
+            }
         }
-        let form = shell_declared_resume_form(harness);
-        cache.insert(harness.to_string(), form);
-        cache.get(harness).cloned().flatten()
-    }
+        forms
+    });
+    parse_resume_form(forms.get(harness)?)
 }
 
-/// Production read: shell the renderer and parse its one-line JSON reply.
-#[cfg(not(test))]
-fn shell_declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
-    let output = std::process::Command::new(crate::digest_overlay::fno_agents_bin())
-        .arg("resume-argv")
-        .arg(harness)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    if reply.get("available")?.as_bool()? {
-        let tokens: Vec<String> = reply
-            .get("argv")?
-            .as_array()?
-            .iter()
-            .map(|t| t.as_str().map(str::to_string))
-            .collect::<Option<Vec<_>>>()?;
-        declared_resume_form_usable("", &tokens)
-    } else {
-        None
-    }
+/// Whether a block is an explicit `kind = "unsupported"` statement - the one
+/// parsable way to say "this harness cannot resume", which an override may
+/// use to retire a bundled form.
+fn is_unsupported_block(block: &toml::Value) -> bool {
+    block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
 }
 
-/// Test seed: the canonical table read straight from the repo, filtered
-/// through the same usability rules the renderer applies. Read once per
-/// thread; the shell path is production-only (see
-/// [`DECLARED_RESUME_FORMS`]).
+/// The pure half of [`declared_resume_form`]: one resume block (contract row
+/// or config override) into a form. `None` for an unsupported or unfillable
+/// block, so a block that cannot address a session is not a resume form. A
+/// resume lane fills exactly `{session_id}` - the contract validator refuses
+/// any other placeholder in a resume lane at parse - so a block naming
+/// anything else reads as declaring nothing.
+fn parse_resume_form(block: &toml::Value) -> Option<DeclaredResumeForm> {
+    if is_unsupported_block(block) {
+        return None;
+    }
+    let tokens: Vec<String> = block
+        .get("tokens")?
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    if tokens.is_empty() || !tokens.iter().any(|t| t == "{session_id}") {
+        return None;
+    }
+    Some(DeclaredResumeForm { tokens })
+}
+
+/// The config files an override layer reads, project-local FIRST then global:
+/// `$PWD/.fno/config.toml`, then the `$FNO_GLOBAL_SETTINGS_PATH` sibling
+/// `config.toml`, else `~/.fno/config.toml`. The same precedence every other
+/// config reader uses - the byte-twin of `agents_view`'s (x-296f) until the
+/// two readers merge into one.
+fn config_toml_candidates() -> Vec<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(pwd) = std::env::var_os("PWD")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+    {
+        candidates.push(pwd.join(".fno").join("config.toml"));
+    }
+    let global = std::env::var_os("FNO_GLOBAL_SETTINGS_PATH")
+        .filter(|v| !v.is_empty())
+        .map(|v| std::path::PathBuf::from(v).with_file_name("config.toml"))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|h| h.join(".fno").join("config.toml"))
+        });
+    if let Some(g) = global {
+        candidates.push(g);
+    }
+    candidates
+}
+
+/// (x-7b5e) Test override pinning one harness's declared resume availability
+/// directly, so the negative arms (a harness the table gives no form) stay
+/// assertable after the table itself declares a form for every harness.
 #[cfg(test)]
-fn test_resume_form_seed() -> HashMap<String, Option<DeclaredResumeForm>> {
-    let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../cli/src/fno/agents/harness_capabilities.toml");
-    let raw = std::fs::read_to_string(&toml_path)
-        .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
-    let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
-    let mut map = HashMap::new();
-    let Some(harnesses) = caps.get("harness").and_then(|h| h.as_table()) else {
-        return map;
-    };
-    for (name, caps) in harnesses {
-        let form = caps
-            .get("resume_strategy")
-            .and_then(|r| r.get("forms"))
-            .and_then(|f| f.get("interactive_resume"))
-            .and_then(|f| {
-                let kind = f.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-                let tokens: Vec<String> = f
-                    .get("tokens")
-                    .and_then(|t| t.as_array())
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|t| t.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                declared_resume_form_usable(kind, &tokens)
-            });
-        map.insert(name.clone(), form);
-    }
-    map
+fn set_declared_resume_form(harness: &str, form: Option<Vec<String>>) {
+    DECLARED_RESUME_FORMS.with(|p| {
+        p.borrow_mut().get_or_insert_with(HashMap::new).insert(
+            harness.to_string(),
+            form.map(|tokens| DeclaredResumeForm { tokens }),
+        );
+    });
 }
 
 #[cfg(test)]
@@ -1254,18 +1283,6 @@ fn set_resume_program(argv: &[&str]) {
 #[cfg(test)]
 fn clear_resume_program() {
     RESUME_PROGRAM.with(|p| *p.borrow_mut() = None);
-}
-
-/// (x-7b5e) Test override pinning one harness's declared resume availability
-/// directly, so the negative arms (a harness the table gives no form) stay
-/// assertable after the table itself declares a form for every harness.
-#[cfg(test)]
-fn set_declared_resume_form(harness: &str, form: Option<Vec<String>>) {
-    DECLARED_RESUME_FORMS.with(|p| {
-        p.borrow_mut()
-            .get_or_insert_with(HashMap::new)
-            .insert(harness.to_string(), form.map(|tokens| DeclaredResumeForm { tokens }));
-    });
 }
 
 #[cfg(test)]
@@ -1386,7 +1403,7 @@ fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<String>, Strin
         return Ok(argv);
     }
     let Some(form) = declared_resume_form(harness) else {
-        return Err(format!("{harness} declares no usable interactive_resume"));
+        return Err(no_resume_form_reason(harness, session_id));
     };
     let mut argv = form.tokens;
     let mut filled = false;
@@ -1483,6 +1500,21 @@ impl Drop for HoldWorkersGuard {
 #[cfg(test)]
 fn clear_known_workers() {
     KNOWN_WORKERS.with(|p| *p.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn set_restore_registry_rows(rows: Vec<RegistryAgent>) {
+    RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = Some(Some(rows)));
+}
+
+#[cfg(test)]
+struct RestoreRegistryRowsGuard;
+
+#[cfg(test)]
+impl Drop for RestoreRegistryRowsGuard {
+    fn drop(&mut self) {
+        RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = None);
+    }
 }
 
 #[cfg(test)]
@@ -2696,6 +2728,26 @@ fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
     format!("{harness} has no resume form; session {session_id} is not resumable")
 }
 
+/// The registry rows the restore verb classifies against, read fresh from
+/// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
+/// overrides the file (a unit test cannot populate the real registry, and
+/// reading it would clobber the fake rows the test installed).
+#[cfg(test)]
+thread_local! {
+    static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
+    #[cfg(test)]
+    if let Some(rows) = RESTORE_REGISTRY_ROWS.with(|p| p.borrow().clone()) {
+        return rows;
+    }
+    std::fs::read_to_string(agents_view::registry_path())
+        .ok()
+        .and_then(|raw| agents_view::derive_rows(&raw, 0))
+}
+
 /// (x-7b5e) The stored member's own structural refusal, when the member
 /// itself explains a failure better than the generic gesture notice: a
 /// harness the capability table gives no form, or a missing session id.
@@ -3481,11 +3533,7 @@ enum ResumeOutcome {
     },
     /// The session already had a live pane and it was focused, never
     /// respawned (AC6-ERR). Carries where the pane lives.
-    Focused {
-        pane: u64,
-        squad: u64,
-        tab: TabId,
-    },
+    Focused { pane: u64, squad: u64, tab: TabId },
     /// Refused with the same reason text the gesture would have noticed.
     Refused { reason: String },
     /// The claude re-entry plan fired off-loop and the gesture will replay.
@@ -6343,9 +6391,7 @@ impl Core {
                 .squad_members
                 .values()
                 .flatten()
-                .filter(|member| {
-                    !member.tombstone && member.worker.as_deref() == Some(name)
-                })
+                .filter(|member| !member.tombstone && member.worker.as_deref() == Some(name))
                 .cloned()
                 .collect(),
         };
@@ -6395,12 +6441,12 @@ impl Core {
                 row_name = Some(a.name.clone());
                 Self::worker_facts(a).or_else(|| {
                     let member = stored_member.as_ref()?;
-                    receipt_for_member(&fresh_receipts, member).cloned().map(
-                        |mut receipt| {
+                    receipt_for_member(&fresh_receipts, member)
+                        .cloned()
+                        .map(|mut receipt| {
                             receipt.name = name.to_string();
                             receipt
-                        },
-                    )
+                        })
                 })
             }
         };
@@ -6514,6 +6560,13 @@ impl Core {
         harness: Option<String>,
         reply: ControlReply,
     ) {
+        // The off-loop registry reader ticks independently and may never have
+        // run in a session nobody has watched (a headless reboot-restore).
+        // This verb's classification IS a registry read, so it reads the file
+        // itself rather than refuse members whose rows exist on disk.
+        if let Some(rows) = restore_registry_rows() {
+            self.agents = rows;
+        }
         if dry_run {
             self.workspace_restore_apply(true, harness, HashMap::new(), reply);
             return;
@@ -13112,6 +13165,20 @@ impl Core {
                 harness,
                 reply,
             } => {
+                // The persisted squads reach memory only on the first real
+                // attach (restore_squads). Answering before that would report
+                // "nothing to restore" for a store that was never read - the
+                // empty-success shape - so name the precondition instead.
+                if !self.restored {
+                    let _ = reply.send(ServerMsg::Err {
+                        code: crate::proto::err_code::RESTORE_NOT_RUN,
+                        msg: "startup restore has not run in this session yet: attach once \
+                              (its first real attach reads the persisted workspace), then \
+                              re-run"
+                            .into(),
+                    });
+                    return Flow::Continue;
+                }
                 self.workspace_restore_start(dry_run, harness, reply);
                 Flow::Continue
             }
@@ -19547,6 +19614,10 @@ mod tests {
         core.agents = rows_for();
         let _known = KnownWorkersGuard;
         set_known_workers(&names);
+        // The verb's own registry read is pinned to the same fake rows, so it
+        // cannot clobber them with the real machine registry.
+        let _rows = RestoreRegistryRowsGuard;
+        set_restore_registry_rows(rows_for());
         {
             let _policy = RestorePolicyGuard;
             set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Resume);
@@ -23903,7 +23974,12 @@ mod tests {
         }
     }
 
-    fn stored_worker(name: &str, harness: &str, sid: &str, cwd: &str) -> crate::squad_store::StoredMember {
+    fn stored_worker(
+        name: &str,
+        harness: &str,
+        sid: &str,
+        cwd: &str,
+    ) -> crate::squad_store::StoredMember {
         crate::squad_store::StoredMember {
             attach_id: String::new(),
             tombstone: false,
@@ -23913,6 +23989,46 @@ mod tests {
             harness: Some(harness.into()),
             harness_session_id: Some(sid.into()),
         }
+    }
+
+    #[test]
+    fn workspace_restore_before_the_first_attach_refuses_not_reports_empty() {
+        // The persisted squads reach memory only on the first real attach, so
+        // a pre-attach verb must name the precondition rather than answer an
+        // empty member list that reads as "nothing to restore".
+        let mut core = empty_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestore {
+            dry_run: false,
+            harness: None,
+            reply: tx,
+        });
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, crate::proto::err_code::RESTORE_NOT_RUN);
+                assert!(
+                    msg.contains("attach"),
+                    "refusal must name the remedy: {msg}"
+                );
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+        // After the first real attach ran the startup restore, the same verb
+        // proceeds instead of refusing.
+        core.restored = true;
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestore {
+            dry_run: true,
+            harness: None,
+            reply: tx,
+        });
+        assert!(
+            matches!(
+                rx.blocking_recv().expect("a reply"),
+                ServerMsg::WorkspaceRestored { .. }
+            ),
+            "a post-attach restore must not be refused"
+        );
     }
 
     #[test]
@@ -24001,7 +24117,11 @@ mod tests {
             .filter(|&&p| p != shell)
             .copied()
             .collect();
-        assert_eq!(new_panes, vec![resumed_pane], "one new pane, the reported one");
+        assert_eq!(
+            new_panes,
+            vec![resumed_pane],
+            "one new pane, the reported one"
+        );
 
         // The rerun focuses the SAME pane: no second writer ever starts.
         let rows = run_workspace_restore(&mut core, false);
@@ -24161,11 +24281,17 @@ mod tests {
         assert_eq!(by_name("t-codex-one").outcome, "resumed", "{rows:?}");
         let mystery = by_name("mystery");
         assert_eq!(mystery.outcome, "refused");
-        let reason = mystery.reason.as_deref().expect("the refusal names a reason");
+        let reason = mystery
+            .reason
+            .as_deref()
+            .expect("the refusal names a reason");
         assert!(reason.contains("iambad"), "the harness is named: {reason}");
         let routed = by_name("routed-glm");
         assert_eq!(routed.outcome, "refused");
-        let reason = routed.reason.as_deref().expect("the refusal names a reason");
+        let reason = routed
+            .reason
+            .as_deref()
+            .expect("the refusal names a reason");
         assert!(
             reason.contains("re-entry plan unresolved"),
             "the missing plan is named: {reason}"

@@ -1802,11 +1802,7 @@ fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
     };
     match control_roundtrip(&sock, &session, verb) {
         Ok(ServerMsg::WorkspaceRestored { rows }) => {
-            let count = |want: &str| {
-                rows.iter()
-                    .filter(|r| r.outcome == want)
-                    .count()
-            };
+            let count = |want: &str| rows.iter().filter(|r| r.outcome == want).count();
             if json {
                 let payload = serde_json::json!({
                     "session": session,
@@ -1871,6 +1867,10 @@ fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
                 );
             }
             EXIT_OK
+        }
+        Ok(ServerMsg::Err { msg, .. }) => {
+            eprintln!("fno mux workspace restore: {msg}");
+            EXIT_ERROR
         }
         Ok(other) => {
             eprintln!("fno mux workspace restore: unexpected reply: {other:?}");

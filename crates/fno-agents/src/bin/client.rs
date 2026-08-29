@@ -158,16 +158,6 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::client_verbs::run_claim(&args[1..]);
     }
 
-    // `resume-argv` (x-7b5e) is the hidden render front over the packaged
-    // capability table (`harness_capabilities::run_resume_argv`): one JSON
-    // line naming a harness's declared `interactive_resume` form. The mux
-    // server shells it once per harness; reads no daemon, registry or runtime
-    // state. Same `matches!` treatment as `claim` so it stays out of
-    // CLIENT_VERB_USAGE / RUST_CLIENT_VERBS and the parity guard.
-    if matches!(verb, "resume-argv") {
-        return fno_agents::harness_capabilities::run_resume_argv(&args[1..]);
-    }
-
     // `detect` is the HIDDEN debug front over the screen-manifest fallback
     // authority (`fno_agents::scrape`): `detect explain <agent>` prints which
     // rung of the badge lattice currently badges the agent. Same `matches!`

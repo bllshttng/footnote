@@ -2415,6 +2415,11 @@ pub mod err_code {
     /// (v51, x-588a) The addressed identity disagrees with the pane's captured
     /// identity or its unique registry occupant; no bytes were typed.
     pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
+    /// (v59, x-7b5e) `WorkspaceRestore` arrived before the session's first real
+    /// attach, so the persisted squads were never read into memory and an empty
+    /// member list would read as "nothing to restore". The refusal names the
+    /// attach precondition; the store is untouched.
+    pub const RESTORE_NOT_RUN: u32 = 15;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -4048,7 +4053,9 @@ mod tests {
         // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
         // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
         // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
-        // 57 -> 58.
+        // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
+        // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
+        // merge).
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
