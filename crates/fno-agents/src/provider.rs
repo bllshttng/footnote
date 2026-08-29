@@ -1466,8 +1466,11 @@ fn pi_run_tail(message: &str) -> Vec<String> {
 /// that has been handed no prompt leaves an EMPTY directory. Reading that
 /// emptiness as `Ok(false)` would false-orphan a live worker during exactly
 /// the window fno spawns into. So an empty-but-readable directory answers
-/// `Err` (inconclusive), and only an unreadable store or a missing id in a
-/// directory that DOES hold other sessions for this cwd can ever be definitive.
+/// `Err` (inconclusive), and this probe has NO definitive-false reading at all:
+/// `Ok(true)` or inconclusive are its only two answers. Nothing pi writes can
+/// prove a session absent, so nothing here pretends to. A caller that needs a
+/// reap decision must get it from a source that records at create time, which
+/// on this harness is fno's own claim registry.
 ///
 /// A DUPLICATE is inconclusive too, deliberately. More than one file on one id
 /// is the silent create race, and this probe must not launder it into a

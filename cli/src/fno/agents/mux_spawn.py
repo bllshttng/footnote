@@ -3650,7 +3650,31 @@ def dispatch_spawn_pane(
                 # unguarded window, which is the race this claim exists to
                 # close. So the claim is held until the session provably
                 # exists, or until a bound expires and the wait says so.
-                _pi_await(cwd, session_uuid)
+                #
+                # And what it says is RECORDED. A timeout here is not a failure
+                # and must not fail the spawn: the blind window is real, and a
+                # session whose first turn has not been attempted writes no file
+                # at all. But it is not a confirmed create either, and dropping
+                # the reading would leave the one honest outcome this wait can
+                # produce visible to nobody. The event is what a later reader
+                # has when a second create lands on the same id.
+                _pi_lookup = _pi_await(cwd, session_uuid)
+                if _pi_lookup.state not in {"one", "duplicate"}:
+                    from fno.agents import events as _events
+
+                    _events.emit(
+                        "pi_session_create_unconfirmed",
+                        name=name,
+                        harness=provider,
+                        session_id=session_uuid,
+                        cwd=str(cwd),
+                        lookup_state=_pi_lookup.state,
+                        reason=_pi_lookup.reason
+                        or "no session file within the create-settle bound; pi "
+                        "writes one at the first turn ATTEMPT, so this is a "
+                        "create that could not be confirmed, never a create "
+                        "that is known to have failed",
+                    )
         else:
             proc = _run_mux(run_args, runner, env=pane_env)
         placement_receipt: Optional[dict] = None

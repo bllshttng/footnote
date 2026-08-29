@@ -210,6 +210,24 @@ pub fn create_claim_key(cwd: &Path, session_id: &str) -> String {
     format!("pi-session:{}:{session_id}", cwd.display())
 }
 
+/// Whether a create-claim reading means "a create is in flight, do not join".
+///
+/// `Live` and `Suspect` both mean HELD. `Suspect` is an unexpired TTL whose
+/// holder is not provably alive, and the acquire path already refuses to steal
+/// one, so treating it as free here would let an attach walk into a window
+/// acquire itself will not enter.
+///
+/// The other three are not evidence of a create. `Free` is no claim, `Stale` is
+/// an expired one, and `Corrupted` is a file that proves nothing - and failing
+/// closed on an unreadable claim would refuse an operator's attach over a
+/// damaged byte rather than over a race.
+pub fn attach_blocked_by_create(state: crate::claims::ClaimState) -> bool {
+    matches!(
+        state,
+        crate::claims::ClaimState::Live | crate::claims::ClaimState::Suspect
+    )
+}
+
 /// How long the create claim is held, in milliseconds.
 ///
 /// The ruling on this node set 30s, justified by measurement: pi reaches
@@ -332,5 +350,27 @@ mod tests {
             !argv.contains(&"--mode".to_string()),
             "the pane lane is the plain TUI, never --mode rpc: {argv:?}"
         );
+    }
+
+    /// An attach into a live create is a second CREATE, not a join, and the
+    /// session store cannot say so: pi writes its file at the first turn
+    /// ATTEMPT, so the lookup reads `None` for a session being made right now.
+    /// The claim is the only instrument that sees that window, so a held one
+    /// blocks the attach and nothing else does.
+    #[test]
+    fn a_held_create_claim_blocks_an_attach_and_nothing_else_does() {
+        use crate::claims::ClaimState;
+
+        assert!(attach_blocked_by_create(ClaimState::Live));
+        // Suspect is an unexpired TTL whose holder is not provably alive. The
+        // acquire path refuses to steal one, so an attach must not walk into a
+        // window acquire itself will not enter.
+        assert!(attach_blocked_by_create(ClaimState::Suspect));
+
+        assert!(!attach_blocked_by_create(ClaimState::Free));
+        assert!(!attach_blocked_by_create(ClaimState::Stale));
+        // A damaged claim file is evidence of nothing, and refusing an
+        // operator's attach over one would fail closed on the wrong fact.
+        assert!(!attach_blocked_by_create(ClaimState::Corrupted));
     }
 }

@@ -81,6 +81,16 @@ PI_DEFAULT_MODEL = "gpt-5.5"
 # completion read on this harness.
 SETTLED_EVENT = "agent_settled"
 
+# The default bound on ONE rpc turn.
+#
+# It exists for the absence a stream end cannot express. `run_turn` raises when
+# the stream ENDS without the settle marker, but a pi that stalls without
+# exiting ends nothing: the reader blocks in `read1` and the raise can never
+# fire. Ten minutes is generous for a real turn on this fleet's models and
+# short enough that a wedged worker is a failure someone reads rather than a
+# session that idles until a human notices.
+TURN_TIMEOUT_S = 600.0
+
 # How long the create claim is held.
 #
 # The ruling on this node set 30s, justified by measurement: pi reaches
@@ -594,6 +604,9 @@ class PiRpcSession:
         #: reader thread keeps the pipe moving and keeps the text available.
         self._stderr: list[str] = []
         self._stderr_thread: Optional[threading.Thread] = None
+        #: Set by `run_turn`'s watchdog so the raise can name the timeout rather
+        #: than reporting the kill it caused as an ordinary stream end.
+        self._timed_out = False
         #: Per-turn request id. The protocol's `id` correlates a request to its
         #: response, so reusing one constant would attribute every later turn's
         #: response, error, or refusal to the first turn.
@@ -665,20 +678,60 @@ class PiRpcSession:
         self._turn += 1
         return f"fno-{self._turn}"
 
-    def run_turn(self, message: str, *, msg_id: Optional[str] = None) -> list[dict[str, Any]]:
+    def run_turn(
+        self,
+        message: str,
+        *,
+        msg_id: Optional[str] = None,
+        timeout_s: Optional[float] = TURN_TIMEOUT_S,
+    ) -> list[dict[str, Any]]:
         """Send one prompt and collect events until ``agent_settled``.
 
         Returns every event seen, settled event included. If the stream ends
         WITHOUT ``agent_settled``, this raises: an absence has three
         explanations and only one of them is the outcome, so a turn that merely
         stopped producing output is never reported as a turn that completed.
+
+        ``timeout_s`` bounds the OTHER absence, the one a stream end cannot
+        express: a pi that stops emitting and does not exit leaves the reader
+        blocked in ``read1`` forever, so the raise above can never fire and the
+        driver wedges with no diagnostic at all. A watchdog kills the child at
+        the bound, which turns that hang into the stream end this method already
+        knows how to report. Pass ``None`` to wait without a bound, which is
+        only correct when some other instrument owns the deadline.
         """
         self.send(prompt_command(message, msg_id=msg_id or self.next_msg_id()))
         seen: list[dict[str, Any]] = []
-        for event in self.events():
-            seen.append(event)
-            if event.get("type") == SETTLED_EVENT:
-                return seen
+        watchdog: Optional[threading.Timer] = None
+        if timeout_s is not None:
+            proc = self.proc
+
+            def _kill_on_timeout() -> None:
+                # Kill, not terminate: the point is to break the blocked read,
+                # and the turn is already lost. The EOF that follows is what
+                # carries the failure back to the caller.
+                self._timed_out = True
+                if proc is not None and proc.poll() is None:
+                    proc.kill()
+
+            watchdog = threading.Timer(timeout_s, _kill_on_timeout)
+            watchdog.daemon = True
+            watchdog.start()
+        try:
+            for event in self.events():
+                seen.append(event)
+                if event.get("type") == SETTLED_EVENT:
+                    return seen
+        finally:
+            if watchdog is not None:
+                watchdog.cancel()
+        if self._timed_out:
+            raise RuntimeError(
+                f"pi rpc turn exceeded {timeout_s}s without {SETTLED_EVENT!r} after "
+                f"{len(seen)} events, so the child was killed to break the blocked "
+                "read. A turn that stopped producing output is not a turn that "
+                f"completed. pi's stderr: {self.stderr_text or '<empty>'}"
+            )
         raise RuntimeError(
             f"pi rpc stream ended without {SETTLED_EVENT!r} after {len(seen)} events. "
             "rpc mode exits on stdin EOF mid-turn with status 0, so this is NOT a "
@@ -708,6 +761,14 @@ class PiRpcSession:
         except subprocess.TimeoutExpired:
             self.proc.kill()
             self.proc.wait(timeout=5)
+        # Join the drain thread BEFORE closing its pipe. The child is reaped by
+        # now, so the read end sees EOF and the thread returns on its own within
+        # milliseconds; closing underneath a thread still inside `readline`
+        # raises ValueError there, and `threading.excepthook` prints it against
+        # pi's own pipe, so a clean teardown reads as a pi failure.
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=5)
+            self._stderr_thread = None
         # Close the read ends too: without this every session leaks two file
         # descriptors, which a long-lived driver notices before anything else
         # does.

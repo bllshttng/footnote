@@ -1544,6 +1544,14 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
         // predicate shape as the codex clause above, and for the same reason:
         // a pi PANE row already has a place for its process and keeps
         // navigating to its tab.
+        //
+        // INERT TODAY, deliberately. pi's capability row declares
+        // `thread = false` and pi is out of `SPAWN_HARNESSES`, so every pi row
+        // fno can register is pane-hosted and carries a `mux` key - which means
+        // this predicate is false for every row that exists and the pi arm of
+        // `attach_id` never runs. It is written now so the thread lane inherits
+        // a viewport door rather than a gap, and it starts firing on its own
+        // the day that spawn arm ships. Do not read it as a shipped path.
         // The RAW `mux` key, not the parsed one, matching the codex clause
         // above for the reason its comment gives: a PRESENT key means
         // pane-hosted whether or not it parses into a (session, pane_id) pair,

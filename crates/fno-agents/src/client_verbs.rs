@@ -3414,6 +3414,47 @@ the pair (cwd, session id), so there is nothing here to attach to."
         return Some(13);
     }
 
+    // An attach during a live CREATE is a second create, not a join, and the
+    // store cannot say so: a session's file appears at the first turn ATTEMPT,
+    // so for the first seconds of a spawn the lookup above reads `None` for a
+    // session that is being made right now. Joining is safe; creating twice is
+    // the silent race this whole lane exists to close, and the only instrument
+    // that sees the window is the claim the spawn holds across it.
+    //
+    // So this reads that claim and refuses while it is held. `Live` and
+    // `Suspect` both mean held: `Suspect` is an unexpired TTL whose holder is
+    // not provably alive, and the acquire path already declines to steal it.
+    // `Free`, `Stale` and `Corrupted` are not evidence of a create in flight
+    // and never block an attach - a refusal on an unreadable claim would fail
+    // closed against the operator over a file that proves nothing.
+    let create_key = crate::pi::create_claim_key(cwd_path, session_id);
+    let (claim_state, claim_record) = crate::claims::status(&create_key, None);
+    if crate::pi::attach_blocked_by_create(claim_state) {
+        let holder = claim_record
+            .as_ref()
+            .map(|r| r.holder.clone())
+            .unwrap_or_else(|| "an unnamed holder".to_string());
+        eprintln!(
+            "fno agents attach: a pi session CREATE is in flight for {session_id:?} in {cwd}, \
+held by {holder}. pi writes its session file at the first turn ATTEMPT, so the store cannot \
+tell a session being made right now from one that is absent, and attaching into that window \
+CREATES a second session under this id rather than joining. Wait for the holder to finish, \
+then attach again."
+        );
+        append_agents_event(
+            events_path,
+            "agent_attach_refused",
+            &[
+                ("name", Value::String(name.to_string())),
+                ("provider", Value::String("pi".to_string())),
+                ("reason", Value::String("pi-create-in-flight".to_string())),
+                ("session_id", Value::String(session_id.to_string())),
+                ("detail", Value::String(holder)),
+            ],
+        );
+        return Some(13);
+    }
+
     let argv = crate::pi::pi_attach_argv(session_id);
     let mut command = std::process::Command::new(&argv[0]);
     command.args(&argv[1..]);

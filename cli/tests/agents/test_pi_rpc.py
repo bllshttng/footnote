@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -96,6 +97,11 @@ class _FakeStdout:
 
     def read1(self, _size: int) -> bytes:
         return self._chunks.pop(0) if self._chunks else b""
+
+    def close(self) -> None:
+        # A real pipe has one, and `close()` closes the read ends to stop
+        # leaking two descriptors per session.
+        pass
 
 
 class _FakeProc:
@@ -268,3 +274,73 @@ def test_the_held_create_refusal_is_catchable_by_the_spawn_cli():
     held = PiCreateHeld("pi-session:/w:s-1", "the-winner", 4242, "host-a")
     assert isinstance(held, DispatchAskError)
     assert "the-winner" in str(held) and "4242" in str(held)
+
+
+class _BlockingStdout:
+    """A pi that has stopped talking and has NOT exited.
+
+    ``read1`` blocks until the watchdog kills the child, exactly as a real
+    pipe does: no bytes, and no EOF either. This is the absence a stream end
+    cannot express, so a reader with no bound never leaves this call.
+    """
+
+    def __init__(self, released: threading.Event) -> None:
+        self._released = released
+
+    def read1(self, _size: int) -> bytes:
+        self._released.wait(timeout=10)
+        return b""
+
+
+class _HangingProc:
+    def __init__(self) -> None:
+        self.stdin = _FakeStdin()
+        self.released = threading.Event()
+        self.stdout = _BlockingStdout(self.released)
+        self.stderr = None
+        self.killed = False
+
+    def poll(self) -> int | None:
+        return None if not self.killed else -9
+
+    def kill(self) -> None:
+        self.killed = True
+        self.released.set()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return -9
+
+
+def test_a_turn_that_hangs_without_exiting_is_bounded_and_says_so():
+    """The other absence: a pi that stops emitting and does not exit ends no
+    stream, so the EOF raise can never fire and the reader blocks forever.
+
+    Asserts the POSITIVE marker the timeout produces - the child was killed and
+    the message names the bound - rather than merely that the call returned.
+    """
+    session = PiRpcSession("s-1", "/repo")
+    proc = _HangingProc()
+    session.proc = proc  # type: ignore[assignment]
+    with pytest.raises(RuntimeError) as excinfo:
+        session.run_turn("hello", timeout_s=0.2)
+    assert proc.killed, "the watchdog must kill the child to break the blocked read"
+    assert "0.2s" in str(excinfo.value)
+    assert SETTLED_EVENT in str(excinfo.value)
+
+
+def test_close_joins_the_drain_thread_before_closing_its_pipe():
+    """Closing a pipe underneath a thread still inside ``readline`` raises
+    there, and ``threading.excepthook`` prints it against pi's own pipe - so a
+    clean teardown reads as a pi failure. The join is what prevents it."""
+    session = PiRpcSession("s-1", "/repo")
+    session.proc = _FakeProc([])  # type: ignore[assignment]
+    joined: list[float | None] = []
+
+    class _Thread:
+        def join(self, timeout: float | None = None) -> None:
+            joined.append(timeout)
+
+    session._stderr_thread = _Thread()  # type: ignore[assignment]
+    session.close()
+    assert joined == [5], "close must join the drain thread, with a bound"
+    assert session._stderr_thread is None
