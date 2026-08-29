@@ -41,7 +41,8 @@ use crate::proto::{
     CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
     PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
-    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
+    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
+    TabLayout,
     TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
@@ -459,6 +460,26 @@ enum CoreMsg {
         id: u64,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
         replay: Box<BatchReplay>,
+    },
+    /// (x-7b5e) `fno mux workspace restore`: collect the candidate members on
+    /// the core loop, resolve claude re-entry plans OFF it, and re-enter
+    /// through [`CoreMsg::WorkspaceRestoreApply`]. A dry run (or a run with
+    /// no claude members) applies inline - plans are never resolved for a
+    /// classification-only pass.
+    WorkspaceRestore {
+        dry_run: bool,
+        harness: Option<String>,
+        reply: ControlReply,
+    },
+    /// (x-7b5e) The bulk apply half of a workspace restore: the plans are in
+    /// hand (keyed by member worker name, `Err` being that member's visible
+    /// refusal), so every gate runs on the core loop through
+    /// [`Core::resume_one`].
+    WorkspaceRestoreApply {
+        dry_run: bool,
+        harness: Option<String>,
+        plans: HashMap<String, Result<ReentryVerdict, String>>,
+        reply: ControlReply,
     },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
@@ -2628,9 +2649,34 @@ fn restore_worker_refusal_reason(
         return "harness is unknown".into();
     };
     if !Core::resume_form(harness) {
-        return format!("{harness} has no resume form; session {session_id} is not resumable");
+        return no_resume_form_reason(harness, session_id);
     }
     format!("spawn receipt is missing for {harness} session {session_id}")
+}
+
+/// (x-7b5e) The one no-form refusal string, shared by the held-worker
+/// restore reason and the bulk driver's report so the two surfaces cannot
+/// teach different vocabularies for the same structural gap.
+fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
+    format!("{harness} has no resume form; session {session_id} is not resumable")
+}
+
+/// (x-7b5e) The stored member's own structural refusal, when the member
+/// itself explains a failure better than the generic gesture notice: a
+/// harness the capability table gives no form, or a missing session id.
+/// Report-only - the gates in [`Core::resume_one`] already refused the
+/// spawn; this names WHY in the member's own terms (AC5-ERR: named, never
+/// silently dropped).
+fn member_structural_refusal(member: &crate::squad_store::StoredMember) -> Option<String> {
+    let harness = member.harness.as_deref()?;
+    let session_id = member.harness_session_id.as_deref().unwrap_or("");
+    if !Core::resume_form(harness) {
+        return Some(no_resume_form_reason(harness, session_id));
+    }
+    if session_id.is_empty() {
+        return Some("session id is missing".into());
+    }
+    None
 }
 
 fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
@@ -6400,6 +6446,218 @@ impl Core {
             tab: tid,
             notice: fallback_notice,
         }
+    }
+
+    /// (x-7b5e) The live, non-tombstoned worker members a restore acts on,
+    /// as (worker name, member) pairs in stored order. `harness` narrows the
+    /// run to one harness's members. A member with no worker name records no
+    /// resumable identity, so it is never a candidate.
+    fn restore_candidates(
+        &self,
+        harness: Option<&str>,
+    ) -> Vec<(String, crate::squad_store::StoredMember)> {
+        self.squad_members
+            .values()
+            .flatten()
+            .filter(|m| !m.tombstone)
+            .filter(|m| m.worker.as_deref().is_some_and(|w| !w.trim().is_empty()))
+            .filter(|m| harness.is_none_or(|h| m.harness.as_deref() == Some(h)))
+            .map(|m| (m.worker.clone().expect("checked above"), m.clone()))
+            .collect()
+    }
+
+    /// (x-7b5e) `fno mux workspace restore`, phase 1: split the run. A dry
+    /// run never resolves plans (it reports classifications and spawns
+    /// nothing), and a run with no claude members needs none, so both apply
+    /// inline. Otherwise the claude members' re-entry plans resolve OFF the
+    /// core loop (the BatchPlansReady shape) and the apply half re-enters
+    /// with the verdicts in hand - no bare claude resume on this axis, and
+    /// no per-member resolver wait landing on the loop.
+    fn workspace_restore_start(
+        &mut self,
+        dry_run: bool,
+        harness: Option<String>,
+        reply: ControlReply,
+    ) {
+        if dry_run {
+            self.workspace_restore_apply(true, harness, HashMap::new(), reply);
+            return;
+        }
+        let claude_names: Vec<String> = self
+            .restore_candidates(harness.as_deref())
+            .into_iter()
+            .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
+            .map(|(name, _)| name)
+            .collect();
+        if claude_names.is_empty() {
+            self.workspace_restore_apply(false, harness, HashMap::new(), reply);
+            return;
+        }
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for name in claude_names {
+                set.spawn(async move {
+                    let verdict = run_reentry_plan(&name, "resume").await;
+                    (name, verdict)
+                });
+            }
+            let mut plans = HashMap::new();
+            while let Some(joined) = set.join_next().await {
+                if let Ok((name, verdict)) = joined {
+                    plans.insert(name, verdict);
+                }
+            }
+            let _ = core_tx
+                .send(CoreMsg::WorkspaceRestoreApply {
+                    dry_run,
+                    harness,
+                    plans,
+                    reply,
+                })
+                .await;
+        });
+    }
+
+    /// (x-7b5e) `fno mux workspace restore`, phase 2: walk every candidate
+    /// through [`Core::resume_one`] and report one row per member. A claude
+    /// member whose plan refused (or never resolved) refuses with the
+    /// resolver's own reason - never a bare claude resume - and
+    /// `reentry_verdict` is cleared around every attempt so one member's
+    /// verdict can never leak into the next one's argv.
+    fn workspace_restore_apply(
+        &mut self,
+        dry_run: bool,
+        harness: Option<String>,
+        mut plans: HashMap<String, Result<ReentryVerdict, String>>,
+        reply: ControlReply,
+    ) {
+        const RESTORE_CLIENT: u64 = u64::MAX;
+        let candidates = self.restore_candidates(harness.as_deref());
+        let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
+        let mut rows = Vec::with_capacity(candidates.len());
+        for (name, member) in candidates {
+            let harness_name = member.harness.clone();
+            // A claude member without a resolvable plan refuses here instead
+            // of firing a stray off-loop resolution from the bulk path; the
+            // single gesture keeps its own replay behavior.
+            if !dry_run && harness_name.as_deref() == Some("claude") {
+                match plans.get(&name) {
+                    Some(Ok(_)) => {
+                        self.reentry_verdict = plans.remove(&name).and_then(|r| r.ok());
+                    }
+                    Some(Err(reason)) => {
+                        rows.push(RestoreRow {
+                            member: name,
+                            harness: harness_name,
+                            squad: 0,
+                            outcome: "refused".into(),
+                            pane: None,
+                            tab: None,
+                            reason: Some(reason.clone()),
+                            notice: None,
+                        });
+                        continue;
+                    }
+                    None => {
+                        rows.push(RestoreRow {
+                            member: name,
+                            harness: harness_name,
+                            squad: 0,
+                            outcome: "refused".into(),
+                            pane: None,
+                            tab: None,
+                            reason: Some(
+                                "claude re-entry plan unresolved; resume it from the agent panel"
+                                    .into(),
+                            ),
+                            notice: None,
+                        });
+                        continue;
+                    }
+                }
+            }
+            let structural = member_structural_refusal(&member);
+            let outcome =
+                self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
+            self.reentry_verdict = None;
+            let row = match outcome {
+                ResumeOutcome::Resumed {
+                    pane,
+                    squad,
+                    tab,
+                    notice,
+                } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad,
+                    outcome: "resumed".into(),
+                    pane: Some(pane),
+                    tab: Some(tab),
+                    reason: None,
+                    notice,
+                },
+                ResumeOutcome::Focused { pane, squad, tab } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad,
+                    outcome: "focused".into(),
+                    pane: Some(pane),
+                    tab: Some(tab),
+                    reason: None,
+                    notice: None,
+                },
+                ResumeOutcome::Refused { reason } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    // The member's own structural gap outranks the generic
+                    // gesture notice in the REPORT: a no-form harness or a
+                    // missing session id is the specific reason AC5-ERR
+                    // demands. The gates themselves already ran.
+                    reason: Some(structural.unwrap_or(reason)),
+                    notice: None,
+                },
+                ResumeOutcome::PlanPending => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(
+                        "claude re-entry plan unresolved; resume it from the agent panel".into(),
+                    ),
+                    notice: None,
+                },
+                ResumeOutcome::Planned => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "planned".into(),
+                    pane: None,
+                    tab: None,
+                    reason: None,
+                    notice: None,
+                },
+            };
+            rows.push(row);
+        }
+        let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
+        if resumed > 0 {
+            self.push_layout(true);
+            // The same zero-inclusive summary the held-restore prints, so an
+            // attached client sees the world change and its counts.
+            let focused = rows.iter().filter(|r| r.outcome == "focused").count();
+            let refused = rows.iter().filter(|r| r.outcome == "refused").count();
+            self.notice_all(format!(
+                "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
+            ));
+        }
+        let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
     }
 
     fn resume_worker_into(
@@ -12794,6 +13052,23 @@ impl Core {
                 self.kill_all_panes();
                 Flow::Shutdown
             }
+            CoreMsg::WorkspaceRestore {
+                dry_run,
+                harness,
+                reply,
+            } => {
+                self.workspace_restore_start(dry_run, harness, reply);
+                Flow::Continue
+            }
+            CoreMsg::WorkspaceRestoreApply {
+                dry_run,
+                harness,
+                plans,
+                reply,
+            } => {
+                self.workspace_restore_apply(dry_run, harness, plans, reply);
+                Flow::Continue
+            }
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
                 // constraining client releases its clamp, so the tab regrows
@@ -14638,6 +14913,15 @@ async fn handle_control(
                 .send(CoreMsg::PaneBreak {
                     pane,
                     name,
+                    reply: reply_tx,
+                })
+                .await
+        }
+        ControlVerb::WorkspaceRestore { dry_run, harness } => {
+            core_tx
+                .send(CoreMsg::WorkspaceRestore {
+                    dry_run,
+                    harness,
                     reply: reply_tx,
                 })
                 .await
@@ -23428,6 +23712,301 @@ mod tests {
             "the resumed pane is titled from the registry row"
         );
         for pid in new_panes {
+            core.reap_pane(pid);
+        }
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// Run the bulk-restore apply half synchronously and return its rows.
+    /// The production claude-plan split (WorkspaceRestore -> off-loop
+    /// resolution -> apply) is exercised by the handler split itself; these
+    /// tests drive the apply half directly so the gates, rows and rerun
+    /// semantics are deterministic.
+    fn run_workspace_restore(core: &mut Core, dry_run: bool) -> Vec<RestoreRow> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestoreApply {
+            dry_run,
+            harness: None,
+            plans: HashMap::new(),
+            reply: tx,
+        });
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::WorkspaceRestored { rows } => rows,
+            other => panic!("expected WorkspaceRestored, got {other:?}"),
+        }
+    }
+
+    fn stored_worker(name: &str, harness: &str, sid: &str, cwd: &str) -> crate::squad_store::StoredMember {
+        crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: Some(cwd.into()),
+            worker: Some(name.into()),
+            harness: Some(harness.into()),
+            harness_session_id: Some(sid.into()),
+        }
+    }
+
+    #[test]
+    fn workspace_restore_resumes_members_and_a_rerun_focuses() {
+        // AC1-HP + AC6-ERR: one apply resumes the stored worker through the
+        // (overridden) harness form; a second apply FOCUSES the live pane and
+        // spawns nothing. Tombstoned and non-worker members are not
+        // candidates.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![
+                stored_worker(
+                    "t-codex-one",
+                    "codex",
+                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                    cwd.to_string_lossy().as_ref(),
+                ),
+                // Not candidates: an attach-recorded member carries no worker
+                // name, and a tombstoned member is dead by operator ruling.
+                crate::squad_store::StoredMember {
+                    attach_id: "deadbee1".into(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: None,
+                    harness: Some("claude".into()),
+                    harness_session_id: None,
+                },
+                {
+                    let mut dead = stored_worker("gone-row", "codex", "sid-gone", "/x");
+                    dead.tombstone = true;
+                    dead
+                },
+            ],
+        );
+
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 1, "exactly the live worker is a candidate");
+        assert_eq!(rows[0].member, "t-codex-one");
+        assert_eq!(rows[0].outcome, "resumed", "{:?}", rows[0]);
+        let resumed_pane = rows[0].pane.expect("resumed row names its pane");
+        let new_panes: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(new_panes, vec![resumed_pane], "one new pane, the reported one");
+
+        // The rerun focuses the SAME pane: no second writer ever starts.
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "focused", "{:?}", rows[0]);
+        assert_eq!(rows[0].pane, Some(resumed_pane), "the live pane is focused");
+        let still_one: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(still_one, vec![resumed_pane], "the rerun spawned nothing");
+
+        core.reap_pane(resumed_pane);
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn workspace_restore_dry_run_classifies_without_spawning() {
+        // --dry-run is load-bearing: the plan is readable before twenty
+        // processes start. Every gate runs; nothing does.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-dry");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![stored_worker(
+                "t-codex-one",
+                "codex",
+                "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                cwd.to_string_lossy().as_ref(),
+            )],
+        );
+
+        let rows = run_workspace_restore(&mut core, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "planned", "{:?}", rows[0]);
+        assert!(rows[0].pane.is_none(), "a plan names no pane");
+        assert_eq!(
+            core.panes.len(),
+            1,
+            "the dry run spawned nothing beyond the seed shell"
+        );
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn workspace_restore_names_every_refused_member_and_restores_the_rest() {
+        // AC5-ERR: a member the table gives no form for, and a claude member
+        // whose plan never resolved, are NAMED with their reasons while the
+        // resumable member still resumes. A silent skip would look identical
+        // to "the code never ran".
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-refused");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![
+                stored_worker(
+                    "t-codex-one",
+                    "codex",
+                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                    cwd.to_string_lossy().as_ref(),
+                ),
+                // A harness no table row declares: the negative arm names it.
+                stored_worker("mystery", "iambad", "sid-9", "/x"),
+                // A claude member whose plan never resolved on the bulk path.
+                stored_worker("routed-glm", "claude", "uuid-1", "/x"),
+            ],
+        );
+
+        let rows = run_workspace_restore(&mut core, false);
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.member == n)
+                .unwrap_or_else(|| panic!("no row for {n} in {rows:?}"))
+        };
+        assert_eq!(by_name("t-codex-one").outcome, "resumed", "{rows:?}");
+        let mystery = by_name("mystery");
+        assert_eq!(mystery.outcome, "refused");
+        let reason = mystery.reason.as_deref().expect("the refusal names a reason");
+        assert!(reason.contains("iambad"), "the harness is named: {reason}");
+        let routed = by_name("routed-glm");
+        assert_eq!(routed.outcome, "refused");
+        let reason = routed.reason.as_deref().expect("the refusal names a reason");
+        assert!(
+            reason.contains("re-entry plan unresolved"),
+            "the missing plan is named: {reason}"
+        );
+
+        let resumed: Vec<u64> = rows.iter().filter_map(|r| r.pane).collect();
+        for pid in resumed {
             core.reap_pane(pid);
         }
         core.reap_pane(shell);

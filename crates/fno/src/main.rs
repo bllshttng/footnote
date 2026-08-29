@@ -326,7 +326,8 @@ fn main() {
                  | fno mux view <selector> [--url] [--fzf] [--json] \
                    (a tab ordinal/id/name resolves as a location; qualify \
                    with --workspace when it repeats) \
-                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] [--json]"
+                 | fno mux workspace prune [--dry-run] [--include-named] [--tabs-only] [--dead-only] [--json] \
+                 | fno mux workspace restore [--dry-run] [--harness <h>] [--json]"
             );
             std::process::exit(2);
         }
@@ -365,7 +366,7 @@ fn main() {
         Role::MuxWhere(rest) => exit_mux(mux_cli::where_(&rest, env_session.as_deref())),
         Role::MuxThread(rest) => exit_mux(mux_cli::thread(&rest, env_session.as_deref())),
         Role::MuxView(rest) => exit_mux(mux_cli::view(&rest, env_session.as_deref())),
-        Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest)),
+        Role::MuxWorkspace(rest) => exit_mux(mux_cli::workspace(&rest, env_session.as_deref())),
         Role::Client(flag) => {
             let env = env_session.as_deref().filter(|s| !s.is_empty());
             // Bare `fno` with nothing pinned: the pre-attach picker decides
