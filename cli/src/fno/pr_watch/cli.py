@@ -751,6 +751,30 @@ def tick() -> None:
         # anything here acts. Report, never reap: only STRANDED rows get
         # pushed and filed; only UNKNOWN rows get recorded; every other
         # class, LIVE included, is quiet and untouched.
+        #
+        # The king wake phase runs BEFORE it: it is cheaper than either leg
+        # (one registry read, one transcript probe per crown, a bus scan) and
+        # the wake it fires is the thing the stranded sweep would otherwise
+        # have to notice too late.
+        set_tick_phase("king_wake")
+        # The guard is the first statement, before the import: this module is
+        # on the launchd hot path and the wake phase pulls the bus and the
+        # harness layer, which an unarmed tick must not pay for.
+        if getattr(settings.king, "wake_enabled", False):
+            try:
+                from fno.pr_watch._king_wake import run_king_wake
+
+                wake_summary = run_king_wake(settings, emit=_emit_event)
+                woke = ", ".join(
+                    f"{w['scope']}:{w['reason']}" for w in wake_summary.get("woke", [])
+                )
+                typer.echo(
+                    f"king wake: crowns={wake_summary.get('crowns', 0)}"
+                    + (f" woke={woke}" if woke else "")
+                )
+            except Exception as exc:  # noqa: BLE001 - never let a wake break the tick
+                log.warning("pr-watch: king wake phase failed: %s", exc)
+
         set_tick_phase("stranded")
         if _wd_lane_armed(settings):
             try:
