@@ -2,12 +2,17 @@
 
 set -uo pipefail
 
+# shellcheck source=lib/guard-mark.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/guard-mark.sh" 2>/dev/null || true
+
 _approve() {
+    _guard_mark worktree-write-protect allow 2>/dev/null || true
     printf '%s\n' '{}'
     exit 0
 }
 
 _block() {
+    _guard_mark worktree-write-protect block 2>/dev/null || true
     local reason="$1"
     if command -v jq >/dev/null 2>&1; then
         jq -nc --arg reason "$reason" '{

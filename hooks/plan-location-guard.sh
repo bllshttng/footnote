@@ -39,22 +39,26 @@
 set -uo pipefail
 
 _HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/guard-mark.sh
+source "${_HOOK_DIR}/lib/guard-mark.sh" 2>/dev/null || true
 # shellcheck source=helpers/plans-dir.sh
-source "${_HOOK_DIR}/helpers/plans-dir.sh" 2>/dev/null || { printf '%s\n' '{}'; exit 0; }
+source "${_HOOK_DIR}/helpers/plans-dir.sh" 2>/dev/null || { _guard_mark plan-location-guard allow 2>/dev/null || true; printf '%s\n' '{}'; exit 0; }
 # Sourcing a TRUNCATED helper still exits 0 - bash runs it as it parses - so
 # presence of the file is not presence of its functions. Without this the
 # guard would block a correct save (a missing containment test reads as "not
 # under the plans dir"), which contradicts the fail-open contract above. The
 # sibling guard carries the same check for the same reason.
 declare -F fno_plans_dir fno_physical_path fno_under_plans_dir >/dev/null 2>&1 \
-    || { printf '%s\n' '{}'; exit 0; }
+    || { _guard_mark plan-location-guard allow 2>/dev/null || true; printf '%s\n' '{}'; exit 0; }
 
 _approve() {
+    _guard_mark plan-location-guard allow 2>/dev/null || true
     printf '%s\n' '{}'
     exit 0
 }
 
 _block() {
+    _guard_mark plan-location-guard block 2>/dev/null || true
     local reason="$1"
     if command -v jq >/dev/null 2>&1; then
         jq -nc --arg r "$reason" '{
