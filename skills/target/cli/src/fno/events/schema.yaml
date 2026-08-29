@@ -2441,6 +2441,42 @@ event_types:
           description: "Optional (done-path fires). Count of blocking inline findings (codex P1 / gemini critical|high) whose thread lacks a qualifying ack."
     consumers: [operator]
 
+  - name: gh_probe
+    description: "The stop gate's gh-availability probe conclusion, one row per fire. Tri-state: found, absent (NotFound and no file at the path), or spawn_trouble (gh exists but could not be spawned right now: ETXTBSY, EACCES, a missing interpreter). Spawn trouble reads as present, so a transient spawn failure can no longer degrade a session to advisory mode as 'gh absent'. Deliberately NOT the loop_check type: read_prior_fires counts loop_check rows as fire observations, and a fingerprint-less row would break the no-progress streak."
+    sources: [hook]
+    data:
+      required: [session_id, outcome]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier from the manifest."
+        outcome:
+          type: string
+          enum: [found, absent, spawn_trouble]
+          description: "What the probe concluded."
+        detail:
+          type: string
+          description: "Optional. The io error kind when outcome is spawn_trouble (e.g. ExecutableFileBusy); empty otherwise."
+    consumers: [operator]
+
+  - name: guard_decision
+    description: "PreToolUse guard liveness marker: exactly one row per guard invocation naming the guard and its decision, so a guard that cannot prove it ran is distinguishable from one that never launched. Emitted by hooks/lib/guard-mark.sh (bash guards, in their _approve/_block funnels) and the inline _guard_mark in the python guards (at their decision funnels)."
+    sources: [hook]
+    data:
+      required: [guard, decision, tool]
+      properties:
+        guard:
+          type: string
+          description: "Guard name: graph-write-protect, worktree-write-protect, join-partition-write-guard, plan-location-guard, git-protection, bg-process-guard, or law-authority-gate."
+        decision:
+          type: string
+          enum: [allow, block]
+          description: "One vocabulary across languages: a refusal is 'block' whether the guard's own output says block (bash) or deny (python permissionDecision)."
+        tool:
+          type: string
+          description: "Tool name from the payload; 'unknown' when the guard approved before parsing."
+    consumers: [operator]
+
   - name: daemon_recovery_interrupted_temp
     description: "Startup recovery detected an interrupted atomic-write temp and moved it out of the live store path when possible."
     sources: [daemon]
