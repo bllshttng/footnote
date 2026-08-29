@@ -1406,3 +1406,210 @@ fn king_walk_dispatches_past_a_prior_reign_terminal_and_bills_one_respawn() {
         "one walk invocation bills exactly one respawn: {manifest}"
     );
 }
+
+/// AC5-EDGE: a wake-mode walk past a SPENT respawn ceiling still dispatches,
+/// and `respawn_count` is untouched afterward. A wake is normal operation, so
+/// it must neither be refused by nor spend the failure-retry budget; the
+/// caller's wake ledger is the bound in this mode. The prompt must also carry
+/// the drain instruction, because a mail-woken king that reads only its board
+/// reproduces the original failure with more processes.
+#[test]
+fn king_wake_mode_dispatches_past_a_spent_ceiling_without_billing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    let dump = dir.path().join("wake-env-dump.txt");
+    let dump_str = dump.display().to_string();
+    write_stub_driver(
+        &lib_dir,
+        "claude-code",
+        3,
+        &format!("env > {dump_str}; exit 0"),
+    );
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 2);
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--wake",
+            "--wake-reason",
+            "mail",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert!(
+        dump.exists(),
+        "wake mode must dispatch past a spent ceiling\nstdout={stdout}\nstderr={stderr}"
+    );
+    let env_dump = fs::read_to_string(&dump).unwrap();
+    assert!(
+        env_dump.contains("fno agents mail unread"),
+        "a mail wake must tell the session to drain the mail first: {env_dump}"
+    );
+    assert!(
+        env_dump.contains("BEFORE your first board read"),
+        "the drain instruction must order itself before the board read: {env_dump}"
+    );
+    let manifest =
+        fs::read_to_string(dir.path().join(".fno").join("kings").join("epic-x.md")).unwrap();
+    assert!(
+        manifest.contains("respawn_count: 4"),
+        "a wake must not spend the failure-retry budget: {manifest}"
+    );
+    // Board still actionable at the dispatch cap: Budget is the honest walk
+    // terminal here, same as a non-wake walk.
+    assert_eq!(code, Some(1), "stdout={stdout}\nstderr={stderr}");
+}
+
+/// The other half of AC5: WITHOUT --wake the same spent ceiling still
+/// terminates Budget before dispatching - wake mode removed no refusal the
+/// plain walk ever had.
+#[test]
+fn king_walk_without_wake_still_refuses_at_the_spent_ceiling() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    let dump = dir.path().join("plain-env-dump.txt");
+    write_stub_driver(
+        &lib_dir,
+        "claude-code",
+        2,
+        &format!("env > {}; exit 0", dump.display()),
+    );
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 2);
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(1),
+        "Budget exits 1\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stderr.contains("respawn ceiling"),
+        "names the ceiling: {stderr}"
+    );
+    assert!(!dump.exists(), "nothing dispatches without --wake");
+}
+
+/// A wake over an EMPTY board must still terminate NoWork: the board check
+/// stays in wake mode so a spurious trigger cannot spawn a king with nothing
+/// to do.
+#[test]
+fn king_wake_mode_over_an_empty_board_terminates_nowork() {
+    let dir = tempfile::tempdir().unwrap();
+    let lib_dir = dir.path().join("lib");
+    let dump = dir.path().join("empty-env-dump.txt");
+    write_stub_driver(
+        &lib_dir,
+        "claude-code",
+        2,
+        &format!("env > {}; exit 0", dump.display()),
+    );
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+    write_stub_fno_board(&bin_dir, 0);
+    write_king_manifest(dir.path(), "epic-x", "k-9331", 4, 4);
+
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "king",
+            "--scope",
+            "epic-x",
+            "--wake",
+            "--wake-reason",
+            "backstop",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            dir.path().to_str().unwrap(),
+            "--max-iterations",
+            "2",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            (
+                "FNO_AGENTS_HOME",
+                &dir.path().join("agents").display().to_string(),
+            ),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(0),
+        "an empty board is NoWork even in wake mode\nstdout={stdout}\nstderr={stderr}"
+    );
+    assert!(!dump.exists(), "no dispatch on an empty board");
+}
+
+/// AC11-EDGE, positive form: a reader looking for the refill-edge owner finds
+/// the pr-watch tick wake phase NAMED in the module docstring, and the counter
+/// doc says the count is dispatch-bearing walk invocations, not failures.
+/// Asserted by the new sentences being present, never by the old ones being
+/// gone (an absence proves nothing about what replaced them).
+#[test]
+fn loop_king_docstring_names_the_refill_edge_owner_and_what_the_counter_counts() {
+    let source = include_str!("../src/loop_king.rs");
+    // Single-line phrases: a doc comment wraps, so a sentence-spanning
+    // contains() would test the wrapping, not the claim.
+    assert!(
+        source.contains("`wake` phase of `fno pr-watch tick`"),
+        "the refill-edge owner must be named positively"
+    );
+    assert!(
+        source.contains("The fleet watchdog does NOT own"),
+        "the mis-attribution must be corrected in place"
+    );
+    assert!(
+        source.contains("dispatch budget, never a failure-retry count"),
+        "the counter doc must say what it counts"
+    );
+}

@@ -294,6 +294,8 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut cli_alias: Option<String> = None;
     let mut driver_lib_dir: Option<PathBuf> = None;
     let mut king_scope: Option<String> = None;
+    let mut king_wake = false;
+    let mut king_wake_reason: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -367,6 +369,12 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--scope" => {
                 king_scope = Some(require_value!("--scope", args, i).to_string());
             }
+            "--wake" => {
+                king_wake = true;
+            }
+            "--wake-reason" => {
+                king_wake_reason = Some(require_value!("--wake-reason", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -376,6 +384,25 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     // ── driver validation ─────────────────────────────────────────────────────
+    // The wake flags are king-only: they name which trigger sent the walk and
+    // switch the queue out of failure-retry accounting, and neither concept
+    // exists on the target driver.
+    if (king_wake || king_wake_reason.is_some()) && driver.as_deref() != Some("king") {
+        eprintln!(
+            "fno-agents loop run: --wake/--wake-reason need --driver king (they name the \
+             trigger that woke a crowned scope)"
+        );
+        return Ok(2);
+    }
+    if let Some(reason) = king_wake_reason.as_deref() {
+        if !matches!(reason, "mail" | "board" | "backstop") {
+            eprintln!(
+                "fno-agents loop run: --wake-reason must be mail|board|backstop, got \
+                 '{reason}'"
+            );
+            return Ok(2);
+        }
+    }
     match driver.as_deref() {
         None => {
             eprintln!("fno-agents loop run: --driver is required");
@@ -434,7 +461,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         };
         let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-        match crate::loop_king::KingQueue::from_manifest(&cwd, scope, fno_bin) {
+        match crate::loop_king::KingQueue::from_manifest(&cwd, scope, fno_bin, king_wake) {
             Ok(q) => {
                 unit_display = (q.walk_key().to_string(), q.scope().to_string());
                 king_queue = Some(q);
@@ -500,20 +527,38 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // for every (re)dispatch, so it IS the spawned session's instruction: a
     // target resumes its own manifest, a king reads its board and reigns. One
     // hardcoded "/target --resume" for every driver is how a respawned king
-    // once ran as a target resume that never knew it was crowned.
+    // once ran as a target resume that never knew it was crowned. The wake
+    // reason clause lives here for the same reason: a king that learns why it
+    // was woken from a file it may never read has not learned it, and a
+    // mail-woken king that reads only its board never drains the mail that
+    // woke it - the original failure with more processes.
     let continue_prompt = if driver_name == "king" {
         let scope = king_queue
             .as_ref()
             .map(|q| q.scope().to_string())
             .or_else(|| king_scope.clone())
             .unwrap_or_default();
+        let wake_clause = match king_wake_reason.as_deref() {
+            Some("mail") => {
+                " You were woken by undrained bus mail addressed to this \
+                 scope: run `fno agents mail unread` and drain it BEFORE your \
+                 first board read. The waking message is not a board row and no \
+                 board read will surface it."
+            }
+            Some("board") => " The board changed while this scope had no king: read it first.",
+            Some("backstop") => {
+                " No event fired; this is the periodic re-check, and an \
+                 unchanged board is a legitimate NoWork exit."
+            }
+            _ => "",
+        };
         format!(
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
              skills/king-for-a-day, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \
-             implement nodes yourself, dispatch and rule."
+             implement nodes yourself, dispatch and rule.{wake_clause}"
         )
     } else {
         "/target --resume".to_string()
@@ -593,9 +638,14 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // The walk is one respawn of the crowned scope. Past the manifest ceiling
     // it terminates on Budget without spawning: a scope that keeps needing a
     // new king is a defect to look at, not a loop to fund. This is the
-    // ceiling's authority; KingQueue re-checks for mid-walk races.
+    // ceiling's authority; KingQueue re-checks for mid-walk races. Wake mode
+    // skips BOTH guards (this one and the queue's): the caller's wake ledger
+    // is the bound there, enforced before the walk was invoked. Skipping the
+    // queue guard alone would leave the walk terminating Budget here before
+    // it ever dequeued. An operator running --wake by hand is bypassing a
+    // rate limit, not a safety limit.
     if let Some(kq) = king_queue.as_ref() {
-        if kq.at_respawn_ceiling() {
+        if !king_wake && kq.at_respawn_ceiling() {
             journal.append(
                 "loop_terminated",
                 json!({
