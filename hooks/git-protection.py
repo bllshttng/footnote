@@ -1758,6 +1758,11 @@ def _guard_mark(decision, tool):
     matches hooks/lib/guard-mark.sh output so bash and python guards write
     indistinguishable rows. Best-effort by contract: any failure is swallowed
     and can never change the decision."""
+    if decision == "deny":
+        # One vocabulary across every guard: bash guards say block, and the
+        # audit row is shared surface, so a refusal is "block" whichever
+        # language recorded it.
+        decision = "block"
     try:
         pin = os.environ.get("FNO_EVENTS_PATH")
         if pin:

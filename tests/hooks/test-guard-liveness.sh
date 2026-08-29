@@ -32,14 +32,15 @@ count_for() { # <guard> <decision> -> row count in the pinned events file
     printf '%s' "${n:-0}"
 }
 
-decision_of() { # guard stdout -> "allow" | "block" | "deny" | "MISSING"
+decision_of() { # guard stdout -> "allow" | "block" | "MISSING"
     # Bash guards answer {"decision":"block",...}; python guards answer
-    # {"hookSpecificOutput":{"permissionDecision":"deny",...}}. Match the
-    # block field first: a bash block row also contains the word deny.
+    # {"permissionDecision":"deny",...} - Claude's own vocabulary. Both map
+    # to "block": the marker row uses one vocabulary for refusals whichever
+    # language recorded it.
     local out="$1"
     if [[ -z "$out" || "$out" == "{}" ]]; then echo allow
     elif printf '%s' "$out" | grep -q '"decision":[[:space:]]*"block"'; then echo block
-    elif printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then echo deny
+    elif printf '%s' "$out" | grep -q '"permissionDecision":[[:space:]]*"deny"'; then echo block
     else echo MISSING; fi
 }
 
@@ -125,20 +126,20 @@ expect_row "plg allows a non-plan write" plan-location-guard allow \
 # ── git-protection.py (Bash) ──────────────────────────────────────────────────
 expect_row "gp allows a benign command" git-protection allow \
     '{"tool_name":"Bash","tool_input":{"command":"echo hello"}}' python3 "git-protection.py"
-expect_row "gp denies a raw gh pr checks read" git-protection deny \
+expect_row "gp denies a raw gh pr checks read" git-protection block \
     '{"tool_name":"Bash","tool_input":{"command":"gh pr checks 12"}}' python3 "git-protection.py"
 
 # ── bg-process-guard.py (Bash) ────────────────────────────────────────────────
 expect_row "bpg allows a bounded command" bg-process-guard allow \
     '{"tool_name":"Bash","tool_input":{"command":"head -c 1M /dev/zero > /dev/null"}}' python3 "bg-process-guard.py"
-expect_row "bpg denies an unbounded yes" bg-process-guard deny \
+expect_row "bpg denies an unbounded yes" bg-process-guard block \
     '{"tool_name":"Bash","tool_input":{"command":"yes"}}' python3 "bg-process-guard.py"
 
 # ── law-authority-gate.py (Bash) ──────────────────────────────────────────────
 LAW_HASH="$(printf 'a%.0s' $(seq 1 64))"
 expect_row "lag allows an unrelated command" law-authority-gate allow \
     '{"tool_name":"Bash","tool_input":{"command":"echo hello"}}' python3 "law-authority-gate.py"
-expect_row "lag denies an unattended law enact" law-authority-gate deny \
+expect_row "lag denies an unattended law enact" law-authority-gate block \
     '{"tool_name":"Bash","tool_input":{"command":"fno inbox law enact lp-abcdef012345 --content-hash '"$LAW_HASH"'"}}' python3 "law-authority-gate.py"
 
 # ── row shape: one deep check that a row is valid JSON with the contract ──────
@@ -146,7 +147,7 @@ SHAPE_OK=0
 if [[ -s "$EVENTS" ]] && command -v jq >/dev/null 2>&1; then
     if jq -e 'select(.type == "guard_decision" and .source == "hook"
                  and (.data.guard | type == "string")
-                 and (.data.decision == "allow" or .data.decision == "block" or .data.decision == "deny")
+                 and (.data.decision == "allow" or .data.decision == "block")
                  and (.ts | type == "string"))' "$EVENTS" >/dev/null 2>&1; then
         SHAPE_OK=1
     fi

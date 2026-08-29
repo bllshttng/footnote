@@ -11036,7 +11036,18 @@ fn probe_gh_bin(gh_bin: &OsStr, cwd: &Path) -> GhProbeOutcome {
                 kind: ReadErrorKind::Unrunnable,
                 spawn_kind: Some(std::io::ErrorKind::NotFound),
                 ..
-            }) => return GhProbeOutcome::Absent,
+            }) => {
+                // ENOENT is ambiguous: the binary is absent, or it EXISTS
+                // and its shebang interpreter is. An existing file is spawn
+                // trouble, never absence - a gh present on disk must not
+                // degrade the session to advisory mode.
+                if path_lookup(gh_bin).is_some() {
+                    return GhProbeOutcome::SpawnTrouble {
+                        kind: std::io::ErrorKind::NotFound,
+                    };
+                }
+                return GhProbeOutcome::Absent;
+            }
             Err(GhReadError {
                 kind: ReadErrorKind::Unrunnable,
                 spawn_kind,
@@ -11048,6 +11059,23 @@ fn probe_gh_bin(gh_bin: &OsStr, cwd: &Path) -> GhProbeOutcome {
         }
     }
     GhProbeOutcome::SpawnTrouble { kind: last_kind }
+}
+
+/// Resolve `bin` the way `Command::new` would: a path with a separator is
+/// checked directly, a bare name is searched on PATH (first regular-file
+/// hit). Used only on the NotFound arm of the gh probe, to tell "no such
+/// file" from "the file exists but execve said ENOENT" (missing interpreter).
+fn path_lookup(bin: &OsStr) -> Option<std::path::PathBuf> {
+    let name = bin.to_str()?;
+    if name.contains('/') {
+        return std::fs::symlink_metadata(name)
+            .ok()
+            .map(|_| std::path::PathBuf::from(name));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
 }
 
 /// One bounded local-`git` read. Every stop-gate git call routes here for
@@ -18042,6 +18070,22 @@ git_bounded();";
         assert_eq!(
             probe_gh_bin(gh.as_os_str(), tmp.path()),
             GhProbeOutcome::Present
+        );
+    }
+
+    /// ENOENT from an EXISTING script (its shebang interpreter is missing)
+    /// must read as spawn trouble, not absence: gh is present on disk, so
+    /// the session must not degrade to advisory mode over an interpreter
+    /// problem. The same ENOENT with no file at the path is real absence.
+    #[test]
+    fn probe_distinguishes_a_missing_interpreter_from_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/definitely/not/an/interp\nexit 0\n");
+        assert_eq!(
+            probe_gh_bin(gh.as_os_str(), tmp.path()),
+            GhProbeOutcome::SpawnTrouble {
+                kind: std::io::ErrorKind::NotFound
+            }
         );
     }
 

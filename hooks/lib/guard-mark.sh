@@ -9,6 +9,14 @@
 # a decision.
 
 _GUARD_MARK_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Resolve the events file without forking git when the cwd is already the
+# project root (the common hook case): two stats instead of a rev-parse.
+# events.sh honors a pre-set EVENTS_FILE and skips its own resolution,
+# including the git fork. An explicit pin still wins.
+if [[ -z "${EVENTS_FILE:-}" && -z "${FNO_EVENTS_PATH:-}" ]] \
+    && { [[ -d .git ]] || [[ -d .fno ]]; }; then
+    EVENTS_FILE="$PWD/.fno/events.jsonl"
+fi
 # Reuse the events transport (path resolution + GC-safe append) when the
 # caller has not sourced it already.
 # shellcheck source=../../scripts/lib/events.sh
