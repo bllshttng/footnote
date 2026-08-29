@@ -19,11 +19,10 @@ from fno.agents import spawn_gate
 
 @pytest.fixture(autouse=True)
 def _fixed_cpus(monkeypatch):
-    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
-    # Preferred on 3.13+ (affinity-aware, mirrors the Rust gate); patch both
-    # spellings so the fixture holds on either interpreter.
-    if hasattr(spawn_gate.os, "process_cpu_count"):
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12)
+    # `_load_cpus` resolves the count through footprint's capacity helper in
+    # another module, so patching `spawn_gate.os` does not reach it and the
+    # test would read the real machine instead.
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
 
 
 def _load(load1: float):
@@ -96,9 +95,7 @@ def test_ceiling_scales_with_cpu_count(monkeypatch):
 
 
 def _set_cpus(monkeypatch, n):
-    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: n)
-    if hasattr(spawn_gate.os, "process_cpu_count"):
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: n)
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: n)
 
 
 def test_config_default_and_coercion():

@@ -393,7 +393,12 @@ class TestRunGate:
             ),
         )
         monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        # This assertion is about FOOTPRINT's capacity denominator, not the
+        # gate's, so pin footprint's own helper. The gate seam below cannot
+        # supply it, and reading the host would make the expected string
+        # depend on the runner: "/12.00" here, "/4.00" on a 4-core CI box.
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
         monkeypatch.setattr(
             spawn_gate.os,
@@ -458,7 +463,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         released: list[str] = []
         mutex_held_when_probed: list[bool] = []
@@ -489,7 +494,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         # 309 on 12 cpus is over the factor-8 trigger; the fleet owning 9 of
         # 12 cores is what turns that into a refusal (x-7c0f).
@@ -509,7 +514,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         monkeypatch.setattr(
             spawn_gate,
@@ -541,7 +546,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         monkeypatch.setattr(
             spawn_gate,
@@ -566,7 +571,7 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
 
         def _no_second_probe():

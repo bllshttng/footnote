@@ -26,9 +26,16 @@ HARD = 40.0
 
 @pytest.fixture(autouse=True)
 def _fixed_cpus(monkeypatch):
-    monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
-    if hasattr(spawn_gate.os, "process_cpu_count"):
-        monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12)
+    """Pin the CPU denominator at the seam that decides it.
+
+    `_load_cpus` reads footprint's capacity helper, which lives in another
+    module and does not see a patched `spawn_gate.os`. Patching the os
+    attributes here would leave these tests reading the real machine, which
+    is how they passed on a 12-core box and failed on a 4-core runner: at 4
+    cpus a load of 309 clears the 40x4 backstop and never reaches the
+    governor these tests exist to exercise.
+    """
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
 
 
 def _load(monkeypatch, load1: float):
