@@ -1764,6 +1764,14 @@ def test_cmd_spawn_pane_refuses_unbound_codex_receipt(tmp_path: Path, monkeypatc
     )
     assert result.exit_code == 1
     assert "required codex session binding" in result.output
+    # x-1595: no refusal an operator actually reads may route them to the
+    # canary. It binds in a scratch cwd with its own baseline, so it read green
+    # at 3.39s and 0.92s while four spawns died at the bind window, and pointing
+    # at it told the operator the lane was fine. This spawn takes the
+    # cleanup-failed arm, which measured no bind wait; the paired
+    # positive-marker assertion on both measured refusals lives in
+    # test_pane_binding_receipt.py.
+    assert "fno doctor --codex-bind" not in result.output
     assert fake_runner.kill_calls
 
 

@@ -201,7 +201,7 @@ def test_daemon_oracle_uses_the_canary_codex_home(monkeypatch) -> None:
         homes.append(("baseline", codex_home))
         return None
 
-    def candidate(_cwd, candidate_baseline, *, codex_home):
+    def candidate(_cwd, candidate_baseline, *, codex_home, observed=None):
         assert candidate_baseline == set()
         homes.append(("candidate", codex_home))
         return SID
