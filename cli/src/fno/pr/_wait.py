@@ -30,6 +30,7 @@ timeout with the last observed count. An unreadable tick is no-answer, never
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -38,40 +39,26 @@ from typing import Callable, Optional
 _DURATION = re.compile(r"^(\d+(?:\.\d+)?)(s|m|h)?$", re.IGNORECASE)
 _MIN_INTERVAL = 5.0
 _UNTIL = ("settled", "green", "review")
-_GITHUB_HOST = "github.com"
 
 
-def _slug_from_url(url: str) -> str:
-    """``owner/repo`` from a git remote URL, or ``""`` when it is not one.
-
-    The two spellings a remote actually carries (https and ssh) both reduce to
-    the same slug; anything else is no-answer so the review read refuses
-    rather than guessing a repo.
-    """
-    text = str(url or "").strip()
-    if not text:
-        return ""
-    marker = _GITHUB_HOST
-    at = text.find(marker)
-    if at < 0:
-        return ""
-    tail = text[at + len(marker):]
-    tail = tail.lstrip(":/").removesuffix(".git").strip("/")
-    return tail if "/" in tail else ""
-
-
-def _review_count(pr: str, cwd: Optional[str]) -> Optional[int]:
+def _review_count(pr: str, cwd: Optional[str], slug: str = "") -> Optional[int]:
     """Reviews on ``pr`` via one REST read, or None when the read fails.
 
     per_page=100 is load-bearing: gh api fetches ONE page, so at the default
-    30 the count saturates and a 31st review can never wake the wait.
+    30 the count saturates and a 31st review can never wake the wait. The
+    ``owner/repo`` slug comes from the one parser the package already owns
+    (``_base_lineage._repo_slug`` -> ``_ritual._parse_origin_slug``); a caller
+    that resolved it once passes it in so a long wait makes no per-tick git
+    read.
     """
     from fno.pr import _proc
 
-    slug_res = _proc.run(["git", "config", "--get", "remote.origin.url"], cwd=cwd)
-    slug = _slug_from_url(slug_res.stdout) if slug_res.ok else ""
     if not slug:
-        return None
+        from fno.pr._base_lineage import _repo_slug
+
+        slug = _repo_slug(cwd or os.getcwd()) or ""
+        if not slug:
+            return None
     res = _proc.run(
         ["gh", "api", f"repos/{slug}/pulls/{pr}/reviews?per_page=100", "--jq", "length"],
         cwd=cwd,
@@ -178,7 +165,7 @@ def _wait_review(
     cwd: Optional[str],
     sleeper: Callable[[float], None],
     clock: Callable[[], float],
-    counter: Optional[Callable[[str, Optional[str]], Optional[int]]] = None,
+    counter: Optional[Callable[..., Optional[int]]] = None,
 ) -> int:
     """Poll the review count until it grows past the first-read baseline."""
     from fno.pr import _proc
@@ -187,13 +174,20 @@ def _wait_review(
         # Resolved at call time, not as a default argument: tests replace the
         # module attribute, and a def-time default would keep the real reader.
         counter = _review_count
+    from fno.pr._base_lineage import _repo_slug
+
+    # Resolve the slug once, not per tick: the replaced shell recipe did the
+    # same, and a 30m wait should not make 30 identical git reads. An
+    # unresolvable slug degrades to "" and the reader retries it per tick, so
+    # a transient failure never wedges the wait.
+    slug = _repo_slug(cwd or os.getcwd()) or ""
 
     interval = max(_MIN_INTERVAL, interval)
     deadline = clock() + max(0.0, timeout)
     baseline: Optional[int] = None
     last: Optional[int] = None
     while True:
-        count = counter(pr, cwd)
+        count = counter(pr, cwd, slug)
         if count is not None:
             last = count
             if baseline is None:

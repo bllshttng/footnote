@@ -176,7 +176,7 @@ def test_review_mode_wakes_when_count_grows(monkeypatch, capsys) -> None:
     from fno.pr import _wait
 
     reads = [3, 3, 5]
-    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
     rc = _wait.wait_status(
         "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
         clock=_Clock(0, 10),
@@ -191,7 +191,7 @@ def test_review_mode_timeout_names_last_count(monkeypatch, capsys) -> None:
 
     reads = [4, 4]
     monkeypatch.setattr(
-        _wait, "_review_count", lambda pr, cwd=None: reads.pop(0) if reads else 4
+        _wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0) if reads else 4
     )
     rc = _wait.wait_status(
         "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
@@ -209,7 +209,7 @@ def test_review_mode_never_exits_zero_on_an_unreadable_read(monkeypatch, capsys)
     from fno.pr import _wait
 
     reads = [None, None]
-    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
     rc = _wait.wait_status(
         "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
         clock=_Clock(0, 28),
@@ -224,7 +224,7 @@ def test_review_mode_baseline_lands_on_first_successful_read(monkeypatch, capsys
     from fno.pr import _wait
 
     reads = [None, 2, 2]
-    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None: reads.pop(0))
+    monkeypatch.setattr(_wait, "_review_count", lambda pr, cwd=None, slug="": reads.pop(0))
     rc = _wait.wait_status(
         "9", until="review", timeout=30, interval=5, sleeper=lambda s: None,
         clock=_Clock(0, 10, 28),
@@ -251,10 +251,65 @@ def test_cli_shape_reaches_review_mode(monkeypatch, capsys) -> None:
     assert seen == {"until": "review", "pr": "9"}
 
 
-def test_repo_slug_strips_both_remote_spellings() -> None:
-    from fno.pr import _wait
+def test_review_count_uses_the_shared_slug_parser(monkeypatch) -> None:
+    """The reader must not carry its own remote-URL parser: the package owns
+    one (``_base_lineage._repo_slug`` -> ``_ritual._parse_origin_slug``), and
+    a second, looser parser here would accept hosts that one rejects."""
+    from fno.pr import _base_lineage, _proc, _wait
 
-    assert _wait._slug_from_url("https://github.com/bll/footnote.git") == "bll/footnote"
-    assert _wait._slug_from_url("git@github.com:bll/footnote.git") == "bll/footnote"
-    assert _wait._slug_from_url("ssh://git@github.com/bll/footnote") == "bll/footnote"
-    assert _wait._slug_from_url("not-a-url") == ""
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        class _R:
+            ok = True
+            stdout = "7"
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(_base_lineage, "_repo_slug", lambda cwd: "bll/footnote")
+    monkeypatch.setattr(_proc, "run", fake_run)
+    assert _wait._review_count("9", None) == 7
+    assert calls[0][:3] == [
+        "gh", "api", "repos/bll/footnote/pulls/9/reviews?per_page=100",
+    ]
+
+    # An unresolvable slug is no-answer: the wait rides to its bound rather
+    # than guessing a repo.
+    monkeypatch.setattr(_base_lineage, "_repo_slug", lambda cwd: None)
+    calls.clear()
+    assert _wait._review_count("9", None) is None
+    assert calls == []
+
+
+def test_review_wait_resolves_slug_from_cwd_when_none(monkeypatch, tmp_path) -> None:
+    """A cwd of None means THIS process's cwd, not the empty string: the
+    probe helper shells `git remote get-url origin` with the cwd it is given,
+    and "" is not a directory. Caught on the real path after the unit suite
+    passed with a stubbed slug reader."""
+    import subprocess as sp
+
+    from fno.pr import _proc, _wait
+
+    repo = tmp_path / "slugrepo"
+    repo.mkdir()
+    sp.run(["git", "init", "-q", str(repo)], check=True)
+    sp.run(
+        ["git", "-C", str(repo), "remote", "add", "origin",
+         "https://github.com/bll/footnote.git"],
+        check=True,
+    )
+    monkeypatch.chdir(repo)
+    seen: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cwd"] = kwargs.get("cwd")
+        class _R:
+            ok = True
+            stdout = "2"
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(_proc, "run", fake_run)
+    assert _wait._review_count("9", None) == 2
+    assert seen["cwd"] is None  # gh ran wherever the process is, a git repo
