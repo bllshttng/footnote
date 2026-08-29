@@ -114,6 +114,19 @@ pub struct ResumeStrategy {
 pub struct ResumeForm {
     pub kind: String,
     pub tokens: Vec<String>,
+    /// A command to run BEFORE `tokens`, for a harness whose attach needs a
+    /// service up first. Declarative rather than fno-specific: codex names its
+    /// own `codex app-server daemon start`, a documented no-op when the daemon
+    /// is already running, so it is safe on every attach. Empty for a harness
+    /// that needs nothing.
+    ///
+    /// The pair reads as action then assertion: `tokens` carries the assertion
+    /// that the action took (codex's `--remote unix://` fails by name against
+    /// a daemon that is not there, where a bare resume would silently run a
+    /// private in-process app-server and hand back a session that looks
+    /// correct).
+    #[serde(default)]
+    pub pre_exec: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -339,9 +352,6 @@ impl HarnessContract {
                 if !RESUME_KINDS.contains(&form.kind.as_str())
                     || form.tokens.iter().any(String::is_empty)
                     || (form.kind == "unsupported" && !form.tokens.is_empty())
-                    || (lane == "interactive_attach"
-                        && form.kind != "unsupported"
-                        && !form.tokens.iter().any(|token| token == "{short_id}"))
                     || (lane.ends_with("resume")
                         && form.kind != "unsupported"
                         && !form.tokens.iter().any(|token| token == "{session_id}"))
@@ -350,6 +360,24 @@ impl HarnessContract {
                         harness,
                         "resume_strategy",
                         &format!("malformed {lane}"),
+                    ));
+                }
+                // An attach form must name the id its harness's own attach
+                // command takes: claude's short jobId, or a full session id
+                // where a short one would collide (a codex UUIDv7 head-8 is a
+                // ~65.5s clock bucket). A form naming NEITHER cannot address a
+                // session, so it is not one.
+                if lane == "interactive_attach"
+                    && form.kind != "unsupported"
+                    && !form
+                        .tokens
+                        .iter()
+                        .any(|token| token == "{short_id}" || token == "{session_id}")
+                {
+                    return Err(field_error(
+                        harness,
+                        "resume_strategy",
+                        &format!("{lane} drops its attach id"),
                     ));
                 }
             }
@@ -452,7 +480,7 @@ impl HarnessContract {
             };
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(tokens);
+            return Ok(with_pre_exec(form, tokens));
         }
         if short_id.is_some_and(|id| !id.is_empty()) {
             return Err(field_error(
@@ -462,12 +490,12 @@ impl HarnessContract {
             ));
         }
         let Some(index) = form.tokens.iter().position(|token| token == "{session_id}") else {
-            return Ok(form.tokens.clone());
+            return Ok(with_pre_exec(form, form.tokens.clone()));
         };
         if let Some(id) = session_id.filter(|id| !id.is_empty()) {
             let mut tokens = form.tokens.clone();
             tokens[index] = id.to_string();
-            return Ok(tokens);
+            return Ok(with_pre_exec(form, tokens));
         }
         if lane.ends_with("create") {
             let start = index
@@ -476,7 +504,7 @@ impl HarnessContract {
                 .unwrap_or(index);
             let mut tokens = form.tokens.clone();
             tokens.drain(start..=index);
-            return Ok(tokens);
+            return Ok(with_pre_exec(form, tokens));
         }
         Err(field_error(
             harness,
@@ -654,6 +682,35 @@ fn validate_model_switch_strategy(
 
 fn field_error(harness: &str, field: &str, detail: &str) -> ContractError {
     ContractError(format!("harness {harness:?} field {field:?}: {detail}"))
+}
+
+/// Compose a form's `pre_exec` with its rendered argv:
+/// `sh -c '<pre_exec>; exec <argv>'`.
+///
+/// The shape is load-bearing three ways. `exec` replaces the shell, so the
+/// pane's child is the harness itself and no fno process sits between the
+/// terminal and it - the exec-versus-proxy property this lane is measured on.
+/// `;` rather than `&&` lets a failed pre-exec still run the attach, which
+/// produces the more specific of the two errors. And both errors surface in
+/// the pane the operator is already looking at.
+///
+/// MIRRORED in `fno::agents_view::AttachForm::render` (the mux viewport's
+/// door). `fno` cannot link this crate, so the two are pinned by
+/// `attach_argv_matches_the_mux_renderer` rather than shared.
+fn with_pre_exec(form: &ResumeForm, argv: Vec<String>) -> Vec<String> {
+    if form.pre_exec.is_empty() {
+        return argv;
+    }
+    let script = format!("{}; exec {}", sh_join(&form.pre_exec), sh_join(&argv));
+    vec!["sh".to_string(), "-c".to_string(), script]
+}
+
+fn sh_join(tokens: &[String]) -> String {
+    tokens
+        .iter()
+        .map(|token| format!("'{}'", token.replace('\'', r"'\''")))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn render_session_argv(
@@ -984,5 +1041,102 @@ mod tests {
         let error = HarnessContract::parse(&bad).unwrap_err().to_string();
         assert!(error.contains("ready_marker"), "{error}");
         assert!(error.contains("invented_ready"), "{error}");
+    }
+
+    fn form_with_pre_exec() -> (ResumeForm, Vec<String>) {
+        (
+            ResumeForm {
+                kind: "subcommand".into(),
+                tokens: vec![
+                    "codex".into(),
+                    "resume".into(),
+                    "{session_id}".into(),
+                    "--remote".into(),
+                    "unix://".into(),
+                ],
+                pre_exec: vec![
+                    "codex".into(),
+                    "app-server".into(),
+                    "daemon".into(),
+                    "start".into(),
+                ],
+            },
+            vec![
+                "codex".into(),
+                "resume".into(),
+                "SESS".into(),
+                "--remote".into(),
+                "unix://".into(),
+            ],
+        )
+    }
+
+    #[test]
+    fn pre_exec_composes_sh_exec_with_the_semicolon_intact() {
+        let (form, rendered) = form_with_pre_exec();
+        let argv = with_pre_exec(&form, rendered);
+        assert_eq!(argv.first().map(String::as_str), Some("sh"));
+        assert_eq!(argv[1], "-c");
+        let script = &argv[2];
+        // The literal "; exec " is load-bearing twice over: the exec makes the
+        // pane's child the harness itself (exec-versus-proxy), and the `;`
+        // rather than `&&` lets a failed pre-exec still produce the attach's
+        // own more specific error. Assert the literal, not just the first token.
+        assert!(script.contains("; exec "), "{script}");
+        assert!(
+            script.starts_with("'codex' 'app-server' 'daemon' 'start'; exec "),
+            "{script}"
+        );
+        assert!(script.ends_with("'codex' 'resume' 'SESS' '--remote' 'unix://'"), "{script}");
+    }
+
+    #[test]
+    fn pre_exec_single_quotes_each_token_so_one_cannot_escape() {
+        let form = ResumeForm {
+            kind: "subcommand".into(),
+            tokens: vec!["at'tach".into(), "{session_id}".into()],
+            pre_exec: vec!["pre'exec".into()],
+        };
+        let argv = with_pre_exec(&form, vec!["at'tach".into(), "S".into()]);
+        let script = &argv[2];
+        assert_eq!(script, r"'pre'\''exec'; exec 'at'\''tach' 'S'", "{script}");
+    }
+
+    #[test]
+    fn a_form_without_pre_exec_renders_bare_with_no_shell_in_the_way() {
+        let form = ResumeForm {
+            kind: "subcommand".into(),
+            tokens: vec!["claude".into(), "attach".into(), "{short_id}".into()],
+            pre_exec: Vec::new(),
+        };
+        let argv = with_pre_exec(
+            &form,
+            vec!["claude".into(), "attach".into(), "deadbeef".into()],
+        );
+        assert_eq!(argv, ["claude", "attach", "deadbeef"]);
+    }
+
+    #[test]
+    fn an_attach_form_may_name_either_id_spelling_but_not_neither() {
+        let claude_attach = "tokens = [\"claude\", \"attach\", \"{short_id}\"]";
+        // Either spelling is a legal attach id: a full session id where a
+        // short one would collide.
+        let session = CAPABILITY_TOML.replacen(
+            claude_attach,
+            "tokens = [\"claude\", \"attach\", \"{session_id}\"]",
+            1,
+        );
+        HarnessContract::parse(&session)
+            .unwrap_or_else(|e| panic!("a session_id attach form is legal: {e}"));
+        // A form naming NEITHER cannot address a session, so it is not one,
+        // and the refusal says what is missing.
+        let idless = CAPABILITY_TOML.replacen(
+            claude_attach,
+            "tokens = [\"claude\", \"attach\", \"--last\"]",
+            1,
+        );
+        let err = HarnessContract::parse(&idless).unwrap_err().to_string();
+        assert!(err.contains("interactive_attach"), "{err}");
+        assert!(err.contains("drops its attach id"), "{err}");
     }
 }

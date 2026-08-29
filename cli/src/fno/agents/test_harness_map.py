@@ -92,16 +92,30 @@ def test_unsupported_attach_lane_fails_closed_for_every_other_harness():
             render_session_argv(harness, "interactive_attach", short_id="deadbeef")
 
 
-def test_contract_rejects_attach_form_without_short_id_placeholder():
+def test_contract_rejects_attach_form_without_any_id_placeholder():
+    """An attach form must name the id its harness's own attach command takes.
+
+    Either spelling is legal: claude's short jobId, or a full session id where
+    a short one would collide (a codex UUIDv7 head-8 is a ~65.5s clock bucket,
+    so siblings spawned in one minute share it). A form naming NEITHER cannot
+    address a session at all, and is what stays refused.
+    """
     from importlib.resources import files
 
     text = files("fno.agents").joinpath("harness_capabilities.toml").read_text()
-    bad = text.replace(
+    swapped = text.replace(
         'tokens = ["claude", "attach", "{short_id}"]',
         'tokens = ["claude", "attach", "{session_id}"]',
         1,
     )
-    with pytest.raises(DispatchResolveError, match="interactive_attach.*short id"):
+    parse_capability_contract(swapped)  # a session id is a legal attach id
+
+    bad = text.replace(
+        'tokens = ["claude", "attach", "{short_id}"]',
+        'tokens = ["claude", "attach", "--last"]',
+        1,
+    )
+    with pytest.raises(DispatchResolveError, match="interactive_attach.*attach id"):
         parse_capability_contract(bad)
 
 
