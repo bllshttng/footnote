@@ -51,9 +51,9 @@ The send boundary also caps each canonical sender-recipient pair at `config.styl
 
 The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.
 
-`progress_notes` is deliberately UNCAPPED, and the reason is worth stating rather than rediscovering. A note is read when a person opens a node, not mid-turn. It is also an agent's only append-only surface on a node, because `update --details` replaces rather than appends, so a refusal there leaves measured evidence nowhere to land that does not overwrite somebody else's writing. The 76,346 words of notes measured on 2026-08-29 are a volume problem on an artifact surface, and a refusal that destroys evidence is the wrong instrument for a volume problem. `fno backlog note` therefore prints one advisory line naming the word count and the cheaper alternative, and appends the note.
+`progress_notes` is deliberately UNCAPPED, and the reason is worth stating rather than rediscovering. When a person opens a node, they read its notes deliberately. That is not mid-turn. A note is also an agent's only append-only surface on a node, because `update --details` replaces rather than appends. A refusal there leaves measured evidence nowhere to land that does not overwrite somebody else's writing. The 76,346 words of notes measured on 2026-08-29 are a volume problem on an artifact surface. A refusal that destroys evidence is the wrong instrument for a volume problem. `fno backlog note` therefore prints one advisory line naming the word count and the cheaper alternative, and appends the note.
 
-The surface set lives in `fno.style.CAPPED_SURFACES` and is not configurable. Config moves a number; it can never add a surface the checker says is uncapped.
+The surface set lives in `fno.style.CAPPED_SURFACES` and is not configurable. Config moves a number. It can never add a surface the checker says is uncapped.
 
 ## Relay concision starts before refusal
 

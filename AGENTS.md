@@ -114,7 +114,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 - **Editing:** `fno backlog update <id>` in place (`--details`, `--domain`, `--size`, `--priority`, ...). Never recreate via `idea` (dupes).
 - **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` floats a card and makes it run next; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
 - **Hygiene:** `fno backlog groom` (daily pass), `triage health [--check]`, `maintain [--apply]`, `reconcile` (auto-fires on SessionStart), `advance` (merge-triggered auto-continue, opt-in).
-- **Demand signal:** `fno backlog encounter <id> --evidence "<what it cost>"` records ONE encounter per session, evidence required and capped; `fno backlog demand` reads them ranked by divergence from operator priority. A read that never re-ranks the board. [demand signal](docs/backlog-usage.md#demand-signal-what-the-agents-keep-hitting).
+- **Demand signal:** `fno backlog encounter <id> --evidence "..."` records ONE encounter per session. Evidence is required and capped. `fno backlog demand` ranks them by divergence from operator priority. It never re-ranks the board. [demand signal](docs/backlog-usage.md#demand-signal-what-the-agents-keep-hitting).
 
 ## Execution & looping
 

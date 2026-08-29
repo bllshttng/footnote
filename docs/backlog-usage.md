@@ -83,15 +83,15 @@ fno backlog demand                 # the divergence table
 fno backlog demand --json          # the same rows, for a groom pass or a king
 ```
 
-An encounter is a thing that HAPPENED, not a preference. Agents have no preferences, they have contexts. A poll count of N agents who like a node is unfalsifiable; N distinct sessions that each name what the node cost them is falsifiable against a transcript. So evidence is required, it is capped by `config.style.word_cap.encounter` (80 words by default), and over-length evidence is refused rather than truncated.
+An encounter is a thing that HAPPENED, not a preference. Agents have no preferences, they have contexts. A poll count of N agents who like a node is unfalsifiable. N distinct sessions that each name what the node cost them is falsifiable against a transcript. So evidence is required. `config.style.word_cap.encounter` caps it at 80 words by default. Over-length evidence is refused rather than truncated.
 
-One session votes once per node. A second attempt is refused, not silently dropped, and the refusal names the timestamp of the vote already on file so the caller can add a `fno backlog note` instead. A session whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
+One session votes once per node. A second attempt is refused, never silently dropped. The refusal names the timestamp of the vote already on file, so the caller can add a `fno backlog note` instead. A session whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
 
-`demand` sorts by DIVERGENCE, not by volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. The `dispatched` column is how many of the encountering sessions were also sent to that node: `enc 12, dispatched 12` is one king that fanned out, while `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
+`demand` sorts by DIVERGENCE, not by volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. The `dispatched` column counts the encountering sessions that were also sent to that node. A row reading `enc 12, dispatched 12` is one king that fanned out. A row reading `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
 
 `demand` is a READ. It never writes `rank`, never touches `_kanban_column`, and never reorders anything. The board stays the work order and demand is a column you rank FROM, by hand, with `fno backlog rank`.
 
-An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path would make the record deniable. A later correction is a progress note.
+An encounter has no correction verb. It cannot be edited or withdrawn, because an edit path makes the record deniable. A later correction is a progress note.
 
 ## Moving cards
 
