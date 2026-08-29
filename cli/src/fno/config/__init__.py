@@ -3693,6 +3693,11 @@ class MuxRestoreBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     hold_workers: bool = True
+    # The three-state startup policy (hold | idle | resume). `hold` rebuilds
+    # named held panes (today's default), `idle` leaves members as idle rows,
+    # `resume` additionally runs the bulk restore at startup. When unset,
+    # `hold_workers = false` still means idle through the legacy spelling.
+    policy: Optional[Literal["hold", "idle", "resume"]] = None
 
 
 class MuxBlock(BaseModel):

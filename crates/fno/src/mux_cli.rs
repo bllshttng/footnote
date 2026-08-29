@@ -1720,7 +1720,7 @@ pub fn doctor(json: bool) -> i32 {
 /// `~/.fno/squads.json`, ride the next change that bumps `PROTO_VERSION` or
 /// migrates the store for a real reason, where the compatibility window and
 /// the migration already exist.
-pub fn workspace(args: &[OsString]) -> i32 {
+pub fn workspace(args: &[OsString], env_session: Option<&str>) -> i32 {
     // main.rs routes here only with a token after the family verb, so a bare
     // `mux workspace` never reaches this function - it is the global usage
     // arm. That leaves exactly one failure shape here, an unknown verb, and a
@@ -1731,9 +1731,157 @@ pub fn workspace(args: &[OsString]) -> i32 {
         .unwrap_or_default();
     match sub.as_ref() {
         "prune" => squad_prune(&args[1..]),
+        "restore" => workspace_restore(&args[1..], env_session),
         _ => {
-            eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune)");
+            eprintln!("fno mux workspace: unknown verb {sub:?} (expected prune|restore)");
             EXIT_USAGE
+        }
+    }
+}
+
+/// `fno mux workspace restore` (x-7b5e): one verb brings the stored
+/// workspaces' worker members back. Every live, non-tombstoned member
+/// resumes through its own harness's declared `interactive_resume` argv in a
+/// pane at its stored cwd; a member that cannot resume is named with its
+/// reason, and a rerun FOCUSES the live panes instead of opening second
+/// writers. `--dry-run` prints the plan without starting anything - at
+/// twenty workers the operator reads it before twenty processes start.
+fn workspace_restore(args: &[OsString], env_session: Option<&str>) -> i32 {
+    let mut dry_run = false;
+    let mut json = false;
+    let mut harness: Option<String> = None;
+    let mut session: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.to_str() {
+            Some("--dry-run") => dry_run = true,
+            Some("--json") => json = true,
+            Some("--harness") => {
+                harness = Some(match it.next().and_then(|v| v.to_str()) {
+                    Some(v) => v.to_string(),
+                    None => {
+                        eprintln!("fno mux workspace restore: --harness needs a value");
+                        return EXIT_USAGE;
+                    }
+                });
+            }
+            Some("--session") => {
+                session = Some(match it.next().and_then(|v| v.to_str()) {
+                    Some(v) => v.to_string(),
+                    None => {
+                        eprintln!("fno mux workspace restore: --session needs a value");
+                        return EXIT_USAGE;
+                    }
+                });
+            }
+            Some(other) => {
+                eprintln!("fno mux workspace restore: unknown argument {other:?}");
+                return EXIT_USAGE;
+            }
+            None => {
+                eprintln!("fno mux workspace restore: non-UTF-8 argument");
+                return EXIT_USAGE;
+            }
+        }
+    }
+    if let Some(h) = harness.as_deref().filter(|h| h.trim().is_empty()) {
+        eprintln!("fno mux workspace restore: --harness needs a non-empty value, got {h:?}");
+        return EXIT_USAGE;
+    }
+    let session = resolve_session(session.as_deref(), env_session);
+    let sock = match proto::socket_path(&session) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fno mux workspace restore: {e}");
+            return EXIT_ERROR;
+        }
+    };
+    let verb = ControlVerb::WorkspaceRestore {
+        dry_run,
+        harness: harness.clone(),
+    };
+    match control_roundtrip(&sock, &session, verb) {
+        Ok(ServerMsg::WorkspaceRestored { rows }) => {
+            let count = |want: &str| rows.iter().filter(|r| r.outcome == want).count();
+            if json {
+                let payload = serde_json::json!({
+                    "session": session,
+                    "dry_run": dry_run,
+                    "harness": harness,
+                    "resumed": count("resumed"),
+                    "focused": count("focused"),
+                    "refused": count("refused"),
+                    "planned": count("planned"),
+                    "members": rows,
+                });
+                println!("{payload}");
+            } else {
+                for row in &rows {
+                    match row.outcome.as_str() {
+                        "resumed" => println!(
+                            "resumed {}{} pane {} squad {}{}",
+                            row.member,
+                            row.harness
+                                .as_deref()
+                                .map(|h| format!(" ({h})"))
+                                .unwrap_or_default(),
+                            row.pane.map(|p| p.to_string()).unwrap_or_default(),
+                            row.squad,
+                            row.notice
+                                .as_deref()
+                                .map(|n| format!(" - {n}"))
+                                .unwrap_or_default(),
+                        ),
+                        "focused" => println!(
+                            "focused {} pane {} squad {}",
+                            row.member,
+                            row.pane.map(|p| p.to_string()).unwrap_or_default(),
+                            row.squad,
+                        ),
+                        "planned" => println!(
+                            "planned {}{}",
+                            row.member,
+                            row.harness
+                                .as_deref()
+                                .map(|h| format!(" ({h})"))
+                                .unwrap_or_default(),
+                        ),
+                        _ => println!(
+                            "refused {}: {}",
+                            row.member,
+                            row.reason.as_deref().unwrap_or("no reason given"),
+                        ),
+                    }
+                }
+                println!(
+                    "restore: {} resumed, {} focused, {} refused, {} planned{}",
+                    count("resumed"),
+                    count("focused"),
+                    count("refused"),
+                    count("planned"),
+                    if dry_run {
+                        " (dry run: nothing started)"
+                    } else {
+                        ""
+                    },
+                );
+            }
+            EXIT_OK
+        }
+        Ok(ServerMsg::Err { msg, .. }) => {
+            eprintln!("fno mux workspace restore: {msg}");
+            EXIT_ERROR
+        }
+        Ok(other) => {
+            eprintln!("fno mux workspace restore: unexpected reply: {other:?}");
+            EXIT_ERROR
+        }
+        Err(e) => {
+            eprintln!("fno mux workspace restore: {e}");
+            match e {
+                ControlError::Unanswered(_) => EXIT_CONTROL_UNANSWERED,
+                _ => EXIT_ERROR,
+            }
         }
     }
 }
@@ -2740,8 +2888,9 @@ genuine keystrokes: `fno mux pane send 45 --text 1 --raw --submit` answers a pro
 /// `pane run` stays byte-identical.
 pub const PANE_RUN_WORKER_HELP: &str = "pane run --worker <registry-name> records the pane as a \
 squad member joined to that registry row: after a mux restart the member stays as an idle row in \
-the agent panel, and selecting it resumes the session through its own harness (claude --resume / \
-codex resume). Restore never respawns it. A run without --worker records no member.";
+the agent panel, and selecting it resumes the session through its own harness. Startup restore \
+holds (default) or idles it by policy; `fno mux workspace restore` respawns it on demand. A run \
+without --worker records no member.";
 
 pub fn parse_pane_args(args: &[OsString]) -> Result<ParsedPane, String> {
     let verb = args

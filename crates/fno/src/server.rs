@@ -41,8 +41,8 @@ use crate::proto::{
     CardState, ClientMsg, Command, ControlVerb, Frame, LayoutBinding, LayoutScope, LayoutSlot,
     LayoutSpec, LayoutTreeChild, LayoutTreeSpec, MouseButton, MouseEvent, MouseKind, PaneInfo,
     PaneMeta, PanePlacement, PaneTarget, PlacementFallback, ProtoError, Reach, ResolvedPlacement,
-    ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo, TabLayout,
-    TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
+    RestoreRow, ServerMsg, SlotBinding, SlotOutcome, SlotResult, SquadLayout, SquadMeta, TabInfo,
+    TabLayout, TabMeta, TabPaneOccupant, TabSel, WaitOutcome, MAX_SQUAD_NAME, MAX_TAB_NAME,
 };
 use crate::pty::{shell_candidates, PtyShell};
 use crate::squad::{self, MoveTabOutcome, RemoveOutcome, Resolver, Session, Squad};
@@ -459,6 +459,26 @@ enum CoreMsg {
         id: u64,
         plans: HashMap<String, Result<ReentryVerdict, String>>,
         replay: Box<BatchReplay>,
+    },
+    /// (x-7b5e) `fno mux workspace restore`: collect the candidate members on
+    /// the core loop, resolve claude re-entry plans OFF it, and re-enter
+    /// through [`CoreMsg::WorkspaceRestoreApply`]. A dry run (or a run with
+    /// no claude members) applies inline - plans are never resolved for a
+    /// classification-only pass.
+    WorkspaceRestore {
+        dry_run: bool,
+        harness: Option<String>,
+        reply: ControlReply,
+    },
+    /// (x-7b5e) The bulk apply half of a workspace restore: the plans are in
+    /// hand (keyed by member worker name, `Err` being that member's visible
+    /// refusal), so every gate runs on the core loop through
+    /// [`Core::resume_one`].
+    WorkspaceRestoreApply {
+        dry_run: bool,
+        harness: Option<String>,
+        plans: HashMap<String, Result<ReentryVerdict, String>>,
+        reply: ControlReply,
     },
     Gone(u64),
     /// A pre-Attach `Query` (mux ls): reply with the whole `Info` message.
@@ -1080,6 +1100,50 @@ thread_local! {
     /// a real claude/codex, mirroring `ATTACH_PROGRAM` for the attach path.
     static RESUME_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+    /// Test override for the declared resume forms (see
+    /// [`declared_resume_form`]). `None` (the default) reads the same bundled
+    /// contract the production reader parses, so tests and prod walk one code
+    /// path and an override is only needed for the negative arms.
+    static DECLARED_RESUME_FORMS:
+        std::cell::RefCell<Option<HashMap<String, Option<DeclaredResumeForm>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// (x-7b5e) One harness's declared `interactive_resume` form: the tokens the
+/// capability table carries, with the `{session_id}` placeholder intact.
+#[derive(Clone, Debug, PartialEq)]
+struct DeclaredResumeForm {
+    tokens: Vec<String>,
+}
+
+/// (x-7b5e) The `interactive_resume` form `harness` declares, or `None` when
+/// it declares none. A thin view over [`agents_view::resume_form`] - the ONE
+/// reader of the declared capability table, shared with the attach lane by a
+/// form-kind parameter as its doc comment promised - so a seventh harness,
+/// and an operator override (`[harness.<name>.resume]` in config), needs no
+/// Rust change here. An unknown harness, an `unsupported` form, and a
+/// malformed one all read as "cannot resume", the safe direction.
+fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
+    #[cfg(test)]
+    if let Some(map) = DECLARED_RESUME_FORMS.with(|p| p.borrow().clone()) {
+        return map.get(harness).cloned().flatten();
+    }
+    agents_view::resume_form(harness).map(|form| DeclaredResumeForm {
+        tokens: form.tokens,
+    })
+}
+
+/// (x-7b5e) Test override pinning one harness's declared resume availability
+/// directly, so the negative arms (a harness the table gives no form) stay
+/// assertable after the table itself declares a form for every harness.
+#[cfg(test)]
+fn set_declared_resume_form(harness: &str, form: Option<Vec<String>>) {
+    DECLARED_RESUME_FORMS.with(|p| {
+        p.borrow_mut().get_or_insert_with(HashMap::new).insert(
+            harness.to_string(),
+            form.map(|tokens| DeclaredResumeForm { tokens }),
+        );
+    });
 }
 
 #[cfg(test)]
@@ -1090,6 +1154,16 @@ fn set_resume_program(argv: &[&str]) {
 #[cfg(test)]
 fn clear_resume_program() {
     RESUME_PROGRAM.with(|p| *p.borrow_mut() = None);
+}
+
+#[cfg(test)]
+struct DeclaredResumeFormsGuard;
+
+#[cfg(test)]
+impl Drop for DeclaredResumeFormsGuard {
+    fn drop(&mut self) {
+        DECLARED_RESUME_FORMS.with(|p| *p.borrow_mut() = None);
+    }
 }
 
 /// Test-only guard clearing the [`RESUME_PROGRAM`] override on scope exit, so
@@ -1106,36 +1180,58 @@ impl Drop for ResumeProgramGuard {
 }
 
 /// (x-d401) The session id a pane-run argv resumes: the token after
-/// `--resume` (claude's flag form) or `resume` (codex's subcommand form).
-/// Anchored past the `env(1)` wrapper to a `claude`/`codex` command, so an
-/// argument that merely mentions the token (`grep --resume file`) never
-/// parses as a resume target. `None` for a shell pane or a run with no
+/// The session id a pane argv is resuming, derived from the SAME declared
+/// resume form the resume spawn builds: the argv's command names a harness
+/// the capability table gives a form, the argv carries that form's literal
+/// tokens in order (extra flags tolerated between them), and the token in
+/// the `{session_id}` slot is the target. Anchored past the `env(1)`
+/// wrapper, so an argument that merely mentions the token (`grep --resume
+/// file`) never parses as a resume target, and a harness the table gives no
+/// form never parses at all. `None` for a shell pane or a run with no
 /// resume form. The row-to-pane join: `row_resume_disposition_in_session`
 /// reads it so a pane visibly running a session makes `BackendNotLive`
-/// unreachable for that session's row.
+/// unreachable for that session's row - for EVERY declared harness, not
+/// just the two this function once hardcoded.
 fn resume_target_from_argv(argv: &[String]) -> Option<String> {
     let start = env_assignments_start(argv).unwrap_or(0);
     let rest = &argv[start..];
     // The command is the first non-assignment token (same scan as
-    // `cmd_from_argv`); only the two harnesses owning a resume form parse.
+    // `cmd_from_argv`); only a harness whose declared form parses.
     let cmd_idx = rest.iter().position(|a| !a.contains('='))?;
     let base = rest[cmd_idx].rsplit('/').next().unwrap_or(&rest[cmd_idx]);
-    if base != "claude" && base != "codex" {
+    let form = declared_resume_form(base)?;
+    let placeholder = form.tokens.iter().position(|t| t == "{session_id}")?;
+    if placeholder < 2 {
+        // Without a literal anchor between the command and the id slot
+        // (`foo --resume <id>`-shaped), any first argument would read as a
+        // session id. Refusing to guess is the safe direction.
         return None;
     }
-    let tokens = &rest[cmd_idx + 1..];
-    tokens
-        .iter()
-        .position(|t| t == "--resume" || t == "resume")
-        .and_then(|i| tokens.get(i + 1))
+    // Walk the form's pre-placeholder literals against the argv in order,
+    // tolerating extra flags between them. tokens[0] is the harness command
+    // itself, already matched by `base`; when the LAST literal lands on an
+    // argv token, the next argv token sits in the placeholder slot.
+    let mut arg = cmd_idx + 1;
+    for literal in &form.tokens[1..placeholder] {
+        loop {
+            let candidate = rest.get(arg)?;
+            if candidate == literal {
+                break;
+            }
+            arg += 1;
+        }
+        arg += 1;
+    }
+    rest.get(arg)
         // A FLAG is not a session id. `codex resume --last` resumes the most
-        // recent session without naming it, so the token after `resume` is
-        // `--last` and storing it yields a join key matching no row. The junk
-        // value is harmless; the MISS is not. `pane_resumes_session` is what
-        // keeps a row non-resumable while a pane runs that session, so a pane
-        // started this way leaves its row still offered as resumable, and one
-        // tap opens a SECOND WRITER on a live rollout. That is not
-        // theoretical: it happened in this branch's own review round.
+        // recent session without naming it, so the token in the placeholder
+        // slot is `--last` and storing it yields a join key matching no row.
+        // The junk value is harmless; the MISS is not. `pane_resumes_session`
+        // is what keeps a row non-resumable while a pane runs that session,
+        // so a pane started this way leaves its row still offered as
+        // resumable, and one tap opens a SECOND WRITER on a live rollout.
+        // That is not theoretical: it happened in this branch's own review
+        // round.
         .filter(|sid| !sid.is_empty() && !sid.contains('=') && !sid.starts_with('-'))
         .cloned()
 }
@@ -1189,15 +1285,35 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// that omitting the state root leaves a resumed worker unable to write its
 /// claim lockfile. Copying it is a fourth divergent implementation of subtle
 /// logic. Depending on fno-agents inverts a boundary its own Cargo.toml
-/// records: fno never links it, it shells the binary at runtime. Shelling
-/// the resume verb for a rendered argv is the open candidate.
-fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
+/// records: fno never links it, it shells the binary at runtime. The open
+/// candidate is TAKEN as of x-7b5e: the tokens come from the declared
+/// `interactive_resume` form via `fno-agents resume-argv` (see
+/// [`declared_resume_form`]), and this fn only fills the session id.
+fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<String>, String> {
     #[cfg(test)]
     if let Some(mut argv) = RESUME_PROGRAM.with(|p| p.borrow().clone()) {
         argv.push(session_id.to_string());
-        return argv;
+        return Ok(argv);
     }
-    vec![bin.to_string(), token.to_string(), session_id.to_string()]
+    let Some(form) = declared_resume_form(harness) else {
+        return Err(no_resume_form_reason(harness, session_id));
+    };
+    let mut argv = form.tokens;
+    let mut filled = false;
+    for token in argv.iter_mut() {
+        if token == "{session_id}" {
+            *token = session_id.to_string();
+            filled = true;
+        } else if token.starts_with('{') && token.ends_with('}') {
+            return Err(format!(
+                "{harness} resume form names {token}; only {{session_id}} can be filled"
+            ));
+        }
+    }
+    if !filled {
+        return Err(format!("{harness} resume form fills no session id"));
+    }
+    Ok(argv)
 }
 
 #[cfg(test)]
@@ -1230,6 +1346,41 @@ fn set_hold_workers(value: bool) {
 }
 
 #[cfg(test)]
+thread_local! {
+    /// Test override for the three-state startup restore policy (x-7b5e),
+    /// outranking the legacy `set_hold_workers` bool. `None` (the default)
+    /// falls through to the bool override, then to the real config ladder.
+    static RESTORE_POLICY_OVERRIDE:
+        std::cell::RefCell<Option<crate::digest_overlay::MuxRestorePolicy>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_restore_policy(policy: crate::digest_overlay::MuxRestorePolicy) {
+    RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = Some(policy));
+}
+
+#[cfg(test)]
+struct RestorePolicyGuard;
+
+#[cfg(test)]
+impl Drop for RestorePolicyGuard {
+    fn drop(&mut self) {
+        RESTORE_POLICY_OVERRIDE.with(|slot| *slot.borrow_mut() = None);
+    }
+}
+
+/// The startup restore policy read from the config ladder. Free fn so the
+/// test override arm and the production arm share one defaulting path.
+fn restore_policy_now() -> crate::digest_overlay::MuxRestorePolicy {
+    std::env::current_dir()
+        .ok()
+        .as_deref()
+        .map(crate::digest_overlay::mux_restore_policy)
+        .unwrap_or(crate::digest_overlay::MuxRestorePolicy::Hold)
+}
+
+#[cfg(test)]
 struct HoldWorkersGuard;
 
 #[cfg(test)]
@@ -1242,6 +1393,21 @@ impl Drop for HoldWorkersGuard {
 #[cfg(test)]
 fn clear_known_workers() {
     KNOWN_WORKERS.with(|p| *p.borrow_mut() = None);
+}
+
+#[cfg(test)]
+fn set_restore_registry_rows(rows: Vec<RegistryAgent>) {
+    RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = Some(Some(rows)));
+}
+
+#[cfg(test)]
+struct RestoreRegistryRowsGuard;
+
+#[cfg(test)]
+impl Drop for RestoreRegistryRowsGuard {
+    fn drop(&mut self) {
+        RESTORE_REGISTRY_ROWS.with(|p| *p.borrow_mut() = None);
+    }
 }
 
 #[cfg(test)]
@@ -2442,10 +2608,55 @@ fn restore_worker_refusal_reason(
     let Some(harness) = member.harness.as_deref() else {
         return "harness is unknown".into();
     };
-    if Core::resume_form(harness).is_none() {
-        return format!("{harness} has no resume form; session {session_id} is not resumable");
+    if !Core::resume_form(harness) {
+        return no_resume_form_reason(harness, session_id);
     }
     format!("spawn receipt is missing for {harness} session {session_id}")
+}
+
+/// (x-7b5e) The one no-form refusal string, shared by the held-worker
+/// restore reason and the bulk driver's report so the two surfaces cannot
+/// teach different vocabularies for the same structural gap.
+fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
+    format!("{harness} has no resume form; session {session_id} is not resumable")
+}
+
+/// The registry rows the restore verb classifies against, read fresh from
+/// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
+/// overrides the file (a unit test cannot populate the real registry, and
+/// reading it would clobber the fake rows the test installed).
+#[cfg(test)]
+thread_local! {
+    static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn restore_registry_rows() -> Option<Vec<RegistryAgent>> {
+    #[cfg(test)]
+    if let Some(rows) = RESTORE_REGISTRY_ROWS.with(|p| p.borrow().clone()) {
+        return rows;
+    }
+    std::fs::read_to_string(agents_view::registry_path())
+        .ok()
+        .and_then(|raw| agents_view::derive_rows(&raw, 0))
+}
+
+/// (x-7b5e) The stored member's own structural refusal, when the member
+/// itself explains a failure better than the generic gesture notice: a
+/// harness the capability table gives no form, or a missing session id.
+/// Report-only - the gates in [`Core::resume_one`] already refused the
+/// spawn; this names WHY in the member's own terms (AC5-ERR: named, never
+/// silently dropped).
+fn member_structural_refusal(member: &crate::squad_store::StoredMember) -> Option<String> {
+    let harness = member.harness.as_deref()?;
+    let session_id = member.harness_session_id.as_deref().unwrap_or("");
+    if !Core::resume_form(harness) {
+        return Some(no_resume_form_reason(harness, session_id));
+    }
+    if session_id.is_empty() {
+        return Some("session id is missing".into());
+    }
+    None
 }
 
 fn agent_harness_session_id(agent: &RegistryAgent) -> Option<&str> {
@@ -3195,6 +3406,36 @@ fn dispatch_notice(stdout: &str) -> String {
 enum RowResumeDisposition {
     Resumable,
     NoPane(AgentNoPaneReason),
+}
+
+/// (x-7b5e) The per-member result of one resume attempt, reported by
+/// [`Core::resume_one`]. The gesture folds it into notices + a view change;
+/// the workspace-restore driver renders it one line per member. The refusal
+/// reason strings are exactly the notices the gesture printed before the
+/// extraction, so the two surfaces cannot disagree about why a row stayed
+/// idle.
+#[derive(Debug, Clone, PartialEq)]
+enum ResumeOutcome {
+    /// A pane now runs the session. Carries the pane id, its workspace and
+    /// tab, and the vanished-cwd notice when the stored directory was gone.
+    Resumed {
+        pane: u64,
+        squad: u64,
+        tab: TabId,
+        notice: Option<String>,
+    },
+    /// The session already had a live pane and it was focused, never
+    /// respawned (AC6-ERR). Carries where the pane lives.
+    Focused { pane: u64, squad: u64, tab: TabId },
+    /// Refused with the same reason text the gesture would have noticed.
+    Refused { reason: String },
+    /// The claude re-entry plan fired off-loop and the gesture will replay.
+    /// A no-op on the surface it came from; the restore driver never hits it
+    /// because it stages every verdict before the apply loop.
+    PlanPending,
+    /// A dry run stopped exactly where the spawn would happen: nothing was
+    /// started and nothing was refused.
+    Planned,
 }
 
 impl Core {
@@ -5726,20 +5967,18 @@ impl Core {
             .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
     }
 
-    /// (x-5f7f) The resume form a harness owns, as `(bin, token)`: what a
-    /// pane runs to bring a session back from that harness's own persisted
-    /// state. Mirrors the resume tokens in
-    /// `cli/src/fno/agents/harness_capabilities.toml`. Two mechanisms, one
-    /// result: a claude bg session whose daemon still owns it ATTACHES (the
-    /// existing `attach_id` path); everything here resumes from disk and
-    /// needs no live process. A harness with no entry (agy) offers no Resume
-    /// - an honest dead row beats a button that fails.
-    fn resume_form(harness: &str) -> Option<(&'static str, &'static str)> {
-        match harness {
-            "claude" => Some(("claude", "--resume")),
-            "codex" => Some(("codex", "resume")),
-            _ => None,
-        }
+    /// (x-5f7f, x-7b5e) Does the capability table declare a usable
+    /// `interactive_resume` form for this harness: what a pane runs to bring
+    /// a session back from that harness's own persisted state. Two
+    /// mechanisms, one result: a claude bg session whose daemon still owns it
+    /// ATTACHES (the existing `attach_id` path); everything here resumes from
+    /// disk and needs no live process. A harness with no usable form offers
+    /// no Resume - an honest dead row beats a button that fails. The argv
+    /// itself is built later by [`resume_argv_for`] from the same declared
+    /// form, so adding a harness to
+    /// `cli/src/fno/agents/harness_capabilities.toml` is the whole change.
+    fn resume_form(harness: &str) -> bool {
+        declared_resume_form(harness).is_some()
     }
 
     /// (v53) Classify the registry facts once so resumability and the final
@@ -5748,7 +5987,7 @@ impl Core {
         let Some(h) = a.harness.as_deref() else {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness);
         };
-        if Self::resume_form(h).is_none() {
+        if !Self::resume_form(h) {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness);
         }
         let has_sid = a
@@ -5923,7 +6162,9 @@ impl Core {
         worker_name: &str,
     ) -> Option<HeldWorker> {
         let harness = member.harness.as_deref()?;
-        Self::resume_form(harness)?;
+        if !Self::resume_form(harness) {
+            return None;
+        }
         let harness_session_id = member.harness_session_id.as_deref()?;
         Some(HeldWorker {
             name: worker_name.to_string(),
@@ -5987,6 +6228,453 @@ impl Core {
         Ok(pid)
     }
 
+    /// (x-7b5e) One resume attempt, shared by the ResumeAgent gesture and
+    /// the workspace-restore driver. Everything the gesture's arm did up to
+    /// the spawn lives here - the live-pane focus instead of a second
+    /// writer, the stale-mapping drop, the catalog gates, the receipt
+    /// fallback, the workspace resolution, the claude re-entry plan - so a
+    /// bulk caller cannot drift from the single-gesture guards and grow a
+    /// second-writer bug. The gesture wraps the outcome in notices and view
+    /// changes; `client_id` is consulted only when the claude plan must
+    /// resolve off-loop (the gesture replay path).
+    ///
+    /// `stored_hint` hands the driver's already-resolved member in; `None`
+    /// resolves it from `name` exactly as the gesture always did.
+    /// `dry_run` walks the same gates and stops where the spawn would
+    /// happen, returning [`ResumeOutcome::Planned`] - the load-bearing
+    /// classification behind the restore verb's `--dry-run`.
+    fn resume_one(
+        &mut self,
+        name: &str,
+        stored_hint: Option<crate::squad_store::StoredMember>,
+        client_id: u64,
+        view: (u64, TabId),
+        dims: (u16, u16),
+        dry_run: bool,
+    ) -> ResumeOutcome {
+        // A resume already mapped to a LIVE pane focuses it - a second
+        // session on the same rollout would be a second writer. A stale
+        // mapping (the pane died) is dropped and falls through to a fresh
+        // resume. Same reconcile-first shape as AttachAgent.
+        match self.unique_worker_pane_by_name(name) {
+            Err(()) => {
+                return ResumeOutcome::Refused {
+                    reason: format!("{name} is ambiguous - use the CLI"),
+                };
+            }
+            Ok(Some(mapped)) => {
+                if self.panes.contains_key(&mapped) {
+                    if let Some((sid, ti)) = self.session.find_pane(mapped) {
+                        let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                        return ResumeOutcome::Focused {
+                            pane: mapped,
+                            squad: sid,
+                            tab: tid,
+                        };
+                    }
+                } else {
+                    self.worker_pane.remove(name);
+                }
+            }
+            Ok(None) => {}
+        }
+        let stored_members: Vec<_> = match stored_hint {
+            Some(member) => vec![member],
+            None => self
+                .squad_members
+                .values()
+                .flatten()
+                .filter(|member| !member.tombstone && member.worker.as_deref() == Some(name))
+                .cloned()
+                .collect(),
+        };
+        if stored_members.len() > 1 {
+            return ResumeOutcome::Refused {
+                reason: format!("{name} is ambiguous - use the CLI"),
+            };
+        }
+        let stored_member = stored_members.into_iter().next();
+        let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
+            Ok(receipts) => (receipts, None),
+            Err(error) => (HashMap::new(), Some(error)),
+        };
+        let mut row_name: Option<String> = None;
+        let facts = {
+            let candidates: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| {
+                    stored_member
+                        .as_ref()
+                        .map(|member| worker_registry_match(member, a, name))
+                        .unwrap_or(a.name == name)
+                })
+                .collect();
+            let a = match candidates.as_slice() {
+                [] => {
+                    return ResumeOutcome::Refused {
+                        reason: "no such agent".into(),
+                    };
+                }
+                [one] => *one,
+                _ => {
+                    return ResumeOutcome::Refused {
+                        reason: format!("{name} is ambiguous - use the CLI"),
+                    };
+                }
+            };
+            let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
+                self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
+            });
+            if live_pane || !self.row_resumable_in_session(a) {
+                None // refused; reason below
+            } else {
+                // (x-d285) The live registry name is the resolver's
+                // key; it outranks the display name the facts carry.
+                row_name = Some(a.name.clone());
+                Self::worker_facts(a).or_else(|| {
+                    let member = stored_member.as_ref()?;
+                    receipt_for_member(&fresh_receipts, member)
+                        .cloned()
+                        .map(|mut receipt| {
+                            receipt.name = name.to_string();
+                            receipt
+                        })
+                })
+            }
+        };
+        let Some(mut facts) = facts else {
+            if let Some(error) = receipt_error {
+                return ResumeOutcome::Refused { reason: error };
+            }
+            return ResumeOutcome::Refused {
+                reason: "agent is not resumable".into(),
+            };
+        };
+        if let Some(worker) = stored_member
+            .as_ref()
+            .and_then(|member| member.worker.clone())
+        {
+            // The persisted member remains keyed by its original
+            // worker name even when the registry display name changed.
+            // Keep that join key while using the exact pair for lookup.
+            facts.name = worker;
+        }
+        // The dry run stops HERE: after every gate, before the claude plan
+        // resolution (a dry run never fires the off-loop resolver) and
+        // before anything spawns.
+        if dry_run {
+            return ResumeOutcome::Planned;
+        }
+        let sid = self
+            .squad_members
+            .iter()
+            .find(|(_, members)| {
+                members.iter().any(|member| {
+                    stored_member
+                        .as_ref()
+                        .is_some_and(|stored| stored == member)
+                        || member.worker.as_deref() == Some(name)
+                })
+            })
+            .map(|(sid, _)| *sid)
+            .or_else(|| {
+                self.session
+                    .squads
+                    .iter()
+                    .find(|squad| squad.owns_path(&facts.cwd))
+                    .map(|squad| squad.id)
+            })
+            .unwrap_or(view.0);
+        // (x-d285) A claude row's resume runs the canonical re-entry
+        // plan; the `None` arm fires the off-loop resolution and the
+        // gesture replays with the verdict staged. A receipt-only row
+        // (no registry row) has no recorded binding, so its name
+        // misses the resolver and the visible refusal is the design -
+        // no bare claude resume on this axis.
+        let plan = if facts.harness == "claude" {
+            let name = row_name.unwrap_or_else(|| facts.name.clone());
+            let Some(plan) = self.resume_gesture_plan(
+                client_id,
+                &name,
+                ReentrySpawnRequest::Resume { name: name.clone() },
+            ) else {
+                return ResumeOutcome::PlanPending;
+            };
+            Some(plan)
+        } else {
+            None
+        };
+        let (pid, tid, fallback_notice) =
+            match self.resume_worker_into(&facts, sid, None, dims.0, dims.1, plan.as_ref()) {
+                Ok(result) => result,
+                Err(error) => {
+                    return ResumeOutcome::Refused {
+                        reason: format!("resume failed: {error}"),
+                    };
+                }
+            };
+        ResumeOutcome::Resumed {
+            pane: pid,
+            squad: sid,
+            tab: tid,
+            notice: fallback_notice,
+        }
+    }
+
+    /// (x-7b5e) The live, non-tombstoned worker members a restore acts on,
+    /// as (worker name, member) pairs in stored order. `harness` narrows the
+    /// run to one harness's members. A member with no worker name records no
+    /// resumable identity, so it is never a candidate.
+    fn restore_candidates(
+        &self,
+        harness: Option<&str>,
+    ) -> Vec<(String, crate::squad_store::StoredMember)> {
+        self.squad_members
+            .values()
+            .flatten()
+            .filter(|m| !m.tombstone)
+            .filter(|m| m.worker.as_deref().is_some_and(|w| !w.trim().is_empty()))
+            .filter(|m| harness.is_none_or(|h| m.harness.as_deref() == Some(h)))
+            .map(|m| (m.worker.clone().expect("checked above"), m.clone()))
+            .collect()
+    }
+
+    /// (x-7b5e) `fno mux workspace restore`, phase 1: split the run. A dry
+    /// run never resolves plans (it reports classifications and spawns
+    /// nothing), and a run with no claude members needs none, so both apply
+    /// inline. Otherwise the claude members' re-entry plans resolve OFF the
+    /// core loop (the BatchPlansReady shape) and the apply half re-enters
+    /// with the verdicts in hand - no bare claude resume on this axis, and
+    /// no per-member resolver wait landing on the loop.
+    fn workspace_restore_start(
+        &mut self,
+        dry_run: bool,
+        harness: Option<String>,
+        reply: ControlReply,
+    ) {
+        // The off-loop registry reader ticks independently and may never have
+        // run in a session nobody has watched (a headless reboot-restore).
+        // This verb's classification IS a registry read, so it reads the file
+        // itself rather than refuse members whose rows exist on disk.
+        if let Some(rows) = restore_registry_rows() {
+            self.agents = rows;
+        }
+        if dry_run {
+            self.workspace_restore_apply(true, harness, HashMap::new(), reply);
+            return;
+        }
+        let claude_names: Vec<String> = self
+            .restore_candidates(harness.as_deref())
+            .into_iter()
+            .filter(|(_, m)| m.harness.as_deref() == Some("claude"))
+            .map(|(name, _)| name)
+            .collect();
+        if claude_names.is_empty() {
+            self.workspace_restore_apply(false, harness, HashMap::new(), reply);
+            return;
+        }
+        let core_tx = self.self_tx.clone();
+        tokio::spawn(async move {
+            let mut set = tokio::task::JoinSet::new();
+            for name in claude_names {
+                set.spawn(async move {
+                    let verdict = run_reentry_plan(&name, "resume").await;
+                    (name, verdict)
+                });
+            }
+            let mut plans = HashMap::new();
+            while let Some(joined) = set.join_next().await {
+                if let Ok((name, verdict)) = joined {
+                    plans.insert(name, verdict);
+                }
+            }
+            let _ = core_tx
+                .send(CoreMsg::WorkspaceRestoreApply {
+                    dry_run,
+                    harness,
+                    plans,
+                    reply,
+                })
+                .await;
+        });
+    }
+
+    /// (x-7b5e) `fno mux workspace restore`, phase 2: walk every candidate
+    /// through [`Core::resume_one`] and report one row per member. A claude
+    /// member whose plan refused (or never resolved) refuses with the
+    /// resolver's own reason - never a bare claude resume - and
+    /// `reentry_verdict` is cleared around every attempt so one member's
+    /// verdict can never leak into the next one's argv.
+    fn workspace_restore_apply(
+        &mut self,
+        dry_run: bool,
+        harness: Option<String>,
+        mut plans: HashMap<String, Result<ReentryVerdict, String>>,
+        reply: ControlReply,
+    ) {
+        const RESTORE_CLIENT: u64 = u64::MAX;
+        let candidates = self.restore_candidates(harness.as_deref());
+        // A worker NAME the store holds more than once (distinct sessions,
+        // one display name - a supported state) refuses up front instead of
+        // reaching resume_one: the second twin would find the first one's
+        // pane through the name-only map and report "focused" while its own
+        // session was never restored.
+        let mut name_counts: HashMap<String, usize> = HashMap::new();
+        for (name, _) in &candidates {
+            *name_counts.entry(name.clone()).or_default() += 1;
+        }
+        let dims = (crate::vt::DEFAULT_ROWS, crate::vt::DEFAULT_COLS);
+        let mut rows = Vec::with_capacity(candidates.len());
+        for (name, member) in candidates {
+            if name_counts.get(name.as_str()).copied().unwrap_or(0) > 1 {
+                rows.push(RestoreRow {
+                    member: name,
+                    harness: member.harness.clone(),
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(
+                        "member name is ambiguous in the store; resume by exact session id".into(),
+                    ),
+                    notice: None,
+                });
+                continue;
+            }
+            let harness_name = member.harness.clone();
+            // A claude member without a resolvable plan refuses here instead
+            // of firing a stray off-loop resolution from the bulk path; the
+            // single gesture keeps its own replay behavior.
+            if !dry_run && harness_name.as_deref() == Some("claude") {
+                match plans.get(&name) {
+                    Some(Ok(_)) => {
+                        self.reentry_verdict = plans.remove(&name).and_then(|r| r.ok());
+                    }
+                    Some(Err(reason)) => {
+                        rows.push(RestoreRow {
+                            member: name,
+                            harness: harness_name,
+                            squad: 0,
+                            outcome: "refused".into(),
+                            pane: None,
+                            tab: None,
+                            reason: Some(reason.clone()),
+                            notice: None,
+                        });
+                        continue;
+                    }
+                    None => {
+                        rows.push(RestoreRow {
+                            member: name,
+                            harness: harness_name,
+                            squad: 0,
+                            outcome: "refused".into(),
+                            pane: None,
+                            tab: None,
+                            reason: Some(
+                                "claude re-entry plan unresolved; resume it from the agent panel"
+                                    .into(),
+                            ),
+                            notice: None,
+                        });
+                        continue;
+                    }
+                }
+            }
+            let structural = member_structural_refusal(&member);
+            let outcome =
+                self.resume_one(&name, Some(member), RESTORE_CLIENT, (0, 0), dims, dry_run);
+            self.reentry_verdict = None;
+            let row = match outcome {
+                ResumeOutcome::Resumed {
+                    pane,
+                    squad,
+                    tab,
+                    notice,
+                } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad,
+                    outcome: "resumed".into(),
+                    pane: Some(pane),
+                    tab: Some(tab),
+                    reason: None,
+                    notice,
+                },
+                ResumeOutcome::Focused { pane, squad, tab } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad,
+                    outcome: "focused".into(),
+                    pane: Some(pane),
+                    tab: Some(tab),
+                    reason: None,
+                    notice: None,
+                },
+                ResumeOutcome::Refused { reason } => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    // The member's own structural gap outranks the generic
+                    // gesture notice in the REPORT: a no-form harness or a
+                    // missing session id is the specific reason AC5-ERR
+                    // demands. The gates themselves already ran.
+                    reason: Some(structural.unwrap_or(reason)),
+                    notice: None,
+                },
+                ResumeOutcome::PlanPending => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "refused".into(),
+                    pane: None,
+                    tab: None,
+                    reason: Some(
+                        "claude re-entry plan unresolved; resume it from the agent panel".into(),
+                    ),
+                    notice: None,
+                },
+                ResumeOutcome::Planned => RestoreRow {
+                    member: name,
+                    harness: harness_name,
+                    squad: 0,
+                    outcome: "planned".into(),
+                    pane: None,
+                    tab: None,
+                    reason: None,
+                    notice: None,
+                },
+            };
+            rows.push(row);
+        }
+        let resumed = rows.iter().filter(|r| r.outcome == "resumed").count();
+        if resumed > 0 {
+            self.push_layout(true);
+        }
+        if !dry_run {
+            // Every refusal reaches the attached clients by name (AC5-ERR),
+            // and a zero-inclusive summary answers "did restore do anything"
+            // without reading a pane count.
+            for row in rows.iter().filter(|r| r.outcome == "refused") {
+                self.notice_all(format!(
+                    "workspace restore: {} could not be resumed: {}",
+                    row.member,
+                    row.reason.as_deref().unwrap_or("no reason given"),
+                ));
+            }
+            let focused = rows.iter().filter(|r| r.outcome == "focused").count();
+            let refused = rows.iter().filter(|r| r.outcome == "refused").count();
+            self.notice_all(format!(
+                "workspace restore: {resumed} resumed, {focused} focused, {refused} refused"
+            ));
+        }
+        let _ = reply.send(ServerMsg::WorkspaceRestored { rows });
+    }
+
     fn resume_worker_into(
         &mut self,
         facts: &HeldWorker,
@@ -5996,9 +6684,9 @@ impl Core {
         cols: u16,
         plan: Option<&ReentryVerdict>,
     ) -> Result<(u64, TabId, Option<String>), String> {
-        let Some((bin, token)) = Self::resume_form(&facts.harness) else {
+        if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
-        };
+        }
         let fallback_cwd = self
             .session
             .squad(sid)
@@ -6023,7 +6711,7 @@ impl Core {
         // off the claude axis (or without a plan) resume exactly as before.
         let argv = match plan {
             Some(verdict) => verdict.prefixed_argv(),
-            None => resume_argv_for(bin, token, &facts.harness_session_id),
+            None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
         };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
@@ -7004,23 +7692,24 @@ impl Core {
         }
         let mut pruned_workers = 0usize;
         #[cfg(test)]
-        let hold_workers = HOLD_WORKERS_OVERRIDE.with(|slot| {
-            slot.borrow().unwrap_or_else(|| {
-                std::env::current_dir()
-                    .ok()
-                    .as_deref()
-                    .map(crate::digest_overlay::mux_restore_hold_workers)
-                    .unwrap_or(true)
+        let policy = RESTORE_POLICY_OVERRIDE.with(|slot| {
+            if let Some(p) = slot.borrow().as_ref().copied() {
+                return p;
+            }
+            HOLD_WORKERS_OVERRIDE.with(|slot| {
+                slot.borrow()
+                    .map(crate::digest_overlay::policy_from_hold_workers)
+                    .unwrap_or_else(|| restore_policy_now())
             })
         });
         #[cfg(not(test))]
-        let hold_workers = {
-            std::env::current_dir()
-                .ok()
-                .as_deref()
-                .map(crate::digest_overlay::mux_restore_hold_workers)
-                .unwrap_or(true)
-        };
+        let policy = restore_policy_now();
+        // (x-7b5e) The one knob, three states. `hold` is today's default:
+        // named held panes, resume on focus. `idle` leaves every member an
+        // idle row. `resume` walks the same idle path here and then runs the
+        // bulk driver at the end, so startup never silently respawns unless
+        // the operator asked for exactly that (AC4-EDGE).
+        let hold_workers = policy == crate::digest_overlay::MuxRestorePolicy::Hold;
         let (spawn_receipts, receipt_store_error) = match load_spawn_receipts() {
             Ok(receipts) => (receipts, None),
             Err(error) => {
@@ -7493,6 +8182,15 @@ impl Core {
             self.notice_all(format!(
                 "restore: pruned {pruned_workers} worker member(s) whose registry row is gone"
             ));
+        }
+        // (x-7b5e) policy = resume: the walk deliberately left every member
+        // idle; the bulk driver now brings each back through its own
+        // harness's declared form. The reply end is dropped on purpose - at
+        // startup the report reaches the operator through the notices the
+        // driver emits, not through a control connection.
+        if policy == crate::digest_overlay::MuxRestorePolicy::Resume {
+            let (tx, _rx) = oneshot::channel::<ServerMsg>();
+            self.workspace_restore_start(false, None, tx);
         }
         // The restored squads must not steal the attaching client's view: its
         // per-client `view` is untouched, but add_squad flipped the global MRU
@@ -11275,175 +11973,50 @@ impl Core {
                 // name must match a surfaced row, and the SERVER re-derives
                 // resumability (the client's Layout can be stale) - a row that
                 // gained a live pane between publish and click is refused
-                // here, never double-spawned.
-                // (x-5f7f) A resume already mapped to a LIVE pane focuses
-                // it - a second session on the same rollout would be a
-                // second writer. A stale mapping (the pane died) is dropped
-                // and falls through to a fresh resume. Same reconcile-first
-                // shape as AttachAgent.
-                match self.unique_worker_pane_by_name(&name) {
-                    Err(()) => {
-                        self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                        return Flow::Continue;
-                    }
-                    Ok(Some(mapped)) => {
-                        if self.panes.contains_key(&mapped) {
-                            if let Some((sid, ti)) = self.session.find_pane(mapped) {
-                                let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
-                                self.set_view(client_id, sid, tid);
-                                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                                    tab.focus = mapped;
-                                }
-                                self.notice(client_id, "already resumed; focused existing pane");
-                                self.push_layout(true);
-                                return Flow::Continue;
-                            }
-                        } else {
-                            self.worker_pane.remove(&name);
-                        }
-                    }
-                    Ok(None) => {}
-                }
-                let stored_members: Vec<_> = self
-                    .squad_members
-                    .values()
-                    .flatten()
-                    .filter(|member| {
-                        !member.tombstone && member.worker.as_deref() == Some(name.as_str())
-                    })
-                    .cloned()
-                    .collect();
-                if stored_members.len() > 1 {
-                    self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                    return Flow::Continue;
-                }
-                let stored_member = stored_members.into_iter().next();
-                let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
-                    Ok(receipts) => (receipts, None),
-                    Err(error) => (HashMap::new(), Some(error)),
-                };
-                let mut row_name: Option<String> = None;
-                let facts = {
-                    let candidates: Vec<&RegistryAgent> = self
-                        .agents
-                        .iter()
-                        .filter(|a| {
-                            stored_member
-                                .as_ref()
-                                .map(|member| worker_registry_match(member, a, &name))
-                                .unwrap_or(a.name == name)
-                        })
-                        .collect();
-                    let a = match candidates.as_slice() {
-                        [] => {
-                            self.notice(client_id, "no such agent");
-                            return Flow::Continue;
-                        }
-                        [one] => *one,
-                        _ => {
-                            self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                            return Flow::Continue;
-                        }
-                    };
-                    let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
-                        self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
-                    });
-                    if live_pane || !self.row_resumable_in_session(a) {
-                        None // refused; notice below
-                    } else {
-                        // (x-d285) The live registry name is the resolver's
-                        // key; it outranks the display name the facts carry.
-                        row_name = Some(a.name.clone());
-                        Self::worker_facts(a).or_else(|| {
-                            let member = stored_member.as_ref()?;
-                            receipt_for_member(&fresh_receipts, member).cloned().map(
-                                |mut receipt| {
-                                    receipt.name = name.clone();
-                                    receipt
-                                },
-                            )
-                        })
-                    }
-                };
-                let Some(mut facts) = facts else {
-                    if let Some(error) = receipt_error {
-                        self.notice(client_id, error);
-                        return Flow::Continue;
-                    }
-                    self.notice(client_id, "agent is not resumable");
-                    return Flow::Continue;
-                };
-                if let Some(worker) = stored_member
-                    .as_ref()
-                    .and_then(|member| member.worker.clone())
-                {
-                    // The persisted member remains keyed by its original
-                    // worker name even when the registry display name changed.
-                    // Keep that join key while using the exact pair for lookup.
-                    facts.name = worker;
-                }
-                let sid = self
-                    .squad_members
-                    .iter()
-                    .find(|(_, members)| {
-                        members.iter().any(|member| {
-                            stored_member
-                                .as_ref()
-                                .is_some_and(|stored| stored == member)
-                                || member.worker.as_deref() == Some(name.as_str())
-                        })
-                    })
-                    .map(|(sid, _)| *sid)
-                    .or_else(|| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|squad| squad.owns_path(&facts.cwd))
-                            .map(|squad| squad.id)
-                    })
-                    .unwrap_or(view.0);
+                // here, never double-spawned. The gate walk lives in
+                // [`Core::resume_one`], shared with the x-7b5e bulk restore
+                // driver so the two surfaces cannot drift.
                 let (rows, cols) = self
                     .clients
                     .iter()
                     .find(|c| c.id == client_id)
                     .map(|c| c.dims)
                     .unwrap_or((vp.rows, vp.cols));
-                // (x-d285) A claude row's resume runs the canonical re-entry
-                // plan; the `None` arm fires the off-loop resolution and the
-                // gesture replays with the verdict staged. A receipt-only row
-                // (no registry row) has no recorded binding, so its name
-                // misses the resolver and the visible refusal is the design -
-                // no bare claude resume on this axis.
-                let plan = if facts.harness == "claude" {
-                    let name = row_name.unwrap_or_else(|| facts.name.clone());
-                    let Some(plan) = self.resume_gesture_plan(
-                        client_id,
-                        &name,
-                        ReentrySpawnRequest::Resume { name: name.clone() },
-                    ) else {
-                        return Flow::Continue;
-                    };
-                    Some(plan)
-                } else {
-                    None
-                };
-                let (pid, tid, fallback_notice) =
-                    match self.resume_worker_into(&facts, sid, None, rows, cols, plan.as_ref()) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            self.notice(client_id, format!("resume failed: {error}"));
-                            return Flow::Continue;
+                match self.resume_one(&name, None, client_id, view, (rows, cols), false) {
+                    ResumeOutcome::Focused { pane, squad, tab } => {
+                        self.set_view(client_id, squad, tab);
+                        if let Some(tab) = self.viewed_tab_mut((squad, tab)) {
+                            tab.focus = pane;
                         }
-                    };
-                if let Some(notice) = fallback_notice {
-                    self.notice(client_id, notice);
+                        self.notice(client_id, "already resumed; focused existing pane");
+                        self.push_layout(true);
+                    }
+                    ResumeOutcome::Refused { reason } => {
+                        self.notice(client_id, reason);
+                    }
+                    // The claude re-entry plan fired off-loop; the
+                    // ReentryPlanReady replay re-enters this command with the
+                    // verdict staged. Nothing to report yet.
+                    ResumeOutcome::PlanPending => {}
+                    ResumeOutcome::Resumed {
+                        pane,
+                        squad,
+                        tab,
+                        notice,
+                    } => {
+                        if let Some(notice) = notice {
+                            self.notice(client_id, notice);
+                        }
+                        self.set_view(client_id, squad, tab);
+                        if let Some(tab) = self.viewed_tab_mut((squad, tab)) {
+                            tab.focus = pane;
+                        }
+                        self.push_layout(true);
+                        self.notice(client_id, format!("resumed {name}"));
+                    }
+                    // The gesture never dry-runs.
+                    ResumeOutcome::Planned => {}
                 }
-                self.set_view(client_id, sid, tid);
-                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                    tab.focus = pid;
-                }
-                self.push_layout(true);
-                self.notice(client_id, format!("resumed {name}"));
                 Flow::Continue
             }
             Command::DispatchNode { node, account } => {
@@ -12503,6 +13076,37 @@ impl Core {
                 self.bye_all("killed");
                 self.kill_all_panes();
                 Flow::Shutdown
+            }
+            CoreMsg::WorkspaceRestore {
+                dry_run,
+                harness,
+                reply,
+            } => {
+                // The persisted squads reach memory only on the first real
+                // attach (restore_squads). Answering before that would report
+                // "nothing to restore" for a store that was never read - the
+                // empty-success shape - so name the precondition instead.
+                if !self.restored {
+                    let _ = reply.send(ServerMsg::Err {
+                        code: crate::proto::err_code::RESTORE_NOT_RUN,
+                        msg: "startup restore has not run in this session yet: attach once \
+                              (its first real attach reads the persisted workspace), then \
+                              re-run"
+                            .into(),
+                    });
+                    return Flow::Continue;
+                }
+                self.workspace_restore_start(dry_run, harness, reply);
+                Flow::Continue
+            }
+            CoreMsg::WorkspaceRestoreApply {
+                dry_run,
+                harness,
+                plans,
+                reply,
+            } => {
+                self.workspace_restore_apply(dry_run, harness, plans, reply);
+                Flow::Continue
             }
             CoreMsg::Gone(id) => {
                 // Gone is a geometry event (Locked 5, AC1-ERR): a vanished
@@ -14352,6 +14956,15 @@ async fn handle_control(
                 })
                 .await
         }
+        ControlVerb::WorkspaceRestore { dry_run, harness } => {
+            core_tx
+                .send(CoreMsg::WorkspaceRestore {
+                    dry_run,
+                    harness,
+                    reply: reply_tx,
+                })
+                .await
+        }
         ControlVerb::PaneFocus { pane } => {
             core_tx
                 .send(CoreMsg::PaneFocus {
@@ -15925,9 +16538,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: None,
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: None,
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
@@ -18854,6 +19467,121 @@ mod tests {
     }
 
     #[test]
+    fn restore_policy_resume_runs_the_bulk_driver_and_idle_spawns_nothing() {
+        // (x-7b5e) The widened knob, both new states. `resume` walks the same
+        // idle path as hold and THEN runs the bulk driver, so the stored
+        // workers come back through their own harness at startup. `idle`
+        // spawns nothing and claims no harness process - the explicit
+        // opt-out. The default stays byte-identical (the pinning test above).
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let names = ["t-codex-one", "t-codex-two"];
+        let rows_for = || -> Vec<RegistryAgent> {
+            [
+                ("t-codex-one", "codex-session-one"),
+                ("t-codex-two", "codex-session-two"),
+            ]
+            .iter()
+            .map(|(n, sid)| {
+                let mut row = exited_claude_row(n, None);
+                row.harness = Some("codex".into());
+                row.harness_session_id = Some((*sid).into());
+                row
+            })
+            .collect()
+        };
+        let seed = |scratch: &str| {
+            let s = StoreScratch::new(scratch);
+            let origin = s.dir.join("repo");
+            std::fs::create_dir_all(&origin).unwrap();
+            crate::squad_store::upsert(
+                "",
+                &crate::squad_store::origin_key(&[origin.to_string_lossy().into_owned()]),
+                &[origin.to_string_lossy().into_owned()],
+                &[
+                    crate::squad_store::StoredMember {
+                        attach_id: String::new(),
+                        tombstone: false,
+                        tab_name: None,
+                        cwd: None,
+                        worker: Some("t-codex-one".into()),
+                        harness: Some("codex".into()),
+                        harness_session_id: Some("codex-session-one".into()),
+                    },
+                    crate::squad_store::StoredMember {
+                        attach_id: String::new(),
+                        tombstone: false,
+                        tab_name: None,
+                        cwd: None,
+                        worker: Some("t-codex-two".into()),
+                        harness: Some("codex".into()),
+                        harness_session_id: Some("codex-session-two".into()),
+                    },
+                ],
+            )
+            .unwrap();
+            s
+        };
+
+        // policy = resume: the driver runs at the end of restore and each
+        // member is resumed through the (overridden) harness form.
+        let _s1 = seed("restore-resume");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.agents = rows_for();
+        let _known = KnownWorkersGuard;
+        set_known_workers(&names);
+        // The verb's own registry read is pinned to the same fake rows, so it
+        // cannot clobber them with the real machine registry.
+        let _rows = RestoreRegistryRowsGuard;
+        set_restore_registry_rows(rows_for());
+        {
+            let _policy = RestorePolicyGuard;
+            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Resume);
+            core.restore_squads(24, 80, 999);
+        }
+        assert_eq!(
+            core.worker_pane.len(),
+            2,
+            "the bulk driver resumed both stored workers: {:?}",
+            core.worker_pane
+        );
+        let resumed: Vec<u64> = core.worker_pane.values().flatten().copied().collect();
+        assert_eq!(resumed.len(), 2, "one pane per resumed member");
+        for pid in resumed {
+            core.reap_pane(pid);
+        }
+
+        // policy = idle: the same members restore as idle rows and nothing
+        // claims a harness process.
+        let _s2 = seed("restore-policy-idle");
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        core.agents = rows_for();
+        let _known2 = KnownWorkersGuard;
+        set_known_workers(&names);
+        {
+            let _policy = RestorePolicyGuard;
+            set_restore_policy(crate::digest_overlay::MuxRestorePolicy::Idle);
+            core.restore_squads(24, 80, 999);
+        }
+        assert!(
+            core.worker_pane.is_empty(),
+            "idle policy claims no harness process"
+        );
+        let members: Vec<String> = core
+            .squad_members
+            .values()
+            .flat_map(|ms| ms.iter().filter_map(|m| m.worker.clone()))
+            .collect();
+        assert_eq!(
+            members,
+            vec!["t-codex-one".to_string(), "t-codex-two".to_string()],
+            "both worker members stay as idle rows"
+        );
+    }
+
+    #[test]
     fn restore_builds_named_held_panes_without_resuming_workers() {
         // x-5f7f task 4: worker members are ALWAYS dead after a restart (their
         // pty was a child of the previous server). Restore must not spawn
@@ -19128,10 +19856,19 @@ mod tests {
         assert_eq!(facts.name, "t-worker");
 
         // A member with no harness resume form must not mint facts: the pane
-        // it would feed has no resume command to run.
+        // it would feed has no resume command to run. The table declares a
+        // form for every harness today, so the negative arm is simulated by
+        // overriding agy's availability to none.
         let mut agy = member.clone();
         agy.harness = Some("agy".into());
-        assert!(Core::member_resume_facts(&agy, "t-worker").is_none());
+        {
+            let _guard = DeclaredResumeFormsGuard;
+            set_declared_resume_form("agy", None);
+            assert!(Core::member_resume_facts(&agy, "t-worker").is_none());
+        }
+        // x-7b5e: with the declared form restored, an agy member mints facts
+        // like any other declared harness - the old two-arm match skipped it.
+        assert!(Core::member_resume_facts(&agy, "t-worker").is_some());
 
         let mut no_id = member;
         no_id.harness_session_id = None;
@@ -19410,9 +20147,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -19490,9 +20227,9 @@ mod tests {
         core.agents = vec![RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
@@ -19574,9 +20311,9 @@ mod tests {
         let live_row = RegistryAgent {
             spawned_by_session: None,
             session_id: None,
-            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
             harness: Some("codex".into()),
             name: "live-codex".into(),
             cwd: "/tmp".into(),
@@ -19621,9 +20358,10 @@ mod tests {
     fn resume_argv_matches_the_harness_capability_tokens() {
         // The mirror is checked against the TOML that owns the tokens, not
         // against this crate's own literals (Rust checked against Rust proves
-        // nothing). Codex resumes through its own interactive form; a claude
-        // row that reaches the mux resume arm uses the saved interactive
-        // transcript form. The headless form is reserved for one-shot and
+        // nothing). EVERY harness the table declares must render, because a
+        // bulk restore built on a partial match silently skips the rest
+        // (x-7b5e: the old two-arm match left gemini/agy/opencode/pi with no
+        // Resume at all). The headless form is reserved for one-shot and
         // stream-json workers, while `claude attach` is the live-row gesture.
         // No override is installed, so the REAL argv is asserted.
         clear_resume_program();
@@ -19647,39 +20385,45 @@ mod tests {
                 .filter_map(|t| t.as_str().map(str::to_string))
                 .collect()
         };
-        let codex_form = token("codex/resume_strategy/forms/interactive_resume");
-        let claude_form = token("claude/resume_strategy/forms/interactive_resume");
-        assert_eq!(
-            codex_form,
-            vec![
-                "codex".to_string(),
-                "resume".to_string(),
-                "{session_id}".into()
-            ],
-            "the codex arm must keep mirroring the capability toml"
+        let declared: Vec<String> = caps
+            .get("harness")
+            .and_then(|h| h.as_table())
+            .expect("harness table")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            declared.len() >= 6,
+            "the table declares every harness under test: {declared:?}"
         );
+        for harness in &declared {
+            let form = token(&format!(
+                "{harness}/resume_strategy/forms/interactive_resume"
+            ));
+            assert!(
+                Core::resume_form(harness),
+                "{harness} is resumable with no Rust change (AC3-HP)"
+            );
+            let sid = format!("{harness}-0a1b2c3d");
+            let expected: Vec<String> = form
+                .iter()
+                .map(|t| t.replace("{session_id}", &sid))
+                .collect();
+            assert_eq!(
+                resume_argv_for(harness, &sid).unwrap(),
+                expected,
+                "{harness} argv comes from the declared tokens"
+            );
+        }
+        // A harness the table does not name answers with a reason that names
+        // it, never an argv (AC5-ERR).
+        let err = resume_argv_for("iambad", "sid").unwrap_err();
+        assert!(err.contains("iambad"), "{err}");
+        // The built argv substitutes the placeholder with the session id, and
+        // no --cd rides this lane until the writable_roots grant can.
         assert_eq!(
-            claude_form,
-            vec![
-                "claude".to_string(),
-                "--resume".to_string(),
-                "{session_id}".into()
-            ],
-            "the claude arm must keep mirroring the capability toml"
-        );
-        // The built argv substitutes the placeholder with the session id.
-        assert_eq!(
-            resume_argv_for("codex", "resume", "01a027ad"),
+            resume_argv_for("codex", "01a027ad").unwrap(),
             vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()],
-            "no --cd on this lane until the writable_roots grant can ride with it"
-        );
-        assert_eq!(
-            resume_argv_for("claude", "--resume", "119e3c52-uuid"),
-            vec![
-                "claude".to_string(),
-                "--resume".to_string(),
-                "119e3c52-uuid".into()
-            ]
         );
     }
 
@@ -19749,13 +20493,34 @@ mod tests {
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
+        // The no-form arm needs an override: the table declares interactive_resume
+        // for agy today (x-7b5e), so a bare agy row now fails on its missing
+        // session id instead.
+        {
+            let _guard = DeclaredResumeFormsGuard;
+            set_declared_resume_form("agy", None);
+            assert_eq!(
+                Core::row_resume_disposition(&agy),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+            );
+            assert!(
+                !Core::row_resumable(&agy),
+                "no resume form and no session id: no Resume offered"
+            );
+        }
+        // With the declared form, the same row fails one step later - and a
+        // dead agy row with a session id IS resumable, which is the AC3-HP
+        // change: the old two-arm match offered no Resume at all.
         assert_eq!(
             Core::row_resume_disposition(&agy),
-            RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId)
         );
-        assert!(
-            !Core::row_resumable(&agy),
-            "no resume form and no session id: no Resume offered"
+        let mut dead_agy = base();
+        dead_agy.harness = Some("agy".into());
+        assert_eq!(
+            Core::row_resume_disposition(&dead_agy),
+            RowResumeDisposition::Resumable,
+            "a declared harness with a session id is resumable without a Rust change"
         );
         let mut live_claude = base();
         live_claude.harness = Some("claude".into());
@@ -19897,6 +20662,35 @@ mod tests {
             resume_target_from_argv(&argv(&["/bin/zsh"])),
             None,
             "a shell pane has no resume target"
+        );
+        // The detector is the DECLARED form, not a harness-name list: every
+        // harness the table gives a form parses, so a live pane running one
+        // keeps its row non-resumable exactly as claude/codex panes do.
+        assert_eq!(
+            resume_target_from_argv(&argv(&["gemini", "--resume", "gem-1234"])),
+            Some("gem-1234".into()),
+            "a declared flag form beyond the old two parses"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["agy", "--conversation", "agy-5678"])),
+            Some("agy-5678".into()),
+            "a session_flag form parses"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&["gemini", "chat", "not-a-target"])),
+            None,
+            "an argv that never walks the form's literals parses nothing"
+        );
+        assert_eq!(
+            resume_target_from_argv(&argv(&[
+                "env",
+                "FNO_AGENT_SELF=peer",
+                "opencode",
+                "--session",
+                "oc-90ab"
+            ])),
+            Some("oc-90ab".into()),
+            "the env(1) wrapper is skipped for every declared form"
         );
     }
 
@@ -23101,6 +23895,415 @@ mod tests {
             "the resumed pane is titled from the registry row"
         );
         for pid in new_panes {
+            core.reap_pane(pid);
+        }
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    /// Run the bulk-restore apply half synchronously and return its rows.
+    /// The production claude-plan split (WorkspaceRestore -> off-loop
+    /// resolution -> apply) is exercised by the handler split itself; these
+    /// tests drive the apply half directly so the gates, rows and rerun
+    /// semantics are deterministic.
+    fn run_workspace_restore(core: &mut Core, dry_run: bool) -> Vec<RestoreRow> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestoreApply {
+            dry_run,
+            harness: None,
+            plans: HashMap::new(),
+            reply: tx,
+        });
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::WorkspaceRestored { rows } => rows,
+            other => panic!("expected WorkspaceRestored, got {other:?}"),
+        }
+    }
+
+    fn stored_worker(
+        name: &str,
+        harness: &str,
+        sid: &str,
+        cwd: &str,
+    ) -> crate::squad_store::StoredMember {
+        crate::squad_store::StoredMember {
+            attach_id: String::new(),
+            tombstone: false,
+            tab_name: None,
+            cwd: Some(cwd.into()),
+            worker: Some(name.into()),
+            harness: Some(harness.into()),
+            harness_session_id: Some(sid.into()),
+        }
+    }
+
+    #[test]
+    fn workspace_restore_before_the_first_attach_refuses_not_reports_empty() {
+        // The persisted squads reach memory only on the first real attach, so
+        // a pre-attach verb must name the precondition rather than answer an
+        // empty member list that reads as "nothing to restore".
+        let mut core = empty_core();
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestore {
+            dry_run: false,
+            harness: None,
+            reply: tx,
+        });
+        match rx.blocking_recv().expect("a reply") {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, crate::proto::err_code::RESTORE_NOT_RUN);
+                assert!(
+                    msg.contains("attach"),
+                    "refusal must name the remedy: {msg}"
+                );
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+        // After the first real attach ran the startup restore, the same verb
+        // proceeds instead of refusing.
+        core.restored = true;
+        let (tx, rx) = tokio::sync::oneshot::channel::<ServerMsg>();
+        core.handle(CoreMsg::WorkspaceRestore {
+            dry_run: true,
+            harness: None,
+            reply: tx,
+        });
+        assert!(
+            matches!(
+                rx.blocking_recv().expect("a reply"),
+                ServerMsg::WorkspaceRestored { .. }
+            ),
+            "a post-attach restore must not be refused"
+        );
+    }
+
+    #[test]
+    fn workspace_restore_refuses_duplicated_worker_names_up_front() {
+        // Two stored members may share one display name with distinct session
+        // identities (a supported store state). The bulk path refuses both by
+        // name instead of letting the second twin find the first one's pane
+        // through the name-only map and report "focused" while its own
+        // session was never restored.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-dup");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.squad_members.insert(
+            7,
+            vec![
+                stored_worker("twin", "codex", "codex-session-one", &cwd.to_string_lossy()),
+                stored_worker("twin", "codex", "codex-session-two", &cwd.to_string_lossy()),
+            ],
+        );
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 2, "both twins report");
+        for row in &rows {
+            assert_eq!(row.outcome, "refused");
+            assert!(
+                row.reason
+                    .as_deref()
+                    .is_some_and(|r| r.contains("ambiguous")),
+                "the refusal names the ambiguity: {:?}",
+                row.reason
+            );
+        }
+        assert!(
+            core.worker_pane.is_empty(),
+            "the guard refuses before any spawn: {:?}",
+            core.worker_pane
+        );
+    }
+
+    #[test]
+    fn workspace_restore_resumes_members_and_a_rerun_focuses() {
+        // AC1-HP + AC6-ERR: one apply resumes the stored worker through the
+        // (overridden) harness form; a second apply FOCUSES the live pane and
+        // spawns nothing. Tombstoned and non-worker members are not
+        // candidates.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![
+                stored_worker(
+                    "t-codex-one",
+                    "codex",
+                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                    cwd.to_string_lossy().as_ref(),
+                ),
+                // Not candidates: an attach-recorded member carries no worker
+                // name, and a tombstoned member is dead by operator ruling.
+                crate::squad_store::StoredMember {
+                    attach_id: "deadbee1".into(),
+                    tombstone: false,
+                    tab_name: None,
+                    cwd: None,
+                    worker: None,
+                    harness: Some("claude".into()),
+                    harness_session_id: None,
+                },
+                {
+                    let mut dead = stored_worker("gone-row", "codex", "sid-gone", "/x");
+                    dead.tombstone = true;
+                    dead
+                },
+            ],
+        );
+
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 1, "exactly the live worker is a candidate");
+        assert_eq!(rows[0].member, "t-codex-one");
+        assert_eq!(rows[0].outcome, "resumed", "{:?}", rows[0]);
+        let resumed_pane = rows[0].pane.expect("resumed row names its pane");
+        let new_panes: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(
+            new_panes,
+            vec![resumed_pane],
+            "one new pane, the reported one"
+        );
+
+        // The rerun focuses the SAME pane: no second writer ever starts.
+        let rows = run_workspace_restore(&mut core, false);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "focused", "{:?}", rows[0]);
+        assert_eq!(rows[0].pane, Some(resumed_pane), "the live pane is focused");
+        let still_one: Vec<u64> = core
+            .panes
+            .keys()
+            .filter(|&&p| p != shell)
+            .copied()
+            .collect();
+        assert_eq!(still_one, vec![resumed_pane], "the rerun spawned nothing");
+
+        core.reap_pane(resumed_pane);
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn workspace_restore_dry_run_classifies_without_spawning() {
+        // --dry-run is load-bearing: the plan is readable before twenty
+        // processes start. Every gate runs; nothing does.
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-dry");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![stored_worker(
+                "t-codex-one",
+                "codex",
+                "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                cwd.to_string_lossy().as_ref(),
+            )],
+        );
+
+        let rows = run_workspace_restore(&mut core, true);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].outcome, "planned", "{:?}", rows[0]);
+        assert!(rows[0].pane.is_none(), "a plan names no pane");
+        assert_eq!(
+            core.panes.len(),
+            1,
+            "the dry run spawned nothing beyond the seed shell"
+        );
+        core.reap_pane(shell);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn workspace_restore_names_every_refused_member_and_restores_the_rest() {
+        // AC5-ERR: a member the table gives no form for, and a claude member
+        // whose plan never resolved, are NAMED with their reasons while the
+        // resumable member still resumes. A silent skip would look identical
+        // to "the code never ran".
+        let _guard = ResumeProgramGuard;
+        set_resume_program(&["/bin/cat"]);
+        let mut core = empty_core();
+        core.shells = vec!["/bin/cat".into()];
+        let cwd = std::env::temp_dir().join("fno-ws-restore-refused");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let shell = core
+            .spawn_pane(24, 80, cwd.to_string_lossy().as_ref())
+            .unwrap();
+        core.session.add_squad(
+            7,
+            vec![cwd.to_string_lossy().into_owned()],
+            None,
+            Tab {
+                name: None,
+                id: 70,
+                root: Node::Leaf(shell),
+                focus: shell,
+            },
+        );
+        core.agents = vec![RegistryAgent {
+            spawned_by_session: None,
+            session_id: None,
+            predecessor_session_ids: Vec::new(),
+            forked_from_session_id: None,
+            harness_session_id: Some("01a027ad-fe00-7c12-a116-9ee37c6bdfec".into()),
+            harness: Some("codex".into()),
+            name: "t-codex-one".into(),
+            cwd: cwd.to_string_lossy().into_owned(),
+            exited: true,
+            badge: None,
+            reason: None,
+            mux: None,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            account: None,
+            claude_session_uuid: None,
+            updated_at: None,
+            crown_level: None,
+            crown_scope: None,
+            liveness: agents_view::Liveness::Dead,
+        }];
+        core.squad_members.insert(
+            7u64,
+            vec![
+                stored_worker(
+                    "t-codex-one",
+                    "codex",
+                    "01a027ad-fe00-7c12-a116-9ee37c6bdfec",
+                    cwd.to_string_lossy().as_ref(),
+                ),
+                // A harness no table row declares: the negative arm names it.
+                stored_worker("mystery", "iambad", "sid-9", "/x"),
+                // A claude member whose plan never resolved on the bulk path.
+                stored_worker("routed-glm", "claude", "uuid-1", "/x"),
+            ],
+        );
+
+        let rows = run_workspace_restore(&mut core, false);
+        let by_name = |n: &str| {
+            rows.iter()
+                .find(|r| r.member == n)
+                .unwrap_or_else(|| panic!("no row for {n} in {rows:?}"))
+        };
+        assert_eq!(by_name("t-codex-one").outcome, "resumed", "{rows:?}");
+        let mystery = by_name("mystery");
+        assert_eq!(mystery.outcome, "refused");
+        let reason = mystery
+            .reason
+            .as_deref()
+            .expect("the refusal names a reason");
+        assert!(reason.contains("iambad"), "the harness is named: {reason}");
+        let routed = by_name("routed-glm");
+        assert_eq!(routed.outcome, "refused");
+        let reason = routed
+            .reason
+            .as_deref()
+            .expect("the refusal names a reason");
+        assert!(
+            reason.contains("re-entry plan unresolved"),
+            "the missing plan is named: {reason}"
+        );
+
+        let resumed: Vec<u64> = rows.iter().filter_map(|r| r.pane).collect();
+        for pid in resumed {
             core.reap_pane(pid);
         }
         core.reap_pane(shell);

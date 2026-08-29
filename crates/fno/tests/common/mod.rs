@@ -855,7 +855,10 @@ impl FakeClient {
             | ServerMsg::LayoutApplied { .. }
             | ServerMsg::LayoutGrafted { .. }
             | ServerMsg::TabLocation { .. }
-            | ServerMsg::TabClosed { .. } => {}
+            | ServerMsg::TabClosed { .. }
+            // (v60, x-7b5e) Bulk restore answers a one-shot control
+            // connection, never an attached client.
+            | ServerMsg::WorkspaceRestored { .. } => {}
             // (x-c376) Peek transcript body: a client-interactive reply covered
             // by client unit tests, not the e2e absorber - ignore here.
             ServerMsg::PeekBody { .. } => {}

@@ -260,6 +260,36 @@ fn shell_join(tokens: &[String]) -> String {
 /// lives inside the crate so the packaged package builds standalone.
 const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 
+/// The two interactive-form lanes [`declared_form`] serves. The lane names
+/// the bundled form it reads, the config key that may override it, and how
+/// strict the parse is: a resume lane fills exactly `{session_id}` (the
+/// contract validator refuses any other placeholder in a resume lane), so a
+/// `{short_id}` form or one promising a `pre_exec` the resume builder does
+/// not run is not a resume form.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum FormLane {
+    Attach,
+    Resume,
+}
+
+impl FormLane {
+    /// The `resume_strategy.forms.<key>` row the bundled contract carries.
+    fn bundled_key(self) -> &'static str {
+        match self {
+            FormLane::Attach => "interactive_attach",
+            FormLane::Resume => "interactive_resume",
+        }
+    }
+
+    /// The shallower `harness.<name>.<key>` block a config override uses.
+    fn config_key(self) -> &'static str {
+        match self {
+            FormLane::Attach => "attach",
+            FormLane::Resume => "resume",
+        }
+    }
+}
+
 /// The attach form `harness` declares, or `None` when it declares none.
 ///
 /// Two sources, config first: `[harness.<name>.attach]` in
@@ -287,71 +317,92 @@ const CAPABILITY_TOML: &str = include_str!("harness_capabilities.toml");
 /// capability field by moving the same merge up a level, not by growing a
 /// second reader beside it.
 pub fn attach_form(harness: &str) -> Option<AttachForm> {
-    static FORMS: std::sync::OnceLock<toml::map::Map<String, toml::Value>> =
+    declared_form(FormLane::Attach, harness)
+}
+
+/// The interactive-resume form `harness` declares, or `None` when it declares
+/// none. Same reader, same sources and precedence as [`attach_form`], keyed
+/// by the resume lane: the bundled `interactive_resume` row, overridable by
+/// the shallower `[harness.<name>.resume]`. The workspace-restore verb
+/// resumes every member through the form this returns, so "none" is the
+/// honest dead row - refused by name, never a spawn that fails.
+pub fn resume_form(harness: &str) -> Option<AttachForm> {
+    declared_form(FormLane::Resume, harness)
+}
+
+/// The ONE reader of the declared capability table, behind the two lane
+/// front doors. Reads the bundled contract once per process, merges config
+/// overrides, and parses the winner through the lane's rules.
+fn declared_form(lane: FormLane, harness: &str) -> Option<AttachForm> {
+    static FORMS: std::sync::OnceLock<[toml::map::Map<String, toml::Value>; 2]> =
         std::sync::OnceLock::new();
-    let forms = FORMS.get_or_init(|| {
-        // name -> the harness's `interactive_attach` block. The bundled
-        // contract's rows live under `harness.<name>.resume_strategy.forms`;
-        // config overrides use the shallower `harness.<name>.attach`. Both
-        // land in this map as the same shape, so ONE parse path serves both
-        // sources and ONE `insert` is the whole merge.
-        let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
-            caps.get("resume_strategy")?
-                .get("forms")?
-                .get("interactive_attach")
-                .cloned()
-        };
-        let mut forms: toml::map::Map<String, toml::Value> =
-            toml::from_str::<toml::Value>(CAPABILITY_TOML)
-                .ok()
-                .and_then(|v| {
-                    let harnesses = v.get("harness")?.as_table()?.clone();
-                    let mut out = toml::map::Map::new();
-                    for (name, caps) in &harnesses {
-                        if let Some(block) = bundled_block(caps) {
-                            out.insert(name.clone(), block);
-                        }
+    let forms = &FORMS
+        .get_or_init(|| [build_forms(FormLane::Attach), build_forms(FormLane::Resume)])
+        [lane as usize];
+    parse_form(lane, forms.get(harness)?)
+}
+
+/// The bundled-plus-override map for one lane: name -> the harness's form
+/// block. The bundled contract's rows live under
+/// `harness.<name>.resume_strategy.forms`; config overrides use the shallower
+/// `harness.<name>.<lane key>`. Both land in this map as the same shape, so
+/// ONE parse path serves both sources and ONE `insert` is the whole merge.
+fn build_forms(lane: FormLane) -> toml::map::Map<String, toml::Value> {
+    let bundled_block = |caps: &toml::Value| -> Option<toml::Value> {
+        caps.get("resume_strategy")?
+            .get("forms")?
+            .get(lane.bundled_key())
+            .cloned()
+    };
+    let mut forms: toml::map::Map<String, toml::Value> =
+        toml::from_str::<toml::Value>(CAPABILITY_TOML)
+            .ok()
+            .and_then(|v| {
+                let harnesses = v.get("harness")?.as_table()?.clone();
+                let mut out = toml::map::Map::new();
+                for (name, caps) in &harnesses {
+                    if let Some(block) = bundled_block(caps) {
+                        out.insert(name.clone(), block);
                     }
-                    Some(out)
-                })
-                .unwrap_or_default();
-        // Fail-open at every layer: an unreadable file, an unparseable file, a
-        // missing `harness` table and an unparseable block each skip rather
-        // than clearing what was already there. A typo in one harness's block
-        // cannot un-attach a working harness.
-        let mut overridden: std::collections::HashSet<String> = Default::default();
-        for path in config_toml_candidates() {
-            let Ok(body) = std::fs::read_to_string(&path) else {
-                continue;
-            };
-            let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
-                continue;
-            };
-            let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
-                continue;
-            };
-            for (name, caps) in harnesses {
-                // First candidate wins per name (project-local over global),
-                // matching the loader's record precedence.
-                if overridden.contains(name) {
-                    continue;
                 }
-                let Some(block) = caps.get("attach") else {
-                    continue;
-                };
-                // A block that does not parse as an attach form is skipped, so
-                // the bundled form (or the safe "cannot attach" for an unknown
-                // name) stays; an explicit kind = "unsupported" override still
-                // lands, because that is a parsable statement.
-                if parse_attach_form(block).is_some() || is_unsupported_block(block) {
-                    forms.insert(name.clone(), block.clone());
-                    overridden.insert(name.clone());
-                }
+                Some(out)
+            })
+            .unwrap_or_default();
+    // Fail-open at every layer: an unreadable file, an unparseable file, a
+    // missing `harness` table and an unparseable block each skip rather
+    // than clearing what was already there. A typo in one harness's block
+    // cannot un-attach a working harness.
+    let mut overridden: std::collections::HashSet<String> = Default::default();
+    for path in config_toml_candidates() {
+        let Ok(body) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(doc) = toml::from_str::<toml::Value>(&body) else {
+            continue;
+        };
+        let Some(harnesses) = doc.get("harness").and_then(|h| h.as_table()) else {
+            continue;
+        };
+        for (name, caps) in harnesses {
+            // First candidate wins per name (project-local over global),
+            // matching the loader's record precedence.
+            if overridden.contains(name) {
+                continue;
+            }
+            let Some(block) = caps.get(lane.config_key()) else {
+                continue;
+            };
+            // A block that does not parse as a form is skipped, so
+            // the bundled form (or the safe "cannot attach" for an unknown
+            // name) stays; an explicit kind = "unsupported" override still
+            // lands, because that is a parsable statement.
+            if parse_form(lane, block).is_some() || is_unsupported_block(block) {
+                forms.insert(name.clone(), block.clone());
+                overridden.insert(name.clone());
             }
         }
-        forms
-    });
-    parse_attach_form(forms.get(harness)?)
+    }
+    forms
 }
 
 /// Whether a block is an explicit `kind = "unsupported"` statement - the one
@@ -361,13 +412,16 @@ fn is_unsupported_block(block: &toml::Value) -> bool {
     block.get("kind").and_then(|k| k.as_str()) == Some("unsupported")
 }
 
-/// The pure half of [`attach_form`]: one attach block (contract row or config
-/// override) into a form. `None` for an unsupported, id-less, or BOTH-id
-/// block, so a block that cannot address a session - or that render() could
-/// only half-fill, leaving one placeholder verbatim in the exec'd argv - is
-/// not an attach form. `kind` is optional here: a config override may carry
-/// only `tokens` and `pre_exec`.
-fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
+/// The pure half of [`declared_form`]: one form block (contract row or config
+/// override) into a form, by the lane's rules. `None` for an unsupported,
+/// id-less, or BOTH-id block, so a block that cannot address a session - or
+/// that render() could only half-fill, leaving one placeholder verbatim in
+/// the exec'd argv - is not a form. `kind` is optional here: a config
+/// override may carry only `tokens` and `pre_exec`. The resume lane is
+/// stricter: it fills exactly `{session_id}`, so a `{short_id}` form is
+/// attach-only, and a `pre_exec` promise is refused rather than silently
+/// ignored by a builder that never runs it.
+fn parse_form(lane: FormLane, block: &toml::Value) -> Option<AttachForm> {
     if block.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
         return None;
     }
@@ -380,6 +434,9 @@ fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
     let has_short = tokens.iter().any(|t| t == "{short_id}");
     let has_session = tokens.iter().any(|t| t == "{session_id}");
     if has_short && has_session {
+        return None;
+    }
+    if lane == FormLane::Resume && (has_short || !has_session) {
         return None;
     }
     let (id_kind, placeholder) = if has_short {
@@ -401,6 +458,9 @@ fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
                 .collect()
         })
         .unwrap_or_default();
+    if lane == FormLane::Resume && !pre_exec.is_empty() {
+        return None;
+    }
     Some(AttachForm {
         tokens,
         id_kind,
@@ -3024,7 +3084,7 @@ mod tests {
     fn parse_attach_form_refuses_malformed_and_honors_explicit_unsupported() {
         let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
         assert!(
-            parse_attach_form(&idless).is_none(),
+            parse_form(FormLane::Attach, &idless).is_none(),
             "an id-less block is not one"
         );
         let unsupported: toml::Value = toml::from_str(
@@ -3032,9 +3092,33 @@ mod tests {
 tokens = []"#,
         )
         .unwrap();
-        assert!(parse_attach_form(&unsupported).is_none());
+        assert!(parse_form(FormLane::Attach, &unsupported).is_none());
         assert!(is_unsupported_block(&unsupported));
         assert!(!is_unsupported_block(&idless));
+    }
+
+    /// The resume lane is stricter than the attach lane: it fills exactly
+    /// `{session_id}` and runs no `pre_exec`, so a `{short_id}` form and a
+    /// daemon-starting form each refuse rather than render an argv the
+    /// resume builder cannot honor.
+    #[test]
+    fn the_resume_lane_refuses_short_id_and_pre_exec_forms() {
+        let short_id: toml::Value =
+            toml::from_str(r#"tokens = ["opencode", "--session", "{short_id}"]"#).unwrap();
+        assert!(parse_form(FormLane::Attach, &short_id).is_some());
+        assert!(parse_form(FormLane::Resume, &short_id).is_none());
+        let daemon_start: toml::Value = toml::from_str(
+            r#"
+            tokens   = ["codex", "resume", "{session_id}"]
+            pre_exec = ["codex", "app-server", "daemon", "start"]
+        "#,
+        )
+        .unwrap();
+        assert!(parse_form(FormLane::Attach, &daemon_start).is_some());
+        assert!(parse_form(FormLane::Resume, &daemon_start).is_none());
+        let plain: toml::Value =
+            toml::from_str(r#"tokens = ["codex", "resume", "{session_id}"]"#).unwrap();
+        assert!(parse_form(FormLane::Resume, &plain).is_some());
     }
 
     /// AC1-HP (x-296f), config half: a harness fno has never heard of, declared
@@ -3050,7 +3134,7 @@ tokens = []"#,
         "#,
         )
         .unwrap();
-        let form = parse_attach_form(&declared).expect("a config form parses");
+        let form = parse_form(FormLane::Attach, &declared).expect("a config form parses");
         assert_eq!(form.id_kind, IdKind::Session);
         assert_eq!(form.pre_exec, ["openclaw", "daemon", "start"]);
         let rendered = form.render("sess-1");
@@ -3062,13 +3146,13 @@ tokens = []"#,
         // No pre_exec: the argv is the bare command, no shell in the way.
         let bare: toml::Value =
             toml::from_str(r#"tokens = ["openclaw", "attach", "{short_id}"]"#).unwrap();
-        let form = parse_attach_form(&bare).unwrap();
+        let form = parse_form(FormLane::Attach, &bare).unwrap();
         assert_eq!(form.id_kind, IdKind::Short);
         assert_eq!(form.render("ab12"), ["openclaw", "attach", "ab12"]);
 
         // A form that names no id cannot address a session, so it is not one.
         let idless: toml::Value = toml::from_str(r#"tokens = ["openclaw", "--last"]"#).unwrap();
-        assert!(parse_attach_form(&idless).is_none());
+        assert!(parse_form(FormLane::Attach, &idless).is_none());
     }
 
     /// The override layer's candidate order: project-local first, then a

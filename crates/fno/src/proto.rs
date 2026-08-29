@@ -296,7 +296,13 @@ fn default_true() -> bool {
 /// `predecessor_session_ids`, and `forked_from_session_id` - each
 /// additive-tolerant via `#[serde(default)]`, but the shape change belongs
 /// to one bump, and the handshake, not serde tolerance, is the skew guard.
-pub const PROTO_VERSION: u32 = 59;
+///
+/// v60 (x-7b5e, workspace restore): `ControlVerb::WorkspaceRestore` +
+/// `ServerMsg::WorkspaceRestored` carrying [`RestoreRow`]s - NEW enum
+/// variants, so a v59 peer cannot decode the pair; the handshake is what
+/// stops the skew. (Second-to-merge re-bump: this branch first claimed 59,
+/// the lineage branch merged first.)
+pub const PROTO_VERSION: u32 = 60;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -612,6 +618,28 @@ pub struct PanePlacement {
     pub thread_pane: bool,
 }
 
+/// (v60, x-7b5e) One member's line of a workspace-restore report. `outcome`
+/// is `resumed` | `focused` | `refused` | `planned`; `reason` is set exactly
+/// on `refused` (a member that cannot resume is NAMED, never silently
+/// dropped), `pane` on `resumed`/`focused`, `tab` on both, and `notice`
+/// carries the vanished-cwd fallback note on a resumed member.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RestoreRow {
+    pub member: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness: Option<String>,
+    pub squad: u64,
+    pub outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pane: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
+}
+
 /// The script-API verbs (`fno mux pane ls|read|run|send|wait|kill`), each a
 /// one-shot request answered by exactly one [`ServerMsg`] reply. Versioned as
 /// part of `Control` (v4); a new verb or a shape change bumps `PROTO_VERSION`.
@@ -837,6 +865,19 @@ pub enum ControlVerb {
         #[serde(default)]
         squad: PaneTarget,
         sel: String,
+    },
+    /// (v60, x-7b5e) Bulk-restore every live, non-tombstoned worker member of
+    /// the stored workspaces: each resumes through its own harness's declared
+    /// `interactive_resume` argv, in a pane at its stored tab and cwd. The
+    /// operator's explicit verb - startup restore never sends this (AC4-EDGE:
+    /// the hold-workers policy stays the default). `harness` restores one
+    /// harness's members only; `dry_run` classifies every member and spawns
+    /// nothing. -> [`ServerMsg::WorkspaceRestored`].
+    WorkspaceRestore {
+        #[serde(default)]
+        dry_run: bool,
+        #[serde(default)]
+        harness: Option<String>,
     },
 }
 
@@ -2018,6 +2059,9 @@ pub enum ServerMsg {
     },
     /// A verb that carries no payload succeeded (`PaneSend`, `PaneKill`).
     Ok,
+    /// (v60, x-7b5e) Answer to [`ControlVerb::WorkspaceRestore`]: one row per
+    /// member, including every refusal with its reason.
+    WorkspaceRestored { rows: Vec<RestoreRow> },
     /// Answer to [`ControlVerb::PaneWait`].
     WaitDone { outcome: WaitOutcome },
     /// A control verb failed (dead pane, spawn failure, version skew, ...).
@@ -2371,6 +2415,11 @@ pub mod err_code {
     /// (v51, x-588a) The addressed identity disagrees with the pane's captured
     /// identity or its unique registry occupant; no bytes were typed.
     pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
+    /// (v60, x-7b5e) `WorkspaceRestore` arrived before the session's first real
+    /// attach, so the persisted squads were never read into memory and an empty
+    /// member list would read as "nothing to restore". The refusal names the
+    /// attach precondition; the store is untouched.
+    pub const RESTORE_NOT_RUN: u32 = 15;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -4004,7 +4053,9 @@ mod tests {
         // 53 -> 54; guarded tab close bumps it 54 -> 55; the hover-affordance
         // message pair bumps it 55 -> 56; the LivenessUnmeasured reason (x-d401)
         // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
-        // 57 -> 58.
+        // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
+        // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
+        // merge).
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4013,7 +4064,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 59);
+        assert_eq!(PROTO_VERSION, 60);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,

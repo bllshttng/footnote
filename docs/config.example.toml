@@ -537,6 +537,8 @@ hover_focus = true
 [mux.restore]
 # Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).
 hold_workers = true
+# Startup restore policy for worker members: hold (rebuild named held panes, default), idle (members stay idle rows), or resume (run the bulk restore and resume every member through its own harness). Overrides hold_workers when set.
+# policy = <unset>   # optional; no default
 
 [dev]
 # Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default).

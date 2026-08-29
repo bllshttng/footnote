@@ -20,9 +20,9 @@ Capture sits on the server, in the `PaneRun` handler behind `fno mux pane run --
 
 Membership meant "a claude agent row was attached here", not "a worker pane lives here". Every write to `attached` followed an `attach_argv` spawn, so a pane created by `pane run` never became a `StoredMember`. Squads full of codex and agy workers persisted with `members: []` correctly, by the rules the code held. Capture was not broken. It measured a different thing than the operator expected. The `--worker` funnel is the fix.
 
-## Restore never spawns a worker member
+## Startup restore holds by default; only policy respawns
 
-A worker pane's pty was a child of the previous mux server pid and died with it. After a restart such a member is always dead. No liveness probe runs, because probing an already-known answer is the receipt-can-lie shape. No process starts either.
+A worker pane's pty was a child of the previous mux server pid and died with it. After a restart such a member is always dead. No liveness probe runs, because probing an already-known answer is the receipt-can-lie shape. By default no process starts either: `[mux.restore] policy` is `hold` (named held panes, resume on focus), or `idle` (members stay idle rows). Only the explicit `resume` policy respawns at startup, and only the explicit `fno mux workspace restore` verb respawns on demand - both name every member they could not bring back.
 
 The member stays as-is and the row renders idle in the agent panel. Restore also prints one notice naming how many idle worker rows it created. That makes "nothing resumed" distinguishable from "the counter never ran".
 
