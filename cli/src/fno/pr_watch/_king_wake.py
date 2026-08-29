@@ -18,6 +18,8 @@ window, while the reverse costs an unbounded respawn storm.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -179,6 +181,90 @@ def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> st
     return qid
 
 
+def _sidecar_path(target: CrownTarget) -> Path:
+    """``.fno/kings/<scope>.wake.json`` - the tick-local board-hash cache.
+
+    Not the manifest: this is a cache with no reign meaning, and the
+    manifest's write-once contract should not absorb a value that changes
+    every ten minutes. Declared in docs/state-root-inventory.md.
+    """
+    return target.manifest.parent / f"{target.scope}.wake.json"
+
+
+def _board_hash(scope: str, entries: list, resolver: Optional[Callable] = None) -> str:
+    """sha256 over the scope's ``(id, status, column, priority)`` rows.
+
+    Reuses :func:`fno.king.board.compile_scope_ids` for scope resolution -
+    never a reimplementation. An empty string means "no signal" (uncompilable
+    scope), which the caller must treat as unchanged, never as a change: an
+    epic that left the graph is not a board refill.
+    """
+    from fno.king.board import compile_scope_ids
+
+    kwargs = {"resolve": resolver} if resolver is not None else {}
+    try:
+        ids = compile_scope_ids(scope, entries, **kwargs)
+    except Exception:  # noqa: BLE001 - an uncompilable scope is not a trigger
+        return ""
+    rows = sorted(
+        (
+            str(row.get("id") or ""),
+            str(row.get("status") or ""),
+            str(row.get("_kanban_column") or ""),
+            str(row.get("priority") or ""),
+        )
+        for row in entries
+        if isinstance(row, dict) and str(row.get("id") or "") in ids
+    )
+    joined = "\n".join("|".join(row) for row in rows)
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()
+
+
+def _board_trigger(
+    target: CrownTarget,
+    entries: list,
+    resolver: Optional[Callable] = None,
+) -> tuple[bool, Optional[str]]:
+    """``(wake?, hash_to_store_after_a_dispatch)``.
+
+    An ABSENT stored hash is a first observation, not a change: it is stored
+    here and wakes nothing, or every new crown wakes on its first tick. A
+    CHANGED hash is returned for the caller to store only after a dispatch
+    actually fired - a refused board change must stay a trigger, exactly like
+    the refused mail a cursor has not advanced past. An unreadable graph
+    (empty entries) is not a board emptied: no signal.
+    """
+    if not entries:
+        return False, None
+    fresh = _board_hash(target.scope, entries, resolver)
+    if not fresh:
+        return False, None
+    sidecar = _sidecar_path(target)
+    stored = ""
+    try:
+        stored = str(
+            json.loads(sidecar.read_text(encoding="utf-8")).get("board_hash") or ""
+        )
+    except (OSError, ValueError):
+        stored = ""  # a corrupt sidecar reads as first observation
+    if not stored:
+        _store_board_hash(target, fresh)
+        return False, None
+    if stored == fresh:
+        return False, None
+    return True, fresh
+
+
+def _store_board_hash(target: CrownTarget, digest: str) -> None:
+    sidecar = _sidecar_path(target)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    tmp = sidecar.with_suffix(".json.tmp")
+    tmp.write_text(
+        json.dumps({"board_hash": digest}), encoding="utf-8"
+    )
+    tmp.replace(sidecar)
+
+
 def _dispatch_walk(
     target: CrownTarget, reason: str, binary: str
 ) -> None:
@@ -220,6 +306,8 @@ def run_king_wake(
     rows_fn: Optional[Callable] = None,
     truth_fn: Optional[Callable] = None,
     unread_fn: Optional[Callable] = None,
+    entries_fn: Optional[Callable] = None,
+    scope_resolver: Optional[Callable] = None,
     should_wake_fn: Optional[Callable] = None,
     bill_fn: Optional[Callable] = None,
     dispatch_fn: Optional[Callable] = None,
@@ -246,6 +334,17 @@ def run_king_wake(
         from fno.bus.cursor import scan_unread
 
         unread_fn = scan_unread
+    if entries_fn is None:
+        def entries_fn() -> list:  # noqa: F811 - lazy default, loaded once below
+            from fno.graph.store import read_graph
+            from fno.paths import graph_json
+
+            try:
+                return read_graph(graph_json())
+            except Exception:  # noqa: BLE001 - an unreadable graph is no signal
+                return []
+
+    entries: Optional[list] = None
     if should_wake_fn is None:
         from fno.king.wake import should_wake
 
@@ -271,8 +370,17 @@ def run_king_wake(
             summary["refused"].append({"scope": target.scope, "refusal": refusal})
             continue
         reason = "mail" if _mail_trigger(target, unread_fn) else None
+        fresh_board_hash: Optional[str] = None
         if reason is None:
-            continue  # board and backstop triggers land here in their own tasks
+            if entries is None:
+                entries = entries_fn()
+            changed, fresh_board_hash = _board_trigger(
+                target, entries, scope_resolver
+            )
+            if changed:
+                reason = "board"
+        if reason is None:
+            continue  # the timer backstop lands here in its own task
         verdict = should_wake_fn(
             target.manifest, now=now, ceiling=ceiling, debounce_s=debounce_s
         )
@@ -309,6 +417,8 @@ def run_king_wake(
             import shutil
 
             _dispatch_walk(target, reason, shutil.which("fno-agents") or "fno-agents")
+        if fresh_board_hash:
+            _store_board_hash(target, fresh_board_hash)
         emit(
             "king_woken",
             {

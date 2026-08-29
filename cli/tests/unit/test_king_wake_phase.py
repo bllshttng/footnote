@@ -70,12 +70,13 @@ def _run(
 ):
     rec = _Recorder()
     root = tmp_path / "proj"
-    root.mkdir()
+    root.mkdir(exist_ok=True)
     manifest = root / ".fno" / "kings" / "epic-x.md"
     write_manifest(
         manifest,
         scope="epic-x",
         harness_session_id="11111111-2222-3333-4444-555555555555",
+        force=True,
     )
     if pre is not None:
         pre(manifest)
@@ -297,3 +298,157 @@ def test_an_unreadable_registry_wakes_nothing(tmp_path):
     assert rec.dispatches == []
     assert rec.events == []
     assert summary["crowns"] == 0
+
+
+# ── the board-change trigger ──────────────────────────────────────────────
+
+from fno.pr_watch._king_wake import _board_hash, _store_board_hash  # noqa: E402
+
+#: Fixture rung: a level-1 project crown over "proj", so no machine config
+#: or graph shape is load-bearing in these tests.
+_PROJECT_RESOLVER = lambda parts: (1, "proj")  # noqa: E731
+
+_BOARD_A = [
+    {
+        "id": "x-1",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    }
+]
+#: Same row, priority moved: a change the hash must see.
+_BOARD_A_REPRIORITIZED = [dict(_BOARD_A[0], priority="p0")]
+#: One row added: the refill case this trigger exists for.
+_BOARD_B = _BOARD_A + [
+    {
+        "id": "x-2",
+        "project": "proj",
+        "status": "ready",
+        "_kanban_column": "ready",
+        "priority": "p1",
+    }
+]
+
+
+class _SidecarTarget:
+    """The narrow slice of CrownTarget the sidecar writer needs."""
+
+    def __init__(self, manifest, scope="epic-x"):
+        self.manifest = manifest
+        self.scope = scope
+
+
+def _sidecar(manifest):
+    return manifest.parent / "epic-x.wake.json"
+
+
+def _stored(manifest) -> str:
+    import json
+
+    return str(json.loads(_sidecar(manifest).read_text())["board_hash"])
+
+
+def test_first_observation_stores_the_hash_and_wakes_nothing(tmp_path):
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "a first observation is not a change"
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+
+
+def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
+    # First pass: first observation only stores. The sidecar persists beside
+    # the manifest across passes in the same root, exactly as across ticks.
+    _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [("epic-x", "board")], "the refill wakes"
+    woken = [e for e in rec.events if e[0] == "king_woken"]
+    assert woken and woken[0][1]["reason"] == "board"
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_B, _PROJECT_RESOLVER)
+
+
+def test_an_unchanged_board_wakes_nothing_and_keeps_the_stored_hash(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "no mail and no change means no wake"
+    assert rec.events == []
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER)
+
+
+def test_a_refused_board_change_keeps_the_old_hash_so_it_stays_a_trigger(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+        bill_wake(manifest, now=NOW - timedelta(minutes=2))  # inside debounce
+
+    rec, _summary, manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == [], "the debounce refuses the spawn"
+    refused = [e for e in rec.events if e[0] == "king_wake_refused"]
+    assert refused and refused[0][1]["reason"] == "board"
+    assert _stored(manifest) == _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER), (
+        "a refused change must not consume the trigger"
+    )
+
+
+def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
+    def prime(manifest):
+        _store_board_hash(
+            _SidecarTarget(manifest),
+            _board_hash("epic-x", _BOARD_A, _PROJECT_RESOLVER),
+        )
+
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        pre=prime,
+        extra={
+            "entries_fn": lambda: _BOARD_A_REPRIORITIZED,
+            "scope_resolver": _PROJECT_RESOLVER,
+        },
+    )
+
+    assert rec.dispatches == [("epic-x", "board")]
+
+
+def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
+    rec, _summary, _manifest = _run(
+        tmp_path,
+        unread=lambda a: [],
+        extra={"entries_fn": lambda: [], "scope_resolver": _PROJECT_RESOLVER},
+    )
+
+    assert rec.dispatches == []
+    assert rec.events == []
