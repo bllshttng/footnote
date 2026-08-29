@@ -914,3 +914,59 @@ def test_empty_state_is_explicit(repo: Path):
     r = _sweep(repo)
     assert r.returncode == 0, r.stderr
     assert "No non-canonical worktrees found." in r.stdout
+
+
+# ── the deleted-upstream case: the shape EVERY merged PR leaves behind ──────
+def _add_merged_with_deleted_upstream(canon: Path, name: str) -> Path:
+    """The real post-merge shape: the branch tracked a remote branch, the merge
+    landed in main, and the remote branch was deleted (GitHub does this on
+    merge), so `fetch --prune` drops the ref while the branch config keeps
+    naming it."""
+    wt = canon / name
+    _git(canon, "worktree", "add", str(wt), "-b", f"feature/{name}", "main")
+    _commit(wt, f"{name}.txt")
+    _git(wt, "push", "-u", "origin", f"feature/{name}")
+    _git(canon, "merge", "--no-ff", f"feature/{name}", "-m", f"merge {name}")
+    _git(canon, "push", "origin", "main")
+    _git(canon, "push", "origin", "--delete", f"feature/{name}")
+    _git(canon, "fetch", "--prune", "origin")
+    return wt
+
+
+def test_deleted_upstream_ref_still_archives(repo: Path):
+    """A pruned upstream is not an unreadable one.
+
+    `rev-parse --abbrev-ref --symbolic-full-name @{u}` prints the literal
+    `@{u}` on stdout when the ref is gone, so `|| true` never clears it and the
+    comparison against that string errors. The caller read the error as
+    "unpushed state not verifiable" and refused. Measured on the real repo:
+    122 of 132 merged candidates refused this way, every one of them already
+    contained in origin/main.
+    """
+    wt = _add_merged_with_deleted_upstream(repo, "pruned")
+    assert _git(wt, "rev-parse", "--verify", "--quiet", "@{u}", check=False).returncode != 0
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert "1 archived" in r.stdout, diag
+    assert "not verifiable" not in r.stderr, diag
+    assert not wt.exists(), "worktree dir should be gone" + diag
+
+
+def test_deleted_upstream_with_unpushed_work_is_still_refused(repo: Path):
+    """Clearing the pruned NAME must not clear the strictness it carried.
+
+    A branch that tracked a remote is held to a refusal, not a warning, when
+    its state cannot be verified. The commit below is in neither the deleted
+    remote branch nor main, so removal would destroy it.
+    """
+    wt = _add_merged_with_deleted_upstream(repo, "pruned2")
+    _commit(wt, "after-merge.txt")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert "0 archived" in r.stdout or "archived" not in r.stdout, diag
+    assert wt.exists(), "a worktree carrying unmerged work must survive" + diag
