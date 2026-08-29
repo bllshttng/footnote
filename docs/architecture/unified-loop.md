@@ -280,7 +280,8 @@ A head-pinned local pass makes coverage known even when the GitHub read failed, 
 A passing PR with coverage 0 or Unknown terminates `DoneUnreviewed` instead of `DonePRGreen`.
 `DoneUnreviewed` is shaped like `DoneAwaitingMerge`: terminal on the first evaluation (no loop iteration spent waiting - that is what keeps the PR #214 wedge from returning), never a ship reason (out of `finalize.SHIP_REASONS`), never arms auto-merge.
 The autonomous merge is therefore refused structurally (`should_arm_auto_merge = approved && reason == "DonePRGreen"`); a human or out-of-band merge closes the node via reconcile.
-The discriminator is coverage, **not** the `attended` manifest field: `attended` is a known-broken substrate proxy (`FNO_AGENT_SELF` is injected by every spawn substrate including the pane default, so a spawned worker stamps `attended: false`), and the coverage path must not read it.
+
+The discriminator is coverage, **not** the `attended` manifest field, and the coverage path must not read it. Whether a review verdict exists is a fact about the PR. Who was watching is a fact about the session. They answer different questions. Until x-be78 `attended` was also a broken substrate proxy. It read `FNO_AGENT_SELF`, which every spawn substrate injects, pane included. So a pane worker with an operator watching stamped `attended: false`. The spawner now stamps `FNO_AGENT_SUBSTRATE` and the field is honest. That changes nothing here, because coverage still does not read it.
 
 Coverage is reported everywhere from one source: loop-check computes it (the `review_coverage` event) and the Python readers consume that event rather than recomputing, so a human and the loop see one number.
 The reachable merge paths it governs:
