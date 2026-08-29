@@ -3382,6 +3382,40 @@ enum RowResumeDisposition {
     NoPane(AgentNoPaneReason),
 }
 
+/// (x-7b5e) The per-member result of one resume attempt, reported by
+/// [`Core::resume_one`]. The gesture folds it into notices + a view change;
+/// the workspace-restore driver renders it one line per member. The refusal
+/// reason strings are exactly the notices the gesture printed before the
+/// extraction, so the two surfaces cannot disagree about why a row stayed
+/// idle.
+#[derive(Debug, Clone, PartialEq)]
+enum ResumeOutcome {
+    /// A pane now runs the session. Carries the pane id, its workspace and
+    /// tab, and the vanished-cwd notice when the stored directory was gone.
+    Resumed {
+        pane: u64,
+        squad: u64,
+        tab: TabId,
+        notice: Option<String>,
+    },
+    /// The session already had a live pane and it was focused, never
+    /// respawned (AC6-ERR). Carries where the pane lives.
+    Focused {
+        pane: u64,
+        squad: u64,
+        tab: TabId,
+    },
+    /// Refused with the same reason text the gesture would have noticed.
+    Refused { reason: String },
+    /// The claude re-entry plan fired off-loop and the gesture will replay.
+    /// A no-op on the surface it came from; the restore driver never hits it
+    /// because it stages every verdict before the apply loop.
+    PlanPending,
+    /// A dry run stopped exactly where the spawn would happen: nothing was
+    /// started and nothing was refused.
+    Planned,
+}
+
 impl Core {
     /// The view-scoped smallest-client clamp (Locked 1): a tab's content
     /// area is the elementwise min over the dims of every client currently
@@ -6170,6 +6204,202 @@ impl Core {
         }
         self.write_restore_message(pid, &format!("{name} could not be resumed: {reason}"));
         Ok(pid)
+    }
+
+    /// (x-7b5e) One resume attempt, shared by the ResumeAgent gesture and
+    /// the workspace-restore driver. Everything the gesture's arm did up to
+    /// the spawn lives here - the live-pane focus instead of a second
+    /// writer, the stale-mapping drop, the catalog gates, the receipt
+    /// fallback, the workspace resolution, the claude re-entry plan - so a
+    /// bulk caller cannot drift from the single-gesture guards and grow a
+    /// second-writer bug. The gesture wraps the outcome in notices and view
+    /// changes; `client_id` is consulted only when the claude plan must
+    /// resolve off-loop (the gesture replay path).
+    ///
+    /// `stored_hint` hands the driver's already-resolved member in; `None`
+    /// resolves it from `name` exactly as the gesture always did.
+    /// `dry_run` walks the same gates and stops where the spawn would
+    /// happen, returning [`ResumeOutcome::Planned`] - the load-bearing
+    /// classification behind the restore verb's `--dry-run`.
+    fn resume_one(
+        &mut self,
+        name: &str,
+        stored_hint: Option<crate::squad_store::StoredMember>,
+        client_id: u64,
+        view: (u64, TabId),
+        dims: (u16, u16),
+        dry_run: bool,
+    ) -> ResumeOutcome {
+        // A resume already mapped to a LIVE pane focuses it - a second
+        // session on the same rollout would be a second writer. A stale
+        // mapping (the pane died) is dropped and falls through to a fresh
+        // resume. Same reconcile-first shape as AttachAgent.
+        match self.unique_worker_pane_by_name(name) {
+            Err(()) => {
+                return ResumeOutcome::Refused {
+                    reason: format!("{name} is ambiguous - use the CLI"),
+                };
+            }
+            Ok(Some(mapped)) => {
+                if self.panes.contains_key(&mapped) {
+                    if let Some((sid, ti)) = self.session.find_pane(mapped) {
+                        let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
+                        return ResumeOutcome::Focused {
+                            pane: mapped,
+                            squad: sid,
+                            tab: tid,
+                        };
+                    }
+                } else {
+                    self.worker_pane.remove(name);
+                }
+            }
+            Ok(None) => {}
+        }
+        let stored_members: Vec<_> = match stored_hint {
+            Some(member) => vec![member],
+            None => self
+                .squad_members
+                .values()
+                .flatten()
+                .filter(|member| {
+                    !member.tombstone && member.worker.as_deref() == Some(name)
+                })
+                .cloned()
+                .collect(),
+        };
+        if stored_members.len() > 1 {
+            return ResumeOutcome::Refused {
+                reason: format!("{name} is ambiguous - use the CLI"),
+            };
+        }
+        let stored_member = stored_members.into_iter().next();
+        let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
+            Ok(receipts) => (receipts, None),
+            Err(error) => (HashMap::new(), Some(error)),
+        };
+        let mut row_name: Option<String> = None;
+        let facts = {
+            let candidates: Vec<&RegistryAgent> = self
+                .agents
+                .iter()
+                .filter(|a| {
+                    stored_member
+                        .as_ref()
+                        .map(|member| worker_registry_match(member, a, name))
+                        .unwrap_or(a.name == name)
+                })
+                .collect();
+            let a = match candidates.as_slice() {
+                [] => {
+                    return ResumeOutcome::Refused {
+                        reason: "no such agent".into(),
+                    };
+                }
+                [one] => *one,
+                _ => {
+                    return ResumeOutcome::Refused {
+                        reason: format!("{name} is ambiguous - use the CLI"),
+                    };
+                }
+            };
+            let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
+                self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
+            });
+            if live_pane || !self.row_resumable_in_session(a) {
+                None // refused; reason below
+            } else {
+                // (x-d285) The live registry name is the resolver's
+                // key; it outranks the display name the facts carry.
+                row_name = Some(a.name.clone());
+                Self::worker_facts(a).or_else(|| {
+                    let member = stored_member.as_ref()?;
+                    receipt_for_member(&fresh_receipts, member).cloned().map(
+                        |mut receipt| {
+                            receipt.name = name.to_string();
+                            receipt
+                        },
+                    )
+                })
+            }
+        };
+        let Some(mut facts) = facts else {
+            if let Some(error) = receipt_error {
+                return ResumeOutcome::Refused { reason: error };
+            }
+            return ResumeOutcome::Refused {
+                reason: "agent is not resumable".into(),
+            };
+        };
+        if let Some(worker) = stored_member
+            .as_ref()
+            .and_then(|member| member.worker.clone())
+        {
+            // The persisted member remains keyed by its original
+            // worker name even when the registry display name changed.
+            // Keep that join key while using the exact pair for lookup.
+            facts.name = worker;
+        }
+        // The dry run stops HERE: after every gate, before the claude plan
+        // resolution (a dry run never fires the off-loop resolver) and
+        // before anything spawns.
+        if dry_run {
+            return ResumeOutcome::Planned;
+        }
+        let sid = self
+            .squad_members
+            .iter()
+            .find(|(_, members)| {
+                members.iter().any(|member| {
+                    stored_member
+                        .as_ref()
+                        .is_some_and(|stored| stored == member)
+                        || member.worker.as_deref() == Some(name)
+                })
+            })
+            .map(|(sid, _)| *sid)
+            .or_else(|| {
+                self.session
+                    .squads
+                    .iter()
+                    .find(|squad| squad.owns_path(&facts.cwd))
+                    .map(|squad| squad.id)
+            })
+            .unwrap_or(view.0);
+        // (x-d285) A claude row's resume runs the canonical re-entry
+        // plan; the `None` arm fires the off-loop resolution and the
+        // gesture replays with the verdict staged. A receipt-only row
+        // (no registry row) has no recorded binding, so its name
+        // misses the resolver and the visible refusal is the design -
+        // no bare claude resume on this axis.
+        let plan = if facts.harness == "claude" {
+            let name = row_name.unwrap_or_else(|| facts.name.clone());
+            let Some(plan) = self.resume_gesture_plan(
+                client_id,
+                &name,
+                ReentrySpawnRequest::Resume { name: name.clone() },
+            ) else {
+                return ResumeOutcome::PlanPending;
+            };
+            Some(plan)
+        } else {
+            None
+        };
+        let (pid, tid, fallback_notice) =
+            match self.resume_worker_into(&facts, sid, None, dims.0, dims.1, plan.as_ref()) {
+                Ok(result) => result,
+                Err(error) => {
+                    return ResumeOutcome::Refused {
+                        reason: format!("resume failed: {error}"),
+                    };
+                }
+            };
+        ResumeOutcome::Resumed {
+            pane: pid,
+            squad: sid,
+            tab: tid,
+            notice: fallback_notice,
+        }
     }
 
     fn resume_worker_into(
@@ -11460,175 +11690,50 @@ impl Core {
                 // name must match a surfaced row, and the SERVER re-derives
                 // resumability (the client's Layout can be stale) - a row that
                 // gained a live pane between publish and click is refused
-                // here, never double-spawned.
-                // (x-5f7f) A resume already mapped to a LIVE pane focuses
-                // it - a second session on the same rollout would be a
-                // second writer. A stale mapping (the pane died) is dropped
-                // and falls through to a fresh resume. Same reconcile-first
-                // shape as AttachAgent.
-                match self.unique_worker_pane_by_name(&name) {
-                    Err(()) => {
-                        self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                        return Flow::Continue;
-                    }
-                    Ok(Some(mapped)) => {
-                        if self.panes.contains_key(&mapped) {
-                            if let Some((sid, ti)) = self.session.find_pane(mapped) {
-                                let tid = self.session.squad(sid).expect("live squad").tabs[ti].id;
-                                self.set_view(client_id, sid, tid);
-                                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                                    tab.focus = mapped;
-                                }
-                                self.notice(client_id, "already resumed; focused existing pane");
-                                self.push_layout(true);
-                                return Flow::Continue;
-                            }
-                        } else {
-                            self.worker_pane.remove(&name);
-                        }
-                    }
-                    Ok(None) => {}
-                }
-                let stored_members: Vec<_> = self
-                    .squad_members
-                    .values()
-                    .flatten()
-                    .filter(|member| {
-                        !member.tombstone && member.worker.as_deref() == Some(name.as_str())
-                    })
-                    .cloned()
-                    .collect();
-                if stored_members.len() > 1 {
-                    self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                    return Flow::Continue;
-                }
-                let stored_member = stored_members.into_iter().next();
-                let (fresh_receipts, receipt_error) = match load_spawn_receipts() {
-                    Ok(receipts) => (receipts, None),
-                    Err(error) => (HashMap::new(), Some(error)),
-                };
-                let mut row_name: Option<String> = None;
-                let facts = {
-                    let candidates: Vec<&RegistryAgent> = self
-                        .agents
-                        .iter()
-                        .filter(|a| {
-                            stored_member
-                                .as_ref()
-                                .map(|member| worker_registry_match(member, a, &name))
-                                .unwrap_or(a.name == name)
-                        })
-                        .collect();
-                    let a = match candidates.as_slice() {
-                        [] => {
-                            self.notice(client_id, "no such agent");
-                            return Flow::Continue;
-                        }
-                        [one] => *one,
-                        _ => {
-                            self.notice(client_id, format!("{name} is ambiguous - use the CLI"));
-                            return Flow::Continue;
-                        }
-                    };
-                    let live_pane = a.mux.as_ref().is_some_and(|(_, pane)| {
-                        self.panes.contains_key(pane) && self.session.find_pane(*pane).is_some()
-                    });
-                    if live_pane || !self.row_resumable_in_session(a) {
-                        None // refused; notice below
-                    } else {
-                        // (x-d285) The live registry name is the resolver's
-                        // key; it outranks the display name the facts carry.
-                        row_name = Some(a.name.clone());
-                        Self::worker_facts(a).or_else(|| {
-                            let member = stored_member.as_ref()?;
-                            receipt_for_member(&fresh_receipts, member).cloned().map(
-                                |mut receipt| {
-                                    receipt.name = name.clone();
-                                    receipt
-                                },
-                            )
-                        })
-                    }
-                };
-                let Some(mut facts) = facts else {
-                    if let Some(error) = receipt_error {
-                        self.notice(client_id, error);
-                        return Flow::Continue;
-                    }
-                    self.notice(client_id, "agent is not resumable");
-                    return Flow::Continue;
-                };
-                if let Some(worker) = stored_member
-                    .as_ref()
-                    .and_then(|member| member.worker.clone())
-                {
-                    // The persisted member remains keyed by its original
-                    // worker name even when the registry display name changed.
-                    // Keep that join key while using the exact pair for lookup.
-                    facts.name = worker;
-                }
-                let sid = self
-                    .squad_members
-                    .iter()
-                    .find(|(_, members)| {
-                        members.iter().any(|member| {
-                            stored_member
-                                .as_ref()
-                                .is_some_and(|stored| stored == member)
-                                || member.worker.as_deref() == Some(name.as_str())
-                        })
-                    })
-                    .map(|(sid, _)| *sid)
-                    .or_else(|| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|squad| squad.owns_path(&facts.cwd))
-                            .map(|squad| squad.id)
-                    })
-                    .unwrap_or(view.0);
+                // here, never double-spawned. The gate walk lives in
+                // [`Core::resume_one`], shared with the x-7b5e bulk restore
+                // driver so the two surfaces cannot drift.
                 let (rows, cols) = self
                     .clients
                     .iter()
                     .find(|c| c.id == client_id)
                     .map(|c| c.dims)
                     .unwrap_or((vp.rows, vp.cols));
-                // (x-d285) A claude row's resume runs the canonical re-entry
-                // plan; the `None` arm fires the off-loop resolution and the
-                // gesture replays with the verdict staged. A receipt-only row
-                // (no registry row) has no recorded binding, so its name
-                // misses the resolver and the visible refusal is the design -
-                // no bare claude resume on this axis.
-                let plan = if facts.harness == "claude" {
-                    let name = row_name.unwrap_or_else(|| facts.name.clone());
-                    let Some(plan) = self.resume_gesture_plan(
-                        client_id,
-                        &name,
-                        ReentrySpawnRequest::Resume { name: name.clone() },
-                    ) else {
-                        return Flow::Continue;
-                    };
-                    Some(plan)
-                } else {
-                    None
-                };
-                let (pid, tid, fallback_notice) =
-                    match self.resume_worker_into(&facts, sid, None, rows, cols, plan.as_ref()) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            self.notice(client_id, format!("resume failed: {error}"));
-                            return Flow::Continue;
+                match self.resume_one(&name, None, client_id, view, (rows, cols), false) {
+                    ResumeOutcome::Focused { pane, squad, tab } => {
+                        self.set_view(client_id, squad, tab);
+                        if let Some(tab) = self.viewed_tab_mut((squad, tab)) {
+                            tab.focus = pane;
                         }
-                    };
-                if let Some(notice) = fallback_notice {
-                    self.notice(client_id, notice);
+                        self.notice(client_id, "already resumed; focused existing pane");
+                        self.push_layout(true);
+                    }
+                    ResumeOutcome::Refused { reason } => {
+                        self.notice(client_id, reason);
+                    }
+                    // The claude re-entry plan fired off-loop; the
+                    // ReentryPlanReady replay re-enters this command with the
+                    // verdict staged. Nothing to report yet.
+                    ResumeOutcome::PlanPending => {}
+                    ResumeOutcome::Resumed {
+                        pane,
+                        squad,
+                        tab,
+                        notice,
+                    } => {
+                        if let Some(notice) = notice {
+                            self.notice(client_id, notice);
+                        }
+                        self.set_view(client_id, squad, tab);
+                        if let Some(tab) = self.viewed_tab_mut((squad, tab)) {
+                            tab.focus = pane;
+                        }
+                        self.push_layout(true);
+                        self.notice(client_id, format!("resumed {name}"));
+                    }
+                    // The gesture never dry-runs.
+                    ResumeOutcome::Planned => {}
                 }
-                self.set_view(client_id, sid, tid);
-                if let Some(tab) = self.viewed_tab_mut((sid, tid)) {
-                    tab.focus = pid;
-                }
-                self.push_layout(true);
-                self.notice(client_id, format!("resumed {name}"));
                 Flow::Continue
             }
             Command::DispatchNode { node, account } => {
