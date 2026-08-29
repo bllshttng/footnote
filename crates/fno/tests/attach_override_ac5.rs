@@ -2,7 +2,6 @@
 //! harness. Own binary: `attach_form` is OnceLock-cached per process (see
 //! `attach_override_ac1.rs`).
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());

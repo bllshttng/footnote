@@ -127,23 +127,6 @@ pub enum Liveness {
 /// exit immediately; that gap is why this list omits opencode).
 const PEEK_READER_HARNESSES: [&str; 2] = ["claude", "codex"];
 
-/// (x-6678) The shared codex app-server control socket:
-/// `$CODEX_HOME/app-server-control/app-server-control.sock`, `CODEX_HOME`
-/// defaulting to `~/.codex`. Mirrors `codex_inject::codex_app_server_socket_path`
-/// in fno-agents, which fno never links (it shells the binary at runtime);
-/// `the_attach_argv_is_identical_in_both_crates` in that crate links both and
-/// pins them against each other, so a change to either fails there rather
-/// than drifting.
-pub fn codex_app_server_socket_path() -> std::path::PathBuf {
-    let home = std::env::var("CODEX_HOME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("{}/.codex", std::env::var("HOME").unwrap_or_default()));
-    std::path::PathBuf::from(home)
-        .join("app-server-control")
-        .join("app-server-control.sock")
-}
-
 /// (x-c198) The argv that opens pi's OWN interface on `session_id`.
 ///
 /// An EXEC target, never a proxy, and the same shape as the codex builder
@@ -371,9 +354,11 @@ fn is_unsupported_block(block: &toml::Value) -> bool {
 }
 
 /// The pure half of [`attach_form`]: one attach block (contract row or config
-/// override) into a form. `None` for an unsupported or id-less block, so a
-/// block that cannot address a session is not an attach form. `kind` is
-/// optional here: a config override may carry only `tokens` and `pre_exec`.
+/// override) into a form. `None` for an unsupported, id-less, or BOTH-id
+/// block, so a block that cannot address a session - or that render() could
+/// only half-fill, leaving one placeholder verbatim in the exec'd argv - is
+/// not an attach form. `kind` is optional here: a config override may carry
+/// only `tokens` and `pre_exec`.
 fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
     if block.get("kind").and_then(|k| k.as_str()) == Some("unsupported") {
         return None;
@@ -384,9 +369,14 @@ fn parse_attach_form(block: &toml::Value) -> Option<AttachForm> {
         .iter()
         .map(|v| v.as_str().map(str::to_string))
         .collect::<Option<Vec<_>>>()?;
-    let (id_kind, placeholder) = if tokens.iter().any(|t| t == "{short_id}") {
+    let has_short = tokens.iter().any(|t| t == "{short_id}");
+    let has_session = tokens.iter().any(|t| t == "{session_id}");
+    if has_short && has_session {
+        return None;
+    }
+    let (id_kind, placeholder) = if has_short {
         (IdKind::Short, true)
-    } else if tokens.iter().any(|t| t == "{session_id}") {
+    } else if has_session {
         (IdKind::Session, true)
     } else {
         (IdKind::Short, false)
@@ -4701,8 +4691,8 @@ config_dir = "~/.claude-alt"
     /// harness added next passes it without touching this file.
     #[test]
     fn every_attach_capable_harness_reaches_drive() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/harness_capabilities.toml");
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/harness_capabilities.toml");
         let raw = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");

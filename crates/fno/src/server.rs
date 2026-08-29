@@ -964,7 +964,24 @@ fn attach_argv_for(
         // the same id.
         return agents_view::pi_attach_argv(id);
     }
-    let base = match harness.and_then(agents_view::attach_form) {
+    // The declaration renders the argv, EXCEPT under a test program stub:
+    // the stub pins the claude-shaped base (x-9f75), and pre-declaration it
+    // reached every non-codex harness through attach_base. A declared
+    // non-claude form renders exactly as production; claude and the
+    // no-harness fallback route through attach_base, where the stub lives.
+    // Without this, a stub naming anything but claude's own shape would
+    // silently spawn the real claude in tests.
+    let declared = harness.and_then(agents_view::attach_form);
+    #[cfg(test)]
+    let declared = {
+        let stubbed = ATTACH_PROGRAM.with(|p| p.borrow().is_some());
+        if stubbed && !matches!(harness, Some(h) if h != "claude") {
+            None
+        } else {
+            declared
+        }
+    };
+    let base = match declared {
         Some(form) => form.render(id),
         None => attach_base(id),
     };

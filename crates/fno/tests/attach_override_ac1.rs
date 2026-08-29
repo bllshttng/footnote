@@ -7,7 +7,6 @@
 //! combining them into one file would let the first test's cache answer the
 //! rest vacuously.
 
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Serializes the env redirect: it is process-global.
