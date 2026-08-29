@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
@@ -419,6 +420,121 @@ def resolve_configured_path(
 ) -> Path:
     """Resolve a configured path against an explicitly loaded repository."""
     return _resolve(raw, project_root=project_root, settings=settings)
+
+
+# ---------------------------------------------------------------------------
+# The state-file table: one resolver per state file
+# ---------------------------------------------------------------------------
+#
+# Epic x-3d21 R4 rules that every fno state access resolves against a DECLARED
+# root, and that ambient position (cwd, `git rev-parse --show-toplevel`, $HOME
+# read at call time, a hand-built `<root>/.fno/<file>`) may never select one.
+# A hand-built path consults nothing, so `FNO_EVENTS_PATH`, a guard, or a
+# refusal cannot reach it by construction.
+#
+# This table is the declaration those three consumers hang on, and it is a
+# tuple of records rather than a registry class because it has exactly three:
+#
+#   `fno doctor lint state-roots`  needs `filename` and `owning_modules`.
+#   `fno config doctor`            needs `root_class` and `selector`.
+#   `fno.state_fence`              needs `resolver`.
+#
+# It is also the ONE point this node shares with x-6f9f, and the two reasons
+# are different on purpose: x-6f9f wants a single named owner per state file
+# because N implementations of one operation drift, and x-3d21 R4 wants one
+# because a resolver is the only thing a root selector can be attached to.
+# One table, both reasons, written once.
+
+
+@dataclass(frozen=True)
+class StateFile:
+    """One state class: what it is called, who resolves it, which root it lives under."""
+
+    filename: str
+    """On-disk basename or directory name."""
+
+    resolver: Optional[str]
+    """Fully qualified symbol that owns the path, or None when nothing does.
+
+    ``None`` is a finding the table makes visible rather than papering over:
+    ``target-state.md`` is built by hand at four sites today and has no owner
+    to name in a refusal.
+    """
+
+    root_class: str
+    """OPERATOR, PROJECT or PROCESS - the epic's three-root vocabulary verbatim."""
+
+    selector: str
+    """The key that legitimately selects the root. Never ``--show-toplevel``, never cwd."""
+
+    owning_modules: tuple[str, ...]
+    """Repo-relative source files permitted to construct this path directly."""
+
+
+STATE_FILES: tuple[StateFile, ...] = (
+    StateFile(
+        filename="graph.json",
+        resolver="fno.paths.graph_json",
+        root_class="OPERATOR",
+        selector="config.paths.graph_json, else config.state_dir",
+        owning_modules=("cli/src/fno/paths.py",),
+    ),
+    StateFile(
+        filename="ledger.json",
+        resolver="fno.paths.ledger_json",
+        root_class="OPERATOR",
+        selector="config.paths.ledger_json, else config.state_dir",
+        owning_modules=("cli/src/fno/paths.py",),
+    ),
+    StateFile(
+        filename="registry.json",
+        resolver="fno.paths.agents_registry_path",
+        root_class="OPERATOR",
+        selector="config.paths.agents_registry_path, else config.state_dir "
+        "(Rust runtime home: FNO_AGENTS_HOME)",
+        owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
+    ),
+    StateFile(
+        filename="claims",
+        # Not in this module, and the table says so rather than pretending
+        # otherwise: claims resolve through the claims package.
+        resolver="fno.claims.io.global_claims_dir",
+        root_class="OPERATOR",
+        selector="FNO_CLAIMS_ROOT, else $HOME",
+        owning_modules=("cli/src/fno/claims/io.py", "crates/fno-agents/src/claims.rs"),
+    ),
+    StateFile(
+        filename="messages.jsonl",
+        resolver="fno.bus.log.bus_log_path",
+        root_class="OPERATOR",
+        selector="FNO_BUS_DIR, else config.paths.bus_dir, else config.state_dir",
+        owning_modules=("cli/src/fno/paths.py", "cli/src/fno/bus/log.py"),
+    ),
+    StateFile(
+        filename="briefs",
+        resolver="fno.paths.briefs_dir",
+        root_class="OPERATOR",
+        selector="config.paths.briefs_dir, else config.state_dir",
+        owning_modules=("cli/src/fno/paths.py",),
+    ),
+    StateFile(
+        filename="events.jsonl",
+        resolver="fno.paths.project_events_json",
+        root_class="PROJECT",
+        selector="FNO_EVENTS_PATH, else git --git-common-dir",
+        owning_modules=("cli/src/fno/paths.py", "crates/fno-agents/src/paths.rs"),
+    ),
+    StateFile(
+        filename="target-state.md",
+        # No owner today. `fno.phase.cli`, `fno.update` and `fno.recovery` each
+        # build it, which is why the lint's refusal for this row names the gap
+        # instead of a symbol that does not exist.
+        resolver=None,
+        root_class="PROJECT",
+        selector="git --git-common-dir",
+        owning_modules=(),
+    ),
+)
 
 
 # ---------------------------------------------------------------------------

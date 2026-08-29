@@ -87,6 +87,18 @@ def global_claims_root() -> Path:
     return Path(override) if override else Path.home()
 
 
+def global_claims_dir() -> Path:
+    """The GLOBAL claims directory itself (``~/.fno/claims`` by default).
+
+    ``claims_dir(global_claims_root())`` spelled once. Five production call
+    sites composed those two by hand, which is the shape x-3d21 R4 rules
+    against: a composition is not a resolver, so nothing can hang a receipt or
+    a fence on it. ``fno.paths.STATE_FILES`` names this symbol as the owner of
+    the ``claims`` row.
+    """
+    return claims_dir(global_claims_root())
+
+
 # Claim prefixes whose identifier is a globally-unique graph node id. Node ids
 # are global (like ~/.fno/graph.json), so EVERY claim keyed on one must
 # coordinate across worktrees/repos via the global root, never a cwd-local dir.

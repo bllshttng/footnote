@@ -1109,3 +1109,363 @@ def test_a_normal_files_run_prints_no_skip_receipt(tmp_path: Path) -> None:
     assert "style-exception" not in result.output, (
         "a file that was actually read must not be reported as skipped"
     )
+
+
+# ---------------------------------------------------------------------------
+# state-roots (x-3d21 R4/R5): every rule ships with a control that FIRES.
+#
+# A zero from a lint proves nothing on its own. A positive control validates
+# the TOOL, not the TARGET, and a green control aimed at the wrong symbol
+# still reads as proof - so each control below names the symbol the rule
+# actually matches, and the two real-tree cases assert against the live
+# specimens rather than a fixture the detector was shaped around.
+# ---------------------------------------------------------------------------
+
+
+def _real_repo_root() -> Path:
+    import fno.lint_cli as lint_cli
+
+    return Path(lint_cli.__file__).resolve().parents[3]
+
+
+def test_state_files_table_resolvers_all_import_and_are_callable() -> None:
+    import importlib
+
+    from fno.paths import STATE_FILES
+
+    for row in STATE_FILES:
+        if row.resolver is None:
+            continue
+        module_name, _, attr = row.resolver.rpartition(".")
+        resolver = getattr(importlib.import_module(module_name), attr)
+        assert callable(resolver), row.resolver
+
+
+def test_state_files_table_records_exactly_one_unowned_state_file() -> None:
+    """`resolver=None` is a finding, so the set of them must not grow silently."""
+    from fno.paths import STATE_FILES
+
+    unowned = {row.filename for row in STATE_FILES if row.resolver is None}
+    assert unowned == {"target-state.md"}
+
+
+def test_state_roots_rule_a_fires_on_a_hand_built_events_path(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        'journal = repo_root / ".fno" / "events.jsonl"\n', encoding="utf-8"
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    violations = _state_root_path_violations(tmp_path)
+
+    assert len(violations) == 1
+    rel, filename, message = violations[0]
+    assert rel == "cli/src/fno/new_writer.py"
+    assert filename == "events.jsonl"
+    assert "new_writer.py:1" in message
+    assert "fno.paths.project_events_json" in message
+
+
+def test_state_roots_rule_a_fires_on_a_multi_line_join(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "graph = (\n    root\n    / \".fno\"\n    / \"graph.json\"\n)\n", encoding="utf-8"
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    violations = _state_root_path_violations(tmp_path)
+
+    assert [(rel, key) for rel, key, _ in violations] == [
+        ("cli/src/fno/new_writer.py", "graph.json")
+    ]
+
+
+def test_state_roots_rule_a_fires_on_the_combined_literal(tmp_path: Path) -> None:
+    """`".fno/graph.json"` as ONE literal, in both languages.
+
+    The control the first cut of this rule did not have. Every other fixture
+    here writes the SEPARATED form (`/ ".fno" / "graph.json"`), so a filename
+    pattern that rejected the slash the `.fno/` token supplies passed all of
+    them while matching none of the combined form - a green control aimed at
+    the wrong symbol. It hid a live production site in `spawn_gate.rs`.
+    """
+    py = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
+    py.parent.mkdir(parents=True)
+    py.write_text('p = root / ".fno/graph.json"\n', encoding="utf-8")
+    rs = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    rs.parent.mkdir(parents=True)
+    rs.write_text('let p = root.join(".fno/claims");\n', encoding="utf-8")
+
+    from fno.lint_cli import _state_root_path_violations
+
+    hit = {(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)}
+
+    assert ("cli/src/fno/new_writer.py", "graph.json") in hit
+    assert ("crates/fno-agents/src/new_writer.rs", "claims") in hit
+
+
+def test_state_roots_rule_a_only_skips_a_cfg_test_MOD(tmp_path: Path) -> None:
+    """`#[cfg(test)]` on a `thread_local!`, an `fn` or an `if` is NOT a module.
+
+    108 of this tree's 207 occurrences are one of those, and three sit inside a
+    comment or a string literal. Scanning forward from any of them to the next
+    brace dropped 94,161 Rust lines from the gate's reach.
+    """
+    source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "#[cfg(test)]\n"
+        "thread_local! {\n"
+        "    static X: u8 = 0;\n"
+        "}\n"
+        '// a comment mentioning #[cfg(test)] must not open a region\n'
+        'let p = root.join(".fno").join("graph.json");\n',
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert [(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)] == [
+        ("crates/fno-agents/src/new_writer.rs", "graph.json")
+    ]
+
+
+def test_state_roots_rule_a_skips_nothing_for_a_cfg_test_mod_DECLARATION(
+    tmp_path: Path,
+) -> None:
+    """`#[cfg(test)] pub mod frame_html;` opens no block, so it excludes nothing.
+
+    The third shape of the same class, live at crates/fno/src/lib.rs. Scanning
+    forward for a brace from a declaration walks into the next unrelated item.
+    """
+    source = tmp_path / "crates" / "fno" / "src" / "lib.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "#[cfg(test)]\n"
+        "pub mod frame_html;\n"
+        "pub fn later() {\n"
+        '    let p = root.join(".fno").join("ledger.json");\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert [(rel, key) for rel, key, _ in _state_root_path_violations(tmp_path)] == [
+        ("crates/fno/src/lib.rs", "ledger.json")
+    ]
+
+
+def test_state_roots_rule_a_fires_on_a_rust_join(tmp_path: Path) -> None:
+    source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        'let p = root.join(".fno").join("events.jsonl");\n', encoding="utf-8"
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    violations = _state_root_path_violations(tmp_path)
+
+    assert [(rel, key) for rel, key, _ in violations] == [
+        ("crates/fno-agents/src/new_writer.rs", "events.jsonl")
+    ]
+
+
+def test_state_roots_rule_a_stays_silent_inside_the_owning_module(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "paths.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        'journal = repo_root / ".fno" / "events.jsonl"\n', encoding="utf-8"
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert _state_root_path_violations(tmp_path) == []
+
+
+def test_state_roots_rule_a_stays_silent_on_config_toml(tmp_path: Path) -> None:
+    """config.toml has its own layered candidate chain, owned by x-79a6."""
+    source = tmp_path / "cli" / "src" / "fno" / "new_reader.py"
+    source.parent.mkdir(parents=True)
+    source.write_text('cfg = root / ".fno" / "config.toml"\n', encoding="utf-8")
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert _state_root_path_violations(tmp_path) == []
+
+
+def test_state_roots_rule_a_stays_silent_in_a_comment(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "new_reader.py"
+    source.parent.mkdir(parents=True)
+    source.write_text('# was root / ".fno" / "graph.json" before\n', encoding="utf-8")
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert _state_root_path_violations(tmp_path) == []
+
+
+def test_state_roots_rule_a_stays_silent_in_a_rust_cfg_test_module(tmp_path: Path) -> None:
+    source = tmp_path / "crates" / "fno-agents" / "src" / "new_writer.rs"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "pub fn real() {}\n"
+        "\n"
+        "#[cfg(test)]\n"
+        "mod tests {\n"
+        '    fn fixture() { let p = root.join(".fno").join("graph.json"); }\n'
+        "}\n",
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _state_root_path_violations
+
+    assert _state_root_path_violations(tmp_path) == []
+
+
+def test_state_roots_rule_b_fires_on_a_zero_arg_cache_over_a_resolver(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "new_reader.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "from functools import lru_cache\n"
+        "\n"
+        "@lru_cache(maxsize=1)\n"
+        "def _cached_graph():\n"
+        "    return graph_json()\n",
+        encoding="utf-8",
+    )
+
+    from fno.lint_cli import _zero_arg_root_cache_violations
+
+    violations = _zero_arg_root_cache_violations(tmp_path)
+
+    assert len(violations) == 1
+    rel, symbol, message = violations[0]
+    assert (rel, symbol) == ("cli/src/fno/new_reader.py", "_cached_graph")
+    # The refusal must TEACH THE REMEDY, not only name the offence.
+    assert "_cached_graph_at(root: Path)" in message
+    assert "fleet_has_crown_at" in message
+
+
+def test_state_roots_rule_b_stays_silent_on_the_repo_s_real_negatives() -> None:
+    """The false-positive controls, asserted against the tree they live in.
+
+    `_running_from_source` is keyed on `Path(__file__)` ON PURPOSE and its
+    docstring says so; `_gh_executable`, `_codex_cli_version` and `machine_id`
+    cache a PATH lookup, a subprocess and a host id, none of which resolve a
+    state root; `fleet_has_crown_at` already takes the root as an argument,
+    which is the remedy this rule prescribes.
+    """
+    from fno.lint_cli import _zero_arg_root_cache_violations
+
+    hit = {symbol for _rel, symbol, _msg in _zero_arg_root_cache_violations(_real_repo_root())}
+
+    assert hit.isdisjoint(
+        {
+            "_running_from_source",
+            "_gh_executable",
+            "_codex_cli_version",
+            "machine_id",
+            "fleet_has_crown_at",
+            "fleet_has_crown",
+        }
+    )
+
+
+def test_state_roots_rule_b_fires_on_the_live_load_settings_specimen() -> None:
+    """The control that proves the rule reaches the offence, not a lookalike.
+
+    `load_settings` is the epic's own live R5 specimen and its body calls no
+    resolver by name - it reaches the root through `_candidate_paths`. A rule
+    that matched only the resolver names would run green against the exact
+    case it was written for.
+    """
+    from fno.lint_cli import _zero_arg_root_cache_violations
+
+    hit = {
+        (rel, symbol)
+        for rel, symbol, _msg in _zero_arg_root_cache_violations(_real_repo_root())
+    }
+
+    assert ("cli/src/fno/config/__init__.py", "load_settings") in hit
+
+
+def test_state_roots_baseline_covers_the_whole_live_census() -> None:
+    """The shipped tree is clean: every live finding is baselined, none is stale.
+
+    Both set differences are empty when the scan finds NOTHING, so the two
+    assertions alone pass vacuously - the absence-only shape this repo's own
+    pitfall corpus forbids. The positive markers come first: the scan must
+    reach both languages and both rules before its emptiness means anything.
+    """
+    from fno.lint_cli import _read_state_roots_baseline, _state_roots_findings
+
+    root = _real_repo_root()
+    findings = set(_state_roots_findings(root))
+    baseline = _read_state_roots_baseline(root)
+
+    assert len(baseline) > 20, "the ratchet lost its census"
+    assert any(rule == "A" and rel.endswith(".rs") for rule, rel, _ in findings)
+    assert any(rule == "A" and rel.endswith(".py") for rule, rel, _ in findings)
+    assert ("B", "cli/src/fno/config/__init__.py", "load_settings") in findings
+
+    assert findings - baseline == set()
+    assert baseline - findings == set()
+
+
+def test_state_roots_baseline_names_an_owner_for_every_line() -> None:
+    root = _real_repo_root()
+    path = root / "scripts" / "ci" / "state-roots-baseline.txt"
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        assert len(fields) == 5, line
+        assert fields[0] in {"A", "B"}, line
+        assert fields[3], line
+        assert fields[4], line
+
+
+def test_state_roots_gate_fails_when_a_baselined_site_was_drained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The load-bearing half: a drained exemption cannot become permanent."""
+    import fno.lint_cli as lint_cli
+
+    (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
+    baseline = tmp_path / "scripts" / "ci"
+    baseline.mkdir(parents=True)
+    (baseline / "state-roots-baseline.txt").write_text(
+        "A\tcli/src/fno/gone.py\tgraph.json\tunowned\tdrained already\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(lint_cli, "_repo_root", lambda: tmp_path)
+
+    result = runner.invoke(app, ["state-roots"])
+
+    assert result.exit_code == 1
+    assert "fixed, remove these baseline lines" in result.output
+    assert "cli/src/fno/gone.py" in result.output
+
+
+def test_state_roots_gate_fails_on_a_new_unbaselined_site(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import fno.lint_cli as lint_cli
+
+    source = tmp_path / "cli" / "src" / "fno" / "new_writer.py"
+    source.parent.mkdir(parents=True)
+    source.write_text('p = root / ".fno" / "ledger.json"\n', encoding="utf-8")
+    monkeypatch.setattr(lint_cli, "_repo_root", lambda: tmp_path)
+
+    result = runner.invoke(app, ["state-roots"])
+
+    assert result.exit_code == 1
+    assert "new violations" in result.output
+    assert "fno.paths.ledger_json" in result.output

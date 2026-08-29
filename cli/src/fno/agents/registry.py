@@ -42,7 +42,6 @@ import sys
 import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from datetime import datetime, timezone
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Optional
 
@@ -54,6 +53,7 @@ from fno.harness_identity import (
     session_identity_key,
     sync_harness_aliases,
 )
+from fno.state_fence import refuse_source_ahead_write, running_from_source
 from fno.time_budget import validate_timeout_budget
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
@@ -1004,25 +1004,10 @@ def _refuse_write_over_newer_schema(raw: Optional[dict], target: Path) -> None:
         )
 
 
-@lru_cache(maxsize=1)
-def _running_from_source() -> Optional[Path]:
-    """The repo root when this fno runs from a checkout, else ``None``.
-
-    Keyed on the MODULE's own path, never on the cwd: a deployed fno invoked
-    from inside a worktree is still deployed and must keep its normal write.
-    A deployed wheel lives under ``.../site-packages/fno/`` and reaches no
-    ``.git`` at any ancestor; source lives at ``<checkout>/cli/src/fno/`` and
-    reaches one four levels up.
-
-    A linked worktree's ``.git`` is a FILE, not a directory, so this tests
-    existence. ``is_dir()`` would miss every worktree, which is the only place
-    a source-ahead process ever runs.
-    """
-    here = Path(__file__).resolve()
-    for parent in list(here.parents)[:6]:
-        if (parent / ".git").exists():
-            return parent
-    return None
+# Re-exported under the registry's own name so a caller (and a test that
+# monkeypatches it) keeps one place to reach. The body moved to fno.state_fence
+# with the fence it feeds; nothing about it is registry-specific.
+_running_from_source = running_from_source
 
 
 def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
@@ -1035,63 +1020,30 @@ def _refuse_source_ahead_schema_bump(raw: Optional[dict], target: Path) -> None:
     into ``~/.fno/agents/registry.json`` on its next ordinary mail send, and
     every deployed process on the machine degrades until the branch merges.
 
-    Three conditions gate it, each load-bearing:
-
-    - the target IS the process-global registry. A named store is nobody's
-      shared state, so every test and every deliberate non-default store is
-      untouched -- and so is a checkout pointed at its own registry, which is
-      the escape hatch. It works by moving the target, not by silencing a check.
-    - :func:`_running_from_source` found a root and the target lies outside it.
-      A store inside the checkout is worktree-local by construction.
-    - the on-disk version is a readable int strictly BELOW this one. An absent
-      or unparseable file is not a raise, mirroring the sibling guard's
-      reasoning: refusing there would leave a torn registry unrepairable by the
-      command meant to rewrite it.
-
-    There is deliberately NO bypass flag and NO env override. The redirect
-    above already covers a developer exercising a new schema end to end, and a
-    disable switch is the first thing a blocked worker would reach for, which
-    is the failure this exists to stop.
-
-    Known sharp edge: this refuses ANY source-run raise of the shared file, not
-    only one that exceeds the deployment. A checkout at the deployed version
-    writing a shared file left at an older one is refused too. Reading the
-    deployed constant to tell those apart needs a machine-specific interpreter
-    path, and in practice the case self-heals in seconds because every deployed
-    process on the machine stamps this file on its next write. The cost of
-    guessing wrong in the other direction is a fleet-wide outage, so the
-    comparison stays local.
+    The three conditions, the sharp edge, and the reason there is no bypass
+    flag all live with the mechanism in :func:`fno.state_fence.refuse_source_ahead_write`.
+    This function is the registry's binding to it: which version constant to
+    compare, which shared resolver to compare the target against, and the
+    remedy to name. Read that module before changing either.
     """
     if raw is None:
         return
-    on_disk = raw.get("schema_version")
-    if not isinstance(on_disk, int) or on_disk >= SCHEMA_VERSION:
-        return
-    root = _running_from_source()
-    if root is None:
-        return
-    resolved = target.resolve()
     try:
-        resolved.relative_to(root)
-    except ValueError:
-        pass
-    else:
-        return
-    try:
-        shared = paths.agents_registry_path().resolve()
+        shared = paths.agents_registry_path()
     except Exception:  # noqa: BLE001 - unreadable config is not a bump
         return
-    if resolved != shared:
-        return
-    raise RegistryVersionError(
-        f"refusing to raise the shared registry at {target} from "
-        f"schema_version={on_disk} to schema_version={SCHEMA_VERSION}: this fno "
-        f"is running from source at {root}, not from the deployed install, so "
-        "the bump exists only on this branch and every deployed reader on the "
-        "machine would degrade until it merges. Either deploy this schema "
-        "(fno doctor update), or point this checkout at its own registry "
-        "(config.paths.agents_registry_path, or FNO_AGENTS_HOME for the Rust "
-        "side)."
+    refuse_source_ahead_write(
+        target=target,
+        shared=shared,
+        on_disk_version=raw.get("schema_version"),
+        code_version=SCHEMA_VERSION,
+        source_root=_running_from_source(),
+        error=RegistryVersionError,
+        what="registry",
+        remedy=(
+            "point this checkout at its own registry "
+            "(config.paths.agents_registry_path, or FNO_AGENTS_HOME for the Rust side)"
+        ),
     )
 
 

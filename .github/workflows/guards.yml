@@ -90,6 +90,15 @@ jobs:
           uv run mypy src/
           echo "main-python-static: checked ${python_files} Python files with ruff + mypy"
 
+      # x-3d21 R4/R5: a state path built by hand consults nothing, so no env
+      # pin, guard or refusal can reach it. The ratchet fails in BOTH
+      # directions - a new hand-built path, and a baselined line whose site was
+      # fixed and not removed.
+      - name: State-roots ratchet (declared root)
+        if: ${{ !cancelled() }}
+        working-directory: cli
+        run: uv run fno-py doctor lint state-roots
+
   # PR-only: every member here originally triggered on `pull_request` alone
   # (no `push`), several because they read PR-only context (PR_BODY,
   # BASE_REF, PR_TITLE, PR_BASE_SHA/PR_HEAD_SHA) that does not exist on a push
