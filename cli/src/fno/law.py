@@ -11,6 +11,8 @@ WIDTH. `require_marked_caller` answers `chat_attested` off
 `resolve_self_identity`, which walks process ancestry. So the door is not
 "a mail-injected slash command". It is ANY process descended from a harness
 session, including an agent's own Bash call with no user-shaped text anywhere.
+The door is the law LANE and never the `operator` VALUE: `_resolve_decider`
+still refuses an `operator` claim from a resolved session.
 The narrower mail shape is merely the one that is impossible to detect: across
 every transcript in this machine's claude project directory, 2173 user turns
 carrying an `<fno_mail>` envelope were recorded with `promptSource: "typed"`

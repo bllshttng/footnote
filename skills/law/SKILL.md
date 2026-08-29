@@ -54,7 +54,7 @@ Report the refusal verbatim. Say that no law was recorded. Never infer a recordi
 
 ## Safety boundary
 
-Invocation is the authority. The door is wider than a chat line. Any process descended from a harness session records as `chat_attested`. That includes an agent's own Bash call. A mail-injected slash command is a special case of it, and is the case that is impossible to detect. That trade is deliberate. [LIMITATIONS.md](LIMITATIONS.md) states it with the measurement behind it. What the skill still guarantees is honest attribution. A chat recording says `chat_attested` and never claims the operator lane. Environment scrubbing stays forbidden.
+Invocation is the authority. The door is the law LANE, not the `operator` value. Any process descended from a harness session records as `chat_attested`. That includes an agent's own Bash call. A mail-injected slash command is a special case of it. It is the case that is impossible to detect. An `operator` row stays refused from any session. That trade is deliberate. [LIMITATIONS.md](LIMITATIONS.md) states it with the measurement behind it. What the skill still guarantees is honest attribution. A chat recording says `chat_attested` and never claims the operator lane. Environment scrubbing stays forbidden.
 
 ## Known Limitations and Deferred Work
 
