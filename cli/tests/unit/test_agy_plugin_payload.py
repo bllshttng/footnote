@@ -1,4 +1,4 @@
-"""Payload boundary for the agy plugin install (x-70a1).
+"""Payload boundary for the agy plugin install.
 
 `agy plugin install` deep-copies whatever directory it is handed, dereferencing
 symlinks, so the script must stage an explicit allowlist instead of the repo
@@ -18,7 +18,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SCRIPT = REPO_ROOT / "scripts" / "install" / "agy-plugin.sh"
 
-FORBIDDEN_ENTRIES = {"internal", "crates", "cli", ".git", ".fno", "docs", "scripts"}
 MANIFEST_KEYS = {"$schema", "name", "description"}
 
 
@@ -43,11 +42,11 @@ def test_payload_holds_exactly_the_allowlist(payload: Path):
     assert (payload / "skills" / "using-fno" / "SKILL.md").is_file()
     agents = list((payload / "agents").rglob("*"))
     assert any(p.is_file() for p in agents)
-    # ...and the top level names nothing outside it.
+    # ...and the top level names nothing outside it, so no repo path can
+    # ride along (internal, crates, cli, .git, docs, scripts, and friends
+    # all fail this equality).
     entries = {p.name for p in payload.iterdir()}
     assert entries == {"plugin.json", "skills", "agents"}
-    leaked = entries & FORBIDDEN_ENTRIES
-    assert not leaked, f"forbidden path(s) rode into the payload: {sorted(leaked)}"
 
 
 def test_manifest_fits_agys_additional_properties_false_schema(payload: Path):
