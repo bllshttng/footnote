@@ -416,11 +416,21 @@ def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     fno = bin_dir / "fno"
     fno.write_text(
         '#!/usr/bin/env bash\n'
-        '[[ "$1 $2" == "pr hold-check" ]] && exit 0\n'
+        '[[ "$1 $2 $3" == "do pr hold-check" ]] && exit 0\n'
         'exit 1\n'
     )
     fno.chmod(0o755)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+    # FNO_HOME alone does NOT isolate the in-process hold reader: graph_json()
+    # resolves through load_settings(), which ignores FNO_HOME, so the veto
+    # read the MACHINE's real backlog graph and then failed its gh closure
+    # fetch in the temp cwd - failing closed on state this test never set up
+    # (4 tests went red on any fleet machine). $FNO_CONFIG makes one temp
+    # settings file the only candidate; state_dir pins the graph inside the
+    # sandbox, where a missing graph.json reads as empty and unheld.
+    config = Path(fno_home).parent / "hook-settings.yaml"
+    config.write_text(f"state_dir: {fno_home}\n")
+    env["FNO_CONFIG"] = str(config)
     env.update(extra_env or {})
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     p = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,

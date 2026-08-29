@@ -164,6 +164,50 @@ def test_dispatch_hold_veto_fails_closed_when_probe_unavailable(monkeypatch, fai
     assert msg and "refusing to assume unheld" in msg
 
 
+def test_dispatch_hold_veto_refuses_bare_merge_with_named_reason(monkeypatch):
+    """Round-12 finding 1: the no-PR-number forms are exactly the forms the
+    two-factor path can still authorize (prefer_pr=None single-session), so
+    the hold veto skipping them let a bare merge proceed against an active
+    plan-level hold with the hold check never running. The refusal must name
+    the reason and the sanctioned verb, and must not spend a probe."""
+    calls = _patch_run(monkeypatch, _Proc(0))
+    for command in ("gh pr merge", "gh pr merge my-branch", "gh pr merge --squash"):
+        msg = git_protection._dispatch_hold_refusal(command)
+        assert msg, f"bare form {command!r} must refuse, not skip"
+        assert "cannot determine which PR" in msg
+        assert "refusing to assume unheld" in msg
+        assert "fno do pr merge" in msg
+    assert "cmd" not in calls, "no hold probe may fire without a PR number"
+
+
+def test_dispatch_hold_veto_bare_merge_other_repo_names_the_repo_case(monkeypatch):
+    """The other-repo refusal is the accurate one for a bare merge aimed
+    elsewhere, so it must be decided BEFORE the unparseable-PR branch."""
+    calls = _patch_run(monkeypatch, _Proc(0))
+    msg = git_protection._dispatch_hold_refusal("gh pr merge -R other/repo")
+    assert msg and "another repository" in msg
+    assert "cmd" not in calls
+
+
+def test_inprocess_hold_reader_degrades_on_broken_import(monkeypatch):
+    """Round-12 finding 8: the import chain reaches typer, so a broken/partial
+    install raises more than ImportError. A version-mismatch AttributeError
+    must degrade to the subprocess fallback, never crash the hook."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def broken(name, *args, **kwargs):
+        if name.startswith("fno.pr"):
+            raise AttributeError(
+                "module 'typer' has no attribute 'Bad' (broken install)"
+            )
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken)
+    assert git_protection._inprocess_dispatch_hold_reason(900) == (False, None)
+
+
 def test_other_repo_is_skipped(monkeypatch):
     """Every probe reads THIS checkout, so a merge aimed at another repository
     is unanswerable and must not even spawn the subprocess."""
