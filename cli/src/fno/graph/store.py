@@ -152,6 +152,13 @@ CANONICAL_FIELD_ORDER: list[str] = [
     # Append-only lifecycle provenance (x-b6e4): {phase, harness, session_id, at}
     # per phase boundary. Sits in the provenance tail after the birth/spawn edges.
     "sessions",
+    # Agent demand signal: {ts, session_id, harness, fno_id, evidence}, one per
+    # session per node. Deliberately NOT setdefault-ed below, the same sparse
+    # treatment as `contained_in` and for the same reason: an empty list stamped
+    # onto every node would change the bytes of a graph nobody has voted on, and
+    # the board digest is what proves a vote never re-ranks anything. Readers
+    # must use `.get("encounters") or []`, never `[...]`.
+    "encounters",
     "queued_at",
     "queued_reason",
 ]
@@ -1159,6 +1166,42 @@ def append_progress_note(
 
     locked_mutate_graph(path, mutator)
     return result["found"], result["plan_path"]
+
+
+def append_encounter(path: Path, node_id: str, record: dict) -> "tuple[bool, str | None]":
+    """Append one encounter, refusing a second from the same session.
+
+    Returns ``(appended, error)``. The duplicate error names the existing
+    record's timestamp: a session that already voted needs to know WHEN, so it
+    can decide whether to add a progress note instead of arguing with a gate.
+
+    The duplicate scan is a linear walk comparing ``session_id``. The list is
+    per node and small, so an index would be a second store to keep true.
+    """
+    from fno.graph._intake import _find_node  # function-local: avoid import cycle
+
+    result: dict[str, object] = {"appended": False, "error": None}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            result["error"] = f"no node resolves to '{node_id}'"
+            return entries
+        session_id = record.get("session_id")
+        for existing in node.get("encounters") or []:
+            if existing.get("session_id") == session_id:
+                result["error"] = (
+                    f"session {session_id} already recorded an encounter on "
+                    f"{node.get('id', node_id)} at {existing.get('ts')}"
+                )
+                return entries
+        node.setdefault("encounters", []).append(dict(record))
+        result["appended"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    error = result["error"]
+    return bool(result["appended"]), error if isinstance(error, str) else None
 
 
 def append_wave_note(path: Path, node_id: str, note: dict) -> tuple[bool, str | None]:
