@@ -2415,7 +2415,7 @@ pub mod err_code {
     /// (v51, x-588a) The addressed identity disagrees with the pane's captured
     /// identity or its unique registry occupant; no bytes were typed.
     pub const TARGET_IDENTITY_MISMATCH: u32 = 14;
-    /// (v59, x-7b5e) `WorkspaceRestore` arrived before the session's first real
+    /// (v60, x-7b5e) `WorkspaceRestore` arrived before the session's first real
     /// attach, so the persisted squads were never read into memory and an empty
     /// member list would read as "nothing to restore". The refusal names the
     /// attach precondition; the store is untouched.
