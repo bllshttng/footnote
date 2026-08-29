@@ -1280,6 +1280,81 @@ def read_route_settings(path: str) -> dict[str, str]:
     return route
 
 
+def provider_name_for_route(
+    route: Mapping[str, str],
+    *,
+    settings: "Optional[SettingsModel]" = None,
+) -> Optional[str]:
+    """The provider a recorded route belongs to, by stamp else base_url.
+
+    One match implementation shared by the resume re-resolution and the
+    ``config route settings ls`` rendering, so the two can never disagree
+    about which provider a file belongs to. None when neither the
+    ``FNO_ROUTE_PROVIDER`` stamp nor the base_url matches today's registry.
+    """
+    base = (route.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+    named = (route.get(ROUTE_PROVIDER_ENV) or "").strip()
+    providers = effective_providers(_routing_block(settings))
+    if named and named in providers:
+        return named
+    for name, record in providers.items():
+        if base and str(record.get("base_url") or "").rstrip("/") == base:
+            return name
+    return None
+
+
+def refresh_provider_default_tiers(
+    route: Mapping[str, str],
+    *,
+    settings: "Optional[SettingsModel]" = None,
+) -> tuple[dict[str, str], Optional[str]]:
+    """Re-resolve a recorded route's provider-DEFAULT tier key, or say why not.
+
+    A recorded route-settings file pins two kinds of value with the same
+    authority: what the operator CHOSE (endpoint, token, model) and what the
+    provider registry defaulted to at launch (the haiku tier, a background
+    model the operator never named). Replayed verbatim on resume, a moved
+    default keeps serving the old tier forever - glm-4.5-air left the z.ai
+    coding-plan supported set, and every resume off a file recorded before
+    the change failed background calls with model-not-found while the main
+    model stayed healthy (x-5cc5).
+
+    The operator's 2026-08-17 rule decides the split: the recorded file pins
+    what the operator chose, not what the provider happened to default to
+    that week. So the haiku tier re-resolves against TODAY'S registry
+    (built-in defaults overlaid by config, the same map
+    :func:`effective_providers` renders), and every other key replays
+    verbatim. An extra_env tier pin does not survive a resume - pin the
+    provider's ``haiku_model`` in config to make a tier durable.
+
+    Returns ``(route, note)``: a copy of the route (the caller's mapping is
+    never mutated) plus a disclosure note naming the provider, the old value
+    and the new one whenever a tier moved. A route whose provider cannot be
+    identified replays verbatim with a note naming what failed to match. No
+    default moved, or nothing recorded to refresh, returns ``(route, None)``.
+    """
+    refreshed = dict(route)
+    pname = provider_name_for_route(route, settings=settings)
+    if pname is None:
+        base = (route.get("ANTHROPIC_BASE_URL") or "").rstrip("/")
+        named = (route.get(ROUTE_PROVIDER_ENV) or "").strip()
+        missing = f"provider {named!r}" if named else f"base_url {base!r}"
+        return refreshed, (
+            f"recorded {missing} is not in today's provider registry; "
+            "replaying recorded tiers verbatim"
+        )
+    record = effective_providers(_routing_block(settings))[pname]
+    todays = record.get("haiku_model")
+    recorded = refreshed.get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
+    if not todays or not recorded or str(todays) == recorded:
+        return refreshed, None
+    refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = str(todays)
+    return refreshed, (
+        f"provider {pname} haiku tier default moved {recorded} -> {todays}; "
+        "tier re-resolved, operator-chosen keys replay verbatim"
+    )
+
+
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
 # (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
 # (OpenAI's API); a routed third-party provider almost always wants "chat".

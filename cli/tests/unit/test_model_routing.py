@@ -756,3 +756,84 @@ def test_route_table_target_uses_slash() -> None:
     rows = mr.build_route_table(settings=_settings(), env={"ZAI_API_KEY": "k"})
     by_role = {r["role"]: r for r in rows}
     assert by_role["coordinate"]["provider_model"] == "zai/glm-5.3"
+
+
+# ---- x-5cc5: a recorded overlay's provider-DEFAULT tier re-resolves on resume ----
+
+
+def _recorded_route(
+    haiku: str = "glm-4.5-air", base: str = mr.DEFAULT_ZAI_BASE_URL
+) -> dict[str, str]:
+    return {
+        "ANTHROPIC_BASE_URL": base,
+        "ANTHROPIC_AUTH_TOKEN": "zk-secret",
+        "ANTHROPIC_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.3",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
+    }
+
+
+def test_refresh_moves_a_stale_haiku_tier_to_todays_default() -> None:
+    """The x-5cc5 symptom: a file recorded when glm-4.5-air was the zai
+    default keeps failing background calls after the default moved. The
+    refresh lands on today's glm-4.7 and the note names provider, old, new."""
+    route = _recorded_route()
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
+    assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    assert note is not None
+    assert "zai" in note and "glm-4.5-air" in note and "glm-4.7" in note
+    # Operator-chosen keys replay verbatim, and the caller's mapping is not
+    # mutated behind its back.
+    assert refreshed["ANTHROPIC_AUTH_TOKEN"] == "zk-secret"
+    assert refreshed["ANTHROPIC_BASE_URL"] == mr.DEFAULT_ZAI_BASE_URL
+    assert refreshed["ANTHROPIC_MODEL"] == "glm-5.3"
+    assert route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.5-air"
+
+
+def test_refresh_is_silent_when_the_default_has_not_moved() -> None:
+    route = _recorded_route(haiku="glm-4.7")
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
+    assert note is None
+    assert refreshed == route
+
+
+def test_refresh_replays_verbatim_and_names_the_miss_when_no_provider_matches() -> None:
+    """A base_url today's registry does not know cannot be re-resolved; the
+    route replays unchanged and the disclosure names exactly what failed to
+    match (never a bare 'kept stale')."""
+    route = _recorded_route(base="https://elsewhere.example/api")
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
+    assert refreshed == route
+    assert note is not None
+    assert "https://elsewhere.example/api" in note
+
+
+def test_refresh_matches_by_provider_stamp_over_base_url() -> None:
+    """A mirrored base_url still resolves through the FNO_ROUTE_PROVIDER
+    stamp the route carries, so the tier follows the provider, not the
+    endpoint spelling."""
+    route = _recorded_route(base="https://mirror.example/api")
+    route[mr.ROUTE_PROVIDER_ENV] = "zai"
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=_settings())
+    assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.7"
+    assert note is not None and "zai" in note
+
+
+def test_refresh_lands_on_a_config_pinned_default_not_the_builtin() -> None:
+    """A provider haiku_model pinned in config is a NAMED default; a resume
+    re-resolves onto the pin, which is the durable form of a tier override."""
+    route = _recorded_route()
+    settings = _settings(providers={"zai": {"haiku_model": "glm-4.6"}})
+    refreshed, note = mr.refresh_provider_default_tiers(route, settings=settings)
+    assert refreshed["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == "glm-4.6"
+    assert note is not None and "glm-4.6" in note
+
+
+def test_provider_name_for_route_returns_none_for_an_unknown_route() -> None:
+    assert mr.provider_name_for_route({}, settings=_settings()) is None
+    assert (
+        mr.provider_name_for_route(
+            {"ANTHROPIC_BASE_URL": "https://nope.example"}, settings=_settings()
+        )
+        is None
+    )

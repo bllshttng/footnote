@@ -2456,11 +2456,15 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     account. Silent is the whole problem - the worker runs fine, bills the wrong
     vendor, and reports nothing.
 
-    A faithful replay, not a re-resolution: the recorded file is read back and
-    handed to the spawn as an explicit route, which ``resolve_spawn_route`` passes
-    through unchanged. Re-resolving against today's config would relaunch the
-    worker onto a route that may differ from the one it ran under, which is a
-    behavior change wearing the word "resume".
+    A faithful replay for what the operator chose, not a blanket re-resolution:
+    the recorded file is read back and handed to the spawn as an explicit route,
+    which ``resolve_spawn_route`` passes through unchanged. Endpoint, token and
+    the named model replay verbatim - re-resolving those against today's config
+    would relaunch the worker onto a route that may differ from the one it ran
+    under, which is a behavior change wearing the word "resume". The one
+    exception is the provider-DEFAULT haiku tier: that value was never the
+    operator's choice, so it re-resolves against today's registry (the
+    2026-08-17 operator rule, x-5cc5) with a stderr note naming the move.
 
     Raises:
         DispatchAskError: exit 2, when the row names a route file that is gone
@@ -2473,7 +2477,11 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     path = getattr(entry, "route_settings_path", None)
     if not path:
         return None
-    from fno.agents.model_routing import RouteRestoreError, read_route_settings
+    from fno.agents.model_routing import (
+        RouteRestoreError,
+        read_route_settings,
+        refresh_provider_default_tiers,
+    )
 
     try:
         restored = read_route_settings(path)
@@ -2490,6 +2498,9 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     # path exists to refuse. No BASE_URL means there was never a route.
     if not restored.get("ANTHROPIC_BASE_URL"):
         return None
+    restored, tier_note = refresh_provider_default_tiers(restored)
+    if tier_note:
+        print(f"route-settings: {tier_note} (recorded at {path})", file=sys.stderr)
     return restored
 
 
