@@ -1080,6 +1080,149 @@ thread_local! {
     /// a real claude/codex, mirroring `ATTACH_PROGRAM` for the attach path.
     static RESUME_PROGRAM: std::cell::RefCell<Option<Vec<String>>> =
         const { std::cell::RefCell::new(None) };
+    /// Test override for the declared resume forms (see
+    /// [`declared_resume_form`]). `None` (the default) reads the repo's
+    /// canonical capability TOML directly: a unit test cannot reach a real
+    /// `fno-agents` binary deterministically, so the seed applies the same
+    /// usability rules to the same file the production renderer reads, and
+    /// the shell path stays production-only.
+    static DECLARED_RESUME_FORMS:
+        std::cell::RefCell<Option<HashMap<String, Option<DeclaredResumeForm>>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Per-thread memo for the TOML seed above; the file is read once.
+    static TEST_RESUME_FORM_SEED:
+        std::cell::RefCell<Option<HashMap<String, Option<DeclaredResumeForm>>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// (x-7b5e) One harness's declared `interactive_resume` form: the tokens the
+/// capability table carries, with the `{session_id}` placeholder intact.
+#[derive(Clone, Debug, PartialEq)]
+struct DeclaredResumeForm {
+    tokens: Vec<String>,
+}
+
+/// The usability rules of the renderer (`fno-agents resume-argv`) applied
+/// locally: a form exists, is not `unsupported`, carries tokens, and names
+/// no placeholder the caller cannot fill.
+fn declared_resume_form_usable(kind: &str, tokens: &[String]) -> Option<DeclaredResumeForm> {
+    if kind == "unsupported" || tokens.is_empty() {
+        return None;
+    }
+    for token in tokens {
+        if token.starts_with('{') && token.ends_with('}') && token != "{session_id}" {
+            return None;
+        }
+    }
+    Some(DeclaredResumeForm {
+        tokens: tokens.to_vec(),
+    })
+}
+
+/// (x-7b5e) The declared `interactive_resume` form for one harness, or `None`
+/// when the table declares nothing usable for it. Production shells
+/// `fno-agents resume-argv <harness>` once per harness and caches the answer
+/// for the process lifetime - `fno` never links `fno-agents` (its Cargo.toml
+/// records that boundary) and never re-implements the renderer, so the table
+/// stays the single source and a seventh harness needs no Rust change. A
+/// failed read (missing binary, unparseable body) is cached as "nothing
+/// usable" too: this server already degrades the same way for every other
+/// fno-agents shellout, and the honest reason travels through the refusal
+/// messages instead of a second fallback copy of claude/codex arms.
+fn declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
+    #[cfg(test)]
+    {
+        if let Some(map) = DECLARED_RESUME_FORMS.with(|p| p.borrow().clone()) {
+            return map.get(harness).cloned().flatten();
+        }
+        TEST_RESUME_FORM_SEED.with(|p| {
+            let mut seed = p.borrow_mut();
+            if seed.is_none() {
+                *seed = Some(test_resume_form_seed());
+            }
+            seed.as_ref()
+                .and_then(|map| map.get(harness))
+                .cloned()
+                .flatten()
+        })
+    }
+    #[cfg(not(test))]
+    {
+        static CACHE: std::sync::OnceLock<
+            std::sync::Mutex<HashMap<String, Option<DeclaredResumeForm>>>,
+        > = std::sync::OnceLock::new();
+        let mut cache = CACHE
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .ok()?;
+        if let Some(cached) = cache.get(harness) {
+            return cached.clone();
+        }
+        let form = shell_declared_resume_form(harness);
+        cache.insert(harness.to_string(), form);
+        cache.get(harness).cloned().flatten()
+    }
+}
+
+/// Production read: shell the renderer and parse its one-line JSON reply.
+#[cfg(not(test))]
+fn shell_declared_resume_form(harness: &str) -> Option<DeclaredResumeForm> {
+    let output = std::process::Command::new(crate::digest_overlay::fno_agents_bin())
+        .arg("resume-argv")
+        .arg(harness)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    if reply.get("available")?.as_bool()? {
+        let tokens: Vec<String> = reply
+            .get("argv")?
+            .as_array()?
+            .iter()
+            .map(|t| t.as_str().map(str::to_string))
+            .collect::<Option<Vec<_>>>()?;
+        declared_resume_form_usable("", &tokens)
+    } else {
+        None
+    }
+}
+
+/// Test seed: the canonical table read straight from the repo, filtered
+/// through the same usability rules the renderer applies. Read once per
+/// thread; the shell path is production-only (see
+/// [`DECLARED_RESUME_FORMS`]).
+#[cfg(test)]
+fn test_resume_form_seed() -> HashMap<String, Option<DeclaredResumeForm>> {
+    let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../cli/src/fno/agents/harness_capabilities.toml");
+    let raw = std::fs::read_to_string(&toml_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
+    let caps: toml::Value = toml::from_str(&raw).expect("parse harness_capabilities.toml");
+    let mut map = HashMap::new();
+    let Some(harnesses) = caps.get("harness").and_then(|h| h.as_table()) else {
+        return map;
+    };
+    for (name, caps) in harnesses {
+        let form = caps
+            .get("resume_strategy")
+            .and_then(|r| r.get("forms"))
+            .and_then(|f| f.get("interactive_resume"))
+            .and_then(|f| {
+                let kind = f.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                let tokens: Vec<String> = f
+                    .get("tokens")
+                    .and_then(|t| t.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|t| t.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                declared_resume_form_usable(kind, &tokens)
+            });
+        map.insert(name.clone(), form);
+    }
+    map
 }
 
 #[cfg(test)]
@@ -1090,6 +1233,28 @@ fn set_resume_program(argv: &[&str]) {
 #[cfg(test)]
 fn clear_resume_program() {
     RESUME_PROGRAM.with(|p| *p.borrow_mut() = None);
+}
+
+/// (x-7b5e) Test override pinning one harness's declared resume availability
+/// directly, so the negative arms (a harness the table gives no form) stay
+/// assertable after the table itself declares a form for every harness.
+#[cfg(test)]
+fn set_declared_resume_form(harness: &str, form: Option<Vec<String>>) {
+    DECLARED_RESUME_FORMS.with(|p| {
+        p.borrow_mut()
+            .get_or_insert_with(HashMap::new)
+            .insert(harness.to_string(), form.map(|tokens| DeclaredResumeForm { tokens }));
+    });
+}
+
+#[cfg(test)]
+struct DeclaredResumeFormsGuard;
+
+#[cfg(test)]
+impl Drop for DeclaredResumeFormsGuard {
+    fn drop(&mut self) {
+        DECLARED_RESUME_FORMS.with(|p| *p.borrow_mut() = None);
+    }
 }
 
 /// Test-only guard clearing the [`RESUME_PROGRAM`] override on scope exit, so
@@ -1189,15 +1354,35 @@ fn resume_target_from_argv(argv: &[String]) -> Option<String> {
 /// that omitting the state root leaves a resumed worker unable to write its
 /// claim lockfile. Copying it is a fourth divergent implementation of subtle
 /// logic. Depending on fno-agents inverts a boundary its own Cargo.toml
-/// records: fno never links it, it shells the binary at runtime. Shelling
-/// the resume verb for a rendered argv is the open candidate.
-fn resume_argv_for(bin: &str, token: &str, session_id: &str) -> Vec<String> {
+/// records: fno never links it, it shells the binary at runtime. The open
+/// candidate is TAKEN as of x-7b5e: the tokens come from the declared
+/// `interactive_resume` form via `fno-agents resume-argv` (see
+/// [`declared_resume_form`]), and this fn only fills the session id.
+fn resume_argv_for(harness: &str, session_id: &str) -> Result<Vec<String>, String> {
     #[cfg(test)]
     if let Some(mut argv) = RESUME_PROGRAM.with(|p| p.borrow().clone()) {
         argv.push(session_id.to_string());
-        return argv;
+        return Ok(argv);
     }
-    vec![bin.to_string(), token.to_string(), session_id.to_string()]
+    let Some(form) = declared_resume_form(harness) else {
+        return Err(format!("{harness} declares no usable interactive_resume"));
+    };
+    let mut argv = form.tokens;
+    let mut filled = false;
+    for token in argv.iter_mut() {
+        if token == "{session_id}" {
+            *token = session_id.to_string();
+            filled = true;
+        } else if token.starts_with('{') && token.ends_with('}') {
+            return Err(format!(
+                "{harness} resume form names {token}; only {{session_id}} can be filled"
+            ));
+        }
+    }
+    if !filled {
+        return Err(format!("{harness} resume form fills no session id"));
+    }
+    Ok(argv)
 }
 
 #[cfg(test)]
@@ -2442,7 +2627,7 @@ fn restore_worker_refusal_reason(
     let Some(harness) = member.harness.as_deref() else {
         return "harness is unknown".into();
     };
-    if Core::resume_form(harness).is_none() {
+    if !Core::resume_form(harness) {
         return format!("{harness} has no resume form; session {session_id} is not resumable");
     }
     format!("spawn receipt is missing for {harness} session {session_id}")
@@ -5726,20 +5911,18 @@ impl Core {
             .any(|a| a.mux.is_none() && !a.exited && a.attach_id.as_deref() == Some(id))
     }
 
-    /// (x-5f7f) The resume form a harness owns, as `(bin, token)`: what a
-    /// pane runs to bring a session back from that harness's own persisted
-    /// state. Mirrors the resume tokens in
-    /// `cli/src/fno/agents/harness_capabilities.toml`. Two mechanisms, one
-    /// result: a claude bg session whose daemon still owns it ATTACHES (the
-    /// existing `attach_id` path); everything here resumes from disk and
-    /// needs no live process. A harness with no entry (agy) offers no Resume
-    /// - an honest dead row beats a button that fails.
-    fn resume_form(harness: &str) -> Option<(&'static str, &'static str)> {
-        match harness {
-            "claude" => Some(("claude", "--resume")),
-            "codex" => Some(("codex", "resume")),
-            _ => None,
-        }
+    /// (x-5f7f, x-7b5e) Does the capability table declare a usable
+    /// `interactive_resume` form for this harness: what a pane runs to bring
+    /// a session back from that harness's own persisted state. Two
+    /// mechanisms, one result: a claude bg session whose daemon still owns it
+    /// ATTACHES (the existing `attach_id` path); everything here resumes from
+    /// disk and needs no live process. A harness with no usable form offers
+    /// no Resume - an honest dead row beats a button that fails. The argv
+    /// itself is built later by [`resume_argv_for`] from the same declared
+    /// form, so adding a harness to
+    /// `cli/src/fno/agents/harness_capabilities.toml` is the whole change.
+    fn resume_form(harness: &str) -> bool {
+        declared_resume_form(harness).is_some()
     }
 
     /// (v53) Classify the registry facts once so resumability and the final
@@ -5748,7 +5931,7 @@ impl Core {
         let Some(h) = a.harness.as_deref() else {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::MissingHarness);
         };
-        if Self::resume_form(h).is_none() {
+        if !Self::resume_form(h) {
             return RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness);
         }
         let has_sid = a
@@ -5923,7 +6106,9 @@ impl Core {
         worker_name: &str,
     ) -> Option<HeldWorker> {
         let harness = member.harness.as_deref()?;
-        Self::resume_form(harness)?;
+        if !Self::resume_form(harness) {
+            return None;
+        }
         let harness_session_id = member.harness_session_id.as_deref()?;
         Some(HeldWorker {
             name: worker_name.to_string(),
@@ -5996,9 +6181,9 @@ impl Core {
         cols: u16,
         plan: Option<&ReentryVerdict>,
     ) -> Result<(u64, TabId, Option<String>), String> {
-        let Some((bin, token)) = Self::resume_form(&facts.harness) else {
+        if !Self::resume_form(&facts.harness) {
             return Err("agent harness has no resume form".into());
-        };
+        }
         let fallback_cwd = self
             .session
             .squad(sid)
@@ -6023,7 +6208,7 @@ impl Core {
         // off the claude axis (or without a plan) resume exactly as before.
         let argv = match plan {
             Some(verdict) => verdict.prefixed_argv(),
-            None => resume_argv_for(bin, token, &facts.harness_session_id),
+            None => resume_argv_for(&facts.harness, &facts.harness_session_id)?,
         };
         let pid = self.spawn_pane_cmd(&argv, rows, cols, &spawn_cwd)?;
         if let Some(entry) = self.panes.get_mut(&pid) {
@@ -19128,10 +19313,19 @@ mod tests {
         assert_eq!(facts.name, "t-worker");
 
         // A member with no harness resume form must not mint facts: the pane
-        // it would feed has no resume command to run.
+        // it would feed has no resume command to run. The table declares a
+        // form for every harness today, so the negative arm is simulated by
+        // overriding agy's availability to none.
         let mut agy = member.clone();
         agy.harness = Some("agy".into());
-        assert!(Core::member_resume_facts(&agy, "t-worker").is_none());
+        {
+            let _guard = DeclaredResumeFormsGuard;
+            set_declared_resume_form("agy", None);
+            assert!(Core::member_resume_facts(&agy, "t-worker").is_none());
+        }
+        // x-7b5e: with the declared form restored, an agy member mints facts
+        // like any other declared harness - the old two-arm match skipped it.
+        assert!(Core::member_resume_facts(&agy, "t-worker").is_some());
 
         let mut no_id = member;
         no_id.harness_session_id = None;
@@ -19621,9 +19815,10 @@ mod tests {
     fn resume_argv_matches_the_harness_capability_tokens() {
         // The mirror is checked against the TOML that owns the tokens, not
         // against this crate's own literals (Rust checked against Rust proves
-        // nothing). Codex resumes through its own interactive form; a claude
-        // row that reaches the mux resume arm uses the saved interactive
-        // transcript form. The headless form is reserved for one-shot and
+        // nothing). EVERY harness the table declares must render, because a
+        // bulk restore built on a partial match silently skips the rest
+        // (x-7b5e: the old two-arm match left gemini/agy/opencode/pi with no
+        // Resume at all). The headless form is reserved for one-shot and
         // stream-json workers, while `claude attach` is the live-row gesture.
         // No override is installed, so the REAL argv is asserted.
         clear_resume_program();
@@ -19647,39 +19842,45 @@ mod tests {
                 .filter_map(|t| t.as_str().map(str::to_string))
                 .collect()
         };
-        let codex_form = token("codex/resume_strategy/forms/interactive_resume");
-        let claude_form = token("claude/resume_strategy/forms/interactive_resume");
-        assert_eq!(
-            codex_form,
-            vec![
-                "codex".to_string(),
-                "resume".to_string(),
-                "{session_id}".into()
-            ],
-            "the codex arm must keep mirroring the capability toml"
+        let declared: Vec<String> = caps
+            .get("harness")
+            .and_then(|h| h.as_table())
+            .expect("harness table")
+            .keys()
+            .cloned()
+            .collect();
+        assert!(
+            declared.len() >= 6,
+            "the table declares every harness under test: {declared:?}"
         );
+        for harness in &declared {
+            let form = token(&format!(
+                "{harness}/resume_strategy/forms/interactive_resume"
+            ));
+            assert!(
+                Core::resume_form(harness),
+                "{harness} is resumable with no Rust change (AC3-HP)"
+            );
+            let sid = format!("{harness}-0a1b2c3d");
+            let expected: Vec<String> = form
+                .iter()
+                .map(|t| t.replace("{session_id}", &sid))
+                .collect();
+            assert_eq!(
+                resume_argv_for(harness, &sid).unwrap(),
+                expected,
+                "{harness} argv comes from the declared tokens"
+            );
+        }
+        // A harness the table does not name answers with a reason that names
+        // it, never an argv (AC5-ERR).
+        let err = resume_argv_for("iambad", "sid").unwrap_err();
+        assert!(err.contains("iambad"), "{err}");
+        // The built argv substitutes the placeholder with the session id, and
+        // no --cd rides this lane until the writable_roots grant can.
         assert_eq!(
-            claude_form,
-            vec![
-                "claude".to_string(),
-                "--resume".to_string(),
-                "{session_id}".into()
-            ],
-            "the claude arm must keep mirroring the capability toml"
-        );
-        // The built argv substitutes the placeholder with the session id.
-        assert_eq!(
-            resume_argv_for("codex", "resume", "01a027ad"),
+            resume_argv_for("codex", "01a027ad").unwrap(),
             vec!["codex".to_string(), "resume".to_string(), "01a027ad".into()],
-            "no --cd on this lane until the writable_roots grant can ride with it"
-        );
-        assert_eq!(
-            resume_argv_for("claude", "--resume", "119e3c52-uuid"),
-            vec![
-                "claude".to_string(),
-                "--resume".to_string(),
-                "119e3c52-uuid".into()
-            ]
         );
     }
 
@@ -19749,13 +19950,34 @@ mod tests {
         let mut agy = base();
         agy.harness = Some("agy".into());
         agy.harness_session_id = None;
+        // The no-form arm needs an override: the table declares interactive_resume
+        // for agy today (x-7b5e), so a bare agy row now fails on its missing
+        // session id instead.
+        {
+            let _guard = DeclaredResumeFormsGuard;
+            set_declared_resume_form("agy", None);
+            assert_eq!(
+                Core::row_resume_disposition(&agy),
+                RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+            );
+            assert!(
+                !Core::row_resumable(&agy),
+                "no resume form and no session id: no Resume offered"
+            );
+        }
+        // With the declared form, the same row fails one step later - and a
+        // dead agy row with a session id IS resumable, which is the AC3-HP
+        // change: the old two-arm match offered no Resume at all.
         assert_eq!(
             Core::row_resume_disposition(&agy),
-            RowResumeDisposition::NoPane(AgentNoPaneReason::UnsupportedHarness)
+            RowResumeDisposition::NoPane(AgentNoPaneReason::MissingSessionId)
         );
-        assert!(
-            !Core::row_resumable(&agy),
-            "no resume form and no session id: no Resume offered"
+        let mut dead_agy = base();
+        dead_agy.harness = Some("agy".into());
+        assert_eq!(
+            Core::row_resume_disposition(&dead_agy),
+            RowResumeDisposition::Resumable,
+            "a declared harness with a session id is resumable without a Rust change"
         );
         let mut live_claude = base();
         live_claude.harness = Some("claude".into());
