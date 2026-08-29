@@ -44,14 +44,13 @@ def _subject_node_id(subject: str) -> Optional[str]:
     answer below still states what it does not cover.
     """
     from fno.decide import _graph_entries, _resolved_node
-    from fno.decide.catalog import load_catalog
 
     try:
         # The same resolution dance, in the same order, as _subject_matcher
-        # in fno/decide/__init__.py: canonicalize, then resolve the spelling
-        # and its case-fold. A private copy that skips a tier here drifts
-        # from the matcher's answer for the same subject.
-        subject = load_catalog().canonical_subject(subject)
+        # in fno/decide/__init__.py: strip, then resolve the spelling and its
+        # case-fold. A private copy that skips a tier here drifts from the
+        # matcher's answer for the same subject.
+        subject = subject.strip()
         entries = _graph_entries()
         return _resolved_node(subject, entries) or _resolved_node(
             subject.strip().casefold(), entries

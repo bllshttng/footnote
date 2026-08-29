@@ -492,24 +492,6 @@ def record_decision(
     return {"decision_id": decision_id, "event": event, "node_id": node_id}
 
 
-_REPOSITORY_AUDIT_FIELDS = (
-    "ts",
-    "decided_by",
-    "attested_by",
-    "relayed_by",
-    "origin",
-)
-
-
-def _merge_repository_row(local: dict, repository: dict) -> dict:
-    """Use reviewed law content while retaining machine-local audit facts."""
-    merged = dict(repository)
-    for key in _REPOSITORY_AUDIT_FIELDS:
-        if key in local:
-            merged[key] = local[key]
-    return merged
-
-
 def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
     rows, _ = _read_index(_index_path())
     local_matches = [
@@ -518,27 +500,6 @@ def _decision_row_by_id(decision_id: str) -> dict[str, Any] | None:
         if row.get("_event_type") in {None, DECISION_EVENT}
         and str(row.get("decision_id") or "").casefold() == decision_id.casefold()
     ]
-    from fno.decide.catalog import load_catalog
-
-    repository = next(
-        (
-            dict(row)
-            for row in load_catalog().rows
-            if str(row.get("decision_id") or "").casefold() == decision_id.casefold()
-        ),
-        None,
-    )
-    if repository is not None and local_matches:
-        local = max(
-            local_matches,
-            key=lambda row: (
-                str(row.get("ts") or ""),
-                str(row.get("decision_id") or ""),
-            ),
-        )
-        return _merge_repository_row(local, repository)
-    if repository is not None:
-        return repository
     if not local_matches:
         return None
     return max(
@@ -823,7 +784,7 @@ def _resolved_node(subject: str, entries: "list[dict]") -> str | None:
     return str(match.id) if match.kind == "exact" and match.id else None
 
 
-def _subject_matcher(subject: str, catalog=None):
+def _subject_matcher(subject: str):
     """A predicate over a recorded subject string, matching the same node.
 
     BOTH sides expand, not just the query. The operator records under whatever
@@ -834,11 +795,7 @@ def _subject_matcher(subject: str, catalog=None):
 
     A subject that names no node matches itself and nothing more.
     """
-    if catalog is None:
-        from fno.decide.catalog import load_catalog
-
-        catalog = load_catalog()
-    subject = catalog.canonical_subject(subject)
+    subject = subject.strip()
     entries = _graph_entries()
     node_id = _resolved_node(subject, entries) or _resolved_node(
         subject.strip().casefold(), entries
@@ -850,7 +807,7 @@ def _subject_matcher(subject: str, catalog=None):
         # - two subject shapes behaving differently on the case this fixes.
         # Still exact: folding case never turns `pr-92` into `pr-921`.
         want = subject.strip().casefold()
-        return lambda recorded: catalog.canonical_subject(recorded).casefold() == want
+        return lambda recorded: recorded.strip().casefold() == want
 
     # Resolved per DISTINCT recorded subject by the caller's cache, never per
     # row: the graph read is the expensive part and it already happened.
@@ -862,7 +819,6 @@ def _subject_matcher(subject: str, catalog=None):
         # case-sensitive, so without it a ruling recorded as `X-7D94` answers
         # nothing for `x-7d94` while the unresolved branch folds case happily -
         # and the doc promises every spelling, "any case", for a node subject.
-        recorded = catalog.canonical_subject(recorded)
         if recorded.strip().casefold() == want:
             return True
         if recorded not in seen:
@@ -876,8 +832,6 @@ def _subject_matcher(subject: str, catalog=None):
 
 def _decision_lane(row: dict) -> str:
     """Map stored provenance to the authority lane a reader can trust."""
-    if row.get("_source") == "repository":
-        return "law"
     authority = str(row.get("authority_source") or "")
     if authority in ("agent", "crown"):
         # A king ruling inside its own crown scope is still coordination. It
@@ -1015,18 +969,15 @@ def near_miss_subjects(subject: str) -> "list[tuple[str, int]]":
     one ruling twice, so a raw row count inflates the very number this message
     exists to convey.
     """
-    from fno.decide.catalog import load_catalog
-
-    catalog = load_catalog()
-    want = catalog.canonical_subject(subject).casefold()
+    want = subject.strip().casefold()
     if not want:
         return []
-    matches = _subject_matcher(subject, catalog)
+    matches = _subject_matcher(subject)
     rows, _ = _read_index(_index_path(), warn=False)
     seen: "dict[str, set[str]]" = {}
     for row in rows:
         recorded = str(row.get("subject") or "")
-        folded = catalog.canonical_subject(recorded).casefold()
+        folded = recorded.strip().casefold()
         if not folded or folded == want or matches(recorded):
             continue
         if want in folded or folded in want:
@@ -1069,30 +1020,11 @@ def list_decisions(
             "unscoped, or all"
         )
     rows, damaged = _read_index(_index_path())
-    from fno.decide.catalog import load_catalog
     from fno.decide.graduation import registered_retirement
 
-    catalog = load_catalog()
-    local_decisions = [
+    decisions: list[dict[str, Any]] = [
         row for row in rows if row.get("_event_type") in {None, DECISION_EVENT}
     ]
-    catalog_by_id = {
-        str(row.get("decision_id") or "").casefold(): dict(row)
-        for row in catalog.rows
-    }
-    decisions: list[dict[str, Any]] = []
-    local_ids: set[str] = set()
-    for local in local_decisions:
-        decision_id = str(local.get("decision_id") or "").casefold()
-        repository = catalog_by_id.get(decision_id)
-        if repository is None:
-            decisions.append(local)
-            continue
-        local_ids.add(decision_id)
-        decisions.append(_merge_repository_row(local, repository))
-    decisions.extend(
-        row for decision_id, row in catalog_by_id.items() if decision_id not in local_ids
-    )
     retractions = [row for row in rows if row.get("_event_type") == RETRACTION_EVENT]
     latest_retractions: dict[str, dict] = {}
     for row in retractions:
@@ -1131,7 +1063,7 @@ def list_decisions(
         if subject and looks_like_decision_id(subject)
         else ""
     )
-    by_subject = _subject_matcher(subject, catalog) if subject else None
+    by_subject = _subject_matcher(subject) if subject else None
 
     def keep(row: dict) -> bool:
         """Id OR subject, never id INSTEAD OF subject.
@@ -1209,9 +1141,7 @@ def list_decisions(
 
 def current_law(subject: str) -> dict[str, Any]:
     """Return one explicit current-law verdict without choosing by recency."""
-    from fno.decide.catalog import load_catalog
-
-    canonical_subject = load_catalog().canonical_subject(subject)
+    canonical_subject = subject.strip()
     _, rows, damaged = list_decisions(
         canonical_subject,
         limit=None,
@@ -1245,9 +1175,6 @@ def current_law(subject: str) -> dict[str, Any]:
 def review_list() -> dict[str, Any]:
     """Report unresolved multi-ruling subjects without mutating the index."""
     _, rows, damaged = list_decisions(limit=None, state="all")
-    from fno.decide.catalog import load_catalog
-
-    catalog = load_catalog()
     grouped: dict[str, list[dict[str, Any]]] = {}
     display_subjects: dict[str, str] = {}
     try:
@@ -1278,16 +1205,12 @@ def review_list() -> dict[str, Any]:
         }
 
     for row in rows:
-        subject = catalog.canonical_subject(str(row.get("subject") or ""))
+        subject = str(row.get("subject") or "").strip()
         if not subject:
             subjectless += 1
             subjectless_rows.append(review_row(row))
         authority = row.get("authority_source")
-        if (
-            authority
-            and row.get("_source") != "repository"
-            and authority not in READ_AUTHORITY_SOURCES
-        ):
+        if authority and authority not in READ_AUTHORITY_SOURCES:
             invalid_authority += 1
             key = str(authority)
             invalid_authority_values[key] = invalid_authority_values.get(key, 0) + 1
