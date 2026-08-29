@@ -295,3 +295,49 @@ class TestReviewRoundOne:
             for bad in ("nan", "inf", "-inf", "NaN", float("nan"), float("inf")):
                 got = getattr(AgentsBlock(**{name: bad}), name)
                 assert got == default, f"{name}={bad!r} coerced to {got}, not {default}"
+
+
+def test_a_settings_object_missing_new_fields_keeps_its_cap(monkeypatch):
+    """A new machine knob must not become a cap bug in another module.
+
+    Reading the two new fields strictly put them in the same failure class as
+    `provider_limits`: any settings object built before they existed dropped
+    the WHOLE config block into its fail-safe branch, which silently replaced
+    that caller's `max_live` with the built-in 3. CI found it as two
+    unrelated-looking failures, an exit code 76 where 80 was expected and a
+    refusal that never fired, three test modules away from this change.
+
+    A missing CAP must still fail loudly, because falling back would uncap a
+    provider. A missing machine THRESHOLD has a safe default. This pins that
+    distinction.
+    """
+
+    class _Defaults:
+        model = None
+        account = None
+
+    class _Agents:
+        defaults = _Defaults()
+        profiles: dict = {}
+        worker_qos = "off"
+        max_live = 9  # the value that must survive
+        min_free_gb = 0.0
+        max_load_per_cpu = 0.0
+        provider_limits: dict = {}
+        # max_fleet_cpu_share and hard_max_load_per_cpu deliberately ABSENT
+
+    class _Settings:
+        agents = _Agents()
+
+    monkeypatch.setattr("fno.config.load_settings", lambda: _Settings())
+
+    from fno.config import load_settings
+
+    cfg = load_settings().agents
+    assert not hasattr(cfg, "max_fleet_cpu_share"), "fixture must omit the field"
+
+    # The read the gate performs, mirrored: the two new knobs fall back and the
+    # cap is untouched.
+    assert float(getattr(cfg, "max_fleet_cpu_share", 0.5)) == 0.5
+    assert float(getattr(cfg, "hard_max_load_per_cpu", 40.0)) == 40.0
+    assert int(cfg.max_live) == 9

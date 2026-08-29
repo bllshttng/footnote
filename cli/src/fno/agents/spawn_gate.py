@@ -1338,8 +1338,17 @@ def run_gate(
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
         max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
-        max_fleet_cpu_share = float(agents_cfg.max_fleet_cpu_share)
-        hard_max_load_per_cpu = float(agents_cfg.hard_max_load_per_cpu)
+        # These two read through getattr, and the distinction from the line
+        # below is deliberate. A missing CAP must fail loudly, because falling
+        # back would silently uncap a provider. A missing machine THRESHOLD has
+        # a safe default and no such consequence. Reading them strictly put
+        # them in the same failure class as `provider_limits`: any caller
+        # holding a settings object built before these fields existed dropped
+        # the WHOLE block into the fail-safe branch below, which silently
+        # discarded that caller's `max_live` too. That turned one new field
+        # into a cap bug three test modules away from it.
+        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
+        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
         # A real attribute read, not a getattr fallback: a missing field must
         # fail loudly here rather than silently uncapping every provider.
         limits = dict(agents_cfg.provider_limits)
