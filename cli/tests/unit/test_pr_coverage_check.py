@@ -2460,3 +2460,29 @@ def test_coverage_verdict_refuses_a_non_directory_at_the_door(monkeypatch, tmp_p
     assert note == "no such directory: bllshttng/footnote"
     assert refusal == "" and head == ""
     assert "pr head fetch failed" not in note
+
+
+def test_coverage_verdict_and_the_slug_read_share_one_cwd_guard(monkeypatch, tmp_path):
+    """The empty string is the seam two copies of a guard disagree on.
+
+    A first pass wrote the gate's own `if cwd and not isdir(cwd)` beside
+    `_repo_slug_reason`'s `cwd is not None`, so "" passed the gate and reached
+    every probe as a subprocess cwd - which raises rather than meaning "here".
+    Both now call `_rest._cwd_refusal`, so they cannot answer differently.
+    """
+    monkeypatch.chdir(tmp_path)
+
+    def never_runs(cmd, **kwargs):
+        raise AssertionError(f"no probe may run on an empty cwd: {cmd}")
+
+    monkeypatch.setattr("fno.pr._proc.run", never_runs)
+    state, _refusal, _head, note = _coverage_gate.coverage_verdict(
+        1264, "", recompute=False
+    )
+    assert state == _coverage_gate.UNANSWERED
+    assert note == "empty cwd: pass a directory or None, never an empty string"
+
+    # And the same sentence, from the slug read the gate feeds.
+    from fno.pr._rest import _repo_slug_reason
+
+    assert _repo_slug_reason("")[1] == note

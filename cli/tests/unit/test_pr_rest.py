@@ -705,3 +705,52 @@ def test_slug_or_reason_gives_every_rendering_caller_the_subject(tmp_path, monke
     info, reason = _rest.fetch_pr_info_rest("42", cwd="bllshttng/footnote")
     assert info is None
     assert reason == "could not resolve owner/repo: no such directory: bllshttng/footnote"
+
+
+def test_cwd_refusal_names_which_of_the_three_facts_isdir_hid(tmp_path, monkeypatch):
+    """`isdir` is false for a missing path, an existing non-directory, and an
+    unreadable one. Asserting "no such directory" for all three is the same
+    wrong-subject defect, relocated - the path in the message plainly exists.
+    """
+    import os
+
+    from fno.pr import _rest as R
+
+    assert R._cwd_refusal(None) == ""
+    assert R._cwd_refusal(str(tmp_path)) == ""
+
+    missing = tmp_path / "gone"
+    assert R._cwd_refusal(str(missing)) == f"no such directory: {missing}"
+
+    a_file = tmp_path / "origin.txt"
+    a_file.write_text("not a directory\n")
+    assert R._cwd_refusal(str(a_file)) == f"not a directory: {a_file}"
+
+    def denied(path):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(os, "stat", denied)
+    assert R._cwd_refusal(str(tmp_path)) == (
+        f"cannot stat: {tmp_path} (Permission denied)"
+    )
+
+
+def test_cwd_refusal_rejects_the_empty_string_that_crashes_a_spawn():
+    """subprocess reads "" as a path, not as "the current directory", so it
+    raises. The two guards disagreed about it once: one tested `is not None`
+    and the other tested truthiness, and "" walked through the gap into every
+    probe. One implementation, one answer."""
+    assert _rest._cwd_refusal("") == (
+        "empty cwd: pass a directory or None, never an empty string"
+    )
+
+
+def test_published_refusal_hides_the_account_name_in_a_local_path(tmp_path, monkeypatch):
+    """The refusal rides the coverage note into a GitHub commit status. It
+    redacts a token in one clause, so interpolating a home directory raw in
+    the next is an oversight, not a policy."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    reason = _rest._cwd_refusal(str(tmp_path / "code" / "proj"))
+    assert reason == "no such directory: ~/code/proj"
+    assert str(tmp_path) not in reason

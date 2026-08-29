@@ -332,8 +332,17 @@ def coverage_verdict(
     # printing (x-51f7). Refuse at the door, before any probe has a chance to
     # misattribute it. UNANSWERED, not REFUSED: a gate that cannot read its
     # own inputs has not judged the PR.
-    if cwd and not os.path.isdir(cwd):
-        return UNANSWERED, "", "", f"no such directory: {cwd}"
+    #
+    # _rest._cwd_refusal, not a second copy of the isdir test: the first pass
+    # here wrote its own, guarded `if cwd` where the original guarded `is not
+    # None`, and an empty string slipped through to every probe as a
+    # subprocess cwd - which raises rather than meaning "here". Two copies of
+    # a guard are two chances to disagree.
+    from fno.pr._rest import _cwd_refusal
+
+    bad_cwd = _cwd_refusal(cwd)
+    if bad_cwd:
+        return UNANSWERED, "", "", bad_cwd
 
     # The guard's own short circuit: a stock install with no review lane
     # configured opts out of coverage entirely. Checked FIRST so neither the

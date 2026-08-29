@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import stat
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Tuple
 
@@ -142,6 +143,51 @@ def _redact_userinfo(text: str) -> str:
     return _URL_USERINFO.sub("***@", text)
 
 
+def _home_relative(path: str) -> str:
+    """``/Users/someone/code/x`` -> ``~/code/x``.
+
+    Same reason as :func:`_redact_userinfo`: this text is published to a
+    GitHub commit status. A local absolute path carries the account name,
+    which nothing downstream needs to act on the refusal. Redacting a token
+    in one clause and interpolating a home directory raw in the next is not a
+    policy, it is an oversight.
+    """
+    home = os.path.expanduser("~")
+    if home and home != os.sep and (path == home or path.startswith(home + os.sep)):
+        return "~" + path[len(home):]
+    return path
+
+
+def _cwd_refusal(cwd: Optional[str]) -> str:
+    """Empty when ``cwd`` names a usable directory, the named reason otherwise.
+
+    ONE implementation, called both here and at ``coverage_verdict``'s door,
+    because two copies of a guard are two chances to disagree about the empty
+    string - which is what a first pass did.
+
+    ``isdir`` is false for three distinct facts, and a message that asserts
+    one of them is the same wrong-subject defect this module is fixing: an
+    existing regular file and an unreadable parent both deserve their own
+    sentence, not "no such directory: <a path that exists>".
+    """
+    if cwd is None:
+        return ""
+    if cwd == "":
+        # subprocess reads "" as a path, not as "the current directory", so it
+        # raises rather than defaulting. Never let it reach a spawn.
+        return "empty cwd: pass a directory or None, never an empty string"
+    shown = _home_relative(cwd)
+    try:
+        mode = os.stat(cwd).st_mode
+    except FileNotFoundError:
+        return f"no such directory: {shown}"
+    except OSError as exc:
+        return f"cannot stat: {shown} ({exc.strerror})"
+    if not stat.S_ISDIR(mode):
+        return f"not a directory: {shown}"
+    return ""
+
+
 def _repo_slug_reason(
     cwd: Optional[str], runner: Callable = run
 ) -> Tuple[Optional[str], str]:
@@ -162,8 +208,9 @@ def _repo_slug_reason(
     shape of the string: `owner/repo` is not a directory, so it is refused by
     name before git is spawned. ``None`` keeps meaning "the process cwd".
     """
-    if cwd is not None and not os.path.isdir(cwd):
-        return None, f"no such directory: {cwd}"
+    bad_cwd = _cwd_refusal(cwd)
+    if bad_cwd:
+        return None, bad_cwd
     try:
         r = runner(["git", "remote", "get-url", "origin"], cwd=cwd)
     except Exception as exc:  # noqa: BLE001 - the failure is the answer, not a raise
