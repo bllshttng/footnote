@@ -9,11 +9,20 @@ from __future__ import annotations
 
 import json as _json
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from fno.pr import _reviews, _status
 from fno.pr._proc import Result
+
+
+def _shared_supersession_cases():
+    fixture = (
+        Path(__file__).resolve().parents[3]
+        / "crates/fno-agents/tests/fixtures/check_supersession.json"
+    )
+    return _json.loads(fixture.read_text())
 
 # Captured at import, before the autouse stub below replaces the attribute:
 # the two tests that exercise the fail-closed wrapper need the real one.
@@ -64,6 +73,27 @@ def test_all_pass_is_green():
         "unsettled": 0,
         "unsettled_fail": 0,
     }
+
+
+def test_ac1_red_same_check_name_in_different_workflows_survives():
+    case = next(
+        case
+        for case in _shared_supersession_cases()
+        if case["name"] == "same_check_name_different_workflows"
+    )
+    assert _status._latest_per_name(case["input"]) == case["expected"]
+
+
+@pytest.mark.parametrize(
+    "case", _shared_supersession_cases(), ids=lambda case: case["name"]
+)
+def test_ac1_shared_corpus_matches_named_expected_rows(case):
+    assert _status._latest_per_name(case["input"]) == case["expected"]
+    if case["name"] == "measured_success_cancelled_newer_success":
+        verdict, code, counts = _status.verdict_for(case["input"])
+        assert verdict == "green"
+        assert code == 0
+        assert counts["pass"] == 1
 
 
 def test_any_failure_is_red():

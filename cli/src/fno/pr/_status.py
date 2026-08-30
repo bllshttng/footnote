@@ -27,6 +27,7 @@ import os
 from typing import Any, Collection, Optional, Sequence
 
 from fno.pr._proc import ToolMissing
+from fno.pr._check_supersession_generated import latest_per_name as _latest_per_name
 from fno.pr._reviews import (
     _NOT_ASKED_COVERAGE,
     _UNKNOWN_COVERAGE,
@@ -112,69 +113,6 @@ def _has_settled_marker(check: dict) -> bool:
         return False
     raw = str(_alt(check.get("conclusion"), check.get("state"), "")).upper()
     return raw in _SETTLED_STATES
-
-
-def _entry_ts(check: dict) -> str:
-    """Recency key for 'latest run per name' = when the run was TRIGGERED, not
-    when it finished. A superseding run always STARTS later but need not finish
-    later (a fast rerun can complete before a slow superseded run still winding
-    down), so keying on startedAt - createdAt for a StatusContext, never
-    completedAt - makes 'latest by timestamp' mean 'latest attempt'. An
-    in-progress run has a startedAt and empty completedAt, so it still sorts.
-    Missing both -> '' (sorts oldest, loses to any timestamped sibling).
-    ISO-8601 strings sort chronologically as plain strings.
-    """
-    return str(_alt(check.get("startedAt"), check.get("createdAt"), ""))
-
-
-def _latest_per_name(rollup: Sequence[dict]) -> list[dict]:
-    """Keep only the latest run per check name/context.
-
-    A force/amend push leaves superseded runs (e.g. a CANCELLED CI) in the
-    rollup beside the fresh ones; classifying all of them counts a stale
-    CANCELLED as a live fail. Grouping by name and keeping the max-startedAt
-    entry drops the stale run, so a superseded CANCELLED loses to a newer
-    same-name run while a genuinely-cancelled *latest* run stays.
-
-    Only a STRICTLY-newer timestamp replaces the kept entry. On a tie (equal
-    timestamps, or both missing) the tie-break is fail-closed: a failing entry
-    is never dropped by a same-time non-fail, so a superseded pass can never
-    hide a real fail even when gh emits no usable ordering (the load-bearing
-    invariant). A tie between two non-fails keeps the first-seen (deterministic).
-
-    The key discriminates a CheckRun's `name` space from a StatusContext's
-    `context` space, so two DIFFERENT checks that happen to share a literal
-    string are never merged (which could drop a genuine fail); same-kind reruns
-    still group on the shared name. An entry with neither key is never merged.
-    """
-    latest: dict[Any, dict] = {}
-    order: list[Any] = []
-    unkeyed: list[dict] = []
-    for c in rollup:
-        nm = c.get("name")
-        ctx = c.get("context")
-        if nm not in (None, ""):
-            key: Any = ("check", nm)
-        elif ctx not in (None, ""):
-            key = ("status", ctx)
-        else:
-            unkeyed.append(c)
-            continue
-        existing = latest.get(key)
-        if existing is None:
-            latest[key] = c
-            order.append(key)
-        else:
-            tc, te = _entry_ts(c), _entry_ts(existing)
-            if tc > te:
-                latest[key] = c
-            elif tc == te and _classify(existing) != "fail" and _classify(c) == "fail":
-                # Tie ONLY (equal/missing timestamps): a fail must never be
-                # dropped by a same-time non-fail. A strictly-OLDER fail still
-                # loses (the `tc == te` guard is load-bearing - without it a
-                # superseded older CANCELLED would re-hide as a false red).
-                latest[key] = c
-    return [latest[k] for k in order] + unkeyed
 
 
 def _fetch(pr: str, cwd: Optional[str]) -> "tuple[Optional[dict], str]":

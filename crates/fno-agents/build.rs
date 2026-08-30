@@ -16,12 +16,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[path = "codegen/check_supersession.rs"]
+mod check_supersession_codegen;
+
 fn main() {
     // Produce the cross-tree copies instead of checking them. Both
     // run before the env-var work so a build that later fails still leaves the
     // copies fresh.
     sync_harness_capabilities();
     sync_events_limits();
+    sync_check_supersession();
 
     let rev = git_rev().unwrap_or_else(|| "unknown".to_string());
     let dirty = git_dirty();
@@ -199,6 +203,32 @@ fn sync_events_limits() {
         &generated,
         render_events_limits(max_data_bytes, encoding).as_bytes(),
     );
+}
+
+/// Generate the shared latest-attempt selector for both runtime languages.
+fn sync_check_supersession() {
+    let contract_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("codegen/check_supersession.toml");
+    println!("cargo:rerun-if-changed={}", contract_path.display());
+    println!("cargo:rerun-if-changed=codegen/check_supersession.rs");
+    let contract = check_supersession_codegen::load_contract(&contract_path)
+        .expect("check_supersession.toml must parse");
+
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR must be set"));
+    std::fs::write(
+        out_dir.join("check_supersession.rs"),
+        check_supersession_codegen::render_rust(&contract),
+    )
+    .expect("generated Rust supersession source must be writable");
+
+    let Some(root) = repo_root() else { return };
+    let cli = root.join("cli");
+    if cli.is_dir() {
+        write_if_different(
+            &cli.join("src/fno/pr/_check_supersession_generated.py"),
+            check_supersession_codegen::render_python(&contract).as_bytes(),
+        );
+    }
 }
 
 /// Render the generated `events_limits.toml` body. The CI tripwire renders the

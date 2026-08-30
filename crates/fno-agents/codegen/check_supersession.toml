@@ -1,0 +1,28 @@
+[identity]
+check_namespace = "check"
+check_name_field = "name"
+check_workflow_field = "workflow"
+status_namespace = "status"
+status_context_field = "context"
+
+[recency]
+fields = ["startedAt", "createdAt"]
+
+[failure]
+bucket_values = ["fail", "cancel"]
+conclusion_state_values = [
+    "FAILURE",
+    "TIMED_OUT",
+    "CANCELLED",
+    "ACTION_REQUIRED",
+    "STARTUP_FAILURE",
+    "STALE",
+    "ERROR",
+]
+
+[tie]
+failure_replaces_non_failure = true
+otherwise = "first_seen"
+
+[output]
+order = "first_seen_slots"
