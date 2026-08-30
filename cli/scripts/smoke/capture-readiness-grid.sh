@@ -40,7 +40,18 @@ PROVIDER="${1:-codex}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
-if ! PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - "$PROVIDER" <<'PY'
+if command -v uv >/dev/null 2>&1; then
+    PYTHON_CMD=(uv run --project "$CLI_ROOT" python)
+elif [[ -x "$CLI_ROOT/.venv/bin/python" ]]; then
+    PYTHON_CMD=("$CLI_ROOT/.venv/bin/python")
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD=(python3)
+else
+    echo "capture-readiness-grid: no Python interpreter available" >&2
+    exit 14
+fi
+
+if ! PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_CMD[@]}" - "$PROVIDER" <<'PY'
 import sys
 
 from fno.agents.mux_spawn import PANE_HOSTABLE_PROVIDERS
@@ -61,10 +72,6 @@ if ! command -v "$PROVIDER" >/dev/null 2>&1; then
     echo "capture-readiness-grid: $PROVIDER CLI not on PATH" >&2
     exit 14
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "capture-readiness-grid: python3 not on PATH" >&2
-    exit 14
-fi
 
 FIX_DIR="${CLI_ROOT}/tests/agents/fixtures"
 mkdir -p "$FIX_DIR"
@@ -75,7 +82,7 @@ OUT_HEX="${FIX_DIR}/readiness-grid-${PROVIDER}.hex"
 # Spawn the CLI under a PTY, read ~4s of startup output, render it through a
 # terminal-state parser, and dump the visible screen + last non-blank line. The
 # child is SIGTERM'd after the read window; no input is ever sent.
-CAP_TXT="$(PROVIDER="$PROVIDER" PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - "$PROVIDER" "$CLI_ROOT" <<'PY'
+CAP_TXT="$(PROVIDER="$PROVIDER" PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" "${PYTHON_CMD[@]}" - "$PROVIDER" "$CLI_ROOT" <<'PY'
 import os, pty, select, signal, sys, time
 from pathlib import Path
 
