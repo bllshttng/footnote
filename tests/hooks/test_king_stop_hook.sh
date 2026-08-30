@@ -397,5 +397,35 @@ MANIFEST
     cleanup
 }
 
+# ── K13: a failing loop-check must report its OWN error, not an empty log ────
+# loop-check reports CLI misuse as {"error": ...} on STDOUT and exits 2,
+# writing nothing to stderr. The hook captured that on stdout and then printed
+# a tail of the STDERR log, which is empty for this entire error class, so a
+# ship gate degraded with no stated cause. Nothing else covers this: every
+# other stub here exits 0, so the failure branch was never driven.
+{
+    setup_king
+    cat > "$BIN" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "manifest-for-session" ]]; then exit 1; fi
+if [[ "$1" == "loop-check" ]]; then
+    # Exactly loopcheck.rs's CLI-misuse shape: JSON on stdout, silent stderr.
+    printf '%s\n' '{"error":"unknown --driver '"''"'; supported: '"'"'target'"'"', '"'"'king'"'"'"}'
+    exit 2
+fi
+exit 0
+STUB
+    chmod +x "$BIN"
+    INPUT="{\"transcript_path\":\"${TRANSCRIPT}\",\"session_id\":\"transcript\"}"
+    run_claude_hook "$INPUT"
+    ERR_TEXT=$(cat "$CLAUDE_ERR" 2>/dev/null || true)
+    if grep -q '"error"' <<< "$ERR_TEXT"; then
+        pass "K13: a nonzero loop-check reports its own stdout error to stderr"
+    else
+        fail "K13: loop-check's error was discarded; stderr was: ${ERR_TEXT:-<empty>}"
+    fi
+    cleanup
+}
+
 printf '[king-hook] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
