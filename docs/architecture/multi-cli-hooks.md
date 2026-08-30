@@ -229,6 +229,8 @@ Retiring a hook script is two steps across two releases. First, remove its confi
 
 A session already bricked recovers without a shell. Write to any watched settings file, for example a whitespace-only edit to `~/.claude/settings.json`. The write forces a hook-config reload, which drops the dead registration. The next identical Bash call succeeds. Editing files still works while Bash is bricked, which is what makes the hatch reachable. Do not recreate the retired script by hand in a shared checkout. An untracked resurrection of a retired hook is a landmine for the next `git add -A`. The tracked stub is the durable replacement.
 
+## Graceful Degradation
+
 | Feature | Claude Code | Gemini/Codex |
 |---------|------------|--------------|
 | Autonomous looping (stop hook) | Full | Full when hooks are configured |
