@@ -142,7 +142,15 @@ def test_AC9_HP_live_turn_answers_the_planted_token(tmp_path, monkeypatch):
         assert session.initialize()["protocolVersion"] == 1
         created = session.session_new()
         assert created and session.session_id == created
-        session.prompt(
-            "Reply with exactly the planted token GROK_ACP_TOKEN_829. Do not call tools."
-        )
+        try:
+            session.prompt(
+                "Reply with exactly the planted token GROK_ACP_TOKEN_829. Do not call tools."
+            )
+        except RuntimeError as exc:  # noqa: PERF203 - one call, not a loop
+            # Narrow on purpose: only an exhausted subscription skips. A plain
+            # transient 429 still FAILS, because a driver that spams the server
+            # into rate limiting is a defect this test exists to catch.
+            if "usage-exhausted" not in str(exc):
+                raise
+            pytest.skip(f"grok subscription quota is spent, not a driver defect: {exc}")
         assert "GROK_ACP_TOKEN_829" in json.dumps(session.notifications)

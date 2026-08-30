@@ -182,9 +182,16 @@ class GrokStdioSession:
     def result(response: dict[str, Any], method: str) -> dict[str, Any]:
         error = response.get("error")
         if isinstance(error, dict):
-            raise RuntimeError(
-                f"grok ACP {method} failed: {error.get('message', error)}"
+            # `message` is a bare category ("Rate limited"); `data` carries the
+            # cause a caller can act on ("subscription:free-usage-exhausted").
+            # Keeping only `message` reads a billing stop as an unexplained
+            # failure, which is the wrong thing to page someone about.
+            detail = " ".join(
+                str(part)
+                for part in (error.get("message", error), error.get("data"))
+                if part
             )
+            raise RuntimeError(f"grok ACP {method} failed: {detail}")
         result = response.get("result")
         if not isinstance(result, dict):
             raise RuntimeError(f"grok ACP {method} returned no positive result")
