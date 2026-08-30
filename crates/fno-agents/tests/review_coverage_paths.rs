@@ -527,8 +527,7 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         .nth(2)
         .expect("crate sits at <repo>/crates/fno-agents");
     let rust = fs::read_to_string(manifest_dir.join("src/loopcheck.rs")).unwrap();
-    let python =
-        fs::read_to_string(repo_root.join("cli/src/fno/pr/_coverage_gate.py")).unwrap();
+    let python = fs::read_to_string(repo_root.join("cli/src/fno/pr/_coverage_gate.py")).unwrap();
     // One standing subject, spelled identically on both sides.
     assert!(
         rust.contains("const STANDING_WAIVER_SUBJECT: &str = \"review-coverage-waiver\""),

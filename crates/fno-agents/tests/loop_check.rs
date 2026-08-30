@@ -9699,7 +9699,11 @@ fn standing_waiver_never_clears_a_hard_finding() {
 #[test]
 fn operator_waiver_answers_unknown_on_a_dead_probe() {
     let dir = TempDir::new().unwrap();
-    let fno = make_script(dir.path(), "fno", "echo 'decide: index unreadable' >&2; exit 1");
+    let fno = make_script(
+        dir.path(),
+        "fno",
+        "echo 'decide: index unreadable' >&2; exit 1",
+    );
     let (waiver, unknown) = operator_waiver(
         fno.to_str().unwrap(),
         dir.path(),
