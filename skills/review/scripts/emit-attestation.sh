@@ -232,7 +232,23 @@ review_verb="$(printf '%s' "$hold_json" | jq -r '.metadata.verb // "/code-review
 # zero lines for every legitimate reviewer at the PR tip.
 reviewed_base_sha="$(git merge-base HEAD "origin/${base}" 2>/dev/null || git merge-base HEAD "${base}" 2>/dev/null || true)"
 if [[ -z "$reviewed_base_sha" ]]; then
-  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no event emitted" >&2
+  # The other DIFF-MEASUREMENT refusal gets the same durable terminal as the
+  # empty-diff one below: an attempt that cannot say what it read journals
+  # stage=refused, so the sent row does not orphan. Pre-attempt refusals
+  # (detached HEAD, usage errors) journal nothing by design - no review
+  # attempt exists for them to terminate.
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
+    --events "$repo_root/.fno/events.jsonl" \
+    -d "$(jq -cn \
+      --arg invocation_id "$invocation_id" \
+      --arg stage refused \
+      --arg verb "$review_verb" \
+      --arg reason unresolvable_base \
+      --arg head_sha "$head_sha" \
+      --arg branch "$branch" \
+      '{invocation_id:$invocation_id,stage:$stage,verb:$verb,reason:$reason,head_sha:$head_sha,branch:$branch}')" \
+    >/dev/null 2>&1 || true
+  echo "emit-attestation: cannot resolve the base branch '${base}' to a merge-base; the diff under review is unmeasurable, so no event emitted (a refused review_invocation row was emitted for invocation ${invocation_id})" >&2
   exit 1
 fi
 reviewed_head_sha="$head_sha"

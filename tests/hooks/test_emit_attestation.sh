@@ -378,8 +378,16 @@ RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
 RECEIPT_RC=$?
 [[ $RECEIPT_RC -ne 0 ]] && pass "unresolvable base refuses to emit" \
   || fail "unresolvable base emitted anyway (exit $RECEIPT_RC)"
-[[ ! -f "$TMP/last-emit.txt" ]] && pass "unresolvable base writes no event" \
-  || fail "unresolvable base wrote an event"
+if [[ -f "$TMP/last-emit.txt" ]] \
+  && grep -q "review_invocation" "$TMP/last-emit.txt" \
+  && ! grep -q "review_attestation" "$TMP/last-emit.txt"; then
+  pass "unresolvable base writes the refused terminal, no attestation"
+else
+  fail "unresolvable base wrote neither or the wrong terminal: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
+fi
+stored '.reason' | grep -qx "unresolvable_base" \
+  && pass "unresolvable-base terminal names reason=unresolvable_base" \
+  || fail "terminal reason: want unresolvable_base, got '$(stored '.reason')'"
 
 # 14-16. --findings-file (AC2-HP / AC2-ERR / AC2-EDGE). The classify leg runs
 # the REAL classifier from the repo tree (PYTHONPATH, no fno binary), so these
