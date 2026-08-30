@@ -3860,6 +3860,49 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     return StopResult(name=name, provider=existing.harness, claude_exit=None)
 
 
+def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
+    """Stop a Cursor pane and reap its detached worker-server process."""
+    mux = existing.mux or {}
+    session = mux.get("session")
+    pane_id = mux.get("pane_id")
+    if session and pane_id is not None:
+        try:
+            result = subprocess.run(
+                ["fno", "mux", "pane", "kill", "--session", str(session), str(pane_id)],
+                capture_output=True,
+                text=True,
+                timeout=_DEFAULT_CLAUDE_SHELLOUT_TIMEOUT,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise DispatchAskError(
+                f"cursor-agent pane teardown failed for {name!r}: {exc}", exit_code=1
+            ) from exc
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "no output").strip()
+            if "no such pane" not in detail.lower() and "already absent" not in detail.lower():
+                raise DispatchAskError(
+                    f"cursor-agent pane teardown failed for {name!r}: {detail}", exit_code=1
+                )
+    from fno.agents.harnesses.cursor_agent import reap_detached_worker_servers
+
+    try:
+        reaped = reap_detached_worker_servers()
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
+    _mark_stopped_orphaned(name, existing)
+    events.emit(
+        "agent_stopped",
+        name=name,
+        provider="cursor-agent",
+        claude_exit=None,
+        stopped_by="pane",
+        worker_servers_reaped=reaped,
+    )
+    print(f"stopped: {name}", flush=True)
+    return StopResult(name=name, provider="cursor-agent", claude_exit=None)
+
+
 def stop_agent(
     name: str,
     *,
@@ -3910,6 +3953,9 @@ def stop_agent(
             _lock_handle,
             existing,
         ):
+            if existing.harness == "cursor-agent":
+                return _stop_cursor_agent(name, existing)
+
             if existing.harness in ("codex", "gemini"):
                 # Locked Decision 5: stop is a no-op between asks for the
                 # synchronous providers. Emit the same event for symmetry
@@ -4116,6 +4162,18 @@ def _teardown_harness_session(
 
         if sid:
             print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
+        return None
+
+    if harness == "cursor-agent":
+        from fno.agents.harnesses.cursor_agent import reap_detached_worker_servers
+
+        try:
+            reaped = reap_detached_worker_servers()
+        except RuntimeError as exc:
+            return _fail(str(exc), exit_code=1)
+        print(
+            f"cursor-agent worker-server processes reaped: {reaped}", flush=True
+        )
         return None
 
     if not sid:

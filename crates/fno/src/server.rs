@@ -15649,6 +15649,20 @@ mod tests {
             form.render(uuid)
         );
         assert_eq!(form.render(uuid)[..2], ["sh".to_string(), "-c".to_string()]);
+
+        // Cursor Agent attaches to the same remote chat by full UUID and
+        // carries the trust flag declared by its capability form.
+        let cursor_id = "fadad56b-8008-45f5-b809-f9fab7074534";
+        let cursor_form =
+            agents_view::attach_form("cursor-agent").expect("cursor-agent declares an attach form");
+        assert_eq!(
+            attach_argv_for(Some("cursor-agent"), cursor_id, Some("ignored"), Some(dir)),
+            cursor_form.render(cursor_id)
+        );
+        assert_eq!(
+            cursor_form.render(cursor_id),
+            ["cursor-agent", "--resume", cursor_id, "--trust",]
+        );
     }
 
     #[test]

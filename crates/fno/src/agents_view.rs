@@ -1875,7 +1875,8 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string),
                 // A full session id addresses a durable thread, and only a
-                // thread-shaped row may take one.
+                // thread-shaped row may take one. Cursor Agent is the pane-row
+                // exception: its remote chat UUID is the attach target.
                 IdKind::Session if is_thread_shape || harness_name == Some("cursor-agent") => row
                     .get("harness_session_id")
                     .and_then(|v| v.as_str())
@@ -3048,6 +3049,25 @@ mod tests {
         assert_eq!(reach("agy-row"), Reach::Locate);
         assert_eq!(reach("oc-row"), Reach::Locate);
         assert_eq!(reach("gm-row"), Reach::Locate);
+    }
+
+    #[test]
+    fn cursor_agent_pane_row_derives_remote_chat_attach_id() {
+        use crate::proto::Reach;
+
+        let chat_id = "fadad56b-8008-45f5-b809-f9fab7074534";
+        let raw = reg(&format!(
+            r#"{{"name":"cursor","cwd":"/w","status":"live","harness":"cursor-agent",
+                "host_mode":"interactive","short_id":"","harness_session_id":"{chat_id}",
+                "mux":{{"session":"s","pane_id":7}}}}"#
+        ));
+        let row = derive_rows(&raw, NOW).unwrap().remove(0);
+
+        assert_eq!(row.attach_id.as_deref(), Some(chat_id));
+        assert_eq!(
+            thread_reach(row.harness.as_deref(), row.attach_id.as_deref()),
+            Reach::Drive
+        );
     }
 
     /// AC14-HP, AC16-EDGE (x-6678, x-296f): the viewport renders codex's
