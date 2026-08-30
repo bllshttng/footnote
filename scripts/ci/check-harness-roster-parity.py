@@ -112,7 +112,14 @@ def extract_setup_harnesses(root: Path) -> tuple[str, ...]:
     docs = sorted((root / "docs").glob(SETUP_GLOB))
     if not docs:
         raise GateError(f"docs/{SETUP_GLOB}: no setup docs found")
-    return tuple(sorted(p.stem[len("SETUP-") :].lower() for p in docs))
+    names = tuple(sorted(p.stem[len("SETUP-") :].lower() for p in docs))
+    # A doc named exactly SETUP-.md extracts the empty string, which would
+    # print as an invisible entry in the divergence report; refuse it as a
+    # malformed source instead of reporting a nameless harness.
+    empty = [p.name for p in docs if not p.stem[len("SETUP-") :]]
+    if empty:
+        raise GateError(f"docs/{SETUP_GLOB}: {', '.join(empty)} carries no harness name")
+    return names
 
 
 def extract_provider_arms(text: str) -> tuple[str, ...]:
@@ -129,17 +136,25 @@ def extract_provider_arms(text: str) -> tuple[str, ...]:
         raise GateError(f"{PROVIDER_RS}: for_name has no body")
     depth = 0
     end = -1
-    for i in range(open_at, len(text)):
-        if text[i] == "{":
+    # Scrub string literals first (length-preserving, so scan offsets stay
+    # text offsets): a brace inside a quoted arm name would otherwise close
+    # the body early and mis-scope the extraction.
+    scan = re.sub(
+        r'"(?:[^"\\]|\\.)*"',
+        lambda m: '"' + " " * (len(m.group(0)) - 2) + '"',
+        text[open_at:],
+    )
+    for i, ch in enumerate(scan):
+        if ch == "{":
             depth += 1
-        elif text[i] == "}":
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 end = i
                 break
     if end == -1:
         raise GateError(f"{PROVIDER_RS}: for_name body is unbalanced")
-    body = text[open_at : end + 1]
+    body = text[open_at : open_at + end + 1]
     catchall = re.search(r"_\s*=>\s*None", body)
     arms = list(re.finditer(r'"([A-Za-z0-9_-]+)"\s*=>', body))
     if catchall is None or not arms:
@@ -361,7 +376,9 @@ def _write_tree(
         _identity_py(markers, legacy, extra), encoding="utf-8"
     )
     for name in setup_docs:
-        (root / "docs" / f"SETUP-{name.upper()}.md").write_text(
+        # Verbatim, not uppercased: a setup doc named SETUP-.md (empty harness
+        # name) is itself a fixture, and uppercasing would hide it from the glob.
+        (root / "docs" / f"SETUP-{name}.md").write_text(
             f"# {name} setup\n", encoding="utf-8"
         )
 
@@ -428,6 +445,31 @@ def run_selftest() -> int:
             1,
             ("absent from _EXTRA_IDENTITY_NAMES"),
             extra=("CLAUDECODE_SESSION_ID",),
+        ),
+        _case(
+            "a setup doc with no harness name fails closed",
+            1,
+            ("FAIL-CLOSED", "carries no harness name"),
+            setup_docs=("hermes", "openclaw", ""),
+        ),
+        _case(
+            "a brace inside a quoted arm name does not mis-scope the body",
+            0,
+            ("GREEN",),
+            provider_text=(
+                "pub fn for_name(name: &str) -> Option<Box<dyn Provider>> {\n"
+                "    match name {\n"
+                '        "a{b" => Some(Box::new(BraceProvider)),\n'
+                '        "claude" => Some(Box::new(ClaudeProvider)),\n'
+                '        "codex" => Some(Box::new(CodexProvider)),\n'
+                '        "gemini" => Some(Box::new(GeminiProvider)),\n'
+                '        "agy" => Some(Box::new(AgyProvider)),\n'
+                '        "opencode" => Some(Box::new(OpencodeProvider)),\n'
+                '        "pi" => Some(Box::new(PiProvider)),\n'
+                "        _ => None,\n"
+                "    }\n"
+                "}\n"
+            ),
         ),
     ]
     failures = [detail for ok, detail in cases if not ok]
