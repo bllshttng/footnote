@@ -175,6 +175,17 @@ def test_probe_seed_requests_distinct_replies() -> None:
     assert "PROBE_SURVIVE=<nonce>" in seed
 
 
+def test_zero_exit_auth_wall_is_credential_skip() -> None:
+    assert harness_probe._credential_skip_allowed(
+        registry_row=None,
+        spawn_output="No providers configured.",
+    )
+    assert not harness_probe._credential_skip_allowed(
+        registry_row=object(),
+        spawn_output="No providers configured.",
+    )
+
+
 def test_survive_requires_successful_resume_and_new_marker() -> None:
     assert harness_probe._survive_marker(
         1, 0, 0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"

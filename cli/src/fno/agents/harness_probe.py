@@ -586,6 +586,10 @@ def _auth_failure(output: str) -> bool:
     )
 
 
+def _credential_skip_allowed(*, registry_row: object | None, spawn_output: str) -> bool:
+    return registry_row is None and _auth_failure(spawn_output)
+
+
 def _checkout_manifest_binary(root: Path) -> Path | None:
     for profile in ("debug", "release"):
         candidate = root / "crates/fno-agents/target" / profile / "fno-agents"
@@ -690,7 +694,7 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                 delay_s=0.5,
             )
             row = _registry_row(name)
-            if spawn_code != 0 and _auth_failure(spawn_output):
+            if _credential_skip_allowed(registry_row=row, spawn_output=spawn_output):
                 row_lines = _credential_skip_lines(
                     f"credential required: run {harness} login"
                 )
@@ -829,7 +833,8 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                 view_line = line_view(
                     screen_marker=None,
                     refusal="harness supplied no native pane reference",
-            )
+                )
+                survive = line_survive(prior_turn_marker=None)
 
             if isinstance(mux, dict) and mux.get("session") and mux.get("pane_id"):
                 kill_code, _ = _run_command(
