@@ -340,12 +340,13 @@ _cargo_target_cleanup() {
     fi
 
     # The absolute cap alone is a floor the sweep defends on a nearly full
-    # disk (x-ea02: 63 GiB allocated, 4.2 GB free, "ok", 0 reaped). The
-    # effective ceiling is min(absolute cap, free-share percent of free
+    # disk (measured live: 63 GiB allocated, 4.2 GB free, "ok", 0 reaped).
+    # The effective ceiling is min(absolute cap, free-share percent of free
     # space) so a full disk tightens it; an unreadable free space falls
-    # back to the absolute cap and is reported as free_bytes=unknown.
+    # back to the absolute cap and is reported as free_bytes=unknown. The
+    # digit bound keeps free*pct inside 64-bit arithmetic.
     free_bytes="$(_cargo_free_bytes "${MAIN_DIR:-$(pwd)}")"
-    if [[ "$free_bytes" =~ ^[1-9][0-9]*$ ]]; then
+    if [[ "$free_bytes" =~ ^[1-9][0-9]{0,14}$ ]]; then
         effective_cap_bytes=$(( free_bytes * free_share_pct / 100 ))
         [[ "$effective_cap_bytes" -gt "$cap_bytes" ]] && effective_cap_bytes="$cap_bytes"
         [[ "$effective_cap_bytes" -lt 1 ]] && effective_cap_bytes=1
