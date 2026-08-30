@@ -2,6 +2,8 @@
 
 `fno agents` supports six harness CLIs: `claude`, `codex`, `gemini`, `agy` (Antigravity), `opencode`, and `pi`. Each harness has different substrates, session IDs, and re-entry paths. This page explains the contract. `cli/src/fno/agents/harness_capabilities.toml` is the authoring source. Cargo packages a byte-identical Rust copy. If the copies differ, tests fail. The complete supported-harness roster is wider than this matrix: `KNOWN_HARNESSES` (`cli/src/fno/harness_names.py`) also carries `hermes` and `openclaw`, identity-only hosts with no dispatch row (`docs/SETUP-HERMES.md`, `docs/SETUP-OPENCLAW.md`). The roster-parity CI gate (`scripts/ci/check-harness-roster-parity.py`) holds that union against its evidence.
 
+Before calling a newly declared lane supported, run `fno doctor harness <name> --live`. The probe reads eight behaviors on the real lane: SPAWN, IDENTITY, CLAIM, MAIL BOTH WAYS, VIEW, SURVIVE, ROW MATCHES, and MANIFEST PINNED. The capability table is input only to ROW MATCHES. It is evidence for no other line. Without `--live`, the probe prints all eight markers and its no-spawn argv.
+
 Two runtimes serve the surface. The **Rust client** (`fno-agents`, the shipped default) intercepts most verbs; **Python** owns a handful (`whoami`, `top`, `peek`, `watch`, plus internal helpers) and is the fallback when no binary is installed (`FNO_AGENTS_RUNTIME=python`). Routing is automatic - you type `fno agents <verb>` either way. Notably, **pane spawns are Python-owned by design**: the mux-hosted back half lives in the Python `cmd_spawn` path, and the router keeps every pane spawn there even when Rust mode is requested - so the default substrate works identically under both runtimes.
 
 Messaging note: `send` / `inbox` / `ack` are not direct lifecycle actions. They live under the `fno agents mail` subgroup.
@@ -57,6 +59,8 @@ What ships today is the PANE lane plus the rpc transport as a driver library. `f
 Two traps carry the rest. `rpc` exits on stdin EOF mid-turn with status 0. `--provider` without `--model` falls through to a Bedrock model. Full contract and the credential rules: [docs/HARNESSES.md](HARNESSES.md).
 
 ## Machine-readable interactive capabilities
+
+The support probe is the onboarding gate for this table. Run `fno doctor harness <name> --live` before treating a row as supported. It must produce a positive marker for every non-skipped line. A missing credential is a named `skip`, not a pass or fail. Run `scripts/ci/check-harness-capabilities-fresh.sh` alongside the honesty sweep for the three committed table copies.
 
 Run `fno agents dispatch capabilities <h> --json` to read one harness without dispatch configuration. The JSON includes versioned data for permissions, sessions, readiness, input, stop, and removal. Missing or malformed fields stop contract loading. A harness never inherits Claude defaults.
 
