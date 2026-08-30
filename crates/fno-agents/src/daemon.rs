@@ -643,6 +643,9 @@ pub struct WorktreeSweepReport {
 /// that could not read its own output must not report "0 eligible, 0 dirty",
 /// which is indistinguishable from a clean machine: an absence has two
 /// explanations and a count must only ever come from a real reading.
+///
+/// The verb differs by mode (`would archive` dry-run vs `archived` apply), so
+/// the eligible count reads from whichever the line carries.
 pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
     let line = stdout
         .lines()
@@ -651,28 +654,36 @@ pub fn parse_worktree_sweep(stdout: &str) -> Option<WorktreeSweepReport> {
         let idx = line.find(needle)?;
         line[..idx].split_whitespace().last()?.parse().ok()
     };
+    let eligible = num_before(" would archive").or_else(|| num_before(" archived"))?;
     Some(WorktreeSweepReport {
-        eligible: num_before(" would archive")?,
+        eligible,
         kept: num_before(" kept (")?,
         dirty: num_before(" dirty")?,
     })
 }
 
-/// Report-only worktree sweep, one line per repo, on a 24h floor.
+/// Worktree sweep, one line per repo, on a 24h floor: report-only until a
+/// merge-minted reap order stands, then applying.
 ///
-/// REPORTS, NEVER REMOVES, and that split is deliberate. A merged PR is external
-/// proof the work landed; a timer tick proves nothing. Removal stays on the
-/// merge-triggered path, gated by the existing `post_merge.self_reap`. There is
-/// no second config knob, because two off-switches for one decision strand
-/// whoever flips the wrong one.
+/// A timer tick proves nothing on its own, so an unearned tick still only
+/// REPORTS. Removal stays on the merge-triggered path: the post-merge ritual
+/// mints a `reap:pr-<n>` claim (TTL-bounded) whenever its archive leg defers
+/// or is guard-refused, and while any such order stands (`orders` injects that
+/// read) the pass runs with `--apply` and the sweep's own guards - reapable,
+/// live claim, rooted processes - decide tree by tree. A tree that stays
+/// protected expires its order rather than being forced. There is no config
+/// knob, because two off-switches for one decision strand whoever flips the
+/// wrong one.
 ///
-/// `run` is injected so the policy is testable without shelling out.
+/// `orders` and `run` are injected so the policy is testable without shelling
+/// out.
 pub fn worktree_sweep(
     home: &AgentsHome,
     emitter: &EventEmitter,
     now: i64,
     roots: &[String],
-    run: &dyn Fn(&str) -> Option<String>,
+    orders: &dyn Fn() -> bool,
+    run: &dyn Fn(&str, bool) -> Option<String>,
 ) -> usize {
     let stamp = home.root().join("worktree-sweep.stamp");
     let last = std::fs::read_to_string(&stamp)
@@ -682,13 +693,15 @@ pub fn worktree_sweep(
     if now.saturating_sub(last) < WORKTREE_SWEEP_INTERVAL_SECS as i64 {
         return 0;
     }
+    let apply = orders();
+    let mode = if apply { "apply-orders" } else { "report-only" };
     let mut swept = 0;
     for root in roots {
         // Emit for EVERY repo, including the ones that read zero. A tick that
         // stays silent when it finds nothing cannot be told from a tick that
         // never ran, and this sweep exists precisely to surface what the
         // ritual missed.
-        match run(root).as_deref().and_then(parse_worktree_sweep) {
+        match run(root, apply).as_deref().and_then(parse_worktree_sweep) {
             Some(r) => {
                 let _ = emitter.emit(
                     "worktree_sweep",
@@ -697,7 +710,7 @@ pub fn worktree_sweep(
                         "eligible": r.eligible,
                         "kept": r.kept,
                         "dirty": r.dirty,
-                        "mode": "report-only",
+                        "mode": mode,
                     }),
                 );
                 swept += 1;
@@ -705,7 +718,7 @@ pub fn worktree_sweep(
             None => {
                 let _ = emitter.emit(
                     "worktree_sweep",
-                    &json!({"repo": root, "mode": "report-only", "error": "unreadable-summary"}),
+                    &json!({"repo": root, "mode": mode, "error": "unreadable-summary"}),
                 );
             }
         }
@@ -2936,11 +2949,12 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let _ = gc_sweep(&home, &emitter, &grace_for_harness);
                     });
                 }
-                // Worktree report sweep: the backstop for what the merge ritual
+                // Worktree sweep: the backstop for what the merge ritual
                 // missed. Its own 24h stamp makes it a near-no-op on this tick,
                 // but the verb shells git across every worktree when it does
                 // fire, so it runs off-loop behind a one-in-flight gate like the
-                // scrape sweep. Report-only by construction.
+                // scrape sweep. Report-only unless a merge-minted reap order
+                // (reap:pr-* claim) stands, in which case the pass applies.
                 if !worktree_sweep_in_flight.swap(true, std::sync::atomic::Ordering::SeqCst) {
                     let flag = Arc::clone(&worktree_sweep_in_flight);
                     let home = ctx.home.clone();
@@ -2949,11 +2963,28 @@ pub async fn run(home: AgentsHome, opts: DaemonOptions) -> Result<(), DaemonErro
                         let _gate = SweepGate(flag);
                         let roots = registry_repo_roots(&home);
                         let now = now_epoch_secs();
-                        worktree_sweep(&home, &emitter, now, &roots, &|root| {
+                        worktree_sweep(&home, &emitter, now, &roots, &|| {
+                            // Live reap orders anywhere (both claim roots are
+                            // read by `list`): each is minted only by a ritual
+                            // that gh-confirmed MERGED, so its standing is the
+                            // merge-trigger for this tick's apply pass.
                             std::process::Command::new("fno")
-                                .current_dir(root)
-                                .args(["agents", "workspace", "worktree", "cleanup", "--merged"])
+                                .args(["agents", "claim", "list", "--prefix", "reap:", "-J"])
                                 .output()
+                                .ok()
+                                .filter(|o| o.status.success())
+                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                                .map(|out| out.trim() != "[]" && !out.trim().is_empty())
+                                .unwrap_or(false)
+                        }, &|root, apply| {
+                            let mut cmd = std::process::Command::new("fno");
+                            cmd.current_dir(root).args([
+                                "agents", "workspace", "worktree", "cleanup", "--merged",
+                            ]);
+                            if apply {
+                                cmd.arg("--apply");
+                            }
+                            cmd.output()
                                 .ok()
                                 .filter(|o| o.status.success())
                                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -10442,6 +10473,18 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
     }
 
     #[test]
+    fn sweep_summary_parses_the_apply_mode_line() {
+        // The apply pass says "archived", not "would archive"; the eligible
+        // count must read from whichever verb the line carries.
+        let line = "archived         feature/x-3e17   /some/wt\n\
+Summary: 3 archived, 4 kept (1 unmerged, 1 unpushed, 1 dirty), 0 failed\n";
+        let r = parse_worktree_sweep(line).expect("parses");
+        assert_eq!(r.eligible, 3);
+        assert_eq!(r.kept, 4);
+        assert_eq!(r.dirty, 1);
+    }
+
+    #[test]
     fn sweep_summary_absent_is_none_not_zero() {
         // A zeroed report is indistinguishable from a clean machine. An absence
         // has two explanations and only a real reading may produce a count.
@@ -10461,42 +10504,86 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
             &emitter,
             1_000_000,
             &["/repo/a".into(), "/repo/b".into()],
-            &|_| Some(quiet.to_string()),
+            &|| false,
+            &|_, _| Some(quiet.to_string()),
         );
 
         assert_eq!(swept, 2, "a tick that finds nothing must still report");
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
         assert_eq!(log.matches("worktree_sweep").count(), 2);
         assert!(log.contains("report-only"));
+        assert!(!log.contains("apply-orders"));
+    }
+
+    #[test]
+    fn sweep_applies_only_when_a_reap_order_stands() {
+        // Ruling preserved: a merged PR is proof, a timer tick is not. The
+        // timer lane applies ONLY when the merge ritual minted an order.
+        let home = tmp_home("wt-sweep-ordered");
+        let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
+        let quiet =
+            "Summary: 0 would archive, 0 kept (0 unmerged, 0 unpushed, 0 dirty), 0 failed\n";
+
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|| true,
+            &|_, apply| {
+                assert!(apply, "a standing order must reach the verb as --apply");
+                Some(quiet.to_string())
+            },
+        );
+
+        assert_eq!(swept, 1);
+        let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();
+        assert!(log.contains("apply-orders"));
+        assert!(!log.contains("report-only"));
     }
 
     #[test]
     fn sweep_honours_its_own_24h_floor() {
         let home = tmp_home("wt-sweep-floor");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
-        let out = |_: &str| Some(REAL_SUMMARY.to_string());
+        let out = |_: &str, _: bool| Some(REAL_SUMMARY.to_string());
         let now = 1_000_000;
 
         assert_eq!(
-            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &out),
+            worktree_sweep(&home, &emitter, now, &["/repo/a".into()], &|| false, &out),
             1
         );
         // Same day: skipped entirely, no second reading.
         assert_eq!(
-            worktree_sweep(&home, &emitter, now + 60, &["/repo/a".into()], &out),
+            worktree_sweep(
+                &home,
+                &emitter,
+                now + 60,
+                &["/repo/a".into()],
+                &|| false,
+                &out
+            ),
             0
         );
         // A day later: fires again.
         assert_eq!(
-            worktree_sweep(&home, &emitter, now + 86_401, &["/repo/a".into()], &out),
+            worktree_sweep(
+                &home,
+                &emitter,
+                now + 86_401,
+                &["/repo/a".into()],
+                &|| false,
+                &out
+            ),
             1
         );
     }
 
     #[test]
-    fn sweep_never_passes_apply() {
-        // Ruling: a merged PR is proof, a timer tick is not. Removal lives on the
-        // merge-triggered path only. Pin that this sweep cannot grow an --apply.
+    fn sweep_never_passes_apply_on_its_own_authority() {
+        // Ruling: a merged PR is proof, a timer tick is not. The fn body may
+        // not carry an --apply literal: applying is decided by the injected
+        // orders read (merge-minted claims), never by the sweep itself.
         let src = include_str!("daemon.rs");
         let idx = src
             .find("fn worktree_sweep(")
@@ -10510,7 +10597,14 @@ Summary: 12 would archive, 37 kept (19 unmerged, 11 unpushed, 5 dirty, 0 live-se
         let home = tmp_home("wt-sweep-unreadable");
         let emitter = EventEmitter::new(home.events_jsonl(), "daemon");
 
-        let swept = worktree_sweep(&home, &emitter, 1_000_000, &["/repo/a".into()], &|_| None);
+        let swept = worktree_sweep(
+            &home,
+            &emitter,
+            1_000_000,
+            &["/repo/a".into()],
+            &|| false,
+            &|_, _| None,
+        );
 
         assert_eq!(swept, 0);
         let log = std::fs::read_to_string(home.events_jsonl()).unwrap_or_default();

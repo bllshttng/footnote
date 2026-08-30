@@ -21,6 +21,7 @@ LIFECYCLE_COMPAT_SRC = REPO_ROOT / "scripts" / "worktree-lifecycle.sh"
 UNPUSHED_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-unpushed.sh"
 ARCHIVE_SRC = REPO_ROOT / "scripts" / "setup" / "archive-worktree.sh"
 TARGET_GUARD_SRC = REPO_ROOT / "scripts" / "lib" / "target-guard.sh"
+REMOVAL_EVENT_SRC = REPO_ROOT / "scripts" / "lib" / "worktree-removal-event.sh"
 SETUP_SRC = REPO_ROOT / "scripts" / "setup" / "setup-worktree.sh"
 runner = CliRunner()
 
@@ -62,6 +63,7 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy2(LIFECYCLE_COMPAT_SRC, canon / "scripts" / "worktree-lifecycle.sh")
     shutil.copy2(UNPUSHED_SRC, canon / "scripts" / "lib" / "worktree-unpushed.sh")
     shutil.copy2(TARGET_GUARD_SRC, canon / "scripts" / "lib" / "target-guard.sh")
+    shutil.copy2(REMOVAL_EVENT_SRC, canon / "scripts" / "lib" / "worktree-removal-event.sh")
     shutil.copy2(ARCHIVE_SRC, canon / "scripts" / "setup" / "archive-worktree.sh")
     return canon
 
@@ -301,6 +303,60 @@ def test_apply_reaps_merged_and_preserves_branch(repo: Path):
     assert not wt.exists(), "worktree dir should be gone" + diag
     branches = _git(repo, "branch", "--list", "feature/reapme").stdout
     assert "feature/reapme" in branches, "branch must be preserved"
+
+
+# ── x-60de: every removal emits one attributable event row ─────────────────
+def test_apply_removal_emits_event_row(repo: Path, tmp_path: Path, monkeypatch):
+    """A removal without a row is unattributable: live trees lost on
+    2026-08-25 and 2026-08-29 left no evidence because no removal path
+    emitted anything. The row must name the path, the caller, the claim
+    state read at decision time, and the reason - and reach the
+    machine-global journal, the instrument that walked 2239 rows and found
+    zero removals."""
+    import json as _json
+
+    venv_bin = REPO_ROOT / "cli" / ".venv" / "bin"
+    if not (venv_bin / "fno-py").exists():
+        pytest.skip("cli venv absent (run fno doctor test once); emit falls back to deployed fno")
+    monkeypatch.setenv("PATH", f"{venv_bin}{os.pathsep}{os.environ['PATH']}")
+    # Sandbox the machine-global mirror through a point-config: the global
+    # journal follows config state_dir, and FNO_CONFIG redirects config
+    # loading for the emit subprocess.
+    sandbox_state = tmp_path / "fno-state"
+    sandbox_state.mkdir()
+    sandbox_cfg = tmp_path / "fno-config.toml"
+    sandbox_cfg.write_text(f'state_dir = "{sandbox_state}"\n')
+    monkeypatch.setenv("FNO_CONFIG", str(sandbox_cfg))
+
+    wt = _add_merged(repo, "reapme")
+
+    r = _sweep(repo, "--apply")
+    diag = f"\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    assert r.returncode == 0, diag
+    assert not wt.exists(), diag
+
+    def _rows(path: Path) -> list[dict]:
+        assert path.exists(), f"missing journal: {path}"
+        return [
+            _json.loads(line)
+            for line in path.read_text().splitlines()
+            if line.strip()
+        ]
+
+    project_rows = _rows(repo / ".fno" / "events.jsonl")
+    hits = [row for row in project_rows if row.get("type") == "worktree_removed"]
+    assert hits, f"removal emitted no row; project log types: {[r.get('type') for r in project_rows]}"
+    data = hits[-1]["data"]
+    assert data["path"] == str(wt), diag
+    assert data["caller"] == "cleanup --merged", diag
+    assert data["claim"], "the row must carry the claim state read at decision time"
+    assert data["reason"], "the row must carry why the tree was judged safe"
+    assert data["branch"] == "feature/reapme", diag
+
+    global_rows = _rows(sandbox_state / "events.jsonl")
+    assert any(row.get("type") == "worktree_removed" for row in global_rows), \
+        "worktree_removed is a GLOBAL_MIRROR_TYPES row: it must reach the machine-global journal"
 
 
 # ── AC2-HP: the four keep-reasons hold, none removed ────────────────────────
@@ -670,26 +726,58 @@ def test_age_sweep_keeps_detached_tree_with_unpushed_commits(repo: Path):
 def test_age_sweep_removes_old_clean_detached_tree(repo: Path):
     wt = _add_detached(repo, repo / "wt-age-clean")
 
-    r = _age_sweep(repo)
+    r = _age_sweep(repo, "--apply")
 
     assert r.returncode == 0, r.stderr
     assert not wt.exists(), r.stdout
     assert "REMOVED" in r.stdout
 
 
-def test_age_sweep_keeps_detached_tree_with_uncommitted_work(repo: Path):
-    """Same loss class as unpushed commits, one step earlier: a detached tree
-    has no branch holding uncommitted content either, and the sweep removes by
-    default with --force. The in-flight eval tree rides this guard via its
-    untracked marker file (cli/src/fno/evals/runner.py)."""
-    wt = _add_detached(repo, repo / "wt-age-dirty")
-    (wt / "scratch.txt").write_text("not on any ref\n")
+def test_age_sweep_is_dry_run_by_default(repo: Path):
+    """Both removal modes share one default: a bare sweep reports, --apply
+    executes. The age mode used to remove on a bare call - a king ran it
+    expecting a preview and 13 trees went."""
+    wt = _add_detached(repo, repo / "wt-age-default")
 
     r = _age_sweep(repo)
 
     assert r.returncode == 0, r.stderr
-    assert f"SKIP: {wt} (detached HEAD holds uncommitted work" in r.stdout
+    assert "WOULD REMOVE" in r.stdout
+    assert "dry-run" in r.stdout
+    assert wt.exists(), "a bare age sweep must not remove anything"
+
+
+def test_age_sweep_keeps_detached_tree_with_uncommitted_work(repo: Path):
+    """Same loss class as unpushed commits, one step earlier: a detached tree
+    has no branch holding uncommitted content either, and the sweep removes
+    with --force under --apply. The in-flight eval tree rides this guard via
+    its untracked marker file (cli/src/fno/evals/runner.py)."""
+    wt = _add_detached(repo, repo / "wt-age-dirty")
+    (wt / "scratch.txt").write_text("not on any ref\n")
+
+    r = _age_sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (holds uncommitted work: " in r.stdout
     assert wt.exists(), "age sweep must not force-remove uncommitted work on a detached HEAD"
+
+
+def test_age_sweep_keeps_branched_tree_with_uncommitted_work(repo: Path):
+    """The uncommitted-work guard used to fire only on detached HEADs; a
+    branched tree with a dirty file hit the same --force remove and lost it -
+    the branch never recorded it. DIRTY is never touched by any automatic
+    path, branched or detached."""
+    wt = repo / "wt-age-branched-dirty"
+    _git(repo, "worktree", "add", str(wt), "-b", "feature/wt-age-branched-dirty", "main")
+    _commit(wt, "branched.txt")
+    (wt / "dirty.txt").write_text("uncommitted\n")
+
+    r = _age_sweep(repo, "--apply")
+
+    assert r.returncode == 0, r.stderr
+    assert f"SKIP: {wt} (holds uncommitted work: " in r.stdout
+    assert wt.exists(), "age sweep must not force-remove uncommitted work on a branched tree"
+    assert (wt / "dirty.txt").exists()
 
 
 def test_compat_age_sweep_delegates_app_owned_guard(

@@ -37,7 +37,7 @@ _PROTOCOL_DATA_STR_CAP = 500
 # only, and a canonical merge reading the other never saw it. The mirror's
 # identity guard (skip when the project log IS the global log) keeps a
 # same-file emit from doubling.
-GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage"})
+GLOBAL_MIRROR_TYPES = frozenset({"review_attestation", "review_coverage", "worktree_removed"})
 
 
 @cli.callback()

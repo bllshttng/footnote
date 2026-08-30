@@ -222,6 +222,14 @@ worktree-reapable.sh
 # surface to a one-line git question. Pure sourcing library; no CLI of its own.
 worktree-unpushed.sh
 
+# The shared "emit one worktree_removed event row per removal" answer. Sourced
+# by scripts/lib/worktree-lifecycle.sh and scripts/setup/archive-worktree.sh;
+# exposes _wt_emit_removal_event. It shells the wrapped entry point
+# `fno doctor event emit` (cli/src/fno/events/cli.py) with repo-first
+# resolution, so a wrapper would be a second path around the one emit verb.
+# Pure sourcing library; no CLI of its own.
+worktree-removal-event.sh
+
 # Bounded append-log rotation (.fno/ dir-hygiene, ab-d5a984f6). A thin
 # `bash <path> <file> <max_bytes>` helper invoked by hooks/convo-signal-capture.sh
 # to cap convo-signals.jsonl; tests run it directly. Pure utility, not a

@@ -492,6 +492,12 @@ _wtm_cmd_cleanup() {
         *) _wtm_err "invalid --mode=$mode (expected ephemeral|stale|all)"; return 1 ;;
     esac
 
+    # The lifecycle script is dry-run by default in BOTH removal modes; this
+    # manager keeps its own historic contract (act unless --dry-run), so it
+    # forwards the execution flag that matches the caller's choice.
+    local rem_flag="--apply"
+    [[ -n "$dry_run" ]] && rem_flag="--dry-run"
+
     # Delegate to the canonical lifecycle script. The mode flag adjusts the
     # prefix filter:
     #   - ephemeral -> only worktrees whose branch starts with "discover/" or "speculate/"
@@ -507,17 +513,16 @@ _wtm_cmd_cleanup() {
         return 1
     fi
 
-    local args=(cleanup --older-than "$older_than")
-    [[ -n "$dry_run" ]] && args+=("$dry_run")
+    local args=(cleanup --older-than "$older_than" "$rem_flag")
     if [[ -n "$prefix" ]]; then
         args+=(--prefix "$prefix")
     elif [[ "$mode" == "ephemeral" ]]; then
         # Two passes for the two ephemeral prefixes - the lifecycle script
         # supports a single --prefix at a time.
         bash "$lifecycle_script" cleanup --older-than "$older_than" \
-            ${dry_run:+$dry_run} --prefix discover/ >&2
+            "$rem_flag" --prefix discover/ >&2
         bash "$lifecycle_script" cleanup --older-than "$older_than" \
-            ${dry_run:+$dry_run} --prefix speculate/ >&2
+            "$rem_flag" --prefix speculate/ >&2
         return 0
     elif [[ "$mode" == "stale" ]]; then
         # Stale = everything that ISN'T ephemeral. The lifecycle script
@@ -537,7 +542,7 @@ _wtm_cmd_cleanup() {
         while IFS= read -r br; do
             [[ -z "$br" ]] && continue
             bash "$lifecycle_script" cleanup --older-than "$older_than" \
-                ${dry_run:+$dry_run} --prefix "$br" >&2
+                "$rem_flag" --prefix "$br" >&2
         done <<< "$stale_branches"
         return 0
     fi

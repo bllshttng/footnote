@@ -169,11 +169,15 @@ def test_the_mirror_set_is_small_and_named():
     # Membership is earned by having a cross-checkout reader. review_coverage
     # earned its place (the coverage reader answers from whichever log holds
     # the row, so a row emitted through the Python chokepoint must reach the
-    # global journal like the Rust loopcheck's own dual-write); no other type
-    # has a cross-checkout reader, and an unnamed member doubles rows nobody
-    # reads twice.
+    # global journal like the Rust loopcheck's own dual-write). worktree_removed
+    # earned its place the same way: a removal happens in one checkout and is
+    # investigated from another (the 2026-08-25/29 live-tree losses were walked
+    # over the machine-global journal and found nothing, because no removal
+    # path emitted anything anywhere). No other type has a cross-checkout
+    # reader, and an unnamed member doubles rows nobody reads twice.
     assert "review_attestation" in GLOBAL_MIRROR_TYPES
     assert "review_coverage" in GLOBAL_MIRROR_TYPES
+    assert "worktree_removed" in GLOBAL_MIRROR_TYPES
     assert GLOBAL_MIRROR_TYPES == frozenset(
-        {"review_attestation", "review_coverage"}
+        {"review_attestation", "review_coverage", "worktree_removed"}
     )

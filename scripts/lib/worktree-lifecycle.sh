@@ -2,8 +2,9 @@
 # Worktree lifecycle management
 # Usage:
 #   worktree-lifecycle.sh status                    # List all worktrees
-#   worktree-lifecycle.sh cleanup [--older-than Nd] [--dry-run] [--prefix <prefix>]
+#   worktree-lifecycle.sh cleanup [--older-than Nd] [--prefix <prefix>] [--apply] [--dry-run]
 #   worktree-lifecycle.sh cleanup --merged [--apply] [--kill-orphans]
+#   Both cleanup removal modes are dry-run by default; --apply executes.
 #   worktree-lifecycle.sh archive <name>            # Keep branch, remove directory
 set -uo pipefail
 
@@ -33,6 +34,11 @@ else
     }
 fi
 
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-removal-event.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-removal-event.sh"
+fi
+
 # The detached-HEAD reachability answer, shared with archive-worktree.sh. A
 # partial deploy that dropped the lib keeps everything (count 1), never reaps;
 # its refresh stub keeps today's fetch-what-the-merged-check-needs behavior.
@@ -46,16 +52,19 @@ fi
 
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
-# Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
-# immutable manifest has no status field, so the durable signal is the node
-# claim (session-pid anchored + TTL). owner_pid is checked last and only as a
-# positive signal: it is the transient `fno do target init` wrapper pid, dead about
-# a second after init returns, so on its own this returned 1 for every live
-# session and the merged-cleanup sweep would prune a running target's worktree.
+# Live target session? The manifest's `status:` field (legacy era) was once
+# read here as liveness, but the field is WRITE-ONCE: a session that died with
+# `status: IN_PROGRESS` carries it forever, so the grep kept every crashed
+# legacy tree eternally live. Liveness truth is the node claim (session-pid
+# anchored + TTL) plus the process lane in the sweep; a legacy manifest with no
+# claim key has neither, and an IN_PROGRESS string is not a third signal.
+# owner_pid is checked last and only as a positive signal: it is the transient
+# `fno do target init` wrapper pid, dead about a second after init returns, so
+# on its own this returned 1 for every live session and the merged-cleanup
+# sweep would prune a running target's worktree.
 _wt_live() {
     local st="$1/.fno/target-state.md"
     [[ -f "$st" ]] || return 1
-    grep -qE '^status:[[:space:]]*IN_PROGRESS' "$st" && return 0
     local guard_lib
     guard_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/target-guard.sh"
     # shellcheck source=./target-guard.sh
@@ -672,8 +681,9 @@ case "${1:-status}" in
                 fi
                 # Salvage + strict re-check + removal all live in archive-worktree.sh
                 # (its liveness re-check at removal time is authoritative, not our
-                # cached one). Exit 5 = salvage kept the worktree.
-                bash "$ARCHIVE" "$wt" $YES >&2
+                # cached one). Exit 5 = salvage kept the worktree. The caller env
+                # names this path in the worktree_removed event row it emits.
+                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
                     0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
@@ -707,6 +717,7 @@ case "${1:-status}" in
         fi
 
         REMOVED=0
+        WOULD=0
 
         _wt_refresh_cwd_snapshot || true
         while IFS= read -r wt; do
@@ -740,14 +751,28 @@ case "${1:-status}" in
             AGE_DAYS=$(( (NOW - LAST_COMMIT) / 86400 ))
 
             if [[ $AGE_DAYS -ge $DAYS ]]; then
-                # Check target
-                STATUS=$(grep '^status:' "$wt/.fno/target-state.md" 2>/dev/null | awk '{print $2}')
-                if [[ "$STATUS" == "IN_PROGRESS" ]]; then
+                # Live-session check via _wt_live (claim-anchored). The legacy
+                # `status: IN_PROGRESS` grep that stood here kept crashed trees
+                # alive forever (write-once field); the claim lane is the real
+                # signal, and it now guards BOTH removal paths.
+                if _wt_live "$wt"; then
                     echo "  SKIP: $wt (active target session)"
                     continue
                 fi
 
                 BRANCH=$(cd "$wt" 2>/dev/null && git branch --show-current || echo "unknown")
+                # Uncommitted content first, before any network, for EVERY tree.
+                # The guard used to fire only on detached HEADs, but a branched
+                # tree with uncommitted work hits the same `--force` remove and
+                # loses it just as surely - the branch never recorded it. Same
+                # classifier as the merged sweep; the in-flight marker
+                # cli/src/fno/evals/runner.py drops is untracked and rides this
+                # guard. DIRTY is never touched by any automatic path.
+                if ! wt_reapable "$wt"; then
+                    reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
+                    echo "  SKIP: $wt (holds uncommitted work: $reason)"
+                    continue
+                fi
                 # A detached tree has no branch to preserve, so the --force
                 # below would destroy any commit no remote carries - the exact
                 # loss the merged sweep's wt_unpushed_count guard prevents.
@@ -755,17 +780,6 @@ case "${1:-status}" in
                 # a $( ) subshell that cannot carry the freshness flag back,
                 # so refreshing only inside it re-fetches per detached tree.
                 if [[ -z "$BRANCH" ]]; then
-                    # Uncommitted content first, before any network: a detached
-                    # tree has no branch holding it, so --force destroys an
-                    # untracked or modified file as surely as an unpushed
-                    # commit. Same classifier as the merged sweep; the
-                    # in-flight marker cli/src/fno/evals/runner.py drops is
-                    # untracked and rides this guard.
-                    if ! wt_reapable "$wt"; then
-                        reason="${WT_REAPABLE_LINE#*reason=}"; reason="${reason%% *}"
-                        echo "  SKIP: $wt (detached HEAD holds uncommitted work: $reason)"
-                        continue
-                    fi
                     wt_refresh_remote_refs "$wt" >/dev/null 2>&1 || true
                     if [[ "$(wt_unpushed_count "$wt")" -gt 0 ]]; then
                         if [[ "${_WT_REMOTE_REFS_FRESH:-0}" == 1 ]]; then
@@ -786,12 +800,22 @@ case "${1:-status}" in
                     echo "  SKIP: $wt (processes: $(printf '%s\n' "$pids" | grep -c .))"
                     continue
                 fi
-                if [[ -n "$DRY_RUN" ]]; then
+                # Dry-run is the default for BOTH removal modes; an explicit
+                # --dry-run wins even if --apply was also passed (a safety
+                # wrapper appending --dry-run must never be ignored), mirroring
+                # the --merged mode's precedence.
+                if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
                     echo "  WOULD REMOVE: $wt ($AGE_DAYS days old, branch: $BRANCH)"
+                    WOULD=$((WOULD + 1))
                 else
                     if git worktree remove --force "$wt" 2>/dev/null; then
                         echo "  REMOVED: $wt (branch $BRANCH preserved)"
                         REMOVED=$((REMOVED + 1))
+                        if declare -F _wt_emit_removal_event >/dev/null 2>&1; then
+                            _wt_emit_removal_event "$MAIN_DIR" "$wt" "cleanup --older-than" \
+                                "no-live-claim (guard passed)" \
+                                "age>=${DAYS}d + reapable passed" "$BRANCH" false
+                        fi
                     else
                         echo "  FAILED: $wt could not be removed (try: git worktree prune)"
                     fi
@@ -799,7 +823,9 @@ case "${1:-status}" in
             fi
         done < <(git worktree list --porcelain 2>/dev/null | grep "^worktree " | sed 's/^worktree //')
 
-        if [[ -z "$DRY_RUN" ]]; then
+        if [[ -z "$APPLY" || -n "$DRY_RUN" ]]; then
+            echo "Cleanup complete (dry-run). Would remove $WOULD worktree(s). Pass --apply to execute."
+        else
             echo "Cleanup complete. Removed $REMOVED worktree(s)."
         fi
         ;;

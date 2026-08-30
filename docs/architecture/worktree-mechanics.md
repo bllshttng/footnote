@@ -65,13 +65,19 @@ With `--force`, the script measures and prints every dirty path. It prints each 
 
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
-Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno agents workspace worktree cleanup --merged --apply` sweeps landed ones.
+Post-merge pruning is automated. When the ritual runs from outside the merged worktree, `/fno:pr merged` archives the PR's worktree directly. When it stands inside the merged worktree (the usual worker case), it defers and MINTS a reap order. The order is a TTL claim (`reap:pr-<n>`, 24h, the TTL ceiling) that only a gh-confirmed MERGED state can create. The daemon's daily worktree sweep runs its pass with `--apply` while any order stands, report-only otherwise: a timer tick alone still removes nothing. The sweep's own guards (reapable, live claim, rooted processes) decide tree by tree, so an order never forces a protected tree. A tree still protected at the order's sweep waits for the next merge's order. `fno agents workspace worktree cleanup --merged` (dry-run by default, both removal modes) sweeps landed ones by hand with `--apply`.
+
+Every removal emits one `worktree_removed` event row (path, caller, claim read, reason). The row mirrors to the machine-global journal. Before this emission landed no removal path recorded anything, so a lost tree left no attributable evidence.
 
 ## Commit-time salvage refs
 
 `scripts/setup/setup-worktree.sh` installs a shared `post-commit` dispatcher that runs the committing worktree's `hooks/worktree-salvage-ref.sh`. Every commit advances a local `refs/fno/salvage/<worktree>` ref so a detached or provider-killed worktree stays recoverable without a network dependency.
 
 Remote mirroring is off by default because the commit can still be work in progress. A repository can explicitly enable the detached best-effort mirror with `git config --local fno.salvageRemoteMirror true`. Disable it again with `git config --local --unset fno.salvageRemoteMirror`. The local salvage ref remains active in both cases, and a remote failure never blocks the commit.
+
+## Cargo build storage
+
+Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno agents workspace worktree cleanup --cargo-targets --apply` (inspect first by omitting `--apply`). It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree. Protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the wrapper at `scripts/lib/cargo-rustc-wrapper.sh`, gated by `incremental = false`. Sccache shares a 10 GiB cache, machines without it run rustc directly.
 
 ## Enforcement
 

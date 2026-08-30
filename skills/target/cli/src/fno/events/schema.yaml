@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals, bash]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -1659,6 +1659,32 @@ event_types:
         ejected:
           type: integer
           description: "Count of completed filed-node lines swept to inbox-archive.md this pass."
+    consumers: [audit]
+
+  - name: worktree_removed
+    description: "A worktree directory was removed by an fno path. Emitted once per removal so a recurrence is attributable: a live worker losing its tree (2026-08-25, 2026-08-29) left no row because no removal path emitted anything, and an absence of rows measured only the instrument. Pair with the guard refusals: this row records what the guard read at decision time, so a removal that skipped the claim check is visible after the fact."
+    sources: [bash]
+    data:
+      required: [path, caller, claim, reason]
+      properties:
+        path:
+          type: string
+          description: "Absolute path of the removed worktree."
+        caller:
+          type: string
+          description: "The path that ordered the removal (cleanup --merged, cleanup --older-than, post-merge ritual, manual archive)."
+        claim:
+          type: string
+          description: "The node-claim liveness read at decision time (no-live-claim, no-manifest, overridden-by-force, or the evidence string)."
+        reason:
+          type: string
+          description: "Why the tree was judged safe to remove (strict checks passed, age threshold met, --force override)."
+        branch:
+          type: string
+          description: "Branch the worktree had checked out; preserved unless --delete-branch ran."
+        forced:
+          type: boolean
+          description: "True when --force overrode the disclosed positive checks."
     consumers: [audit]
 
   - name: worktree_overlap_observed

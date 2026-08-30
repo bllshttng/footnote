@@ -105,7 +105,8 @@ def cleanup(
     older_than: Optional[str] = typer.Option(
         None,
         "--older-than",
-        help="Remove worktrees with no commits in N days (e.g. '7d' or '7').",
+        help="Remove worktrees with no commits in N days (e.g. '7d' or '7'). "
+        "Dry-run by default; pass --apply to execute.",
     ),
     dry_run: bool = typer.Option(False, "--dry-run", "-N", help="Show what would be removed."),
     prefix: Optional[str] = typer.Option(
@@ -118,7 +119,9 @@ def cleanup(
         "(clean + pushed + no live session). Dry-run by default; pass --apply to execute.",
     ),
     apply: bool = typer.Option(
-        False, "--apply", help="With --merged, actually archive (default is dry-run)."
+        False,
+        "--apply",
+        help="Actually remove (--older-than) or archive (--merged); default is dry-run.",
     ),
     kill_orphans: bool = typer.Option(
         False,
