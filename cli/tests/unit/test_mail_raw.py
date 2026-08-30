@@ -748,6 +748,9 @@ def test_raw_check_codex_review_answers_empty_diff_subject(mailbox, monkeypatch,
 
     _seed_codex_app_server(mailbox, monkeypatch)
     monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(
         mail_cli,
         "_codex_review_subject_nonempty",
         lambda _cwd, _base: (
