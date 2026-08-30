@@ -41,7 +41,7 @@ git init -q
 mkdir -p .fno
 
 TARGET_START=1 \
-TARGET_INPUT="test-input" \
+TARGET_INPUT="mission fields happy path" \
 TARGET_MISSION_ID="ab-test1234" \
 TARGET_MISSION_WAVE="2" \
 TARGET_MISSION_SLUG="2026-05-13-test-slug" \
@@ -119,7 +119,7 @@ env -u TARGET_MISSION_ID \
     -u TARGET_MISSION_SLUG \
     -u TARGET_MISSION_FROM_MSG_ID \
     TARGET_START=1 \
-    TARGET_INPUT="test-no-mission" \
+    TARGET_INPUT="mission fields defaults" \
     bash "$INIT" >/dev/null 2>&1 \
   || fail "AC2-ERR: init exited non-zero with no mission vars"
 
