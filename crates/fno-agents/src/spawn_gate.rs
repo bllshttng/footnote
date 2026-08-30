@@ -474,6 +474,8 @@ pub fn run_gate(
     let cap = agents_config::max_live(config_cwd) as usize;
     let floor_gb = agents_config::min_free_gb(config_cwd);
     let load_ceiling = agents_config::max_load_per_cpu(config_cwd);
+    let fleet_cpu_share = agents_config::max_fleet_cpu_share(config_cwd);
+    let hard_load_ceiling = agents_config::hard_max_load_per_cpu(config_cwd);
     let holder = format!("spawn-gate:{}:{}", std::process::id(), name);
     let root = gate_claims_root();
 
@@ -573,18 +575,27 @@ pub fn run_gate(
                     guard.release();
                     return Err(code);
                 }
-                if let Err(code) = check_load_ceiling(load_ceiling) {
+                if let Err((code, cause_stated)) =
+                    check_load_ceiling(load_ceiling, fleet_cpu_share, hard_load_ceiling)
+                {
                     // The refusal is decided; drop the mutex BEFORE the cause
                     // probe so queued spawners (and --no-wait callers) never
                     // sit behind seconds of evidence gathering.
                     guard.release();
-                    eprintln!(
-                        "{}",
-                        footprint_cause_evidence().unwrap_or_else(|| {
-                            "spawn-gate: footprint cause unavailable; load refusal unchanged"
-                                .to_string()
-                        })
-                    );
+                    // Only the backstop refuses without reading attribution, so
+                    // it is the only branch this line can inform. This probe is
+                    // a SECOND, independent sample: beside a refusal that
+                    // already named its own it would print two disagreeing
+                    // measurements, which is the defect x-7c0f removed.
+                    if !cause_stated {
+                        eprintln!(
+                            "{}",
+                            footprint_cause_evidence().unwrap_or_else(|| {
+                                "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                                    .to_string()
+                            })
+                        );
+                    }
                     return Err(code);
                 }
                 if substrate == "headless" {
@@ -721,6 +732,25 @@ struct FootprintCausePayload {
     fleet_percent_measured_cpu: f64,
 }
 
+/// Footprint's attribution as numbers: `(fleet_cores, capacity_cores)`.
+///
+/// The governor and the refusal text must read ONE instrument. Before x-7c0f
+/// these numbers existed only inside the explanation string, which is how a
+/// gate came to print `0.79/12.00 cores` in the same breath as a refusal
+/// decided on something else. `None` means unreadable, which is never
+/// headroom (x-e040: this sensor goes blind under the load it measures).
+fn parse_footprint_cause_json(raw: &str) -> Option<(f64, f64)> {
+    let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
+    if payload.cpu_capacity_cores <= 0.0
+        || !payload.cpu_capacity_cores.is_finite()
+        || !payload.fleet_cpu_cores.is_finite()
+        || payload.fleet_cpu_cores < 0.0
+    {
+        return None;
+    }
+    Some((payload.fleet_cpu_cores, payload.cpu_capacity_cores))
+}
+
 fn format_footprint_cause_json(raw: &str) -> Option<String> {
     let payload: FootprintCausePayload = serde_json::from_str(raw).ok()?;
     let values = [
@@ -745,13 +775,25 @@ fn format_footprint_cause_json(raw: &str) -> Option<String> {
     ))
 }
 
+/// Wall-clock budget for the out-of-process footprint probe: the Python
+/// twin's 5s measurement budget plus an allowance for interpreter startup.
+const FOOTPRINT_PROBE_BUDGET: Duration = Duration::from_secs(8);
+
 fn footprint_cli_binary() -> Option<&'static str> {
     ["fno", "fno-py"]
         .into_iter()
         .find(|name| resolves_on_path(name))
 }
 
+fn fleet_cpu_reading() -> Option<(f64, f64)> {
+    footprint_cause_raw().and_then(|raw| parse_footprint_cause_json(&raw))
+}
+
 fn footprint_cause_evidence() -> Option<String> {
+    footprint_cause_raw().and_then(|raw| format_footprint_cause_json(&raw))
+}
+
+fn footprint_cause_raw() -> Option<String> {
     let binary = footprint_cli_binary()?;
     let mut child = Command::new(binary)
         .args(["doctor", "footprint", "--json", "--cause-only"])
@@ -759,12 +801,20 @@ fn footprint_cause_evidence() -> Option<String> {
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // 5s of MEASUREMENT plus 3s of interpreter start, and the two halves are
+    // why this is not the 5s its Python twin passes to `cause_reading`.
+    // Python spends its whole budget measuring; this budget also has to cover
+    // spawning `fno doctor footprint` and importing it. Matching the numbers
+    // would make the Rust gate time out first on a loaded box, and since
+    // x-7c0f a timeout REFUSES rather than merely losing the explanation. Two
+    // admission gates disagreeing about the same machine is the defect beside
+    // the one this check fixes.
+    let deadline = Instant::now() + FOOTPRINT_PROBE_BUDGET;
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
                 let output = child.wait_with_output().ok()?;
-                return format_footprint_cause_json(std::str::from_utf8(&output.stdout).ok()?);
+                return Some(std::str::from_utf8(&output.stdout).ok()?.to_string());
             }
             Ok(Some(_)) => return None,
             Ok(None) if Instant::now() >= deadline => {
@@ -782,38 +832,103 @@ fn footprint_cause_evidence() -> Option<String> {
     }
 }
 
-/// CPU ceiling check (Layer 2, x-3f84 W3): refuse when the 1-min loadavg
-/// exceeds `max_load_per_cpu x cpu count` (never queue). Same contract as
-/// [`check_ram_floor`]: `<= 0` disables, unreadable load skips (fail open).
-/// Measured motivation: load 309 on 12 CPUs while the RAM floor held ten
-/// times its margin, so the one machine guard was reading the one resource
-/// that was never scarce.
-fn check_load_ceiling(max_load_per_cpu: f64) -> Result<(), i32> {
+/// Refuse (never queue) when the FLEET is the reason the box is loaded.
+///
+/// Three thresholds, because the honest question needs two instruments:
+/// `max_load_per_cpu x cpus` is a TRIGGER (below it we admit without
+/// probing, so the common path costs no subprocess); above it the gate asks
+/// footprint whose CPU this is and refuses only when the fleet holds more
+/// than `max_fleet_cpu_share` of capacity; `hard_max_load_per_cpu x cpus`
+/// refuses regardless of attribution.
+///
+/// WHY (x-7c0f, measured twice). This check refused on the 1-min load
+/// average while printing footprint's contradicting attribution in the same
+/// refusal: `load 127.6 exceeds ... 96.0` beside `attributes 0.79/12.00
+/// cores (6.6% capacity)`. Load average counts runnable PLUS blocked
+/// processes, so it is not a CPU measure and belongs to nobody. On
+/// 2026-08-29 the three largest consumers on the refusing box were desktop
+/// applications, and killing one unscoped recursive search moved the 1-min
+/// load from 374 to 179 with no agent stopped.
+///
+/// The backstop exists because a pure fleet-share governor would admit onto
+/// a box already thrashing from foreign work.
+///
+/// Same contract as [`check_ram_floor`] otherwise: `max_load_per_cpu <= 0`
+/// disables, unreadable LOAD skips (fail open). Unreadable ATTRIBUTION
+/// refuses (fail closed): an unknown share is not evidence of headroom.
+/// The Python twin in `cli/src/fno/agents/spawn_gate.py` is the same
+/// contract; the two gates must not disagree about admission.
+///
+/// The error carries `(exit code, cause_stated)`. `cause_stated` means the
+/// refusal already printed the attribution sample it decided on, so the
+/// caller must not append a second, independently taken one.
+fn check_load_ceiling(
+    max_load_per_cpu: f64,
+    max_fleet_cpu_share: f64,
+    hard_max_load_per_cpu: f64,
+) -> Result<(), (i32, bool)> {
     if max_load_per_cpu <= 0.0 {
         return Ok(());
     }
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
-    let ceiling = max_load_per_cpu * cpus as f64;
-    match loadavg_1m() {
-        Some(load1) if !load_over_ceiling(load1, max_load_per_cpu, cpus) => Ok(()),
-        Some(load1) => {
-            eprintln!(
-                "spawn-gate: 1-min load {load1:.1} exceeds max_load_per_cpu \
-                 {max_load_per_cpu} x {cpus} cpus = {ceiling:.1}; refusing to spawn \
-                 (--force to bypass)"
-            );
-            // No evidence probe here: it costs seconds in a subprocess, and
-            // this check runs inside the held gate mutex. The caller releases
-            // first, then gathers (run_gate); the Python twin does the same.
-            Err(EXIT_LOAD_REFUSED)
-        }
+    let load1 = match loadavg_1m() {
+        Some(load1) => load1,
         None => {
             eprintln!("spawn-gate: could not read load average; skipping the load check");
-            Ok(())
+            return Ok(());
         }
+    };
+    if !load_over_ceiling(load1, max_load_per_cpu, cpus) {
+        return Ok(());
     }
+
+    if hard_max_load_per_cpu > 0.0 && load_over_ceiling(load1, hard_max_load_per_cpu, cpus) {
+        let backstop = hard_max_load_per_cpu * cpus as f64;
+        eprintln!(
+            "spawn-gate: 1-min load {load1:.1} exceeds the absolute machine backstop \
+             hard_max_load_per_cpu {hard_max_load_per_cpu} x {cpus} cpus = {backstop:.1}; \
+             refusing to spawn whoever caused it (--force to bypass)"
+        );
+        // The one branch that never reads attribution, so the caller's cause
+        // probe is the only thing that can say whose load this was.
+        return Err((EXIT_LOAD_REFUSED, false));
+    }
+
+    let trigger = max_load_per_cpu * cpus as f64;
+    let (fleet, capacity) = match fleet_cpu_reading() {
+        Some(reading) => reading,
+        None => {
+            eprintln!(
+                "spawn-gate: 1-min load {load1:.1} is over the max_load_per_cpu trigger \
+                 {max_load_per_cpu} x {cpus} cpus = {trigger:.1} and fleet CPU attribution \
+                 unavailable; refusing to spawn (--force to bypass)"
+            );
+            // The attribution read just failed; the caller's probe reads the
+            // same instrument and would fail the same way one sample later.
+            return Err((EXIT_LOAD_REFUSED, true));
+        }
+    };
+    let share = fleet / capacity;
+    if share > max_fleet_cpu_share {
+        let pct = share * 100.0;
+        let ceil_pct = max_fleet_cpu_share * 100.0;
+        eprintln!(
+            "spawn-gate: the fleet holds {fleet:.2}/{capacity:.2} cores ({pct:.1}% of \
+             capacity), over the max_fleet_cpu_share ceiling {ceil_pct:.1}%; refusing to \
+             spawn (--force to bypass)"
+        );
+        // This refusal already named the sample it decided on.
+        return Err((EXIT_LOAD_REFUSED, true));
+    }
+    let pct = share * 100.0;
+    eprintln!(
+        "spawn-gate: 1-min load {load1:.1} is high but only {fleet:.2}/{capacity:.2} cores \
+         ({pct:.1}%) are attributed to the fleet, so the load is not attributed to the \
+         fleet; admitting the spawn"
+    );
+    Ok(())
 }
 
 /// The ceiling verdict as a pure function: 1-min loadavg vs factor x cpus.
@@ -1110,8 +1225,62 @@ MemAvailable:    8000000 kB\n";
         assert!(load_over_ceiling(20.0, 2.0, 8));
         assert!(!load_over_ceiling(20.0, 2.0, 16));
         // Disabled (`<= 0`) never refuses, whatever the machine reads.
-        assert!(check_load_ceiling(0.0).is_ok());
-        assert!(check_load_ceiling(-1.0).is_ok());
+        // It disables the WHOLE check, governor and backstop with it, which
+        // is why the other two arguments cannot rescue it.
+        assert!(check_load_ceiling(0.0, 0.0, 1.0).is_ok());
+        assert!(check_load_ceiling(-1.0, 0.0, 1.0).is_ok());
+    }
+
+    /// x-7c0f: the governor's arithmetic, as a table.
+    ///
+    /// The refusal this replaces printed `0.79/12.00 cores` beside a refusal
+    /// decided on load average. Row one is that exact reading, and it now
+    /// admits. Kept as a pure-function table because the check itself reads
+    /// the live machine and a subprocess; the Python twin's
+    /// `test_fleet_load_governor.py` covers the wiring with both stubbed.
+    #[test]
+    fn fleet_share_governs_and_backstop_overrides() {
+        fn over_share(fleet: f64, capacity: f64, ceiling: f64) -> bool {
+            fleet / capacity > ceiling
+        }
+        // The measured refusal, admitted: the load was real and was not ours.
+        assert!(!over_share(0.79, 12.0, 0.5));
+        // Our own fleet over half the box still refuses.
+        assert!(over_share(9.0, 12.0, 0.5));
+        // Exactly at the ceiling passes (inclusive, like the load boundary).
+        assert!(!over_share(6.0, 12.0, 0.5));
+        // The backstop is a load question, not a share one: at load 600 on 12
+        // cpus it fires at factor 40 no matter how little the fleet holds.
+        assert!(load_over_ceiling(600.0, 40.0, 12));
+        assert!(!load_over_ceiling(374.0, 40.0, 12));
+        // ...and it must sit well above the trigger, or it silently restores
+        // the defect by refusing before attribution is ever consulted.
+        assert!(
+            agents_config::DEFAULT_HARD_MAX_LOAD_PER_CPU
+                > agents_config::DEFAULT_MAX_LOAD_PER_CPU * 4.0
+        );
+    }
+
+    /// The numbers seam and the explanation string must agree, because the
+    /// whole defect was a gate deciding on one instrument while printing
+    /// another.
+    #[test]
+    fn fleet_reading_parses_what_the_evidence_string_prints() {
+        let raw = r#"{"fleet_cpu_cores":0.79,"cpu_capacity_cores":12,"fleet_percent_capacity":6.6,"fleet_percent_measured_cpu":17.3}"#;
+        assert_eq!(parse_footprint_cause_json(raw), Some((0.79, 12.0)));
+        assert!(format_footprint_cause_json(raw)
+            .unwrap()
+            .contains("0.79/12.00 cores"));
+        // Unreadable is unreadable for both readers: never a zero share, which
+        // would read to the governor as an idle fleet (x-e040).
+        assert_eq!(parse_footprint_cause_json("{}"), None);
+        assert_eq!(parse_footprint_cause_json("not json"), None);
+        assert_eq!(
+            parse_footprint_cause_json(
+                r#"{"fleet_cpu_cores":1.0,"cpu_capacity_cores":0,"fleet_percent_capacity":0,"fleet_percent_measured_cpu":0}"#
+            ),
+            None
+        );
     }
 
     #[test]

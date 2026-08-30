@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import difflib
 import logging
+import math
 import os
 import re
 import tempfile
@@ -2053,6 +2054,30 @@ class ProcessAdmissionBlock(BaseModel):
         return 400
 
 
+
+def _finite_or(value: object, default: float) -> float:
+    """Coerce a machine-dimension knob to a FINITE float, else the default.
+
+    `float("nan")` and `float("inf")` both parse, and both then disarm the
+    guard they configure without saying so: nan loses every comparison, inf
+    wins every one. Either way the ceiling stops refusing while still reading
+    as configured, which is worse than a value that is merely wrong. Booleans
+    are rejected because `True` would silently mean 1.0.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str):
+        try:
+            parsed = float(value.strip())
+        except ValueError:
+            return default
+    else:
+        return default
+    return parsed if math.isfinite(parsed) else default
+
+
 class AgentsBlock(BaseModel):
     """Agent-runtime settings (nested under 'config.agents').
 
@@ -2146,14 +2171,30 @@ class AgentsBlock(BaseModel):
     #                 share that name with `parallel.max_lanes`; the legacy
     #                 spelling still parses, with one deprecation line.
     #   min_free_gb — available-RAM floor for spawn preflight; <= 0 disables.
-    #   max_load_per_cpu — CPU ceiling for spawn preflight: refuse when the
-    #                 1-min loadavg exceeds this factor times the CPU count
-    #                 (x-3f84 W3). Measured 2026-08-22: load 309 on 12 CPUs
-    #                 while the RAM floor held ten times its margin - the one
-    #                 machine guard read the one resource that was never scarce.
-    #                 A machine dimension, so a scalar on agents.* and never a
-    #                 field on ProviderBudget (a machine is not an account).
-    #                 <= 0 disables.
+    #   max_load_per_cpu — the load at which the gate STOPS TRUSTING LOAD and
+    #                 consults fleet attribution: `factor x cpu count` on the
+    #                 1-min loadavg (x-3f84 W3). This is a TRIGGER, not a
+    #                 refusal. It was a refusal until x-7c0f, and it refused
+    #                 twice on load the fleet did not cause. Load average
+    #                 counts blocked processes, so it measures neither CPU nor
+    #                 anyone's share of it. Measured 2026-08-22: load 309 on 12
+    #                 CPUs while the RAM floor held ten times its margin - the
+    #                 one machine guard read the one resource that was never
+    #                 scarce. <= 0 disables the whole check.
+    #   max_fleet_cpu_share — the GOVERNOR: above the trigger, refuse when
+    #                 footprint attributes more than this share of CPU capacity
+    #                 to the fleet (0.5 = half the box). This is the number the
+    #                 refusal always printed and never decided on. When
+    #                 attribution is unreadable the gate refuses, because an
+    #                 unknown share is not evidence of headroom (x-e040).
+    #   hard_max_load_per_cpu — the absolute machine backstop: refuse above
+    #                 `factor x cpu count` no matter whose load it is. Pure
+    #                 fleet-share would admit onto a box already thrashing from
+    #                 foreign work. Must stay well above max_load_per_cpu or it
+    #                 silently restores the defect x-7c0f removed.
+    #                 All three are machine dimensions, so scalars on agents.*
+    #                 and never fields on ProviderBudget (a machine is not an
+    #                 account).
     #   worker_qos  — utility (demote workers to background QoS) | off.
     max_live: int = 3
     provider_limits: dict[str, ProviderBudget] = Field(
@@ -2164,6 +2205,8 @@ class AgentsBlock(BaseModel):
     pane_group_max: int = 4
     min_free_gb: float = 4.0
     max_load_per_cpu: float = 8.0
+    max_fleet_cpu_share: float = 0.5
+    hard_max_load_per_cpu: float = 40.0
     worker_qos: str = "utility"
     # Default permission/approval mode for AUTONOMOUS dispatchers only
     # (dispatch-node.sh / `fno backlog advance` / `/think dispatch`). Defaults to
@@ -2328,6 +2371,29 @@ class AgentsBlock(BaseModel):
             out[provider] = {**builtin, **fields}
         return out
 
+    @model_validator(mode="after")
+    def _backstop_must_sit_above_the_trigger(self) -> "AgentsBlock":
+        """The backstop must be REACHED after the trigger, never before it.
+
+        `max_load_per_cpu` is the load at which the gate consults fleet
+        attribution; `hard_max_load_per_cpu` refuses without consulting. Set
+        the backstop at or below the trigger and every load that would have
+        been attributed is refused blindly instead, which silently restores
+        the exact defect the governor removed. Four docstrings said so and
+        nothing enforced it, so one config line was enough to undo it.
+
+        Coerced, not raised: this block's contract is that a config typo can
+        never brick the spawn primitive. An incoherent PAIR restores the
+        default pair, because clamping only one of them cannot know which
+        number the operator meant.
+        """
+        if self.hard_max_load_per_cpu > 0 and (
+            self.hard_max_load_per_cpu <= self.max_load_per_cpu
+        ):
+            self.max_load_per_cpu = 8.0
+            self.hard_max_load_per_cpu = 40.0
+        return self
+
     @field_validator("min_free_gb", mode="before")
     @classmethod
     def _coerce_min_free_gb(cls, v: object) -> object:
@@ -2336,16 +2402,7 @@ class AgentsBlock(BaseModel):
         <= 0 is a VALID value (guard disabled), so only unparseable input
         falls back to the default.
         """
-        if isinstance(v, bool):
-            return 4.0
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, str):
-            try:
-                return float(v.strip())
-            except ValueError:
-                return 4.0
-        return 4.0
+        return _finite_or(v, 4.0)
 
     @field_validator("max_load_per_cpu", mode="before")
     @classmethod
@@ -2353,16 +2410,26 @@ class AgentsBlock(BaseModel):
         """Coerce a non-numeric max_load_per_cpu to the default (8.0); never
         raise. Same contract as :meth:`_coerce_min_free_gb`: <= 0 is a VALID
         value (guard disabled), so only unparseable input falls back."""
-        if isinstance(v, bool):
-            return 8.0
-        if isinstance(v, (int, float)):
-            return float(v)
-        if isinstance(v, str):
-            try:
-                return float(v.strip())
-            except ValueError:
-                return 8.0
-        return 8.0
+        return _finite_or(v, 8.0)
+
+    @field_validator("max_fleet_cpu_share", mode="before")
+    @classmethod
+    def _coerce_max_fleet_cpu_share(cls, v: object) -> object:
+        """Coerce an unparseable share to the default (0.5); never raise.
+
+        Same contract as :meth:`_coerce_max_load_per_cpu`. <= 0 is VALID and
+        means the governor refuses on any fleet attribution at all, which is
+        the strictest setting rather than a disabled one; `max_load_per_cpu`
+        is the knob that turns the whole check off.
+        """
+        return _finite_or(v, 0.5)
+
+    @field_validator("hard_max_load_per_cpu", mode="before")
+    @classmethod
+    def _coerce_hard_max_load_per_cpu(cls, v: object) -> object:
+        """Coerce an unparseable backstop to the default (40.0); never raise.
+        <= 0 disables the backstop and leaves the governor alone in charge."""
+        return _finite_or(v, 40.0)
 
     @field_validator("worker_qos", mode="before")
     @classmethod

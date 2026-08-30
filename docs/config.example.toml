@@ -269,8 +269,12 @@ provider_limits = { zai = { lanes = 5, subagents = 1 } }
 pane_group_max = 4
 # Available-RAM floor in GB for spawn preflight; spawn refuses below it (<= 0 disables; default 4).
 min_free_gb = 4.0
-# CPU ceiling for spawn preflight: spawn refuses when the 1-min load average exceeds this factor times the CPU count (<= 0 disables; default 8). Measured motivation: load 309 on 12 CPUs while the RAM floor held ten times its margin.
+# Load at which spawn preflight stops trusting load average and consults fleet CPU attribution: this factor times the CPU count on the 1-min load average (<= 0 disables the whole check; default 8). A TRIGGER, not a refusal - it refused outright until the fleet-share governor landed, twice on load the fleet did not cause, because load average counts blocked processes and measures nobody's CPU share. Measured motivation for keeping a load signal at all: load 309 on 12 CPUs while the RAM floor held ten times its margin.
 max_load_per_cpu = 8.0
+# Share of CPU capacity the fleet may hold before spawn preflight refuses, checked only above agents.max_load_per_cpu (default 0.5). This is the figure the refusal already printed and never decided on. Unreadable attribution refuses, because an unknown share is not evidence of headroom.
+max_fleet_cpu_share = 0.5
+# Absolute machine backstop for spawn preflight: refuse above this factor times the CPU count regardless of whose load it is (<= 0 disables; default 40). Pure fleet-share admits spawns onto a box already thrashing from foreign work. Keep it well above agents.max_load_per_cpu.
+hard_max_load_per_cpu = 40.0
 # Worker CPU/IO priority: utility (background QoS, default) or off.
 worker_qos = "utility"
 # Default --permission-mode for autonomous dispatchers only (dispatch-node.sh / backlog advance / think dispatch); defaults to bypassPermissions so fire-and-forget workers skip the worktree-entry prompt. An explicit flag wins; opt out with an explicit "" (forward nothing) or "default" (prompt positively). Claude-native, fail-closed at the spawn seam.

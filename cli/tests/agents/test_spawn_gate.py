@@ -30,6 +30,18 @@ def _isolated_world(tmp_path, monkeypatch):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_live_footprint(monkeypatch):
+    """Attribution is stubbed idle unless a test asks otherwise.
+
+    Since x-7c0f the gate consults fleet CPU attribution above the load
+    trigger, and that read is a subprocess against the real machine. Left
+    unstubbed these tests refuse or admit according to what the developer's
+    box happens to be doing.
+    """
+    monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (0.1, 12.0))
+
+
 def _write_roster(tmp_path, workers: dict) -> None:
     roster = {"proto": 1, "supervisorPid": 1, "workers": workers}
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))
@@ -318,7 +330,16 @@ class TestRamFloor:
         assert "skipping the floor check" in capsys.readouterr().err
 
 
-def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_load_per_cpu=0.0):
+def _settings(
+    monkeypatch,
+    *,
+    max_live=3,
+    min_free_gb=0.0,
+    max_lanes=None,
+    max_load_per_cpu=0.0,
+    max_fleet_cpu_share=0.5,
+    hard_max_load_per_cpu=40.0,
+):
     """Point run_gate at fixed knobs without touching real settings."""
 
     class _D:
@@ -334,6 +355,11 @@ def _settings(monkeypatch, *, max_live=3, min_free_gb=0.0, max_lanes=None, max_l
     a.max_live = max_live
     a.min_free_gb = min_free_gb
     a.max_load_per_cpu = max_load_per_cpu  # 0 = the CPU guard stays off in tests
+    # run_gate reads these as REAL attributes (x-7c0f). A fake settings object
+    # missing one drops the whole config block into its fail-safe branch, which
+    # silently discards max_live as well - the failure looks like a cap bug.
+    a.max_fleet_cpu_share = max_fleet_cpu_share
+    a.hard_max_load_per_cpu = hard_max_load_per_cpu
     a.provider_limits = {"zai": 5} if max_lanes is None else max_lanes
 
     class _S:
@@ -367,7 +393,12 @@ class TestRunGate:
             ),
         )
         monkeypatch.setattr(doctor_footprint, "_cpu_quota_cores", lambda: None)
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        # This assertion is about FOOTPRINT's capacity denominator, not the
+        # gate's, so pin footprint's own helper. The gate seam below cannot
+        # supply it, and reading the host would make the expected string
+        # depend on the runner: "/12.00" here, "/4.00" on a 4-core CI box.
+        monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "process_cpu_count", lambda: 12, raising=False)
         monkeypatch.setattr(
             spawn_gate.os,
@@ -421,12 +452,18 @@ class TestRunGate:
         self, monkeypatch, capsys
     ):
         """The cause probe costs seconds of ps/lsof; it must not run inside the
-        held gate mutex (queued spawners would stall behind evidence)."""
-        _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
+        held gate mutex (queued spawners would stall behind evidence).
+
+        Driven through the BACKSTOP, the one refusal that still gathers cause:
+        the attribution-aware branches already printed their own sample.
+        """
+        _settings(
+            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
+        )
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         released: list[str] = []
         mutex_held_when_probed: list[bool] = []
@@ -457,18 +494,59 @@ class TestRunGate:
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        # 309 on 12 cpus is over the factor-8 trigger; the fleet owning 9 of
+        # 12 cores is what turns that into a refusal (x-7c0f).
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
 
-    def test_over_load_reports_fleet_cause_evidence(self, monkeypatch, capsys):
+    def test_share_refusal_prints_one_sample_not_two(self, monkeypatch, capsys):
+        """A share refusal names its own numbers and appends no second sample.
+
+        The evidence line is a SEPARATE footprint read taken after the mutex
+        drops, so it disagrees with the sample the gate decided on. Printing
+        both is the exact defect x-7c0f removed, in miniature.
+        """
         _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+        monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+        monkeypatch.setattr(
+            spawn_gate,
+            "_footprint_cause_evidence",
+            lambda: "spawn-gate: footprint attributes 1.86/12.00 cores (15.5% capacity, 58.0% of measured CPU) to the fleet",
+            raising=False,
+        )
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: (9.0, 12.0))
+
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+
+        assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
+        error = capsys.readouterr().err
+        # The refusal names the FLEET's cores now, not the machine's load: it
+        # could not say whose load it was refusing until x-7c0f.
+        assert "the fleet holds 9.00/12.00 cores" in error
+        assert "1.86/12.00" not in error
+
+    def test_backstop_refusal_reports_fleet_cause_evidence(self, monkeypatch, capsys):
+        """The backstop is the one branch that refuses without attribution.
+
+        It never read footprint, so the evidence line is the only thing that
+        can say whose load it just refused.
+        """
+        _settings(
+            monkeypatch, max_live=3, max_load_per_cpu=8.0, hard_max_load_per_cpu=20.0
+        )
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
         monkeypatch.setattr(
             spawn_gate,
@@ -482,29 +560,33 @@ class TestRunGate:
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
         error = capsys.readouterr().err
-        assert "1-min load 309.0 exceeds" in error
+        assert "absolute machine backstop" in error
         assert "footprint attributes 1.86/12.00 cores" in error
 
     def test_over_load_keeps_refusal_when_fleet_cause_is_unavailable(
         self, monkeypatch, capsys
     ):
+        """Unreadable attribution refuses, and says so without a second probe."""
         _settings(monkeypatch, max_live=3, max_load_per_cpu=8.0)
         monkeypatch.setattr(
             spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
         )
-        monkeypatch.setattr(spawn_gate.os, "cpu_count", lambda: 12)
+        monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
         monkeypatch.setattr(spawn_gate.os, "getloadavg", lambda: (309.0, 0.0, 0.0))
+
+        def _no_second_probe():
+            raise AssertionError("re-probed footprint after it just failed")
+
         monkeypatch.setattr(
-            spawn_gate, "_footprint_cause_evidence", lambda: None, raising=False
+            spawn_gate, "_footprint_cause_evidence", _no_second_probe, raising=False
         )
+        monkeypatch.setattr(spawn_gate, "_fleet_cpu_reading", lambda: None)
 
         with pytest.raises(SystemExit) as exc:
             spawn_gate.run_gate("w2", "bg", no_wait=True)
 
         assert exc.value.code == spawn_gate.EXIT_LOAD_REFUSED
-        error = capsys.readouterr().err
-        assert "footprint cause unavailable; load refusal unchanged" in error
-        assert "1-min load 309.0 exceeds" in error
+        assert "attribution unavailable" in capsys.readouterr().err
 
     def test_at_cap_no_wait_refuses(self, monkeypatch, capsys):
         _settings(monkeypatch, max_live=1)

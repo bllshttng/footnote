@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, NoReturn, Optional
+from typing import Any, Literal, NoReturn, Optional, cast
 from urllib.parse import unquote
 
 from fno.agents.row_contradiction import project_row
@@ -974,6 +974,34 @@ def _check_ram_floor(floor_gb: float) -> None:
         raise GateRefused(EXIT_RAM_REFUSED, receipt)
 
 
+def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
+    """Footprint's attribution as numbers: ``(fleet_cores, capacity_cores)``.
+
+    The governor and the refusal text must read ONE instrument. Before
+    x-7c0f the numbers existed only inside the explanation string, which is
+    how a gate came to print `0.79/12.00 cores` in the same breath as a
+    refusal decided on something else.
+
+    ``None`` means unreadable, which is never headroom (see x-e040: this
+    sensor goes blind under exactly the load it exists to measure).
+    """
+    try:
+        from fno.doctor_footprint import _cpu_capacity_cores, cause_reading
+
+        reading, _error = cause_reading()
+        if reading is None:
+            return None
+        capacity = float(_cpu_capacity_cores())
+        fleet = float(reading.fleet_cpu_cores)
+        if capacity <= 0 or not all(
+            math.isfinite(v) and v >= 0 for v in (fleet, capacity)
+        ):
+            return None
+        return fleet, capacity
+    except Exception:
+        return None
+
+
 def _footprint_cause_evidence() -> Optional[str]:
     """Read one fail-open fleet footprint for an over-load refusal."""
     try:
@@ -1007,15 +1035,134 @@ def _footprint_cause_evidence() -> Optional[str]:
         return None
 
 
-def _check_load_ceiling(max_load_per_cpu: float) -> None:
-    """Refuse (never queue) above the CPU ceiling (x-3f84 W3).
+def _refusal_with_cause_stated() -> GateRefused:
+    """A load refusal that already printed the attribution it decided on.
 
-    The ceiling is `max_load_per_cpu x cpu count` on the 1-min loadavg, so one
-    number ports across machines without an edit. Measured motivation: load 309
-    on 12 CPUs while the RAM floor held ten times its margin - the one machine
-    guard was reading the one resource that was never scarce. Same contract as
-    :func:`_check_ram_floor`: <= 0 disables, unreadable skips, refuse never
-    queues.
+    :func:`run_gate` appends a footprint cause line to a load refusal, taken
+    from a SECOND, independent sample. That is honest only when the refusal
+    itself could not say whose CPU this is (the backstop). Marking the two
+    attribution-aware branches keeps one refusal reading one sample.
+    """
+    refusal = GateRefused(EXIT_LOAD_REFUSED)
+    refusal.cause_stated = True  # type: ignore[attr-defined]
+    return refusal
+
+
+#: `_check_load_ceiling` takes its own attribution reading when the caller
+#: has not already taken one. `None` is a real reading ("unreadable"), so the
+#: "not supplied" case needs a value that cannot be confused with it.
+_NOT_PREFETCHED: object = object()
+
+
+def _load_cpus() -> int:
+    """The CPU denominator for the trigger and the backstop.
+
+    Footprint's capacity reading, which is the minimum of the affinity count,
+    the host count and the cgroup quota. Two reasons it is worth the import
+    over a bare `process_cpu_count`:
+
+    the Rust gate uses `available_parallelism`, which IS quota-aware, so an
+    affinity-only count here made the two runtimes compute different triggers
+    from one config on a quota-constrained container (2-of-32 cores gives 16
+    against 256);
+
+    and the share comparison already divides by this exact number, so a
+    different denominator for the trigger meant one check answering a
+    question the other was not asking.
+
+    It reads affinity and a cgroup file, never `ps`, so the cheap path stays
+    cheap. Falls back rather than raising: a guard must not brick the spawn
+    primitive because an import moved.
+    """
+    try:
+        from fno.doctor_footprint import _cpu_capacity_cores
+
+        return int(_cpu_capacity_cores()) or 1
+    except Exception:
+        return getattr(os, "process_cpu_count", os.cpu_count)() or 1
+
+
+def _needs_attribution(
+    load1: float, cpus: int, max_load_per_cpu: float, hard_max_load_per_cpu: float
+) -> bool:
+    """True only in the band where the verdict depends on WHOSE CPU it is.
+
+    Below the trigger the gate admits without asking, and above the backstop
+    it refuses without asking. Only between them does attribution decide, and
+    only there is the expensive read worth taking.
+    """
+    if max_load_per_cpu <= 0:
+        return False
+    if load1 <= max_load_per_cpu * cpus:
+        return False
+    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
+        return False
+    return True
+
+
+def _prefetch_fleet_reading(
+    max_load_per_cpu: float, hard_max_load_per_cpu: float
+) -> object:
+    """Take the attribution reading OUTSIDE the gate mutex, when needed at all.
+
+    The reading is a `ps` snapshot behind a multi-second deadline, and the gate
+    mutex serializes every spawner on the machine. Taking it inside the lock
+    made a loaded box hold the mutex for seconds, which is exactly when
+    contention is worst: concurrent `--no-wait` spawners then refuse with
+    `no_wait_mutex_held` for no reason of their own. The measurement is
+    identical outside the lock, and it is a SAMPLE either way; the RAM floor
+    re-reads on dequeue for the same reason.
+
+    Returns `_NOT_PREFETCHED` when the band does not need attribution, so the
+    caller stays free to decide from load alone.
+    """
+    try:
+        load1 = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return _NOT_PREFETCHED
+    if not _needs_attribution(
+        load1, _load_cpus(), max_load_per_cpu, hard_max_load_per_cpu
+    ):
+        return _NOT_PREFETCHED
+    return _fleet_cpu_reading()
+
+
+def _check_load_ceiling(
+    max_load_per_cpu: float,
+    max_fleet_cpu_share: float = 0.5,
+    hard_max_load_per_cpu: float = 40.0,
+    prefetched: object = _NOT_PREFETCHED,
+) -> None:
+    """Refuse (never queue) when the FLEET is the reason the box is loaded.
+
+    Three thresholds, because the honest question needs two instruments:
+
+    1. ``max_load_per_cpu x cpus`` is a TRIGGER. Below it the gate admits
+       without probing, so the common path costs no subprocess.
+    2. Above the trigger the gate asks footprint whose CPU this is and
+       refuses only when the fleet holds more than ``max_fleet_cpu_share``
+       of capacity.
+    3. ``hard_max_load_per_cpu x cpus`` refuses regardless of attribution.
+
+    WHY (x-7c0f, measured twice). This check refused on the 1-min load
+    average while printing footprint's contradicting attribution in the same
+    refusal: `load 127.6 exceeds ... 96.0` beside `attributes 0.79/12.00
+    cores (6.6% capacity)`. Load average counts runnable PLUS blocked
+    processes, so it is not a CPU measure and belongs to nobody. On
+    2026-08-29 the three largest consumers on the refusing box were desktop
+    applications, and killing one unscoped ripgrep moved the 1-min load from
+    374 to 179 with no agent stopped. A gate that refuses beside its own
+    contradicting measurement teaches an operator to reach for --force,
+    which is how a guard becomes a formality.
+
+    Step 3 exists because a pure fleet-share governor would admit onto a box
+    already thrashing from foreign work. Keep the backstop well above the
+    trigger; :func:`AgentsBlock` defaults are 8 and 40.
+
+    Same contract as :func:`_check_ram_floor` otherwise: ``max_load_per_cpu
+    <= 0`` disables, unreadable LOAD skips (fail open, the platform may have
+    no getloadavg at all). Unreadable ATTRIBUTION refuses (fail closed): an
+    unknown share is not evidence of headroom.
     """
     if max_load_per_cpu <= 0:
         return
@@ -1026,21 +1173,59 @@ def _check_load_ceiling(max_load_per_cpu: float) -> None:
         # at all (the Rust gate cfg-guards the same case).
         _warn("spawn-gate: could not read load average; skipping the load check")
         return
-    # Affinity/cgroup-aware where available (mirrors the Rust gate's
-    # available_parallelism, so the two gates compute the same ceiling on a
-    # constrained host instead of a 4x disagreement).
-    cpus = getattr(os, "process_cpu_count", os.cpu_count)() or 1
-    ceiling = max_load_per_cpu * cpus
-    if load1 > ceiling:
+    cpus = _load_cpus()
+    trigger = max_load_per_cpu * cpus
+    if load1 <= trigger:
+        return
+
+    if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:
         _warn(
-            f"spawn-gate: 1-min load {load1:.1f} exceeds max_load_per_cpu "
-            f"{max_load_per_cpu:g} x {cpus} cpus = {ceiling:.1f}; refusing to "
+            f"spawn-gate: 1-min load {load1:.1f} exceeds the absolute machine "
+            f"backstop hard_max_load_per_cpu {hard_max_load_per_cpu:g} x {cpus} "
+            f"cpus = {hard_max_load_per_cpu * cpus:.1f}; refusing to spawn "
+            f"whoever caused it (--force to bypass)"
+        )
+        raise GateRefused(EXIT_LOAD_REFUSED)
+
+    # run_gate prefetches this outside the gate mutex; a direct caller (and
+    # every unit test) still gets the read on demand.
+    reading = (
+        _fleet_cpu_reading()
+        if prefetched is _NOT_PREFETCHED
+        else cast("Optional[tuple[float, float]]", prefetched)
+    )
+    if reading is None:
+        _warn(
+            f"spawn-gate: 1-min load {load1:.1f} is over the "
+            f"max_load_per_cpu trigger {max_load_per_cpu:g} x {cpus} cpus = "
+            f"{trigger:.1f} and fleet CPU attribution unavailable; refusing to "
             f"spawn (--force to bypass)"
         )
-        # No evidence probe here: it costs seconds of ps/lsof, and this check
-        # runs inside the held gate mutex. The caller releases first, then
-        # gathers (see run_gate).
-        raise GateRefused(EXIT_LOAD_REFUSED)
+        # The attribution read just failed, so run_gate's evidence probe would
+        # fail the same way one sample later. Nothing to add.
+        raise _refusal_with_cause_stated()
+
+    fleet, capacity = reading
+    share = fleet / capacity
+    if share > max_fleet_cpu_share:
+        _warn(
+            f"spawn-gate: the fleet holds {fleet:.2f}/{capacity:.2f} cores "
+            f"({share * 100:.1f}% of capacity), over the "
+            f"max_fleet_cpu_share ceiling {max_fleet_cpu_share * 100:.1f}%; "
+            f"refusing to spawn (--force to bypass)"
+        )
+        # This refusal already names the sample it decided on, so run_gate must
+        # not append a SECOND, independently taken attribution beside it: two
+        # samples seconds apart disagree, and a refusal printing numbers it did
+        # not decide on is the whole defect x-7c0f removed.
+        raise _refusal_with_cause_stated()
+
+    _warn(
+        f"spawn-gate: 1-min load {load1:.1f} is high but only "
+        f"{fleet:.2f}/{capacity:.2f} cores ({share * 100:.1f}%) are attributed "
+        f"to the fleet, so the load is not attributed to the fleet; admitting "
+        f"the spawn"
+    )
 
 
 def _king_share(cap: int, king_counts: dict[Optional[str], int], caller: str) -> int:
@@ -1153,11 +1338,23 @@ def run_gate(
         cap = int(agents_cfg.max_live)
         floor_gb = float(agents_cfg.min_free_gb)
         max_load_per_cpu = float(agents_cfg.max_load_per_cpu)
+        # These two read through getattr, and the distinction from the line
+        # below is deliberate. A missing CAP must fail loudly, because falling
+        # back would silently uncap a provider. A missing machine THRESHOLD has
+        # a safe default and no such consequence. Reading them strictly put
+        # them in the same failure class as `provider_limits`: any caller
+        # holding a settings object built before these fields existed dropped
+        # the WHOLE block into the fail-safe branch below, which silently
+        # discarded that caller's `max_live` too. That turned one new field
+        # into a cap bug three test modules away from it.
+        max_fleet_cpu_share = float(getattr(agents_cfg, "max_fleet_cpu_share", 0.5))
+        hard_max_load_per_cpu = float(getattr(agents_cfg, "hard_max_load_per_cpu", 40.0))
         # A real attribute read, not a getattr fallback: a missing field must
         # fail loudly here rather than silently uncapping every provider.
         limits = dict(agents_cfg.provider_limits)
     except Exception:
         cap, floor_gb, max_load_per_cpu = 3, 4.0, 8.0
+        max_fleet_cpu_share, hard_max_load_per_cpu = 0.5, 40.0
         # The same budget the built-in table carries, coerced through the same
         # model so this fail-safe path cannot disagree with the configured one
         # about zai's caps.
@@ -1221,6 +1418,12 @@ def run_gate(
     mutex_blocked_since: Optional[float] = None
 
     while True:
+        # Before the mutex, never inside it: this can cost seconds and the
+        # mutex serializes every spawner on the machine. Re-taken each pass so
+        # a spawn that queued does not decide on a reading from minutes ago.
+        prefetched_fleet = _prefetch_fleet_reading(
+            max_load_per_cpu, hard_max_load_per_cpu
+        )
         try:
             acquired = (
                 _acquire_gate_mutex(holder, fail_closed=True)
@@ -1325,16 +1528,26 @@ def run_gate(
                     guard.release()
                     raise
                 try:
-                    _check_load_ceiling(max_load_per_cpu)
-                except GateRefused:
+                    _check_load_ceiling(
+                        max_load_per_cpu,
+                        max_fleet_cpu_share,
+                        hard_max_load_per_cpu,
+                        prefetched=prefetched_fleet,
+                    )
+                except GateRefused as refusal:
                     # The refusal is decided; release the mutex BEFORE the
                     # cause probe so queued spawners (and --no-wait callers)
                     # never sit behind seconds of evidence gathering.
                     guard.release()
-                    _warn(
-                        _footprint_cause_evidence()
-                        or "spawn-gate: footprint cause unavailable; load refusal unchanged"
-                    )
+                    # Only the backstop refuses without reading attribution, so
+                    # it is the only branch this line can inform. Adding it to
+                    # a refusal that already named its own sample would print
+                    # two disagreeing measurements in one refusal.
+                    if not getattr(refusal, "cause_stated", False):
+                        _warn(
+                            _footprint_cause_evidence()
+                            or "spawn-gate: footprint cause unavailable; load refusal unchanged"
+                        )
                     raise
                 try:
                     _check_king_share(c, cap, caller_session=caller_session)
