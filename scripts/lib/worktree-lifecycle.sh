@@ -34,6 +34,11 @@ else
     }
 fi
 
+if [[ -f "${_WT_LIFECYCLE_DIR}/worktree-removal-event.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "${_WT_LIFECYCLE_DIR}/worktree-removal-event.sh"
+fi
+
 # The detached-HEAD reachability answer, shared with archive-worktree.sh. A
 # partial deploy that dropped the lib keeps everything (count 1), never reaps;
 # its refresh stub keeps today's fetch-what-the-merged-check-needs behavior.
@@ -676,8 +681,9 @@ case "${1:-status}" in
                 fi
                 # Salvage + strict re-check + removal all live in archive-worktree.sh
                 # (its liveness re-check at removal time is authoritative, not our
-                # cached one). Exit 5 = salvage kept the worktree.
-                bash "$ARCHIVE" "$wt" $YES >&2
+                # cached one). Exit 5 = salvage kept the worktree. The caller env
+                # names this path in the worktree_removed event row it emits.
+                FNO_WT_REMOVE_CALLER="cleanup --merged" bash "$ARCHIVE" "$wt" $YES >&2
                 rc=$?
                 case "$rc" in
                     0) printf '%-18s %-34s %s\n' "archived" "$branch" "$wt"; N_REAP=$((N_REAP + 1))
@@ -805,6 +811,11 @@ case "${1:-status}" in
                     if git worktree remove --force "$wt" 2>/dev/null; then
                         echo "  REMOVED: $wt (branch $BRANCH preserved)"
                         REMOVED=$((REMOVED + 1))
+                        if declare -F _wt_emit_removal_event >/dev/null 2>&1; then
+                            _wt_emit_removal_event "$MAIN_DIR" "$wt" "cleanup --older-than" \
+                                "no-live-claim (guard passed)" \
+                                "age>=${DAYS}d + reapable passed" "$BRANCH" false
+                        fi
                     else
                         echo "  FAILED: $wt could not be removed (try: git worktree prune)"
                     fi

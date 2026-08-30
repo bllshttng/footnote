@@ -162,6 +162,14 @@ if [[ -f "$_CHECK_REAPABLE_LIB" ]]; then
   source "$_CHECK_REAPABLE_LIB"
 fi
 
+# One worktree_removed event row per removal (sourced beside the reapable
+# lib; the row is what makes a recurrence attributable).
+_REMOVAL_EVENT_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" 2>/dev/null && pwd)/worktree-removal-event.sh"
+if [[ -f "$_REMOVAL_EVENT_LIB" ]]; then
+  # shellcheck source=/dev/null
+  source "$_REMOVAL_EVENT_LIB"
+fi
+
 measure_strict_state() {
   FORCE_DIRTY_STATUS=""
   FORCE_DIRTY_STATUS_RC=0
@@ -623,6 +631,23 @@ if ! git worktree remove $REMOVE_FLAGS "$TARGET"; then
   exit 4
 fi
 git worktree prune
+
+# The tree is gone: emit the removal row with what the guards read at decision
+# time. Caller comes from the invoking path (FNO_WT_REMOVE_CALLER); a manual
+# run says so honestly. A failed emit never blocks the branch handling below.
+if declare -F _wt_emit_removal_event >/dev/null 2>&1; then
+  _WT_EVENT_CLAIM="no-live-claim"
+  _WT_EVENT_REASON="strict checks passed (reapable, pushed, no live session)"
+  if [[ "$FORCE" -eq 1 ]]; then
+    _WT_EVENT_CLAIM="overridden-by-force: ${INITIAL_LIVE_EVIDENCE:-none}"
+    _WT_EVENT_REASON="--force override of disclosed checks"
+  fi
+  _WT_EVENT_FORCED=false
+  [[ "$FORCE" -eq 1 ]] && _WT_EVENT_FORCED=true
+  _wt_emit_removal_event "$CANONICAL" "$TARGET" \
+    "${FNO_WT_REMOVE_CALLER:-manual archive}" \
+    "$_WT_EVENT_CLAIM" "$_WT_EVENT_REASON" "$BRANCH" "$_WT_EVENT_FORCED"
+fi
 
 # ---- Branch handling -----------------------------------------------------
 BRANCH_DELETE_RC=0

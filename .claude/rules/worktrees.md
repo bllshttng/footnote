@@ -37,7 +37,7 @@ Creation has had a contract since day one; removal was conversation-only, and 17
 - **DIRTY** - never touched by any automatic path, ever. Report only.
 - **clean + unmerged** - never auto-pruned. Report the branch name so a human judges; the branch may be an open PR or abandoned work.
 - **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout; the branch is the work. Every branch survived a 13-tree reap run, verified by rev-parse.
-- **Trigger: MERGE, never node-done.** A node can be done while its branch is unmerged, and that tree holds the only checkout of unlanded commits. The post-merge ritual (`fno do pr ritual`) is the natural home.
+- **Trigger: MERGE, never node-done.** A node can be done while its branch is unmerged. That tree then holds the only checkout of unlanded commits. The post-merge ritual (`fno do pr ritual`) is the natural home.
 - **Gate: `reapable`** (`fno agents workspace worktree reapable`). The buckets are enforced by the tool, not by each caller's care.
 - **Backstop: a periodic `cleanup --merged` sweep**, because the ritual only ever sees the PRs it is invoked for.
 
@@ -48,7 +48,7 @@ The verb: `fno agents workspace worktree cleanup --merged` (dry-run by default; 
 Every code-payload dispatch routes through `fno agents workspace worktree ensure`, which resolves a `worktree` policy.
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
-- **`never`** - launch in place on the canonical checkout (for projects whose working tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.
+- **`never`** - launch in place on the canonical checkout (for projects whose tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.
 - **`harness-native`** (default) - the harness's own location: claude lands at `<repo>/.claude/worktrees/<name>`, **always**, ignoring `worktrees_base`; Codex Desktop uses `/worktree` or **Hand off -> Worktree**. A harness with no native transition degrades to `~/.fno/worktrees` and does not inherit `worktrees_base`; ensure needs `--harness` and never guesses.
 - **`external`** - fno-managed at `<worktrees_base>/<repo>/<name>`.
 

@@ -54,6 +54,11 @@ from fno.pr._proc import Result, ToolMissing, run as _run
 # concurrently. 15m bounds a run that finishes in 1-3 min; the TTL is the
 # crash backstop.
 _CLAIM_TTL = "15m"
+# Reap order: minted only by this ritual against a gh-confirmed MERGED state,
+# consumed by the daemon's periodic worktree sweep (which runs its pass with
+# --apply while any order stands). TTL is the retry bound: a tree that stays
+# protected expires its order rather than being forced.
+_REAP_ORDER_TTL = "7d"
 # x-0d66: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
 # partial-dispatch state instead of wedging the ritual. Killing mid-dispatch is
@@ -563,6 +568,36 @@ class Ritual:
         self._emit(step, _SKIPPED, detail)
         return False
 
+    def _register_reap_order(self, why: str) -> str:
+        """Mint the durable reap order a deferred archive owes (a TTL claim).
+
+        The daemon's periodic worktree sweep consumes standing orders: while
+        any live order exists it runs its pass with ``--apply``. Removal stays
+        merge-triggered - only this ritual, against a gh-confirmed MERGED
+        state, mints orders - and the sweep's own guards (reapable, live
+        claim, rooted processes) still decide tree by tree, so a tree that is
+        still in use stays put and the order simply expires.
+        """
+        key = f"reap:pr-{self.ctx.pr}"
+        try:
+            r = self.runner(
+                [*fno_py_cmd(), "agents", "claim", "acquire", key,
+                 "--holder", f"postmerge:reap:pr-{self.ctx.pr}",
+                 "--ttl", _REAP_ORDER_TTL,
+                 "--reason", "post-merge reap order",
+                 "--metadata", json.dumps({"pr": self.ctx.pr,
+                                           "project": self.ctx.project})],
+                timeout=15.0,
+            )
+        except (ToolMissing, subprocess.SubprocessError) as exc:
+            return f"reap-order-unwritten ({exc})"
+        if r.returncode == 0:
+            return f"reap-order {key} standing ({why})"
+        if r.returncode == 1:
+            # Already held: a prior ritual for this PR already ordered it.
+            return f"reap-order {key} already standing ({why})"
+        return f"reap-order-unwritten (exit={r.returncode}, {why})"
+
     def leg_archive(self) -> None:
         """Step 4: best-effort worktree archive; defer when run from inside it."""
         state, branch = self._merged_state()
@@ -584,15 +619,21 @@ class Ritual:
             # that merged its own PR is standing in its own worktree - which is
             # why the freshest merged worktrees were the ones that survived.
             # `deferred` says the work is still owed; `skipped` plus a command
-            # in the detail line read as done and nobody ever ran it.
-            self._emit("archive", _DEFERRED, "sweep-will-reap")
+            # in the detail line read as done and nobody ever ran it. The
+            # order makes "later" a fact in the world: the daemon's sweep pays
+            # this debt instead of a human remembering to.
+            self._emit("archive", _DEFERRED,
+                       f"sweep-will-reap; {self._register_reap_order('self-worktree')}")
             return
         script = self.canon / "scripts" / "setup" / "archive-worktree.sh"
         if not script.exists():
             self._emit("archive", _SKIPPED, "archive-worktree.sh missing")
             return
         try:
-            r = self.runner(["bash", str(script), str(wt), "--yes"],
+            # env(1) prefixes the caller into the removal event the script
+            # emits; the runner has no env parameter by design (test seams).
+            r = self.runner(["env", "FNO_WT_REMOVE_CALLER=post-merge ritual",
+                             "bash", str(script), str(wt), "--yes"],
                             cwd=str(self.canon), timeout=120.0)
         except subprocess.TimeoutExpired:
             self._emit("archive", _FAILED, "timeout")
@@ -600,8 +641,15 @@ class Ritual:
         except (ToolMissing, subprocess.SubprocessError) as exc:
             self._emit("archive", _FAILED, f"spawn-error: {exc}")
             return
-        self._emit("archive", _OK if r.ok else _FAILED,
-                   "archived" if r.ok else f"exit={r.returncode} (worktree left in place)")
+        if r.ok:
+            self._emit("archive", _OK, "archived")
+            return
+        # A guarded refusal (live session in the tree, salvage, confirmation)
+        # leaves the tree in place: the work is still owed, so the order
+        # stands for the sweep to retry once the guard's cause is gone.
+        self._emit("archive", _FAILED,
+                   f"exit={r.returncode} (worktree left in place); "
+                   f"{self._register_reap_order('archive-refused')}")
 
     def _find_worktree(self, branch: str) -> Optional[str]:
         out = _git_text(["worktree", "list", "--porcelain"], self.canon)

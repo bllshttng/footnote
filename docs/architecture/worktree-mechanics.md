@@ -65,7 +65,9 @@ With `--force`, the script measures and prints every dirty path. It prints each 
 
 NEVER `rm -rf` a worktree, which leaves dangling refs.
 
-Post-merge pruning is automated. `/fno:pr merged` archives the PR's worktree. `fno agents workspace worktree cleanup --merged --apply` sweeps landed ones.
+Post-merge pruning is automated. When the ritual runs from outside the merged worktree, `/fno:pr merged` archives the PR's worktree directly. When it stands inside the merged worktree (the usual worker case), it defers and MINTS a reap order. The order is a TTL claim (`reap:pr-<n>`, 7d) that only a gh-confirmed MERGED state can create. The daemon's daily worktree sweep runs its pass with `--apply` while any order stands, report-only otherwise: a timer tick alone still removes nothing. The sweep's own guards (reapable, live claim, rooted processes) decide tree by tree, so an order never forces a protected tree - it expires instead. `fno agents workspace worktree cleanup --merged` (dry-run by default, both removal modes) sweeps landed ones by hand with `--apply`.
+
+Every removal emits one `worktree_removed` event row (path, caller, claim read, reason). The row mirrors to the machine-global journal. Before x-60de no removal path emitted anything, so a lost tree left no attributable evidence.
 
 ## Commit-time salvage refs
 

@@ -726,6 +726,60 @@ def test_archive_defers_when_run_inside_worktree(tmp_path, capsys, monkeypatch):
     assert "sweep-will-reap" in out
 
 
+def test_archive_defer_mints_the_reap_order(tmp_path, capsys, monkeypatch):
+    # The deferred debt is now a fact in the world: a TTL claim the daemon's
+    # periodic sweep consumes (it applies while any order stands), so "later"
+    # no longer depends on a human remembering the sweep verb.
+    runner = FakeRunner(branch="feature/x")
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
+    r.leg_archive()
+    out = capsys.readouterr().out
+    order_calls = [c for c in runner.calls if "reap:pr-7" in " ".join(c)]
+    assert order_calls, "the defer must mint the reap order"
+    c = order_calls[0]
+    assert "acquire" in c and "--ttl" in c and "7d" in c
+    assert "reap-order reap:pr-7 standing" in out
+
+
+def test_archive_refusal_leaves_a_standing_order(tmp_path, capsys, monkeypatch):
+    # A guarded refusal (live session, salvage) leaves the tree in place: the
+    # work is still owed, so the order stands for the sweep to retry.
+    inner = FakeRunner(branch="feature/x")
+
+    class _RefusingRunner:
+        calls = inner.calls
+
+        def __call__(self, argv, *, cwd=None, timeout=None):
+            if argv and "archive-worktree.sh" in " ".join(argv):
+                return Result(2, "", "strict check failed")
+            return inner(argv, cwd=cwd, timeout=timeout)
+
+    r = _bare(tmp_path, _RefusingRunner())
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    (tmp_path / "scripts" / "setup").mkdir(parents=True)
+    (tmp_path / "scripts" / "setup" / "archive-worktree.sh").write_text("#!/bin/sh\nexit 0\n")
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(wt))
+    r.leg_archive()
+    out = capsys.readouterr().out
+    assert "step=archive status=failed" in out
+    assert "exit=2" in out
+    assert "reap-order reap:pr-7 standing" in out
+
+
+def test_reap_order_already_standing_is_not_a_failure(tmp_path, capsys, monkeypatch):
+    # acquire rc 1 = an earlier ritual for this PR already ordered it; the
+    # standing order is the desired end state, not an error.
+    runner = FakeRunner(branch="feature/x", claim_rc=1)
+    r = _bare(tmp_path, runner)
+    monkeypatch.setattr(r, "_find_worktree", lambda branch: str(r.cwd))
+    r.leg_archive()
+    out = capsys.readouterr().out
+    assert "step=archive status=deferred" in out
+    assert "already standing" in out
+
+
 def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     # AC1-HP: a found worktree for the merged branch is archived.
     runner = FakeRunner(branch="feature/x")
@@ -739,10 +793,12 @@ def test_archive_runs_script_when_worktree_found(tmp_path, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "step=archive status=ok" in out
     assert "archived" in out
-    # the archive script was invoked with --yes, never --force
-    archive_calls = [c for c in runner.calls if c[:1] == ["bash"] and "archive-worktree.sh" in " ".join(c)]
+    # the archive script was invoked with --yes, never --force, and carries
+    # the removal-event caller stamp
+    archive_calls = [c for c in runner.calls if "archive-worktree.sh" in " ".join(c)]
     assert archive_calls and "--yes" in archive_calls[0]
     assert "--force" not in archive_calls[0]
+    assert "FNO_WT_REMOVE_CALLER=post-merge ritual" in archive_calls[0]
 
 
 def test_archive_skips_when_no_worktree(tmp_path, capsys, monkeypatch):
