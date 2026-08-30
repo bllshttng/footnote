@@ -8,6 +8,8 @@ from fno import config
 def test_candidate_chain_accepts_a_seeded_worktree_root(monkeypatch, tmp_path: Path):
     worktree = tmp_path / "worktree"
     canonical = tmp_path / "canonical"
+    worktree.mkdir()
+    (worktree / ".git").touch()
     global_config = tmp_path / "global.toml"
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(global_config))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
@@ -37,6 +39,8 @@ def test_repo_loader_reads_the_canonical_tier_for_a_linked_worktree(
 ):
     worktree = tmp_path / "worktree"
     canonical = tmp_path / "canonical"
+    worktree.mkdir()
+    (worktree / ".git").touch()
     (canonical / ".fno").mkdir(parents=True)
     (canonical / ".fno" / "config.toml").write_text(
         "[review]\nmax_rounds = 5\ngithub_approval_satisfies = false\n",
@@ -60,6 +64,8 @@ def test_repo_loader_keeps_local_override_allowlist_and_canonical_fallback(
 ):
     worktree = tmp_path / "worktree"
     canonical = tmp_path / "canonical"
+    worktree.mkdir()
+    (worktree / ".git").touch()
     (worktree / ".fno").mkdir(parents=True)
     (canonical / ".fno").mkdir(parents=True)
     (canonical / ".fno" / "config.toml").write_text(
@@ -87,6 +93,8 @@ def test_repo_loader_keeps_local_override_allowlist_and_canonical_fallback(
 def test_repo_loader_preserves_a_real_worktree_config_file(monkeypatch, tmp_path: Path):
     worktree = tmp_path / "worktree"
     canonical = tmp_path / "canonical"
+    worktree.mkdir()
+    (worktree / ".git").touch()
     (worktree / ".fno").mkdir(parents=True)
     (canonical / ".fno").mkdir(parents=True)
     (worktree / ".fno" / "config.toml").write_text(

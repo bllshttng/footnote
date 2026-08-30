@@ -4786,7 +4786,7 @@ def _settings_yaml_locations(root: Optional[Path] = None) -> list[Path]:
          $FNO_GLOBAL_SETTINGS_PATH override for test isolation)
     """
     env_path = os.environ.get("FNO_CONFIG")
-    if env_path:
+    if env_path and root is None:
         return [Path(env_path)]
 
     # Resolve project-local candidates from the seeded root, or from the
@@ -4799,7 +4799,10 @@ def _settings_yaml_locations(root: Optional[Path] = None) -> list[Path]:
             canonical_root = resolve_canonical_repo_root()
         else:
             repo_root = Path(root).resolve()
-            canonical_root = resolve_canonical_worktree(repo_root) or repo_root
+            if (repo_root / ".git").exists():
+                canonical_root = resolve_canonical_worktree(repo_root) or repo_root
+            else:
+                canonical_root = repo_root
     except (ImportError, ModuleNotFoundError):
         repo_root = Path(root).resolve() if root is not None else Path.cwd()
         canonical_root = repo_root

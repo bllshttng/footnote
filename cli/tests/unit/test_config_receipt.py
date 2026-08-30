@@ -8,6 +8,8 @@ from fno.config_cli import get_cmd
 
 
 def _patch_roots(monkeypatch, worktree: Path, canonical: Path, tmp_path: Path):
+    worktree.mkdir(parents=True, exist_ok=True)
+    (worktree / ".git").touch()
     monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "global.toml"))
     monkeypatch.delenv("FNO_CONFIG", raising=False)
     monkeypatch.delenv("FNO_NO_CANONICAL_CONFIG", raising=False)
