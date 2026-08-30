@@ -549,9 +549,9 @@ def fetch_pr_rest(
             break
         page += 1
     for cr in check_runs:
-        # `_classify`/`_entry_ts` uppercase and alt-chain internally, so the
-        # lowercase REST enum values and the started_at mapping need no case
-        # work here.
+        # The generated selector and `_classify` normalize enum case and use
+        # the alternate timestamp chain, so the lowercase REST enum values and
+        # the started_at mapping need no case work here.
         rollup.append(
             {
                 "name": cr.get("name"),
