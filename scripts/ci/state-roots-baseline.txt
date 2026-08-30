@@ -91,10 +91,10 @@ A	cli/src/fno/worktree_stranded.py	target-state.md	unowned	target-state.md has N
 A	crates/fno-agents/src/active_backlog.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/claims.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/codex_inject.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
-A	crates/fno-agents/src/daemon.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/daemon.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/finalize.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/kill_criteria.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
+A	crates/fno-agents/src/loop_runtime.rs	events.jsonl	x-77f7	canonical Rust ProjectJournalPath constructor; x-77f7 owns the shared caller-root path seam.
 A	crates/fno-agents/src/loop_target.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.
 A	crates/fno-agents/src/loop_target.rs	target-state.md	unowned	target-state.md has NO resolver today (STATE_FILES records resolver=None). That gap is the finding; a resolver must exist before this can drain.
 A	crates/fno-agents/src/loopcheck.rs	events.jsonl	x-1571	surviving Rust ProjectJournalPath site; x-1571 owns draining these and carries a standing warning against re-adding the events pin here.

@@ -1,0 +1,102 @@
+[
+  {
+    "name": "measured_success_cancelled_newer_success",
+    "input": [
+      {"name": "ci", "workflow": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-15T01:00:00Z"},
+      {"name": "ci", "workflow": "build", "status": "COMPLETED", "conclusion": "CANCELLED", "startedAt": "2026-08-15T02:00:00Z"},
+      {"name": "ci", "workflow": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-15T03:00:00Z"}
+    ],
+    "expected": [
+      {"name": "ci", "workflow": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-08-15T03:00:00Z"}
+    ]
+  },
+  {
+    "name": "same_check_name_different_workflows",
+    "input": [
+      {"name": "self-test", "workflow": "control-plane", "bucket": "cancel", "startedAt": "2026-08-15T01:00:00Z"},
+      {"name": "self-test", "workflow": "loc-ratchet", "bucket": "pass", "startedAt": "2026-08-15T02:00:00Z"}
+    ],
+    "expected": [
+      {"name": "self-test", "workflow": "control-plane", "bucket": "cancel", "startedAt": "2026-08-15T01:00:00Z"},
+      {"name": "self-test", "workflow": "loc-ratchet", "bucket": "pass", "startedAt": "2026-08-15T02:00:00Z"}
+    ]
+  },
+  {
+    "name": "check_name_status_context_collision",
+    "input": [
+      {"name": "shared", "workflow": "build", "bucket": "pass"},
+      {"context": "shared", "state": "FAILURE"}
+    ],
+    "expected": [
+      {"name": "shared", "workflow": "build", "bucket": "pass"},
+      {"context": "shared", "state": "FAILURE"}
+    ]
+  },
+  {
+    "name": "created_at_only_reverse_order",
+    "input": [
+      {"name": "ci", "conclusion": "SUCCESS", "createdAt": "2026-08-15T02:00:00Z"},
+      {"name": "ci", "conclusion": "FAILURE", "createdAt": "2026-08-15T01:00:00Z"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "SUCCESS", "createdAt": "2026-08-15T02:00:00Z"}
+    ]
+  },
+  {
+    "name": "equal_timestamp_failure_first",
+    "input": [
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T01:00:00Z"},
+      {"name": "ci", "conclusion": "SUCCESS", "startedAt": "2026-08-15T01:00:00Z"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T01:00:00Z"}
+    ]
+  },
+  {
+    "name": "equal_timestamp_failure_second",
+    "input": [
+      {"name": "ci", "conclusion": "SUCCESS", "startedAt": "2026-08-15T01:00:00Z"},
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T01:00:00Z"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T01:00:00Z"}
+    ]
+  },
+  {
+    "name": "missing_timestamp_failure_first",
+    "input": [
+      {"name": "ci", "conclusion": "FAILURE"},
+      {"name": "ci", "conclusion": "SUCCESS"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "FAILURE"}
+    ]
+  },
+  {
+    "name": "missing_timestamp_failure_second",
+    "input": [
+      {"name": "ci", "conclusion": "SUCCESS"},
+      {"name": "ci", "conclusion": "FAILURE"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "FAILURE"}
+    ]
+  },
+  {
+    "name": "unkeyed_rows_keep_stable_slots",
+    "input": [
+      {"name": "ci", "conclusion": "SUCCESS", "startedAt": "2026-08-15T01:00:00Z"},
+      {"id": "unkeyed-1"},
+      {"context": "legacy", "state": "SUCCESS"},
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T02:00:00Z"},
+      {"id": "unkeyed-2"},
+      {"context": "legacy", "state": "FAILURE", "createdAt": "2026-08-15T03:00:00Z"}
+    ],
+    "expected": [
+      {"name": "ci", "conclusion": "FAILURE", "startedAt": "2026-08-15T02:00:00Z"},
+      {"id": "unkeyed-1"},
+      {"context": "legacy", "state": "FAILURE", "createdAt": "2026-08-15T03:00:00Z"},
+      {"id": "unkeyed-2"}
+    ]
+  }
+]

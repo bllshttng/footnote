@@ -7,7 +7,10 @@
 //!
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
-use crate::{completion_output::allow_output, delivery_completion::pr_passes};
+use crate::{
+    check_supersession::latest_per_name, completion_output::allow_output,
+    delivery_completion::pr_passes,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -3557,61 +3560,6 @@ fn read_pr_info(
         malformed_attestations,
         coverage,
     })
-}
-
-/// Latest run per (check name, workflow), keyed on when the run was
-/// TRIGGERED. The key is the pair, not the name alone: several workflows in
-/// this repo define a job literally named `self-test`, and a name-only key
-/// would fold an unrelated workflow's cancelled or failing `self-test` into
-/// whichever workflow's `self-test` started latest, hiding the real result. A
-/// superseding run always starts later but need not finish later, so
-/// `startedAt` is the only honest recency key; list order is not one. A
-/// missing timestamp sorts oldest and loses to any timestamped sibling. On a
-/// timestamp tie the kept entry is fail-closed: a fail|cancel entry is never
-/// dropped by a same-time non-fail (parity with `_latest_per_name` in
-/// cli/src/fno/pr/_status.py). Entries without a name cannot group and pass
-/// through verbatim.
-fn latest_per_name(checks: &Value) -> Value {
-    let Some(arr) = checks.as_array() else {
-        return checks.clone();
-    };
-    fn ts_of(v: &Value) -> &str {
-        v.get("startedAt").and_then(|t| t.as_str()).unwrap_or("")
-    }
-    fn workflow_of(v: &Value) -> &str {
-        v.get("workflow").and_then(|w| w.as_str()).unwrap_or("")
-    }
-    fn is_fail(v: &Value) -> bool {
-        matches!(
-            v.get("bucket")
-                .and_then(|b| b.as_str())
-                .unwrap_or("")
-                .to_lowercase()
-                .as_str(),
-            "fail" | "cancel"
-        )
-    }
-    let mut kept: Vec<Value> = Vec::new();
-    for c in arr {
-        let name = c.get("name").and_then(|n| n.as_str()).map(str::to_string);
-        let slot = name.as_deref().and_then(|nm| {
-            kept.iter().position(|k| {
-                k.get("name").and_then(|n| n.as_str()) == Some(nm)
-                    && workflow_of(k) == workflow_of(c)
-            })
-        });
-        match slot {
-            None => kept.push(c.clone()),
-            Some(i) => {
-                let (tn, te) = (ts_of(c), ts_of(&kept[i]));
-                // Strictly-newer replaces; a tie replaces only fail-closed.
-                if tn > te || (tn == te && !is_fail(&kept[i]) && is_fail(c)) {
-                    kept[i] = c.clone();
-                }
-            }
-        }
-    }
-    Value::Array(kept)
 }
 
 fn without_coverage_statuses(checks: &Value) -> Value {

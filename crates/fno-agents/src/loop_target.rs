@@ -690,17 +690,12 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     install_sigint_handler();
 
     // ── build journal ─────────────────────────────────────────────────────────
-    let project_events = crate::paths::worktree_repo_root(&cwd)
-        .join(".fno")
-        .join("events.jsonl");
+    let project_events = ProjectJournalPath::from_caller_root(&cwd);
     let home_dir = std::env::var("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/tmp"));
     let global_events = home_dir.join(".fno").join("events.jsonl");
-    let journal = Journal::new(
-        ProjectJournalPath(project_events),
-        GlobalJournalPath(global_events),
-    );
+    let journal = Journal::new(project_events, GlobalJournalPath(global_events));
 
     // ── peek at the first unit for the header (F6: no TOCTOU re-read) ────────
     // Captured at queue construction above (unit_display) instead of

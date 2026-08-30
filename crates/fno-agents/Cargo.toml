@@ -17,6 +17,7 @@ readme = "README.md"
 keywords = ["pty", "agent", "supervisor", "terminal", "cli"]
 categories = ["command-line-utilities", "development-tools", "asynchronous"]
 publish = true
+include = ["build.rs", "codegen/**", "src/**", "Cargo.toml", "README.md", "LICENSE*"]
 
 [lib]
 name = "fno_agents"
@@ -97,6 +98,8 @@ regex = "1"
 serde_yaml_ng = "0.10"
 
 [build-dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
 # build.rs projects the `limits` block of cli/src/fno/events/schema.yaml into
 # src/events_limits.toml. Same crate the library already depends on,
 # so the compile is cached; a hand-rolled indented-block reader would be a

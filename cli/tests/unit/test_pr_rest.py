@@ -24,7 +24,9 @@ _PULLS = {
 _GH_URL = "git@github.com:Owner/Repo.git"
 
 
-def _runner(*, pulls=_PULLS, check_runs=(), statuses=None, fail=None, calls=None):
+def _runner(
+    *, pulls=_PULLS, check_runs=(), statuses=None, workflow_runs=(), fail=None, calls=None
+):
     """Dispatch by URL shape: git remote -> slug, gh api -> REST payloads."""
 
     def r(cmd, cwd=None):
@@ -39,6 +41,12 @@ def _runner(*, pulls=_PULLS, check_runs=(), statuses=None, fail=None, calls=None
             return Result(0, json.dumps(pulls), "")
         if "check-runs" in url:
             return Result(0, json.dumps({"check_runs": list(check_runs)}), "")
+        if "actions/runs?" in url:
+            return Result(
+                0,
+                json.dumps({"total_count": len(list(workflow_runs)), "workflow_runs": list(workflow_runs)}),
+                "",
+            )
         if url.endswith("/status"):
             return Result(0, json.dumps({"statuses": list(statuses or [])}), "")
         return Result(1, "", "unexpected: " + " ".join(cmd))
@@ -65,9 +73,10 @@ def test_settledness_reader_issues_no_graphql_call():
         if c[:3] == ["gh", "pr", "view"] or (len(c) > 2 and c[2] == "graphql")
     ]
     assert graphql == [], f"settledness read spent GraphQL: {graphql}"
-    # The reads that DID fire are the three REST endpoints + the local slug.
+    # The reads that DID fire are the four REST endpoints + the local slug.
     assert any("/pulls/42" in c[-1] for c in calls)
     assert any("check-runs" in c[-1] for c in calls)
+    assert any("actions/runs?head_sha=" in c[-1] for c in calls)
     assert any(c[-1].endswith("/status") for c in calls)
     assert any(c[:2] == ["git", "remote"] for c in calls)
 
@@ -233,6 +242,8 @@ def test_rest_reader_rejects_malformed_statuses():
             return Result(0, json.dumps(_PULLS), "")
         if "check-runs" in cmd[-1]:
             return Result(0, '{"check_runs":[{"name":"ci"}]}', "")
+        if "actions/runs?" in cmd[-1]:
+            return Result(0, '{"total_count":0,"workflow_runs":[]}', "")
         return Result(0, '{"statuses":{}}', "")
 
     payload, reason = _rest.fetch_pr_rest("42", runner=runner)
@@ -754,3 +765,73 @@ def test_published_refusal_hides_the_account_name_in_a_local_path(tmp_path, monk
     reason = _rest._cwd_refusal(str(tmp_path / "code" / "proj"))
     assert reason == "no such directory: ~/code/proj"
     assert str(tmp_path) not in reason
+
+
+def _workflow_run(run_id, name):
+    return {"id": run_id, "name": name, "head_sha": "abc123def"}
+
+
+def test_same_named_jobs_from_different_workflows_both_survive():
+    """The selector's workflow dimension must be live on the REST path: two
+    workflows both defining `self-test` key distinct slots, so a CANCELLED red
+    from one is not superseded by a pass from the other. The join key is the
+    run id embedded in the job's details_url."""
+    crs = [
+        {
+            "name": "self-test", "status": "completed", "conclusion": "cancelled",
+            "started_at": "2026-08-30T05:00:00Z",
+            "details_url": "https://github.com/Owner/Repo/actions/runs/111/job/1a",
+        },
+        {
+            "name": "self-test", "status": "completed", "conclusion": "success",
+            "started_at": "2026-08-30T06:00:00Z",
+            "details_url": "https://github.com/Owner/Repo/actions/runs/222/job/2a",
+        },
+    ]
+    pr_json, reason = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha"), _workflow_run(222, "beta")]),
+    )
+    assert reason == "" and pr_json is not None
+    rollup = pr_json["statusCheckRollup"]
+    by_workflow = {row["workflow"]: row for row in rollup if row["name"] == "self-test"}
+    assert set(by_workflow) == {"alpha", "beta"}, by_workflow
+    assert by_workflow["alpha"]["conclusion"] == "cancelled"
+    verdict, _, counts = _status.verdict_for(rollup)
+    assert verdict == "red"
+    assert counts["fail"] == 1 and counts["total"] == 2
+
+
+def test_check_run_whose_url_names_no_listed_run_keeps_empty_workflow():
+    """An external app's check run carries no Actions URL; "" keys it exactly
+    like the pre-workflow selector did instead of crashing the join."""
+    crs = [
+        {
+            "name": "external", "status": "completed", "conclusion": "success",
+            "started_at": "2026-08-30T05:00:00Z",
+            "details_url": "https://ci.example.net/builds/9",
+        },
+    ]
+    pr_json, reason = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(check_runs=crs, workflow_runs=[_workflow_run(111, "alpha")]),
+    )
+    assert reason == ""
+    assert pr_json["statusCheckRollup"][0]["workflow"] == ""
+
+
+def test_failed_workflow_run_listing_is_loud_not_a_silent_degrade():
+    """A workflow name the read could not fetch cannot prove the slot
+    collapse it would hide: (None, reason), the module's loud-failure
+    contract, never rows that quietly key name-only."""
+    pr_json, reason = _rest.fetch_pr_rest(
+        "42",
+        runner=_runner(
+            check_runs=[_cr("ci", "completed", "success")],
+            fail=lambda cmd: (
+                "secondary rate limit" if "actions/runs" in cmd[-1] else None
+            ),
+        ),
+    )
+    assert pr_json is None
+    assert "secondary rate limit" in reason

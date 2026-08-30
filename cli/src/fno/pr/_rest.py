@@ -4,7 +4,8 @@ The GraphQL quota is per-USER and shared by every session on the machine, so
 the documented idle behaviour (watchers, stop-hook reads) exhausted it while
 the core REST budget sat untouched. This module answers the settledness
 question on REST: `pulls/{n}` for state + head sha, `commits/{sha}/check-runs`
-for CheckRuns, `commits/{sha}/status` for legacy StatusContexts. The entries
+for CheckRuns, `commits/{sha}/status` for legacy StatusContexts, and one
+head_sha-scoped `actions/runs` listing that names each run's workflow. The entries
 are mapped onto the rollup shape `_status.verdict_for` already classifies, so
 verdict semantics (latest-per-name dedup, pending-never-red, tie fail-closed)
 are byte-identical to the GraphQL path.
@@ -37,6 +38,9 @@ from fno.pr._ritual import _parse_origin_slug
 # rate-limit refusal (measured on `fno do pr info`), so they drop out before
 # classification and before any line is quoted.
 _WRAPPER_NOISE = re.compile(r"^(fno config|gh proxy):", re.IGNORECASE)
+# The run id embedded in an Actions job details_url, the join key to the
+# head_sha workflow-run listing that supplies each row's workflow name.
+_ACTIONS_RUN_RE = re.compile(r"/actions/runs/(\d+)")
 # A 403 rate-limit refusal is classified against the LIVE exempt bucket,
 # never against GitHub's wording. The measured 2026-08-24 secondary refusal
 # said only "API rate limit exceeded ..." - no "secondary" anywhere - so the
@@ -548,10 +552,44 @@ def fetch_pr_rest(
         if not isinstance(total, int) or len(check_runs) >= total or not page < 10:
             break
         page += 1
+    # The workflow name is the generated selector's dedup dimension for
+    # same-named jobs (several workflows here define `self-test`), but the
+    # REST check-run object carries no workflow field. One head_sha-scoped
+    # workflow-run listing supplies it: an Actions row's details_url embeds
+    # the run id, and a run entry's `name` is its workflow's name. A check
+    # run whose URL matches no run (an external app) keeps "", which keys
+    # exactly like the pre-workflow selector did; the GraphQL rollup blob
+    # (pr_json.statusCheckRollup) has no selectable workflow field either,
+    # so its rows degrade the same way. Failure is loud: a name the read
+    # could not fetch cannot prove the slot collapse it would hide.
+    runs = runner(
+        ["gh", "api", f"repos/{slug}/actions/runs?head_sha={sha}&per_page=100"],
+        cwd=cwd,
+    )
+    if not runs.ok:
+        return None, _rest_reason(runs, runner=runner, cwd=cwd)
+    try:
+        runs_payload = json.loads(runs.stdout)
+        if not isinstance(runs_payload, dict):
+            return None, "gh api actions runs returned a JSON value that is not an object"
+        run_rows = runs_payload.get("workflow_runs")
+        if not isinstance(run_rows, list) or not all(
+            isinstance(row, dict) for row in run_rows
+        ):
+            return None, "gh api actions runs carried malformed workflow_runs"
+    except json.JSONDecodeError:
+        return None, "gh api actions runs returned output that is not JSON"
+    run_names: dict[str, str] = {}
+    for run_row in run_rows:
+        run_id = run_row.get("id")
+        name = run_row.get("name")
+        if isinstance(run_id, int) and isinstance(name, str):
+            run_names[str(run_id)] = name
     for cr in check_runs:
-        # `_classify`/`_entry_ts` uppercase and alt-chain internally, so the
-        # lowercase REST enum values and the started_at mapping need no case
-        # work here.
+        # The generated selector and `_classify` normalize enum case and use
+        # the alternate timestamp chain, so the lowercase REST enum values and
+        # the started_at mapping need no case work here.
+        run_id = _ACTIONS_RUN_RE.search(str(cr.get("details_url") or ""))
         rollup.append(
             {
                 "name": cr.get("name"),
@@ -562,6 +600,9 @@ def fetch_pr_rest(
                 # under the GraphQL-shape key `fno.pr._logs._job_ref` parses,
                 # so a failing row carries its own log ref through the rollup.
                 "detailsUrl": cr.get("details_url") or "",
+                # Per-run workflow name from the listing above; "" when the
+                # details_url names no run the listing knows.
+                "workflow": run_names.get(run_id.group(1), "") if run_id else "",
             }
         )
 

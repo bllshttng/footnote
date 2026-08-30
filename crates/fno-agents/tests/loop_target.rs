@@ -523,6 +523,81 @@ fn e2e_binary_missing_driver_binary() {
     );
 }
 
+#[test]
+fn caller_root_journal() {
+    let dir = TempDir::new().unwrap();
+    let caller_root = dir.path().join("caller-root");
+    let pin_path = dir.path().join("pinned").join("events.jsonl");
+    let session_key = "caller-root-session";
+
+    write_manifest(&caller_root, session_key, "caller-root journal", "");
+    fs::create_dir_all(pin_path.parent().unwrap()).unwrap();
+    seed_termination_event(&pin_path, session_key, "DonePRGreen");
+
+    let project_path = fno_agents::loop_runtime::ProjectJournalPath::from_caller_root(&caller_root);
+    assert_eq!(
+        project_path.0,
+        caller_root.join(".fno").join("events.jsonl"),
+        "constructor must resolve the caller-root project journal"
+    );
+
+    let lib_dir = dir.path().join("lib");
+    write_stub_driver(
+        &lib_dir,
+        "claude-code",
+        1,
+        &format!(
+            "mkdir -p \"$FNO_CWD/.fno\"\nprintf '{{\"ts\":\"2026-06-06T00:00:00Z\",\"type\":\"termination\",\"source\":\"hook\",\"data\":{{\"session_id\":\"{session_key}\",\"reason\":\"DonePRGreen\",\"message\":\"done\"}}}}\\n' >> \"$FNO_CWD/.fno/events.jsonl\"\nexit 0"
+        ),
+    );
+    let bin_dir = dir.path().join("bin");
+    write_stub_binary(&bin_dir, "claude", "exit 0");
+
+    let caller_root_str = caller_root.display().to_string();
+    let pin_path_str = pin_path.display().to_string();
+    let home_str = dir.path().join("home").display().to_string();
+    let (stdout, stderr, code) = run_verb(
+        &[
+            "loop",
+            "run",
+            "--driver",
+            "target",
+            "--dispatcher",
+            "claude-code",
+            "--driver-lib-dir",
+            lib_dir.to_str().unwrap(),
+            "--cwd",
+            &caller_root_str,
+            "--max-iterations",
+            "1",
+        ],
+        &[
+            ("PATH", &path_with(&bin_dir)),
+            ("FNO_EVENTS_PATH", &pin_path_str),
+            ("HOME", &home_str),
+        ],
+    );
+
+    assert_eq!(
+        code,
+        Some(0),
+        "caller-root journal run must complete\nstdout={stdout}\nstderr={stderr}"
+    );
+
+    let caller_events = caller_root.join(".fno").join("events.jsonl");
+    let dispatched = read_jsonl(&caller_events)
+        .into_iter()
+        .find(|event| {
+            event["type"].as_str() == Some("loop_unit_dispatched")
+                && event["source"].as_str() == Some("loop")
+                && event["data"]["session_id"].as_str() == Some(session_key)
+        })
+        .expect("caller-root journal must contain the deterministic loop marker");
+    assert_eq!(dispatched["type"].as_str(), Some("loop_unit_dispatched"));
+    assert_eq!(dispatched["source"].as_str(), Some("loop"));
+    assert_eq!(dispatched["data"]["session_id"].as_str(), Some(session_key));
+}
+
 // ── test 9: e2e binary megawalk driver is rejected (driver removed) ──────────
 //
 // The megawalk driver was deprecated and its loop arm deleted; `--driver` now
