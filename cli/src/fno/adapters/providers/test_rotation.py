@@ -1,6 +1,6 @@
 """Tests for combos rotation: Combo dataclass, load_combos, get_rotated_providers, dispatch_with_combo.
 
-Plan B of provider-rotation 9router port (ab-0e5a921e). Run:
+Provider-rotation Plan B tests. Run:
     cd cli && uv run pytest src/fno/adapters/providers/test_rotation.py -v
 """
 from __future__ import annotations
@@ -170,7 +170,7 @@ class TestLoadCombosErrors:
 
 
 # ---------------------------------------------------------------------------
-# AC1.3-EDGE: sticky_limit <= 0 clamps to 1 (matches 9router normalizeStickyLimit)
+# AC1.3-EDGE: sticky_limit <= 0 clamps to 1
 # ---------------------------------------------------------------------------
 
 class TestComboConstructionEdges:

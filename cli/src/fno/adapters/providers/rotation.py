@@ -1,6 +1,6 @@
 """Provider combos: named ordered lists with rotation strategies.
 
-Plan B of the 9router port (ab-0e5a921e). Composes on top of Plan A
+Provider-rotation Plan B. Composes on top of Plan A
 (ab-6534a78a)'s ProviderHealth + cooldown substrate.
 
 A Combo is a named ordered list of provider IDs with a strategy:
@@ -12,7 +12,6 @@ A Combo is a named ordered list of provider IDs with a strategy:
   ``provider-runtime-state.json`` so parallel target spawns within a
   megawalk campaign share rotation state via fcntl locking.
 
-Source port: ``~/code/tools/9router/open-sse/services/combo.js`` (MIT).
 """
 from __future__ import annotations
 
@@ -65,8 +64,8 @@ class Combo:
                 f"Combo {self.name!r} has invalid strategy "
                 f"{self.strategy!r}; valid: {_VALID_STRATEGIES}"
             )
-        # Clamp sticky_limit to 1 minimum (matches 9router's
-        # normalizeStickyLimit at combo.js:14-17).
+        # Clamp sticky_limit to 1 minimum (the sticky cursor never sits on
+        # a zero-width budget).
         if self.sticky_limit < 1:
             object.__setattr__(self, "sticky_limit", 1)
 
@@ -212,8 +211,7 @@ def dispatch_with_combo(
 ) -> DispatchOutcome:
     """Try providers from ``combo_name`` in rotation order until one succeeds.
 
-    Iteration semantics (port of 9router's handleComboChat at combo.js:
-    98-180):
+    Iteration semantics:
 
     1. Resolve combo via ``load_combos()``; raise ``ComboNotFoundError`` if
        missing - callers may catch this and fall through to the no-combo

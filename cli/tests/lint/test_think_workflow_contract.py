@@ -37,7 +37,7 @@ def test_think_demands_cited_claims() -> None:
 
 
 def test_native_plan_boundary_survives_in_architecture() -> None:
-    """The Footnote-specific plan boundary is documented, not copied from Superpowers."""
+    """The Footnote-specific plan boundary is documented as footnote-native."""
     architecture = ARCH.read_text(encoding="utf-8")
     assert "Native Plan Mode" in architecture
-    assert "does not copy Superpowers" in architecture
+    assert "copies no external workflow pack" in architecture

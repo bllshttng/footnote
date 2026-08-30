@@ -50,7 +50,7 @@ Dispatch primitive: subprocess-spawn openclaw itself.
 
 Advanced: multi-soul orchestration. **Future work, not v1.**
 
-- The `openclaw-persona-forge` skill in ECC (`~/code/tools/everything-claude-code/skills/openclaw-persona-forge/`) generates `SOUL.md` files per persona.
+- The `openclaw-persona-forge` skill in the upstream skills pack generates `SOUL.md` files per persona.
 - Spawning `openclaw --soul path/to/orchestrator.md` and multiple `openclaw --soul path/to/worker-N.md` in parallel creates a heterogeneous subagent fleet.
 - V1 of footnote does NOT implement multi-soul orchestration inside the autonomous loop; single-soul subprocess spawn is the default. Multi-soul support is listed in the future-work section of `docs/SETUP-OPENCLAW.md`.
 

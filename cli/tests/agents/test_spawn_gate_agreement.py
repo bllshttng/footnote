@@ -91,7 +91,7 @@ def test_slot_count_excludes_roster_while_count_includes_it(tmp_path, monkeypatc
         "supervisorPid": 1,
         "workers": {
             f"{i:08x}": {"sessionId": f"{i:08x}-1-2-3-4", "pid": alive}
-            for i in range(1, 39)  # 38 claude-mem-style observer sessions
+            for i in range(1, 39)  # 38 memory-plugin-style observer sessions
         },
     }
     (tmp_path / "daemon" / "roster.json").write_text(json.dumps(roster))

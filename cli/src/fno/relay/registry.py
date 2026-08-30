@@ -1,8 +1,8 @@
 """Group 2 of the cross-session agent relay (x-908b / x-e4ac): a PERSISTENT
 session registry. Maps ``session_id -> {provider, pid, cwd, inject_handle,
 status}`` so a peer is addressable by its session id and discovery survives a
-restart (cmux and herdr both fail here by staying in-memory; the design's
-Architecture/Registry section makes persistence the fix).
+restart (earlier designs kept this map in memory and lost it on restart;
+persistence is the fix).
 
 Two sources, two durability models:
 

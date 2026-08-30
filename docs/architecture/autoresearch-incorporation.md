@@ -3,17 +3,17 @@ created: 2026-03-24T22:28
 status: accepted
 ---
 
-# Autoresearch Incorporation
+# Bounded-Iteration Pattern Incorporation
 
 ## Overview
 
-footnote now carries the core bounded-iteration patterns directly instead of depending on a separate autoresearch plugin. The integration adds two new skills, `what-if` and `fix`, and upgrades `debug` to use a scientific-method loop inside the existing BDD-first debugging frame.
+footnote now carries the core bounded-iteration patterns directly instead of depending on a separate iteration plugin. The integration adds two new skills, `what-if` and `fix`, and upgrades `debug` to use a scientific-method loop inside the existing BDD-first debugging frame.
 
 ## Architecture
 
 ```mermaid
 graph TD
-    AR["Autoresearch design inputs"] --> LOOP["iteration-loop.md"]
+    AR["Bounded-iteration design inputs"] --> LOOP["iteration-loop.md"]
     AR --> VERIFY["verification-patterns.md"]
 
     LOOP --> WHATIF["fno:what-if"]
@@ -58,7 +58,7 @@ This keeps scenario exploration, debugging, and repair aligned on the same decis
 
 ### 1. Pattern extraction, not plugin vendoring
 
-The new footnote skills borrow the loop structure and verification discipline from autoresearch, but they stay in footnote-native SKILL.md form. No separate helper scripts were added for the loop itself.
+The new footnote skills borrow the loop structure and verification discipline from prior bounded-iteration work, but they stay in footnote-native SKILL.md form. No separate helper scripts were added for the loop itself.
 
 ### 2. Mechanical verification is mandatory
 

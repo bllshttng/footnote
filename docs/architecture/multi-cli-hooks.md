@@ -183,7 +183,7 @@ flowchart TD
 
 ### Why runtime detection over build-time transformation?
 
-The get-shit-done project uses install-time transformation (4,479-line installer that converts content per platform). We chose runtime detection because:
+An earlier skill-pipeline project uses install-time transformation (a 4,479-line installer that converts content per platform). We chose runtime detection because:
 
 1. **Simpler** — No build tooling, no installer maintenance
 2. **Single source of truth** — One script, not N platform copies

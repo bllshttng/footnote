@@ -6,7 +6,7 @@ Single source of truth for Anthropic model pricing.
 Pricing sources:
 - https://platform.claude.com/docs/en/about-claude/pricing (canonical)
 - LiteLLM's model_prices_and_context_window.json (machine-readable
-  reference, what ccusage uses):
+  reference, the same one community cost tools use):
   https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json
 
 Usage:

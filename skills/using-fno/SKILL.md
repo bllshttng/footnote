@@ -1,6 +1,6 @@
 ---
 name: using-fno
-description: Loaded at every SessionStart so the agent knows the two footnote surfaces (slash-command workflows + fno CLI primitives) exist from turn one. Mirrors the using-superpowers pattern.
+description: Loaded at every SessionStart so the agent knows the two footnote surfaces (slash-command workflows + fno CLI primitives) exist from turn one. Mirrors the session-start pattern.
 ---
 
 <!-- style-exception: mechanical verb rename preserves pre-existing prose -->

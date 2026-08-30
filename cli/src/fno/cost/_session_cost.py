@@ -56,7 +56,7 @@ from fno.cost.cost_tracker import (
 # content block, and every line of the same API message repeats identical
 # `message.usage` (verified live: 502 assistant lines -> 185 unique pairs,
 # 0 duplicate groups with differing usage). Counting usage once per unique
-# (message.id, requestId) matches ccusage semantics.
+# (message.id, requestId) matches the community cost-report semantics.
 DedupKey = tuple[str, str]
 
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -173,7 +173,8 @@ def _accumulate_entry(
             for compaction detection. Pass None to skip compaction detection.
         seen: Set of (message.id, requestId) pairs already counted. Usage and
             message counts accumulate once per unique key; lines missing either
-            field are counted as-is (no false dedup, matching ccusage). Pass
+            field are counted as-is (no false dedup, matching the community
+            cost reports). Pass
             None to skip dedup. Mutated in place so callers can share one set
             across transcripts (resumed sessions copy history lines, with
             usage, into the new file).

@@ -9,8 +9,8 @@
 //!
 //! Model: an n-ary tree (`Warp`'s `pane_group/tree.rs` shape - `Branch` with
 //! a `Vec` of ratio-tagged children, not a binary tree) so a 3-way split
-//! never needs a synthetic wrapper branch. Directional navigation ports
-//! herdr's `find_in_direction` geometry exactly (see `navigate` below).
+//! never needs a synthetic wrapper branch. Directional navigation filters to
+//! the geometrically adjacent pane (see `navigate` below).
 
 use serde::{Deserialize, Serialize};
 
@@ -919,8 +919,7 @@ fn replace_anchor_node(node: &Node, anchor: PaneId, subtree: Node) -> Option<Nod
 // navigate
 // ---------------------------------------------------------------------------
 
-/// Geometric adjacency, ported EXACTLY from herdr's `find_in_direction`
-/// (`~/code/tools/herdr/src/layout.rs`): filter to panes strictly beyond the
+/// Geometric adjacency: filter to panes strictly beyond the
 /// focused rect in `dir` with perpendicular-range overlap, then pick the min
 /// by `(edge_distance, Reverse(overlap_amount), center_distance, index)`.
 pub fn navigate(node: &Node, viewport: Rect, focus: PaneId, dir: Dir) -> Option<PaneId> {

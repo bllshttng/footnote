@@ -6745,11 +6745,11 @@ mod tests {
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as
-        // an undispatchable identity row (aider: a real CLI we deliberately do
+        // an undispatchable identity row (goose: a real CLI we deliberately do
         // not host). Capability is refused later at the spawn seam, not here.
         fs::write(
             &reg,
-            r#"{"schema_version":3,"agents":[{"name":"x","provider":"aider","cwd":"/x","log_path":"/l","status":"live"}]}"#,
+            r#"{"schema_version":3,"agents":[{"name":"x","provider":"goose","cwd":"/x","log_path":"/l","status":"live"}]}"#,
         )
         .unwrap();
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);

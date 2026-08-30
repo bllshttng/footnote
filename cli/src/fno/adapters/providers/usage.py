@@ -2,7 +2,7 @@
 
 Predictive layer on top of the reactive failover substrate: read remaining
 quota + reset time per provider BEFORE a dispatch decision, instead of burning
-a failed call to learn it. Orca (2026-07-09) only DISPLAYS this data and makes
+a failed call to learn it. Existing tooling only DISPLAYS this data and makes
 the human swap accounts; footnote acts on it (defer, reroute) autonomously.
 
 This module is pure probe + data shapes. The caching, the headroom predicate,
@@ -42,15 +42,15 @@ from fno.agents.model_routing import _parse_target
 
 logger = logging.getLogger(__name__)
 
-PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code / orca's own 10s usage-fetch budget
+PROBE_TIMEOUT_SECONDS = 10  # matches Claude Code's own 10s usage-fetch budget
 
-# The claude OAuth usage endpoint Claude Code's `/usage` and orca's claude-fetcher
-# read. Verified live against a real account (x-6bcf): the response is top-level
+# The claude OAuth usage endpoint Claude Code's `/usage` reads. Verified live
+# against a real account (x-6bcf): the response is top-level
 # window objects (five_hour / seven_day), each `{utilization: 0-100 float,
 # resets_at: ISO-8601 string}` - NOT a `windows[]` array of epoch floats.
 _CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 _CLAUDE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
-_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item (orca-verified)
+_CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"  # macOS Keychain item, live-verified
 # The API's known window keys mapped to our short labels. The response also
 # carries model-specific weekly windows (seven_day_opus, seven_day_sonnet, ...);
 # those are captured generically by _parse_claude_windows (any five_hour /
@@ -565,8 +565,7 @@ def _probe_claude(
             probed_at=now,
             source="oauth-endpoint",
             # The endpoint reports a utilization percentage and no counts, so
-            # a reading here is never better than percent-precise. codexbar
-            # reports `percentOnly` for this same account and endpoint.
+            # a reading here is never better than percent-precise.
             confidence="percent_only",
         ), None
     if unattributable:

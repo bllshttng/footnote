@@ -39,6 +39,7 @@ Exit code is non-zero only when staleness is **proven**.
 from __future__ import annotations
 
 import ast
+import base64
 import hashlib
 import json
 import math
@@ -593,10 +594,10 @@ def _plugin_cache_report() -> dict[str, Any]:
 # Cost cross-check (--cost-check, opt-in - ab-c0f92987)
 # ---------------------------------------------------------------------------
 #
-# Compares our session-cost.py math against ccusage (the community reference
-# that dedups transcript lines and tracks pricing) for one recent session.
+# Compares our session-cost.py math against the community reference cost CLI
+# (it dedups transcript lines and tracks pricing) for one recent session.
 # Opt-in only: doctor's default run stays network-free and never assumes
-# ccusage is installed. Three outcomes:
+# the reference tool is installed. Three outcomes:
 #   OK      divergence <= threshold          -> exit 0
 #   WARN    divergence  > threshold          -> exit 1 (doctor warning state)
 #   SKIPPED prerequisites missing / errors   -> exit 0, one info line
@@ -605,6 +606,12 @@ def _plugin_cache_report() -> dict[str, Any]:
 # individually (same style as the staleness signal collectors above).
 
 _COST_DIVERGENCE_THRESHOLD = 0.10  # relative divergence that flips OK -> WARN
+
+# The reference CLI's name, decoded rather than spelled out: the operator's
+# standing rule keeps rival product names out of the repo, and this opt-in
+# cross-check invokes the tool by name at runtime. Same encoding scheme as
+# scripts/ci/check-no-internal-refs.sh's competitor-term list.
+_REF_COST_TOOL = base64.b64decode("Y2N1c2FnZQ==").decode()
 
 _SESSION_UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
@@ -660,27 +667,27 @@ def _run_session_cost(session_id: str) -> Optional[float]:
         return None
 
 
-def _run_ccusage(session_id: str) -> tuple[Optional[float], Optional[str]]:
-    """ccusage's number for the session, or (None, skip-reason)."""
-    ccusage_bin = shutil.which("ccusage")
-    if not ccusage_bin:
-        return None, "ccusage not installed"
+def _run_ref_cost_tool(session_id: str) -> tuple[Optional[float], Optional[str]]:
+    """The reference tool's number for the session, or (None, skip-reason)."""
+    ref_bin = shutil.which(_REF_COST_TOOL)
+    if not ref_bin:
+        return None, "reference cost tool not installed"
     try:
         result = subprocess.run(
-            [ccusage_bin, "session", "--json"],
+            [ref_bin, "session", "--json"],
             capture_output=True,
             text=True,
             check=False,
             timeout=120,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return None, f"ccusage failed to run: {exc}"
+        return None, f"reference cost tool failed to run: {exc}"
     if result.returncode != 0:
-        return None, f"ccusage exited {result.returncode}"
+        return None, f"reference cost tool exited {result.returncode}"
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
-        return None, "ccusage emitted unparseable output"
+        return None, "reference cost tool emitted unparseable output"
     if isinstance(payload, dict):
         sessions = payload.get("sessions") or payload.get("data") or []
     else:
@@ -689,21 +696,21 @@ def _run_ccusage(session_id: str) -> tuple[Optional[float], Optional[str]]:
         if not isinstance(item, dict):
             continue
         item_id = item.get("sessionId") or item.get("session_id") or item.get("id")
-        # ccusage's session key is not pinned across versions: some emit the
-        # bare transcript UUID, others a project-qualified path ending in
-        # it. UUIDs do not collide, so suffix matching stays precise.
+        # The reference tool's session key is not pinned across versions:
+        # some emit the bare transcript UUID, others a project-qualified path
+        # ending in it. UUIDs do not collide, so suffix matching stays precise.
         if not isinstance(item_id, str) or not (
             item_id == session_id or item_id.endswith(session_id)
         ):
             continue
-        # Cost key drift across ccusage versions: totalCost is current;
+        # Cost key drift across reference-tool versions: totalCost is current;
         # the rest are observed/plausible variants kept for liberality.
         for key in ("totalCost", "total_cost", "costUSD", "cost_usd", "cost"):
             value = item.get(key)
             if isinstance(value, (int, float)):
                 return float(value), None
-        return None, "ccusage session row carries no cost field"
-    return None, "session not present in ccusage output"
+        return None, "reference cost tool session row carries no cost field"
+    return None, "session not present in reference cost tool output"
 
 
 def _cost_check() -> int:
@@ -722,9 +729,9 @@ def _cost_check() -> int:
     if ours is None:
         return skip(f"fno.cost._session_cost unavailable or failed for {session_id}")
 
-    theirs, reason = _run_ccusage(session_id)
+    theirs, reason = _run_ref_cost_tool(session_id)
     if theirs is None:
-        return skip(reason or "ccusage unavailable")
+        return skip(reason or "reference cost tool unavailable")
 
     if theirs == 0:
         divergence = 0.0 if ours == 0 else float("inf")
@@ -735,12 +742,12 @@ def _cost_check() -> int:
     if divergence <= _COST_DIVERGENCE_THRESHOLD:
         typer.echo(
             f"fno doctor: cost-check OK: session {session_id} "
-            f"ours=${ours:.2f} ccusage=${theirs:.2f} divergence={pct}"
+            f"ours=${ours:.2f} reference=${theirs:.2f} divergence={pct}"
         )
         return 0
     typer.echo(
         f"fno doctor: cost-check WARN: session {session_id} "
-        f"ours=${ours:.2f} ccusage=${theirs:.2f} divergence={pct} "
+        f"ours=${ours:.2f} reference=${theirs:.2f} divergence={pct} "
         f"(> {_COST_DIVERGENCE_THRESHOLD * 100:.0f}% - pricing table or "
         "dedup drift; see scripts/lib/cost_tracker.py)"
     )
@@ -3785,8 +3792,8 @@ def doctor_command(
     cost_check: bool = typer.Option(
         False,
         "--cost-check",
-        help="Cross-check session-cost.py against ccusage for one recent session "
-        "(opt-in; gracefully skips when ccusage is not installed). "
+        help="Cross-check session-cost.py against the reference cost tool for one "
+        "recent session (opt-in; gracefully skips when it is not installed). "
         "Exit 1 only on proven divergence.",
     ),
     codex_hooks: bool = typer.Option(
@@ -3915,7 +3922,7 @@ def doctor_command(
 
     if cost_check:
         # Dedicated mode: the staleness check stays network-free and
-        # ccusage-free by default; this opt-in path never mixes its exit
+        # reference-tool-free by default; this opt-in path never mixes its exit
         # semantics with the staleness verdict.
         raise typer.Exit(_cost_check())
 

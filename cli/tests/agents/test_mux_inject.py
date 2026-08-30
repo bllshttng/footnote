@@ -727,11 +727,11 @@ def test_ask_mux_codex_row_also_rides_pane_send(
     submit_keys = ["unsupported"]. That was a declaration, not a measurement.
     """
     use_tmpdir(monkeypatch, tmp_path)
-    _seed(_mux_entry(name="cmux", provider="codex"))
+    _seed(_mux_entry(name="samplemux", provider="codex"))
     fake = FakeMux()
     _patch_mux(monkeypatch, fake)
 
     from fno.agents.dispatch import dispatch_ask
 
-    dispatch_ask("cmux", "ping", harness=None, cwd=Path("/w"))
+    dispatch_ask("samplemux", "ping", harness=None, cwd=Path("/w"))
     assert [call[0][3] for call in fake.calls], "the pane lane must be tried"

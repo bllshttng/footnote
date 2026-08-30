@@ -109,8 +109,8 @@ If you are cleaning up an install and hit one of these, find the writer first. I
 | Entry | Age when found | What is known |
 |---|---|---|
 | `.context-nudge-flush-rollout-<ts>-<uuid>` | written within four days | No source and no git history for the string anywhere in the repo. The writer is live and ahead of merged source. Check `fno doctor` for deployed-vs-source staleness before deciding. |
-| `.ralph-cancelled` | - | No writer. `ralph` is a retired surface. |
-| `do-ralph-stop-hook.log` | 5 months | Same retired surface. |
+| `.<retired-loop>-cancelled` | - | No writer. A retired loop surface. |
+| `do-<retired-loop>-stop-hook.log` | 5 months | Same retired surface. |
 | `registry.json.lock` | 3 months, 0 bytes | The agents registry moved to `agents/registry.json`. |
 | `keepalive.log` | 6 weeks | No writer found. |
 | `fno-mode.sh` | 4 weeks | No writer found. A shell script living in the state root. |

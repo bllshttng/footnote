@@ -329,16 +329,15 @@ def _classify(
     return ErrorClass.UNKNOWN
 
 
-# Plan A (ab-6534a78a): priority-ordered ErrorRule list ported from
-# 9router (~/code/tools/9router/open-sse/config/errorConfig.js:59-76).
-# These rules are SUPPLEMENTARY to the closed ErrorClass taxonomy: they
+# Plan A (ab-6534a78a): priority-ordered ErrorRule list. These rules are
+# SUPPLEMENTARY to the closed ErrorClass taxonomy: they
 # produce the COOLDOWN-shaping rule (fixed cooldown_ms vs exponential
 # backoff), not a new ErrorClass. The classifier walks ERROR_RULES
 # top-to-bottom; text rules (priority 1) match the response body
 # case-insensitively; status rules (priority 2) match the HTTP status
 # exactly. First match wins.
 
-# Cooldown bands borrowed from 9router. LONG = auth/credential errors
+# Cooldown bands. LONG = auth/credential errors
 # (operator must intervene); SHORT = transient request-shape problems
 # (next call from a different provider may succeed immediately).
 COOLDOWN_LONG_MS = 2 * 60 * 1000  # 2 min

@@ -3,7 +3,7 @@
 //!
 //! G4 deleted grid screen-scraping, so an agent that never emits the per-turn
 //! inside-leg hook (foreign CLIs, partial-lifecycle agents) dropped to bare
-//! alive/dead. This module restores the herdr-style fallback: for each
+//! alive/dead. This module restores a screen-read fallback: for each
 //! registry row that is mux-hosted AND hook-less, the daemon reads the pane's
 //! rendered screen through the mux script API (`fno mux pane ls/read --json`,
 //! the same one-shot control verbs scripts use - no mux proto change, no
@@ -11,8 +11,8 @@
 //! provider's detection manifest ([`crate::manifest`]) against it, and stores
 //! the verdict as [`state::ScreenStateReport`] on the row.
 //!
-//! Arbitration is per-capability, not per-moment (herdr's "no two competing
-//! sources of truth"): a row that carries ANY `inside_leg` report - live or
+//! Arbitration is per-capability, not per-moment (no two competing sources of
+//! truth): a row that carries ANY `inside_leg` report - live or
 //! TTL-lapsed - is never scraped; its TTL lapse degrades to liveness-only
 //! exactly as before. The inside-leg store path clears `screen_state` on the
 //! capability flip, and the sweep's write closure re-checks under the

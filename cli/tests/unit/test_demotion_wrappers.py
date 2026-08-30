@@ -70,7 +70,7 @@ def test_canonical_scripts_exist_at_expected_paths() -> None:
 def test_codemap_engine_lives_inside_the_fno_package() -> None:
     """The codemap engine resolves from the fno INSTALLATION, not the target repo.
 
-    This replaces an assertion on ``<repo>/scripts/codemap/repogram.py``, which
+    This replaces an assertion on ``<repo>/scripts/codemap/repo_map.py``, which
     held both before and after the fix (the suite runs inside footnote, where
     that path existed) and so constrained nothing. Asserting the engine is
     package-relative is what actually rules out the target-repo lookup.
@@ -83,9 +83,9 @@ def test_codemap_engine_lives_inside_the_fno_package() -> None:
         f"codemap engine dir {ENGINE_DIR} is outside the fno package "
         f"{package_root}; it would not ship with an installed fno"
     )
-    assert (ENGINE_DIR / "repogram.py").is_file()
+    assert (ENGINE_DIR / "repo_map.py").is_file()
     assert (ENGINE_DIR / "db-schema.py").is_file()
-    assert (ENGINE_DIR / "queries").is_dir(), "repogram's bundled tree-sitter queries"
+    assert (ENGINE_DIR / "queries").is_dir(), "repo_map's bundled tree-sitter queries"
 
 
 def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) -> None:
@@ -96,7 +96,7 @@ def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) ->
     lookup must not follow it.
 
     The pass condition is "did NOT exit EXIT_NO_ENGINE", not "exited 0", because
-    repogram needs heavy system-python deps a CI box legitimately lacks. Reaching
+    repo_map needs heavy system-python deps a CI box legitimately lacks. Reaching
     EXIT_NO_INTERPRETER is itself PROOF of success: that check runs strictly
     after the engine-exists check, so the command could only get there by having
     already found the engine. An earlier version of this test asserted

@@ -24,11 +24,11 @@ budget caps (`cost_cap_usd`) tripped sessions at ~13% of their real budget.
 
 | Surface | Role |
 |---|---|
-| `scripts/lib/cost_tracker.py` | **Single pricing source of truth.** `PRICING` table + `model_tier()` + `calculate_cost()` + the `estimate` CLI for shell callers. Pricing sources cited in the header: the Anthropic pricing page (canonical) and LiteLLM's `model_prices_and_context_window.json` (machine-readable reference, what ccusage uses). |
+| `scripts/lib/cost_tracker.py` | **Single pricing source of truth.** `PRICING` table + `model_tier()` + `calculate_cost()` + the `estimate` CLI for shell callers. Pricing sources cited in the header: the Anthropic pricing page (canonical) and LiteLLM's `model_prices_and_context_window.json` (machine-readable reference, the same one community cost tools use). |
 | `scripts/metrics/session-cost.py` | Transcript parser. Dedups usage by `(message.id, requestId)`; computes `SessionMetrics`; `--json` feeds the register path. |
 | `scripts/metrics/cost-tracker.sh` | Shell shim. `estimate_cost` delegates to `cost_tracker.py estimate` - there is deliberately no shell pricing table. |
 | `scripts/metrics/backfill-cost-recompute.py` | One-shot historical correction for ledger.json + graph.json (idempotent, marker-based). |
-| `fno doctor --cost-check` | Opt-in drift tripwire vs ccusage. |
+| `fno doctor --cost-check` | Opt-in drift tripwire vs the reference cost tool. |
 
 ```
 transcript JSONL ──parse (dedup by message.id+requestId)──> SessionMetrics
@@ -49,11 +49,7 @@ stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.j
   the rest are skipped. Lines missing either field (or carrying non-string
   values) count as-is - over-counting toward the old behavior is the safe
   failure direction for a cost meter; false dedup is not.
-- The `seen` set is shared across all transcripts within one logical sum
-  (`main()` across session IDs, one set per ledger entry in backfills).
-  Resumed sessions copy prior history lines, with usage, into the new
-  transcript file, so per-file dedup alone would re-count history. This is
-  the same reason ccusage dedups globally.
+- The `seen` set is shared across all transcripts within one logical sum (`main()` across session IDs, one set per ledger entry in backfills). Resumed sessions copy prior history lines, with usage, into the new transcript file, so per-file dedup alone would re-count history. This is the same reason the community cost tools dedup globally.
 - Compaction detection is unaffected: duplicates carry identical usage, so
   skipping them does not change the context-size series.
 
@@ -109,25 +105,19 @@ python3 scripts/metrics/backfill-cost-recompute.py --apply    # write
 
 ## Drift tripwire: `fno doctor --cost-check`
 
-Opt-in (doctor's default run stays network-free and never assumes ccusage is
-installed). Finds a recent ledger session with a surviving transcript, runs
-`session-cost.py --json`, runs `ccusage session --json`, compares:
+Opt-in (doctor's default run stays network-free and never assumes the reference tool is installed). Finds a recent ledger session with a surviving transcript, runs `session-cost.py --json`, then the reference tool's `session --json`, and compares:
 
 | Outcome | Meaning | Exit |
 |---|---|---|
 | OK | divergence <= 10% | 0 |
 | WARN | > 10% - pricing table or dedup drift; both numbers printed | 1 |
-| skipped (reason) | ccusage absent / no candidate session / ccusage error | 0 |
+| skipped (reason) | reference tool absent / no candidate session / reference tool error | 0 |
 
-Ground truth at ship time: the fixed parser reproduced ccusage's $31.30 for
-the reference transcript to the cent at the measurement cutoff.
+Ground truth at ship time: the fixed parser reproduced the reference tool's $31.30 for the reference transcript to the cent at the measurement cutoff.
 
 ## Adding a new model (checklist)
 
-1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the
-   pricing page in the header comment if rates changed).
+1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the pricing page in the header comment if rates changed).
 2. If it is the newest opus, update `LATEST_MODERN_OPUS_TIER`.
-3. Extend the `model_tier` matrix test in
-   `tests/lib/test_cost_tracker_pricing.py`.
-4. Nothing else: the shell shim and every register-path consumer read the
-   same table by construction.
+3. Extend the `model_tier` matrix test in `tests/lib/test_cost_tracker_pricing.py`.
+4. Nothing else: the shell shim and every register-path consumer read the same table by construction.

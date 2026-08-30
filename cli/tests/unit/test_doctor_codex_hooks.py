@@ -72,7 +72,7 @@ def test_both_layers_with_foreign_json_warns_and_preserves_paths(
     monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     config = tmp_path / "config.toml"
     legacy = tmp_path / "hooks.json"
-    foreign = "bash '/Users/test/.codex/herdr-agent-state.sh' session"
+    foreign = "bash '/Users/test/.codex/sample-agent-state.sh' session"
     _write_toml(config)
     _write_json(legacy, foreign)
 

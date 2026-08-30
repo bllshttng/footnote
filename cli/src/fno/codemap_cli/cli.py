@@ -1,6 +1,6 @@
 """fno doctor codemap - AST + PageRank codebase map.
 
-Thin wrapper around ``repogram.py`` (the analysis engine) and ``db-schema.py``
+Thin wrapper around ``repo_map.py`` (the analysis engine) and ``db-schema.py``
 (optional DB-aware companion), both of which sit next to this module. The
 wrapper preserves byte-equivalent output so callers that already rely on
 .fno/codemap.md (blueprint, target, operator, megawalk) keep working.
@@ -25,7 +25,7 @@ from fno.paths import resolve_repo_root
 def _system_python_env() -> dict:
     """Strip the cli's venv markers so subprocess python3 hits system Python.
 
-    repogram.py imports networkx + tree-sitter + grep-ast + pygments, which
+    repo_map.py imports networkx + tree-sitter + grep-ast + pygments, which
     we deliberately don't bundle into the cli wheel (heavy native deps).
     The user's system python typically has these installed because the old
     /codemap skill ran against system python too. Stripping VIRTUAL_ENV from
@@ -56,9 +56,9 @@ def _interpreter_names() -> tuple[str, ...]:
     return ("python3", "python")
 
 
-#: repogram's heavy native deps, deliberately not bundled into the fno wheel.
-#: Only the three repogram HARD-exits on (repogram.py:30-54). ``tree_sitter`` is
-#: deliberately absent: repogram degrades to ``Query = None`` without it, so
+#: repo_map's heavy native deps, deliberately not bundled into the fno wheel.
+#: Only the three repo_map HARD-exits on (repo_map.py:30-54). ``tree_sitter`` is
+#: deliberately absent: repo_map degrades to ``Query = None`` without it, so
 #: probing for it would reject an interpreter that runs the engine fine.
 ENGINE_DEPS = ("networkx", "grep_ast", "pygments")
 
@@ -149,17 +149,17 @@ def codemap(
         help="Also append the DB-schema companion section (Supabase/Drizzle aware).",
     ),
 ) -> None:
-    """Run the repogram analysis and write the codemap."""
+    """Run the repo-map analysis and write the codemap."""
     if ctx.invoked_subcommand is not None:
         return
     target_repo = repo or Path(resolve_repo_root())
-    script = ENGINE_DIR / "repogram.py"
+    script = ENGINE_DIR / "repo_map.py"
     if not script.exists():
         # Name the installation, not the analyzed repo: the old message pointed
         # at the target repo and sent readers hunting for a file that never
         # belonged there.
         typer.echo(
-            f"fno doctor codemap: the repogram engine is missing from this fno "
+            f"fno doctor codemap: the repo-map engine is missing from this fno "
             f"installation (looked for {script}). This is a broken/incomplete "
             f"fno install, not a problem with {target_repo}. Try `fno doctor update`.",
             err=True,
@@ -207,9 +207,9 @@ def codemap(
     if orphans:
         cmd.append("--orphans")
     # Write to a sibling tmpfile and os.replace on success so a partial
-    # crash (signal-killed repogram, missing dep) leaves the previous
+    # crash (signal-killed repo_map, missing dep) leaves the previous
     # codemap.md intact rather than truncating it to whatever bytes
-    # repogram managed to flush before dying. Callers (blueprint, target,
+    # repo_map managed to flush before dying. Callers (blueprint, target,
     # operator, megawalk) read codemap.md unconditionally; a corrupt
     # half-file would silently misinform them.
     #

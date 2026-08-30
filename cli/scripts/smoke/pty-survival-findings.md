@@ -41,5 +41,5 @@ child_sighup_received pid=78679 ts=1779566761.499950000   <- supervisor SIGKILLe
 ## Scope notes / follow-ups
 
 - Tested on darwin-arm64 only. The mechanism (SIGHUP on controlling-terminal hang-up) is POSIX-standard; a linux-x64 confirmation run is a cheap follow-up but the outcome is not expected to differ.
-- `portable-pty 0.8.1` resolved (0.9.0 available). Wave 1 should pin a version deliberately; AgentRelay's pin was unavailable (reference repo absent at `~/code/tools/agentworkforce/relay`).
+- `portable-pty 0.8.1` resolved (0.9.0 available). Wave 1 must pin a version deliberately. The reference upstream pin was unavailable at the time.
 - The harness and probe are committed as reproducible evidence, mirroring the existing `capture-*.sh` smoke scripts. The probe crate is `publish = false` and excluded from the workspace build.

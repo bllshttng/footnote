@@ -9,14 +9,14 @@
 //!
 //! Rendering matches the existing overlay idiom (`draw_lines_overlay`): a padded
 //! INVERSE block fully overwrites the cells beneath it, so the popup is opaque
-//! (the herdr "cover the middle, no bleed" requirement) without a real bg color.
+//! (cover the middle, no bleed) without a real bg color.
 //! The selected target renders as a normal-video cut-out in the inverse block.
 
 use crate::chrome::{self, BodyLine, Chrome, FramedLine, Scroll};
 use crate::proto::Cell;
 use crate::theme::{cell_style, Role, Theme};
 
-/// Popup content never renders wider than this (herdr: fixed max width); longer
+/// Popup content never renders wider than this (fixed max width); longer
 /// lines ellipsize. Anchored menus are usually far narrower.
 pub const WIDTH_CAP: usize = 60;
 
