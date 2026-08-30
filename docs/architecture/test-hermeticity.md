@@ -118,6 +118,28 @@ dirty lane -> canary leaks -> the canary test FAILS
 If someone widens a scrub rule until it swallows the canary, the second half stops holding and the self-test goes red, so the silent disarming is caught.
 A dirty-lane failure of the canary is never something to fix by pinning it.
 
+## The state lane
+
+Ambient environment neutralisation cannot close readers that derive answers from Git, config files, registries, claims, or cached path decisions. `fno doctor test smoke --state clean|populated|both` runs the same Python smoke step against an empty profile and a populated profile, then compares the JUnit testcase verdicts by node ID.
+
+The populated profile contains a graph node named `STATE_LEAK_CANARY`, a config profile, an agent registry crown, a session identity, and one claim. The canary test reads the graph through `fno.paths.graph_json()`. Clean passes because the marker is absent; populated fails because the marker is present. `tests/ci/test_state_lanes.sh` asserts both outcomes, so an empty diff or a profile that was never populated cannot read as a green result.
+
+The profile is a discovery instrument, not a completeness proof. A clean populated run proves that the listed profile reached the reader and that the changed testcase list is real; it does not prove that every possible state store was represented. The populated run must record its named escape list in the execution summary.
+
+The final populated full smoke run completed with 18,789 passed, 127 skipped, and one expected failure: `tests.unit.test_state_canary::test_state_canary_detects_populated_state`. A targeted clean/populated comparison of the discovery surface also named `tests.agents.test_discover::test_daemon_row_is_enriched_by_recent_rollout` and `tests.agents.test_discover::test_us2_codex_old_watching_rollout_is_not_bulk_enumerated`; both passed in both lanes but changed verdict shape, so they remain named escapes for follow-up rather than being treated as clean.
+
+## Cached declared state
+
+The R5 guard walks every `lru_cache` and `cache` decorator under `cli/src/fno`. A cached reader of declared state has one of two recorded answers: its cache is cleared by the pytest conftest before each test, or one of its declared root arguments is part of the cache key. `fleet_has_crown_at(registry_path)` is the keyed precedent; `load_settings`, `fno.paths._settings`, `resolve_repo_root`, and the graph status map use the existing per-test clear registry. Tool discovery and machine-identity caches are recorded as non-state caches with their reasons.
+
+`cli/tests/unit/test_cached_state_surface.py` contains a positive control that fails on an unregistered zero-argument cache and passes on a root-keyed cache. A zero-hit scan without that positive control is not evidence that the decorator walk ran.
+
+## State accessor fence
+
+When `FNO_TEST_HERMETIC=1`, the `fno.paths` state accessors pass their resolved paths through the existing events hermetic fence. A path outside the temporary allowed roots raises `HermeticEscapeError` with the path and remediation. The check judges the resolved path, so a symlink inside the sandbox cannot redirect a write to a live journal.
+
+`locks_dir()` remains deliberately home-anchored and config-free because the bare-python plan stamp uses it before config dependencies load. Hand-built state paths are outside the accessor fence; the state-root lint catches those construction sites until their owning resolver is consolidated.
+
 ## CI
 
 `smoke` is the merge gate. A separate `smoke-dirty` CI job used to rerun the full suite under synthetic ambient state beside it, advisory. Its full history (122 runs, 2026-08-11 to 2026-08-19) caught zero real ambient leaks. It was deleted rather than kept as a second 1500s+ full-suite run for no observed signal. The hermeticity fixture and `cli/tests/unit/test_ambient_canary.py` keep running inside `smoke` itself. `fno doctor test smoke --ambient dirty` (see above) still exists for local verification and `tests/ci/test_hermetic_lanes.sh`. If a future ambient leak surfaces some other way, narrow a lane to the tests that can observe it rather than reviving the full-suite rerun.
