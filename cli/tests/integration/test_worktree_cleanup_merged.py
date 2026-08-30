@@ -92,11 +92,14 @@ def _compat_age_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
     )
 
 
-def _cargo_sweep(canon: Path, *flags: str) -> subprocess.CompletedProcess:
+def _cargo_sweep(canon: Path, *flags: str, env_extra: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     script = canon / "scripts" / "lib" / "worktree-lifecycle.sh"
+    env = os.environ.copy()
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         ["bash", str(script), "cleanup", "--cargo-targets", *flags],
-        cwd=str(canon), capture_output=True, text=True,
+        cwd=str(canon), capture_output=True, text=True, env=env,
     )
 
 
@@ -125,6 +128,8 @@ def test_cargo_target_dry_run_reports_projection_without_mutation(repo: Path):
     assert "after_bytes=" in r.stdout
     assert "projected_after_bytes=" in r.stdout
     assert "cap_bytes=3145728" in r.stdout
+    assert "free_bytes=" in r.stdout
+    assert "effective_cap_bytes=" in r.stdout
     assert "reason=age" in r.stdout
     assert old.exists() and young.exists(), "dry-run must not remove either target"
 
@@ -195,6 +200,66 @@ def test_cargo_target_apply_refuses_to_delete_rooted_builder(repo: Path):
     assert target.exists(), "a rooted process must protect its worktree target"
 
 
+def test_cargo_target_low_free_space_tightens_ceiling_high_free_leaves_alone(repo: Path):
+    # x-ea02: the same allocation must be left alone when free space is ample
+    # and reaped when the disk is nearly full - the ceiling is a function of
+    # free space, not just the absolute cap.
+    target = _add_target(repo, "cargo-lowfree", 4 * 1024 * 1024)
+
+    high = _cargo_sweep(
+        repo, "--cap-bytes", str(64 * 1024 * 1024), "--apply",
+        env_extra={"FNO_CARGO_FREE_BYTES": "100000000000000"},
+    )
+    assert high.returncode == 0, high.stderr
+    assert "status=ok" in high.stdout
+    assert "reaped=0" in high.stdout
+    assert "effective_cap_bytes=67108864" in high.stdout
+    assert target.exists(), "ample free space must leave the same allocation alone"
+
+    low = _cargo_sweep(
+        repo, "--cap-bytes", str(64 * 1024 * 1024), "--apply",
+        env_extra={"FNO_CARGO_FREE_BYTES": "6000000"},
+    )
+    assert low.returncode == 0, low.stderr
+    assert "reason=cap" in low.stdout
+    assert "free_bytes=6000000" in low.stdout
+    assert "effective_cap_bytes=3000000" in low.stdout
+    assert not target.exists(), "a nearly full disk must tighten the ceiling and reap"
+
+
+def test_cargo_target_unreadable_free_space_falls_back_to_absolute_cap(repo: Path):
+    target = _add_target(repo, "cargo-badfree", 2 * 1024 * 1024)
+
+    r = _cargo_sweep(
+        repo, "--cap-bytes", str(64 * 1024 * 1024), "--apply",
+        env_extra={"FNO_CARGO_FREE_BYTES": "garbage"},
+    )
+
+    assert r.returncode == 0, r.stderr
+    assert "free_bytes=unknown" in r.stdout
+    assert "effective_cap_bytes=67108864" in r.stdout
+    assert target.exists(), "an unreadable free-space read must not widen the ceiling"
+
+
+def test_cargo_target_over_free_ceiling_with_everything_protected_names_free(repo: Path):
+    target = _add_target(repo, "cargo-protfree", 2 * 1024 * 1024, old=True)
+    holder = subprocess.Popen(["sleep", "10"], cwd=target.parent.parent.parent)
+    try:
+        r = _cargo_sweep(
+            repo, "--cap-bytes", "1", "--target-max-age", "0d", "--apply",
+            env_extra={"FNO_CARGO_FREE_BYTES": "2"},
+        )
+    finally:
+        holder.terminate()
+        holder.wait(timeout=5)
+
+    assert r.returncode != 0
+    assert "over-cap-protected" in r.stdout
+    assert "free_bytes=2" in r.stdout
+    assert "effective_cap_bytes=1" in r.stdout
+    assert target.exists(), "protection holds even under a tightened ceiling"
+
+
 def test_setup_worktree_runs_the_same_cargo_target_apply_path():
     text = SETUP_SRC.read_text()
     # Canonical spelling leads; the retired root one stays for one release as
@@ -234,6 +299,8 @@ def test_cargo_target_cli_forwards_explicit_bounds(monkeypatch: pytest.MonkeyPat
         "--cargo-targets",
         "--cap-bytes",
         "8388608",
+        "--free-share-pct",
+        "50",
         "--target-max-age",
         "3d",
     ]

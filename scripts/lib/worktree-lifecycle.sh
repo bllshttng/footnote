@@ -309,11 +309,22 @@ _cargo_target_path_is_owned() {
     esac
 }
 
+_cargo_free_bytes() {
+    # Available bytes on the volume holding $1. FNO_CARGO_FREE_BYTES overrides
+    # the read so tests can simulate a low-free disk without filling one.
+    if [[ -n "${FNO_CARGO_FREE_BYTES:-}" ]]; then
+        printf '%s\n' "$FNO_CARGO_FREE_BYTES"
+        return 0
+    fi
+    df -Pk "$1" 2>/dev/null | awk 'NR==2 {print $4*1024}'
+}
+
 _cargo_target_cleanup() {
-    local cap_bytes="$1" max_age_days="$2" apply="$3"
+    local cap_bytes="$1" max_age_days="$2" apply="$3" free_share_pct="${4:-50}"
     local inventory candidates selected now before_bytes projected_after
     local mtime bytes protection wt target age_days reason pids
     local reaped=0 reclaimed=0 protected=0 after_bytes status mode
+    local free_bytes effective_cap_bytes
 
     if [[ ! "$cap_bytes" =~ ^[1-9][0-9]*$ ]]; then
         echo "cargo target cleanup: --cap-bytes must be a positive integer" >&2
@@ -322,6 +333,25 @@ _cargo_target_cleanup() {
     if [[ ! "$max_age_days" =~ ^[0-9]+$ ]]; then
         echo "cargo target cleanup: --target-max-age must be Nd or a non-negative day count" >&2
         return 1
+    fi
+    if [[ ! "$free_share_pct" =~ ^[0-9]+$ ]] || [[ "$free_share_pct" -lt 1 || "$free_share_pct" -gt 100 ]]; then
+        echo "cargo target cleanup: --free-share-pct must be an integer between 1 and 100" >&2
+        return 1
+    fi
+
+    # The absolute cap alone is a floor the sweep defends on a nearly full
+    # disk (x-ea02: 63 GiB allocated, 4.2 GB free, "ok", 0 reaped). The
+    # effective ceiling is min(absolute cap, free-share percent of free
+    # space) so a full disk tightens it; an unreadable free space falls
+    # back to the absolute cap and is reported as free_bytes=unknown.
+    free_bytes="$(_cargo_free_bytes "${MAIN_DIR:-$(pwd)}")"
+    if [[ "$free_bytes" =~ ^[1-9][0-9]*$ ]]; then
+        effective_cap_bytes=$(( free_bytes * free_share_pct / 100 ))
+        [[ "$effective_cap_bytes" -gt "$cap_bytes" ]] && effective_cap_bytes="$cap_bytes"
+        [[ "$effective_cap_bytes" -lt 1 ]] && effective_cap_bytes=1
+    else
+        free_bytes="unknown"
+        effective_cap_bytes="$cap_bytes"
     fi
 
     inventory="$(mktemp -t fno-cargo-targets.XXXXXX)"
@@ -354,13 +384,13 @@ _cargo_target_cleanup() {
         projected_after=$((projected_after - bytes))
     done < <(sort -n "$candidates")
 
-    if [[ "$projected_after" -gt "$cap_bytes" ]]; then
+    if [[ "$projected_after" -gt "$effective_cap_bytes" ]]; then
         while IFS=$'\t' read -r mtime bytes wt target; do
             [[ -n "$target" ]] || continue
             awk -F '\t' -v wanted="$target" '$4 == wanted { found=1 } END { exit !found }' "$selected" && continue
             printf '%s\t%s\t%s\t%s\t%s\n' "$mtime" "$bytes" "$wt" "$target" "cap" >> "$selected"
             projected_after=$((projected_after - bytes))
-            [[ "$projected_after" -le "$cap_bytes" ]] && break
+            [[ "$projected_after" -le "$effective_cap_bytes" ]] && break
         done < <(sort -n "$candidates")
     fi
 
@@ -371,9 +401,9 @@ _cargo_target_cleanup() {
             printf 'cargo-target would-reap bytes=%s reason=%s path=%s\n' "$bytes" "$reason" "$target"
         done < "$selected"
         status="ok"
-        [[ "$projected_after" -gt "$cap_bytes" ]] && status="over-cap-protected"
-        printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s reaped=0 reclaimed_bytes=0 protected=%s\n' \
-            "$status" "$mode" "$before_bytes" "$before_bytes" "$projected_after" "$cap_bytes" "$protected"
+        [[ "$projected_after" -gt "$effective_cap_bytes" ]] && status="over-cap-protected"
+        printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s free_bytes=%s effective_cap_bytes=%s reaped=0 reclaimed_bytes=0 protected=%s\n' \
+            "$status" "$mode" "$before_bytes" "$before_bytes" "$projected_after" "$cap_bytes" "$free_bytes" "$effective_cap_bytes" "$protected"
         unlink "$inventory" "$candidates" "$selected" 2>/dev/null || true
         [[ "$status" == "ok" ]]
         return $?
@@ -417,11 +447,11 @@ _cargo_target_cleanup() {
     _cargo_target_inventory "$inventory"
     after_bytes="$(awk -F '\t' '{sum += $2} END {printf "%.0f", sum+0}' "$inventory")"
     status="ok"
-    if [[ "$after_bytes" -gt "$cap_bytes" ]]; then
+    if [[ "$after_bytes" -gt "$effective_cap_bytes" ]]; then
         status="over-cap-protected"
     fi
-    printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s reaped=%s reclaimed_bytes=%s protected=%s\n' \
-        "$status" "$mode" "$before_bytes" "$after_bytes" "$after_bytes" "$cap_bytes" "$reaped" "$reclaimed" "$protected"
+    printf 'cargo-target-sweep status=%s mode=%s before_bytes=%s after_bytes=%s projected_after_bytes=%s cap_bytes=%s free_bytes=%s effective_cap_bytes=%s reaped=%s reclaimed_bytes=%s protected=%s\n' \
+        "$status" "$mode" "$before_bytes" "$after_bytes" "$after_bytes" "$cap_bytes" "$free_bytes" "$effective_cap_bytes" "$reaped" "$reclaimed" "$protected"
     unlink "$inventory" "$candidates" "$selected" 2>/dev/null || true
     [[ "$status" == "ok" ]]
 }
@@ -454,6 +484,7 @@ case "${1:-status}" in
         CARGO_TARGETS=""
         CARGO_CAP_BYTES=68719476736
         CARGO_MAX_AGE_DAYS=7
+        CARGO_FREE_SHARE_PCT=50
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --older-than) DAYS="${2%d}"; OLDER_SET="true"; shift 2 ;;
@@ -464,6 +495,7 @@ case "${1:-status}" in
                 --kill-orphans) KILL_ORPHANS="true"; shift ;;
                 --cargo-targets) CARGO_TARGETS="true"; shift ;;
                 --cap-bytes) CARGO_CAP_BYTES="$2"; shift 2 ;;
+                --free-share-pct) CARGO_FREE_SHARE_PCT="$2"; shift 2 ;;
                 --target-max-age) CARGO_MAX_AGE_DAYS="${2%d}"; shift 2 ;;
                 *) shift ;;
             esac
@@ -534,7 +566,7 @@ case "${1:-status}" in
                 exit 1
             fi
             [[ -n "$DRY_RUN" ]] && CARGO_APPLY=""
-            _cargo_target_cleanup "$CARGO_CAP_BYTES" "$CARGO_MAX_AGE_DAYS" "$CARGO_APPLY"
+            _cargo_target_cleanup "$CARGO_CAP_BYTES" "$CARGO_MAX_AGE_DAYS" "$CARGO_APPLY" "$CARGO_FREE_SHARE_PCT"
             exit $?
         fi
 
