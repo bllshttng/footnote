@@ -500,6 +500,25 @@ def test_owned_proven_marker_wins_over_self_registration_collision(tmp_path):
     assert owned.rejected == ()
 
 
+def test_owned_canonical_marker_wins_over_self_registration_collision():
+    """A single proven canonical marker is also its own registered row."""
+    mine = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+
+    owned = resolve_owned_identity(
+        {
+            "FNO_HARNESS_NAME": "codex",
+            "FNO_HARNESS_SESSION_ID": mine,
+            "CODEX_THREAD_ID": mine,
+        },
+        prove=lambda harness, sid: harness == "codex",
+        collide=lambda harness, sid: "self-row",
+    )
+
+    assert owned.disposition == "canonical"
+    assert owned.harness == "codex"
+    assert owned.session_id == mine
+
+
 def test_owned_lone_foreign_marker_is_not_stamped_when_prover_contradicts():
     """The single-family fast path used to stamp the only marker without any
     ownership check, so a claude hook carrying only an inherited

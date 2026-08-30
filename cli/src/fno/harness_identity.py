@@ -753,7 +753,7 @@ def resolve_owned_identity(
     dependency-free; the consuming verb injects the real prover and collider.
 
     Resolution order: a uniquely proven family wins; collision rejects ids a
-    live row owns (recorded regardless of proof, so the owner is named); a
+    live row owns when proof is unavailable (recorded so the owner is named); a
     marker the prover actively contradicts is excluded; among the rest, the sole
     surviving family wins or the result degrades to ``None``.
     """
@@ -769,6 +769,12 @@ def resolve_owned_identity(
         if not identity.session_id or not identity.harness:
             return OwnedHarnessIdentity(None, None, present, "ambiguous")
         verdict = prove(identity.harness, identity.session_id) if prove else None
+        # Proof is stronger than collision: a process-tree-proven marker is this
+        # session, so a live row holding it is the session's own registration.
+        if verdict is True:
+            return OwnedHarnessIdentity(
+                identity.session_id, identity.harness, present, "canonical"
+            )
         owner = collide(identity.harness, identity.session_id) if collide else None
         if owner:
             canonical_rejected = (
