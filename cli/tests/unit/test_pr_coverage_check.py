@@ -2574,6 +2574,14 @@ def test_law_authority_reads_the_real_index_three_ways(tmp_path):
     # subject is a single law row whose text is not the affirmative value.
     _seed(_row("coverage waiver DENIED for this head"))
     assert _coverage_gate.law_authority(subject) == ("none", "")
+    # A single row with NO decision field at all is malformed authority, not
+    # a clean no: unknown, with the dead field nameable in the probe.
+    row_no_decision = _row(_coverage_gate.WAIVER_DECISION)
+    del row_no_decision["data"]["decision"]
+    _seed(row_no_decision)
+    status, probe = _coverage_gate.law_authority(subject)
+    assert status == "unknown"
+    assert "no decision" in probe, probe
     _seed(_row(_coverage_gate.WAIVER_DECISION), "not json at all")
     status, probe = _coverage_gate.law_authority(subject)
     assert status == "unknown"

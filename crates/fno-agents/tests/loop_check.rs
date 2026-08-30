@@ -9656,6 +9656,21 @@ esac"#
     )
 }
 
+/// A `single` verdict whose one row carries NO decision field at all - the
+/// malformed-authority shape the affirmative-value check must answer Unknown.
+fn law_stub_without_decision(dir: &Path, name: &str, single_pattern: &str) -> PathBuf {
+    make_script(
+        dir,
+        name,
+        &format!(
+            r#"case "$3" in
+{single_pattern}) echo '{{"canonical_subject":"s","current_law":{{"status":"single","decision_ids":["d-1"],"decision_id":"d-1"}},"decisions":[{{"decision_id":"d-1"}}]}}'; exit 0 ;;
+*) echo '{{"canonical_subject":"s","current_law":{{"status":"none"}}}}'; exit 0 ;;
+esac"#
+        ),
+    )
+}
+
 #[test]
 fn operator_waiver_scoped_names_the_head_it_pinned() {
     let dir = TempDir::new().unwrap();
@@ -9730,6 +9745,28 @@ fn operator_waiver_never_reads_a_negative_row_as_a_waiver() {
     );
     assert_eq!(waiver, None);
     assert!(!unknown, "a different decision is a no, not a failed probe");
+}
+
+#[test]
+fn operator_waiver_answers_unknown_on_a_row_without_a_decision() {
+    let dir = TempDir::new().unwrap();
+    // `current_law.status` says single but the one row carries no readable
+    // decision: malformed authority, which is Unknown with the dead field
+    // nameable, never a clean no dressed up as a world verdict.
+    let fno = law_stub_without_decision(dir.path(), "fno", "review-coverage-waiver");
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver, None);
+    assert!(
+        unknown,
+        "a missing decision field is a failed probe, not a no"
+    );
 }
 
 #[test]
