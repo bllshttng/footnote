@@ -8927,44 +8927,6 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         .ledger_path
         .clone()
         .unwrap_or_else(|| cwd.join(".fno/ledger.json"));
-    // A code payload carries its own review obligation on a stock install:
-    // when no lane is configured, the harness-resolved self-review reviewer is
-    // floored onto `required_reviewers` so the existing unattested_reviewers_scan
-    // holds the session for a head-pinned attestation instead of the run asking
-    // an epic leader. Opt out with config.review.self_review_required = false.
-    // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
-    // rather than waving the obligation away. The floor is additive: an
-    // already-configured lane (reviewers, bots, peers) keeps meaning exactly
-    // what it meant today, and a lane that already names code-review is a no-op.
-    let lane_configured = !required_bots.is_empty()
-        || inputs.optional_lane_configured
-        || !required_reviewers.is_empty();
-    let self_review_required = settings.self_review_required.unwrap_or(true);
-    // The floor applies where a session can satisfy it: a harness with a
-    // self-review verb (claude /code-review, codex /review, opencode
-    // /review-changes), or a harness that could not be attributed at all -
-    // ambiguity is not permission (x-129b). A KNOWN verbless harness
-    // (gemini/agy) stays unfloored: the floor would demand an attestation no
-    // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
-    // those harnesses' path and is deferred. classify_payload forks git, so it
-    // runs only when the floor could apply - a configured lane makes it moot,
-    // and most fires have one.
-    let floor_applies =
-        self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
-    let self_review_floor = if !lane_configured && self_review_required && floor_applies {
-        let payload = classify_payload_for_floor(&parsed.gh_bin, &parsed.git_bin, &cwd, None);
-        floor_self_review(&required_reviewers, false, payload.0, true)
-    } else {
-        None
-    };
-    if let Some(floored) = self_review_floor.clone() {
-        required_reviewers.push(floored);
-    }
-    // x-0eaf: DoneUnreviewed applies only when review is required. A stock
-    // install that opts out (self_review_required=false AND no lane, or a
-    // harness with no self-review verb) has zero coverage as its configured
-    // state, not a defect - those green PRs still reach DonePRGreen.
-    let review_required = lane_configured || self_review_floor.is_some();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -9886,6 +9848,48 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                 ),
             );
         }
+
+        // A code payload carries its own review obligation on a stock install:
+        // when no lane is configured, the harness-resolved self-review reviewer is
+        // floored onto `required_reviewers` so the existing unattested_reviewers_scan
+        // holds the session for a head-pinned attestation instead of the run asking
+        // an epic leader. Opt out with config.review.self_review_required = false.
+        // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
+        // rather than waving the obligation away. The floor is additive: an
+        // already-configured lane (reviewers, bots, peers) keeps meaning exactly
+        // what it meant today, and a lane that already names code-review is a no-op.
+        // It sits BELOW the stand-down gates on purpose: the payload consult can
+        // reach gh (the PR's files), and a fire the quota floor or a recent
+        // secondary refusal stands down must spend no gh read at all. Nothing
+        // between those gates and run_done reads the floored set, so the late
+        // placement changes only which fires pay for the consult.
+        let lane_configured = !required_bots.is_empty()
+            || inputs.optional_lane_configured
+            || !required_reviewers.is_empty();
+        let self_review_required = settings.self_review_required.unwrap_or(true);
+        // The floor applies where a session can satisfy it: a harness with a
+        // self-review verb (claude /code-review, codex /review, opencode
+        // /review-changes), or a harness that could not be attributed at all -
+        // ambiguity is not permission (x-129b). A KNOWN verbless harness
+        // (gemini/agy) stays unfloored: the floor would demand an attestation no
+        // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
+        // those harnesses' path and is deferred.
+        let floor_applies =
+            self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
+        let self_review_floor = if !lane_configured && self_review_required && floor_applies {
+            let payload = classify_payload_for_floor(&parsed.gh_bin, &parsed.git_bin, &cwd, None);
+            floor_self_review(&required_reviewers, false, payload.0, true)
+        } else {
+            None
+        };
+        if let Some(floored) = self_review_floor.clone() {
+            required_reviewers.push(floored);
+        }
+        // x-0eaf: DoneUnreviewed applies only when review is required. A stock
+        // install that opts out (self_review_required=false AND no lane, or a
+        // harness with no self-review verb) has zero coverage as its configured
+        // state, not a defect - those green PRs still reach DonePRGreen.
+        let review_required = lane_configured || self_review_floor.is_some();
 
         // Run done() for code units
         let done_gh_bin = if intent == Intent::Promise {
