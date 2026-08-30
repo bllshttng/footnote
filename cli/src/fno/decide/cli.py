@@ -257,10 +257,14 @@ def _record(
     except RefusedAuthorityError as exc:
         typer.echo(
             f"backlog decide: refused. This session is agent {exc.agent_handle}, so it "
-            "cannot record decisions. Decisions are operator-authored. From "
-            "chat, draft it with `/fno:law <the ruling>` and the operator's "
-            "approval records it in the law lane, no terminal needed. At a "
-            "terminal, `fno inbox law set <subject> <decision>` does it in one call. "
+            "cannot record decisions HERE. The law door is open to it and "
+            "the terms are narrow, so read them before you use it: "
+            "`fno inbox law set <subject> <decision> --rationale <why>` "
+            "(the operator types `/fno:law <the ruling>` for the same "
+            "thing) records a chat_attested row, never an operator row, "
+            "and it cannot supersede the operator's own law. That door is "
+            "for a durable rule the OPERATOR asked for. It is not a way to "
+            "route your own ruling around this refusal. "
             "Append agent findings without replacing node details with "
             "`fno backlog note <node> <text>`.",
             err=True,
@@ -271,9 +275,10 @@ def _record(
             "decide: refused. This process has no session identity and no "
             "terminal, so nothing here shows the operator ruled. Operator "
             "authority is never inherited by silence. Run "
-            "`fno inbox law set <subject> <decision>` from an attended operator "
-            "terminal, or draft it from chat with `/fno:law <the ruling>` for "
-            "the operator to approve. Append agent findings with "
+            "`fno inbox law set <subject> <decision> --rationale <why>` from an "
+            "attended operator "
+            "terminal, or have the operator type `/fno:law <the ruling>` in "
+            "chat, which records in one step. Append agent findings with "
             "`fno backlog note <node> <text>`.",
             err=True,
         )

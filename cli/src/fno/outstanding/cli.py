@@ -379,28 +379,34 @@ def clear(
                         )
                     else:
                         # A real agent session. --answer is what is refused,
-                        # NOT the --authority value: record_decision calls
-                        # require_operator_session() before it reads authority
-                        # at all, so every --answer from an agent refuses
+                        # NOT the --authority value: `clear` validates
+                        # --authority against AUTHORITY_SOURCES, which excludes
+                        # chat_attested, so every --answer from an agent refuses
                         # identically. Advising a different flag loops forever.
+                        # (record_decision now branches on chat_attested BEFORE
+                        # require_operator_session, so that is no longer the
+                        # reason, though the outcome here is unchanged.)
                         #
                         # Name the door, not just the wall. An agent refused
                         # here used to be told only that it could not answer,
                         # so the operator's real instruction stalled until they
                         # opened a second terminal (specimen d-796ed205). The
-                        # two-step path needs no terminal and already ships.
+                        # one-step law door needs no terminal and already ships.
                         remedy = (
                             "An agent session cannot record ANY answer here, "
                             "whatever --authority says, so changing that flag "
                             "will not help. The operator still does not need a "
-                            "second terminal: compose the ruling in chat with "
-                            "`/fno:law <the ruling>` and their approval records "
-                            "it in the law lane. Then retire this question with "
+                            "second terminal: THEY type the ruling in chat "
+                            "with `/fno:law <the ruling>` and it records in "
+                            "one step, as chat_attested and never as an "
+                            "operator row. Then retire this question with "
                             "`fno inbox outstanding clear <qid>` and NO "
                             "--answer. That close notifies nobody, so tell the "
                             "asker the `d-...` id yourself if they are waiting. "
                             "At a terminal, `fno inbox law set <subject> "
-                            "<decision>` is the same destination in one call."
+                            "<decision> --rationale <why>` is the same "
+                            "destination in one call, and there it records "
+                            "as an operator row."
                         )
                     typer.echo(
                         f"outstanding: refused: {exc}. Nothing was closed; "

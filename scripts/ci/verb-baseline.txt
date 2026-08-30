@@ -87,10 +87,6 @@ inbox approvals show !--db
 inbox board !--state
 inbox decide !--decision !--origin !--subject
 inbox decisions !--subject
-inbox law enact
-inbox law inspect
-inbox law prepare
-inbox law resume
 inbox law set
 inbox notify
 inbox outstanding ask
@@ -102,10 +98,6 @@ king done
 king escalate
 king init
 king manifest-path
-law enact
-law inspect
-law prepare
-law resume
 law set
 lint
 loops

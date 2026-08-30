@@ -18,8 +18,6 @@ import json
 import re
 import secrets
 import sys
-from dataclasses import dataclass
-from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple, overload
 
@@ -159,35 +157,9 @@ class UnattributedAuthorityError(RuntimeError):
 
     def __init__(self) -> None:
         super().__init__(
-            "no session identity and no terminal, so operator authority "
-            "cannot be established"
+            "no session identity and no terminal, so nothing here marks a "
+            "decider"
         )
-
-
-@dataclass(frozen=True)
-class OperatorConsent:
-    """Permission-bound proof for one exact staged law proposal."""
-
-    proposal_id: str
-    content_hash: str
-    session_id: str
-    permission_mode: str
-    tool_input: str
-
-
-def _consent_locked(function: Any) -> Any:
-    """Hold the proposal lock across validation, writes, and consumption."""
-    @wraps(function)
-    def wrapped(*args: Any, **kwargs: Any) -> Any:
-        consent = kwargs.get("consent")
-        if consent is None:
-            return function(*args, **kwargs)
-        from fno.law import proposal_lock
-
-        with proposal_lock(consent.proposal_id):
-            return function(*args, **kwargs)
-
-    return wrapped
 
 
 def mint_decision_id() -> str:
@@ -321,15 +293,38 @@ def _resolve_decider(
 def require_operator_session() -> Provenance:
     """Return positive operator provenance or refuse the decision write.
 
-    Decision writes without a law-consent receipt are operator-only. This
-    reuses the existing positive identity contract: a proven harness session
-    refuses, an attended terminal permits, and an unattributed process fails
-    closed. The law consent path carries its separate human-approval proof.
+    Decision writes are operator-only unless the caller records the honest
+    ``chat_attested`` value instead. This reuses the existing positive identity
+    contract: a proven harness session refuses, an attended terminal permits,
+    and an unattributed process fails closed. The one-step chat law door
+    (``fno inbox law set``) resolves its own authority in :mod:`fno.law`.
     """
     return _resolve_decider(None, "operator")
 
 
-@_consent_locked
+def require_marked_caller() -> str:
+    """Return the honest law authority for this caller, or refuse the write.
+
+    The sibling of :func:`require_operator_session` for the one-step chat law
+    door. Same three states, same fail-closed third, but state 1 answers
+    ``chat_attested`` instead of refusing: a session that a person typed into
+    is allowed to record law, and the row says exactly that much and no more.
+
+    This lives here rather than in :mod:`fno.law` so there is ONE resolver. The
+    CLI is not the only caller of :func:`record_decision`, and a gate that only
+    the CLI enforces is a gate anything importing the library walks around.
+    """
+    from fno.agents.self_stamp import resolve_self_identity
+    from fno.harness_identity import canonical_handle
+
+    ident = resolve_self_identity()
+    if ident.session_id and ident.harness and canonical_handle(ident.session_id):
+        return "chat_attested"
+    if _attended_terminal():
+        return "operator"
+    raise UnattributedAuthorityError()
+
+
 def record_decision(
     *,
     decision: str,
@@ -337,7 +332,6 @@ def record_decision(
     decided_by: str | None = None,
     authority_source: str | None = None,
     graduation: dict[str, str] | None = None,
-    consent: OperatorConsent | None = None,
     origin: str | None = None,
     rationale: str | None = None,
     options: "list[str] | None" = None,
@@ -365,7 +359,20 @@ def record_decision(
     from fno.outstanding.core import events_path
     from fno.decide.graduation import normalize_graduation
 
-    if consent is None:
+    if authority_source == "chat_attested":
+        require_marked_caller()
+        # The statement classifier moves down here with the session gate, for
+        # the same reason: `record_decision` is importable, so a check only the
+        # command body ran is a check anything using the library walks around.
+        from fno.law import validate_durable_law
+
+        validate_durable_law(
+            subject=subject or "",
+            decision=decision,
+            rationale=rationale,
+            supersedes=supersedes,
+        )
+    else:
         require_operator_session()
     graduation = normalize_graduation(graduation)
 
@@ -374,33 +381,7 @@ def record_decision(
     # origin on the same row would be the inconsistency the gate exists to
     # close.
     origin = enforce_origin_floor(origin)
-    if consent is not None and authority_source != "chat_attested":
-        from fno.law import InvalidOperatorConsentError
-
-        raise InvalidOperatorConsentError(
-            "consent proves a chat approval, never operator authority"
-        )
-
-    consent_expected = None
-    if consent is not None:
-        from fno.law import validate_operator_consent
-
-        consent_expected = {
-            "subject": subject,
-            "decision": decision,
-            "rationale": rationale,
-            "options": list(options or []),
-            "supersedes": supersedes,
-            "graduation": graduation,
-        }
-        validate_operator_consent(consent, expected=consent_expected)
-        # The permission click approves the attribution; it does not prove a
-        # human origin (the 2026-08-24 UserPromptSubmit probe found no
-        # discriminator), so authority_source keeps the caller's honest value
-        # and the reader lanes the row accordingly.
-        provenance = Provenance("operator", authority_source, "operator", None)
-    else:
-        provenance = _resolve_decider(decided_by, authority_source, origin=origin)
+    provenance = _resolve_decider(decided_by, authority_source, origin=origin)
 
     if supersedes:
         superseded_row = _decision_row_by_id(supersedes)
@@ -413,6 +394,20 @@ def record_decision(
             superseded_row is not None
             and _decision_lane(superseded_row) == "law"
             and provenance.authority_source not in {"operator", "chat_attested"}
+        ):
+            raise RefusedAuthorityError(provenance.decided_by, origin)
+        # A chat recording may retire ITS OWN kind, never the operator's.
+        #
+        # One-step recording is what the operator asked for. Retiring a row a
+        # person stood behind is a different act, and supersession IS retiring
+        # it: every reader that filters `--state live` stops seeing the old row.
+        # Without this line the retract guard below is decorative, because a
+        # session that cannot retract an operator row could still supersede it
+        # into invisibility.
+        if (
+            superseded_row is not None
+            and provenance.authority_source == "chat_attested"
+            and str(superseded_row.get("authority_source") or "") == "operator"
         ):
             raise RefusedAuthorityError(provenance.decided_by, origin)
 
@@ -444,30 +439,7 @@ def record_decision(
         rationale=rationale,
         supersedes=supersedes,
     )
-    if consent is not None:
-        from fno.law import claim_operator_consent
-
-        claim_operator_consent(
-            consent,
-            expected=consent_expected or {},
-            decision_id=decision_id,
-        )
-    try:
-        append_event(event, events_path=events_path(events_root))
-    except Exception:
-        if consent is not None:
-            from fno.law import release_operator_consent
-
-            release_operator_consent(consent, decision_id=decision_id)
-        raise
-    if consent is not None:
-        from fno.law import consume_operator_consent
-
-        consume_operator_consent(
-            consent,
-            expected=consent_expected or {},
-            decision_id=decision_id,
-        )
+    append_event(event, events_path=events_path(events_root))
     # Order is the contract: the project journal is durability, the index is
     # recall, the graph projection is the node view.
     try:
