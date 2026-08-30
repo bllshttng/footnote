@@ -439,13 +439,28 @@ else
         --hook-input-stdin \
         2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
 
+    # loop-check reports CLI misuse as {"error": ...} on STDOUT and exits 2,
+    # writing NOTHING to stderr (loopcheck.rs decide_inner: "Missing required
+    # flags are CLI misuse: exit 2"). Tailing the stderr log alone therefore
+    # prints an EMPTY file for that whole error class, and an operator watches
+    # a ship gate degrade with no stated cause. We already captured the answer
+    # in DECISION_JSON; print it before falling back to the log.
+    report_loop_check_output() {
+        if [[ -n "$DECISION_JSON" ]]; then
+            echo "target stop-hook: loop-check output: ${DECISION_JSON}" >&2
+        else
+            echo "target stop-hook: loop-check produced no output at all" >&2
+        fi
+        tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
+    }
     if [[ $verb_rc -ne 0 ]]; then
         echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc for an active session" >&2
-        tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
+        report_loop_check_output
         unavailable_block_or_allow
     fi
     if ! echo "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
         echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
+        report_loop_check_output
         unavailable_block_or_allow
     fi
 fi
