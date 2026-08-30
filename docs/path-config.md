@@ -34,7 +34,7 @@ Pointing `state_dir` at a per-project root is how one checkout gets its own grap
 
 This matches the shell reader (`scripts/lib/config.sh`, which already does per-key local-over-global fallback) and the provider loader, so all three config surfaces agree on precedence. Note `fno config get` only resolves schema-modeled keys (`config.{state_dir, plans_dir, paths.*, obsidian, project, blueprint, post_merge, target}`); unmodeled keys such as `external_reviewers`, `auto_merge`, `gates`, and `budget_cap` are read only by the shell reader.
 
-`fno config get <key>` prints the resolved value on stdout and keeps provenance on stderr. For a leaf key, the `source:` line names the deciding file, the root used for the lookup, and the ordered candidates searched. A built-in default is reported as `source: default (no config file sets this key)` with the same searched-candidate receipt; absence is therefore a searched result, not an unmeasured zero.
+`fno config get <key>` prints the resolved value on stdout and keeps provenance on stderr. For a leaf key, the `source:` line names the deciding file, the root used for the lookup, and the ordered candidates searched. A built-in default is reported as `source: default (no config file sets this key)` with the same searched-candidate receipt. Absence is therefore a searched result, not an unmeasured zero.
 
 ## Full schema
 
