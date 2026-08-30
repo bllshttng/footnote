@@ -1602,14 +1602,22 @@ fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
 /// contained in the base) - is the PR consulted, because a floor that answers
 /// for a directory can be more permissive than the merge it arms. A PR that
 /// exists but cannot be read fails closed to code, matching
-/// `classify_payload`'s degraded shape; a branch with no PR keeps the cwd
-/// answer (the pre-PR fallback the merge gate has no counterpart for).
-fn classify_payload_for_floor(gh_bin: &str, git_bin: &str, cwd: &Path) -> (bool, bool) {
+/// `classify_payload`'s degraded shape. A branch with no PR keeps the cwd
+/// answer (the pre-PR fallback the merge gate has no counterpart for) - but a
+/// NAMED PR (`pr_selector`, the review-coverage verb's --pr) that resolves to
+/// nothing is a degraded read of the PR under evaluation, never a no-PR
+/// branch, so it fails closed instead of falling back.
+fn classify_payload_for_floor(
+    gh_bin: &str,
+    git_bin: &str,
+    cwd: &Path,
+    pr_selector: Option<&str>,
+) -> (bool, bool) {
     let local = classify_payload(git_bin, cwd);
     if local.0 {
         return local;
     }
-    match read_pr_view(gh_bin, cwd, None) {
+    match read_pr_view(gh_bin, cwd, pr_selector) {
         Ok(Some(view)) => {
             let number = view
                 .get("number")
@@ -1655,8 +1663,16 @@ fn classify_payload_for_floor(gh_bin: &str, git_bin: &str, cwd: &Path) -> (bool,
             // An empty file list is not code, matching _pr_payload_is_code.
             (payload_is_code(&paths), false)
         }
-        // No PR for the branch: the cwd answer stands (pre-PR fire).
-        Ok(None) => local,
+        // No PR for the branch: the cwd answer stands (pre-PR fire). A NAMED
+        // PR resolving to nothing is the degraded direction - the PR under
+        // evaluation could not be read - so it fails closed.
+        Ok(None) => {
+            if pr_selector.is_some() {
+                (true, true)
+            } else {
+                local
+            }
+        }
         // The view failed without being a no-PR answer: degraded probe.
         Err(_) => (true, true),
     }
@@ -8936,7 +8952,7 @@ fn decide_inner(args: &[String]) -> (i32, String) {
     let floor_applies =
         self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
     let self_review_floor = if !lane_configured && self_review_required && floor_applies {
-        let payload = classify_payload_for_floor(&parsed.gh_bin, &parsed.git_bin, &cwd);
+        let payload = classify_payload_for_floor(&parsed.gh_bin, &parsed.git_bin, &cwd, None);
         floor_self_review(&required_reviewers, false, payload.0, true)
     } else {
         None
@@ -13701,7 +13717,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             inputs.author_harness_pinned_none,
         )
     {
-        let payload = classify_payload_for_floor(&gh_bin, &git_bin, &cwd);
+        let payload = classify_payload_for_floor(&gh_bin, &git_bin, &cwd, pr.as_deref());
         if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
             required_reviewers.push(floored);
         }
@@ -18646,8 +18662,12 @@ git_bounded();";
         // answers for a directory is more permissive than the merge it arms.
         let dir = tempfile::tempdir().unwrap();
         let (git, gh) = floor_payload_stubs(dir.path(), r#"[{"filename":"src/x.rs"}]"#);
-        let (is_code, assumed) =
-            classify_payload_for_floor(gh.to_str().unwrap(), git.to_str().unwrap(), Path::new("."));
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
         assert!(
             is_code,
             "a code PR must floor even where the cwd diff is empty"
@@ -18660,8 +18680,12 @@ git_bounded();";
         // The mirror control: the PR, not the directory, decides both ways.
         let dir = tempfile::tempdir().unwrap();
         let (git, gh) = floor_payload_stubs(dir.path(), r#"[{"filename":"docs/x.md"}]"#);
-        let (is_code, assumed) =
-            classify_payload_for_floor(gh.to_str().unwrap(), git.to_str().unwrap(), Path::new("."));
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
         assert!(!is_code, "a docs-only PR must not floor");
         assert!(!assumed);
     }
@@ -18680,10 +18704,60 @@ git_bounded();";
             "gh",
             "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *) echo 'no pull requests found' >&2; exit 1 ;;\nesac\n",
         );
-        let (is_code, assumed) =
-            classify_payload_for_floor(gh.to_str().unwrap(), git.to_str().unwrap(), Path::new("."));
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
         assert!(!is_code);
         assert!(!assumed);
+    }
+
+    #[test]
+    fn floor_payload_classifies_the_named_pr_for_the_coverage_verb() {
+        // The review-coverage verb evaluates a PR it names (--pr), from a
+        // checkout that need not sit on its branch: the floor must classify
+        // THAT PR, and a named PR that resolves to nothing fails closed
+        // rather than falling back to the foreign checkout's empty diff.
+        let dir = tempfile::tempdir().unwrap();
+        let git = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf '' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let gh = write_exec(
+            dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *files*) printf '[{\"filename\":\"src/x.rs\"}]' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            Some("7"),
+        );
+        assert!(
+            is_code,
+            "a named code PR must floor even from a foreign checkout"
+        );
+        assert!(!assumed);
+
+        // The same gh refusing the named PR (no view answer): fail closed,
+        // never the foreign checkout's empty-diff answer.
+        let gh = write_exec(
+            dir.path(),
+            "gh-refuses",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *) echo 'no pull requests found' >&2; exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            Some("7"),
+        );
+        assert!(is_code, "an unreadable named PR must fail closed");
+        assert!(assumed);
     }
 
     #[test]
@@ -18700,8 +18774,12 @@ git_bounded();";
             "gh",
             "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *) exit 1 ;;\nesac\n",
         );
-        let (is_code, assumed) =
-            classify_payload_for_floor(gh.to_str().unwrap(), git.to_str().unwrap(), Path::new("."));
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
         assert!(is_code, "an unreadable PR files read must fail closed");
         assert!(assumed);
     }
@@ -18721,8 +18799,12 @@ git_bounded();";
             "gh",
             "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *files*) printf '[{\"filename\":\"docs/x.md\"}]' ;;\n  *) exit 1 ;;\nesac\n",
         );
-        let (is_code, assumed) =
-            classify_payload_for_floor(gh.to_str().unwrap(), git.to_str().unwrap(), Path::new("."));
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
         assert!(is_code);
         assert!(!assumed);
     }
