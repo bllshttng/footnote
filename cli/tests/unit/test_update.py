@@ -2420,6 +2420,25 @@ def test_update_readiness_compatible_older_wire_is_not_a_bump(monkeypatch, tmp_p
     assert "wire unchanged" in result["guidance"]
 
 
+def test_update_readiness_downgrade_wire_is_a_bump(monkeypatch, tmp_path) -> None:
+    """A live server NEWER than the source is a bump: installing the source
+    downgrades the binary, and the older installed build's equality gate
+    refuses the still-running newer server. Without the newer-than-source
+    comparison the readiness probe answers "wire unchanged, shells survive"
+    on exactly the install that breaks them."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    runner = _make_runner(
+        mux_rows=[{"session": "new", "state": "live", "panes": 14, "wire_version": 61}]
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["wire"]["bump"] is True
+    assert result["shells_ended"] == 14
+    assert "WIRE BUMP v61" in result["guidance"]
+    assert "ends 14" in result["guidance"]
+
+
 def test_update_readiness_wire_bump_names_ended_and_revivable(monkeypatch, tmp_path) -> None:
     """AC2-HP: differing wire_version -> bump, guidance names ended shells and
     revivable worker count."""

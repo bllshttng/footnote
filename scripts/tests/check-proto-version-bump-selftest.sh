@@ -614,6 +614,68 @@ else
 fi
 
 echo ""
+
+# --- floor case 1: floor moved below the base floor is a collision ---------
+# Two branches both moving MIN_COMPAT_PROTO to the same value merge silently,
+# the same shape the version guard exists for. The feature here moves the
+# floor to 57 while the base holds 58: the line is touched and the move is
+# not monotonic, so the guard must fail before the version check runs.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 60)
+pub const MIN_COMPAT_PROTO: u32 = 58;"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m base
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 60)
+pub const MIN_COMPAT_PROTO: u32 = 57;"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "floor move"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"MIN_COMPAT_PROTO move is not monotonic"* ]]; then
+    pass "a floor move below the base floor exits 1"
+else
+    fail "floor-collision case: rc=$rc out=$out"
+fi
+
+# --- floor case 2: floor raised monotonically still passes -----------------
+# PROTO_VERSION untouched, floor 58 -> 59: the floor check passes and the
+# untouched-version exit still reads as a pass.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 60)
+pub const MIN_COMPAT_PROTO: u32 = 58;"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m base
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 60)
+pub const MIN_COMPAT_PROTO: u32 = 59;"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "floor raise"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"PROTO_VERSION line untouched"* ]]; then
+    pass "a monotonic floor raise exits 0"
+else
+    fail "floor-raise case: rc=$rc out=$out"
+fi
+
+# --- floor case 3: absent floor consts on both sides keep passing ----------
+# Pre-floor sources have no MIN_COMPAT_PROTO line at all; the floor check
+# must read that as untouched history, not as a parse failure.
+read -r dir sha <<< "$(make_repo 10 "$(version_line 11)")"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"OK (v10 -> v11)"* ]]; then
+    pass "a repo with no floor const still checks the version only"
+else
+    fail "no-floor-const case: rc=$rc out=$out"
+fi
+
 if [[ $failures -eq 0 ]]; then
     echo "proto-version-bump selftest: all cases passed"
     exit 0
