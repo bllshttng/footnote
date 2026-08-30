@@ -39,14 +39,14 @@ class _RecordingDispatch:
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="sess",
             reply=self.reply,
         )
 
     @property
     def providers(self) -> list[str]:
-        return [c["provider"] for c in self.calls]
+        return [c["harness"] for c in self.calls]
 
 
 class _FakeClaudeDispatch:
@@ -153,7 +153,7 @@ def test_explicit_agent_route_uses_named_headless_session_with_runtime_evidence(
 
     outcome = _run(runner, "code_reviewer")
     call = dispatch.calls[0]
-    assert call["provider"] == "claude"
+    assert call["harness"] == "claude"
     assert call["agent"] == "fno:code-reviewer"
     assert call["headless"] is True
     assert call["model"] == "glm-5.2"
