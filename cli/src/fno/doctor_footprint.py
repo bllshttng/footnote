@@ -214,7 +214,7 @@ def _live_root_pids(
     deadline: float | None = None,
     snapshot_pids: set[int] | None = None,
     snapshot_at: float | None = None,
-) -> tuple[set[int], str | None]:
+) -> tuple[set[int], str | AttributionGap | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     try:
@@ -499,7 +499,7 @@ def _payload(
         if reading.measured_cpu_cores > 0
         else 0.0
     )
-    payload = {
+    payload: dict[str, object] = {
         "sustained_cpu_cores": reading.sustained_cpu_cores,
         "descendant_cpu_cores": reading.descendant_cpu_cores,
         "fleet_cpu_cores": reading.fleet_cpu_cores,
