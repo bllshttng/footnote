@@ -76,6 +76,10 @@ def test_all_pass_is_green():
 
 
 def test_ac1_red_same_check_name_in_different_workflows_survives():
+    """Red-survival for same-named jobs is asserted where the producer lives:
+    the REST reader now carries the workflow name the selector dedups on
+    (test_pr_rest.py), so this corpus case only pins the selector's own
+    partitioning against the shared fixture."""
     case = next(
         case
         for case in _shared_supersession_cases()
