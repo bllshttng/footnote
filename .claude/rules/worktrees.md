@@ -30,6 +30,19 @@ The setup script links shared state from canonical: the vault symlink, per-file 
 
 Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno agents workspace worktree cleanup --cargo-targets --apply` (inspect first by omitting `--apply`). It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree. Protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the wrapper at `scripts/lib/cargo-rustc-wrapper.sh`, gated by `incremental = false`. Sccache shares a 10 GiB cache, machines without it run rustc directly.
 
+## Removal
+
+Creation has had a contract since day one; removal was conversation-only, and 174 trees piled up (74 GB, one fleet-wide disk incident, 2026-08-29). The removal contract is three buckets, one trigger, one gate:
+
+- **DIRTY** - never touched by any automatic path, ever. Report only.
+- **clean + unmerged** - never auto-pruned. Report the branch name so a human judges; the branch may be an open PR or abandoned work.
+- **clean + merged** - prune the TREE, keep the BRANCH. The tree is a checkout; the branch is the work. Every branch survived a 13-tree reap run, verified by rev-parse.
+- **Trigger: MERGE, never node-done.** A node can be done while its branch is unmerged, and that tree holds the only checkout of unlanded commits. The post-merge ritual (`fno do pr ritual`) is the natural home.
+- **Gate: `reapable`** (`fno agents workspace worktree reapable`). The buckets are enforced by the tool, not by each caller's care.
+- **Backstop: a periodic `cleanup --merged` sweep**, because the ritual only ever sees the PRs it is invoked for.
+
+The verb: `fno agents workspace worktree cleanup --merged` (dry-run by default; `--apply` to execute, from canonical). It preserves every branch, skips live claims, rooted processes, app-owned and permanent trees, and fails closed when it cannot verify.
+
 ## Per-project worktree policy
 
 Every code-payload dispatch routes through `fno agents workspace worktree ensure`, which resolves a `worktree` policy.
