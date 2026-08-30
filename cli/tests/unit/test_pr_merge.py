@@ -223,6 +223,8 @@ class FakeRun:
                         json.dumps({"total_count": len(rows), "check_runs": rows}) + "\n",
                         "",
                     )
+                if "/actions/runs?" in endpoint:
+                    return Result(0, json.dumps({"total_count": 0, "workflow_runs": []}), "")
                 if endpoint.endswith("/status"):
                     rows = [
                         {

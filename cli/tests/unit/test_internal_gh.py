@@ -43,6 +43,8 @@ def _runner(calls: list[list[str]]):
                 ),
                 "",
             )
+        if "actions/runs?" in endpoint:
+            return Result(0, '{"total_count":0,"workflow_runs":[]}', "")
         if endpoint.endswith("/status"):
             return Result(0, '{"statuses":[]}', "")
         if cmd[-2:] == ["api", "rate_limit"]:

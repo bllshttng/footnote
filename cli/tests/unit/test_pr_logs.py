@@ -53,6 +53,8 @@ class _Gh:
                 json.dumps({"total_count": len(self._rollup), "check_runs": self._rollup}),
                 "",
             )
+        if "actions/runs?" in url:
+            return Result(0, json.dumps({"total_count": 0, "workflow_runs": []}), "")
         if url.endswith("/status"):
             return Result(0, json.dumps({"statuses": self._statuses}), "")
         if "/pulls?" in url:
