@@ -738,7 +738,7 @@ def test_archive_defer_mints_the_reap_order(tmp_path, capsys, monkeypatch):
     order_calls = [c for c in runner.calls if "reap:pr-7" in " ".join(c)]
     assert order_calls, "the defer must mint the reap order"
     c = order_calls[0]
-    assert "acquire" in c and "--ttl" in c and "7d" in c
+    assert "acquire" in c and "--ttl" in c and "24h" in c
     assert "reap-order reap:pr-7 standing" in out
 
 

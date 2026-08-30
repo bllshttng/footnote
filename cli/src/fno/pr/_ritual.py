@@ -56,9 +56,12 @@ from fno.pr._proc import Result, ToolMissing, run as _run
 _CLAIM_TTL = "15m"
 # Reap order: minted only by this ritual against a gh-confirmed MERGED state,
 # consumed by the daemon's periodic worktree sweep (which runs its pass with
-# --apply while any order stands). TTL is the retry bound: a tree that stays
-# protected expires its order rather than being forced.
-_REAP_ORDER_TTL = "7d"
+# --apply while any order stands). 24h is the claim TTL ceiling AND the sweep
+# interval, so an order pairs the merge proof with at most one sweep window; a
+# tree still protected at that sweep waits for the next merge's order rather
+# than a timer's authority. "7d"-style day units are rejected TTL syntax
+# (verified: only m/h/s parse, and the ms range caps at one day).
+_REAP_ORDER_TTL = "24h"
 # x-0d66: bound the advance leg. advance dispatches successors inline and can
 # spend minutes with no output; a bounded run with progress lines surfaces
 # partial-dispatch state instead of wedging the ritual. Killing mid-dispatch is
