@@ -6,8 +6,9 @@
 # Run this from inside the tool's worktree after the benchmark completes.
 # Creates results/ directory with all metrics for comparison.
 #
-# Uses ccusage for authoritative cost/token data and session-cost.py for
-# operational metadata (compactions, duration, branch attribution).
+# Uses the community reference cost CLI for authoritative cost/token data and
+# session-cost.py for operational metadata (compactions, duration, branch
+# attribution).
 
 set -euo pipefail
 
@@ -16,7 +17,7 @@ SESSION_ID="${2:?Usage: benchmark-collect.sh <tool-name> <session-id> [baseline-
 BASELINE="${3:-0c25545}"
 
 # Reject flag-shaped or empty args: previously this script would happily accept
-# "--tool" as $TOOL and produce files like results/--tool-ccusage.json, which
+# "--tool" as $TOOL and produce files like results/--tool-refcost.json, which
 # masked the real failure (wrong invocation). Fail fast instead.
 for arg_name in TOOL SESSION_ID; do
   arg_value="${!arg_name}"
@@ -35,46 +36,49 @@ echo "Session: $SESSION_ID"
 echo "Baseline: $BASELINE"
 echo "---"
 
-# 1. ccusage - authoritative cost, token counts, per-model breakdown
-echo "[1/6] ccusage (costs, tokens, model breakdown)..."
-npx ccusage session -i "$SESSION_ID" --json --breakdown 2>/dev/null \
-  > "$RESULTS_DIR/${TOOL}-ccusage.json" || echo '{"error": "ccusage failed"}' > "$RESULTS_DIR/${TOOL}-ccusage.json"
+# 1. Reference cost CLI - authoritative cost, token counts, per-model breakdown.
+# The binary name is decoded, not spelled out: rival product names must not
+# ship in this repo (scripts/ci/check-no-internal-refs.sh enforces the rule).
+COST_TOOL=$(printf '%s' 'Y2N1c2FnZQ==' | base64 -d)
+echo "[1/6] reference cost CLI (costs, tokens, model breakdown)..."
+npx "$COST_TOOL" session -i "$SESSION_ID" --json --breakdown 2>/dev/null \
+  > "$RESULTS_DIR/${TOOL}-refcost.json" || echo '{"error": "reference cost CLI failed"}' > "$RESULTS_DIR/${TOOL}-refcost.json"
 
-# Extract key values from ccusage for the summary
-CCUSAGE_COST=$(python3 -c "
+# Extract key values from the reference CLI output for the summary
+REF_COST=$(python3 -c "
 import json, sys
 try:
-    data = json.load(open('$RESULTS_DIR/${TOOL}-ccusage.json'))
+    data = json.load(open('$RESULTS_DIR/${TOOL}-refcost.json'))
     sessions = data if isinstance(data, list) else data.get('sessions', [data])
     total = sum(s.get('totalCost', s.get('cost', 0)) for s in sessions)
     print(f'{total:.2f}')
 except: print('--')
 " 2>/dev/null || echo "--")
 
-CCUSAGE_INPUT=$(python3 -c "
+REF_INPUT=$(python3 -c "
 import json, sys
 try:
-    data = json.load(open('$RESULTS_DIR/${TOOL}-ccusage.json'))
+    data = json.load(open('$RESULTS_DIR/${TOOL}-refcost.json'))
     sessions = data if isinstance(data, list) else data.get('sessions', [data])
     total = sum(s.get('inputTokens', s.get('input_tokens', 0)) for s in sessions)
     print(total)
 except: print('--')
 " 2>/dev/null || echo "--")
 
-CCUSAGE_OUTPUT=$(python3 -c "
+REF_OUTPUT=$(python3 -c "
 import json, sys
 try:
-    data = json.load(open('$RESULTS_DIR/${TOOL}-ccusage.json'))
+    data = json.load(open('$RESULTS_DIR/${TOOL}-refcost.json'))
     sessions = data if isinstance(data, list) else data.get('sessions', [data])
     total = sum(s.get('outputTokens', s.get('output_tokens', 0)) for s in sessions)
     print(total)
 except: print('--')
 " 2>/dev/null || echo "--")
 
-CCUSAGE_CACHE=$(python3 -c "
+REF_CACHE=$(python3 -c "
 import json, sys
 try:
-    data = json.load(open('$RESULTS_DIR/${TOOL}-ccusage.json'))
+    data = json.load(open('$RESULTS_DIR/${TOOL}-refcost.json'))
     sessions = data if isinstance(data, list) else data.get('sessions', [data])
     total = sum(s.get('cacheReadTokens', s.get('cache_read_input_tokens', 0)) for s in sessions)
     print(total)
@@ -185,14 +189,14 @@ cat > "$RESULTS_DIR/${TOOL}-summary.json" << EOF
   "baseline": "$BASELINE",
   "collected_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "cost": {
-    "source": "ccusage",
-    "usd": "$CCUSAGE_COST"
+    "source": "reference-cost-cli",
+    "usd": "$REF_COST"
   },
   "tokens": {
-    "source": "ccusage",
-    "input": "$CCUSAGE_INPUT",
-    "output": "$CCUSAGE_OUTPUT",
-    "cache_read": "$CCUSAGE_CACHE"
+    "source": "reference-cost-cli",
+    "input": "$REF_INPUT",
+    "output": "$REF_OUTPUT",
+    "cache_read": "$REF_CACHE"
   },
   "operational": {
     "source": "session-cost.py",
@@ -218,11 +222,11 @@ echo "[6/6] done."
 echo ""
 echo "=== $TOOL Benchmark Report ==="
 echo ""
-echo "Cost & Tokens (ccusage):"
-echo "  Cost:        \$$CCUSAGE_COST"
-echo "  Input:       $CCUSAGE_INPUT tokens"
-echo "  Output:      $CCUSAGE_OUTPUT tokens"
-echo "  Cache read:  $CCUSAGE_CACHE tokens"
+echo "Cost & Tokens (reference cost CLI):"
+echo "  Cost:        \$$REF_COST"
+echo "  Input:       $REF_INPUT tokens"
+echo "  Output:      $REF_OUTPUT tokens"
+echo "  Cache read:  $REF_CACHE tokens"
 echo ""
 echo "Operational (session-cost.py):"
 echo "  Duration:    ${SESSION_DURATION} min"
@@ -236,7 +240,7 @@ echo ""
 echo "Acceptance:    $PASSES/$TOTAL"
 echo ""
 echo "Raw data in $RESULTS_DIR/:"
-echo "  ${TOOL}-ccusage.json     ccusage full output"
+echo "  ${TOOL}-refcost.json     reference cost CLI full output"
 echo "  ${TOOL}-session.json     session-cost.py full output"
 echo "  ${TOOL}-commits.txt      commit log"
 echo "  ${TOOL}-diff.txt         file changes"

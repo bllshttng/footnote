@@ -1,12 +1,12 @@
 """Unit tests for `fno doctor --cost-check` (ab-c0f92987, US5).
 
 Covers AC5-HP (agreement), AC5-ERR (divergence -> WARN, exit 1), AC5-UI
-(ccusage absent -> skipped, exit 0), AC5-EDGE (no recent session with a
-surviving transcript -> skipped), and AC5-FR (ccusage errors mid-run ->
+(reference tool absent -> skipped, exit 0), AC5-EDGE (no recent session with a
+surviving transcript -> skipped), and AC5-FR (reference tool errors mid-run ->
 skipped-with-reason, never a crash or false WARN).
 
 The collectors (_find_recent_session_with_transcript, _run_session_cost,
-_run_ccusage) are module-level so each test stubs them for a hermetic,
+_run_ref_cost_tool) are module-level so each test stubs them for a hermetic,
 network-free run - same style as test_doctor.py's _stub_signals.
 """
 from __future__ import annotations
@@ -29,18 +29,18 @@ def _stub_cost_signals(
     *,
     found: tuple[str, Path] | None = (SID, Path("/t.jsonl")),
     ours: float | None = 10.0,
-    ccusage: tuple[float | None, str | None] = (10.0, None),
+    ref: tuple[float | None, str | None] = (10.0, None),
 ) -> None:
     monkeypatch.setattr(doctor, "_find_recent_session_with_transcript", lambda: found)
     monkeypatch.setattr(doctor, "_run_session_cost", lambda sid: ours)
-    monkeypatch.setattr(doctor, "_run_ccusage", lambda sid: ccusage)
+    monkeypatch.setattr(doctor, "_run_ref_cost_tool", lambda sid: ref)
 
 
 # --- AC5-HP: agreement -------------------------------------------------------
 
 
 def test_ac5_hp_agreement_reports_ok(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_cost_signals(monkeypatch, ours=31.30, ccusage=(31.05, None))
+    _stub_cost_signals(monkeypatch, ours=31.30, ref=(31.05, None))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
     assert "cost-check OK" in result.stdout
@@ -50,7 +50,7 @@ def test_ac5_hp_agreement_reports_ok(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_ac5_hp_exact_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_cost_signals(monkeypatch, ours=5.0, ccusage=(5.0, None))
+    _stub_cost_signals(monkeypatch, ours=5.0, ref=(5.0, None))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
     assert "divergence=0.0%" in result.stdout
@@ -62,8 +62,8 @@ def test_ac5_hp_exact_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_ac5_err_divergence_warns_and_exits_nonzero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The original bug: our math 7.5x ccusage's number.
-    _stub_cost_signals(monkeypatch, ours=234.91, ccusage=(31.30, None))
+    # The original bug: our math 7.5x the reference tool's number.
+    _stub_cost_signals(monkeypatch, ours=234.91, ref=(31.30, None))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 1
     assert "cost-check WARN" in result.stdout
@@ -75,41 +75,42 @@ def test_boundary_divergence_at_threshold_is_ok(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Exactly 10% divergence is OK (threshold is "> 10%", per the plan).
-    _stub_cost_signals(monkeypatch, ours=11.0, ccusage=(10.0, None))
+    _stub_cost_signals(monkeypatch, ours=11.0, ref=(10.0, None))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
     assert "cost-check OK" in result.stdout
 
 
-def test_ccusage_zero_but_ours_nonzero_warns(
+def test_ref_zero_but_ours_nonzero_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_cost_signals(monkeypatch, ours=4.0, ccusage=(0.0, None))
+    _stub_cost_signals(monkeypatch, ours=4.0, ref=(0.0, None))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 1
     assert "cost-check WARN" in result.stdout
 
 
-# --- AC5-UI: absent ccusage ----------------------------------------------------
+# --- AC5-UI: absent reference tool ----------------------------------------------
 
 
-def test_ac5_ui_ccusage_absent_skips_exit_zero(
+def test_ac5_ui_ref_absent_skips_exit_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_cost_signals(monkeypatch, ccusage=(None, "ccusage not installed"))
+    _stub_cost_signals(monkeypatch, ref=(None, "reference cost tool not installed"))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
-    assert "skipped (ccusage not installed)" in result.stdout
+    assert "skipped (reference cost tool not installed)" in result.stdout
 
 
-def test_real_run_ccusage_lookup_does_not_crash(
+def test_real_run_ref_lookup_does_not_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Unstubbed _run_ccusage with ccusage absent from PATH -> skip reason.
+    # Unstubbed _run_ref_cost_tool with the reference tool absent from PATH
+    # -> skip reason.
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None)
-    cost, reason = doctor._run_ccusage(SID)
+    cost, reason = doctor._run_ref_cost_tool(SID)
     assert cost is None
-    assert reason == "ccusage not installed"
+    assert reason == "reference cost tool not installed"
 
 
 # --- AC5-EDGE: no recent session with transcript --------------------------------
@@ -132,31 +133,31 @@ def test_our_cost_unavailable_skips(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "skipped" in result.stdout
 
 
-# --- AC5-FR: ccusage errors mid-run ----------------------------------------------
+# --- AC5-FR: reference tool errors mid-run ----------------------------------------
 
 
-def test_ac5_fr_ccusage_nonzero_exit_skips_not_warns(
+def test_ac5_fr_ref_nonzero_exit_skips_not_warns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _stub_cost_signals(monkeypatch, ccusage=(None, "ccusage exited 1"))
+    _stub_cost_signals(monkeypatch, ref=(None, "reference cost tool exited 1"))
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
-    assert "skipped (ccusage exited 1)" in result.stdout
+    assert "skipped (reference cost tool exited 1)" in result.stdout
     assert "WARN" not in result.stdout
 
 
-def test_ac5_fr_unparseable_ccusage_output_skips(
+def test_ac5_fr_unparseable_ref_output_skips(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _stub_cost_signals(
-        monkeypatch, ccusage=(None, "ccusage emitted unparseable output")
+        monkeypatch, ref=(None, "reference cost tool emitted unparseable output")
     )
     result = runner.invoke(app, ["doctor", "--cost-check"])
     assert result.exit_code == 0
     assert "skipped" in result.stdout
 
 
-# --- default doctor run unaffected ------------------------------------------------
+# --- default doctor run unaffected --------------------------------------------------
 
 
 def test_default_doctor_run_never_touches_cost_collectors(
@@ -192,7 +193,7 @@ def test_default_doctor_run_never_touches_cost_collectors(
     assert "cost-check" not in result.stdout
 
 
-# --- ccusage payload parsing (shape liberality) -------------------------------------
+# --- reference tool payload parsing (shape liberality) -------------------------------
 
 
 @pytest.mark.parametrize(
@@ -205,11 +206,13 @@ def test_default_doctor_run_never_touches_cost_collectors(
         {"sessions": [{"sessionId": f"-Users-x-proj/{SID}", "totalCost": 7.5}]},
     ],
 )
-def test_ccusage_payload_shapes(monkeypatch: pytest.MonkeyPatch, payload) -> None:
+def test_ref_payload_shapes(monkeypatch: pytest.MonkeyPatch, payload) -> None:
     import json as _json
     import subprocess as _subprocess
 
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/local/bin/ccusage")
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: f"/usr/local/bin/{name}"
+    )
 
     def _fake_run(*args, **kwargs):
         class R:
@@ -221,17 +224,19 @@ def test_ccusage_payload_shapes(monkeypatch: pytest.MonkeyPatch, payload) -> Non
 
     monkeypatch.setattr(_subprocess, "run", _fake_run)
     monkeypatch.setattr(doctor.subprocess, "run", _fake_run)
-    cost, reason = doctor._run_ccusage(SID)
+    cost, reason = doctor._run_ref_cost_tool(SID)
     assert reason is None
     assert cost == 7.5
 
 
-def test_ccusage_session_missing_from_payload(
+def test_ref_session_missing_from_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import json as _json
 
-    monkeypatch.setattr(doctor.shutil, "which", lambda name: "/usr/local/bin/ccusage")
+    monkeypatch.setattr(
+        doctor.shutil, "which", lambda name: f"/usr/local/bin/{name}"
+    )
 
     def _fake_run(*args, **kwargs):
         class R:
@@ -242,6 +247,6 @@ def test_ccusage_session_missing_from_payload(
         return R()
 
     monkeypatch.setattr(doctor.subprocess, "run", _fake_run)
-    cost, reason = doctor._run_ccusage(SID)
+    cost, reason = doctor._run_ref_cost_tool(SID)
     assert cost is None
     assert "not present" in reason
