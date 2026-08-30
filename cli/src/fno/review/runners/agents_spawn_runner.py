@@ -132,7 +132,7 @@ def run_via_agents_spawn(
             result_holder["value"] = dispatch(
                 name=name,
                 message=composed,
-                provider=provider,
+                harness=provider,
                 cwd=cwd,
                 once=not headless,
                 # Floor at 1s: int(0.x) == 0, and a 0 timeout is "no timeout"
