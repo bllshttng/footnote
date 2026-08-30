@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -239,17 +238,10 @@ def _hermetic_in_flight_review_gate(monkeypatch):
 from fno.hermetic import neutralise  # noqa: E402
 
 _REAL_HOME = os.environ.get("HOME") or os.path.expanduser("~")
-_STATE_PROFILE_DIR = os.environ.get("STATE_PROFILE_DIR")
 _SANDBOX = tempfile.mkdtemp(prefix="fno-test-sandbox-")
 _hermetic_env = neutralise(os.environ, Path(_SANDBOX))
 os.environ.clear()
 os.environ.update(_hermetic_env)
-if _STATE_PROFILE_DIR:
-    shutil.copytree(
-        _STATE_PROFILE_DIR,
-        Path(_SANDBOX) / "home" / ".fno",
-        dirs_exist_ok=True,
-    )
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
