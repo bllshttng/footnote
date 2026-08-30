@@ -318,7 +318,7 @@ def _emit_write_receipts(
                 failed_keys.append(key)
                 last_error = exc
     except Exception as exc:
-        failed_keys = [key for key in changed_keys if key not in failed_keys]
+        failed_keys.extend(key for key in changed_keys if key not in failed_keys)
         last_error = exc
 
     if failed_keys:
