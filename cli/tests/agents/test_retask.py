@@ -318,6 +318,54 @@ def test_execute_retask_accepts_x_dfe7_succession_receipt_and_names_one_row():
     assert receipt["target_submit_confirmed"] is True
 
 
+def test_run_retask_parses_codex_clear_receipt_before_accepting_successor(monkeypatch):
+    import fno.agents.retask as retask
+
+    row = _row()
+    target = retask.RetaskCoordinate(
+        harness="codex", provider=None, model="gpt-5.6-sol", effort="high",
+        substrate="pane", permission_mode=None, route=None, account=None,
+    )
+    successor = SimpleNamespace(
+        name=row.name,
+        harness="codex",
+        harness_session_id="new-session",
+        predecessor_session_ids=["old-session"],
+        forked_from_session_id=None,
+    )
+    reads = iter([
+        "› Ask Codex to do anything\n",
+        "To continue this session, run codex resume old-session\n",
+        "Model: gpt-5.6-sol (reasoning high, summaries auto)",
+    ])
+    monkeypatch.setattr(retask, "resolve_agent", lambda *_args, **_kwargs: SimpleNamespace(entry=row))
+    monkeypatch.setattr(retask, "resolve_target_coordinate", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(retask, "_source_preflight", lambda _entry: {"status": "ready"})
+    monkeypatch.setattr(retask, "load_registry", lambda **_kwargs: [successor])
+    monkeypatch.setattr(retask, "rename_agent", lambda *_args, **_kwargs: SimpleNamespace(name="target-x-bdb9"))
+    monkeypatch.setattr("fno.agents.registry.project_verified_tier", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("fno.agents.mux_spawn._pane_osc_title", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "fno.agents.mux_spawn._evaluate_manifest_screen",
+        lambda *_args, **_kwargs: _screen_verdict(),
+    )
+
+    def run(command, **_kwargs):
+        if "read" in command:
+            return SimpleNamespace(returncode=0, stdout=next(reads), stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(retask.subprocess, "run", run)
+
+    receipt = retask.run_retask("bp-xbdb9-retask", node="x-bdb9", env={})
+
+    assert receipt["status"] == "retasked"
+    assert receipt["source_session_id"] == "old-session"
+    assert receipt["current_session_id"] == "new-session"
+    assert receipt["transition"] == "succession"
+    assert receipt["registry_rows"] == 1
+
+
 @pytest.mark.parametrize(
     "transition",
     [
