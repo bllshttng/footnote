@@ -30,11 +30,13 @@ _REQUIRED_INTERACTIVE_FIELDS = {
 
 
 def test_packaged_contract_is_complete_for_every_known_harness():
-    # Rendered from KNOWN_HARNESSES rather than spelled out: this test is about
-    # the CONTRACT being complete for every known harness, and a hardcoded set
-    # turns adding one into an unrelated red. The import-time assertion in
-    # harness_map already pins the two together, so this reads the same source.
-    assert set(known_harnesses()) == set(KNOWN_HARNESSES)
+    # Enumerated from the capability table's own keys (known_harnesses), not
+    # KNOWN_HARNESSES: the complete roster is wider on purpose (hermes and
+    # openclaw carry no row), and this test is about the CONTRACT being
+    # complete for every harness that has one. The subset relation is pinned
+    # separately, in test_harness_names.py.
+    assert known_harnesses(), "capability table is empty"
+    assert set(known_harnesses()) <= set(KNOWN_HARNESSES)
     for harness in known_harnesses():
         caps = capabilities(harness)
         assert _REQUIRED_INTERACTIVE_FIELDS <= caps.keys(), harness
@@ -620,6 +622,33 @@ def test_known_harnesses_covers_readable_set():
     from fno.agents.harnesses import READABLE_PROVIDERS
 
     assert set(known_harnesses()) == set(READABLE_PROVIDERS)
+
+
+def test_contract_rejects_a_row_absent_from_the_complete_roster():
+    """AC1-ERR: a capability row naming a harness KNOWN_HARNESSES does not
+    carry fails loudly at parse time, with the extra harness named. The
+    converse - a roster entry with no row - stays legal (hermes, openclaw),
+    which is why the relation is subset and not equality."""
+    from importlib.resources import files
+
+    text = files("fno.agents").joinpath("harness_capabilities.toml").read_text(
+        encoding="utf-8"
+    )
+    # Clone the claude section as [harness.ghost]: a full, well-formed row for
+    # a name the roster does not carry.
+    start = text.index("[harness.claude]")
+    end = text.index("[harness.", start + 1)
+    ghost = text[start:end].replace("[harness.claude]", "[harness.ghost]", 1)
+    poisoned = text[:end] + ghost + text[end:]
+    with pytest.raises(DispatchResolveError, match=r"absent from KNOWN_HARNESSES: ghost"):
+        parse_capability_contract(poisoned)
+
+
+def test_contract_rejects_an_empty_capability_table():
+    """An empty harness table would pass a subset check vacuously, so it is
+    refused on its own: zero rows is a broken file, not a legal narrow one."""
+    with pytest.raises(DispatchResolveError, match="harness set is empty"):
+        parse_capability_contract("map_version = 1\n\n[harness]\n")
 
 
 # --- US3: configurable dispatch verb + brief ------------------------------

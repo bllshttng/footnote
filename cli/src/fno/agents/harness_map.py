@@ -191,9 +191,19 @@ def parse_capability_contract(text: str) -> tuple[int, dict[str, dict]]:
     harnesses = root.get("harness")
     if not isinstance(version, int) or version < 1:
         raise DispatchResolveError("harness capability contract field 'map_version' is invalid")
-    if not isinstance(harnesses, dict) or set(harnesses) != set(KNOWN_HARNESSES):
+    if not isinstance(harnesses, dict) or not harnesses:
         raise DispatchResolveError(
-            "harness capability contract harness set diverges from KNOWN_HARNESSES"
+            "harness capability contract harness set is empty or not a table"
+        )
+    # Subset, not equality: KNOWN_HARNESSES is the COMPLETE supported roster
+    # and a roster entry with no capability row is legal (hermes, openclaw).
+    # A capability row naming a harness the roster does not carry is not - it
+    # would advertise a dispatch lane for a harness no evidence supports.
+    absent = set(harnesses) - set(KNOWN_HARNESSES)
+    if absent:
+        raise DispatchResolveError(
+            "harness capability contract harness set contains names absent "
+            f"from KNOWN_HARNESSES: {', '.join(sorted(absent))}"
         )
     required = {
         "permission_bypass", "resume", "thread", "autonomous_pane", "route_on_pane",
@@ -506,12 +516,17 @@ class DispatchResolveError(ValueError):
 MAP_VERSION, _HARNESS_CAPS = parse_capability_contract(
     files("fno.agents").joinpath("harness_capabilities.toml").read_text(encoding="utf-8")
 )
-assert set(_HARNESS_CAPS) == set(KNOWN_HARNESSES)
+# Non-empty subset of the complete roster, mirroring parse_capability_contract:
+# the roster (KNOWN_HARNESSES) is wider than the capability table on purpose.
+assert _HARNESS_CAPS and set(_HARNESS_CAPS) <= set(KNOWN_HARNESSES)
 
 
 def known_harnesses() -> list[str]:
-    """Sorted harness names the map knows (the loud-error candidate list)."""
-    return sorted(KNOWN_HARNESSES)
+    """Sorted names of the harnesses that carry a capability row: the
+    loud-error candidate list and the dispatch-capable roster. The COMPLETE
+    supported-harness roster is ``fno.harness_names.KNOWN_HARNESSES``, which
+    is wider - hermes and openclaw sit on it with no row here."""
+    return sorted(_HARNESS_CAPS)
 
 
 def capabilities(harness: str) -> dict:
