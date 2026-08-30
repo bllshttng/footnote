@@ -138,7 +138,17 @@ def cleanup(
         68_719_476_736,
         "--cap-bytes",
         min=1,
-        help="With --cargo-targets, maximum aggregate allocated target bytes (default 64 GiB).",
+        help="With --cargo-targets, absolute ceiling on aggregate allocated "
+        "target bytes (default 64 GiB). The effective ceiling is "
+        "min(this, --free-share-pct percent of free disk space).",
+    ),
+    free_share_pct: int = typer.Option(
+        50,
+        "--free-share-pct",
+        min=1,
+        max=100,
+        help="With --cargo-targets, percent of free disk space the effective "
+        "ceiling never exceeds (default 50).",
     ),
     target_max_age: str = typer.Option(
         "7d",
@@ -174,6 +184,8 @@ def cleanup(
                 "--cargo-targets",
                 "--cap-bytes",
                 str(cap_bytes),
+                "--free-share-pct",
+                str(free_share_pct),
                 "--target-max-age",
                 target_max_age,
             ]
