@@ -185,6 +185,12 @@ def admit_wake(
         if ceiling > 0 and len(stamps) >= ceiling:
             return WakeVerdict(refusal="ceiling", count=len(stamps))
         stamps.append(now.astimezone(timezone.utc))
+        # The ledger must be able to HOLD what the gate may count: a ceiling
+        # above the default keep would otherwise be unreachable, because the
+        # prune would cap the stored stamps below the configured cap and the
+        # gate would read len(stamps) < ceiling forever.
+        if ceiling > 0:
+            keep = max(keep, ceiling)
         stamps = sorted(stamps)[-max(1, keep):]
         _rewrite_wake_times(path, stamps)
         return WakeVerdict(refusal="", count=len(stamps))

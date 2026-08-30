@@ -213,3 +213,18 @@ def test_a_ceiling_of_zero_is_unbounded_even_past_the_default(tmp_path):
     verdict = should_wake(path, now=NOW, ceiling=0, debounce_s=DEBOUNCE_S)
 
     assert verdict.allowed, "40 stamps pass when the operator disabled the cap"
+
+
+def test_admit_wake_retains_enough_stamps_for_a_ceiling_above_the_default(tmp_path):
+    # 63 stamps inside the window, spaced past debounce: the 64th wake under
+    # a configured ceiling of 64 is allowed, and the prune must not then cap
+    # the stored ledger at the default 32 - the gate reads len(stamps), so a
+    # ledger that cannot hold 64 stamps can never refuse at 64 and the
+    # operator's raised cap silently stops bounding anything.
+    path = tmp_path / "kings" / "epic-x.md"
+    _manifest(path, [_stamp(20 + 15 * i) for i in range(63)])
+
+    verdict = admit_wake(path, now=NOW, ceiling=64, debounce_s=DEBOUNCE_S)
+
+    assert verdict.allowed and verdict.count == 64
+    assert len(read_wakes(path, now=NOW)) == 64, "the ledger must hold 64 stamps"
