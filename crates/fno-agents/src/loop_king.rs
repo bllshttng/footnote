@@ -563,15 +563,10 @@ mod tests {
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err = KingQueue::from_manifest(
-            Path::new("."),
-            "../escape",
-            "fno".to_string(),
-            false,
-            None,
-        )
-            .err()
-            .expect("escape scope must refuse");
+        let err =
+            KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false, None)
+                .err()
+                .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
     }
 
@@ -690,8 +685,7 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q =
-            KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
+        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);

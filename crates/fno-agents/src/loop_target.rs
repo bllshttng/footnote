@@ -300,11 +300,9 @@ fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
         Some("board") => {
             " The board changed while this scope had no king: read it first.".to_string()
         }
-        Some("backstop") => {
-            " No event fired; this is the periodic re-check, and an \
+        Some("backstop") => " No event fired; this is the periodic re-check, and an \
              unchanged board is a legitimate NoWork exit."
-                .to_string()
-        }
+            .to_string(),
         _ => String::new(),
     }
 }
@@ -625,7 +623,8 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             .map(|q| q.scope().to_string())
             .or_else(|| king_scope.clone())
             .unwrap_or_default();
-        let wake_clause = king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
+        let wake_clause =
+            king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
         format!(
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
