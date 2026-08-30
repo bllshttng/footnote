@@ -19,7 +19,7 @@
 //! - `ls`: array of `{session, state: live|stale|unqueryable|unprobeable,
 //!   clients?, squads?, panes?, error?}` (`[]` when empty). A `live` row also
 //!   carries `stale` (a live wire this client cannot attach to: a sidecar
-//!   below this build's `PROTO_VERSION`) and
+//!   below the first floor-admitting generation, `FLOOR_SINCE_PROTO`) and
 //!   `wire_version` (the server's `.ver` sidecar value, `null` for a
 //!   pre-sidecar server).
 //! - `kill-server`: `{session, killed: true, note, path}` on success, `path`
@@ -231,8 +231,8 @@ impl SessionRow {
     }
 
     /// (x-1a85) A LIVE server this client cannot attach to. Floor-admitting
-    /// binaries (this generation and newer) accept any client at or above
-    /// their floor, so a sidecar at or above this client's PROTO_VERSION is
+    /// binaries ([`proto::FLOOR_SINCE_PROTO`] and newer) accept any client at
+    /// or above their floor, so a sidecar at or above that generation is
     /// compatible, including a newer server. Older sidecars predate the
     /// floor: those binaries gate attach with `client_proto == PROTO_VERSION`
     /// and refuse this client outright, so they read as stale (spared while
@@ -243,7 +243,7 @@ impl SessionRow {
         self.is_live()
             && self
                 .wire_version
-                .map_or(true, |version| version < proto::PROTO_VERSION)
+                .map_or(true, |version| version < proto::FLOOR_SINCE_PROTO)
     }
 }
 
@@ -7229,13 +7229,15 @@ mod tests {
     #[test]
     fn mux_ls_flags_stale_wire_live_server() {
         // A live server is stale only when this client cannot attach to it.
-        // Floor-admitting generations (PROTO_VERSION and newer) accept this
-        // client; anything older predates the floor and == -gates attach, so
-        // it reads as stale even when its sidecar sits inside the floor range.
+        // Floor-admitting generations (FLOOR_SINCE_PROTO and newer) accept
+        // this client - including a server one additive bump AHEAD of this
+        // build, which a version-equality reading would wrongly heal. Anything
+        // older predates the floor and == -gates attach, so it reads as stale
+        // even when its sidecar sits inside the floor range.
         for version in [
-            proto::PROTO_VERSION,
-            proto::PROTO_VERSION + 1,
-            proto::PROTO_VERSION + 2,
+            proto::FLOOR_SINCE_PROTO,
+            proto::FLOOR_SINCE_PROTO + 1,
+            proto::FLOOR_SINCE_PROTO + 2,
         ] {
             let mut compatible = live("compatible");
             compatible.wire_version = Some(version);
@@ -7247,7 +7249,7 @@ mod tests {
         // "in range", but those binaries refuse any != client, so the x-1a85
         // auto-heal must still see them as stale.
         let mut below_floor = live("old");
-        below_floor.wire_version = Some(proto::PROTO_VERSION - 1);
+        below_floor.wire_version = Some(proto::FLOOR_SINCE_PROTO - 1);
         assert!(below_floor.wire_stale(), "a pre-floor wire is stale");
         assert_eq!(session_row_json(&below_floor)["stale"], true);
 

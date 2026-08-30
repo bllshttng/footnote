@@ -2405,9 +2405,28 @@ def test_update_readiness_no_bump_wire_unchanged(monkeypatch, tmp_path) -> None:
     assert "14" in result["guidance"]
 
 
-def test_update_readiness_compatible_older_wire_is_not_a_bump(monkeypatch, tmp_path) -> None:
-    """A server below the current version but at the compatibility floor does
-    not make an update destructive."""
+def test_update_readiness_pre_floor_wire_is_a_bump(monkeypatch, tmp_path) -> None:
+    """A live server inside the floor range is STILL a bump: every pre-floor
+    generation gates attach with client_proto == its PROTO_VERSION, so a
+    wire-59 server refuses a v60 client however the floor numbers read. The
+    binary's own `stale` verdict is the truth readiness consumes."""
+    _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
+    runner = _make_runner(
+        mux_rows=[
+            {"session": "main", "state": "live", "panes": 14, "wire_version": 59, "stale": True}
+        ]
+    )
+
+    result = update.update_readiness(runner=runner)
+
+    assert result["wire"]["bump"] is True
+    assert result["shells_ended"] == 14
+    assert "WIRE BUMP v59" in result["guidance"]
+
+
+def test_update_readiness_older_wire_without_stale_field_is_a_bump(monkeypatch, tmp_path) -> None:
+    """An older fno that emits no `stale` field falls back to equality for
+    the same reason: a pre-floor generation refuses any != client."""
     _readiness_env(monkeypatch, tmp_path, source_wire=60, source_floor=58)
     runner = _make_runner(
         mux_rows=[{"session": "main", "state": "live", "panes": 14, "wire_version": 59}]
@@ -2415,9 +2434,8 @@ def test_update_readiness_compatible_older_wire_is_not_a_bump(monkeypatch, tmp_p
 
     result = update.update_readiness(runner=runner)
 
-    assert result["wire"]["bump"] is False
-    assert result["shells_ended"] == 0
-    assert "wire unchanged" in result["guidance"]
+    assert result["wire"]["bump"] is True
+    assert result["shells_ended"] == 14
 
 
 def test_update_readiness_downgrade_wire_is_a_bump(monkeypatch, tmp_path) -> None:

@@ -309,6 +309,19 @@ pub const PROTO_VERSION: u32 = 60;
 /// shape must move this floor too.
 pub const MIN_COMPAT_PROTO: u32 = 58;
 
+/// The first wire generation whose SERVER admits a compatibility-floor range
+/// of clients instead of equality-gating attach. Every older generation
+/// (`58`/`59`, shipped 2026-08-29) refuses any `client_proto !=` its own, so
+/// the client-side sidecar verdict (`SessionRow::wire_stale`) reads a sidecar
+/// below this generation as unattachable, never merely "older".
+///
+/// Ceiling, recorded because the `.ver` sidecar stamps only `PROTO_VERSION`:
+/// a future server whose floor EXCEEDS a given client's generation will still
+/// read as compatible to that client until the sidecar carries the floor
+/// alongside the version. Equality-with-the-version must not come back as the
+/// test: it misflags every one-generation-old floor-admitting server.
+pub const FLOOR_SINCE_PROTO: u32 = 60;
+
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
 /// because a silently cut instruction to a worker is worse than a visible

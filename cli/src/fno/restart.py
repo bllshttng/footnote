@@ -216,7 +216,7 @@ def restart_command(
     revive = revive if revive is not None else _revive_enabled()
     result: dict[str, Any] = {
         "daemon": None,
-        "mux_sessions": [],  # LIVE session names (the restart targets)
+        "mux_sessions": [],  # all LIVE rows, including spared ones; the set actually restarted is mux_restarted
         "mux_spared": [],  # stale-wire live-pane servers spared by default
         "mux_wedged": [],  # wedged rows: actionable failures (holds socket, not accepting)
         "mux_other": [],  # other non-live rows (stale/unqueryable): reported, never killed
