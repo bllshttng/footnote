@@ -489,34 +489,27 @@ def stale_mux_servers(
     ]
 
 
-def _read_source_wire_version(source: Path) -> Optional[int]:
-    """Parse ``PROTO_VERSION`` out of the source checkout's
-    ``crates/fno/src/proto.rs``. ``source`` is the ``cli/`` dir (this module's
-    discovery convention, ``_discover_source``); its parent is the repo root in
-    both dev-clone and plugin layouts. None on any read/parse failure - the
-    readiness resolver treats that as a degraded input, never a bogus wire."""
+def _read_source_wire(source: Path) -> tuple[Optional[int], Optional[int]]:
+    """Parse both wire constants out of the source checkout's
+    ``crates/fno/src/proto.rs`` in ONE read: ``(PROTO_VERSION,
+    MIN_COMPAT_PROTO)``, either half None when its const is absent or
+    unparseable. ``source`` is the ``cli/`` dir (this module's discovery
+    convention, ``_discover_source``); its parent is the repo root in both
+    dev-clone and plugin layouts. The caller treats a None half as a degraded
+    input, never a bogus wire, and names WHICH const degraded."""
     proto_path = source.parent / "crates" / "fno" / "src" / "proto.rs"
     try:
         text = proto_path.read_text(encoding="utf-8")
     except OSError:
-        return None
-    match = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
-    return int(match.group(1)) if match else None
-
-
-def _read_source_wire_floor(source: Path) -> Optional[int]:
-    """Parse the source checkout's compatibility floor, falling back to its
-    protocol version for sources that predate the floor declaration."""
-    proto_path = source.parent / "crates" / "fno" / "src" / "proto.rs"
-    try:
-        text = proto_path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    floor = re.search(r"^pub const MIN_COMPAT_PROTO: u32 = (\d+);", text, re.MULTILINE)
-    if floor:
-        return int(floor.group(1))
+        return None, None
     version = re.search(r"^pub const PROTO_VERSION: u32 = (\d+);", text, re.MULTILINE)
-    return int(version.group(1)) if version else None
+    version_v = int(version.group(1)) if version else None
+    floor = re.search(r"^pub const MIN_COMPAT_PROTO: u32 = (\d+);", text, re.MULTILINE)
+    # A source without the floor const predates the floor declaration; its
+    # gate is the protocol version itself, so fall back rather than read a
+    # merely old source as a degraded one.
+    floor_v = int(floor.group(1)) if floor else version_v
+    return version_v, floor_v
 
 
 def _live_mux_rows(
@@ -701,9 +694,12 @@ def update_readiness(
 
     update_ready = bool(installed_rev and source_rev and installed_rev != source_rev)
 
-    source_wire = _read_source_wire_version(resolved_source) if resolved_source else None
-    source_floor = _read_source_wire_floor(resolved_source) if resolved_source else None
-    if resolved_source is not None and (source_wire is None or source_floor is None):
+    source_wire, source_floor = (
+        _read_source_wire(resolved_source) if resolved_source else (None, None)
+    )
+    # floor falls back to version for a pre-floor source, so floor is None
+    # only when the version const itself was unreadable.
+    if resolved_source is not None and source_wire is None:
         degraded.append("source PROTO_VERSION unreadable")
 
     live_rows = _live_mux_rows(runner)
@@ -713,12 +709,17 @@ def update_readiness(
         live_rows = []
         wire_bump = True  # unknown live state: never assert shells survive.
     else:
+        # A live server NEWER than the source is also a bump: installing the
+        # source downgrades the binary, and the older installed build's
+        # equality gate then refuses the still-running newer server. Unknown
+        # live state: never assert shells survive.
         wire_bump = (
             True
-            if source_floor is None
+            if source_wire is None
             else any(
                 not isinstance(r.get("wire_version"), int)
                 or r["wire_version"] < source_floor
+                or r["wire_version"] > source_wire
                 for r in live_rows
             )
         )

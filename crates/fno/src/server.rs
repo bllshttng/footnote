@@ -15100,13 +15100,30 @@ async fn handle_client(
     )
     .await;
     let first = match first {
-        Ok(Ok(value)) => match serde_json::from_value::<ClientMsg>(value.clone()) {
+        Ok(Ok(value)) => match <ClientMsg as serde::Deserialize>::deserialize(&value) {
             Ok(message) => message,
             Err(error) => {
                 if let Some(reply) = unknown_control_refusal(&value) {
                     let _ = write_msg(&mut stream, &reply).await;
                 } else {
                     eprintln!("fno mux: initial client message failed to decode: {error}");
+                    // The refusal above recovers every envelope shape this
+                    // build knows. An envelope it cannot interpret at all
+                    // must not restore the silent close this branch removed:
+                    // even a hopeless decode gets a loud refusal, so drift
+                    // surfaces as a client-side error, never a dead socket.
+                    let _ = write_msg(
+                        &mut stream,
+                        &ServerMsg::Err {
+                            code: err_code::BAD_REQUEST,
+                            msg: format!(
+                                "undecodable first message; server {} speaks wire v{}",
+                                crate::proto::BUILD_VERSION,
+                                crate::proto::PROTO_VERSION
+                            ),
+                        },
+                    )
+                    .await;
                 }
                 return;
             }

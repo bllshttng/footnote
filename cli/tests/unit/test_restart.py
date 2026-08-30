@@ -100,8 +100,9 @@ def test_restart_mux_skips_non_live_sessions(monkeypatch) -> None:
 
 
 def test_restart_spares_stale_wire_server_with_live_panes(monkeypatch) -> None:
-    """A stale-wire server with live panes is spared; a current-wire server
-    stays opt-in as well."""
+    """A stale-wire server with live panes is spared, but sparing is a
+    reported failure, not success: exit-code automation must see the fleet is
+    still skewed. A current-wire server stays opt-in as well."""
     _fake_daemon_binary(monkeypatch)
     calls: list = []
     monkeypatch.setattr(restart.subprocess, "run", _record_run(calls))
@@ -116,12 +117,14 @@ def test_restart_spares_stale_wire_server_with_live_panes(monkeypatch) -> None:
     )
 
     result = runner.invoke(app, ["agents", "restart", "--json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 1, "a spared stale-wire server is an unrestored fleet"
     assert not any(
         "kill-server" in c for c in calls
     ), "live-pane and current-wire servers are left opt-in"
     payload = json.loads([ln for ln in result.output.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["mux_spared"] == ["old"]
+    assert payload["ok"] is False
+    assert "spared" in result.output and "--mux" in result.output, "names the break-glass lever"
     assert "current wire" in result.output, "current-wire server reported, not killed"
 
 

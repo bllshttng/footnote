@@ -1941,7 +1941,8 @@ def _emit_human(
     for sess in result.get("mux_server_stale") or []:
         out(
             f"fno doctor: mux server '{sess}' is running an older build than the installed "
-            "`fno`; run `fno agents restart --mux` to cut it over (ends live sessions)."
+            "`fno`; run `fno agents restart` to cut it over (auto-heals pane-less servers; "
+            "add `--mux` to also end servers with live panes)."
         )
 
     # Orphan files from deleted capture/migration paths (Group 3 GC). Advisory.

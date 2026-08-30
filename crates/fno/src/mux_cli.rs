@@ -18,7 +18,8 @@
 //! errors stay one-line on stderr (never mixed into the json). The shapes:
 //! - `ls`: array of `{session, state: live|stale|unqueryable|unprobeable,
 //!   clients?, squads?, panes?, error?}` (`[]` when empty). A `live` row also
-//!   carries `stale` (a wire version below `MIN_COMPAT_PROTO`) and
+//!   carries `stale` (a live wire this client cannot attach to: a sidecar
+//!   below this build's `PROTO_VERSION`) and
 //!   `wire_version` (the server's `.ver` sidecar value, `null` for a
 //!   pre-sidecar server).
 //! - `kill-server`: `{session, killed: true, note, path}` on success, `path`
@@ -229,16 +230,20 @@ impl SessionRow {
         matches!(self.probe, Probe::Live { .. })
     }
 
-    /// (x-1a85) A LIVE server below the compatibility floor cannot accept this
-    /// client's wire. A missing sidecar (`None`) is treated as stale - it
-    /// predates the floor. Versions at or above the floor remain compatible,
-    /// including versions newer than this client. Non-live rows are never
-    /// "wire stale" (they are dead/wedged).
+    /// (x-1a85) A LIVE server this client cannot attach to. Floor-admitting
+    /// binaries (this generation and newer) accept any client at or above
+    /// their floor, so a sidecar at or above this client's PROTO_VERSION is
+    /// compatible, including a newer server. Older sidecars predate the
+    /// floor: those binaries gate attach with `client_proto == PROTO_VERSION`
+    /// and refuse this client outright, so they read as stale (spared while
+    /// they hold panes, auto-healed when pane-less). A missing sidecar
+    /// (`None`) also predates the floor. Non-live rows are never "wire
+    /// stale" (they are dead/wedged).
     fn wire_stale(&self) -> bool {
         self.is_live()
             && self
                 .wire_version
-                .map_or(true, |version| version < proto::MIN_COMPAT_PROTO)
+                .map_or(true, |version| version < proto::PROTO_VERSION)
     }
 }
 
@@ -315,9 +320,10 @@ fn session_row_json(row: &SessionRow) -> serde_json::Value {
         } => serde_json::json!({
             "session": name, "state": "live",
             "clients": clients, "squads": squads, "panes": panes,
-            // (x-1a85) `stale` = live but below MIN_COMPAT_PROTO. Restart policy
-            // may auto-restart a pane-less server, but spares live-pane servers.
-            // `wire_version` is null for a pre-sidecar (older) server.
+            // (x-1a85) `stale` = live but on a wire this client cannot attach
+            // to. Restart policy may auto-restart a pane-less server, but
+            // spares live-pane servers. `wire_version` is null for a
+            // pre-sidecar (older) server.
             "stale": stale, "wire_version": wire_version,
         }),
         Probe::Unqueryable => serde_json::json!({ "session": name, "state": "unqueryable" }),
@@ -368,10 +374,15 @@ pub fn ls(json: bool) -> i32 {
                 squads,
                 panes,
             } => {
-                // (x-1a85) A below-floor live server is flagged. Restart policy
-                // auto-restarts it only when it hosts no live panes.
+                // (x-1a85) An incompatible live server is flagged with the fix
+                // that actually applies: plain restart auto-heals a pane-less
+                // one; a server holding panes needs the --mux lever.
                 let tail = if stale {
-                    " [incompatible wire - pane servers are spared]"
+                    if *panes > 0 {
+                        " [incompatible wire - spared; `fno agents restart --mux` revives it]"
+                    } else {
+                        " [incompatible wire - `fno agents restart` auto-heals it]"
+                    }
                 } else {
                     ""
                 };
@@ -7217,14 +7228,14 @@ mod tests {
 
     #[test]
     fn mux_ls_flags_stale_wire_live_server() {
-        // A live server is stale only when its wire is below the compatibility
-        // floor. Additive versions on either side of the running version are
-        // compatible.
+        // A live server is stale only when this client cannot attach to it.
+        // Floor-admitting generations (PROTO_VERSION and newer) accept this
+        // client; anything older predates the floor and == -gates attach, so
+        // it reads as stale even when its sidecar sits inside the floor range.
         for version in [
-            proto::MIN_COMPAT_PROTO,
-            proto::MIN_COMPAT_PROTO + 1,
             proto::PROTO_VERSION,
             proto::PROTO_VERSION + 1,
+            proto::PROTO_VERSION + 2,
         ] {
             let mut compatible = live("compatible");
             compatible.wire_version = Some(version);
@@ -7232,10 +7243,16 @@ mod tests {
             assert_eq!(session_row_json(&compatible)["stale"], false);
         }
 
+        // The trap the pre-floor reading hid: a sidecar at the floor looks
+        // "in range", but those binaries refuse any != client, so the x-1a85
+        // auto-heal must still see them as stale.
         let mut below_floor = live("old");
-        below_floor.wire_version = Some(proto::MIN_COMPAT_PROTO - 1);
-        assert!(below_floor.wire_stale(), "a below-floor wire is stale");
+        below_floor.wire_version = Some(proto::PROTO_VERSION - 1);
+        assert!(below_floor.wire_stale(), "a pre-floor wire is stale");
         assert_eq!(session_row_json(&below_floor)["stale"], true);
+
+        below_floor.wire_version = Some(proto::MIN_COMPAT_PROTO);
+        assert!(below_floor.wire_stale(), "a pre-floor sidecar at the floor value is still stale");
 
         let mut unstamped = live("pre");
         unstamped.wire_version = None; // a pre-sidecar (older) build

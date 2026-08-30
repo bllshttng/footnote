@@ -269,37 +269,45 @@ def restart_command(
     if sessions is None:
         say("fno agents restart: mux front door unavailable; skipped mux check.")
     else:
-        live_rows = [
-            s
-            for s in sessions
-            if isinstance(s, dict) and s.get("session") and s.get("state") == "live"
-        ]
-        live = [s["session"] for s in live_rows]
-        # (x-1a85) A stale-wire live server is below the compatibility floor.
-        # A pane-less one still heals pair-deploy skew automatically. A server
-        # with live panes is spared because killing it closes their PTYs; --mux
-        # remains the deliberate break-glass lever.
-        stale_live = [s["session"] for s in live_rows if s.get("stale")]
-        stale_pane_live = [s for s in live_rows if s.get("stale") and (s.get("panes") or 0) > 0]
-        stale_pane_sessions = [s["session"] for s in stale_pane_live]
-        stale_pane_free = [s["session"] for s in live_rows if s.get("stale") and (s.get("panes") or 0) <= 0]
-        current_live = [s["session"] for s in live_rows if not s.get("stale")]
-        # A wedged server holds its socket but never accepts (x-82c6): it is a
-        # broken server, NOT a benign non-live socket. Reporting it as
-        # "restart succeeded" is the ok:true lie this fixes -- surface each one
-        # (name + log) and fail the command so `fno agents restart` exits non-zero.
-        wedged = [
-            s
-            for s in sessions
-            if isinstance(s, dict) and s.get("session") and s.get("state") == "wedged"
-        ]
-        other = [
-            s["session"]
-            for s in sessions
-            if isinstance(s, dict)
-            and s.get("session")
-            and s.get("state") not in ("live", "wedged")
-        ]
+        # One partition pass over the rows: the live-side buckets hold their
+        # invariants by construction instead of by five comprehensions
+        # agreeing with each other.
+        live_rows: list[dict] = []
+        live: list[str] = []
+        stale_live: list[str] = []
+        stale_pane_live: list[dict] = []
+        stale_pane_sessions: list[str] = []
+        stale_pane_free: list[str] = []
+        current_live: list[str] = []
+        wedged: list[dict] = []
+        other: list[str] = []
+        for s in sessions:
+            if not (isinstance(s, dict) and s.get("session")):
+                continue
+            state = s.get("state")
+            if state == "wedged":
+                # A wedged server holds its socket but never accepts (x-82c6):
+                # a broken server, NOT a benign non-live socket.
+                wedged.append(s)
+            elif state != "live":
+                other.append(s["session"])
+            else:
+                live_rows.append(s)
+                live.append(s["session"])
+                # (x-1a85) A stale-wire live server is below the compatibility
+                # floor. A pane-less one still heals pair-deploy skew
+                # automatically. A server with live panes is spared because
+                # killing it closes their PTYs; --mux remains the deliberate
+                # break-glass lever.
+                if s.get("stale"):
+                    stale_live.append(s["session"])
+                    if (s.get("panes") or 0) > 0:
+                        stale_pane_live.append(s)
+                        stale_pane_sessions.append(s["session"])
+                    else:
+                        stale_pane_free.append(s["session"])
+                else:
+                    current_live.append(s["session"])
         result["mux_sessions"] = live
         result["mux_stale"] = stale_live
         result["mux_spared"] = [] if mux else stale_pane_sessions
@@ -323,6 +331,13 @@ def restart_command(
                     f"fno agents restart: mux session '{row['session']}' has {row['panes']} live "
                     "pane(s); its stale-wire server is spared. Use `fno agents restart --mux` "
                     "to force-kill and revive it."
+                )
+                # Sparing is deliberate, but the fleet is NOT healed: an exit 0
+                # here lets automation conclude the skew was cleared, the same
+                # ok:true lie the wedged rows stopped telling (x-82c6).
+                failures.append(
+                    f"mux: {row['session']} spared (stale wire, "
+                    f"{row.get('panes') or 0} live pane(s)); --mux forces"
                 )
 
         # Restart stale-wire servers only when pane-less by default; --mux adds

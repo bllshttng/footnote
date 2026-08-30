@@ -2565,7 +2565,9 @@ pub enum Color {
 
 /// The version-handshake decision, factored pure so it is unit-testable. On a
 /// mismatch the message names BOTH versions and how to recover, because the
-/// operator seeing it is mid-upgrade and the server is the stale side.
+/// operator seeing it is mid-upgrade and the CLIENT is the stale side (only a
+/// client below the floor reaches the `Err` branch; a client at or above it
+/// is admitted).
 pub fn check_attach_version(client_proto: u32, client_build: &str) -> Result<(), String> {
     if client_proto >= MIN_COMPAT_PROTO {
         return Ok(());
