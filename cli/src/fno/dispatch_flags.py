@@ -35,7 +35,7 @@ spelling while ruling that it carries harness values, and it loses to ``-H``
 inside the spawn path rather than here.
 
 Inference never guesses: an absent or ambiguous harness marker falls through to
-the builtin default rather than picking a harness.
+the builtin default rather than picking one of the candidates it saw.
 """
 
 from __future__ import annotations
