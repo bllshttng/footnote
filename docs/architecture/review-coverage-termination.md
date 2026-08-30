@@ -9,7 +9,7 @@ When the attestation chain's reviewed ranges tile `merge_base..head` AND every f
 1. **fixed**, and a later round reviewed the fix delta,
 2. **non-blocking by class**, re-derived by the gate from the finding's own primitives (never the producer's count),
 3. **declined with corroboration** the author cannot mint alone (a second session's head-pinned attestation, or a non-author GitHub approval),
-4. **waived** by the `coverage-override` label, which answers covered-with-note before this predicate runs.
+4. **waived** before this predicate runs: by a non-author `coverage-override` label, or by operator law (the next section).
 
 A declined blocking finding on the author's own signature alone is not terminal. That is the whole difference between this gate and the decline exploit: receive a review, decline every finding, attest, done. The disposition pass carries its own corroboration requirement independent of `config.review.require_corroboration`, because a clean review cannot be gamed by declining and a disposition pass can.
 
@@ -26,7 +26,30 @@ A declined blocking finding on the author's own signature alone is not terminal.
 
 A hard finding is a CONFIRMED correctness or security finding, or a truncated remainder the gate cannot inspect. Only those reach IMPOSSIBLE. Every other finding still open at the cap is FILED as a backlog node and the PR merges. That is the operator's ruling on the round cap. The class gate from the finding classifier is what makes it safe. Noise can be filed away, a confirmed correctness bug cannot.
 
-IMPOSSIBLE names the two acts that can clear it: a non-author GitHub approval on the PR, or the `coverage-override` label. It never asks for another review. `fno do pr merge` refuses on it with its own receipt name. `fno do pr status` renders `review_coverage_impossible` as a blocker distinct from `review_coverage_uncovered`. The git-protection hook denies a bare `gh pr merge` on exit 5 exactly as on exit 3.
+IMPOSSIBLE names the three acts that can clear it: a non-author GitHub approval on the PR, a non-author `coverage-override` label, or the attended `fno do pr coverage-waive` command. It never asks for another review. `fno do pr merge` refuses on it with its own receipt name. `fno do pr status` renders `review_coverage_impossible` as a blocker distinct from `review_coverage_uncovered`. The git-protection hook denies a bare `gh pr merge` on exit 5 exactly as on exit 3.
+
+## The operator-law exit
+
+The first two exits above need a second GitHub account. The third is the one a single-account operator can run. Operator law reaches this gate through `fno.decide.current_law` and one standing subject, `review-coverage-waiver`, plus one head-scoped subject minted by the attended command:
+
+```
+fno do pr coverage-waive <pr> --reason "why this head is waived"
+```
+
+The command resolves the repository slug and the live 40-character head, records an operator decision at `review-coverage-waiver:<owner/repo>#<pr>@<head>`, and prints `coverage waiver recorded: <owner/repo>#<pr>@<short head>` only after the index write lands. Provenance decides, never a GitHub login: an attended terminal records, a harness-identified session is refused and exits nonzero. A blank reason is refused. An unreadable slug or head records nothing.
+
+Current law resolves in three states and only one of them is authority. `single` (exactly one live law verdict on the subject) authorizes. `none` preserves the ordinary predicate. A conflict, a damaged index row, a failed read, or malformed output is UNKNOWN authority: the gate answers UNANSWERED with the dead probe named, never a refusal built on a store that could not answer, and never permission either. No caller scans the decision index, picks the newest row, or treats a failed query as `none`.
+
+The two waiver shapes are deliberately different strengths:
+
+- **Standing law** (`review-coverage-waiver`) waives an uncovered review for every PR, narrowed by the gate: it never clears an unresolved CONFIRMED correctness or security finding, whatever the round budget says.
+- **A head-scoped waiver** is explicit and strong: it covers exactly the head its subject names, clears even a hard finding at that head, and dies on the next push, because the new head's subject matches nothing.
+
+Neither bypasses anything but review coverage. Red or pending checks, mergeability, plan fidelity, an in-flight review, and the head pin (`--match-head-commit`) all still refuse. The author-label refusal is unchanged: a `coverage-override` label applied by the PR author still reads `an author cannot override its own review gate`, because the label is authorized by account identity while the command is authorized by operator provenance.
+
+Every allowed merge prints either `coverage waived: standing operator law` or `coverage waived: head-pinned operator waiver at <short head>`; a reviewed merge prints neither. The commit-status publisher posts the same receipt as success on the exact head, and replaces it with the computed verdict once the law no longer answers `single` for that head. `fno do pr status` clears only the review-coverage blockers under a waiver and names it as `coverage_waiver` in its payload; an unknown decision probe is its own blocker (`review_coverage_waiver_unknown`).
+
+The Python gate and the Rust stop gate read the same law: the Rust side shells the canonical query (`fno backlog decisions <subject> --lane law --state live --json`) and parses only `current_law.status`. Both spell the standing subject identically, and the coverage-path tests pin that parity.
 
 ## The round budget
 
