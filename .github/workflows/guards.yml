@@ -202,6 +202,17 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_workflow_manifest.sh
 
+      # A hook script the base revision's config referenced cannot be deleted
+      # in the same commit that unregisters it: running sessions cache hook
+      # config for their lifetime and a PreToolUse hook that cannot launch
+      # fails the whole Bash call, so one stubless deletion bricks every
+      # pre-merge session's shell. One release of no-op stub, then delete.
+      - name: Hook script tombstone gate (no stubless deletion)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        working-directory: cli
+        run: uv run fno-py doctor lint hook-tombstones
+
       - name: Harness capabilities table fresh (one canonical source, byte-identical copy)
         if: ${{ !cancelled() }}
         timeout-minutes: 5
