@@ -75,6 +75,10 @@ Every removal emits one `worktree_removed` event row (path, caller, claim read, 
 
 Remote mirroring is off by default because the commit can still be work in progress. A repository can explicitly enable the detached best-effort mirror with `git config --local fno.salvageRemoteMirror true`. Disable it again with `git config --local --unset fno.salvageRemoteMirror`. The local salvage ref remains active in both cases, and a remote failure never blocks the commit.
 
+## Cargo build storage
+
+Cargo targets remain worktree-local so sibling builds never share Cargo's artifact-directory lock. After linking succeeds, setup runs `fno agents workspace worktree cleanup --cargo-targets --apply` (inspect first by omitting `--apply`). It reaps inactive targets older than seven days first, then the oldest inactive targets until allocated target bytes are at or below 64 GiB. A live target claim or rooted process protects its worktree. Protected bytes that prevent the cap return `over-cap-protected` instead of deleting an active build. Repository Cargo config uses the wrapper at `scripts/lib/cargo-rustc-wrapper.sh`, gated by `incremental = false`. Sccache shares a 10 GiB cache, machines without it run rustc directly.
+
 ## Enforcement
 
 Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-location.sh`. It emits `verdict=ok|canonical-protected` plus a nested-worktree advisory, and always exits 0.
