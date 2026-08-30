@@ -516,9 +516,10 @@ fn make_script_publishes_an_immediately_executable_script() {
 }
 
 /// The operator-law waiver surface is ONE law on both sides: the same
-/// standing subject, the same canonical CLI query, and only the
-/// `current_law.status` verdict as deciding. Either side renaming its seam
-/// alone fails here, which is the drift the dual-gate shape risks.
+/// standing subject, the same canonical CLI query, the same affirmative
+/// decision value, and only the `current_law.status` verdict as the deciding
+/// shape. Either side renaming its seam alone fails here, which is the drift
+/// the dual-gate shape risks.
 #[test]
 fn operator_waiver_law_surface_is_pinned_across_both_gates() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -538,7 +539,7 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         "the Python standing subject moved"
     );
     // The Rust probe shells the canonical CLI query - lane law, live only -
-    // and parses only the verdict, never decision prose or the index file.
+    // never reading the index file.
     assert!(rust.contains("\"backlog\"") && rust.contains("\"decisions\""));
     assert!(rust.contains("\"--lane\"") && rust.contains("\"law\""));
     assert!(rust.contains("\"--state\"") && rust.contains("\"live\""));
@@ -546,9 +547,23 @@ fn operator_waiver_law_surface_is_pinned_across_both_gates() {
         rust.contains("/current_law/status"),
         "the Rust reader must decide on current_law.status only"
     );
-    // The Python side resolves law through the same single reader.
+    // One affirmative decision value on both sides: a single row counts only
+    // when its decision equals it, so a denial recorded at a waiver subject
+    // reads as no waiver on BOTH gates.
     assert!(
-        python.contains("from fno.decide import current_law"),
+        rust.contains("const WAIVER_DECISION: &str = \"review coverage waived for this head\""),
+        "the Rust affirmative waiver value moved"
+    );
+    assert!(
+        rust.contains("/decisions/0/decision"),
+        "the Rust reader stopped checking the row's decision value"
+    );
+    assert!(
+        python.contains("WAIVER_DECISION = \"review coverage waived for this head\""),
+        "the Python affirmative waiver value moved"
+    );
+    assert!(
+        python.contains("list_decisions(subject, lane=\"law\", state=\"live\")"),
         "the Python gate grew a second law reader"
     );
 }

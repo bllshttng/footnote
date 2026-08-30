@@ -40,6 +40,8 @@ The command resolves the repository slug and the live 40-character head. It reco
 
 Current law resolves in three states and only one of them is authority. `single` (exactly one live law verdict on the subject) authorizes. `none` preserves the ordinary predicate. A conflict, a damaged index row, a failed read, or malformed output is UNKNOWN authority. The gate then answers UNANSWERED with the dead probe named. That is never a refusal built on a store that cannot answer, and never permission either. No caller scans the decision index, picks the newest row, or treats a failed query as `none`.
 
+Only a row whose decision equals the affirmative value the command mints counts as authority. That value is `review coverage waived for this head`. Row existence carries no polarity: a note or a denial recorded at a waiver subject reads as no waiver, never as one. The command also publishes the head-pinned success status immediately after recording, so GitHub's ruleset sees the context the law already answers.
+
 The two waiver shapes are deliberately different strengths:
 
 - **Standing law** (`review-coverage-waiver`) waives an uncovered review for every PR. The gate narrows it: it never clears an unresolved CONFIRMED correctness or security finding, whatever the round budget says.
@@ -48,6 +50,8 @@ The two waiver shapes are deliberately different strengths:
 Neither bypasses anything but review coverage. Red or pending checks, mergeability, plan fidelity, an in-flight review, and the head pin (`--match-head-commit`) all still refuse. The author-label refusal is unchanged. A `coverage-override` label applied by the PR author still reads `an author cannot override its own review gate`. The label is authorized by account identity. The command is authorized by operator provenance.
 
 Every allowed merge prints `coverage waived: standing operator law` or `coverage waived: head-pinned operator waiver at <short head>`. A reviewed merge prints neither. The commit-status publisher posts the same receipt as success on the exact head. It replaces that marker with the computed verdict once the law no longer answers `single` for the head. `fno do pr status` clears only the review-coverage blockers under a waiver and names it as `coverage_waiver` in its payload. An unknown decision probe is its own blocker (`review_coverage_waiver_unknown`).
+
+A waiver green can outlive its law on the GitHub side: a retraction or a conflicting ruling changes the verdict locally at once, but the posted status stays green until a publisher next runs. Two surfaces heal it, and both recompute law live: any `fno do pr status` read (a posted state that disagrees with the computed verdict triggers the republish), and every sanctioned merge attempt, each of which re-derives the verdict rather than trusting the marker. There is no law-change webhook; the residual exposure is a human merge button in the window before any publisher runs, the same staleness every commit status carries.
 
 The Python gate and the Rust stop gate read the same law. The Rust side shells the canonical query (`fno backlog decisions <subject> --lane law --state live --json`) and parses only `current_law.status`. Both spell the standing subject identically, and the coverage-path tests pin that parity.
 

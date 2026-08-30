@@ -2539,9 +2539,10 @@ WAIVE_HEAD = "f" * 40
 
 
 def test_law_authority_reads_the_real_index_three_ways(tmp_path):
-    """The seam is current_law, not a second deciding list: none, single,
-    damaged -> unknown. Seeded straight into the sandboxed index the conftest
-    pins, so the statuses come from the real reader."""
+    """The seam is the engine's law-lane live read, not a second deciding
+    list: none, single (affirmative value only), damaged -> unknown. Seeded
+    straight into the sandboxed index the conftest pins, so the statuses come
+    from the real reader."""
     from fno import paths
 
     def _seed(*rows):
@@ -2550,35 +2551,30 @@ def test_law_authority_reads_the_real_index_three_ways(tmp_path):
             "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
         )
 
-    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
-    _seed()
-    assert _coverage_gate.law_authority(subject) == ("none", "")
-    _seed(
-        {
+    def _row(decision):
+        return {
             "type": "operator_decision",
             "ts": "2026-08-29T00:00:00Z",
             "data": {
                 "decision_id": "d-law0001",
-                "decision": "waived",
-                "subject": subject,
+                "decision": decision,
+                "subject": _coverage_gate.scoped_waiver_subject(
+                    "acme/widgets", 42, WAIVE_HEAD
+                ),
                 "authority_source": "operator",
             },
         }
-    )
+
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    _seed()
+    assert _coverage_gate.law_authority(subject) == ("none", "")
+    _seed(_row(_coverage_gate.WAIVER_DECISION))
     assert _coverage_gate.law_authority(subject) == ("single", "")
-    _seed(
-        {
-            "type": "operator_decision",
-            "ts": "2026-08-29T00:00:00Z",
-            "data": {
-                "decision_id": "d-law0001",
-                "decision": "waived",
-                "subject": subject,
-                "authority_source": "operator",
-            },
-        },
-        "not json at all",
-    )
+    # Row existence carries no polarity: a denial recorded at the waiver
+    # subject is a single law row whose text is not the affirmative value.
+    _seed(_row("coverage waiver DENIED for this head"))
+    assert _coverage_gate.law_authority(subject) == ("none", "")
+    _seed(_row(_coverage_gate.WAIVER_DECISION), "not json at all")
     status, probe = _coverage_gate.law_authority(subject)
     assert status == "unknown"
     assert "damaged" in probe

@@ -107,6 +107,13 @@ NO_LANE_NOTE = "no review lane configured"
 # subject, which IS that strong and dies on the next push.
 STANDING_WAIVER_SUBJECT = "review-coverage-waiver"
 
+#: The one decision value that counts as an affirmative waiver. The
+#: ``coverage-waive`` command mints exactly this string; the gate reads a
+#: single law row at a waiver subject as authority ONLY when its decision
+#: equals it. Existence alone carries no polarity: a note or a denial
+#: recorded at the subject must read as no waiver, never as one.
+WAIVER_DECISION = "review coverage waived for this head"
+
 
 def scoped_waiver_subject(slug: str, pr_number: int, head: str) -> str:
     """The head-pinned waiver subject: one ruling authorizes exactly one head,
@@ -118,29 +125,37 @@ def law_authority(subject: str) -> Tuple[str, str]:
     """Three-state law resolution for one subject: ``(status, probe)``.
 
     ``status`` is ``single`` / ``none`` / ``unknown``. The deciding list is
-    ``fno.decide.current_law`` and its exact ``--lane law --state live``
-    semantics - this wrapper adds no second reader, it only folds what
-    current_law raises (conflict, damaged rows, an unreadable index, malformed
-    output) into ``unknown``, because a probe that died is never the same
+    the decision engine's own law-lane live read (the exact filter behind
+    ``current_law``) - this wrapper adds no second reader and never scans the
+    index file. Damaged rows, a conflicting pair, a failed read, or malformed
+    output fold into ``unknown``, because a probe that died is never the same
     answer as a verdict of none. ``probe`` is empty unless status is unknown,
     and then names what died.
+
+    A single row counts as authority only when its decision EQUALS
+    ``WAIVER_DECISION`` - the exact value the ``coverage-waive`` command
+    mints. Row existence carries no polarity: a note or a denial recorded at
+    a waiver subject reads as none, never as a waiver.
     """
     try:
-        from fno.decide import current_law
+        from fno.decide import list_decisions
 
-        verdict = current_law(subject)
-        law = verdict.get("current_law") if isinstance(verdict, dict) else None
-        status = str((law or {}).get("status") or "")
-        if status in ("single", "none"):
-            return status, ""
-        if status == "conflict":
-            return "unknown", f"decision probe: conflicting law rows for {subject}"
-        return "unknown", f"decision probe: malformed current_law output for {subject}"
+        _label, rows, damaged = list_decisions(subject, lane="law", state="live")
     except Exception as exc:  # noqa: BLE001 - a dead probe is unknown, never none
         return (
             "unknown",
             f"decision probe failed for {subject}: {type(exc).__name__}: {exc}",
         )
+    if damaged:
+        noun = "row" if damaged == 1 else "rows"
+        return "unknown", f"decision probe: {damaged} damaged {noun} for {subject}"
+    if not rows:
+        return "none", ""
+    if len(rows) > 1:
+        return "unknown", f"decision probe: conflicting law rows for {subject}"
+    if str(rows[0].get("decision") or "") == WAIVER_DECISION:
+        return "single", ""
+    return "none", ""
 
 
 def operator_waiver_verdict(
@@ -243,7 +258,7 @@ def run_coverage_waive(pr_number: int, reason: str, cwd: Optional[str] = None) -
 
     try:
         record_decision(
-            decision="review coverage waived for this head",
+            decision=WAIVER_DECISION,
             subject=subject,
             rationale=text,
             authority_source="operator",
@@ -269,6 +284,24 @@ def run_coverage_waive(pr_number: int, reason: str, cwd: Optional[str] = None) -
             f"{type(exc).__name__}: {exc}\n"
         )
         return 1
+    # Publish the waiver green NOW, so GitHub's ruleset sees the context the
+    # law already answers. Best-effort: the recorded law is the authority, a
+    # failed POST is the documented publisher lag, and the next publisher run
+    # heals it.
+    try:
+        from fno.pr import _reviews
+
+        posted, why = _reviews.publish_coverage_status(pr_number, head=head, cwd=cwd)
+        if not posted:
+            sys.stderr.write(
+                f"coverage-waive: status publish failed ({why}); the waiver is "
+                "recorded and the next publisher run will post it.\n"
+            )
+    except Exception as exc:  # noqa: BLE001 - the record stands without the marker
+        sys.stderr.write(
+            f"coverage-waive: status publish raised ({exc}); the waiver is "
+            "recorded and the next publisher run will post it.\n"
+        )
     sys.stdout.write(f"coverage waiver recorded: {slug}#{pr_number}@{head[:8]}\n")
     return 0
 

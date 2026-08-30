@@ -3839,18 +3839,27 @@ fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<
 /// coverage-path tests, not by trust.
 const STANDING_WAIVER_SUBJECT: &str = "review-coverage-waiver";
 
+/// The one decision value that counts as an affirmative waiver. Mirrors
+/// `WAIVER_DECISION` in cli/src/fno/pr/_coverage_gate.py: a single law row at
+/// a waiver subject counts ONLY when its decision equals this string - row
+/// existence carries no polarity, so a note or a denial recorded at the
+/// subject reads as no waiver. An exact match against a constant, never free
+/// prose parsing.
+const WAIVER_DECISION: &str = "review coverage waived for this head";
+
 fn scoped_waiver_subject(repo_slug: &str, pr_number: i64, head: &str) -> String {
     format!("{STANDING_WAIVER_SUBJECT}:{repo_slug}#{pr_number}@{head}")
 }
 
 /// Three-state current-law verdict for one subject, read through the one
 /// canonical CLI query (`fno backlog decisions <subject> --lane law --state
-/// live --json`). Only `current_law.status` is parsed - never decision prose,
-/// never the index file - and everything else is `Unknown`: a nonzero exit
-/// (the reader refuses a damaged index), a dead probe, a conflict, or
-/// malformed output all answer UNKNOWN authority, which no consumer may read
-/// as either permission or absence. Mirrors `law_authority` on the Python
-/// side, seam for seam.
+/// live --json`). `current_law.status` decides the shape, and a `single`
+/// verdict counts ONLY when the one row's decision equals `WAIVER_DECISION`
+/// (row existence carries no polarity); everything else is `NoLaw` or
+/// `Unknown`: a nonzero exit (the reader refuses a damaged index), a dead
+/// probe, a conflict, or malformed output all answer UNKNOWN authority,
+/// which no consumer may read as either permission or absence. Mirrors
+/// `law_authority` on the Python side, seam for seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LawStatus {
     Single,
@@ -3875,15 +3884,29 @@ fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> LawStatus {
         stopgate_read_timeout(),
     ) {
         BoundedRun::Completed(out) if out.status.success() => {
-            match serde_json::from_slice::<Value>(&out.stdout)
-                .ok()
-                .and_then(|v| {
-                    v.pointer("/current_law/status")
-                        .and_then(|s| s.as_str())
-                        .map(|s| s.to_string())
-                }) {
-                Some(s) if s == "single" => LawStatus::Single,
-                Some(s) if s == "none" => LawStatus::NoLaw,
+            let parsed = serde_json::from_slice::<Value>(&out.stdout).ok();
+            let status = parsed.as_ref().and_then(|v| {
+                v.pointer("/current_law/status")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            });
+            match status.as_deref() {
+                Some("single") => {
+                    let affirmative = parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.pointer("/decisions/0/decision")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == WAIVER_DECISION)
+                        })
+                        .unwrap_or(false);
+                    if affirmative {
+                        LawStatus::Single
+                    } else {
+                        LawStatus::NoLaw
+                    }
+                }
+                Some("none") => LawStatus::NoLaw,
                 _ => LawStatus::Unknown,
             }
         }
