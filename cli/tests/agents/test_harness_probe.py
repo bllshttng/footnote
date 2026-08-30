@@ -114,6 +114,17 @@ def test_identity_accepts_cross_process_recall_without_local_store() -> None:
 
 def test_line_seven_reports_instrument_results(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(harness_probe, "run_instrument", lambda *args, **kwargs: (0, "clean"))
+    for relative in (
+        "crates/fno-agents/src/harness_capabilities.toml",
+        "cli/src/fno/harness_names.py",
+        "cli/src/fno/agents/harnesses/__init__.py",
+        "cli/src/fno/agents/mux_spawn.py",
+        "crates/fno-agents/src/provider.rs",
+        "cli/src/fno/hermetic.py",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("'pi'\n[harness.pi]\n", encoding="utf-8")
     verdict = harness_probe.line_row_matches("pi", repo_root=tmp_path)
 
     assert verdict.status == "pass"

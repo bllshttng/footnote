@@ -154,7 +154,8 @@ def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerd
         f"freshness={'fresh' if fresh_copies else 'stale'}; "
         f"registration present={','.join(present) or 'none'} absent={','.join(absent) or 'none'}"
     )
-    if clean_sweep and fresh_copies:
+    table_present = "CAPABILITY_TABLE" in present
+    if clean_sweep and fresh_copies and table_present:
         return LineVerdict("ROW MATCHES", "pass", "honesty sweep and three-copy freshness", detail=detail)
     return LineVerdict("ROW MATCHES", "fail", "honesty sweep and three-copy freshness", detail=detail)
 
@@ -163,6 +164,8 @@ def line_manifest_pinned(*, harness: str, result: tuple[int, str] | None = None)
     if result is None:
         return LineVerdict("MANIFEST PINNED", "skip", "live readiness-grid capture", detail="live pane not requested")
     code, output = result
+    if code == 0 and "READINESS_SMOKE!=1" in output:
+        return LineVerdict("MANIFEST PINNED", "skip", "live readiness-grid capture", detail="live capture was not requested")
     if code == 0:
         return LineVerdict("MANIFEST PINNED", "pass", "live readiness-grid capture", detail=output)
     return LineVerdict("MANIFEST PINNED", "fail", "live readiness-grid capture", detail=output or f"capture exited {code}")
