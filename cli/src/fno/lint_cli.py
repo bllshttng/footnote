@@ -39,6 +39,7 @@ CHECKS: dict[str, str] = {
     "retired-commands": "retired_commands",
     "registry": "registry",
     "state-roots": "state_roots",
+    "hook-tombstones": "hook_tombstones",
 }
 
 
@@ -579,6 +580,104 @@ def _dump_state_roots_baseline(repo_root: Path) -> str:
             f"{rule}\t{rel}\t{key}\tunowned\tseeded from the measured census"
             for rule, rel, key in _state_roots_findings(repo_root)
         )
+    )
+
+
+# ---------------------------------------------------------------------------
+# hook-tombstones: a retired hook script stays one release as a no-op stub
+# ---------------------------------------------------------------------------
+
+def _resolve_range_base(repo_root: Path) -> Optional[str]:
+    """The revision a deletion is measured against, by trigger shape.
+
+    PR checkout: origin/main is fetched and differs from HEAD, so the
+    merge-base names exactly this PR's boundary. Push to main: origin/main
+    equals HEAD, so the runner's GITHUB_EVENT_BEFORE carries the prior tip.
+    Local worktree: HEAD~1. Each fallback is used only when the one before
+    it is absent or resolves to HEAD itself.
+    """
+    from fno.hook_config import _git
+
+    head = _git(repo_root, "rev-parse", "HEAD")
+    if head is None:
+        return None
+    head = head.strip()
+
+    origin_main = _git(repo_root, "rev-parse", "--verify", "origin/main")
+    if origin_main is not None and origin_main.strip() != head:
+        merged = _git(repo_root, "merge-base", head, "origin/main")
+        if merged is not None and merged.strip() != head:
+            return merged.strip()
+
+    event_before = os.environ.get("GITHUB_EVENT_BEFORE", "")
+    if event_before:
+        verified = _git(repo_root, "rev-parse", "--verify", f"{event_before}^{{commit}}")
+        if verified is not None and verified.strip() != head:
+            return verified.strip()
+
+    parent = _git(repo_root, "rev-parse", "--verify", "HEAD~1")
+    if parent is not None and parent.strip() != head:
+        return parent.strip()
+    return None
+
+
+def hook_tombstones(base: Optional[str] = None) -> None:
+    """Refuse deleting a script the base revision's hook config referenced.
+
+    The harness answers hook config from an init-time snapshot, and a
+    PreToolUse hook that cannot launch fails the whole matched tool call -
+    on the Bash matcher that is every shell verb at once. So a commit that
+    deletes a referenced script bricks every session started before the
+    merge, including the verbs needed to diagnose it. Retiring a hook is
+    two steps across two releases: remove its config entry and leave a
+    no-op stub this release, delete the stub in a later one. This gate
+    fails the one-commit version of that.
+    """
+    from fno.hook_config import deleted_in_range, referenced_at_revision
+
+    repo_root = _repo_root()
+    resolved = base or _resolve_range_base(repo_root)
+    if resolved is None:
+        typer.echo(
+            "hook-tombstones: no git repo, or no revision to compare against "
+            "(pass --base <rev>).",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    refs = referenced_at_revision(repo_root, resolved)
+    deleted = deleted_in_range(repo_root, resolved, "HEAD")
+    if refs is None or deleted is None:
+        typer.echo(
+            f"hook-tombstones: git failed reading {resolved}..HEAD; "
+            "refusing to read a broken probe as a clean pass.",
+            err=True,
+        )
+        raise typer.Exit(2)
+
+    findings = sorted(refs & deleted)
+    if findings:
+        typer.echo(
+            f"hook-tombstones: {len(findings)} referenced hook script(s) "
+            f"deleted since {resolved}:",
+            err=True,
+        )
+        for rel in findings:
+            typer.echo(f"  {rel}", err=True)
+        typer.echo(
+            "  Running sessions answer hook config from an init-time snapshot, "
+            "and a PreToolUse hook that cannot launch fails the whole Bash "
+            "call, so each deletion above bricks every pre-merge session's "
+            "shell. Fix: restore the path as a no-op stub and remove only its "
+            "config entry this release; delete the stub in a later release. "
+            "A session already bricked recovers without Bash by writing any "
+            "watched settings file, which forces a hook-config reload.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    typer.echo(
+        f"hook-tombstones: ok ({len(refs)} referenced script(s) at {resolved}, "
+        "0 deleted)"
     )
 
 
@@ -1485,6 +1584,11 @@ def lint(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="registry: machine-readable output."
     ),
+    base: Optional[str] = typer.Option(
+        None, "--base",
+        help="hook-tombstones: revision to measure deletions against, "
+        "instead of the auto-resolved base.",
+    ),
 ) -> None:
     """Run a repository lint check by name.
 
@@ -1511,6 +1615,7 @@ def lint(
         "files": files,
         "diff_base": diff_base,
         "as_json": as_json,
+        "base": base,
     }
     accepted = set(inspect.signature(fn).parameters)
     fn(**{k: v for k, v in supplied.items() if k in accepted})
