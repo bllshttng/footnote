@@ -1501,7 +1501,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         return clean_rc or dirty_rc
 
     if opts["state"] == "both":
-        rest: list[str] = []
+        state_rest: list[str] = []
         skip_next = False
         for a in args:
             if skip_next:
@@ -1512,11 +1512,13 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
                 continue
             if a.startswith("--state="):
                 continue
-            rest.append(a)
+            state_rest.append(a)
         print("state: clean lane")
-        clean_rc = _run_smoke([*rest, "--state=clean"], stream=stream)
+        clean_rc = _run_smoke([*state_rest, "--state=clean"], stream=stream)
         print("state: populated lane")
-        populated_rc = _run_smoke([*rest, "--state=populated"], stream=stream)
+        populated_rc = _run_smoke(
+            [*state_rest, "--state=populated"], stream=stream
+        )
         diff = _state_verdict_diff(
             _state_junit_path("clean"), _state_junit_path("populated")
         )
