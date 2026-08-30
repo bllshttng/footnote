@@ -182,16 +182,23 @@ fences = re.findall(r"```json\s*(.*?)```", text, re.DOTALL)
 if not fences:
     print("absent")
     sys.exit(0)
+parsed = []
 for body in fences:
     try:
         data = json.loads(body)
     except Exception:
         print("absent")
         sys.exit(0)
-    if data != []:
-        print("nonempty")
+    if not isinstance(data, list):
+        print("absent")
         sys.exit(0)
-print("[]")
+    parsed.append(data)
+if len(parsed) == 1:
+    print(json.dumps(parsed[0], separators=(",", ":")))
+elif all(data == [] for data in parsed):
+    print("[]")
+else:
+    print("ambiguous")
 ' 2>/dev/null || echo "absent")"
     if [[ "$findings" == "[]" ]]; then
       findings_payload="[]"
@@ -202,6 +209,12 @@ print("[]")
       # standalone "(none)" line inside longer output, an excuse line above
       # it especially, attests nothing.
       findings_payload="[]"
+    elif [[ "$findings" != "ambiguous" ]] \
+      && jq -e 'type == "array" and length > 0' <<<"$findings" >/dev/null 2>&1; then
+      # One valid non-empty findings array is a failed review verdict, not silence.
+      # Multiple fences remain ambiguous because an exclusion or later example can
+      # otherwise be mistaken for the review's findings.
+      findings_payload="$findings"
     fi
     ;;
   Stop)
@@ -260,6 +273,8 @@ esac
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null || true)"
 [[ -n "$cwd" ]] || exit 0
 cd "$cwd"
+reviewed_head="$(git rev-parse HEAD 2>/dev/null || true)"
+[[ -n "$reviewed_head" ]] || reviewed_head="unavailable"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -286,7 +301,13 @@ else
 fi
 # The one positive line naming what was classified: a run where the
 # classifier never fired is visibly different from one that classified zero.
-echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking"
+echo "code-review-attest: classified $total finding(s): $blocking blocking, $nonblocking non-blocking; reviewed head $reviewed_head; findings held"
 
-bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
-  "$reviewer_context" "$execution_context" "$output_contract" --findings-file "$payload_file"
+if bash "$script_dir/../skills/review/scripts/emit-attestation.sh" code-review "$verdict" \
+  "$reviewer_context" "$execution_context" "$output_contract" --findings-file "$payload_file"; then
+  :
+else
+  emit_rc=$?
+  echo "code-review-attest: attestation emission failed (exit $emit_rc); reviewed head $reviewed_head; holding $total finding(s); coverage remains uncovered" >&2
+  exit 2
+fi
