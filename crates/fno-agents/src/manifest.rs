@@ -1413,9 +1413,24 @@ mod tests {
         // x-8f7f added agy + opencode; x-83e7 grew the roster to full-roster parity.
         let synthetic = view("some scrollback\nesc to interrupt\n\u{276f} ");
         for agent in [
-            "claude", "codex", "gemini", "agy", "opencode", // pre-x-83e7
-            "amp", "cline", "cursor", "devin", "droid", "copilot", "grok", "hermes", "kilo",
-            "kimi", "kiro", "pi", "qodercli", // x-83e7
+            "claude",
+            "codex",
+            "gemini",
+            "agy",
+            "opencode", // pre-x-83e7
+            "amp",
+            "cline",
+            "cursor-agent",
+            "devin",
+            "droid",
+            "copilot",
+            "grok",
+            "hermes",
+            "kilo",
+            "kimi",
+            "kiro",
+            "pi",
+            "qodercli", // x-83e7
         ] {
             let src = bundled_manifest(agent).unwrap_or_else(|| panic!("{agent} is bundled"));
             let m = Manifest::parse(src)
