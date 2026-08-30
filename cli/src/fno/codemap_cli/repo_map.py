@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Standalone repo-map generator extracted from aider's RepoMap.
+Standalone repo-map generator.
 
 Generates a PageRank-weighted map of a repository's most important symbols
 and their relationships. No LLM dependency — just tree-sitter + networkx.
@@ -12,8 +12,8 @@ Usage:
     python repo_map.py /path/to/repo --tokens 2048       # Adjust token budget
     python repo_map.py /path/to/repo /path/to/other/repo # Map multiple repos
 
-Based on: https://github.com/Aider-AI/aider/blob/main/aider/repomap.py
-License: Apache-2.0 (same as aider)
+Portions of this file were derived from an Apache-2.0 upstream repo-map
+implementation and subsequently modified.
 """
 
 import argparse
@@ -87,7 +87,7 @@ QUERIES_DIR = REPOGRAM_DIR / "queries"
 
 def get_scm_fname(lang: str) -> Path | None:
     """Find the tree-sitter query file for a language."""
-    # Bundled queries (shipped with repogram)
+    # Bundled queries (shipped with the engine)
     path = QUERIES_DIR / f"{lang}-tags.scm"
     if path.exists():
         return path

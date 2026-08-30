@@ -95,7 +95,7 @@ python_version = "3.11"
 # import-not-found no matter how the file is annotated. Type-checking a script
 # against libraries the checker is not allowed to see produces noise, not safety.
 [[tool.mypy.overrides]]
-module = ["fno.codemap_cli.repogram"]
+module = ["fno.codemap_cli.repo_map"]
 ignore_errors = true
 
 # The path-config modules are held to mypy --strict. strict is expanded to its
