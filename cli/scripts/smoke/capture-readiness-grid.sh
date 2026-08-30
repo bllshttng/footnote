@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # capture-readiness-grid.sh — pin the interactive-TUI readiness prompt for
-# codex / gemini (Phase 6 Wave 2, Open Questions #2 / #3).
+# every pane-hostable harness (Phase 6 Wave 2).
 #
 # The Rust readiness detectors (crates/fno-agents/src/readiness.rs) decide an
 # agent is "ready for input" by matching a prompt glyph on the rendered grid's
@@ -12,7 +12,7 @@
 # PROMPT_GLYPHS if it differs.
 #
 # Usage:
-#   READINESS_SMOKE=1 bash scripts/smoke/capture-readiness-grid.sh [codex|gemini]
+#   READINESS_SMOKE=1 bash scripts/smoke/capture-readiness-grid.sh <harness>
 #
 # A faithful grid render needs `pyte` (pip install pyte); without it the script
 # falls back to a naive ANSI strip that does NOT handle cursor save/restore
@@ -36,10 +36,23 @@ if [[ "${READINESS_SMOKE:-0}" != "1" ]]; then
 fi
 
 PROVIDER="${1:-codex}"
-case "$PROVIDER" in
-    codex|gemini) ;;
-    *) echo "capture-readiness-grid: provider must be codex|gemini, got '$PROVIDER'" >&2; exit 2 ;;
-esac
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CLI_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+if ! PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - "$PROVIDER" <<'PY'
+import sys
+
+from fno.harness_names import KNOWN_HARNESSES
+
+harness = sys.argv[1]
+if harness not in KNOWN_HARNESSES:
+    print(f"capture-readiness-grid: unknown harness '{harness}'", file=sys.stderr)
+    raise SystemExit(2)
+PY
+then
+    exit 2
+fi
 
 if ! command -v "$PROVIDER" >/dev/null 2>&1; then
     echo "capture-readiness-grid: $PROVIDER CLI not on PATH" >&2
@@ -50,8 +63,6 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 14
 fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CLI_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FIX_DIR="${CLI_ROOT}/tests/agents/fixtures"
 mkdir -p "$FIX_DIR"
 
@@ -61,15 +72,19 @@ OUT_HEX="${FIX_DIR}/readiness-grid-${PROVIDER}.hex"
 # Spawn the CLI under a PTY, read ~4s of startup output, render it through a
 # terminal-state parser, and dump the visible screen + last non-blank line. The
 # child is SIGTERM'd after the read window; no input is ever sent.
-CAP_TXT="$(PROVIDER="$PROVIDER" python3 - "$PROVIDER" <<'PY'
+CAP_TXT="$(PROVIDER="$PROVIDER" PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - "$PROVIDER" "$CLI_ROOT" <<'PY'
 import os, pty, select, signal, sys, time
+from pathlib import Path
 
 provider = sys.argv[1]
+cli_root = sys.argv[2]
+sys.path.insert(0, os.path.join(cli_root, "src"))
+from fno.agents.mux_spawn import build_pane_argv
+
 # Interactive composer mode (no -p / exec one-shot): we want the idle prompt.
-argv = {
-    "codex": ["codex"],
-    "gemini": ["gemini", "--skip-trust"],
-}[provider]
+# The capability table and pane argv builder are the only sources of harness
+# forms; this pinner must not grow a second provider map.
+argv = build_pane_argv(provider, "", Path.cwd(), False, None)
 
 pid, fd = pty.fork()
 if pid == 0:  # child
