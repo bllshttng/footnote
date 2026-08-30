@@ -234,11 +234,20 @@ def dispatch_hold(entry: object) -> DispatchHold:
     probe = resolve_plan_probe(entry)
     if not probe:
         return DispatchHold(DispatchHoldState.ABSENT)
-    # Cross-project and temporarily unmounted plan roots are an established
+    # Cross-project and temporarily unmounted plan ROOTS are an established
     # no-signal case: there is no declaration to validate in this process. An
     # existing file that cannot be parsed is different - its hold state was
-    # reached but is unreadable, and that fails closed below.
+    # reached but is unreadable, and that fails closed below. So is a missing
+    # file under an EXISTING root (round-12 finding 6): the plan tree is
+    # mounted and the plan is absent from where the node says it lives (a
+    # stale path, a typo, a mid-fetch checkout), which must not read as
+    # unheld - only a root that is itself absent keeps ABSENT.
     if not os.path.exists(probe):
+        if os.path.isdir(os.path.dirname(probe)):
+            return DispatchHold(
+                DispatchHoldState.INVALID,
+                detail=f"plan file is missing under its existing plan root: {probe}",
+            )
         return DispatchHold(DispatchHoldState.ABSENT)
     fm, readable = _read_frontmatter(probe)
     if not readable or fm is None:
@@ -280,9 +289,21 @@ def dispatch_hold_verdict(
         return None
     queue = [entry]
     seen: set[str] = set()
+    # Enqueue-time dedup (codex round on PR 1282): `seen` only gains an id at
+    # DEQUEUE, so reconverging siblings each enqueue the same ancestor and the
+    # duplicates burned the whole 64-step budget before deeper unique
+    # ancestors were evaluated - cap exhaustion returned None (unheld) with a
+    # held ancestor never visited, the fail-open direction. With one queue
+    # slot per node id, every dequeue is a unique node and the cap counts
+    # exactly what it documents.
+    enqueued: set[str] = set()
     steps = 0
     while queue and steps < 64:
         current = queue.pop(0)
+        # Every dequeue counts (round-12 finding 9): the guard used to fire
+        # before this increment, so duplicates never counted against the
+        # 64-step cost bound this loop documents.
+        steps += 1
         node_id = str(current.get("id") or "unknown")
         if node_id in seen:
             continue
@@ -295,8 +316,10 @@ def dispatch_hold_verdict(
             if isinstance(related, str) and related and related not in seen:
                 ancestor = entries_by_id.get(related)
                 if isinstance(ancestor, dict):
-                    queue.append(ancestor)
-        steps += 1
+                    ancestor_id = str(ancestor.get("id") or "unknown")
+                    if ancestor_id not in enqueued:
+                        enqueued.add(ancestor_id)
+                        queue.append(ancestor)
     return None
 
 

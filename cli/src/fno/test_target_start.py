@@ -154,7 +154,7 @@ def test_desktop_canonical_start_requests_native_handoff_without_side_effects(
     monkeypatch.chdir(canonical)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli,
         "_git_out",
@@ -234,7 +234,7 @@ def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-tui")
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     def _git_out_stub(cwd, *args):
         if args == ("rev-parse", "--show-toplevel"):
             return str(canonical)
@@ -280,7 +280,7 @@ def test_desktop_canonical_start_refuses_without_project_assignment(
     monkeypatch.chdir(canonical)
     monkeypatch.setenv("CODEX_THREAD_ID", "thread-desktop")
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node: node)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node, entries=None: node)
     monkeypatch.setattr(
         target_cli,
         "_git_out",
@@ -494,7 +494,7 @@ def test_native_codex_retry_initializes_in_app_owned_worktree(monkeypatch, tmp_p
     native.mkdir(parents=True)
     monkeypatch.chdir(native)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
     monkeypatch.setattr(target_cli, "_codex_native_repo", lambda cwd: canonical)
     monkeypatch.setattr(
@@ -620,7 +620,7 @@ def test_unverified_codex_worktree_refuses_instead_of_noop(monkeypatch, tmp_path
     monkeypatch.chdir(native)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node: node)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda node, entries=None: node)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda node: None)
     monkeypatch.setattr(target_cli, "_codex_native_repo", lambda cwd: None)
 
@@ -863,7 +863,7 @@ def test_native_codex_free_text_resume_refuses_malformed_manifest(
 # ------------------------------- no-op branch ----------------------------- #
 def test_already_isolated_is_noop(monkeypatch):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda nid: None)
     spawned = []
     monkeypatch.setattr(
@@ -877,12 +877,16 @@ def test_already_isolated_is_noop(monkeypatch):
 
 def test_start_refuses_dispatch_hold_before_worktree_ensure(monkeypatch):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
-    monkeypatch.setattr(target_cli, "_find_node", lambda node: {"id": node})
+    # start() finds the node from the one shared graph read (round-12
+    # finding 10), so the shared reader - not _find_node - is the seam.
+    monkeypatch.setattr(
+        target_cli, "_graph_entries_or_none", lambda: [{"id": "x-5a5c"}]
+    )
     seen = []
 
-    def refuse(node):
+    def refuse(node, entries=None):
         seen.append(node["id"])
         raise typer.Exit(code=2)
 
@@ -901,7 +905,7 @@ def test_start_refuses_dispatch_hold_before_worktree_ensure(monkeypatch):
 def _wire_happy(monkeypatch, wt_path: Path, *, manifest_exists: bool):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli, "_git_out", lambda cwd, *a: "/canonical/repo"
     )
@@ -951,7 +955,7 @@ def test_start_forwards_model_provider_to_init(monkeypatch, tmp_path):
     wt.mkdir()
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda r, w: (0, ""))
 
@@ -1061,7 +1065,7 @@ def test_already_claimed_receipt_names_the_live_holder(monkeypatch, tmp_path):
 def test_ensure_failure_is_loud_and_skips_init(monkeypatch, tmp_path):
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
     init_calls = []
 
@@ -1086,7 +1090,7 @@ def _wire_start(monkeypatch, wt: Path):
     """
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_resolve_fno_cmd", lambda: ["fno"])
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_git_out", lambda cwd, *a: "/canonical/repo")
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda r, w: (0, ""))
     init_args: list[str] = []
@@ -1274,7 +1278,7 @@ def test_resolve_node_model_scopes_by_provider(monkeypatch):
 
 def test_resolve_model_command_prints_model(monkeypatch):
     """`fno do target resolve-model` prints the resolved model for bash dispatchers."""
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
@@ -1287,7 +1291,7 @@ def test_resolve_model_command_prints_model(monkeypatch):
 
 def test_resolve_model_command_empty_when_no_model(monkeypatch):
     """No pin/tier -> prints nothing (caller uses the provider default)."""
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
@@ -1312,7 +1316,7 @@ def _declare_fleet(monkeypatch):
 def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
     """--harness claude drops a tier that resolved to a codex model (bg is claude-only)."""
     _declare_fleet(monkeypatch)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
@@ -1329,7 +1333,7 @@ def test_resolve_model_provider_filter_drops_cross_harness(monkeypatch):
 def test_resolve_model_provider_filter_keeps_same_harness(monkeypatch):
     """--harness claude keeps a claude-reachable tier model."""
     _declare_fleet(monkeypatch)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli,
         "_resolve_node_model",
@@ -1563,7 +1567,7 @@ def test_manifest_present_own_rerun_proceeds(monkeypatch, tmp_path):
 def test_already_isolated_foreign_holder_refuses(monkeypatch):
     # AC2-HP: cwd is a foreign live session's worktree -> park, exit 1.
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli, "_foreign_live_holder",
         lambda nid: {"holder": "target-session:A", "pid": 4321, "host": "boxA"},

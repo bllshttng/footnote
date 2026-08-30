@@ -695,7 +695,7 @@ def test_target_start_forwards_harness_and_never_launches_in_place(tmp_path, mon
         return (0, "")
 
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", _setup_hook)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
     result = runner.invoke(app, ["do", "target", "start", "x-nev"])
@@ -741,7 +741,7 @@ def test_target_start_forwards_beastmode_to_init(tmp_path, monkeypatch):
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
     )
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_resolve_node_model", lambda *a, **k: (None, "none"))
 
     result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
@@ -790,7 +790,7 @@ def test_resolve_model_command_resolves_difficulty_band(monkeypatch):
         {"name": "glm-4.7", "harness": "claude", "model": "glm-4.7", "band": "low"},
     ])
     monkeypatch.setattr(rr, "resolve_inventory", lambda **_kw: inv)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(
         target_cli, "_find_node", lambda node_id: {"id": node_id, "difficulty": "low"}
     )
@@ -813,7 +813,7 @@ def test_target_start_beastmode_noop_when_already_isolated_is_named(tmp_path, mo
 
     monkeypatch.chdir(fake_root)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda _p: True)
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda _n: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-yol", "--beastmode"])
@@ -947,7 +947,7 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
         lambda *a, **k: HarnessIdentity(session_id="s", harness="claude"),
     )
     monkeypatch.setattr("fno.worktree._run_setup_worktree_hook", lambda *a, **k: (0, ""))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_foreign_live_holder", lambda n: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-nev"])
@@ -1072,6 +1072,92 @@ def test_check_dispatch_hold_is_wired_for_direct_shell_bootstrap(tmp_path, monke
     text = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh")).read_text()
     assert "fno do target check-dispatch-hold" in text
     assert '"$_DH_RC" -eq 9' in text
+
+
+def _unreadable_graph(tmp_path, monkeypatch):
+    """graph.json resolves to a directory: open() raises, nothing parses."""
+    gp = tmp_path / "graph-unreadable"
+    gp.mkdir()
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    _clear_root_cache()
+    return gp
+
+
+def test_target_init_refuses_named_node_when_graph_unreadable(tmp_path, monkeypatch):
+    """Round-12 finding 10: the resolver's fail-open swallowed an unreadable
+    graph before the hold gate could refuse on it, so a named dispatch
+    silently skipped the hold check exactly when nothing could prove the plan
+    unheld."""
+    _unreadable_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["do", "target", "init", "--input", "x-5a5c"])
+    assert result.exit_code == 2, result.output
+    assert "dispatch-hold-invalid" in result.output
+    assert "backlog graph is unreadable" in result.output
+    assert "refusing to assume unheld" in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_target_init_free_text_proceeds_when_graph_unreadable(tmp_path, monkeypatch):
+    """Free text cannot name a held node, so an unreadable graph keeps its
+    proceed path - the refusal is scoped to named dispatches."""
+    _unreadable_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["do", "target", "init", "--input", "fix the login bug"])
+    assert "dispatch-hold-invalid" not in result.output
+    assert ran != [], "free-text init must still reach the bootstrap"
+    _clear_root_cache()
+
+
+def test_check_dispatch_hold_refuses_named_node_when_graph_unreadable(tmp_path, monkeypatch):
+    _unreadable_graph(tmp_path, monkeypatch)
+    monkeypatch.setenv("TARGET_INPUT", "x-5a5c")
+    result = runner.invoke(app, ["do", "target", "check-dispatch-hold"])
+    assert result.exit_code == 9, result.output
+    assert "backlog graph is unreadable" in result.output
+    assert "refusing to assume unheld" in result.output
+    _clear_root_cache()
+
+
+def test_target_start_refuses_node_when_graph_unreadable(tmp_path, monkeypatch):
+    """The start path shared the same hole via best-effort _find_node: an
+    unreadable graph returned None and the hold gate skipped. It must refuse
+    before any worktree is allocated."""
+    import subprocess as _real_subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _real_subprocess.run(["git", "-C", str(repo), "init", "-q", "-b", "main"], check=True)
+    _real_subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "init"], check=True
+    )
+    monkeypatch.chdir(repo)
+    _unreadable_graph(tmp_path, monkeypatch)
+
+    seen = {"ensure": False}
+    real_run = _real_subprocess.run
+
+    def _dispatch(cmd, *a, **k):
+        cmd = list(cmd)
+        if cmd and cmd[0] == "git":
+            return real_run(cmd, *a, **k)
+        if "ensure" in cmd:
+            seen["ensure"] = True
+        return _real_subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _dispatch)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
+
+    result = runner.invoke(app, ["do", "target", "start", "x-5a5c"])
+    assert result.exit_code == 2, result.output
+    assert "dispatch-hold-invalid" in result.output
+    assert "backlog graph is unreadable" in result.output
+    assert seen["ensure"] is False, "no worktree may be allocated before the refusal"
+    _clear_root_cache()
 
 
 def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
@@ -1333,7 +1419,7 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
     monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
     monkeypatch.setattr(target_cli, "_git_out", lambda *a, **k: str(tmp_path))
-    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n, entries=None: n)
     monkeypatch.setattr(target_cli, "_codex_desktop_handoff_policy", lambda r: None)
 
     result = runner.invoke(app, ["do", "target", "start", "x-261c"])

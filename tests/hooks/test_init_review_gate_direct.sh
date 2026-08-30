@@ -82,13 +82,15 @@ STUB
 }
 
 # Usage: run_init <dir> [extra env assignments...]
+# The input is SPACED free text on purpose: a kebab-shaped token is a
+# legal node slug, and the fno-absent hold gate (x-d884 F7) refuses those.
 run_init() {
   local _dir="$1"; shift
   (cd "$_dir" && env \
     PATH="${_dir}/bin:${PATH}" \
     HOME="${_dir}/home" \
     TARGET_START=1 \
-    TARGET_INPUT="review-gate-probe" \
+    TARGET_INPUT="review gate probe" \
     "$@" \
     bash "$INIT") > "${_dir}/out.log" 2> "${_dir}/err.log"
 }
@@ -171,7 +173,7 @@ _CLEAN_PATH="$(cd "$TMP_NOFNO" && command -v git | xargs dirname)"
   PATH="${_CLEAN_PATH}:/usr/bin:/bin" \
   HOME="${TMP_NOFNO}/home" \
   TARGET_START=1 \
-  TARGET_INPUT="review-gate-probe" \
+  TARGET_INPUT="review gate probe" \
   bash "$INIT") > "${TMP_NOFNO}/out.log" 2> "${TMP_NOFNO}/err.log"
 _RC=$?
 [[ "$_RC" -eq 0 ]] || fail "AC5-ERR: absent fno blocked bootstrap (exit $_RC; err: $(cat "$TMP_NOFNO/err.log"))"

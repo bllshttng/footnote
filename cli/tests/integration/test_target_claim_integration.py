@@ -37,9 +37,16 @@ STOP_HOOK = REPO_ROOT / "hooks" / "target-stop-hook.sh"
 # ---------------------------------------------------------------------------
 
 
-def test_init_target_state_writes_a_state_file_for_a_node_input(tmp_path):
-    """init-target-state.sh runs end to end for a node input and writes a state
-    file, with no `fno` on PATH.
+def test_init_target_state_writes_a_state_file_for_a_free_text_input_no_fno(tmp_path):
+    """init-target-state.sh runs end to end for a FREE-TEXT input and writes a
+    state file, with no `fno` on PATH.
+
+    A node-shaped input (canonical id, bare hex, slug) now REFUSES on this
+    degraded path by design: the dispatch hold state cannot be checked, and
+    refusing is the fail-closed answer. That refusal has its own forced-failure
+    coverage in tests/hooks/test_init_hold_shapes.sh; what this test owns is
+    the end-to-end manifest write for the input shape that may legitimately
+    proceed.
 
     Deliberately NOT the claim-acquisition test, though it used to claim to be.
     Its claim assertions sat behind `if "target_claim_key:" in text:` and that
@@ -74,7 +81,7 @@ def test_init_target_state_writes_a_state_file_for_a_node_input(tmp_path):
     env = os.environ.copy()
     env.update({
         "TARGET_START": "1",
-        "TARGET_INPUT": "ab-testit",
+        "TARGET_INPUT": "ship the widget",
         "TARGET_SIZE": "S",
         "HOME": str(fno_home.parent),  # so the script's path-discovery works
     })
@@ -109,7 +116,7 @@ def test_init_target_state_writes_a_state_file_for_a_node_input(tmp_path):
     # Assert what this sandbox actually produces, unconditionally. A `fno`-less
     # run still has to write a well-formed manifest naming its input.
     assert "fno_id:" in text, text
-    assert 'input: "ab-testit"' in text, text
+    assert 'input: "ship the widget"' in text, text
     assert result.returncode == 0, (
         f"rc={result.returncode}, stderr={result.stderr[:500]!r}"
     )

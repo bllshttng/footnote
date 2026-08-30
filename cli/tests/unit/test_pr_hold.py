@@ -21,6 +21,27 @@ def _real_hold_reader(monkeypatch):
     monkeypatch.setattr(_hold, "hold_for_pr", _REAL_HOLD_FOR_PR)
 
 
+@pytest.fixture(autouse=True)
+def _record_disable_auto(monkeypatch):
+    """Capture `gh pr merge <n> --disable-auto` calls (the F3 disarm leg)
+    instead of shelling a real gh, passing every other `_merge.run` command
+    through - the root-resolution tests below run real `git rev-parse`."""
+    import fno.pr._merge as merge_mod
+    from fno.pr._proc import Result
+
+    real = merge_mod.run
+    disarm_calls: list[list[str]] = []
+
+    def fake(cmd, **kwargs):
+        if list(cmd[:2]) == ["gh", "pr"] and "--disable-auto" in cmd:
+            disarm_calls.append(list(cmd))
+            return Result(returncode=0, stdout="", stderr="")
+        return real(cmd, **kwargs)
+
+    monkeypatch.setattr(merge_mod, "run", fake)
+    return disarm_calls
+
+
 def _graph(tmp_path, monkeypatch, *, plan_body: str, pr_body: str = "", entries=None):
     plan = tmp_path / "held.md"
     plan.write_text(plan_body)
@@ -402,3 +423,99 @@ def test_hold_check_cli_refuses_with_reason_and_setter(tmp_path, monkeypatch):
     assert result.exit_code == 3, result.output
     assert "dispatch-hold:x-5a5c" in result.output
     assert "set_by=king:119e3c52" in result.output
+
+
+def test_hold_for_pr_refuses_on_ambiguous_pr_to_node_match(tmp_path, monkeypatch):
+    """Round-12 finding 2: two same-number candidates with no discriminating
+    pr_url must NOT read as "no binding" - one of them may carry an active
+    hold. The refusal names both candidates."""
+    held_plan = tmp_path / "held.md"
+    held_plan.write_text(
+        "---\nstatus: ready\ndispatch_hold:\n"
+        "  reason: Blocking finding\n  release_when: Finding fixed\n"
+        "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+    )
+    unheld_plan = tmp_path / "unheld.md"
+    unheld_plan.write_text("---\nstatus: ready\n---\n")
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body="---\nstatus: ready\n---\n",  # unused: entries below
+        entries=[
+            # Both carry pr_number 42 and no pr_url, so neither can be proven
+            # foreign to this repo: a genuine ambiguity, not a cross-repo
+            # collision.
+            {"id": "x-a001", "cwd": str(tmp_path), "pr_number": 42,
+             "plan_path": str(held_plan)},
+            {"id": "x-a002", "cwd": str(tmp_path), "pr_number": 42,
+             "plan_path": str(unheld_plan)},
+        ],
+    )
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None, "an ambiguous match must refuse, not read unheld"
+    assert "maps ambiguously" in reason
+    assert "x-a001" in reason and "x-a002" in reason
+    assert "refusing to assume unheld" in reason
+
+
+def test_a_hold_verdict_disarms_the_queued_auto_merge(tmp_path, monkeypatch, capsys, _record_disable_auto):
+    """Round-12 finding 3: GitHub's --auto queue fires server-side with no
+    hold re-check, so the first local read that sees a hold must kill the
+    queue entry. A held verdict fires `gh pr merge <n> --disable-auto` and
+    says how to re-arm."""
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body=(
+            "---\nstatus: ready\ndispatch_hold:\n"
+            "  reason: Blocking finding\n  release_when: Finding fixed\n"
+            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        ),
+    )
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold:x-5a5c" in reason
+    assert _record_disable_auto == [["gh", "pr", "merge", "42", "--disable-auto"]]
+    err = capsys.readouterr().err
+    assert "disabled an armed auto-merge for PR 42" in err
+    assert "re-arm" in err
+
+
+def test_an_unheld_verdict_never_disarms(tmp_path, monkeypatch, _record_disable_auto):
+    """The disarm is the hold's shadow, not a tax on every read: a proven
+    unheld PR must not spend a gh call."""
+    _graph(tmp_path, monkeypatch, plan_body="---\nstatus: ready\n---\n")
+    assert _hold.merge_hold_reason(42, str(tmp_path)) is None
+    assert _record_disable_auto == []
+
+
+def test_a_failed_disarm_is_surfaced_not_silenced(tmp_path, monkeypatch, capsys):
+    """Codex round on PR 1282: a nonzero disable-auto exit covers both the
+    benign nothing-armed case and the dangerous auth/permission failure where
+    the queue STAYS armed. gh's own output is the only discriminator, so the
+    note must carry it."""
+    from fno.pr._proc import Result
+
+    import fno.pr._merge as merge_mod
+
+    _graph(
+        tmp_path,
+        monkeypatch,
+        plan_body=(
+            "---\nstatus: ready\ndispatch_hold:\n"
+            "  reason: Blocking finding\n  release_when: Finding fixed\n"
+            "  review_on: 2099-08-20\n  set_by: king:119e3c52\n---\n"
+        ),
+    )
+    monkeypatch.setattr(
+        merge_mod,
+        "run",
+        lambda cmd, **k: Result(
+            returncode=1, stdout="", stderr="gh: authentication failed"
+        ),
+    )
+    reason = _hold.merge_hold_reason(42, str(tmp_path))
+    assert reason is not None and "dispatch-hold:x-5a5c" in reason
+    err = capsys.readouterr().err
+    assert "returned nonzero" in err
+    assert "authentication failed" in err
+    assert "may still exist" in err

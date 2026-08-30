@@ -86,14 +86,30 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
       echo "[init-target-state] note: containment gate unavailable (rc=$_CT_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
     fi
   else
+    # Node-shape detection on the fno-absent fallback (round-12 finding 7).
+    # fuzzy.resolve_node accepts canonical <prefix>-<hex>, bare <hex>, and
+    # slugs; the old single regex matched only the first, so a bare-hex or
+    # slug TARGET_INPUT sailed through as "free text" on exactly the degraded
+    # path where the hold gate cannot run. Every shape that MIGHT name a node
+    # or plan refuses - including a .md-suffixed path that does not exist on
+    # disk (a typo'd plan path is exactly as uncheckable as a live one); only
+    # shapes that cannot (spaced free text, a single word) proceed. A 4-8
+    # char all-hex word (cafe, dead) collides with bare-hex and refuses too -
+    # the fail-closed direction this branch exists for.
     _HOLD_CHECK_REQUIRED=0
     [[ -n "${TARGET_PLAN_PATH:-}" ]] && _HOLD_CHECK_REQUIRED=1
     [[ "${TARGET_INPUT:-}" =~ ^[a-zA-Z][a-zA-Z0-9_-]*-[0-9a-fA-F]{4,8}$ ]] \
       && _HOLD_CHECK_REQUIRED=1
+    [[ "${TARGET_INPUT:-}" =~ ^[0-9a-fA-F]{4,8}$ ]] \
+      && _HOLD_CHECK_REQUIRED=1
+    [[ "${TARGET_INPUT:-}" =~ ^[a-z0-9]+(-[a-z0-9]+)+$ ]] \
+      && _HOLD_CHECK_REQUIRED=1
+    [[ "${TARGET_INPUT:-}" =~ \.md$ ]] \
+      && _HOLD_CHECK_REQUIRED=1
     [[ -n "${TARGET_INPUT:-}" && -f "${TARGET_INPUT:-}" ]] \
       && _HOLD_CHECK_REQUIRED=1
     if [[ "$_HOLD_CHECK_REQUIRED" == "1" ]]; then
-      echo "[init-target-state] REFUSED: fno absent - dispatch hold state cannot be checked" >&2
+      echo "[init-target-state] REFUSED: fno absent - TARGET_INPUT may name a node (canonical id, bare hex, slug, or plan path) and dispatch hold state cannot be checked; refusing to assume unheld. Install or fix fno, or pass the canonical node id from a shell where fno resolves." >&2
       exit 2
     fi
     echo "[init-target-state] note: fno absent - no existing node or plan to hold; proceeding with free-text init" >&2

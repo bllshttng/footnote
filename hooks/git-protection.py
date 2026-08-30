@@ -648,7 +648,14 @@ def _inprocess_dispatch_hold_reason(pr_number):
         if cli_src.is_dir() and str(cli_src) not in sys.path:
             sys.path.insert(0, str(cli_src))
         from fno.pr._hold import merge_hold_reason
-    except (ImportError, ModuleNotFoundError):
+    except Exception:  # noqa: BLE001 - any dead import leg degrades to subprocess
+        # The import chain reaches third-party deps (`fno.pr._hold` ->
+        # `fno.pr.__init__` -> typer), so a broken/partial install raises more
+        # than ImportError - a version-mismatch AttributeError propagated
+        # uncaught and crashed this PreToolUse hook instead of degrading to
+        # the documented subprocess fallback (round-12 finding 8). The
+        # fallback itself fails closed on failure, so widening this catch can
+        # only route to a slower reader, never a weaker verdict.
         return False, None
     try:
         return True, merge_hold_reason(int(pr_number), os.getcwd())
@@ -744,11 +751,26 @@ def _coverage_refusal(command=""):
 
 def _dispatch_hold_refusal(command=""):
     """Fail-closed plan-hold veto for every bare ``gh pr merge`` path."""
-    pr_number = _parse_merge_pr(command)
-    if not pr_number:
-        return None
     if _targets_other_repo(command):
         return "cannot verify plan dispatch hold for a merge targeting another repository"
+    pr_number = _parse_merge_pr(command)
+    if not pr_number:
+        # The no-PR-number forms (current-branch and branch-name) are exactly
+        # the forms `_check_pr_merge_allowed` can still authorize via its
+        # single-neutral-session path (prefer_pr=None), so returning None here
+        # let a merge proceed against an active plan-level hold with the hold
+        # check never running (round-12 finding 1). The sibling lineage and
+        # coverage vetoes fail OPEN on this shape by documented policy - the
+        # sanctioned verb recomputes them - but this veto's own contract is
+        # fail-closed: an unanswerable hold state must not read as unheld.
+        # Resolving the PR from the branch costs a network call this hook
+        # cannot afford, so the refusal names the sanctioned verb instead.
+        return (
+            "cannot determine which PR this bare `gh pr merge` targets, so its "
+            "plan dispatch hold cannot be checked; refusing to assume unheld. "
+            "Run `fno do pr merge <N>` (or pass the PR number), which resolves "
+            "the PR and is not gated by this hook"
+        )
     available, reason = _inprocess_dispatch_hold_reason(pr_number)
     if available:
         return reason

@@ -2967,6 +2967,12 @@ def test_adopt_under_a_deferred_group_child_is_refused(graph_env):
     assert unit in result.output
     assert "deferred" in result.output
     assert "undefer" in result.output
+    # Round-12 finding 5: the refusal must not claim the deferral released
+    # containment - cmd_defer keeps children folded
+    # (test_defer_keeps_an_existing_adoptee_folded), so the message names the
+    # fold instead of a release that never ran.
+    assert "already released" not in result.output, result.output
+    assert "remain folded" in result.output, result.output
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None
 

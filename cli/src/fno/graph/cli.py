@@ -2183,6 +2183,10 @@ def cmd_decompose(
                 # that exits 0 and changes nothing this refusal reads.
                 if _superseder:
                     _how = f"was superseded by {_superseder}"
+                    _containment = (
+                        "its death already released the nodes it contained "
+                        "and nothing re-runs that release"
+                    )
                     _remedy = (
                         f"Run `fno backlog unsupersede {node['id']}` to revive it "
                         "(clears superseded_by; `undefer` does not), or point the "
@@ -2190,15 +2194,26 @@ def cmd_decompose(
                         "new slug so it mints a live delivery unit"
                     )
                 else:
+                    # Round-12 finding 5: `cmd_defer` no longer releases
+                    # contained children, so a deferred owner's adoptees stay
+                    # folded (test_defer_keeps_an_existing_adoptee_folded).
+                    # The superseded branch's "already released" claim is
+                    # provably false here; name the real state so the operator
+                    # undefering knows the paused unit resumes with its
+                    # children still contained, not re-run from scratch.
                     _how = "is deferred"
+                    _containment = (
+                        "its contained nodes remain folded under it (defer "
+                        "keeps containment; nothing re-runs a release)"
+                    )
                     _remedy = (
-                        f"Run `fno backlog undefer {node['id']}` first, or drop "
+                        f"Run `fno backlog undefer {node['id']}` first (its "
+                        "children resume contained, not released), or drop "
                         "the adopt list from this group"
                     )
                 raise DecomposeError(
                     f"group {grp['slug']!r} resolves to {node['id']}, which "
-                    f"{_how}; its death already released the nodes it contained "
-                    "and nothing re-runs that release, so stamping containment "
+                    f"{_how}; {_containment}, so stamping containment "
                     "here would leave every adoptee undispatchable with no verb "
                     f"to free it. {_remedy}",
                     exit_code=2,
