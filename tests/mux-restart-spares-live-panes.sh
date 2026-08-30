@@ -65,8 +65,16 @@ fi
 
 SIDECAR="$MUX_DIR/$SESSION.ver"
 printf '57\n' >"$SIDECAR"
-RESTART_OUTPUT="$(uv run --project "$REPO_ROOT/cli" fno-py agents restart --no-revive --json 2>&1)"
+RESTART_RC=0
+RESTART_OUTPUT="$(uv run --project "$REPO_ROOT/cli" fno-py agents restart --no-revive --json 2>&1)" || RESTART_RC=$?
 printf '%s\n' "$RESTART_OUTPUT"
+# A spared stale-wire server is a reported FAILURE, not success: the command
+# must exit 1 so exit-code automation sees the fleet is still skewed (the
+# same contract the wedged rows already had), while the pane child survives.
+if [[ "$RESTART_RC" -ne 1 ]]; then
+    echo "FAIL: restart rc=$RESTART_RC; a spared stale-wire server must exit 1" >&2
+    exit 1
+fi
 if ! grep -F "mux session '$SESSION'" <<<"$RESTART_OUTPUT" | grep -F 'spared' >/dev/null; then
     echo "FAIL: restart output did not name the spared session" >&2
     exit 1
