@@ -143,14 +143,51 @@ def test_mail_requires_a_distinct_worker_reply() -> None:
     ) == "PROBE_REPLY=nonce"
 
 
+def test_recall_requires_a_distinct_worker_reply() -> None:
+    assert harness_probe._recall_marker(
+        0,
+        0,
+        "PROBE_SEED=nonce\nPROBE_RECALL=nonce",
+        "PROBE_SEED=nonce\nPROBE_RECALL=nonce",
+        "nonce",
+    ) == ""
+    assert harness_probe._recall_marker(
+        0, 0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+    ) == ""
+    assert harness_probe._recall_marker(
+        0,
+        0,
+        "PROBE_SEED=nonce",
+        "PROBE_SEED=nonce\nPROBE_RECALL=nonce",
+        "nonce",
+    ) == "PROBE_RECALL=nonce"
+
+
+def test_probe_seed_requests_distinct_replies() -> None:
+    seed = harness_probe._probe_seed("seed", "worker", "probe:claude:1234")
+
+    assert "PROBE_RECALL_REQUEST=<nonce>" in seed
+    assert "PROBE_RECALL=<nonce>" in seed
+    assert "PROBE_MAIL=<nonce>" in seed
+    assert "PROBE_REPLY=<nonce>" in seed
+    assert "PROBE_SURVIVE_REQUEST=<nonce>" in seed
+    assert "PROBE_SEED=seed" in seed
+    assert "PROBE_SURVIVE=<nonce>" in seed
+
+
 def test_survive_requires_successful_resume_and_new_marker() -> None:
     assert harness_probe._survive_marker(
-        1, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+        1, 0, 0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
     ) == ""
     assert harness_probe._survive_marker(
-        0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+        0, 1, 0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
     ) == ""
     assert harness_probe._survive_marker(
+        0, 0, 1, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+    ) == ""
+    assert harness_probe._survive_marker(
+        0,
+        0,
         0,
         "PROBE_SEED=nonce",
         "PROBE_SEED=nonce\nPROBE_SURVIVE=nonce",
@@ -327,6 +364,35 @@ def test_manifest_pinned_requires_readiness_marker() -> None:
 
     assert verdict.status == "fail"
     assert verdict.marker == "live readiness-grid capture"
+
+
+def test_readiness_marker_uses_checkout_binary(monkeypatch, tmp_path: Path) -> None:
+    fixture = tmp_path / "cli/tests/agents/fixtures/readiness-grid-claude.txt"
+    fixture.parent.mkdir(parents=True)
+    fixture.write_text("idle prompt\n", encoding="utf-8")
+    binary = tmp_path / "crates/fno-agents/target/debug/fno-agents"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    seen: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        seen["command"] = command
+        seen["input"] = kwargs["input"]
+        return harness_probe.subprocess.CompletedProcess(
+            command, 0, '{"matched": true, "rule_id": "idle"}', ""
+        )
+
+    monkeypatch.setattr(harness_probe.subprocess, "run", run)
+
+    assert harness_probe._readiness_marker("claude", tmp_path) == "readiness rule idle"
+    assert seen["command"] == [
+        str(binary),
+        "manifest-eval",
+        "--harness",
+        "claude",
+    ]
+    assert seen["input"] == "idle prompt\n"
 
 
 def test_instrument_timeout_is_longer_than_status_timeout(monkeypatch, tmp_path: Path) -> None:

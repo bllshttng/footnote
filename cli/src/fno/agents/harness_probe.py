@@ -114,11 +114,12 @@ def _identity_from_marker(
     expected_nonce: str,
     attempts: int,
 ) -> LineVerdict:
+    recall_marker = f"PROBE_RECALL={expected_nonce}"
     return line_identity(
         session_id=session_id,
         store_match=observed == "local store artifact",
         recalled_nonce=expected_nonce
-        if observed == "cross-process recall nonce"
+        if observed in {"cross-process recall nonce", recall_marker}
         else "",
         expected_nonce=expected_nonce,
         attempts=attempts,
@@ -130,14 +131,65 @@ def _mail_response_marker(before: str, after: str, nonce: str) -> str:
     return marker if marker in after and marker not in before else ""
 
 
+def _recall_marker(
+    resume_code: int,
+    request_code: int,
+    before: str,
+    after: str,
+    nonce: str,
+) -> str:
+    marker = f"PROBE_RECALL={nonce}"
+    if (
+        resume_code == 0
+        and request_code == 0
+        and marker in after
+        and marker not in before
+    ):
+        return marker
+    return ""
+
+
 def _survive_marker(
-    resume_code: int, before: str, after: str, nonce: str
+    kill_code: int,
+    resume_code: int,
+    request_code: int,
+    before: str,
+    after: str,
+    nonce: str,
 ) -> str:
     prior = f"PROBE_SEED={nonce}"
     reply = f"PROBE_SURVIVE={nonce}"
-    if resume_code == 0 and prior in before and prior in after and reply in after and reply not in before:
+    if (
+        kill_code == 0
+        and resume_code == 0
+        and request_code == 0
+        and prior in before
+        and prior in after
+        and reply in after
+        and reply not in before
+    ):
         return reply
     return ""
+
+
+def _identity_observed_marker(
+    *,
+    session_id: str,
+    logs_before: str,
+    logs_after: str,
+    resume_code: int,
+    request_code: int,
+    nonce: str,
+) -> str:
+    if session_id and session_id in logs_after:
+        return "local store artifact"
+    return _recall_marker(
+        resume_code,
+        request_code,
+        logs_before,
+        logs_after,
+        nonce,
+    )
 
 
 def _screen_marker(code: int, output: str) -> str:
@@ -534,17 +586,40 @@ def _auth_failure(output: str) -> bool:
     )
 
 
+def _checkout_manifest_binary(root: Path) -> Path | None:
+    for profile in ("debug", "release"):
+        candidate = root / "crates/fno-agents/target" / profile / "fno-agents"
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def _readiness_marker(harness: str, root: Path) -> str | None:
     fixture = root / "cli/tests/agents/fixtures" / f"readiness-grid-{harness}.txt"
     try:
         screen = fixture.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
+    binary = _checkout_manifest_binary(root)
+    if binary is None:
+        return None
     try:
-        from fno.agents.mux_spawn import _evaluate_manifest_screen
-
-        verdict = _evaluate_manifest_screen(harness, screen, allow_dev_binary=True)
-    except Exception:  # noqa: BLE001 - unreadable detector is no proof
+        result = subprocess.run(
+            [str(binary), "manifest-eval", "--harness", harness],
+            input=screen,
+            capture_output=True,
+            text=True,
+            timeout=INSTRUMENT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        verdict = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(verdict, dict):
         return None
     if verdict.get("matched") and verdict.get("rule_id"):
         return f"readiness rule {verdict['rule_id']}"
@@ -566,15 +641,24 @@ def _credential_skip_lines(action: str) -> list[LineVerdict]:
     ]
 
 
+def _probe_seed(nonce: str, name: str, claim_key: str) -> str:
+    return (
+        f"Support probe {nonce}. Run fno agents claim acquire {claim_key} "
+        f"--holder {name} --ttl 2m, then print PROBE_SEED={nonce}. "
+        "When you receive PROBE_RECALL_REQUEST=<nonce>, print "
+        "PROBE_RECALL=<nonce>. When you receive PROBE_MAIL=<nonce>, print "
+        "PROBE_REPLY=<nonce>. When you receive "
+        "PROBE_SURVIVE_REQUEST=<nonce>, and only after seeing "
+        f"PROBE_SEED={nonce}, print PROBE_SURVIVE=<nonce>. Remain idle."
+    )
+
+
 def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
     probe_id = uuid.uuid4().hex[:8]
     name = f"harness-probe-{harness}-{probe_id}"
     claim_key = f"probe:{harness}:{probe_id}"
     nonce = uuid.uuid4().hex
-    seed = (
-        f"Support probe {nonce}. Run fno agents claim acquire {claim_key} "
-        f"--holder {name} --ttl 2m, print PROBE_SEED={nonce}, then remain idle."
-    )
+    seed = _probe_seed(nonce, name, claim_key)
     with tempfile.TemporaryDirectory(prefix=f"fno-harness-{harness}-") as scratch_name:
         scratch = Path(scratch_name)
         spawn_code, spawn_output = _run_command(
@@ -643,29 +727,33 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
 
             session_id = str(_row_value(row, "harness_session_id") or "")
             logs_before = _worker_logs(name, cwd=root)
-            _, recall_output = _run_command(
+            resume_code, _ = _run_command(
+                ["fno", "agents", "resume", name],
+                cwd=root,
+                timeout=PROBE_TIMEOUT_S,
+            )
+            recall_request_code, _ = _run_command(
                 [
                     "fno",
                     "agents",
-                    "resume",
+                    "mail",
+                    "send",
                     name,
-                    "--message",
-                    f"print PROBE_RECALL={nonce}",
+                    f"PROBE_RECALL_REQUEST={nonce}",
                 ],
                 cwd=root,
                 timeout=PROBE_TIMEOUT_S,
             )
             identity = retry_marker(
                 line="IDENTITY",
-                marker_name="local store artifact",
-                read_marker=lambda: (
-                    "local store artifact"
-                    if session_id and session_id in _worker_logs(name, cwd=root)
-                    else (
-                        "cross-process recall nonce"
-                        if nonce in recall_output or nonce in _worker_logs(name, cwd=root)
-                        else ""
-                    )
+                marker_name="local store artifact or cross-process recall nonce",
+                read_marker=lambda: _identity_observed_marker(
+                    session_id=session_id,
+                    logs_before=logs_before,
+                    logs_after=_worker_logs(name, cwd=root),
+                    resume_code=resume_code,
+                    request_code=recall_request_code,
+                    nonce=nonce,
                 ),
                 matches=bool,
                 delay_s=0.5,
@@ -744,7 +832,7 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
             )
 
             if isinstance(mux, dict) and mux.get("session") and mux.get("pane_id"):
-                resume_code, _ = _run_command(
+                kill_code, _ = _run_command(
                     [
                         "fno",
                         "mux",
@@ -757,14 +845,20 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                     cwd=root,
                     timeout=PROBE_TIMEOUT_S,
                 )
-                _run_command(
+                resume_code, _ = _run_command(
                     [
                         "fno",
                         "agents",
                         "resume",
                         name,
-                        "--message",
-                        f"print PROBE_SURVIVE={nonce}",
+                    ],
+                    cwd=root,
+                    timeout=PROBE_TIMEOUT_S,
+                )
+                survive_request_code, _ = _run_command(
+                    [
+                        "fno", "agents", "mail", "send", name,
+                        f"PROBE_SURVIVE_REQUEST={nonce}",
                     ],
                     cwd=root,
                     timeout=PROBE_TIMEOUT_S,
@@ -773,14 +867,16 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                     line="SURVIVE",
                     marker_name="prior turn after process stop",
                     read_marker=lambda: _survive_marker(
+                        kill_code,
                         resume_code,
+                        survive_request_code,
                         logs_before,
                         _worker_logs(name, cwd=root),
                         nonce,
                     ),
-                matches=bool,
-                delay_s=0.5,
-            )
+                    matches=bool,
+                    delay_s=0.5,
+                )
             survive_line = line_survive(
                 prior_turn_marker=survive.detail if survive.status == "pass" else None,
                 attempts=survive.attempts,
