@@ -9,7 +9,7 @@ status: accepted
 
 The provider rotation substrate (Spec 1 of 4) gives footnote a typed model for "which CLI + which credentials" a subprocess dispatch should use, and a pure helper that returns the env dict for that combination. It ships data + dispatch primitives only. Specs 2 through 4 layer reactive failover, per-agent routing, and proactive round-robin on top of this substrate.
 
-The motivating use case is daily-driver reliability across Jason's accounts: 2x Claude Max OAuth, 2x Gemini Pro OAuth, plus Anthropic API credits via OpenClaw, Hermes, and Codex. Manual switching between accounts replaces the external account-swap step previously run between sessions today.
+Daily-driver reliability across Jason's accounts: 2x Claude Max OAuth, 2x Gemini Pro OAuth, plus Anthropic API credits via OpenClaw, Hermes, and Codex. Manual switching between accounts replaces the external account-swap step previously run between sessions today.
 
 ## Architecture
 

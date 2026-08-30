@@ -49,11 +49,7 @@ stop hook ──register-session-cost.sh──> session-cost.py ──> ledger.j
   the rest are skipped. Lines missing either field (or carrying non-string
   values) count as-is - over-counting toward the old behavior is the safe
   failure direction for a cost meter; false dedup is not.
-- The `seen` set is shared across all transcripts within one logical sum
-  (`main()` across session IDs, one set per ledger entry in backfills).
-  Resumed sessions copy prior history lines, with usage, into the new
-  transcript file, so per-file dedup alone would re-count history. This is
-  the same reason the community cost tools dedup globally.
+- The `seen` set is shared across all transcripts within one logical sum (`main()` across session IDs, one set per ledger entry in backfills). Resumed sessions copy prior history lines, with usage, into the new transcript file, so per-file dedup alone would re-count history. This is the same reason the community cost tools dedup globally.
 - Compaction detection is unaffected: duplicates carry identical usage, so
   skipping them does not change the context-size series.
 
@@ -109,10 +105,7 @@ python3 scripts/metrics/backfill-cost-recompute.py --apply    # write
 
 ## Drift tripwire: `fno doctor --cost-check`
 
-Opt-in (doctor's default run stays network-free and never assumes the
-reference tool is installed). Finds a recent ledger session with a surviving
-transcript, runs `session-cost.py --json`, runs the reference cost tool's
-`session --json`, compares:
+Opt-in (doctor's default run stays network-free and never assumes the reference tool is installed). Finds a recent ledger session with a surviving transcript, runs `session-cost.py --json`, then the reference tool's `session --json`, and compares:
 
 | Outcome | Meaning | Exit |
 |---|---|---|
@@ -120,16 +113,11 @@ transcript, runs `session-cost.py --json`, runs the reference cost tool's
 | WARN | > 10% - pricing table or dedup drift; both numbers printed | 1 |
 | skipped (reason) | reference tool absent / no candidate session / reference tool error | 0 |
 
-Ground truth at ship time: the fixed parser reproduced the reference tool's
-$31.30 for
-the reference transcript to the cent at the measurement cutoff.
+Ground truth at ship time: the fixed parser reproduced the reference tool's $31.30 for the reference transcript to the cent at the measurement cutoff.
 
 ## Adding a new model (checklist)
 
-1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the
-   pricing page in the header comment if rates changed).
+1. Add the tier to `PRICING` in `scripts/lib/cost_tracker.py` (cite the pricing page in the header comment if rates changed).
 2. If it is the newest opus, update `LATEST_MODERN_OPUS_TIER`.
-3. Extend the `model_tier` matrix test in
-   `tests/lib/test_cost_tracker_pricing.py`.
-4. Nothing else: the shell shim and every register-path consumer read the
-   same table by construction.
+3. Extend the `model_tier` matrix test in `tests/lib/test_cost_tracker_pricing.py`.
+4. Nothing else: the shell shim and every register-path consumer read the same table by construction.

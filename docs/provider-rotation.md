@@ -985,7 +985,7 @@ contract tests against golden output captured before the bash oracle was deleted
 
 The Spec 2 failover controller ships with a closed-taxonomy `ErrorClass` enum and fixed-cooldown swap behavior. Provider-rotation Plan A adds two complementary behaviors without touching the swap-decision contract or the existing `failover-state.json` schema:
 
-1. **Priority-ordered error rules.** Text-substring matches in the response body run BEFORE HTTP-status fallback, so `"rate limit"`, `"quota exceeded"`, `"capacity"`, `"overloaded"` etc. catch the rate-limit class even when the upstream provider returns 200 with a soft-error body. Status rules (401, 402, 403, 404, 429) act as fallbacks. Rules live in `cli/src/fno/adapters/providers/error_taxonomy.py::ERROR_RULES` as a verbatim rule table.
+1. **Priority-ordered error rules.** Body text runs BEFORE HTTP-status fallback. When the upstream provider returns 200 with a soft-error body, the body phrases catch the rate-limit class. Phrases include `"rate limit"`, `"quota exceeded"`, `"capacity"`, and `"overloaded"`. Status rules (401, 402, 403, 404, 429) act as fallbacks. Rules live in `cli/src/fno/adapters/providers/error_taxonomy.py::ERROR_RULES` as a verbatim rule table.
 
 2. **Per-provider exponential backoff.** Repeated rate-limit/quota errors increment a per-provider `backoff_level` from 0 toward 15. The cooldown for the just-witnessed error is `BASE * 2^old_level` (1st hit -> 2000ms, 2nd -> 4000ms, 9th and beyond capped at MAX_BACKOFF_MS = 5min). A successful call clears the level back to 0 via the public `failover.record_success(provider_id)` helper.
 

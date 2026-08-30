@@ -24,9 +24,7 @@ The next bare `/fno:target` may capture an approved native plan, while Blueprint
 
 ## Why this is Footnote-specific
 
-The workflow is footnote-native and copies no external workflow pack.
-It keeps the useful separation between exploring a design and compiling an implementation plan.
-Both layers ground in Footnote's graph, schema artifact, worktree ownership, discovery receipt, and durable node lifecycle.
+The workflow is footnote-native and copies no external workflow pack. It keeps the useful separation between exploring a design and compiling an implementation plan. Both layers ground in Footnote's graph, schema artifact, worktree ownership, discovery receipt, and durable node lifecycle.
 
 Visual aids are optional and evidence-driven.
 Footnote should add one when a state machine, graph, or spatial interface becomes easier to review visually, not operate a companion server as mandatory ceremony.

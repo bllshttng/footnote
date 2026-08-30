@@ -12,8 +12,7 @@
 - **feat: add gemini project-agent orchestration parity** (`2be8758`)
   Add orchestration support for Gemini CLI project-agent mode, bringing feature parity with Claude Code and Codex for workspaces that opt into experimental agents.
 
-- **feat(skills): add bounded-iteration skills** (`69e756b`)
-  Introduce iteration skills built on bounded-iteration patterns - pre-flight checks, verify+guard, git-as-memory, and atomic operations.
+- **feat(skills): add bounded-iteration skills** (`69e756b`) Introduce iteration skills built on bounded-iteration patterns - pre-flight checks, verify+guard, git-as-memory, and atomic operations.
 
 - **feat(codex): add target parity runtime** (`3ba3adb`)
   Bring Codex CLI to full target parity with Claude Code, including state management, agent recovery, and hook-based loop enforcement.
@@ -21,8 +20,7 @@
 - **feat(roadmap): add discovery relay and context injection** (`2e9a2a6`)
   Add discovery relay mechanism and context injection for expedition, enabling multi-session campaign awareness.
 
-- **feat(roadmap): add expedition skill, campaign state** (`d5f26de`)
-  Introduce the expedition skill with persistent campaign state for multi-session task orchestration following established campaign-pattern prior art.
+- **feat(roadmap): add expedition skill, campaign state** (`d5f26de`) Introduce the expedition skill with persistent campaign state for multi-session task orchestration following established campaign-pattern prior art.
 
 - **feat(roadmap): add task lifecycle management** (`1106ddc`)
   Add roadmap-tasks.py for task lifecycle management - status tracking, dependency resolution, and roadmap mode for tasks.json.
@@ -138,11 +136,9 @@
 
 ## Documentation
 
-- **docs: document iteration skill integration** (`0cd0cec`)
-  Document how the bounded-iteration-inspired skills integrate with the footnote pipeline.
+- **docs: document iteration skill integration** (`0cd0cec`) Document how the bounded-iteration-inspired skills integrate with the footnote pipeline.
 
-- **docs: sync multi-cli adapter context** (`0648ea0`)
-  Synchronize documentation for multi-CLI adapter configuration across providers.
+- **docs: sync multi-cli adapter context** (`0648ea0`) Synchronize documentation for multi-CLI adapter configuration across providers.
 
 - **docs: add expedition architecture doc** (`919b83b`)
   Add architecture documentation for the expedition feature, covering campaign state and discovery relay.
