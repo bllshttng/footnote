@@ -834,6 +834,9 @@ def _ordinary_verdict(
             _merge._coverage_sources(cwd) if cov is None else None,
             self_review_hint=hint,
         )
+    # Appended here, where `cov` is in scope, rather than in `coverage_verdict`:
+    # one site, and a granted waiver discards this refusal anyway.
+    refusal = _with_stale_waiver_guidance(refusal, cov)
     if override_refusal:
         # The label is present but stayed shut; naming that first beats a
         # generic uncovered refusal the operator cannot act on.
@@ -844,6 +847,37 @@ def _ordinary_verdict(
     return REFUSED, refusal, "", "; ".join(
         x for x in (recompute_note, unread_note, filed_note) if x
     ), (head, disposition_hard)
+
+
+def _with_stale_waiver_guidance(refusal: str, cov) -> str:
+    """Name the operator waiver on a refusal a STALE attestation caused.
+
+    Coverage is head-pinned, so a review that finds anything destroys its own
+    coverage: the fix it demanded moves the head its attestation names. Only a
+    review that finds NOTHING can leave a covered head. Operator ruling
+    d-4d05272e exists for exactly that treadmill and waives the gate for
+    merging, but nothing in the refusal said so, so the waiver was reachable
+    only by querying the decision store. On 2026-08-30 six agents each
+    rediscovered the wall and stopped, and eight PRs aged 16-21h behind it,
+    while the stop hook offered two remedies standing rules forbid (a third
+    round past the cap, and a recovery attestation for a round that never
+    passed).
+
+    Gated on a stale verdict EXISTING. The waiver answers an attestation the
+    head moved out from under, never a PR nothing has reviewed; widening it to
+    an absent attestation would turn the gate into a bypass. Advisory only:
+    this returns text, never authority, and `coverage-waive` still refuses a
+    harness-identified session.
+    """
+    if not isinstance(cov, dict) or not cov.get("stale_verdicts"):
+        return refusal
+    return (
+        f"{refusal}. A prior attestation exists but its head moved, which is "
+        "what operator ruling d-4d05272e waives: with CI green and no "
+        "unresolved P1, this may merge without a head-pinned attestation. "
+        "P1 does not waive and still blocks. The lever is attended-operator "
+        "only: `fno do pr coverage-waive <pr> --reason ...`"
+    )
 
 
 def coverage_verdict(

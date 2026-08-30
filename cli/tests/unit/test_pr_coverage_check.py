@@ -2840,3 +2840,38 @@ def test_impossible_remedies_name_the_attended_command(monkeypatch, tmp_path, ca
     assert "coverage-waive" in line
     assert "non-author GitHub approval" in line
     assert "coverage-override label" in line
+
+
+def test_stale_attestation_refusal_names_the_operator_waiver():
+    """A refusal caused by a MOVED head teaches the waiver that answers it.
+
+    d-4d05272e waives coverage-at-head for merging, and the refusal never said
+    so, leaving the waiver reachable only by querying the decision store. Six
+    agents in one night each hit this wall and stalled, and eight PRs aged
+    16-21h behind it.
+    """
+    from fno.pr import _coverage_gate
+
+    cov = {"coverage": "uncovered", "stale_verdicts": [{"name": "code-review"}]}
+    out = _coverage_gate._with_stale_waiver_guidance("base refusal", cov)
+
+    assert "base refusal" in out
+    assert "d-4d05272e" in out
+    # Both conditions, and the one that never waives.
+    assert "CI green" in out
+    assert "no unresolved P1" in out
+    assert "P1 does not waive" in out
+    assert "coverage-waive" in out
+
+
+def test_a_never_reviewed_refusal_is_left_alone():
+    """The waiver answers a STALE attestation, never an absent one.
+
+    Widening it to a PR nothing has reviewed turns a gate into a bypass, so the
+    guidance is gated on a stale verdict actually existing.
+    """
+    from fno.pr import _coverage_gate
+
+    for cov in ({"coverage": "uncovered", "stale_verdicts": []}, {}, None):
+        out = _coverage_gate._with_stale_waiver_guidance("base refusal", cov)
+        assert out == "base refusal", cov
