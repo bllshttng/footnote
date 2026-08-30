@@ -1332,6 +1332,13 @@ fn cascade_harness_session_result_with(
                 Err((_, reason)) => CascadeOutcome::Failed(reason),
             }
         }
+        "cursor-agent" => match crate::cursor_agent::reap_detached_worker_servers() {
+            Ok(0) => CascadeOutcome::AlreadyAbsent(
+                "cursor-agent worker-server was already absent".into(),
+            ),
+            Ok(_count) => CascadeOutcome::Removed,
+            Err(reason) => CascadeOutcome::Failed(reason),
+        },
         _ => CascadeOutcome::NotApplicable,
     }
 }

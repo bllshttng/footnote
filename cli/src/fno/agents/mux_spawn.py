@@ -456,6 +456,7 @@ PANE_HOSTABLE_PROVIDERS: tuple[str, ...] = (
     "agy",
     "opencode",
     "pi",
+    "cursor-agent",
 )
 
 #: x-f579: the token shape an UNDECLARED harness name must match before the
@@ -517,6 +518,14 @@ def permission_pane_tokens(provider: str, mode: str) -> list[str]:
             "docs say so) and `pi --help` carries no bypass flag, so there is "
             "nothing to answer and nothing to skip. `--approve` trusts "
             "project-local FILES, a different axis, and stays an operator choice.",
+            exit_code=2,
+        )
+    if provider == "cursor-agent":
+        if mode in {"force", "yolo"}:
+            return ["--force"]
+        raise DispatchAskError(
+            f"cursor-agent --permission-mode {mode!r} unmappable; only "
+            "'force' maps to --force; --auto-review and --sandbox are separate settings",
             exit_code=2,
         )
     raise DispatchAskError(f"provider {provider!r} has no permission-mode mapping", exit_code=2)
@@ -608,6 +617,12 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
+    if harness == "cursor-agent":
+        raise DispatchAskError(
+            "harness 'cursor-agent' has no --effort flag; effort is encoded in "
+            "the selected --model value",
+            exit_code=2,
+        )
     from fno.agents.harness_map import is_declared
 
     if not is_declared(harness):
@@ -1501,6 +1516,28 @@ def build_pane_argv(
             # no equal-form. fno's DRIVING lane is rpc, where the message rides
             # a JSON string field that no parser can read as a flag.
             argv += [message]
+        return argv
+    if provider == "cursor-agent":
+        # cursor-agent has no bidirectional local transport. Its stream-json
+        # mode is output-only, so fno drives it through a hosted pty: the pane,
+        # or the keeper that hosts the same argv on the thread lane.
+        # create-chat mints the UUID before this builder runs; the declared
+        # resume form then joins that exact remote chat. --trust is NOT the
+        # bypass: in an untrusted cwd cursor-agent refuses with Workspace Trust
+        # Required and does no work, and fno always spawns into a fresh
+        # worktree. -w/--worktree is never passed; the worktree is fno's.
+        argv = identity
+        argv += ["--trust"]
+        if model:
+            argv += ["--model", model]
+        if permission_mode:
+            argv += permission_pane_tokens("cursor-agent", permission_mode)
+        elif yolo:
+            argv += ["--force"]
+        if effort:
+            argv += effort_tokens("cursor-agent", effort)
+        argv += tier3
+        argv += pane_passthrough_tokens(passthrough, argv)
         return argv
     if not is_declared(provider):
         # The undeclared lane: fno is the VIEWPORT, nothing more. No identity
@@ -2621,7 +2658,9 @@ _RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 #: binding REQUIRED: pi adopts any caller-assigned `--session-id`, and letting
 #: it mint its own would hand the fleet a UUIDv7 whose head-8 is the same clock
 #: bucket that collides two codex short ids.
-_SESSION_BINDING_HARNESSES: tuple[str, ...] = ("claude", "codex", "opencode", "pi")
+_SESSION_BINDING_HARNESSES: tuple[str, ...] = (
+    "claude", "codex", "opencode", "pi", "cursor-agent"
+)
 
 
 def _ensure_agy_folder_trusted(cwd: Path) -> bool:
@@ -3647,6 +3686,13 @@ def dispatch_spawn_pane(
     # `--session-id` out of the argv it forwards, and it never wraps pi.
     pin_session = pin_session or provider == "pi"
     session_uuid = str(_uuid.uuid4()) if pin_session else None
+    if provider == "cursor-agent":
+        # cursor-agent's create-chat mints the full UUID. It is a distinct
+        # create verb, so there is no pi-style create claim to hold: read the
+        # id, terminate that non-exiting helper, then launch the pane on it.
+        from fno.agents.harnesses.cursor_agent import create_chat
+
+        session_uuid = create_chat(cwd)
     if provider == "agy":
         _ensure_agy_folder_trusted(cwd)
     computed_writable_dirs = worker_writable_dirs(cwd)

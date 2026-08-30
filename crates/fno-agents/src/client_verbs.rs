@@ -3738,9 +3738,10 @@ fn is_codex_thread_row(entry: &Value) -> bool {
 /// mux viewport renders from the declaration - one declaration, two doors,
 /// pinned byte-identical by `attach_argv_matches_the_mux_renderer`.
 ///
-/// The row-shape predicate (`is_codex_thread_row`) is load-bearing and kept:
-/// a declared form widens WHICH harnesses can attach, never which row shapes.
-/// A codex PANE row and a one-shot ask row refuse exactly as before.
+/// The row-shape predicate (`is_codex_thread_row`) is load-bearing and kept for
+/// Codex: a declared form widens WHICH harnesses can attach, never which row
+/// shapes. Cursor Agent is the measured exception because its pane row's full
+/// remote chat UUID is itself the attach target.
 fn attach_via_declared_form(
     harness: &str,
     entry: &Value,

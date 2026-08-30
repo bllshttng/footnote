@@ -66,6 +66,64 @@ pub fn chat_id_error(value: &str) -> Option<String> {
     })
 }
 
+pub fn is_cursor_worker_server_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("worker-server")
+        && (command.contains("/cursor-agent/") || command.contains("cursor-agent"))
+}
+
+/// Reap Cursor's detached worker-server children after pane teardown.
+///
+/// The daemon is reparented, so killing the pane child alone does not remove
+/// it. The command-line identity is the only provider-owned marker available
+/// after reparenting; unrelated Node worker servers do not match.
+pub fn reap_detached_worker_servers() -> Result<usize, String> {
+    let output = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .map_err(|error| format!("cursor-agent worker-server census failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "cursor-agent worker-server census exited {}",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    let mut pids = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut fields = line.split_whitespace();
+        let Some(pid) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        let command = fields.collect::<Vec<_>>().join(" ");
+        if pid != std::process::id() as i32 && is_cursor_worker_server_command(&command) {
+            pids.push(pid);
+        }
+    }
+    for pid in &pids {
+        let result = unsafe { libc::kill(*pid, libc::SIGTERM) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!(
+                    "cursor-agent worker-server pid {pid} could not be terminated: {error}"
+                ));
+            }
+        }
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for pid in &pids {
+        while unsafe { libc::kill(*pid, 0) } == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        if unsafe { libc::kill(*pid, 0) } == 0 {
+            return Err(format!(
+                "cursor-agent worker-server pid {pid} survived teardown"
+            ));
+        }
+    }
+    Ok(pids.len())
+}
+
 pub fn attach_argv(chat_id: &str) -> Vec<String> {
     if let Some(error) = chat_id_error(chat_id) {
         panic!("{error}");
@@ -88,10 +146,18 @@ impl Provider for CursorAgentProvider {
     }
 
     fn create_argv(&self, ctx: &crate::provider::CreateContext) -> Vec<String> {
+        let session_id = ctx
+            .session_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| panic!("cursor-agent create requires a full chat id"));
+        if let Some(error) = chat_id_error(session_id) {
+            panic!("{error}");
+        }
         let mut argv = crate::harness_capabilities::render_session_argv(
             "cursor-agent",
             "interactive_create",
-            ctx.session_id.as_deref(),
+            Some(session_id),
         )
         .expect("embedded cursor-agent interactive-create capability");
         argv.push("--trust".to_string());
