@@ -5224,28 +5224,17 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     read per-repo config (e.g. ``config.review.required_bots``) for each
     candidate PR's repository, without polluting the process-level cache.
 
-    Merge order (highest to lowest priority):
-      worktree config.local.toml -> <repo_root>/.fno/config.toml ->
-      ~/.fno/config.toml -> built-in defaults.
+    Uses the shared candidate chain seeded at ``repo_root`` so the worktree,
+    canonical, and global tiers cannot drift from ``load_settings``.
     """
-    layers: list[tuple[Path, dict[str, object]]] = []
-
-    locations = [
-        repo_root / ".fno" / "settings.yaml",
-        _global_settings_path(),
-    ]
-    _ensure_migrated(locations)
-    candidates = _prefer_toml(locations)
-    for candidate in candidates:
-        if candidate.is_file():
-            parsed, ok = _load_raw(candidate)
-            if ok:
-                layers.append((candidate.resolve(), parsed))
+    candidates = _candidate_paths(repo_root)
+    layers = list(_aliased_layers(tuple(candidates)))
 
     raw: dict[str, object] = {}
     for _path, parsed in reversed(layers):
-        raw = _deep_merge(raw, _alias_legacy_keys(parsed))
-    raw = _layer_worktree_local_override(raw, Path(repo_root) / ".fno")
+        raw = _deep_merge(raw, parsed)
+    if candidates:
+        raw = _layer_worktree_local_override(raw, candidates[0].parent)
     return SettingsModel.model_validate(raw)
 
 
