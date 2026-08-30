@@ -43,11 +43,14 @@ CLI_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 if ! PYTHONPATH="${CLI_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}" python3 - "$PROVIDER" <<'PY'
 import sys
 
-from fno.harness_names import KNOWN_HARNESSES
+from fno.agents.mux_spawn import PANE_HOSTABLE_PROVIDERS
 
 harness = sys.argv[1]
-if harness not in KNOWN_HARNESSES:
-    print(f"capture-readiness-grid: unknown harness '{harness}'", file=sys.stderr)
+if harness not in PANE_HOSTABLE_PROVIDERS:
+    print(
+        f"capture-readiness-grid: harness '{harness}' is not pane-hostable",
+        file=sys.stderr,
+    )
     raise SystemExit(2)
 PY
 then

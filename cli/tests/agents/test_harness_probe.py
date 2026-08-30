@@ -99,6 +99,29 @@ def test_live_missing_harness_binary_returns_a_verdict(monkeypatch) -> None:
     assert any(item["marker"] == "harness binary" for item in report["lines"])
 
 
+def test_live_mode_runs_the_lifecycle_runner(monkeypatch) -> None:
+    expected = [
+        harness_probe.LineVerdict("SPAWN", "pass", "registry row"),
+        harness_probe.LineVerdict("IDENTITY", "pass", "local store artifact"),
+        harness_probe.LineVerdict("CLAIM", "pass", "live claim holder"),
+        harness_probe.LineVerdict("MAIL BOTH WAYS", "pass", "worker response"),
+        harness_probe.LineVerdict("VIEW", "skip", "harness-owned screen"),
+        harness_probe.LineVerdict("SURVIVE", "pass", "prior turn after process stop"),
+        harness_probe.LineVerdict("ROW MATCHES", "pass", "honesty sweep"),
+        harness_probe.LineVerdict("MANIFEST PINNED", "skip", "live readiness-grid capture"),
+    ]
+    monkeypatch.setattr(harness_probe.shutil, "which", lambda _: "/bin/true")
+    monkeypatch.setattr(
+        harness_probe,
+        "_run_live_probe",
+        lambda harness, root: expected,
+    )
+
+    report = harness_probe.run_probe("claude", live=True)
+
+    assert [item["line"] for item in report["lines"]] == [item.line for item in expected]
+
+
 def test_doctor_command_exposes_dry_run_without_spawning(monkeypatch) -> None:
     from fno.cli import app
 
@@ -160,7 +183,11 @@ def test_identity_accepts_cross_process_recall_without_local_store() -> None:
 
 
 def test_line_seven_reports_instrument_results(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(harness_probe, "run_instrument", lambda *args, **kwargs: (0, "clean"))
+    monkeypatch.setattr(
+        harness_probe,
+        "run_instrument",
+        lambda *args, **kwargs: (0, "=== 3. findings ===\n=== 4. lists ===\n"),
+    )
     for relative in (
         "crates/fno-agents/src/harness_capabilities.toml",
         "cli/src/fno/harness_names.py",
@@ -171,9 +198,101 @@ def test_line_seven_reports_instrument_results(monkeypatch, tmp_path: Path) -> N
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("'pi'\n[harness.pi]\n", encoding="utf-8")
+        if relative.endswith("harness_capabilities.toml"):
+            content = "[harness.pi]\n"
+        elif relative.endswith("provider.rs"):
+            content = 'pub const KNOWN_PROVIDERS: &[&str] = &["pi"];\n'
+        else:
+            content = (
+                "KNOWN_HARNESSES = ('pi',)\n"
+                "READABLE_PROVIDERS = ('pi',)\n"
+                "PANE_HOSTABLE_PROVIDERS = ('pi',)\n"
+                "_SESSION_BINDING_HARNESSES = ('pi',)\n"
+                "_AMBIENT_NAMES = ('PI_HOME',)\n"
+            )
+        path.write_text(content, encoding="utf-8")
     verdict = harness_probe.line_row_matches("pi", repo_root=tmp_path)
 
     assert verdict.status == "pass"
     assert "freshness" in verdict.detail
     assert "registration" in verdict.detail
+
+
+def test_row_match_ignores_harness_name_in_negative_claim_counts(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        harness_probe,
+        "run_instrument",
+        lambda command, **kwargs: (
+            0,
+            "=== 2. negative claims ===\n  claude: 3\n=== 3. a negative claim beside a harness-NAMED implementation ===\n",
+        ),
+    )
+    for relative in (
+        "crates/fno-agents/src/harness_capabilities.toml",
+        "cli/src/fno/harness_names.py",
+        "cli/src/fno/agents/harnesses/__init__.py",
+        "cli/src/fno/agents/mux_spawn.py",
+        "crates/fno-agents/src/provider.rs",
+        "cli/src/fno/hermetic.py",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "KNOWN_HARNESSES = ('claude',)\n"
+            "READABLE_PROVIDERS = ('claude',)\n"
+            "PANE_HOSTABLE_PROVIDERS = ('claude',)\n"
+            "_SESSION_BINDING_HARNESSES = ('claude',)\n"
+            "KNOWN_PROVIDERS = ['claude']\n"
+            "_AMBIENT_NAMES = ('CLAUDE_HOME',)\n"
+            "[harness.claude]\n",
+            encoding="utf-8",
+        )
+
+    verdict = harness_probe.line_row_matches("claude", repo_root=tmp_path)
+
+    assert verdict.status == "pass"
+
+
+def test_row_match_fails_missing_required_registration(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(harness_probe, "run_instrument", lambda *args, **kwargs: (0, ""))
+    table = tmp_path / "crates/fno-agents/src/harness_capabilities.toml"
+    table.parent.mkdir(parents=True)
+    table.write_text("[harness.claude]\n", encoding="utf-8")
+    for relative in (
+        "cli/src/fno/harness_names.py",
+        "cli/src/fno/agents/harnesses/__init__.py",
+        "cli/src/fno/agents/mux_spawn.py",
+        "crates/fno-agents/src/provider.rs",
+        "cli/src/fno/hermetic.py",
+    ):
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("", encoding="utf-8")
+
+    verdict = harness_probe.line_row_matches("claude", repo_root=tmp_path)
+
+    assert verdict.status == "fail"
+    assert "KNOWN_HARNESSES" in verdict.detail
+
+
+def test_manifest_pinned_requires_readiness_marker() -> None:
+    verdict = harness_probe.line_manifest_pinned(
+        harness="claude",
+        result=(0, "capture-readiness-grid: wrote fixture"),
+    )
+
+    assert verdict.status == "fail"
+    assert verdict.marker == "live readiness-grid capture"
+
+
+def test_instrument_timeout_is_longer_than_status_timeout(monkeypatch, tmp_path: Path) -> None:
+    seen = {}
+
+    def run(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return harness_probe.subprocess.CompletedProcess(args[0], 0, "ok", "")
+
+    monkeypatch.setattr(harness_probe.subprocess, "run", run)
+
+    assert harness_probe.run_instrument(["true"], cwd=tmp_path) == (0, "ok")
+    assert seen["timeout"] == harness_probe.INSTRUMENT_TIMEOUT_S
