@@ -991,6 +991,11 @@ def _fleet_cpu_reading() -> Optional[tuple[float, float]]:
         reading, _error = cause_reading()
         if reading is None:
             return None
+        if getattr(reading, "attribution_gap", None) is not None:
+            # A gapped fleet share is an undercount: unknown, never headroom
+            # (x-e040). None routes into the same refuse-above-trigger branch
+            # as an unreadable instrument.
+            return None
         capacity = float(_cpu_capacity_cores())
         fleet = float(reading.fleet_cpu_cores)
         if capacity <= 0 or not all(
@@ -1009,6 +1014,10 @@ def _footprint_cause_evidence() -> Optional[str]:
 
         reading, _error = cause_reading()
         if reading is None:
+            return None
+        if getattr(reading, "attribution_gap", None) is not None:
+            # Same rule as _fleet_cpu_reading: an undercount is not evidence
+            # about the fleet (x-e040).
             return None
         capacity = float(_cpu_capacity_cores())
         measured_share = (

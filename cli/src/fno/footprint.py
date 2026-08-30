@@ -34,6 +34,10 @@ class Footprint(NamedTuple):
     measured_cpu_cores: float
     top: list[tuple[float, str]]
     unparsed_lines: int
+    # None on a complete reading. Set when live worker rows could not be
+    # attributed to processes: the fleet share above is then an UNDERCOUNT,
+    # which a spawn gate must read as unknown, never as headroom (x-e040).
+    attribution_gap: str | None = None
 
 
 class _Process(NamedTuple):

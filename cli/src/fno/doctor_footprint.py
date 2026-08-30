@@ -11,7 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 
@@ -156,6 +156,40 @@ def _root_pid_is_live(pid: int, pid_start: int | None) -> bool | None:
     return _pid_alive(pid, pid_start)
 
 
+class AttributionGap:
+    """Live worker rows this reading could not attribute to processes.
+
+    Not an error: the machine-level measurement stands, and the gap text
+    names what is missing so a reader can tell an undercount from a clean
+    reading. A spawn gate must treat a gapped fleet share as unknown, never
+    as headroom (x-e040).
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+    def __repr__(self) -> str:  # pragma: no cover - debug aid
+        return f"AttributionGap({self.text!r})"
+
+
+def _pidless_route(row: Any) -> str | None:
+    """Name the route that can resolve this pidless row, or None.
+
+    A route names the MECHANISM it drives, and may legitimately mention the
+    harness whose machinery that is. What it must never do is gate a
+    capability on a harness name: the predicate callers care about is the
+    PROPERTY - "this row carries an identity handle some route accepts" -
+    and a new harness gets resolution by adding a route entry here, never by
+    editing a hardcoded-name list somewhere else (x-e040, the seventh
+    specimen of that family).
+    """
+    # The claude bg socket farm: an 8-hex jobId resolves through the rv
+    # socket map. short_id is that handle.
+    if getattr(row, "short_id", None):
+        return "bg-socket"
+    return None
+
+
 def _terminal_row_changed_after_snapshot(row: Any, snapshot_at: float) -> bool:
     # Only the exit-transition stamp (`exited_at`) counts: `last_reconciled_at`
     # rotates on every probe, so a CHECKED bump inside the measurement window
@@ -180,7 +214,7 @@ def _live_root_pids(
     deadline: float | None = None,
     snapshot_pids: set[int] | None = None,
     snapshot_at: float | None = None,
-) -> tuple[set[int], str | None]:
+) -> tuple[set[int], str | AttributionGap | None]:
     """Return positively live worker PIDs that may have detached children."""
     roots: set[int] = set()
     try:
@@ -226,42 +260,40 @@ def _live_root_pids(
                 roots.add(row.pid)
             elif snapshot_pids is not None and row.pid in snapshot_pids:
                 return roots, "worker root liveness unavailable"
-        unresolved_rows = [
-            row
-            for row in rows
-            if (
-                row.status in LIVE_STATUSES
-                and row.pid is None
-                and not (row.harness == "claude" and row.short_id)
-            )
+        pidless_rows = [
+            row for row in rows if row.status in LIVE_STATUSES and row.pid is None
         ]
-        if unresolved_rows:
-            return roots, "worker root discovery unavailable"
-        pidless_claude_rows = [
-            row
-            for row in rows
-            if (
-                row.status in LIVE_STATUSES
-                and row.pid is None
-                and row.harness == "claude"
-                and row.short_id
-            )
-        ]
-        if not pidless_claude_rows:
-            return roots, None
+        unrouted_rows = [row for row in pidless_rows if _pidless_route(row) is None]
+        routed_rows = [row for row in pidless_rows if _pidless_route(row) is not None]
+        # A pidless row NO route accepts is an attribution gap, not a dead
+        # reading: one such row used to suppress the entire report (x-e040,
+        # measured: six pidless codex rows kept the sensor returning
+        # "worker root discovery unavailable" at rest). The machine-level
+        # measurement stands; the gap names what is unattributed.
+        gap_rows: list[str] = [
+            f"{len(unrouted_rows)} pidless row(s) with no identity route "
+            f"({', '.join(sorted({str(row.harness) for row in unrouted_rows}))})"
+        ] if unrouted_rows else []
+        if not routed_rows:
+            return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
         if deadline is not None and time.monotonic() >= deadline:
-            return roots, "worker root discovery timed out"
+            gap_rows.append("bg-socket resolution timed out")
+            return roots, AttributionGap("; ".join(gap_rows))
         socket_timeout = (
             15.0
             if deadline is None
             else max(0.01, deadline - time.monotonic())
         )
         socket_pids = bg_socket_pid_map(timeout=socket_timeout)
-        missing = [row.short_id for row in pidless_claude_rows if row.short_id not in socket_pids]
+        missing = [row for row in routed_rows if row.short_id not in socket_pids]
         if missing:
-            return roots, "worker root discovery unavailable"
-        for row in pidless_claude_rows:
-            pid = socket_pids[row.short_id]
+            gap_rows.append(
+                f"{len(missing)} bg-socket row(s) missing from the socket map"
+            )
+        for row in routed_rows:
+            pid = socket_pids.get(row.short_id)
+            if pid is None:
+                continue
             root_live = _root_pid_is_live(pid, None)
             if root_live is None:
                 return roots, "worker root liveness unavailable"
@@ -269,11 +301,11 @@ def _live_root_pids(
                 roots.add(pid)
             else:
                 return roots, "worker root liveness unavailable"
+        return roots, AttributionGap("; ".join(gap_rows)) if gap_rows else None
     except ImportError:
         raise
     except Exception:
         return roots, "worker root discovery unavailable"
-    return roots, None
 
 
 def _live_shared_serve_root_pids(
@@ -332,6 +364,12 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
     root_pids, root_error = _live_root_pids(
         deadline=deadline, snapshot_pids=snapshot_pids, snapshot_at=snapshot_at
     )
+    attribution_gap = None
+    if isinstance(root_error, AttributionGap):
+        # The reading stands with a named gap; the fleet share above it is an
+        # undercount, which the gates must read as unknown (x-e040).
+        attribution_gap = root_error.text
+        root_error = None
     if root_error is not None:
         return None, f"footprint unavailable: {root_error}"
     shared_serve_pids, shared_serve_error = _live_shared_serve_root_pids(
@@ -351,6 +389,8 @@ def cause_reading(*, timeout: float = 5.0) -> tuple[Footprint | None, str | None
         return None, (
             f"footprint unavailable: {reading.unparsed_lines} ps line(s) could not be parsed"
         )
+    if attribution_gap is not None:
+        reading = reading._replace(attribution_gap=attribution_gap)
     return reading, None
 
 
@@ -459,7 +499,7 @@ def _payload(
         if reading.measured_cpu_cores > 0
         else 0.0
     )
-    return {
+    payload: dict[str, object] = {
         "sustained_cpu_cores": reading.sustained_cpu_cores,
         "descendant_cpu_cores": reading.descendant_cpu_cores,
         "fleet_cpu_cores": reading.fleet_cpu_cores,
@@ -490,6 +530,9 @@ def _payload(
         "unparsed_lines": reading.unparsed_lines,
         "exit_code": exit_code,
     }
+    if reading.attribution_gap is not None:
+        payload["attribution_gap"] = reading.attribution_gap
+    return payload
 
 
 def _emit_failure(message: str, *, json_output: bool) -> None:
@@ -505,13 +548,20 @@ def _emit_result(
     process_threshold: int | None,
     json_output: bool,
     cause_only: bool = False,
-) -> None:
+    note: str | None = None,
+) -> NoReturn:
     cpu_over = reading.fleet_cpu_cores > CPU_THRESHOLD_CORES
     process_over = (
         process_threshold is not None
         and reading.direct_process_count > process_threshold
     )
     exit_code = 0 if cause_only else (3 if cpu_over or process_over else 0)
+    # A gapped reading answers, but it does not clear the gate: --cause-only
+    # keeps exit 4 (the Rust spawn gate takes stdout only on exit 0, so a
+    # gapped undercount can never be admitted as headroom without a Rust
+    # change). The measurement itself is printed either way.
+    if reading.attribution_gap is not None and cause_only:
+        exit_code = 4
     top_limit = 5 if cause_only else None
     command_limit = 1024 if cause_only else None
     payload = _payload(
@@ -521,6 +571,8 @@ def _emit_result(
         top_limit=top_limit,
         command_limit=command_limit,
     )
+    if note is not None:
+        payload["degraded"] = note
     if json_output:
         typer.echo(json.dumps(payload, sort_keys=True))
     else:
@@ -546,9 +598,16 @@ def _emit_result(
             f"(threshold {process_threshold if process_threshold is not None else 'n/a'})"
         )
         typer.echo(f"transient calls: {reading.transient_call_count}")
+        if reading.attribution_gap is not None:
+            typer.echo(
+                f"attribution gap: {reading.attribution_gap} "
+                "(fleet share is an undercount, not headroom)"
+            )
         typer.echo(f"verdict: {verdict} (exit {exit_code})")
         if reading.unparsed_lines:
             typer.echo(f"unparsed lines: {reading.unparsed_lines}")
+        if note is not None:
+            typer.echo(f"degraded: {note}")
         if exit_code == 3 or cause_only:
             typer.echo("top fleet consumers:")
             for cpu_percent, command in reading.top[: top_limit or 5]:
@@ -593,8 +652,17 @@ def footprint_command(
 
     roster_count, error = _roster_count()
     if error is not None or roster_count is None:
-        _emit_failure(error or "roster unavailable: no row count", json_output=json_output)
-        raise typer.Exit(code=4)
+        # The roster is an ENRICHMENT: it sets the process threshold. On
+        # roster failure the measurement still prints, with the threshold
+        # degraded away and the reason named - a 5s roster timeout under load
+        # is exactly when this reading matters (x-e040). _emit_result raises
+        # with its own verdict, so the CPU threshold still applies here.
+        _emit_result(
+            reading,
+            process_threshold=None,
+            json_output=json_output,
+            note=error or "roster unavailable: no row count",
+        )
 
     _emit_result(
         reading,
