@@ -4400,7 +4400,7 @@ def rm_agent(
                             f"back under management.\n"
                         )
 
-            elif existing.harness in ("codex", "opencode"):
+            elif existing.harness in ("codex", "opencode", "cursor-agent"):
                 teardown_error = _teardown_harness_session(
                     existing,
                     name=name,

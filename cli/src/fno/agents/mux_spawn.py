@@ -611,9 +611,9 @@ def effort_tokens(harness: str, value: str) -> list[str]:
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
-    if provider == "cursor-agent":
+    if harness == "cursor-agent":
         raise DispatchAskError(
-            "provider 'cursor-agent' has no --effort flag; effort is encoded in "
+            "harness 'cursor-agent' has no --effort flag; effort is encoded in "
             "the selected --model value",
             exit_code=2,
         )
