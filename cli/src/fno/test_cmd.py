@@ -822,9 +822,11 @@ def _smoke_env(root: Path) -> dict:
     venv_bin = str((root / "cli" / ".venv" / "bin"))
     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
     env["FNO_STATE_POPULATED"] = "1" if _STATE_MODE == "populated" else "0"
+    env["STATE_LANE"] = _STATE_MODE
     if _STATE_MODE == "populated":
         profile = _populate_state(_sandbox())
         env["FNO_CONFIG"] = str(profile / "config.toml")
+        env["STATE_PROFILE_DIR"] = str(_sandbox() / "home" / ".fno")
         env["CLAUDE_CODE_SESSION_ID"] = "state-canary-session"
     return env
 
