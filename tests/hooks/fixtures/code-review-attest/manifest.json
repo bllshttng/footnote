@@ -1,5 +1,5 @@
 {
-  "rule": "strict equality over the whole final text: every json fence parses to [], or no fences and the entire text is the bare (none) marker",
+  "rule": "strict structured output: one JSON array is a review verdict, including non-empty findings; multiple, malformed, or absent verdict shapes stay silent",
   "context": "every payload is delivered as a SubagentStop under a forked-skill marker sidecar (forkedSkill true, skillName code-review); only the text varies",
   "shapes": {
     "bare-none-marker.attest": "the low-level protocol's whole-verdict marker",
