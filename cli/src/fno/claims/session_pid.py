@@ -32,7 +32,7 @@ _MAX_DEPTH = 25
 # with spawn's KNOWN_PROVIDERS (the sibling harness list); no runtime import -
 # claims sits at the bottom of the stack and must not couple to the spawn
 # registry.
-_HARNESS_TOKENS = ("claude", "codex", "gemini", "opencode", "agy")
+_HARNESS_TOKENS = ("claude", "codex", "gemini", "opencode", "agy", "cursor-agent")
 # `claude` keeps its proven substring rule (unchanged: its versioned binary
 # hides the name in the exe path, and the shipped x-616b lane depends on it).
 # The rest match by exact path SEGMENT only, never substring: `agy` is a
