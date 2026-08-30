@@ -2,7 +2,11 @@
 
 set -uo pipefail
 
+# shellcheck source=lib/guard-mark.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/guard-mark.sh" 2>/dev/null || true
+
 _approve() {
+    _guard_mark join-partition-write-guard allow 2>/dev/null || true
     printf '%s\n' '{}'
     exit 0
 }
@@ -43,6 +47,12 @@ HELPER="$PLUGIN_ROOT/hooks/helpers/join_partition_guard.py"
 # default, never a wedge (the OS layer still covers a real joiner).
 out="$(uv run --project "$PLUGIN_ROOT/cli/pyproject.toml" python3 "$HELPER" <<< "$PAYLOAD" 2>/dev/null)"
 if [[ $? -eq 0 && -n "$out" ]]; then
+    # The helper owns this decision; mark which way it went before relaying it.
+    if [[ "$out" == *'permissionDecision": "deny'* || "$out" == *'permissionDecision":"deny'* ]]; then
+        _guard_mark join-partition-write-guard block 2>/dev/null || true
+    else
+        _guard_mark join-partition-write-guard allow 2>/dev/null || true
+    fi
     printf '%s\n' "$out"
     exit 0
 fi

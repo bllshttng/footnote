@@ -25,9 +25,12 @@ is worse than the orphans it prevents.
 """
 
 import json
+import os
 import re
 import shlex
+import subprocess
 import sys
+import time
 
 # Characters shlex may accumulate into a single operator token.
 PUNCT_CHARS = set("();<>|&\n")
@@ -655,7 +658,55 @@ def _refusal(reason, segment):
     )
 
 
+def _guard_mark(decision, tool):
+    """One guard_decision event row per run: the liveness signal that this
+    guard actually ran and what it decided. Row shape matches
+    hooks/lib/guard-mark.sh output so bash and python guards write
+    indistinguishable rows. Best-effort by contract: any failure is
+    swallowed and can never change the decision."""
+    if decision == "deny":
+        # One vocabulary across every guard: bash guards say block, and the
+        # audit row is shared surface, so a refusal is "block" whichever
+        # language recorded it.
+        decision = "block"
+    try:
+        pin = os.environ.get("FNO_EVENTS_PATH")
+        if pin:
+            path = pin
+        elif os.path.isdir(".git") or os.path.isdir(".fno"):
+            path = os.path.join(".fno", "events.jsonl")
+        else:
+            root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            path = os.path.join(root or os.getcwd(), ".fno", "events.jsonl")
+        row = (
+            '{"ts":"%s","type":"guard_decision","data":{"guard":"bg-process-guard",'
+            '"decision":"%s","tool":"%s"},"source":"hook"}'
+            % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision, tool)
+        )
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(row + "\n")
+    except Exception:
+        pass
+
+
+_GUARD_MARKED = {"done": False}
+
+
+def _exit_allow():
+    """Exit 0 with the liveness row, unless _emit already recorded the
+    decision (deny paths emit first, then exit through here too)."""
+    if not _GUARD_MARKED["done"]:
+        _guard_mark("allow", "Bash")
+    sys.exit(0)
+
+
 def _emit(decision, reason):
+    _guard_mark(decision, "Bash")
+    _GUARD_MARKED["done"] = True
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -686,14 +737,14 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except Exception:  # noqa: BLE001
-        sys.exit(0)
+        _exit_allow()
 
     if input_data.get("tool_name", "") != "Bash":
-        sys.exit(0)
+        _exit_allow()
 
     command = (input_data.get("tool_input", {}) or {}).get("command", "")
     if not isinstance(command, str) or not command.strip():
-        sys.exit(0)
+        _exit_allow()
 
     # Denied whether or not run_in_background is set. A foreground unbounded
     # `yes` is orphaned just as surely when the session exits - that is exactly
@@ -702,7 +753,7 @@ def main():
     refusal = decide(command.strip())
     if refusal:
         _emit("deny", refusal)
-    sys.exit(0)
+    _exit_allow()
 
 
 if __name__ == "__main__":

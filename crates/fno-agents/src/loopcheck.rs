@@ -8593,35 +8593,25 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         return (0, allow_output("block", None, &reason, 0, None));
     }
     // ── Check gh binary availability ──────────────────────────────────────────
-    // Probe by attempting to spawn; if the binary doesn't exist at all (NotFound
-    // error kind), treat as absent. Exit-code failures from valid gh commands
-    // are handled per-read below as transient failures, not absence.
+    // Only a NotFound spawn reads as absence. Every other spawn failure is
+    // SpawnTrouble: gh exists but could not be spawned right now, which is
+    // not a fact about the world and must not degrade the session. The probe
+    // outcome is emitted as an event row so what it concluded is observable.
     let gh_bin = &parsed.gh_bin;
-    let gh_available = {
-        // Use a harmless read-only probe: `gh auth status` exits non-zero when
-        // not logged in, but the binary IS present. We only care about
-        // NotFound (binary missing from path entirely). Bounded like every
-        // other synchronous child, so even `--version` cannot wedge the fire.
-        match bounded_read(
-            gh_bin.as_ref(),
-            &["--version"],
-            &cwd,
-            "gh_version_probe",
-            std::time::Duration::from_secs(5),
-        ) {
-            // SpawnFailed (kind Failed) covers NotFound and every other spawn
-            // error: binary absent. Completion at any exit code proves it
-            // exists, and so does a timeout - a wedged --version must not read
-            // as "gh not found" and Interrupt an unattended session; the
-            // downstream reads are themselves bounded.
-            Err(GhReadError {
-                kind: ReadErrorKind::Failed | ReadErrorKind::Unrunnable,
-                ..
-            }) => false,
-            Err(_) => true,
-            Ok(_) => true,
-        }
-    };
+    let gh_probe = probe_gh_bin(gh_bin.as_ref(), &cwd);
+    // Type is deliberately NOT "loop_check": read_prior_fires treats every
+    // loop_check row for this session as a fire observation, and a probe row
+    // with no fingerprint would break the no-progress streak on each fire.
+    // The probe is its own observable, not a fire decision.
+    emit(
+        "gh_probe",
+        serde_json::json!({
+            "session_id": session_id,
+            "outcome": gh_probe.outcome_str(),
+            "detail": gh_probe.detail_str(),
+        }),
+    );
+    let gh_available = !matches!(gh_probe, GhProbeOutcome::Absent);
 
     if !gh_available
         && matches!(
@@ -10625,7 +10615,11 @@ struct BoundedOutput {
 enum BoundedRun {
     Completed(BoundedOutput),
     TimedOut(std::time::Duration),
-    SpawnFailed,
+    /// The io error kind is kept because "binary absent" (NotFound) and
+    /// "could not spawn right now" (ETXTBSY, EACCES, ...) are different
+    /// facts; collapsing them is how a transient spawn failure used to read
+    /// as absence at the gh probe.
+    SpawnFailed(std::io::ErrorKind),
     /// `try_wait()` itself errored (e.g. a concurrent reap of the group
     /// leader) - the bound was never reached, so this must stay distinct
     /// from `TimedOut` or a wait failure would misreport as "timed out
@@ -10664,7 +10658,7 @@ fn run_bounded(
 
     let mut child = match spawned {
         Ok(c) => c,
-        Err(_) => return BoundedRun::SpawnFailed,
+        Err(e) => return BoundedRun::SpawnFailed(e.kind()),
     };
     let pgid = child.id() as i32;
 
@@ -10854,6 +10848,10 @@ struct GhReadError {
     kind: ReadErrorKind,
     stderr_tail: String,
     elapsed: Option<std::time::Duration>,
+    /// The raw io error kind when a spawn failed, so a caller can tell
+    /// "binary absent" (NotFound) from "could not spawn right now". None for
+    /// every other failure class, including wait failures.
+    spawn_kind: Option<std::io::ErrorKind>,
 }
 
 impl GhReadError {
@@ -10863,6 +10861,7 @@ impl GhReadError {
             kind: ReadErrorKind::Failed,
             stderr_tail,
             elapsed: None,
+            spawn_kind: None,
         }
     }
 
@@ -10876,6 +10875,7 @@ impl GhReadError {
             kind: ReadErrorKind::TimedOut,
             stderr_tail: String::new(),
             elapsed: Some(elapsed),
+            spawn_kind: None,
         }
     }
 
@@ -10885,6 +10885,17 @@ impl GhReadError {
             kind: ReadErrorKind::Unrunnable,
             stderr_tail: detail.to_string(),
             elapsed: None,
+            spawn_kind: None,
+        }
+    }
+
+    fn unrunnable_spawn(read: &str, spawn_kind: std::io::ErrorKind, detail: &str) -> Self {
+        GhReadError {
+            read: read.to_string(),
+            kind: ReadErrorKind::Unrunnable,
+            stderr_tail: detail.to_string(),
+            elapsed: None,
+            spawn_kind: Some(spawn_kind),
         }
     }
 
@@ -10952,9 +10963,119 @@ fn bounded_read(
     match run_bounded(bin, args, cwd, timeout) {
         BoundedRun::Completed(out) => Ok(out),
         BoundedRun::TimedOut(elapsed) => Err(GhReadError::timed_out(read_name, elapsed)),
-        BoundedRun::SpawnFailed => Err(GhReadError::unrunnable(read_name, "spawn failed")),
+        BoundedRun::SpawnFailed(kind) => Err(GhReadError::unrunnable_spawn(
+            read_name,
+            kind,
+            "spawn failed",
+        )),
         BoundedRun::WaitFailed => Err(GhReadError::unrunnable(read_name, "wait failed")),
     }
+}
+
+/// The stop gate's answer to "is gh installed?" Three states, because a
+/// transient spawn failure and an absent binary are different claims (the
+/// failure-encoded-as-value class): Absent means the OS answered NotFound;
+/// SpawnTrouble means gh exists but could not be spawned right now (ETXTBSY
+/// while the binary is still being written, EACCES, ...); Present means the
+/// probe spawned at all - completion at any exit code OR a timeout both
+/// prove the binary exists, since the child had to run to hit either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GhProbeOutcome {
+    Present,
+    Absent,
+    SpawnTrouble { kind: std::io::ErrorKind },
+}
+
+impl GhProbeOutcome {
+    /// The positive outcome marker for the `gh_probe` event row: each state
+    /// has its own string, so the probe's conclusion is readable from the
+    /// events log without parsing prose.
+    fn outcome_str(&self) -> &'static str {
+        match self {
+            GhProbeOutcome::Present => "found",
+            GhProbeOutcome::Absent => "absent",
+            GhProbeOutcome::SpawnTrouble { .. } => "spawn_trouble",
+        }
+    }
+
+    fn detail_str(&self) -> String {
+        match self {
+            GhProbeOutcome::SpawnTrouble { kind } => format!("{kind:?}"),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Probe gh by spawning `gh --version` through the bounded transport. Only
+/// NotFound reads as Absent, and absence is stable so it is not retried.
+/// Every other spawn error is retried a bounded number of times (ETXTBSY
+/// clears in milliseconds) and then reported as SpawnTrouble - never as
+/// absence, because "could not spawn right now" is not a fact about the
+/// world. Callers treat SpawnTrouble as present: the downstream reads are
+/// individually bounded and each carries its own conservative failure
+/// handling, which is exactly where a still-broken spawn belongs.
+fn probe_gh_bin(gh_bin: &OsStr, cwd: &Path) -> GhProbeOutcome {
+    let mut last_kind = std::io::ErrorKind::Other;
+    for _ in 0..3 {
+        match bounded_read(
+            gh_bin,
+            &["--version"],
+            cwd,
+            "gh_version_probe",
+            std::time::Duration::from_secs(5),
+        ) {
+            // Completion proves existence at any exit code; a timeout proves
+            // it too (the child ran and outlived its bound), and a Failed
+            // read can only follow a completed spawn.
+            Ok(_)
+            | Err(GhReadError {
+                kind: ReadErrorKind::Failed | ReadErrorKind::TimedOut,
+                ..
+            }) => return GhProbeOutcome::Present,
+            Err(GhReadError {
+                kind: ReadErrorKind::Unrunnable,
+                spawn_kind: Some(std::io::ErrorKind::NotFound),
+                ..
+            }) => {
+                // ENOENT is ambiguous: the binary is absent, or it EXISTS
+                // and its shebang interpreter is. An existing file is spawn
+                // trouble, never absence - a gh present on disk must not
+                // degrade the session to advisory mode.
+                if path_lookup(gh_bin).is_some() {
+                    return GhProbeOutcome::SpawnTrouble {
+                        kind: std::io::ErrorKind::NotFound,
+                    };
+                }
+                return GhProbeOutcome::Absent;
+            }
+            Err(GhReadError {
+                kind: ReadErrorKind::Unrunnable,
+                spawn_kind,
+                ..
+            }) => {
+                last_kind = spawn_kind.unwrap_or(std::io::ErrorKind::Other);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+    }
+    GhProbeOutcome::SpawnTrouble { kind: last_kind }
+}
+
+/// Resolve `bin` the way `Command::new` would: a path with a separator is
+/// checked directly, a bare name is searched on PATH (first regular-file
+/// hit). Used only on the NotFound arm of the gh probe, to tell "no such
+/// file" from "the file exists but execve said ENOENT" (missing interpreter).
+fn path_lookup(bin: &OsStr) -> Option<std::path::PathBuf> {
+    let name = bin.to_str()?;
+    if name.contains('/') {
+        return std::fs::symlink_metadata(name)
+            .ok()
+            .map(|_| std::path::PathBuf::from(name));
+    }
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
 }
 
 /// One bounded local-`git` read. Every stop-gate git call routes here for
@@ -10975,7 +11096,7 @@ fn git_bounded(git_bin: &str, args: &[&str], cwd: &Path) -> Option<BoundedOutput
             log_bounded_read_error("git", &error);
             None
         }
-        BoundedRun::SpawnFailed => {
+        BoundedRun::SpawnFailed(_) => {
             let error = GhReadError::unrunnable(&read_name, "spawn failed");
             log_bounded_read_error("git", &error);
             None
@@ -11014,7 +11135,7 @@ fn evaluate_plan_fidelity(
         timeout,
     ) {
         BoundedRun::Completed(out) => classify_plan_fidelity(&out.stdout),
-        BoundedRun::SpawnFailed | BoundedRun::WaitFailed => FidelityGate::Absent,
+        BoundedRun::SpawnFailed(_) | BoundedRun::WaitFailed => FidelityGate::Absent,
         BoundedRun::TimedOut(elapsed) => FidelityGate::Degraded {
             reason: format!(
                 "plan fidelity check timed out after {:.1}s running `{} do plan fidelity {} --json` \
@@ -13634,7 +13755,7 @@ mod tests {
         let missing = Path::new("/definitely/missing/fno");
         assert!(matches!(
             run_bounded(missing.as_os_str(), &[], &cwd, PROBE_TIMEOUT),
-            BoundedRun::SpawnFailed
+            BoundedRun::SpawnFailed(std::io::ErrorKind::NotFound)
         ));
     }
 
@@ -13673,7 +13794,7 @@ mod tests {
         match run {
             BoundedRun::Completed(_) => "Completed",
             BoundedRun::TimedOut(_) => "TimedOut",
-            BoundedRun::SpawnFailed => "SpawnFailed",
+            BoundedRun::SpawnFailed(_) => "SpawnFailed",
             BoundedRun::WaitFailed => "WaitFailed",
         }
     }
@@ -17928,6 +18049,85 @@ git_bounded();";
             std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         p
+    }
+
+    // ── gh probe: spawn trouble is never absence ─────────────────────────────
+
+    #[test]
+    fn probe_reports_absent_only_for_a_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("gh-not-there");
+        assert_eq!(
+            probe_gh_bin(missing.as_os_str(), tmp.path()),
+            GhProbeOutcome::Absent
+        );
+    }
+
+    #[test]
+    fn probe_reports_present_for_a_working_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 0\n");
+        assert_eq!(
+            probe_gh_bin(gh.as_os_str(), tmp.path()),
+            GhProbeOutcome::Present
+        );
+    }
+
+    /// ENOENT from an EXISTING script (its shebang interpreter is missing)
+    /// must read as spawn trouble, not absence: gh is present on disk, so
+    /// the session must not degrade to advisory mode over an interpreter
+    /// problem. The same ENOENT with no file at the path is real absence.
+    #[test]
+    fn probe_distinguishes_a_missing_interpreter_from_absence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/definitely/not/an/interp\nexit 0\n");
+        assert_eq!(
+            probe_gh_bin(gh.as_os_str(), tmp.path()),
+            GhProbeOutcome::SpawnTrouble {
+                kind: std::io::ErrorKind::NotFound
+            }
+        );
+    }
+
+    /// THE acceptance for the spawn-trouble class: an existing 644 file
+    /// fails to spawn with EACCES, a spawn error that is NOT absence, and
+    /// the probe must say spawn trouble - never "gh is absent".
+    #[test]
+    fn probe_reports_spawn_trouble_not_absent_for_a_non_executable_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = tmp.path().join("gh-644");
+        std::fs::write(&gh, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let outcome = probe_gh_bin(gh.as_os_str(), tmp.path());
+        assert_ne!(outcome, GhProbeOutcome::Absent);
+        assert!(matches!(outcome, GhProbeOutcome::SpawnTrouble { .. }));
+        assert_eq!(outcome.outcome_str(), "spawn_trouble");
+    }
+
+    /// ETXTBSY forced deterministically: a write fd held open across the
+    /// probe makes every exec attempt fail with ExecutableFileBusy, the
+    /// exact CI-load shape that used to read as "gh absent". Linux-only:
+    /// darwin's execve ignores a write fd held by another process (verified
+    /// 2026-08-29 - the exec succeeds), so on macOS the EACCES test above is
+    /// the portable stand-in for the non-NotFound spawn-error class.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_reports_spawn_trouble_for_a_busy_text_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gh = write_exec(tmp.path(), "gh", "#!/bin/sh\nexit 0\n");
+        let _held = std::fs::OpenOptions::new().write(true).open(&gh).unwrap();
+        let outcome = probe_gh_bin(gh.as_os_str(), tmp.path());
+        assert_ne!(outcome, GhProbeOutcome::Absent);
+        assert_eq!(
+            outcome,
+            GhProbeOutcome::SpawnTrouble {
+                kind: std::io::ErrorKind::ExecutableFileBusy
+            }
+        );
     }
 
     #[test]

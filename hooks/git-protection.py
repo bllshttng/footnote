@@ -1751,8 +1751,57 @@ def _find_graphql_pr_reads(segments):
     return out
 
 
+def _guard_mark(decision, tool):
+    """One guard_decision event row per run: the liveness signal that this
+    guard actually ran and what it decided. Without it, a guard that cannot
+    prove it ran is indistinguishable from one that never launched. Row shape
+    matches hooks/lib/guard-mark.sh output so bash and python guards write
+    indistinguishable rows. Best-effort by contract: any failure is swallowed
+    and can never change the decision."""
+    if decision == "deny":
+        # One vocabulary across every guard: bash guards say block, and the
+        # audit row is shared surface, so a refusal is "block" whichever
+        # language recorded it.
+        decision = "block"
+    try:
+        pin = os.environ.get("FNO_EVENTS_PATH")
+        if pin:
+            path = pin
+        elif os.path.isdir(".git") or os.path.isdir(".fno"):
+            path = os.path.join(".fno", "events.jsonl")
+        else:
+            root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            path = os.path.join(root or os.getcwd(), ".fno", "events.jsonl")
+        row = (
+            '{"ts":"%s","type":"guard_decision","data":{"guard":"git-protection",'
+            '"decision":"%s","tool":"%s"},"source":"hook"}'
+            % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), decision, tool)
+        )
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(row + "\n")
+    except Exception:
+        pass
+
+
+_GUARD_MARKED = {"done": False}
+
+
+def _exit_allow():
+    """Exit 0 with the liveness row, unless _emit already recorded the
+    decision (deny paths emit first, then exit through here too)."""
+    if not _GUARD_MARKED["done"]:
+        _guard_mark("allow", "Bash")
+    sys.exit(0)
+
+
 def _emit(decision, reason):
     """Print a PreToolUse permission decision as JSON."""
+    _guard_mark(decision, "Bash")
+    _GUARD_MARKED["done"] = True
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
@@ -2072,18 +2121,18 @@ def main():
     try:
         input_data = json.load(sys.stdin)
     except Exception:
-        sys.exit(0)  # Allow if we can't parse input
+        _exit_allow()  # Allow if we can't parse input
 
     tool_name = input_data.get("tool_name", "")
     tool_input = input_data.get("tool_input", {})
 
     # Only check Bash commands
     if tool_name != "Bash":
-        sys.exit(0)
+        _exit_allow()
 
     command = tool_input.get("command", "").strip()
     if not command:
-        sys.exit(0)
+        _exit_allow()
 
     # No pre-gate opt-out marker lives here. One used to, and being ahead of
     # every gate made it an unconditional allow: while it existed, a bare
@@ -2137,7 +2186,7 @@ def main():
                 "refusal is unconditional, so waiting for a quota reset changes nothing."
             )
         _emit("deny", reason)
-        sys.exit(0)
+        _exit_allow()
 
     # gh pr create - gated only on the closure trailer (x-49ec). Everything
     # else about ad-hoc creation stays ungated; the merge gate below is where
@@ -2161,7 +2210,7 @@ def main():
             )
             if closure_reason:
                 _emit("deny", closure_reason)
-                sys.exit(0)
+                _exit_allow()
 
     # ==========================================
     # gh pr merge - allow only with two-factor (state + artifact) verification.
@@ -2215,7 +2264,7 @@ def main():
     for seg, decision in git_decisions:
         if decision is not None and decision[0] == "deny":
             _emit("deny", decision[1])
-            sys.exit(0)
+            _exit_allow()
 
     # Which segments, if any, rely on the single-use --no-verify approval.
     # Nothing is CLAIMED yet: a claim before the outcome is known burns the
@@ -2236,7 +2285,7 @@ def main():
     if (len(merge_segs) > 1 or len(git_allows) > 1
             or (merge_seg is not None and git_allow is not None)):
         _emit("deny", _compound_authorization_deny_message(command))
-        sys.exit(0)
+        _exit_allow()
 
     # A PreToolUse allow is NOT segment-scoped: it approves the whole Bash call.
     # So anything this hook AUTHORIZES must stand alone, or the authorization
@@ -2291,19 +2340,19 @@ def main():
         # evidence-backed and pre-existing); a single-use approval does not.
         if git_allow is not None:
             _emit("deny", _compound_authorization_deny_message(command))
-            sys.exit(0)
+            _exit_allow()
     else:
         authorizes_alone = (len(segments) == 1 and not carries_substitution
                             and not wrapped)
         if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
             _emit("deny", _compound_authorization_deny_message(command))
-            sys.exit(0)
+            _exit_allow()
 
     if merge_seg is not None:
         holdref = _dispatch_hold_refusal(merge_seg)
         if holdref:
             _emit("deny", f"[fno agents dispatch-hold] {holdref}")
-            sys.exit(0)
+            _exit_allow()
         # Checked BEFORE the two-factor path, so it vetoes every route that
         # would otherwise allow - including the merge-gate override marker.
         # That marker buys out the review ceremony; a base that no longer leads
@@ -2313,7 +2362,7 @@ def main():
         stacked = _stacked_base_refusal(merge_seg)
         if stacked:
             _emit("deny", f"[fno stacked-base] {stacked}")
-            sys.exit(0)
+            _exit_allow()
         # Beside the lineage veto and ahead of the two-factor allow for the
         # same reason: the override marker buys out review ceremony, and a PR
         # nothing reviewed at the head that would merge is not ceremony. The
@@ -2325,7 +2374,7 @@ def main():
             _emit("deny", f"[fno do review-coverage] {covref}\n"
                           "Recovery: run `fno do pr merge`, which recomputes coverage "
                           "and is not gated by this hook.")
-            sys.exit(0)
+            _exit_allow()
         # Beside the coverage veto, and ahead of the two-factor allow for the
         # same reason it is: a session that satisfied its own ceremony has not
         # thereby answered whether a review of this head is still executing.
@@ -2336,11 +2385,11 @@ def main():
                           "per-branch hold and is not gated by this hook. To clear a "
                           "finished review: `fno do pr review-hold release --branch <b> "
                           "--holder <h>`.")
-            sys.exit(0)
+            _exit_allow()
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
-            sys.exit(0)
+            _exit_allow()
         # Scoped override, reached only after the legitimate two-factor path
         # failed and every git segment cleared, so the marker is claimed only
         # when it is actually the thing authorizing the merge.
@@ -2352,12 +2401,12 @@ def main():
             if not _audit("two-factor check failed, merge allowed by "
                           f"marker: {merge_seg}"):
                 _emit("deny", _unrecordable_override_deny_message())
-                sys.exit(0)
+                _exit_allow()
             _emit("allow", "[fno merge-gate override] marker consumed; "
                            "recorded in merge-gate-overrides.log")
-            sys.exit(0)
+            _exit_allow()
         _emit("deny", _merge_deny_message(merge_seg))
-        sys.exit(0)
+        _exit_allow()
 
     if git_allow is not None:
         # The claim must WIN, not merely find a fresh flag: has_approval above
@@ -2365,12 +2414,12 @@ def main():
         # that removes it is authorized.
         if not _claim_marker(APPROVAL_FLAG):
             _emit("deny", _no_verify_deny_message(git_allow[0]))
-            sys.exit(0)
+            _exit_allow()
         _emit("allow", git_allow[1])
-        sys.exit(0)
+        _exit_allow()
 
     # All git segments safe, allow it
-    sys.exit(0)
+    _exit_allow()
 
 
 if __name__ == "__main__":

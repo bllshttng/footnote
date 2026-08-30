@@ -34,6 +34,8 @@ _REPO_ROOT="$(cd "${_HOOK_DIR}/.." && pwd)"
 source "${_REPO_ROOT}/scripts/lib/drive-authority.sh" 2>/dev/null || true
 # shellcheck source=../scripts/lib/events.sh
 source "${_REPO_ROOT}/scripts/lib/events.sh" 2>/dev/null || true
+# shellcheck source=lib/guard-mark.sh
+source "${_REPO_ROOT}/hooks/lib/guard-mark.sh" 2>/dev/null || true
 
 # Fail-open shim: if drive-authority.sh did not load, report "no window" so a
 # missing lib never blocks an ordinary edit and the audit path degrades cleanly.
@@ -42,10 +44,12 @@ if ! declare -F drive_authority_active >/dev/null 2>&1; then
 fi
 
 _approve() {
+    _guard_mark graph-write-protect allow 2>/dev/null || true
     printf '%s\n' '{}'
     exit 0
 }
 _block() {
+    _guard_mark graph-write-protect block 2>/dev/null || true
     jq -n --arg r "$1" '{
         decision: "block",
         reason: $r,

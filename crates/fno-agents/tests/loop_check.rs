@@ -20,33 +20,43 @@ use tempfile::TempDir;
 
 /// Write an executable shell script to `dir/<name>` that prints `body` to
 /// stdout and exits 0.  Returns the path.
+///
+/// Published atomically: the body is written to a temp sibling, chmod'd,
+/// then renamed onto the final path. Rename is atomic within a directory,
+/// so the published path is complete and closed from birth - it never has a
+/// write-open fd (which is what makes an exec fail ETXTBSY, including via a
+/// parallel test's fork inheriting the fd) and never exists as a partial
+/// file (the ENOEXEC variant PR 650 showed). That is why no probe-exec or
+/// retry loop is needed here: the flake family this used to paper over is
+/// unreachable at the source.
 fn make_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    let mut perms = fs::metadata(&path).unwrap().permissions();
+    let tmp = dir.join(format!(".{name}.tmp-{}", std::process::id()));
+    fs::write(&tmp, format!("#!/bin/sh\n{body}\n")).unwrap();
+    let mut perms = fs::metadata(&tmp).unwrap().permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&path, perms).unwrap();
-    // Probe-exec until the script actually runs. A parallel test's fork can
-    // inherit the just-written fd (CLOEXEC closes it only at the CHILD's
-    // exec), so the verb under test exec'ing this script can hit ETXTBSY,
-    // read the mock as "unavailable", and degrade fail-open - the
-    // ac1_fr/ac2_edge/ac5_hp "allow where block expected" CI flake family.
-    // Mock bodies are side-effect-free echoes, so one probe run is harmless;
-    // any non-ETXTBSY outcome (nonzero exits included) proves exec works.
-    for _ in 0..100 {
-        match std::process::Command::new(&path)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .output()
-        {
-            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy => {
-                std::thread::sleep(std::time::Duration::from_millis(5));
-            }
-            _ => break,
-        }
-    }
+    fs::set_permissions(&tmp, perms).unwrap();
+    fs::rename(&tmp, &path).unwrap();
     path
+}
+
+/// Positive marker that publication is exec-ready: the script make_script
+/// returns must run immediately, with no sleep, probe, or retry, and carry
+/// its full body. Fails if anyone reintroduces write-in-place publication.
+#[test]
+fn make_script_publishes_an_immediately_executable_script() {
+    let dir = TempDir::new().unwrap();
+    let script = make_script(dir.path(), "mock-echo", "echo exec-ready-$$.ok");
+    let out = std::process::Command::new(&script)
+        .arg("--version")
+        .output()
+        .expect("exec right after make_script must succeed");
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("exec-ready-"),
+        "body must be complete at first exec, got: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 /// Build the two mock bin scripts (gh + git) in a temp dir and return the dir
@@ -2118,6 +2128,70 @@ fn ac5_ui_golden_fingerprint_byte_identical() {
         d.fingerprint.as_deref(),
         Some("deadbeefdeadbeefdeadbeefdeadbeef00000001|OPEN|SUCCESS|2026-06-05T01:00:00Z"),
         "fingerprint format must be byte-identical to the pre-enum string"
+    );
+}
+
+/// A gh that exists but cannot spawn (644 file, EACCES) is spawn trouble,
+/// NOT absence: the fire must not drop to advisory mode, and the probe's
+/// conclusion must be observable as a gh_probe event row. This is the
+/// integration-level positive marker for the x-c425 class fix.
+#[test]
+fn gh_unspawnable_stays_out_of_advisory_mode() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-trouble", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    // gh exists but is not executable: every spawn fails EACCES, a spawn
+    // error that is NOT absence.
+    let gh_644 = cwd.join("gh-644");
+    fs::write(&gh_644, "#!/bin/sh\nexit 0\n").unwrap();
+    let mut perms = fs::metadata(&gh_644).unwrap().permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(&gh_644, perms).unwrap();
+
+    let (.., git) = MockBins::no_gh();
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:10:00Z",
+        &format!("--gh-bin={}", gh_644.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+
+    assert_eq!(code, 0);
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap();
+    assert!(
+        events.contains("\"gh_probe\""),
+        "probe outcome row expected: {events}"
+    );
+    assert!(
+        events.contains("\"spawn_trouble\""),
+        "EACCES must read as spawn trouble, not absence: {events}"
+    );
+    assert!(
+        !events.contains("\"loop_advisory_mode\""),
+        "a spawn failure must not degrade the session to advisory mode: {events}"
+    );
+    assert_ne!(
+        d.termination_reason.as_deref(),
+        Some("DoneAdvisory"),
+        "spawn trouble is not absence; no advisory termination"
     );
 }
 
