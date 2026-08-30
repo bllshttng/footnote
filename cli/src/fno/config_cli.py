@@ -1222,6 +1222,81 @@ def unset_cmd(
 app.command("rm")(unset_cmd)
 
 
+@app.command("history", hidden=True)
+def history(
+    key: Optional[str] = typer.Argument(
+        None,
+        help="Exact config key or dotted prefix to filter.",
+    ),
+    limit: int = typer.Option(50, "--limit", min=1, help="Maximum rows to print."),
+    json_out: bool = typer.Option(False, "--json", help="Emit matching rows as JSONL."),
+    scope: Literal["global", "project", "all"] = typer.Option(
+        "all", "--scope", help="Limit rows by the config scope that was written."
+    ),
+) -> None:
+    """Read config-write receipts from the global and project journals."""
+    import json
+
+    from fno.paths import global_events_json, project_events_json
+
+    journal_paths = [global_events_json(), project_events_json()]
+    rows: list[dict[str, Any]] = []
+    for journal_path in journal_paths:
+        try:
+            lines = journal_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict) or row.get("type") != "config_write":
+                continue
+            data = row.get("data")
+            if not isinstance(data, dict) or not isinstance(data.get("key"), str):
+                continue
+            if scope != "all" and data.get("scope") != scope:
+                continue
+            if key and data["key"] != key and not data["key"].startswith(f"{key}."):
+                continue
+            rows.append(row)
+
+    rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
+    rows = rows[:limit]
+    if not rows:
+        typer.echo(
+            "no config_write rows; searched journals: "
+            + ", ".join(str(path) for path in journal_paths)
+        )
+        return
+
+    if json_out:
+        for row in rows:
+            typer.echo(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        return
+
+    def display_value(data: dict[str, Any], field: str, presence: str) -> str:
+        if not data.get(presence):
+            return "(unset)"
+        value = data.get(field)
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    for row in rows:
+        data = row["data"]
+        old_value = display_value(data, "old_value", "present_before")
+        new_value = display_value(data, "new_value", "present_after")
+        attester = data.get("attester_session_id") or "(none)"
+        witness = data.get("attester_witness") or "(unknown)"
+        typer.echo(
+            f"{row.get('ts', '')} {data['key']} {old_value} -> {new_value} "
+            f"{data.get('scope', '(unknown)')}/{data.get('root_kind', '(unknown)')} "
+            f"{data.get('config_path', '(unknown)')} session {attester} ({witness})"
+        )
+
+
 @app.command("schema")
 def schema(
     json_schema: bool = typer.Option(

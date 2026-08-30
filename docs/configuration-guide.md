@@ -239,3 +239,11 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `accounts.quota.pick_on_launch` | bool | `false` | never | Pick the least-loaded account at spawn time instead of pinning one. |
 | `accounts.failover` | FailoverBlock (optional) | _(none)_ | never | Provider-rotation failover: {max_swaps_per_phase}. |
 | `schema_version` | int | `1` | never | Settings schema version; managed by fno, not hand-set. |
+
+## Config-write provenance
+
+Every `fno config set` and `fno config unset` write emits one typed `config_write` row per changed leaf key into the journal for the root where the write landed. The row records the key, old and new values, resolved config path, scope, root kind, and attester session and witness.
+
+Read the receipts with `fno config history [KEY] [--limit N] [--json] [--scope global|project|all]`. The reader searches both the global and project journals, and an empty result names both paths it searched.
+
+`fno config route sample` emits no receipt because it only appends commented example text. `_migrate_yaml_to_toml` emits no receipt because format conversion changes no config key value.

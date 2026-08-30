@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import copy
 import os
+import sys
 import tempfile
 import time
 import tomllib
@@ -223,10 +224,117 @@ def _deep_set(d: dict[str, Any], parts: list[str], value: Any) -> dict[str, Any]
     return out
 
 
+def _emit_write_receipts(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    real_target: Path,
+    scope: str,
+) -> None:
+    """Append one config-write row per changed leaf, without failing the write.
+
+    The config file is already replaced when this runs, so a journal failure is
+    reported but never turns a successful config write into a failed command.
+    The remaining crash window is the interval between releasing the config
+    lock and appending this receipt.
+    """
+    changed_keys: list[str] = []
+    failed_keys: list[str] = []
+    last_error: Exception | None = None
+    try:
+        import hashlib
+        import json
+
+        from fno import events, paths
+        from fno.config import _flatten_leaf_paths
+        from fno.harness_identity import AttesterIdentityConflict, resolve_attester_identity
+
+        before_flat = dict(_flatten_leaf_paths(before))
+        after_flat = dict(_flatten_leaf_paths(after))
+        changed_keys = sorted(
+            key
+            for key in set(before_flat) | set(after_flat)
+            if key not in before_flat
+            or key not in after_flat
+            or before_flat[key] != after_flat[key]
+        )
+        if not changed_keys:
+            return
+
+        try:
+            attester_session_id, attester_witness = resolve_attester_identity()
+        except AttesterIdentityConflict:
+            attester_session_id, attester_witness = "", "conflict"
+
+        secret_segments = {"key", "token", "secret", "password"}
+
+        def _receipt_value(key: str, value: Any) -> tuple[Any, bool]:
+            serialized = json.dumps(
+                value,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                default=str,
+            )
+            if any(segment.casefold() in secret_segments for segment in key.split(".")):
+                digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:12]
+                return f"<redacted:sha256:{digest}>", True
+            if len(serialized) > 4096:
+                omitted = len(serialized) - 4096
+                return f"{serialized[:4096]}...(truncated {omitted} chars)", False
+            return value, False
+
+        journal = (
+            paths.project_events_json()
+            if scope == "project"
+            else paths.global_events_json()
+        )
+        root_kind = "project" if scope == "project" else "operator"
+        config_path = str(Path(os.path.realpath(real_target)))
+        for key in changed_keys:
+            present_before = key in before_flat
+            present_after = key in after_flat
+            data: dict[str, Any] = {
+                "key": key,
+                "scope": scope,
+                "root_kind": root_kind,
+                "config_path": config_path,
+                "present_before": present_before,
+                "present_after": present_after,
+                "attester_session_id": attester_session_id,
+                "attester_witness": attester_witness,
+            }
+            redacted = False
+            if present_before:
+                data["old_value"], redacted = _receipt_value(key, before_flat[key])
+            if present_after:
+                data["new_value"], new_redacted = _receipt_value(key, after_flat[key])
+                redacted = redacted or new_redacted
+            if redacted:
+                data["redacted"] = True
+            try:
+                append_kwargs = dict(data)
+                event = events.config_write(**append_kwargs)
+                events.append_event(event, events_path=journal)
+            except Exception as exc:
+                failed_keys.append(key)
+                last_error = exc
+    except Exception as exc:
+        failed_keys = [key for key in changed_keys if key not in failed_keys]
+        last_error = exc
+
+    if failed_keys:
+        detail = f": {last_error}" if last_error else ""
+        print(
+            "warning: config write receipt not recorded for key(s): "
+            f"{', '.join(failed_keys)}{detail}",
+            file=sys.stderr,
+        )
+
+
 def _locked_update(
     target: Path,
     mutate: Callable[[dict[str, Any]], dict[str, Any]],
     *,
+    scope: str = "global",
     lock_timeout: Optional[float] = None,
     lock_poll_seconds: float = 0.02,
 ) -> Path:
@@ -259,6 +367,8 @@ def _locked_update(
         target = Path(os.path.realpath(target))
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_suffix(target.suffix + ".lock")
+    before: dict[str, Any] = {}
+    after: dict[str, Any] = {}
     with open(lock_path, "w") as lock_fh:
         if lock_timeout is None:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
@@ -295,27 +405,31 @@ def _locked_update(
                 if isinstance(loaded, dict):
                     existing = loaded
 
+            before = copy.deepcopy(existing)
             data = mutate(existing)
 
-            fd, tmp_str = tempfile.mkstemp(
-                dir=str(target.parent),
-                prefix=f".{target.name}.tmp.",
-                suffix=".part",
-            )
-            tmp = Path(tmp_str)
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    clean = cast("dict[str, Any]", _strip_none(data))
-                    f.write(tomli_w.dumps(clean).encode("utf-8"))
-                os.replace(str(tmp), str(target))
-            except Exception:
+            clean = cast("dict[str, Any]", _strip_none(data))
+            after = copy.deepcopy(clean)
+            if clean != before:
+                fd, tmp_str = tempfile.mkstemp(
+                    dir=str(target.parent),
+                    prefix=f".{target.name}.tmp.",
+                    suffix=".part",
+                )
+                tmp = Path(tmp_str)
                 try:
-                    tmp.unlink()
-                except OSError:
-                    pass
-                raise
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(tomli_w.dumps(clean).encode("utf-8"))
+                    os.replace(str(tmp), str(target))
+                except Exception:
+                    try:
+                        tmp.unlink()
+                    except OSError:
+                        pass
+                    raise
         finally:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+    _emit_write_receipts(before, after, target, scope)
     return target
 
 
@@ -471,6 +585,7 @@ def set_config_values(
         written = _locked_update(
             target,
             _validate_and_merge,
+            scope=scope,
             lock_timeout=lock_timeout,
         )
     except OSError as exc:
@@ -614,7 +729,7 @@ def unset_config_value(
         return new
 
     try:
-        written = _locked_update(target, _mutate)
+        written = _locked_update(target, _mutate, scope=scope)
     except OSError as exc:
         raise ConfigSetError(
             f"failed to write {target}: {exc} (settings left unchanged)", 1
