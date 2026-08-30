@@ -142,7 +142,7 @@ def test_canonical_pair_requires_process_proof_and_respects_collision():
     )
 
 
-def test_canonical_pair_does_not_skip_collision_on_family_proof():
+def test_canonical_pair_proof_wins_over_self_registration_collision():
     session_id = "11111111-1111-4111-8111-111111111111"
     env = {
         "FNO_HARNESS_NAME": "claude",
@@ -157,10 +157,10 @@ def test_canonical_pair_does_not_skip_collision_on_family_proof():
         collide=lambda _harness, _session: "victim",
     )
 
-    assert owned.disposition == "ambiguous"
-    assert owned.session_id is None
-    assert owned.harness is None
-    assert owned.rejected[0]["owner"] == "victim"
+    assert owned.disposition == "canonical"
+    assert owned.session_id == session_id
+    assert owned.harness == "claude"
+    assert owned.rejected == ()
 
 
 def test_canonical_name_only_uses_same_family_vendor_session():
