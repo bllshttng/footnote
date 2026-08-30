@@ -1079,6 +1079,7 @@ def _run_codex(tmp_path, codex_dir, **kw):
         projects_dir=tmp_path / "no-projects",
         codex_sessions_dir=codex_dir,
         name_map_path=tmp_path / ".fno" / "session-names.json",
+        registry_path=tmp_path / "missing-registry.json",
         psutil_mod=_FakePsutil(alive={}),
         project_resolver=kw.pop("project_resolver", lambda c: None),
         **kw,
@@ -1681,7 +1682,7 @@ def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
         ],
     )
 
-    sessions = _run_codex(tmp_path, codex)
+    sessions = _run_codex(tmp_path, codex, include_daemon=True)
 
     assert len(sessions) == 1
     assert sessions[0].cwd == "/rollout/repo"

@@ -156,6 +156,15 @@ def _state_verdict_diff(clean: Path, populated: Path) -> list[str]:
     )
 
 
+def _state_canary_status(path: Path) -> str | None:
+    """Return the recorded state-canary verdict, or None when it did not run."""
+    verdicts = _state_verdicts(path)
+    for nodeid, verdict in verdicts.items():
+        if "test_state_canary" in nodeid:
+            return verdict
+    return None
+
+
 def _state_steps(
     steps: Sequence[tuple[str, str, str]], mode: str
 ) -> list[tuple[str, str, str]]:
@@ -1511,6 +1520,14 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         diff = _state_verdict_diff(
             _state_junit_path("clean"), _state_junit_path("populated")
         )
+        canary_clean = _state_canary_status(_state_junit_path("clean"))
+        canary_populated = _state_canary_status(_state_junit_path("populated"))
+        if canary_clean != "passed" or canary_populated != "failed":
+            sys.stderr.write(
+                "state verdict diff: positive control missing or unexpected; "
+                "require canary clean=passed and populated=failed\n"
+            )
+            return 1
         if diff:
             print("state verdict diff:")
             for nodeid in diff:
@@ -1544,7 +1561,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         steps = list(ns["STEPS"])
     else:
         steps = smoke_steps(root)
-    if _STATE_MODE != "clean":
+    if any(a == "--state" or a.startswith("--state=") for a in args):
         steps = _state_steps(steps, _STATE_MODE)
 
     names = [s[0] for s in steps]

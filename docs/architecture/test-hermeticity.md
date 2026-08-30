@@ -126,9 +126,7 @@ The populated profile contains a graph node named `STATE_LEAK_CANARY`, a config 
 
 The profile is a discovery instrument, not a completeness proof. A populated run proves the listed profile reached the reader. It proves the changed testcase list is real. It does not prove every possible state store was represented. The execution summary must record named escapes.
 
-The final populated full smoke run completed with 18,789 passed, 127 skipped, and one expected failure. The failure was `tests.unit.test_state_canary::test_state_canary_detects_populated_state`.
-
-A targeted clean/populated comparison named two discovery tests. They were `tests.agents.test_discover::test_daemon_row_is_enriched_by_recent_rollout` and `tests.agents.test_discover::test_us2_codex_old_watching_rollout_is_not_bulk_enumerated`. Both passed in both lanes. Their verdict shape changed. They remain named escapes for follow-up.
+The final populated full smoke run completed with 18,789 passed, 127 skipped, and one expected failure. The failure was `tests.unit.test_state_canary::test_state_canary_detects_populated_state`. A state comparison without the canary now refuses with a positive-control-missing result instead of accepting an empty diff.
 
 ## Cached declared state
 
