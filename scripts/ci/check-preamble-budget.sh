@@ -86,7 +86,10 @@ set -euo pipefail
 # (`fno mux workspace restore`) with no session-start mention collects zero
 # use, and reboot recovery is exactly the moment no agent is reading docs.
 # 352 measured, the rest is the rounding the zero-spare rule below demands.
-CEILING_BYTES=37811
+# Raised by 357 for two positive-marker specimens (zsh eats `:c` in an
+# unquoted HASH:path; stat prints local time and a hand-appended Z falsified
+# an elimination), plus the +1000 the ratchet band asks for on a growth step.
+CEILING_BYTES=39168
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
