@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,45 @@ def test_cursor_agent_worker_server_selector_is_exclusive_to_owner_tree():
     ]
 
     assert cursor_agent.select_owned_worker_server_pids(rows, owner_pid=100) == [200, 400]
+
+
+def test_cursor_agent_reaper_refuses_unreadable_captured_identity(monkeypatch):
+    from fno.agents.harnesses import cursor_agent
+
+    class FakeProcess:
+        pid = 731
+
+        def cmdline(self):
+            return ["/Users/test/cursor-agent", "worker-server"]
+
+        def terminate(self):
+            raise AssertionError("an unreadable identity must not be signaled")
+
+    class FakePsutil:
+        class AccessDenied(Exception):
+            pass
+
+        class NoSuchProcess(Exception):
+            pass
+
+        class ZombieProcess(Exception):
+            pass
+
+        class TimeoutExpired(Exception):
+            pass
+
+        @staticmethod
+        def Process(pid):
+            assert pid == 731
+            return FakeProcess()
+
+    monkeypatch.setitem(sys.modules, "psutil", FakePsutil)
+    monkeypatch.setattr(cursor_agent, "_process_start_token", lambda pid, psutil: None)
+
+    with pytest.raises(RuntimeError, match="could not be confirmed"):
+        cursor_agent.reap_detached_worker_servers(
+            [cursor_agent.CursorWorkerServerHandle(pid=731, start_time=7)]
+        )
 
 
 def test_cursor_agent_is_named_in_spawn_help():

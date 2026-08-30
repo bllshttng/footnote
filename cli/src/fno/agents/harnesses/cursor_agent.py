@@ -272,11 +272,20 @@ def reap_detached_worker_servers(
     candidates = []
     for handle in handles:
         try:
-            if _process_start_token(handle.pid, psutil) != handle.start_time:
+            process = psutil.Process(handle.pid)
+            current_start = _process_start_token(handle.pid, psutil)
+            if current_start is None:
+                raise RuntimeError(
+                    f"cursor-agent worker-server pid {handle.pid} identity could not be confirmed"
+                )
+            if current_start != handle.start_time:
                 raise RuntimeError(
                     f"cursor-agent worker-server pid {handle.pid} identity changed"
                 )
-            process = psutil.Process(handle.pid)
+            if not is_cursor_worker_server_command(" ".join(process.cmdline())):
+                raise RuntimeError(
+                    f"cursor-agent worker-server pid {handle.pid} command changed"
+                )
             process.terminate()
         except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess) as exc:
             if isinstance(exc, psutil.NoSuchProcess):
