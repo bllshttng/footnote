@@ -8,7 +8,15 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MUX_BIN="${FNO_MUX_BIN:-$REPO_ROOT/crates/fno/target/debug/fno}"
 if [[ ! -x "$MUX_BIN" ]]; then
-    echo "FAIL: mux binary not found or not executable: $MUX_BIN" >&2
+    if [[ -n "${FNO_MUX_BIN:-}" ]]; then
+        echo "FAIL: explicit FNO_MUX_BIN is not executable: $MUX_BIN" >&2
+        exit 1
+    fi
+    echo "[setup] building mux binary: crates/fno" >&2
+    cargo build --manifest-path "$REPO_ROOT/crates/fno/Cargo.toml" --bin fno
+fi
+if [[ ! -x "$MUX_BIN" ]]; then
+    echo "FAIL: mux binary is still unavailable after the default build: $MUX_BIN" >&2
     exit 1
 fi
 

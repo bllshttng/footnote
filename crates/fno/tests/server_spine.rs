@@ -12,7 +12,8 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use fno::proto::{
-    read_msg_sync, write_msg_sync, ClientMsg, ServerMsg, BUILD_VERSION, PROTO_VERSION,
+    read_msg_sync, write_msg_sync, ClientMsg, ServerMsg, BUILD_VERSION, MIN_COMPAT_PROTO,
+    PROTO_VERSION,
 };
 use fno::vt::frame_text;
 
@@ -539,15 +540,16 @@ fn server_answers_queries_while_a_pane_spawn_is_wedged() {
 
 #[test]
 fn server_spine_version_skew_is_refused_with_both_versions() {
-    // The version handshake at the wire level: a mismatched Attach gets a
-    // loud Bye naming both sides, and the connection closes.
+    // The version handshake at the wire level: a below-floor Attach gets a
+    // loud Bye naming both sides, and the connection closes. A newer protocol
+    // remains valid when its changes are above the compatibility floor.
     let scratch = Scratch::new("skew");
     let _server = spawn_server(&scratch.sock(), "/bin/sh");
     let mut stream = connect_with_retry(&scratch.sock());
     write_msg_sync(
         &mut stream,
         &ClientMsg::Attach {
-            proto: PROTO_VERSION + 7,
+            proto: MIN_COMPAT_PROTO - 1,
             build: "99.0.0".to_string(),
             rows: 24,
             cols: 80,
@@ -561,6 +563,10 @@ fn server_spine_version_skew_is_refused_with_both_versions() {
     match read_msg_sync::<_, ServerMsg>(&mut stream) {
         Ok(ServerMsg::Bye { reason }) => {
             assert!(reason.contains("99.0.0"), "{reason}");
+            assert!(
+                reason.contains(&format!("v{}", MIN_COMPAT_PROTO - 1)),
+                "{reason}"
+            );
             assert!(reason.contains(&format!("v{PROTO_VERSION}")), "{reason}");
         }
         other => panic!("expected Bye, got {other:?}"),
