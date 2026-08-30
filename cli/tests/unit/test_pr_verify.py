@@ -104,6 +104,8 @@ class FakeGH:
                 for row in self.checks.get("statusCheckRollup", [])
             ]
             return Result(0, json.dumps({"total_count": len(check_runs), "check_runs": check_runs}), "")
+        if cmd[:2] == ["gh", "api"] and "/actions/runs?" in cmd[2]:
+            return Result(0, json.dumps({"total_count": 0, "workflow_runs": []}), "")
         if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/status"):
             return Result(0, json.dumps({"statuses": []}), "")
         if (
