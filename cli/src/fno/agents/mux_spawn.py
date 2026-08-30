@@ -537,8 +537,8 @@ def tier3_pane_tokens(
 
     def unsupported(flag: str) -> "list[str]":
         raise DispatchAskError(
-            f"{flag} is not supported for provider {provider!r}; drop it or pick "
-            "a provider that maps it",
+            f"{flag} is not supported for harness {provider!r}; drop it or pick "
+            "a harness that maps it",
             exit_code=2,
         )
 
@@ -573,33 +573,37 @@ def tier3_pane_tokens(
     return out
 
 
-def effort_tokens(provider: str, value: str) -> list[str]:
+def effort_tokens(harness: str, value: str) -> list[str]:
     """Translate effort without maintaining a provider/model value catalog.
 
-    The selected provider owns the accepted vocabulary. fno only translates
-    the flag spelling and refuses lanes that have no effort flag at all.
+    Keyed by HARNESS, not vendor: every branch below is a CLI binary, and the
+    flag spelling that has to be translated is the binary's. gemini and agy have
+    no reasoning-effort surface at all, which is a property of those binaries.
+    The sibling that reads the same axis, ``harness_map.effort_values``, was
+    already spelled this way. The provider/model at the far end still owns the
+    accepted VALUES; fno translates the spelling and keeps no catalog.
     """
     if not value:
         raise DispatchAskError("--effort requires a value", exit_code=2)
-    if provider in {"gemini", "agy"}:
+    if harness in {"gemini", "agy"}:
         raise DispatchAskError(
-            f"provider {provider!r} has no reasoning-effort surface; omit --effort",
+            f"harness {harness!r} has no reasoning-effort surface; omit --effort",
             exit_code=2,
         )
-    if provider == "claude":
+    if harness == "claude":
         return ["--effort", value]
-    if provider == "codex":
+    if harness == "codex":
         return ["-c", f"model_reasoning_effort={value}"]
-    if provider == "opencode":
+    if harness == "opencode":
         return []
-    if provider == "pi":
+    if harness == "pi":
         # pi's effort axis is `--thinking <level>`, a first-class flag rather
         # than a model suffix or a config key: off, minimal, low, medium, high,
         # xhigh, max. Exact passthrough, like claude's - pi validates the
         # vocabulary itself, and fno does not keep a second copy of it.
         return ["--thinking", value]
     raise DispatchAskError(
-        f"provider {provider!r} has no reasoning-effort surface; omit --effort",
+        f"harness {harness!r} has no reasoning-effort surface; omit --effort",
         exit_code=2,
     )
 
@@ -1464,7 +1468,7 @@ def build_pane_argv(
 
 def _mesh_env_wrapper(
     name: str,
-    provider: str,
+    harness: str,
     role: Optional[str],
     argv: list[str],
     provenance: Optional[dict[str, str]] = None,
@@ -1506,8 +1510,8 @@ def _mesh_env_wrapper(
 
     pairs = [
         f"FNO_AGENT_SELF={name}",
-        f"FNO_AGENT_HARNESS={provider}",
-        f"FNO_HARNESS_NAME={provider}",
+        f"FNO_AGENT_HARNESS={harness}",
+        f"FNO_HARNESS_NAME={harness}",
         f"FNO_AGENT_ROW_PENDING={name}",
         f"{FNO_AGENT_SUBSTRATE}=pane",
     ]
@@ -1539,7 +1543,7 @@ def _mesh_env_wrapper(
     from fno.agents.model_routing import ROUTE_PROVIDER_ENV
 
     unset += ["-u", ROUTE_PROVIDER_ENV]
-    if provider == "claude":
+    if harness == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
         # Raise the harness Stop-hook block cap so fno's repeated-block loop is
@@ -1573,7 +1577,7 @@ def _mesh_env_wrapper(
         # harness must not strip unrelated inherited Claude auth. `env -u` on
         # an unset var is a harmless no-op; `unset +=` (not `=`) so the
         # identity/provenance unsets above are preserved.
-        if provider == "claude":
+        if harness == "claude":
             for _k in SCRUB_AUTH_VARS:
                 unset += ["-u", _k]
         pairs += [f"{k}={v}" for k, v in composed.items()]
@@ -1583,7 +1587,7 @@ def _mesh_env_wrapper(
     # from a non-claude pane would be unrelated); env(1) is left-to-right
     # last-wins and `unset` renders before `pairs`, so a composed route's own
     # model vars still win. `env -u` on an unset var is a harmless no-op.
-    if provider == "claude":
+    if harness == "claude":
         from fno.agents.model_routing import (
             incoherent_model_env_notice,
             incoherent_model_env_unset_args,

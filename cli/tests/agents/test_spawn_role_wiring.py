@@ -89,7 +89,7 @@ def test_dispatch_spawn_threads_captured_role_route_to_create_path(
     result = dispatch_spawn(
         name="dreamer",
         message="consolidate memory",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         role="consolidate",
         provider_gate=_zai_admission(monkeypatch, "dreamer"),
@@ -118,7 +118,7 @@ def test_dispatch_spawn_defaults_role_to_none(
     dispatch_spawn(
         name="builder",
         message="build it",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
     )
     # Regression guard: the default spawn passes role=None (today's behavior).
@@ -155,7 +155,7 @@ def test_direct_dispatch_spawn_composes_managed_role_route(
     result = dispatch_spawn(
         name="direct-route",
         message="work",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         role="tidy",
         provider_gate=_zai_admission(monkeypatch, "direct-route"),
@@ -220,7 +220,7 @@ def test_pre_resolved_route_without_provider_axis_refuses_before_launch(
             dispatch_spawn(
                 name="missing-provider-worker",
                 message="work",
-                provider=harness,
+                harness=harness,
                 cwd=tmp_path,
                 route_env=_route_unit(),
             )
@@ -268,7 +268,7 @@ def test_resolved_provider_must_match_admitted_provider(
             dispatch_spawn(
                 name="wrong-provider-worker",
                 message="work",
-                provider=harness,
+                harness=harness,
                 cwd=tmp_path,
                 role="tidy",
                 route_provider="openai",
@@ -310,7 +310,7 @@ def test_provider_admission_is_single_use_and_name_bound(
     dispatch_spawn(
         name="single-use",
         message="first",
-        provider=harness,
+        harness=harness,
         cwd=tmp_path,
         role="tidy",
         provider_gate=gate,
@@ -319,7 +319,7 @@ def test_provider_admission_is_single_use_and_name_bound(
         dispatch_spawn(
             name="single-use",
             message="second",
-            provider=harness,
+            harness=harness,
             cwd=tmp_path,
             role="tidy",
             provider_gate=gate,
@@ -342,7 +342,7 @@ def test_forged_admission_object_is_refused(
         dispatch_spawn(
             name="forged-gate",
             message="work",
-            provider=harness,
+            harness=harness,
             cwd=tmp_path,
             route_env=bind_route_provider(_route_unit(), "zai"),
             route_provider="zai",
@@ -375,7 +375,7 @@ def test_raw_route_env_cannot_borrow_another_provider_admission(
             dispatch_spawn(
                 name=name,
                 message="work",
-                provider=harness,
+                harness=harness,
                 cwd=tmp_path,
                 route_env=_route_unit(),
                 route_provider="openai",
@@ -416,7 +416,7 @@ def test_routed_direct_spawn_without_admission_token_refuses(
             dispatch_spawn(
                 name="ungated-worker",
                 message="work",
-                provider=harness,
+                harness=harness,
                 cwd=tmp_path,
                 role="tidy",
             )
@@ -460,7 +460,7 @@ def test_tier_remap_preflight_normalizes_business_role_refusal(
             dispatch_spawn(
                 name="tier-worker",
                 message="work",
-                provider="claude",
+                harness="claude",
                 cwd=tmp_path,
                 role="publisher",
                 model="opus",
@@ -498,7 +498,7 @@ def test_tier_remap_preflight_normalizes_actual_conflict(
             dispatch_spawn(
                 name="remap-worker",
                 message="work",
-                provider="claude",
+                harness="claude",
                 cwd=tmp_path,
                 model="opus",
             )
@@ -553,7 +553,7 @@ def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
         dispatch_spawn(
             name="snapshot-worker",
             message="work",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             role="publisher",
             model="opus",
@@ -693,7 +693,7 @@ def test_cmd_spawn_resolves_role_route_once_before_substrate_fanout(
         or dispatch.SpawnResult(
             kind="once" if substrate == "headless" else "created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="abcd1234",
             reply="ok" if substrate == "headless" else None,
         ),
@@ -780,7 +780,7 @@ def test_cmd_spawn_composes_role_route_over_managed_oauth_overlay(
         or dispatch.SpawnResult(
             kind="once" if "headless" in extra else "created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="abcd1234",
             reply="ok" if "headless" in extra else None,
         ),

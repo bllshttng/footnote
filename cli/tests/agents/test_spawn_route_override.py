@@ -157,7 +157,7 @@ def test_codex_thread_lane_refuses_resume_instead_of_spawning_fresh(
         dispatch.dispatch_spawn(
             name="codex-thread",
             message="hi",
-            provider="codex",
+            harness="codex",
             cwd=tmp_path,
             resume_session_id="019f0000-0000-7000-8000-000000000003",
         )
@@ -645,7 +645,7 @@ def test_mesh_env_wrapper_route_wins_over_account() -> None:
 
     argv = _mesh_env_wrapper(
         name="w",
-        provider="claude",
+        harness="claude",
         role=None,
         argv=["claude", "hi"],
         account_env={"CLAUDE_CONFIG_DIR": "/x/.claude", "ANTHROPIC_AUTH_TOKEN": "acct"},
@@ -1021,7 +1021,9 @@ def test_bare_route_vendor_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPatch) -> None:
-    """--provider/-p and --harness/-H name one axis: the CLI binary."""
+    """--harness/-H names the CLI binary, and dispatch_spawn receives it as
+    `harness`. The name survives from when --provider was the older spelling of
+    that same axis; -P now names the model vendor, a different axis."""
     from fno.agents import dispatch, spawn_gate
 
     monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
@@ -1036,13 +1038,13 @@ def test_provider_is_the_older_spelling_of_harness(monkeypatch: pytest.MonkeyPat
 
     result = runner.invoke(agents_app, ["spawn", "--name", "w1", "hi", "--harness", "codex", "--headless"])
     assert result.exit_code == 0, result.output
-    assert captured["provider"] == "codex"
+    assert captured["harness"] == "codex"
 
-    # The canonical --harness spelling threads the same provider.
+    # The canonical --harness spelling threads the same harness.
     captured.clear()
     clean = runner.invoke(agents_app, ["spawn", "--name", "w2", "hi", "--harness", "codex", "--headless"])
     assert clean.exit_code == 0, clean.output
-    assert captured["provider"] == "codex"
+    assert captured["harness"] == "codex"
 
 
 def test_harness_name_on_the_provider_axis_is_refused_by_name(
@@ -1088,7 +1090,7 @@ def test_provider_and_model_build_the_route(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
     assert captured["model"] is None
-    assert captured["provider"] == "claude"
+    assert captured["harness"] == "claude"
 
 
 def test_provider_without_model_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1157,7 +1159,7 @@ def test_route_under_managed_without_account_composes(
         return dispatch.SpawnResult(
             kind="created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="abcd1234",
         )
 

@@ -64,7 +64,7 @@ def _parallel_dispatch_worker(
         dispatch_ask(
             name=name,
             message=message,
-            provider="claude",
+            harness="claude",
             cwd=_P(home),
             timeout=10,
         )
@@ -120,7 +120,7 @@ def test_dispatch_ask_happy_path(tmp_path: Path, monkeypatch) -> None:
         dispatch_ask(
             name="frontend-worker",
             message="implement Login.tsx",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -255,12 +255,12 @@ def test_dispatch_ask_rejects_empty_message(tmp_path: Path, monkeypatch) -> None
     cwd = tmp_path / "w"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_ask(name="z", message="", provider="claude", cwd=cwd, timeout=10)
+        dispatch_ask(name="z", message="", harness="claude", cwd=cwd, timeout=10)
     assert exc_info.value.exit_code == 2
     assert "message must be non-empty" in str(exc_info.value)
 
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_ask(name="z", message="   ", provider="claude", cwd=cwd, timeout=10)
+        dispatch_ask(name="z", message="   ", harness="claude", cwd=cwd, timeout=10)
     assert exc_info.value.exit_code == 2
 
 
@@ -278,7 +278,7 @@ def test_dispatch_ask_rejects_name_too_long(tmp_path: Path, monkeypatch) -> None
         dispatch_ask(
             name=long_name,
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -298,7 +298,7 @@ def test_dispatch_ask_accepts_name_at_128_chars(tmp_path: Path, monkeypatch) -> 
     name = "a" * 128
     # 128-char name is valid input; unknown-agent error fires (not input-validation error)
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_ask(name=name, message="hi", provider="claude", cwd=cwd, timeout=10)
+        dispatch_ask(name=name, message="hi", harness="claude", cwd=cwd, timeout=10)
     # Exit 16 (not 2) proves the name passed input validation and was rejected as unknown
     assert exc_info.value.exit_code == UNKNOWN_AGENT_EXIT_CODE
 
@@ -316,7 +316,7 @@ def test_dispatch_ask_rejects_name_matching_short_id_shape(
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
         dispatch_ask(
-            name="7c5dcf5d", message="hi", provider="claude", cwd=cwd, timeout=10
+            name="7c5dcf5d", message="hi", harness="claude", cwd=cwd, timeout=10
         )
     assert exc_info.value.exit_code == 2
     assert "short-id shape" in str(exc_info.value)
@@ -337,7 +337,7 @@ def test_dispatch_ask_rejects_unknown_provider(tmp_path: Path, monkeypatch) -> N
         dispatch_ask(
             name="x",
             message="hi",
-            provider="not-real",
+            harness="not-real",
             cwd=cwd,
             timeout=10,
         )
@@ -356,7 +356,7 @@ def test_dispatch_ask_claude_not_on_path(tmp_path: Path, monkeypatch) -> None:
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
         dispatch_ask(
-            name="y", message="hi", provider="claude", cwd=cwd, timeout=10
+            name="y", message="hi", harness="claude", cwd=cwd, timeout=10
         )
     # Exit 16 (unknown-agent) precedes PATH check now; PATH=14 belongs to spawn
     assert exc_info.value.exit_code == UNKNOWN_AGENT_EXIT_CODE
@@ -397,7 +397,7 @@ def test_dispatch_ask_existing_name_routes_to_followup(tmp_path: Path, monkeypat
         dispatch_ask(
             name="already-there",
             message="new msg",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -421,7 +421,7 @@ def test_dispatch_ask_new_agent_requires_provider(
     cwd = tmp_path / "w"
     cwd.mkdir()
     with pytest.raises(DispatchAskError) as exc_info:
-        dispatch_ask(name="x", message="hi", provider=None, cwd=cwd, timeout=10)
+        dispatch_ask(name="x", message="hi", harness=None, cwd=cwd, timeout=10)
     # Unknown-agent guard fires before select_provider's "provider is required" check
     assert exc_info.value.exit_code == UNKNOWN_AGENT_EXIT_CODE
     assert "unknown agent" in str(exc_info.value)
@@ -707,7 +707,7 @@ def test_dispatch_ask_lock_timeout(tmp_path: Path, monkeypatch) -> None:
             dispatch_ask(
                 name="stuck",
                 message="hi",
-                provider="claude",
+                harness="claude",
                 cwd=cwd,
                 timeout=10,
                 lock_timeout=1,
@@ -785,7 +785,7 @@ def test_dispatch_ask_prints_wait_message(
             dispatch_ask(
                 name="slow",
                 message="hi",
-                provider="claude",
+                harness="claude",
                 cwd=cwd,
                 timeout=10,
                 lock_timeout=10,
@@ -864,7 +864,7 @@ def test_dispatch_ask_select_provider_inside_flock(
     # The assertion is on the ORDER of lock+select_provider, not on success.
     with pytest.raises(DispatchAskError):
         dispatch_ask(
-            name="ordered", message="hi", provider="claude", cwd=cwd, timeout=10
+            name="ordered", message="hi", harness="claude", cwd=cwd, timeout=10
         )
 
     # The trace MUST show the lock acquired before select_provider runs.
@@ -905,7 +905,7 @@ def test_dispatch_ask_registry_version_error_surfaces_as_exit_12(
         dispatch_ask(
             name="rve",
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -1073,7 +1073,7 @@ def test_dispatch_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
     result = dispatch_ask(
         name="frontend-worker",
         message="add validation",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=30,
     )
@@ -1116,7 +1116,7 @@ def test_dispatch_ask_followup_orphan_marks_status(tmp_path: Path, monkeypatch) 
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1142,7 +1142,7 @@ def test_dispatch_ask_followup_provider_mismatch(tmp_path: Path, monkeypatch) ->
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="gemini",
+            harness="gemini",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1170,7 +1170,7 @@ def test_dispatch_ask_followup_poll_timeout(tmp_path: Path, monkeypatch) -> None
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1204,7 +1204,7 @@ def test_dispatch_ask_followup_socket_error(tmp_path: Path, monkeypatch) -> None
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1252,7 +1252,7 @@ def test_dispatch_ask_followup_preserves_lock_on_registry_write_failure(
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1296,7 +1296,7 @@ def test_dispatch_ask_followup_rejects_xml_unsafe_from_name(
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
             from_name='bad"name',
@@ -1336,7 +1336,7 @@ def test_dispatch_ask_followup_ctrl_c_during_poll_releases_lock(
         dispatch_ask(
             name="frontend-worker",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             timeout=10,
         )
@@ -1381,7 +1381,7 @@ def test_dispatch_ask_followup_default_from_name_is_fno(
     dispatch_ask(
         name="frontend-worker",
         message="msg",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         timeout=10,
     )

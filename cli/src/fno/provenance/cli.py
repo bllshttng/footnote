@@ -97,7 +97,7 @@ def dispatch(
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
+        resolve_dispatch_harness,
     )
     from fno.graph.cli import _session_provenance
     from fno.graph.fuzzy import resolve_node
@@ -105,13 +105,19 @@ def dispatch(
     from fno.tracker.metadata import ExternalMetadataUnavailable, read_entries
 
     # Validate the dispatch flags up front (empty --model/--provider is a usage
-    # error, not a silently-forwarded empty argv token). Provider is resolved only
-    # when given: absent, the bg /think substrate keeps its claude default rather
+    # error, not a silently-forwarded empty argv token). Resolved only when
+    # given: absent, the bg /think substrate keeps its claude default rather
     # than inferring the invoking harness (which bg cannot host anyway).
+    # This verb's `--provider/-p` is spelled on the wrong axis and carries a
+    # HARNESS: the value is compared against "claude" below and gates on what
+    # the bg substrate can host. The flag spelling is a CLI contract and does
+    # not move here; `flag=` keeps the refusal naming what the operator typed.
     try:
         model = reject_empty_model(model)
-        resolved_provider = (
-            resolve_dispatch_provider(provider)[0] if provider is not None else None
+        resolved_harness = (
+            resolve_dispatch_harness(provider, flag="--provider")[0]
+            if provider is not None
+            else None
         )
     except DispatchFlagError as exc:
         typer.echo(f"fno do think dispatch: {exc}", err=True)
@@ -123,7 +129,7 @@ def dispatch(
     prov = _session_provenance()
     sid = (session_id or prov.get("source_session_id") or "").strip()
     live_harness = (harness or prov.get("source_harness") or "claude").strip()
-    if resolved_provider is not None and resolved_provider != "claude":
+    if resolved_harness is not None and resolved_harness != "claude":
         if live_harness == "codex":
             typer.echo(
                 "codex posture: think source=codex; dispatch=unsupported",
@@ -186,8 +192,8 @@ def dispatch(
     # parameter through every layer.
     if model is not None:
         target["model"] = model
-    if resolved_provider is not None:
-        target["provider"] = resolved_provider
+    if resolved_harness is not None:
+        target["provider"] = resolved_harness
 
     if live_harness == "codex":
         typer.echo(

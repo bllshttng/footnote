@@ -990,7 +990,7 @@ pub fn dispatch_gemini_once(
         )
     } else {
         // Teardown receipt on stderr (AC2-UI), byte-parity with Python:
-        // f"once: {name} ({provider}/{session_or_short_id}) torn down"
+        // f"once: {name} ({harness}/{session_or_short_id}) torn down"
         format!(
             "once: {} (gemini/{}) torn down\n",
             name, session_or_short_id

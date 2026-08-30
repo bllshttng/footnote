@@ -132,7 +132,11 @@ def run_via_agents_spawn(
             result_holder["value"] = dispatch(
                 name=name,
                 message=composed,
-                provider=provider,
+                # This runner's own `provider` parameter carries a HARNESS, so it
+                # feeds dispatch_spawn's `harness`. The two spellings on one line
+                # are the axis seam, not a mistake: renaming the parameter moves
+                # a public signature and belongs with the receipt keys in wave 4.
+                harness=provider,
                 cwd=cwd,
                 once=not headless,
                 # Floor at 1s: int(0.x) == 0, and a 0 timeout is "no timeout"

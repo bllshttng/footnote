@@ -142,7 +142,7 @@ def run_via_claude_code(
             result = dispatch(
                 name=f"review-{agent}",
                 message=f"{prompt}\n\n---\nDIFF CONTEXT:\n{diff_context}",
-                provider="claude",
+                harness="claude",
                 cwd=Path.cwd(),
                 headless=True,
                 once=True,

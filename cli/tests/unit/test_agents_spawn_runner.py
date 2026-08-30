@@ -20,7 +20,7 @@ def _ok_dispatch(reply: str):
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="sess-1",
             reply=reply,
         )
@@ -121,14 +121,14 @@ def test_dispatch_invoked_with_once_true() -> None:
     def _capture(**kwargs):
         captured.update(kwargs)
         return SpawnResult(kind="once", name=kwargs["name"],
-                          provider=kwargs["provider"], short_id="s", reply="[]")
+                          provider=kwargs["harness"], short_id="s", reply="[]")
 
     run_via_agents_spawn(
         "code_reviewer", "prompt-body", "diff-body",
         provider="codex", cwd=Path("/tmp/x"), dispatch=_capture,
     )
     assert captured["once"] is True
-    assert captured["provider"] == "codex"
+    assert captured["harness"] == "codex"
     assert "DIFF CONTEXT:" in captured["message"]
     assert "diff-body" in captured["message"]
     assert captured["name"].startswith("review-code_reviewer-codex-")
@@ -142,7 +142,7 @@ def test_explicit_route_dispatches_plugin_agent_and_attributes_effective_model()
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="",
             reply="[]",
         )
@@ -160,7 +160,7 @@ def test_explicit_route_dispatches_plugin_agent_and_attributes_effective_model()
         dispatch=_capture,
     )
 
-    assert captured["provider"] == "claude"
+    assert captured["harness"] == "claude"
     assert captured["once"] is False
     assert captured["headless"] is True
     assert captured["agent"] == "fno:code-reviewer"
@@ -189,7 +189,7 @@ def test_explicit_route_runs_provider_gate_across_dispatch(monkeypatch) -> None:
         return SpawnResult(
             kind="once",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="",
             reply="[]",
         )
@@ -218,6 +218,15 @@ def test_explicit_route_runs_provider_gate_across_dispatch(monkeypatch) -> None:
     assert kwargs == {"route_provider": "zai"}
     assert [event[0] for event in events] == ["gate", "dispatch", "release"]
     assert events[1][1]["route_provider"] == "zai"
+    # The route has to be visible on the OUTCOME, not merely on the call. The
+    # runner catches BaseException around the dispatch and folds a failure into
+    # a note, so `ok is True` above stays true when the lane silently falls back
+    # to claude and the route never happens. `route_provider` is the positive
+    # marker only a real routed dispatch produces; asserting the absence of an
+    # error cannot tell the two apart.
+    assert outcome.route_provider == "zai"
+    assert outcome.provider == "claude"
+    assert outcome.error is None
 
 
 def test_dispatch_timeout_floored_to_one() -> None:
@@ -227,7 +236,7 @@ def test_dispatch_timeout_floored_to_one() -> None:
     def _capture(**kwargs):
         captured.update(kwargs)
         return SpawnResult(kind="once", name=kwargs["name"],
-                          provider=kwargs["provider"], short_id="s", reply="[]")
+                          provider=kwargs["harness"], short_id="s", reply="[]")
 
     run_via_agents_spawn(
         "code_reviewer", "p", "d", provider="codex", cwd=Path("."),

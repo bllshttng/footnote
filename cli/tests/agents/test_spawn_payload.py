@@ -49,7 +49,7 @@ def test_python_background_spawn_appends_brevity_marker_after_exact_payload(
     dispatch_spawn(
         name="brief-worker",
         message=ORIGINAL_PAYLOAD,
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
     )
 

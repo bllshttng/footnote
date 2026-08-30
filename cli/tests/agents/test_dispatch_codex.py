@@ -266,7 +266,7 @@ def test_followup_codex_propagates_provider_specific_exit_code(workdir, fake_cod
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=5,
         )
@@ -352,7 +352,7 @@ def test_followup_codex_routes_to_resume_and_bumps_last_message_at(
     result = dispatch_ask(
         name="worker-X",
         message="follow up",
-        provider=None,
+        harness=None,
         cwd=workdir,
         timeout=10,
     )
@@ -452,7 +452,7 @@ def test_recovered_full_id_resumes_marker_and_stamps_exact_row(
     result = dispatch_ask(
         name=session_id,
         message=f"Reply exactly {marker}",
-        provider=None,
+        harness=None,
         cwd=workdir,
         timeout=10,
     )
@@ -478,7 +478,7 @@ def test_recovered_full_id_resume_failure_leaves_activity_unstamped(
         dispatch_ask(
             name=session_id,
             message="Reply exactly RECOVERY-RESUME-OK-never",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=10,
         )
@@ -509,7 +509,7 @@ def test_followup_codex_provider_mismatch_rejected(workdir, fake_codex_resume):
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider="claude",
+            harness="claude",
             cwd=workdir,
             timeout=5,
         )
@@ -534,7 +534,7 @@ def test_followup_codex_empty_log_path_rejected_at_dispatch(workdir, fake_codex_
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=5,
         )
@@ -560,7 +560,7 @@ def test_followup_codex_empty_cwd_rejected_at_dispatch(workdir, fake_codex_resum
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=5,
         )
@@ -584,7 +584,7 @@ def test_followup_codex_no_session_id_in_registry_rejected(workdir, fake_codex_r
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=5,
         )
@@ -608,7 +608,7 @@ def test_followup_codex_timeout_maps_to_exit_15(workdir, fake_codex_resume):
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=2,
         )
@@ -633,7 +633,7 @@ def test_followup_codex_invocation_error_maps_to_exit_1(workdir, fake_codex_resu
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider=None,
+            harness=None,
             cwd=workdir,
             timeout=5,
         )
@@ -656,7 +656,7 @@ def test_followup_codex_emits_yolo_flag_in_events(workdir, fake_codex_resume):
     dispatch_ask(
         name="worker-X",
         message="msg",
-        provider="codex",
+        harness="codex",
         cwd=workdir,
         timeout=5,
         yolo=True,
@@ -731,13 +731,13 @@ def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch)
     dispatch_ask(
         name="worker-Y",
         message="msg",
-        provider="claude",
+        harness="claude",
         cwd=workdir,
         timeout=5,
         yolo=True,
     )
     err = capsys.readouterr().err
-    assert "--yolo has no effect for provider 'claude'" in err
+    assert "--yolo has no effect for harness 'claude'" in err
 
 
 # ---------------------------------------------------------------------------
@@ -776,7 +776,7 @@ def test_invalid_from_name_rejected_before_subprocess(workdir, fake_codex_create
             dispatch_ask(
                 name="worker-X",
                 message="msg",
-                provider="codex",
+                harness="codex",
                 cwd=workdir,
                 timeout=5,
                 from_name=bad,
@@ -793,7 +793,7 @@ def test_yolo_does_not_bypass_from_name_validator(workdir, fake_codex_create):
         dispatch_ask(
             name="worker-X",
             message="msg",
-            provider="codex",
+            harness="codex",
             cwd=workdir,
             yolo=True,
             from_name='evil"',

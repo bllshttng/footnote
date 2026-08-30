@@ -264,7 +264,7 @@ def test_register_rejects_unknown_provider(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import register_existing_session
 
-    with pytest.raises(ValueError, match="unknown provider"):
+    with pytest.raises(ValueError, match="unknown harness"):
         register_existing_session(provider="bogus", session_id="x", cwd="/s")
 
 

@@ -1706,7 +1706,7 @@ def register_existing_session(
         harness, provider = provider, None
     if harness not in HARNESS_SESSION_ID_FIELDS:
         raise ValueError(
-            f"unknown provider for registration: {harness or provider!r}; "
+            f"unknown harness for registration: {harness or provider!r}; "
             f"known: {sorted(HARNESS_SESSION_ID_FIELDS)}"
         )
     if not session_id:

@@ -267,7 +267,7 @@ def test_explicit_add_dir_still_refuses_on_that_provider(tmp_path: Path) -> None
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.mux_spawn import build_pane_argv
 
-    with pytest.raises(DispatchAskError, match="not supported for provider"):
+    with pytest.raises(DispatchAskError, match="not supported for harness"):
         build_pane_argv("opencode", "t", tmp_path, False, None, add_dir="/w")
 
 

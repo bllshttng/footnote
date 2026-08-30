@@ -47,7 +47,7 @@ _VALUE_FLAGS = frozenset(
 # The harness axis (the CLI binary) is --harness/-H only: --provider/-P names the
 # model VENDOR, a different axis that never picks a binary, so it must not feed
 # the provider-aware default scan.
-_PROVIDER_FLAGS = ("--harness", "-H")
+_HARNESS_FLAGS = ("--harness", "-H")
 _MODEL_FLAGS = ("--model", "-m")
 _EFFORT_FLAGS = ("--effort",)
 
@@ -55,21 +55,23 @@ _EFFORT_FLAGS = ("--effort",)
 def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
     """One pass over a spawn argv (verb already stripped by the caller).
 
-    Returns ``(provider_present, provider_value, model_present, effort_present)``.
+    Returns ``(harness_present, harness_value, model_present, effort_present)``.
+    The scanned flag is ``-H/--harness``: this pass reads the HARNESS axis and
+    never touches ``-P/--provider``, which the caller reads separately.
     Handles both `--flag value` and `--flag=value`; stops at the `--argv`
     payload boundary and at a bare `--` passthrough fence (x-1caa: fenced
-    tokens are the provider's flags, never fno's); skips a value flag's value.
+    tokens are the harness's own flags, never fno's); skips a value flag's value.
     """
-    provider_present = model_present = effort_present = False
-    provider_value: Optional[str] = None
+    harness_present = model_present = effort_present = False
+    harness_value: Optional[str] = None
     it = iter(args)
     for a in it:
         if a == "--argv" or a == "--":
             break
         key, eq, val = a.partition("=")
-        if key in _PROVIDER_FLAGS:
-            provider_present = True
-            provider_value = val if eq else next(it, None)
+        if key in _HARNESS_FLAGS:
+            harness_present = True
+            harness_value = val if eq else next(it, None)
         elif key in _MODEL_FLAGS:
             model_present = True
             if not eq:
@@ -80,7 +82,7 @@ def _scan(args: Sequence[str]) -> Tuple[bool, Optional[str], bool, bool]:
                 next(it, None)
         elif key in _VALUE_FLAGS and not eq:
             next(it, None)  # skip this flag's value so it can't be misread
-    return provider_present, provider_value, model_present, effort_present
+    return harness_present, harness_value, model_present, effort_present
 
 
 # --------------------------------------------------------------------------- #
@@ -963,9 +965,9 @@ def resolve_lane_vendor(
         resolved_harness = values[0]
     if not resolved_harness:
         try:
-            from fno.dispatch_flags import resolve_dispatch_provider
+            from fno.dispatch_flags import resolve_dispatch_harness
 
-            resolved_harness = resolve_dispatch_provider(None, env=env)[0]
+            resolved_harness = resolve_dispatch_harness(None, env=env)[0]
         except Exception:
             resolved_harness = "claude"
     lane = _HARNESS_DEFAULT_VENDOR.get(resolved_harness)
@@ -1177,7 +1179,7 @@ def inject_spawn_defaults(
             return dv, "agents.defaults"
         return "", None
 
-    cfg_provider, provider_rung = field("provider")
+    cfg_harness, provider_rung = field("provider")
     cfg_model, model_rung = field("model")
     cfg_effort, effort_rung = field("effort")
     cfg_substrate, substrate_rung = field("substrate")
@@ -1194,7 +1196,7 @@ def inject_spawn_defaults(
     # The grid is below an explicitly pinned stage profile and above the
     # bottom defaults. It is evaluated from the node-bearing spawn only; a
     # node-less spawn has no truthful difficulty or priority input.
-    has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
+    has_harness, explicit_harness, has_model, has_effort = _scan(out[1:])
     explicit_vendor = _flag_value(out[1:], "--provider", "-P")
     explicit_vendor_present = explicit_vendor is not None
     explicit_route = _flag_present(out[1:], "--route")
@@ -1279,8 +1281,8 @@ def inject_spawn_defaults(
                     grid_node_entry.get("priority"),
                     capacity,
                     constrain_harness=(
-                        explicit_provider
-                        or (cfg_provider if _above_defaults(provider_rung) else "")
+                        explicit_harness
+                        or (cfg_harness if _above_defaults(provider_rung) else "")
                         or ""
                     ).strip() or None,
                     substrate=explicit_substrate,
@@ -1301,7 +1303,7 @@ def inject_spawn_defaults(
             terminal = "grid=model-axis-occupied"
         from_config.append(("grid", terminal, "routing"))
     if not (
-        cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
+        cfg_harness or cfg_model or cfg_effort or cfg_substrate or cfg_permission
         or cfg_route or cfg_account or cfg_pane_group
     ) and grid_candidate is None and not from_config:
         # No config field resolved at all, so any --model here was typed.
@@ -1321,7 +1323,7 @@ def inject_spawn_defaults(
     if grid_candidate is not None:
         inject += ["--harness", grid_candidate["harness"], "--model", grid_candidate["model"]]
         from_config.append(("grid", f"{grid_candidate['harness']}/{grid_candidate['model']}", "difficulty-grid"))
-        has_provider = True
+        has_harness = True
         has_model = True
         if grid_candidate.get("effort") and not effort_occupied:
             inject += ["--effort", grid_candidate["effort"]]
@@ -1329,19 +1331,20 @@ def inject_spawn_defaults(
             has_effort = True
         _resolved["v"] = grid_candidate["harness"]
 
-    # Lazy resolved-target provider for the substrate/permission compatibility
-    # checks: explicit -p > merged config provider > harness inference.
-    def resolved_provider() -> Optional[str]:
+    # Lazy resolved-target HARNESS for the substrate/permission compatibility
+    # checks: explicit -H > the merged config `provider` field (which carries a
+    # harness) > harness inference.
+    def resolved_harness() -> Optional[str]:
         if "v" not in _resolved:
-            if explicit_provider and explicit_provider.strip():
-                _resolved["v"] = explicit_provider.strip()
-            elif cfg_provider:
-                _resolved["v"] = cfg_provider
+            if explicit_harness and explicit_harness.strip():
+                _resolved["v"] = explicit_harness.strip()
+            elif cfg_harness:
+                _resolved["v"] = cfg_harness
             else:
                 try:
-                    from fno.dispatch_flags import resolve_dispatch_provider
+                    from fno.dispatch_flags import resolve_dispatch_harness
 
-                    _resolved["v"] = resolve_dispatch_provider(None, env=env)[0]
+                    _resolved["v"] = resolve_dispatch_harness(None, env=env)[0]
                 except Exception:
                     _resolved["v"] = None
         return _resolved["v"]
@@ -1366,20 +1369,24 @@ def inject_spawn_defaults(
     # helpful "add --model" error into a confusing one on an argv the
     # operator never paired with a route at all.
     explicit_model_present = has_model
-    if cfg_provider and not has_provider:
+    if cfg_harness and not has_harness:
         from fno.agents.harnesses import READABLE_PROVIDERS
 
-        if cfg_provider not in READABLE_PROVIDERS:
+        if cfg_harness not in READABLE_PROVIDERS:
+            # READABLE_PROVIDERS is a HARNESS roster despite its name (its own
+            # rename crosses the Rust KNOWN_PROVIDERS parity pin), so the
+            # refusal names the axis the value has to satisfy, not the roster's
+            # spelling. The config key keeps its documented `provider` spelling.
             print(
                 f"fno agents spawn: config.{provider_rung}.provider = "
-                f"{cfg_provider!r} is not a known provider; valid: "
+                f"{cfg_harness!r} is not a known harness; valid: "
                 f"{', '.join(READABLE_PROVIDERS)}",
                 file=err,
             )
             raise SystemExit(2)
 
         # AC2-HP: the profile is about to fill the HARNESS axis (nothing on
-        # the caller's argv set it - has_provider is False, or we would not
+        # the caller's argv set it - has_harness is False, or we would not
         # be here). If the caller's argv is already route-shaped, that route
         # only the claude harness can carry, and a non-claude profile harness
         # makes it unusable. This is not a precedence bug (no explicit flag is
@@ -1387,14 +1394,14 @@ def inject_spawn_defaults(
         # config path, the value, the axis it set, and the caller's own flags
         # in the caller's own spelling.
         route_shaped = explicit_route or (explicit_vendor_present and explicit_model_present)
-        if route_shaped and cfg_provider != "claude":
+        if route_shaped and cfg_harness != "claude":
             if explicit_route:
                 caller_spelling = f"--route {_flag_value(out[1:], '--route')}"
             else:
                 model_val = _flag_value(out[1:], "--model", "-m")
                 caller_spelling = f"-P {explicit_vendor} --model {model_val}"
             print(
-                f"fno agents spawn: config.{provider_rung}.provider = {cfg_provider!r} "
+                f"fno agents spawn: config.{provider_rung}.provider = {cfg_harness!r} "
                 "sets the HARNESS axis,\n"
                 "and a route only the claude harness can carry is already on your "
                 "command line\n"
@@ -1407,8 +1414,8 @@ def inject_spawn_defaults(
             )
             raise SystemExit(2)
 
-        inject += ["--harness", cfg_provider]
-        from_config.append(("harness", cfg_provider, f"{provider_rung}.provider"))  # type: ignore[arg-type]
+        inject += ["--harness", cfg_harness]
+        from_config.append(("harness", cfg_harness, f"{provider_rung}.provider"))  # type: ignore[arg-type]
 
     # route / account (ruling 4): two new fields beside the legacy provider.
     # route carries vendor/model as vendor/model and is forwarded as --route, so
@@ -1441,7 +1448,7 @@ def inject_spawn_defaults(
     # would otherwise carry a Claude account into a spawn that can't use it and
     # abort instead of cutting over.
     if cfg_account and not _flag_present(out[1:], "--account"):
-        prov = resolved_provider()
+        prov = resolved_harness()
         if prov == "claude":
             inject += ["--account", cfg_account]
             from_config.append(("account", cfg_account, f"{account_rung}.account"))  # type: ignore[arg-type]
@@ -1498,28 +1505,28 @@ def inject_spawn_defaults(
             # A provider-less config model is scoped to the harness it was written
             # for, but nothing on disk records which harness that was. Scope it to
             # the HOME provider - the config provider, else the builtin default
-            # (claude, the same fallback resolve_dispatch_provider uses) - NOT the
+            # (claude, the same fallback resolve_dispatch_harness uses) - NOT the
             # ambient harness. Inject only when the spawn's resolved TARGET equals
             # that home: a codex spawn (explicit `-p codex` OR a codex-ambient
             # session) must not inherit a claude model (it 400s after the round-trip);
             # an explicit --model stays the supported cross-harness override. This
             # never maps a model value to a provider (no catalog); it only scopes an
             # UNqualified default the way the rest of dispatch scopes one.
-            from fno.dispatch_flags import resolve_dispatch_provider
+            from fno.dispatch_flags import resolve_dispatch_harness
 
-            home = cfg_provider or "claude"
+            home = cfg_harness or "claude"
             try:
-                if explicit_provider and explicit_provider.strip():
-                    target: Optional[str] = explicit_provider.strip()
-                elif cfg_provider:
-                    target = cfg_provider
+                if explicit_harness and explicit_harness.strip():
+                    target: Optional[str] = explicit_harness.strip()
+                elif cfg_harness:
+                    target = cfg_harness
                 else:
-                    target = resolve_dispatch_provider(None, env=env)[0]
+                    target = resolve_dispatch_harness(None, env=env)[0]
             except Exception:
                 # Degrade open (AC5-FR): a resolution raise must never brick a
                 # spawn that would otherwise work. No target => no basis to inject.
                 print(
-                    "fno agents spawn: provider resolution failed; "
+                    "fno agents spawn: harness resolution failed; "
                     "leaving model to the harness",
                     file=err,
                 )
@@ -1536,22 +1543,25 @@ def inject_spawn_defaults(
                 )
 
     if cfg_effort and not has_effort:
-        # Effort surface depends on the RESOLVED provider: an explicit -p flag,
-        # else the config provider, else harness inference / builtin claude.
-        eff_provider = (explicit_provider or "").strip() or cfg_provider
-        if not eff_provider:
-            from fno.dispatch_flags import resolve_dispatch_provider
+        # Effort surface depends on the RESOLVED HARNESS, not the vendor: an
+        # explicit -H flag, else the config `provider` field (harness-valued),
+        # else harness inference / builtin claude. effort_tokens branches on
+        # harness names (gemini/agy have no effort surface at all), so feeding
+        # it a vendor would refuse a legal spawn and pass an illegal one.
+        eff_harness = (explicit_harness or "").strip() or cfg_harness
+        if not eff_harness:
+            from fno.dispatch_flags import resolve_dispatch_harness
 
-            # `None` = no explicit provider, so resolve_dispatch_provider does
+            # `None` = no explicit harness, so resolve_dispatch_harness does
             # harness inference (env-based via infer_invoking_harness) then the
-            # builtin claude. Its first arg is the explicit provider STRING, not
+            # builtin claude. Its first arg is the explicit harness STRING, not
             # argv, and inference reads env markers, not command-line args.
-            eff_provider, _ = resolve_dispatch_provider(None, env=env)
+            eff_harness, _ = resolve_dispatch_harness(None, env=env)
         from fno.agents.mux_spawn import effort_tokens
 
         reason = None
         try:
-            effort_tokens(eff_provider, cfg_effort)
+            effort_tokens(eff_harness, cfg_effort)
         except Exception as exc:
             reason = str(exc)
         else:
@@ -1573,14 +1583,14 @@ def inject_spawn_defaults(
     explicit_substrate = _has_explicit_substrate(out[1:])
     injected_substrate: Optional[str] = None
     if cfg_substrate and explicit_substrate is None:
-        prov = resolved_provider()
+        prov = resolved_harness()
         if prov and _substrate_compatible(cfg_substrate, prov):
             inject += ["--substrate", cfg_substrate]
             injected_substrate = cfg_substrate
             from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
         else:
             if not prov:
-                reason = "provider resolution failed"
+                reason = "harness resolution failed"
             elif cfg_substrate not in _SUBSTRATES:
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
             else:
@@ -1602,7 +1612,7 @@ def inject_spawn_defaults(
     # mapped --permission-mode. An explicit --permission-mode/--yolo keeps the
     # fail-closed behavior (has_permission short-circuits this branch).
     if cfg_permission and not _has_permission_mode(out[1:]):
-        prov = resolved_provider()
+        prov = resolved_harness()
         # The effective substrate this spawn resolves to: an explicit pin, else a
         # config value injected this run, else the `fno agents spawn` default -
         # PANE (cli.py, not the autonomous-dispatch substrate_default, which picks
@@ -1616,7 +1626,7 @@ def inject_spawn_defaults(
             reason = (
                 f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
                 if prov
-                else "provider resolution failed"
+                else "harness resolution failed"
             )
             print(
                 f"fno agents spawn: permission-mode skipped ({reason}); "

@@ -675,7 +675,7 @@ def test_ask_mux_row_rides_pane_send(tmp_path: Path, monkeypatch) -> None:
 
     from fno.agents.dispatch import dispatch_ask
 
-    result = dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"))
+    result = dispatch_ask("muxed", "ping", harness=None, cwd=Path("/w"))
 
     assert result.kind == "followup"
     assert result.reply == ""  # fire-and-forget: no captured reply
@@ -698,7 +698,7 @@ def test_ask_mux_preserves_from_name_framing(tmp_path: Path, monkeypatch) -> Non
 
     from fno.agents.dispatch import dispatch_ask
 
-    dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"), from_name="peer-x")
+    dispatch_ask("muxed", "ping", harness=None, cwd=Path("/w"), from_name="peer-x")
     sent = fake.calls[1][1]
     assert '<cross-session-message from-name="peer-x">' in sent
 
@@ -714,7 +714,7 @@ def test_ask_mux_dead_pane_raises_transport_error(
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
 
     with pytest.raises(DispatchAskError) as exc:
-        dispatch_ask("muxed", "ping", provider=None, cwd=Path("/w"))
+        dispatch_ask("muxed", "ping", harness=None, cwd=Path("/w"))
     assert exc.value.exit_code == 1  # transport failure, not the old exit 12
 
 
@@ -733,5 +733,5 @@ def test_ask_mux_codex_row_also_rides_pane_send(
 
     from fno.agents.dispatch import dispatch_ask
 
-    dispatch_ask("cmux", "ping", provider=None, cwd=Path("/w"))
+    dispatch_ask("cmux", "ping", harness=None, cwd=Path("/w"))
     assert [call[0][3] for call in fake.calls], "the pane lane must be tried"

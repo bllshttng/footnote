@@ -91,7 +91,7 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
 
     # Operator spawns intentionally keep their own attended defaults, but pane
     # permission still comes from the same harness capability table.
-    assert "capabilities(provider).get(\"route_on_pane\", False)" in attended_spawn
+    assert "capabilities(harness).get(\"route_on_pane\", False)" in attended_spawn
 
 
 def test_context_think_legacy_substrate_is_compatibility_only() -> None:

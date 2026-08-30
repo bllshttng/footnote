@@ -1,4 +1,4 @@
-"""Shared ``--provider`` / ``--model`` flag resolution for dispatch verbs.
+"""Shared ``--harness`` / ``--model`` flag resolution for dispatch verbs.
 
 Lives at the platform layer, not under ``fno.agents``, because its callers span
 every layer: the backlog CLI, target, mail, provenance and the agents CLI all
@@ -16,15 +16,26 @@ visible to the check rather than hiding in an unmapped blind spot. The runtime
 capability table (``fno.agents.harness_map``) asserts its keys stay in sync with
 the name list, preserving the single-source-of-truth property.
 
-``resolve_dispatch_provider`` centralizes one precedence so every dispatch verb
-defaults the provider the same way:
+``resolve_dispatch_harness`` centralizes one precedence so every dispatch verb
+defaults the harness the same way:
 
-    explicit --provider  >  invoking-harness inference  >  builtin default (claude)
+    explicit --harness  >  invoking-harness inference  >  builtin default (claude)
 
-There is no ``config.agents.default_provider`` field today, so a config-default
+Every rung of that chain is on the HARNESS axis: the middle rung reads harness
+markers out of the environment, and the builtin ``claude`` is a CLI binary, not
+a vendor. It resolved a "provider" until x-c55f, which is why an operator could
+read a harness name out of a provider-shaped field and conclude a route had
+fallen back. See ``docs/architecture/axis-vocabulary.md``.
+
+There is no ``config.agents.default_harness`` field today, so a config-default
 rung would be a no-op; add it between inference and the builtin if that field
-lands. Inference never guesses: an absent or ambiguous harness marker falls
-through to the builtin default rather than picking a provider.
+lands. Note that ``config.agents.defaults.provider`` is NOT that field under
+another name: the vocabulary doc's "Named exception" section keeps that key's
+spelling while ruling that it carries harness values, and it loses to ``-H``
+inside the spawn path rather than here.
+
+Inference never guesses: an absent or ambiguous harness marker falls through to
+the builtin default rather than picking one of the candidates it saw.
 """
 
 from __future__ import annotations
@@ -35,14 +46,16 @@ from typing import Mapping, Optional
 from fno.harness_identity import resolve_harness_identity
 
 # decision_source vocabulary surfaced in the spawn receipt so a dispatch's
-# provider choice is auditable after the fact. The resolver emits this subset.
-PROVIDER_SOURCE_EXPLICIT = "explicit"
-PROVIDER_SOURCE_HARNESS = "harness-inferred"
-PROVIDER_SOURCE_BUILTIN = "builtin-default"
+# harness choice is auditable after the fact. The resolver emits this subset.
+# The VALUES are a wire contract the receipt carries and stay verbatim; only
+# the constant names moved onto the harness axis.
+HARNESS_SOURCE_EXPLICIT = "explicit"
+HARNESS_SOURCE_INFERRED = "harness-inferred"
+HARNESS_SOURCE_BUILTIN = "builtin-default"
 
 
 class DispatchFlagError(ValueError):
-    """A dispatch flag value is invalid (empty --model or empty --provider)."""
+    """A dispatch flag value is invalid (empty --model or empty harness pin)."""
 
 
 def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[str]:
@@ -57,30 +70,39 @@ def infer_invoking_harness(env: Optional[Mapping[str, str]] = None) -> Optional[
     return resolve_harness_identity(environ).harness
 
 
-def resolve_dispatch_provider(
-    explicit: Optional[str], *, env: Optional[Mapping[str, str]] = None
+def resolve_dispatch_harness(
+    explicit: Optional[str],
+    *,
+    env: Optional[Mapping[str, str]] = None,
+    flag: str = "--harness",
 ) -> tuple[str, str]:
-    """Resolve the dispatch provider and record how it was decided.
+    """Resolve the dispatch harness and record how it was decided.
 
     Precedence: explicit flag > invoking-harness inference > builtin ``claude``.
-    Returns ``(provider, decision_source)`` where decision_source is one of
+    Returns ``(harness, decision_source)`` where decision_source is one of
     ``explicit`` / ``harness-inferred`` / ``builtin-default``.
-    Raises :class:`DispatchFlagError` on an empty explicit provider. The
-    provider-name set is NOT validated here: the downstream spawn path checks it
+
+    ``flag`` names the option the caller read ``explicit`` from, so the refusal
+    sends the operator back to the flag they actually typed. It defaults to
+    ``--harness`` because that is the axis this resolver owns; a caller whose
+    own flag is spelled differently passes its own spelling.
+
+    Raises :class:`DispatchFlagError` on an empty explicit value. The harness
+    name set is NOT validated here: the downstream spawn path checks it
     substrate-aware (pane hosts the wider ``READABLE_PROVIDERS`` incl. agy/
     opencode; bg/headless the narrower dispatchable set), so a single set here
-    would both duplicate that check and wrongly reject a pane-hostable provider.
+    would both duplicate that check and wrongly reject a pane-hostable harness.
     """
     if explicit is not None:
-        provider = explicit.strip()
-        if not provider:
-            raise DispatchFlagError("--provider must not be empty")
-        return provider, PROVIDER_SOURCE_EXPLICIT
+        harness = explicit.strip()
+        if not harness:
+            raise DispatchFlagError(f"{flag} must not be empty")
+        return harness, HARNESS_SOURCE_EXPLICIT
 
     inferred = infer_invoking_harness(env)
     if inferred is not None:
-        return inferred, PROVIDER_SOURCE_HARNESS
-    return "claude", PROVIDER_SOURCE_BUILTIN
+        return inferred, HARNESS_SOURCE_INFERRED
+    return "claude", HARNESS_SOURCE_BUILTIN
 
 
 def reject_empty_model(model: Optional[str]) -> Optional[str]:

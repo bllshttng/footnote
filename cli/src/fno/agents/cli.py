@@ -1548,7 +1548,7 @@ def cmd_spawn(
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
+        resolve_dispatch_harness,
     )
 
     workdir = _resolve_dispatch_workdir(cwd, fresh, here)
@@ -1560,11 +1560,12 @@ def cmd_spawn(
     _moved_cwd = str(workdir) if not cwd and workdir != Path(os.getcwd()).resolve() else None
 
     # Three orthogonal axes: --harness names the CLI binary, --provider the model
-    # vendor that binary talks to, --model the model at that vendor. `provider` is
-    # the local name for the HARNESS axis all the way down -- it is the
-    # dispatch_spawn kwarg and the receipt key every consumer parses, so the wire
-    # name outranks the tidier local one.
-    provider = harness
+    # vendor that binary talks to, --model the model at that vendor. The local
+    # carrying the harness is now spelled for its own axis: 40-odd refusals below
+    # read from it, and each one taught the operator the wrong word for the thing
+    # they had to change. The dispatch_spawn/dispatch_ask kwargs moved with it;
+    # the RECEIPT key stays `provider` until wave 4 moves it with its consumers,
+    # which is why a `provider=harness` call survives at the pane seam below.
     # The caller's own spelling of the route, for refusal messages further
     # down: a route only the claude harness can carry may get refused after
     # the vendor+model collapse below, and naming the collapsed `--route`
@@ -1602,19 +1603,20 @@ def cmd_spawn(
         route_spelling = f"--provider {vendor} --model {model}"
         route, model = f"{vendor}/{model}", None
 
-    # --provider is optional: resolve it (explicit > invoking harness > claude)
-    # and reject an empty --model before anything spawns. `provider` is a
-    # concrete string from here down; the provider-name set is validated
-    # substrate-aware further in.
+    # --harness is optional: resolve it (explicit > invoking harness > claude)
+    # and reject an empty --model before anything spawns. Every rung of that
+    # chain is a harness, which is why the resolver is spelled for that axis.
+    # The value is a concrete string from here down; the harness-name set is
+    # validated substrate-aware further in.
     try:
-        provider, provider_source = resolve_dispatch_provider(provider)
+        harness, harness_source = resolve_dispatch_harness(harness)
         model = reject_empty_model(model)
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
     # Provenance rides the pane receipt's harness_source field below (the
-    # default substrate) - it is the HARNESS axis's provenance, so it must not
-    # be named provider_*, which now holds the vendor. The bg/once stdout
+    # default substrate) - it is the HARNESS axis's provenance, so it is not
+    # named provider_*, which now holds the vendor. The bg/once stdout
     # receipts stay byte-parity-locked with the Rust client, so they don't
     # carry it.
 
@@ -1672,15 +1674,15 @@ def cmd_spawn(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
-    if monitor == "happy" and provider != "claude":
+    if monitor == "happy" and harness != "claude":
         print(
-            f"--monitor happy requires the claude harness; got harness {provider!r}",
+            f"--monitor happy requires the claude harness; got harness {harness!r}",
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
 
     if output_format is not None and (
-        provider != "claude" or substrate != "headless" or output_format != "json"
+        harness != "claude" or substrate != "headless" or output_format != "json"
     ):
         print(
             "--output-format supports only 'json' on claude headless spawns",
@@ -1690,10 +1692,10 @@ def cmd_spawn(
 
     # US4 revival: --resume continues an existing claude --bg transcript, so it
     # only applies to the claude bg lane (the Python bg_create path forwards
-    # --resume <uuid>). provider None defaults to claude downstream.
-    if resume is not None and (substrate != "bg" or provider not in (None, "claude")):
+    # --resume <uuid>). An unset harness defaults to claude downstream.
+    if resume is not None and (substrate != "bg" or harness not in (None, "claude")):
         print(
-            "--resume requires --substrate bg on provider claude "
+            "--resume requires --substrate bg on harness claude "
             "(it continues an existing claude --bg session)",
             file=sys.stderr,
         )
@@ -1703,7 +1705,7 @@ def cmd_spawn(
         from fno.agents.mux_spawn import effort_tokens
 
         try:
-            effort_tokens(provider, effort)
+            effort_tokens(harness, effort)
         except DispatchAskError as exc:
             print(str(exc), file=sys.stderr)
             raise typer.Exit(code=exc.exit_code) from exc
@@ -1720,9 +1722,9 @@ def cmd_spawn(
     # (dispatch_spawn -> _claude_create_path); codex/gemini one-shot lanes
     # hardcode their own bypass and can't express a mapped mode. The pane
     # substrate maps every provider, so it's exempt here. (x-dfa4)
-    if permission_mode is not None and provider != "claude" and (substrate != "pane" or once):
+    if permission_mode is not None and harness != "claude" and (substrate != "pane" or once):
         print(
-            f"--permission-mode is not supported for provider {provider!r} on "
+            f"--permission-mode is not supported for harness {harness!r} on "
             "--substrate bg/headless (its one-shot lane hardcodes its own bypass "
             "form); use --substrate pane",
             file=sys.stderr,
@@ -1737,21 +1739,21 @@ def cmd_spawn(
         # Truthiness, not `is not None`: an empty value is UNSET (the builders
         # omit an empty flag), so `--add-dir=""` must NOT trip the guard.
         bad = None
-        if add_dir and provider not in ("claude", "codex", "agy"):
+        if add_dir and harness not in ("claude", "codex", "agy"):
             bad = "--add-dir"
-        elif agent and provider != "claude":
+        elif agent and harness != "claude":
             bad = "--agent"
-        elif tools and provider != "claude":
+        elif tools and harness != "claude":
             bad = "--tools"
-        elif deny_tools and provider != "claude":
+        elif deny_tools and harness != "claude":
             bad = "--deny-tools"
         if bad is not None:
             # No "use --substrate pane" advice: pane rejects the same tier3 cells
             # (gemini --add-dir, codex --agent), so it would mislead. Mirror the
             # tier3_pane_tokens wording instead.
             print(
-                f"{bad} is not supported for provider {provider!r}; "
-                "drop it or use a provider that maps it",
+                f"{bad} is not supported for harness {harness!r}; "
+                "drop it or use a harness that maps it",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1844,8 +1846,8 @@ def cmd_spawn(
     # the x-2af5 split-brain (overlay winning endpoint+auth while the route won
     # the model) cannot recur. Refused BEFORE route resolution so a keyless route
     # never masks this receipt.
-    if account is not None and provider != "claude":
-        print(f"--account is claude-only; got provider {provider!r}", file=sys.stderr)
+    if account is not None and harness != "claude":
+        print(f"--account is claude-only; got harness {harness!r}", file=sys.stderr)
         raise typer.Exit(code=2)
 
     # Explicit --route override (x-b0b4). Resolve + FAIL CLOSED here, BEFORE the
@@ -1867,18 +1869,18 @@ def cmd_spawn(
         if substrate == "pane":
             from fno.agents.harness_map import capabilities
 
-            if not capabilities(provider).get("route_on_pane", False):
+            if not capabilities(harness).get("route_on_pane", False):
                 print(
-                    f"harness {provider!r} does not have the evidence-backed "
+                    f"harness {harness!r} does not have the evidence-backed "
                     "route_on_pane capability; no worker launched, node stays "
                     "dispatchable.",
                     file=sys.stderr,
                 )
                 raise typer.Exit(code=2)
-        if provider != "claude":
+        if harness != "claude":
             print(
                 f"{route_spelling} requires the claude harness; "
-                f"got harness {provider!r} substrate {substrate!r}.",
+                f"got harness {harness!r} substrate {substrate!r}.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1932,7 +1934,7 @@ def cmd_spawn(
     # Resolve/validate the route once before pane/bg/headless fan out. The same
     # helper is called by the in-process spawn APIs, so bypassing the CLI cannot
     # recreate a managed-OAuth half-composition.
-    if provider == "claude" and (role is not None or route_env):
+    if harness == "claude" and (role is not None or route_env):
         from fno.agents.model_routing import (
             RouteCompositionError,
             resolve_spawn_route,
@@ -1990,10 +1992,10 @@ def cmd_spawn(
             # Require a harness AND exact equality. Treating an empty harness as
             # "no objection" would wave through the one record we can say least
             # about, which is the opposite of what a fail-closed guard is for.
-            if rec_harness != provider:
+            if rec_harness != harness:
                 raise ValueError(
                     f"record is a {rec_harness or '<no harness>'} account but "
-                    f"the spawn resolves {provider}"
+                    f"the spawn resolves {harness}"
                 )
             account_env = {
                 **(account_env or {}),
@@ -2058,7 +2060,7 @@ def cmd_spawn(
     # harness that cannot close a loop takes the /target and runs forever with
     # nothing to stop it, and no instrument reports that.
     try:
-        check_loop_participation(provider, message)
+        check_loop_participation(harness, message)
     except DispatchResolveError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2)
@@ -2321,10 +2323,10 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        if provider != "claude":
+        if harness != "claude":
             print(
                 f"--sandbox-write-policy composes into the claude --settings "
-                f"payload; provider {provider!r} would carry the flag and "
+                f"payload; harness {harness!r} would carry the flag and "
                 f"enforce nothing. Drop the flag or spawn claude.",
                 file=sys.stderr,
             )
@@ -2344,7 +2346,7 @@ def cmd_spawn(
                 pane_result = dispatch_spawn_pane(
                     name=name,
                     message=message,
-                    provider=provider,
+                    provider=harness,
                     cwd=workdir,
                     yolo=yolo,
                     role=role,
@@ -2383,7 +2385,7 @@ def cmd_spawn(
                 "name": pane_result.name,
                 "short_id": pane_result.short_id,
                 "harness": pane_result.provider,
-                "harness_source": provider_source,
+                "harness_source": harness_source,
                 "status": pane_result.status,
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,
@@ -2564,7 +2566,7 @@ def cmd_spawn(
             result: SpawnResult = dispatch_spawn(
                 name=name,
                 message=message,
-                provider=provider,
+                harness=harness,
                 cwd=workdir,
                 once=once,
                 timeout=timeout,
@@ -3056,7 +3058,7 @@ def cmd_ask(
         result = dispatch_ask(
             name=name,
             message=message,
-            provider=harness,
+            harness=harness,
             cwd=workdir,
             timeout=timeout,
             from_name=from_name,
@@ -3739,7 +3741,7 @@ def cmd_register(
 
     try:
         entry = register_existing_session(
-            provider=harness, session_id=session_id, cwd=os.getcwd(),
+            harness=harness, session_id=session_id, cwd=os.getcwd(),
             origin="operator",
             delivery_policy=delivery_policy,
         )

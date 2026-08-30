@@ -974,7 +974,7 @@ fn validate_effort_for_spawn(
     }
     if matches!(provider, "gemini" | "agy") {
         return Err(format!(
-            "provider {} has no reasoning-effort surface; omit --effort",
+            "harness {} has no reasoning-effort surface; omit --effort",
             provider
         ));
     }
@@ -1055,7 +1055,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     }
 
     // Resolve provider: explicit --provider > invoking-harness inference >
-    // builtin `claude` (mirrors Python's resolve_dispatch_provider). A missing
+    // builtin `claude` (mirrors Python's resolve_dispatch_harness). A missing
     // flag no longer exits 2 -- that was the bg/headless split-brain vs pane,
     // which already infers via the Python re-exec.
     let provider = match provider_param {
@@ -1176,7 +1176,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // pane substrate (which DOES map every provider's vocabulary).
     if permission_mode.is_some() && provider != "claude" {
         eprintln!(
-            "--permission-mode is not supported for provider {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
+            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
             py_repr(provider)
         );
         return Some(2);
@@ -1199,7 +1199,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // codex --agent fail closed on pane too), so that advice would mislead.
         let unsupported = |flag: &str| {
             eprintln!(
-                "{} is not supported for provider {}; drop it or use a provider that maps it",
+                "{} is not supported for harness {}; drop it or use a harness that maps it",
                 flag,
                 py_repr(provider)
             );

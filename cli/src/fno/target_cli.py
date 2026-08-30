@@ -1499,15 +1499,15 @@ def init(
     from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
-        resolve_dispatch_provider,
+        resolve_dispatch_harness,
     )
 
     refuse_retired_provider(_provider_tombstone)
 
     try:
         dispatch_model = reject_empty_model(model)
-        dispatch_provider = (
-            resolve_dispatch_provider(harness)[0] if harness is not None else None
+        dispatch_harness = (
+            resolve_dispatch_harness(harness)[0] if harness is not None else None
         )
     except DispatchFlagError as exc:
         typer.echo(f"fno do target init: {exc}", err=True)
@@ -1669,8 +1669,10 @@ def init(
         env["TARGET_SIZE"] = normalized_size
     if dispatch_model:
         env["TARGET_DISPATCH_MODEL"] = dispatch_model
-    if dispatch_provider:
-        env["TARGET_DISPATCH_PROVIDER"] = dispatch_provider
+    # The env var and the manifest field keep their spelling: both are read by
+    # other processes and are wave 5's to move, not this wave's.
+    if dispatch_harness:
+        env["TARGET_DISPATCH_PROVIDER"] = dispatch_harness
     if deliverables is not None:
         env["TARGET_DELIVERABLES"] = str(deliverables)
     # Sole authority: an inherited TARGET_BEASTMODE must never self-grant (spawns

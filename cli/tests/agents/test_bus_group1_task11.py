@@ -83,7 +83,7 @@ def test_unknown_agent_name_exits_16(tmp_path: Path, monkeypatch) -> None:
         dispatch_ask(
             name="blue",
             message="hello",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -109,7 +109,7 @@ def test_unknown_agent_name_registry_unchanged(tmp_path: Path, monkeypatch) -> N
         dispatch_ask(
             name="blue",
             message="hello",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -148,7 +148,7 @@ def test_unknown_agent_name_no_provider_subprocess(tmp_path: Path, monkeypatch) 
         dispatch_ask(
             name="blue",
             message="hello",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -182,7 +182,7 @@ def test_unknown_agent_name_with_provider_still_exits_16(tmp_path: Path, monkeyp
         dispatch_ask(
             name="blue",
             message="hello",
-            provider="codex",
+            harness="codex",
             cwd=cwd,
             timeout=10,
         )
@@ -235,7 +235,7 @@ def test_unknown_agent_emits_ask_failed_event(tmp_path: Path, monkeypatch) -> No
         dispatch_ask(
             name="blue",
             message="hello",
-            provider="claude",
+            harness="claude",
             cwd=cwd,
             timeout=10,
         )
@@ -280,7 +280,7 @@ def test_existing_claude_entry_still_follows_up(tmp_path: Path, monkeypatch) -> 
         dispatch_ask(
             name="existing-worker",
             message="new message",
-            provider=None,
+            harness=None,
             cwd=cwd,
             timeout=10,
         )
@@ -312,7 +312,7 @@ def test_provider_mismatch_on_existing_still_exits_2(tmp_path: Path, monkeypatch
         dispatch_ask(
             name="worker",
             message="hello",
-            provider="codex",  # wrong provider
+            harness="codex",  # wrong provider
             cwd=cwd,
             timeout=10,
         )

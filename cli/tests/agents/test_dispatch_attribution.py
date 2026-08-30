@@ -103,7 +103,7 @@ def test_started_and_done_share_request_id(
         dispatch_ask(
             name="alpha",
             message="hello",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             from_name="orchestrator",
         )
@@ -141,7 +141,7 @@ def test_create_done_carries_from_name(
         dispatch_ask(
             name="beta",
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             from_name="orchestrator",
         )
@@ -170,7 +170,7 @@ def test_create_started_carries_from_name_and_caller_kind(
         dispatch_ask(
             name="gamma",
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             from_name="orchestrator",
         )
@@ -211,7 +211,7 @@ def test_nested_agent_attribution_propagates(
         dispatch_ask(
             name="child",
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
             # from_name omitted — env attribution should outrank it anyway
         )
@@ -262,9 +262,9 @@ def test_context_var_resets_between_dispatches(
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
 
     with pytest.raises(DispatchAskError):
-        dispatch_ask(name="d1", message="hi", provider="claude", cwd=tmp_path)
+        dispatch_ask(name="d1", message="hi", harness="claude", cwd=tmp_path)
     with pytest.raises(DispatchAskError):
-        dispatch_ask(name="d2", message="hi", provider="claude", cwd=tmp_path)
+        dispatch_ask(name="d2", message="hi", harness="claude", cwd=tmp_path)
 
     started = [e for e in captured if e[0] == "agent_followup_started"]
     assert len(started) == 2, f"expected 2 followup_started events, got: {[e[0] for e in captured]}"
@@ -310,7 +310,7 @@ def test_dispatch_rejects_name_with_env_corrupting_char(
         dispatch_ask(
             name=name,
             message="hi",
-            provider="claude",
+            harness="claude",
             cwd=tmp_path,
         )
     assert excinfo.value.exit_code == 2
@@ -341,7 +341,7 @@ def test_spawn_create_events_carry_context(
     result = dispatch_spawn(
         name="spawned-alpha",
         message="hello",
-        provider="claude",
+        harness="claude",
         cwd=tmp_path,
         from_name="orchestrator",
     )

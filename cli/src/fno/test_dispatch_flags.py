@@ -12,7 +12,7 @@ from fno.dispatch_flags import (
     DispatchFlagError,
     infer_invoking_harness,
     reject_empty_model,
-    resolve_dispatch_provider,
+    resolve_dispatch_harness,
 )
 _ALL_MARKERS = (
     "CODEX_THREAD_ID",
@@ -35,24 +35,24 @@ def _clear_harness_env(monkeypatch):
 
 @pytest.mark.parametrize("prov", ["claude", "codex", "gemini"])
 def test_explicit_valid_provider(prov):
-    assert resolve_dispatch_provider(prov) == (prov, "explicit")
+    assert resolve_dispatch_harness(prov) == (prov, "explicit")
 
 
 def test_explicit_beats_harness_marker():
     # AC2-EDGE-adjacent: an explicit flag outranks the inferred harness.
     env = {"CODEX_SESSION_ID": "abc"}
-    assert resolve_dispatch_provider("claude", env=env) == ("claude", "explicit")
+    assert resolve_dispatch_harness("claude", env=env) == ("claude", "explicit")
 
 
 def test_explicit_unknown_provider_passed_through():
     # The resolver does NOT validate the provider set (substrate-aware downstream
     # check owns AC1-ERR); it returns any non-empty explicit value verbatim.
-    assert resolve_dispatch_provider("opencode") == ("opencode", "explicit")
+    assert resolve_dispatch_harness("opencode") == ("opencode", "explicit")
 
 
 def test_explicit_empty_provider_rejected():
     with pytest.raises(DispatchFlagError):
-        resolve_dispatch_provider("   ")
+        resolve_dispatch_harness("   ")
 
 
 # --- harness inference (middle) -------------------------------------------
@@ -69,7 +69,7 @@ def test_explicit_empty_provider_rejected():
     ],
 )
 def test_harness_inferred_from_marker(marker, expected):
-    assert resolve_dispatch_provider(None, env={marker: "sid"}) == (
+    assert resolve_dispatch_harness(None, env={marker: "sid"}) == (
         expected,
         "harness-inferred",
     )
@@ -79,13 +79,13 @@ def test_multiple_markers_are_ambiguous():
     # Inference never guesses: two markers -> None (caller falls to builtin).
     env = {"CODEX_SESSION_ID": "b", "GEMINI_SESSION_ID": "c"}
     assert infer_invoking_harness(env) is None
-    assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
+    assert resolve_dispatch_harness(None, env=env) == ("claude", "builtin-default")
 
 
 def test_codex_thread_and_legacy_codex_marker_infer_same_harness():
     env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
     assert infer_invoking_harness(env) == "codex"
-    assert resolve_dispatch_provider(None, env=env) == (
+    assert resolve_dispatch_harness(None, env=env) == (
         "codex",
         "harness-inferred",
     )
@@ -103,12 +103,12 @@ def test_whitespace_marker_is_absent():
 
 def test_no_marker_falls_to_builtin_claude():
     # AC1-EDGE: bare shell, no markers, no config default -> claude/builtin.
-    assert resolve_dispatch_provider(None, env={}) == ("claude", "builtin-default")
+    assert resolve_dispatch_harness(None, env={}) == ("claude", "builtin-default")
 
 
 def test_canonical_harness_name_drives_inference():
     assert infer_invoking_harness({"FNO_HARNESS_NAME": "codex"}) == "codex"
-    assert resolve_dispatch_provider(None, env={"FNO_HARNESS_NAME": "codex"}) == (
+    assert resolve_dispatch_harness(None, env={"FNO_HARNESS_NAME": "codex"}) == (
         "codex",
         "harness-inferred",
     )
@@ -121,7 +121,7 @@ def test_canonical_vendor_contradiction_is_not_inferred():
         "CODEX_THREAD_ID": "codex-session",
     }
     assert infer_invoking_harness(env) is None
-    assert resolve_dispatch_provider(None, env=env) == ("claude", "builtin-default")
+    assert resolve_dispatch_harness(None, env=env) == ("claude", "builtin-default")
 
 
 # --- model flag validation -------------------------------------------------

@@ -62,7 +62,7 @@ def test_ask_yolo_flag_reaches_dispatch_ask(monkeypatch, runner: CliRunner) -> N
     assert received["yolo"] is True
     assert received["name"] == "worker"
     assert received["message"] == "msg"
-    assert received["provider"] == "codex"
+    assert received["harness"] == "codex"
 
 
 def test_ask_without_yolo_defaults_false(monkeypatch, runner: CliRunner) -> None:

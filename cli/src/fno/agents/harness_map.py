@@ -659,7 +659,7 @@ def resolve_dispatch(
     # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
     # wrapper interpolating an unset env var) must fail loud, never silently fall
     # through to config/claude - the epic's "never silently default to claude"
-    # invariant + the sibling resolve_dispatch_provider contract.
+    # invariant + the sibling resolve_dispatch_harness contract.
     if harness is not None:
         chosen_harness = harness.strip()
         if not chosen_harness:

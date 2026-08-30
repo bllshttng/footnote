@@ -287,7 +287,7 @@ def test_composed_receipt_names_live_credential_and_payer(monkeypatch, runner):
         return dispatch.SpawnResult(
             kind="created",
             name=kwargs["name"],
-            provider=kwargs["provider"],
+            provider=kwargs["harness"],
             short_id="abcd1234",
         )
 
@@ -452,7 +452,7 @@ def test_codex_one_shot_refuses_a_pinned_account(monkeypatch, tmp_path):
         dsp.dispatch_spawn(
             name="t-once",
             message="hi",
-            provider="codex",
+            harness="codex",
             cwd=tmp_path,
             once=True,
             account_env={"HOME": "/accounts/zai-1/home"},
