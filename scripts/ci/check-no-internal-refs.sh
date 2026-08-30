@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
-# check-no-internal-refs.sh - CI gate that blocks three leak classes from
-# landing in shipped, user-facing prose:
-#   internal-path  "internal/" vault-path literals (file-allowlisted below)
-#   node-id        internal backlog node IDs (x-XXXX / ab-XXXXXXXX) - the
-#                  standing "no internal node IDs in public docs" rule;
-#                  exempt by TOKEN (documented format examples), never by file
-#   session-url    a claude.ai/code session URL pasted into prose
-# All three share the same scanned scope and the same fail-loud file-list
-# capture. The commit-message / PR-body session-URL gate is a SEPARATE
-# workflow (scripts/ci/check-no-session-urls.sh); this script covers prose.
+# check-no-internal-refs.sh - CI gate that blocks four leak classes from
+# landing in this repo:
+#   internal-path    "internal/" vault-path literals (file-allowlisted below)
+#   node-id          internal backlog node IDs (x-XXXX / ab-XXXXXXXX) - the
+#                    standing "no internal node IDs in public docs" rule;
+#                    exempt by TOKEN (documented format examples), never by file
+#   session-url      a claude.ai/code session URL pasted into prose
+#   competitor-name  a rival product's name anywhere in the tree (repo-wide,
+#                    code included). The term list is base64-encoded below so
+#                    this gate does not itself publish the names it guards.
+# All three prose classes share the same scanned scope and the same fail-loud
+# file-list capture. The competitor-name class scans every tracked file
+# instead; see its block below. The commit-message / PR-body session-URL gate
+# is a SEPARATE workflow (scripts/ci/check-no-session-urls.sh); this script
+# covers checked-in content.
 #
 # "internal/" is the symlink to the maintainers' Obsidian vault. It exists
 # only when Obsidian is enabled (config.obsidian.enabled); for an OSS install
@@ -158,6 +163,51 @@ while IFS= read -r f; do
     fi
 done <<< "$files_to_check"
 
+# competitor-name scan: a rival product's name must not ship anywhere in this
+# repo, code included, so this class walks every tracked file rather than the
+# prose scope above. The term list is one base64 blob, one term per line when
+# decoded, because a guard that named its terms would itself be the leak it
+# exists to prevent. To maintain the list: write the terms one per line, then
+#   <terms one per line> | base64 | tr -d '\n'
+# and paste the single-line result below. Matching is case-insensitive and
+# whole-word (git grep -w; POSIX ERE has no \b), so a Capitalized
+# reintroduction fails and ordinary words that merely contain a term as a
+# substring do not.
+COMPETITOR_TERMS_B64='aGVyZHIKY211eApvcmNhCnN1cGVycG93ZXJzCmdldC1zaGl0LWRvbmUKZXZlcnl0aGluZy1jbGF1ZGUtY29kZQplY2MKY2N1c2FnZQphaWRlcgpyZXBvZ3JhbQphdXRvcmVzZWFyY2gKOXJvdXRlcgpjbGF1ZGUtbWVtCmNjLXN3aXRjaAphZ2VudHdvcmtmb3JjZQpjb2RleGJhcgpsaW5lYXJpcwptb3RpYQpjbGF1ZGUtY29kZS1yb3V0ZXIKcmFscGgKY2l0YWRlbAphbnRpZ3Jhdml0eS1mb3ItY2xhdWRlLWNvZGUK'
+
+# Files exempt from the competitor-name scan. Each entry carries a WHY, so the
+# next reader can audit the exemption instead of trusting it. Empty at
+# landing; add a file only when the name in it is load-bearing and cannot be
+# rewritten (a vendored license notice, for example).
+NAME_ALLOWLIST=(
+)
+
+competitor_terms=$(printf '%s' "$COMPETITOR_TERMS_B64" | base64 -d 2>/dev/null)
+if [[ -z "$competitor_terms" ]]; then
+    echo "check-no-internal-refs: failed to decode the competitor term list" >&2
+    exit 1
+fi
+
+while IFS= read -r term; do
+    [[ -z "$term" ]] && continue
+    if ! term_hits=$(git grep -Iinw -e "$term" 2>/dev/null); then
+        continue
+    fi
+    while IFS= read -r hit; do
+        [[ -z "$hit" ]] && continue
+        hit_file="${hit%%:*}"
+        skip=0
+        # ${arr[@]+"${arr[@]}"}: a plain "${arr[@]}" on an empty array aborts
+        # under set -u on stock macOS bash 3.2.
+        for exempt in ${NAME_ALLOWLIST[@]+"${NAME_ALLOWLIST[@]}"}; do
+            [[ "$hit_file" == "$exempt" ]] && skip=1 && break
+        done
+        [[ $skip -eq 1 ]] && continue
+        REPORT+="[competitor-name] $hit"$'\n'
+        VIOLATIONS=$((VIOLATIONS + 1))
+    done <<< "$term_hits"
+done <<< "$competitor_terms"
+
 if [[ $VIOLATIONS -eq 0 ]]; then
     echo "check-no-internal-refs: no violations found"
     exit 0
@@ -184,6 +234,13 @@ fi
     echo
     echo "[session-url] a claude.ai/code session URL is an internal, irreversible"
     echo "  leak - remove it from the prose."
+    echo
+    echo "[competitor-name] a rival product's name must not ship in this repo."
+    echo "  Rewrite to describe the behavior, not its source: 'the lowercase"
+    echo "  wire label' needs no provenance to be correct. If a hit is fno's"
+    echo "  own vocabulary that merely collides with a term, add the file to"
+    echo "  NAME_ALLOWLIST in scripts/ci/check-no-internal-refs.sh with a WHY"
+    echo "  comment."
     echo
     echo "The code tree (cli/, crates/, scripts/, hooks/, skills/) is not"
     echo "scanned; the Obsidian-gated resolver lives in cli/src/fno/paths.py."
