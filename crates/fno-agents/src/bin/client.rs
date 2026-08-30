@@ -1176,7 +1176,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
     // pane substrate (which DOES map every provider's vocabulary).
     if permission_mode.is_some() && provider != "claude" {
         eprintln!(
-            "--permission-mode is not supported for provider {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
+            "--permission-mode is not supported for harness {} on --substrate bg/headless (its one-shot lane hardcodes its own bypass form); use --substrate pane",
             py_repr(provider)
         );
         return Some(2);
@@ -1199,7 +1199,7 @@ fn maybe_run_spawn(home: &AgentsHome, params: &Value, name: &str) -> Option<i32>
         // codex --agent fail closed on pane too), so that advice would mislead.
         let unsupported = |flag: &str| {
             eprintln!(
-                "{} is not supported for provider {}; drop it or use a provider that maps it",
+                "{} is not supported for harness {}; drop it or use a harness that maps it",
                 flag,
                 py_repr(provider)
             );

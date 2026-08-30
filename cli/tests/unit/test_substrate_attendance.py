@@ -80,7 +80,7 @@ def test_pane_spawn_argv_stamps_pane_after_the_ambient_scrub():
     carries both and the assignment is the one that survives."""
     from fno.agents.mux_spawn import _mesh_env_wrapper
 
-    argv = _mesh_env_wrapper(name="w1", provider="codex", role=None, argv=["codex"])
+    argv = _mesh_env_wrapper(name="w1", harness="codex", role=None, argv=["codex"])
     unset = [argv[i + 1] for i, tok in enumerate(argv) if tok == "-u"]
     assert "FNO_AGENT_SUBSTRATE" in unset
     assert "FNO_AGENT_SUBSTRATE=pane" in argv

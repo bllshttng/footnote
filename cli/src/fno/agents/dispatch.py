@@ -11,7 +11,7 @@ Phase 1 surface:
 
 US1 surface (this module):
 
-- ``dispatch_ask(name, message, provider, cwd, timeout, lock_timeout)`` —
+- ``dispatch_ask(name, message, harness, cwd, timeout, lock_timeout)`` —
   orchestrates is_provider_available + per-agent flock + select_provider
   (INSIDE the flock per architecture step 3) + provider.bg_create +
   update_registry + events. Returns the parsed short-id on success.

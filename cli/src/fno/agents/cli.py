@@ -1692,10 +1692,10 @@ def cmd_spawn(
 
     # US4 revival: --resume continues an existing claude --bg transcript, so it
     # only applies to the claude bg lane (the Python bg_create path forwards
-    # --resume <uuid>). provider None defaults to claude downstream.
+    # --resume <uuid>). An unset harness defaults to claude downstream.
     if resume is not None and (substrate != "bg" or harness not in (None, "claude")):
         print(
-            "--resume requires --substrate bg on provider claude "
+            "--resume requires --substrate bg on harness claude "
             "(it continues an existing claude --bg session)",
             file=sys.stderr,
         )

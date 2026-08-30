@@ -443,7 +443,7 @@ The actionable view. A high ratio on a 4-line function is usually a thorough doc
 | 1.2x | 12 | 10 | `cli/src/fno/agents/test_harness_map.py:424` | `test_both_merge_posture_readers_default_to_deny` |
 | 1.2x | 12 | 10 | `cli/src/fno/approvals/store.py:788` | `_drain` |
 | 1.2x | 6 | 5 | `cli/src/fno/cost/__init__.py:263` | `_as_cost` |
-| 1.2x | 12 | 10 | `cli/src/fno/dispatch_flags.py:64` | `resolve_dispatch_harness` |
+| 1.2x | 12 | 10 | `cli/src/fno/dispatch_flags.py:73` | `resolve_dispatch_harness` |
 | 1.2x | 6 | 5 | `cli/src/fno/doctor.py:78` | `_read_marker` |
 | 1.2x | 6 | 5 | `cli/src/fno/evals/history.py:33` | `iter_rows` |
 | 1.2x | 6 | 5 | `cli/src/fno/events/verify_child_promise.py:163` | `complete` |

@@ -1590,7 +1590,7 @@ def inject_spawn_defaults(
             from_config.append(("substrate", cfg_substrate, f"{substrate_rung}.substrate"))  # type: ignore[arg-type]
         else:
             if not prov:
-                reason = "provider resolution failed"
+                reason = "harness resolution failed"
             elif cfg_substrate not in _SUBSTRATES:
                 reason = f"unknown substrate (valid: {', '.join(_SUBSTRATES)})"
             else:
@@ -1626,7 +1626,7 @@ def inject_spawn_defaults(
             reason = (
                 f"{prov} cannot map permission mode {cfg_permission!r} on substrate {eff_substrate!r}"
                 if prov
-                else "provider resolution failed"
+                else "harness resolution failed"
             )
             print(
                 f"fno agents spawn: permission-mode skipped ({reason}); "
