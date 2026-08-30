@@ -11,7 +11,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 
@@ -549,7 +549,7 @@ def _emit_result(
     json_output: bool,
     cause_only: bool = False,
     note: str | None = None,
-) -> None:
+) -> NoReturn:
     cpu_over = reading.fleet_cpu_cores > CPU_THRESHOLD_CORES
     process_over = (
         process_threshold is not None
@@ -655,14 +655,14 @@ def footprint_command(
         # The roster is an ENRICHMENT: it sets the process threshold. On
         # roster failure the measurement still prints, with the threshold
         # degraded away and the reason named - a 5s roster timeout under load
-        # is exactly when this reading matters (x-e040).
+        # is exactly when this reading matters (x-e040). _emit_result raises
+        # with its own verdict, so the CPU threshold still applies here.
         _emit_result(
             reading,
             process_threshold=None,
             json_output=json_output,
             note=error or "roster unavailable: no row count",
         )
-        raise typer.Exit(code=0)
 
     _emit_result(
         reading,
