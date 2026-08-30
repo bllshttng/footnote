@@ -526,6 +526,8 @@ body[data-local="false"] .detail { padding-left:15px }
 .pr-p1 { color:var(--p1); font-weight:700 }
 .dot { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--muted);
   white-space:nowrap; font-variant-numeric:tabular-nums }
+.votes { color:var(--accent); cursor:copy; border-radius:4px; padding:1px 4px }
+.votes:hover { background:var(--accent-soft) }
 .haspl { color:var(--accent) }
 .haspr { color:var(--done) }
 .kids { font-family:"IBM Plex Mono",ui-monospace,monospace; font-size:11px; color:var(--muted);
@@ -590,6 +592,7 @@ _DASHBOARD_JS = """\
     if (ORDER.indexOf(node.s) < 0) ORDER.push(node.s);
   });
   var LOCAL = document.body.dataset.local === 'true';
+  var VOTE_SUFFIX = '__VOTE_SUFFIX__';
   var esc = function (s) { return String(s == null ? '' : s).replace(/[&<>\"]/g, function (c) {
     return {'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;'}[c];
   }); };
@@ -597,7 +600,7 @@ _DASHBOARD_JS = """\
   var counts = function (nodes) { var result = {}; ORDER.forEach(function (s) { result[s] = 0; });
     nodes.forEach(function (n) { result[n.s] = (result[n.s] || 0) + 1; }); return result; };
   var ALL = counts(NODES);
-  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false };
+  var state = { q:'', status:new Set(), projects:new Set(), projectFilterActive:false, group:'', prio:'', size:'', from:'', ty:'', planOnly:false, prOnly:false, demand:false };
   var PROJECT_KEY = 'fno-kanban-project-state';
   function loadProjects() {
     try {
@@ -675,12 +678,14 @@ _DASHBOARD_JS = """\
   fromEl.addEventListener('change', function () { state.from = fromEl.value || '';
     document.getElementById('datef').className = 'datef' + (state.from ? ' on' : ''); render(); });
   document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value.toLowerCase().trim(); render(); });
-  function buttonFilter(id, key) { var b = document.getElementById(id); b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
+  function buttonFilter(id, key) { var b = document.getElementById(id); if (!b) return; b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
   buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
+  if (LOCAL) buttonFilter('demandOnly', 'demand');
   var openStatuses = new Set(ORDER.filter(function (s) { return s !== 'superseded' && (s !== 'done' || DATA.initial_done); })); openStatuses.forEach(function (s) { state.status.add(s); });
   ORDER.forEach(function (s) { var b = statusChips.querySelector('[data-s="' + s + '"]'); if (b) b.setAttribute('aria-pressed', state.status.has(s) ? 'true' : 'false'); });
   function projectMatch(n) { return !state.projectFilterActive || !state.projects.size || state.projects.has(n.project); }
   function matches(n) {
+    if (state.demand && !n.en) return false;
     if (!projectMatch(n) || (state.status.size && !state.status.has(n.s))) return false;
     if (state.group && state.group !== n.g) return false; if (state.prio && state.prio !== n.p) return false;
     if (state.size && state.size !== n.sz) return false;
@@ -758,6 +763,7 @@ _DASHBOARD_JS = """\
         }).join('')
       + '</div>';
   }
+  function voteCommand(n) { return 'fno backlog encounter ' + n.id + VOTE_SUFFIX; }
   function detail(n) {
     var h = '<div class=\"kv\">';
     // The row's .rid copy is mouse-only by construction: it is a span inside
@@ -765,6 +771,7 @@ _DASHBOARD_JS = """\
     // the same copy is this button, reached by expanding the row.
     if (LOCAL) h += '<span><b>id</b> ' + esc(n.id) + ' <button class=\"pbtn\" type=\"button\" data-copy=\"id\">Copy</button></span>';
     h += '<span><b>status</b> ' + esc(n.s) + '</span>' + (n.p ? '<span><b>priority</b> ' + esc(n.p) + '</span>' : '') + (n.sz ? '<span><b>size</b> ' + esc(n.sz) + '</span>' : '') + '</div>';
+    if (LOCAL && n.en) h += '<div class="kv"><span><b>encounters</b> ' + n.en + ' (' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator)</span><button class="pbtn" type="button" data-copy="vote">Copy upvote</button></div>';
     if (n.pa) h += '<div class=\"blk kin\"><div class=\"h\">Parent</div><div class=\"item\">'
       // No not-found marker here: pt_ is empty BOTH when the parent is absent
       // from the graph and when it simply has no title, so a marker keyed on it
@@ -801,7 +808,9 @@ _DASHBOARD_JS = """\
         if (n.id) row.id = n.id;
         row.dataset.project = n.project; row.dataset.s = n.s;
         if (n.ty) row.dataset.type = n.ty;
-        var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button'; main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
+        var main = document.createElement('button'); main.className = 'rmain'; main.type = 'button';
+        var votePill = LOCAL && n.en ? '<span class=\"votes\" title=\"' + (n.en - n.eo) + ' agent, ' + n.eo + ' operator\">▲ ' + n.en + '</span>' : '';
+        main.innerHTML = (LOCAL ? '<span class=\"rid\">' + esc(n.id) + '</span>' : '<span class=\"rid\"></span>') + '<span class=\"rt\">' + esc(n.t) + '</span><span class=\"meta\">' + typeBadge(n.ty) + '<span class=\"pill s-' + esc(n.s) + '\">' + esc(n.s) + '</span>' + (n.p ? '<span class=\"pill' + (n.p === 'p0' || n.p === 'p1' ? ' pr-p1' : '') + '\">' + esc(n.p) + '</span>' : '') + (n.sz ? '<span class=\"pill\">' + esc(n.sz) + '</span>' : '') + '</span><span class=\"dot\">' + kidBar(n) + votePill + (n.pl ? '<span class=\"haspl\">plan</span>' : '') + (n.pr ? '<span class=\"haspr\">PR</span>' : '') + esc(n.u || n.c || '') + '</span>';
         main.setAttribute('aria-expanded', 'false');
         // The id is the thing most often copied out of this board, so it is
         // one click ON the id rather than a trip through the detail. A span,
@@ -812,12 +821,14 @@ _DASHBOARD_JS = """\
         if (LOCAL && n.id) { var rid = main.querySelector('.rid');
           if (rid) { rid.title = 'Copy node id';
             rid.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(n.id, rid); }); } }
+        if (LOCAL && n.en) { var votes = main.querySelector('.votes');
+          if (votes) votes.addEventListener('click', function (ev) { ev.stopPropagation(); copyText(voteCommand(n), votes); }); }
         main.addEventListener('click', function () { var old = row.querySelector('.detail');
           if (old) { old.remove(); main.setAttribute('aria-expanded', 'false'); return; }
           var d = document.createElement('div'); d.className = 'detail'; d.innerHTML = detail(n);
           d.querySelectorAll('[data-copy]').forEach(function (b) {
             b.addEventListener('click', function (ev) { ev.stopPropagation();
-              copyText(b.dataset.copy === 'id' ? n.id : n.pl, b); });
+              copyText(b.dataset.copy === 'id' ? n.id : b.dataset.copy === 'vote' ? voteCommand(n) : n.pl, b); });
           });
           row.appendChild(d); main.setAttribute('aria-expanded', 'true'); });
         row.appendChild(main); list.appendChild(row); return { node:n, el:row }; });
@@ -832,11 +843,25 @@ _DASHBOARD_JS = """\
   // same lie the visible-count invariant below exists to prevent. So the next
   // render the reader causes drops it, and the row obeys the filter again.
   var revealed = null;
+  // Whether the previous render left the board demand-sorted. DOM moves are a
+  // transition cost: sorting must move rows and toggling off must restore
+  // authored order, but a filter keystroke while unsorted must move nothing.
+  // Unconditional re-appending ran ~4,700 appendChild moves per keystroke on
+  // the live graph to achieve nothing.
+  var wasSorted = false;
   function render(keepReveal) {
     if (!keepReveal) revealed = null;
     var shown = 0;
+    var sorted = !!state.demand;
     sections.forEach(function (sec) {
       var vis = [];
+      if (sorted || wasSorted) {
+        // build() fixed the DOM order and render() only toggles classes, so a demand
+        // sort has to move nodes. sec.rows keeps authored order, so toggling off
+        // re-appends in that order instead of leaving the board sorted.
+        var moveOrder = sorted ? sec.rows.slice().sort(function (a, b) { return (b.node.dv || 0) - (a.node.dv || 0); }) : sec.rows;
+        moveOrder.forEach(function (r) { r.el.parentNode.appendChild(r.el); });
+      }
       sec.rows.forEach(function (r) { var ok = matches(r.node) || r.node.id === revealed;
         r.el.className = 'row' + (ok ? '' : ' is-hidden'); if (ok) vis.push(r.node); });
       shown += vis.length;
@@ -853,6 +878,7 @@ _DASHBOARD_JS = """\
       }).join('') : '';
       sec.el.className = 'group' + (vis.length ? '' : ' is-hidden');
     });
+    wasSorted = sorted;
     document.getElementById('shown').textContent = shown + ' of ' + NODES.length + ' nodes shown';
   }
   // A child link can name a row the active filter hides, and an anchor to a
@@ -891,6 +917,15 @@ def _dashboard_rows(
 ) -> list[dict]:
     """Project graph entries into the canonical dashboard's data contract."""
     source = context_entries if context_entries is not None else entries
+    if local:
+        from fno.graph._intake import make_effective_priority
+        from fno.graph.demand import (
+            divergence_score,
+            encounter_voters,
+            operator_voters,
+        )
+
+        priority_for = make_effective_priority(source)
     index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
     # Successors, indexed once. Scanning `source` per entry to find what each
     # one unblocks is quadratic, and this runs inside the auto-render hook on
@@ -932,6 +967,12 @@ def _dashboard_rows(
             "ty": str(entry.get("type") or ""),
         }
         if local:
+            # The same helpers the CLI demand read uses. Re-walking the
+            # encounters here split the definition of a voter across two
+            # files, and a voter-key rule change would then pass one reader
+            # and silently disagree in the other on this auto-render path.
+            voters = encounter_voters(entry)
+            operators = operator_voters(entry)
             row.update(
                 {
                     "id": str(entry.get("id") or "?"),
@@ -1008,6 +1049,15 @@ def _dashboard_rows(
                     ],
                 }
             )
+            if voters:
+                operator_count = len(voters & operators)
+                row.update(
+                    {
+                        "en": len(voters),
+                        "eo": operator_count,
+                        "dv": divergence_score(entry, priority_for(entry)),
+                    }
+                )
             plan_path = str(row["pl"])
             if vault and plan_path:
                 row["link"] = _obsidian_url(vault, plan_path)
@@ -1187,6 +1237,14 @@ def _dashboard_html(
     static_board = _dashboard_static_html(
         rows, local=local, initial_done=projection == "roadmap"
     )
+    vote_suffix = (
+        ' --operator --evidence "REPLACE: what it cost"' if local else ""
+    )
+    # The splice lands inside a single-quoted JS string literal, so an
+    # apostrophe in the suffix would terminate it and kill the whole dashboard
+    # script at parse time. Escape for that literal at the one splice site.
+    js_safe_suffix = vote_suffix.replace("\\", "\\\\").replace("'", "\\'")
+    dashboard_js = _DASHBOARD_JS.replace("__VOTE_SUFFIX__", js_safe_suffix)
     # The font is the original design's, so it stays; the LOAD is what must not
     # block. A stylesheet in <head> is render-blocking, and a network that
     # blackholes rather than refuses (captive portal, offline laptop, locked-down
@@ -1232,11 +1290,16 @@ def _dashboard_html(
         '<select id="sizeSel" aria-label="Filter by size"><option value="">Any size</option></select>'
         '<button class="chip" id="planOnly" type="button" aria-pressed="false">Plan, unfinished <span class="c" id="planCount"></span></button>'
         '<button class="chip" id="prOnly" type="button" aria-pressed="false">has a PR <span class="c" id="prCount"></span></button>'
-        f'</div><main id="board">{static_board}</main>'
+        + (
+            '<button class="chip" id="demandOnly" type="button" aria-pressed="false">Demand</button>'
+            if local
+            else ""
+        )
+        + f'</div><main id="board">{static_board}</main>'
         f'<footer><span id="shown"></span><span>rendered {generated}</span>'
         f"<span>statuses: {status_legend}</span></footer>"
         f'</div><script id="data" type="application/json">{payload}</script>'
-        f"<script>{_DASHBOARD_JS}</script></body></html>\n"
+        f"<script>{dashboard_js}</script></body></html>\n"
     )
 
 

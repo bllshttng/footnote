@@ -80,7 +80,15 @@ class El {
     }
   }
   get innerHTML() { return this._html; }
-  appendChild(c) { c.parentNode = this; this.children.push(c); return c; }
+  appendChild(c) {
+    if (c.parentNode) {
+      const oldIndex = c.parentNode.children.indexOf(c);
+      if (oldIndex >= 0) c.parentNode.children.splice(oldIndex, 1);
+    }
+    c.parentNode = this;
+    this.children.push(c);
+    return c;
+  }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addEventListener(k, fn) { (this._listeners[k] ||= []).push(fn); }

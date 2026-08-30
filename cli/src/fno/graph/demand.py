@@ -13,6 +13,14 @@ DISPLAY concerns here, not corrections. `dispatched` renders the dispatch
 context beside the number rather than subtracting it out, because withholding
 the signal is worse than showing it with its context.
 
+An operator vote and an operator priority are two expressions from one person,
+so a p3 node the operator voted on and never ranked scores 4 on the strength of
+the operator disagreeing with themselves. That is not corrected. It is
+DISPLAYED: `enc 1 (0a/1o)` tells the reader which kind of disagreement they are
+looking at, and "four agents hit this and I never ranked it" is a different fact
+from "I hit this once and never ranked it". Both are worth knowing. Withholding
+the row is worse than showing it with its provenance.
+
 Nothing in this module writes. `demand` never touches `rank` and never consults
 `_kanban_column` as an input, because the board is the work order and a signal
 that reorders it on its own removes the judgement this feature exists to inform.
@@ -26,17 +34,39 @@ PRIORITY_WEIGHT = {"p0": 1, "p1": 2, "p2": 3, "p3": 4}
 _DEFAULT_WEIGHT = PRIORITY_WEIGHT["p2"]
 
 
-def encounter_sessions(entry: dict) -> set:
-    """Distinct session ids that recorded an encounter with this node.
+#: The one shared operator voter key. A literal here and a check everywhere a
+#: kind is tested; the constant is what keeps a third module from re-spelling it.
+OPERATOR_VOTER_KIND = "operator"
 
-    Distinct SESSIONS, never rows. The write verb already refuses a second vote
-    per session, so a duplicate row means the record was written some other way;
-    counting rows would let that path inflate the signal.
+
+def voter_key(record: dict) -> str:
+    """Return the identity that makes an encounter one-per voter."""
+    return str(record.get("voter_key") or record.get("session_id") or "")
+
+
+def encounter_voters(entry: dict) -> set:
+    """Distinct voter keys that recorded an encounter with this node.
+
+    Distinct VOTERS, never rows. The write verb already refuses a second vote per
+    voter, so a duplicate row means the record was written some other way;
+    counting rows would let that path inflate the signal. The fallback to
+    ``session_id`` keeps encounters written before ``voter_key`` was introduced.
     """
     return {
-        e.get("session_id")
+        voter_key(e)
         for e in (entry.get("encounters") or [])
-        if isinstance(e, dict) and e.get("session_id")
+        if isinstance(e, dict) and voter_key(e)
+    }
+
+
+def operator_voters(entry: dict) -> set:
+    """The subset of encounter voters that voted under the operator key."""
+    return {
+        voter_key(e)
+        for e in (entry.get("encounters") or [])
+        if isinstance(e, dict)
+        and e.get("voter_kind") == OPERATOR_VOTER_KIND
+        and voter_key(e)
     }
 
 
@@ -51,17 +81,17 @@ def divergence_score(entry: dict, effective_priority: str) -> int:
     weight = PRIORITY_WEIGHT.get(effective_priority, _DEFAULT_WEIGHT)
     if not entry.get("sessions") and not entry.get("pr_number"):
         weight *= 2
-    return len(encounter_sessions(entry)) * weight
+    return len(encounter_voters(entry)) * weight
 
 
-def _dispatched_count(entry: dict, sessions: set) -> int:
+def _dispatched_count(entry: dict, voters: set) -> int:
     """How many encountering sessions were also dispatched to this node."""
     dispatched = {
         row.get("session_id")
         for row in (entry.get("sessions") or [])
         if isinstance(row, dict) and row.get("session_id")
     }
-    return len(sessions & dispatched)
+    return len(voters & dispatched)
 
 
 def demand_rows(entries: list[dict]) -> list[dict]:
@@ -76,16 +106,19 @@ def demand_rows(entries: list[dict]) -> list[dict]:
     for entry in entries:
         if not isinstance(entry, dict):
             continue
-        sessions = encounter_sessions(entry)
-        if not sessions:
+        voters = encounter_voters(entry)
+        if not voters:
             continue
+        operators = operator_voters(entry)
         rows.append(
             {
                 "score": divergence_score(entry, priority_for(entry)),
                 "node": entry.get("id"),
                 "pri": priority_for(entry),
-                "enc": len(sessions),
-                "dispatched": _dispatched_count(entry, sessions),
+                "enc": len(voters),
+                "agent": len(voters - operators),
+                "operator": len(voters & operators),
+                "dispatched": _dispatched_count(entry, voters),
                 # `status`, not the kanban column. The column is DERIVED at
                 # render time and is absent from a stored entry, so reading it
                 # here rendered blank on every row of the live graph. Deriving
@@ -106,14 +139,21 @@ def format_rows(rows: list[dict]) -> str:
             "no encounters recorded yet. An agent files one with "
             "`fno backlog encounter <node> --evidence \"<what it cost>\"`."
         )
+    # The enc cell swallows the (Na/No) split at a FIXED width. Appending the
+    # split after a bare :>3 shifted dispatched/status/title right on
+    # operator-voted rows only, so those columns aligned with nothing. Counts
+    # beyond the width overflow it, exactly as a bare :>3 always could.
+    enc_width = 12
     header = (
-        f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':>3} {'dispatched':>10}  "
+        f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':<{enc_width}} {'dispatched':>10}  "
         f"{'status':<12} title"
     )
     lines = [header]
     for row in rows:
+        split = f" ({row['agent']}a/{row['operator']}o)" if row["operator"] else ""
+        enc_cell = f"{row['enc']}{split}"
         lines.append(
-            f"{row['score']:>5}  {row['node']:<8} {row['pri']:<4} {row['enc']:>3} "
+            f"{row['score']:>5}  {row['node']:<8} {row['pri']:<4} {enc_cell:<{enc_width}} "
             f"{row['dispatched']:>10}  {row['status']:<12} {row['title']}"
         )
     return "\n".join(lines)

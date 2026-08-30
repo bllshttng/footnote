@@ -161,6 +161,85 @@ def test_an_unprovable_identity_cannot_vote(probe):
     assert _encounters(probe) == []
 
 
+def test_operator_vote_does_not_require_session_identity(probe):
+    """AC1-HP: the explicit operator voter works from a plain terminal."""
+    _seed(probe, _node())
+
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--operator",
+        "--evidence",
+        "the operator hit the same seam.",
+        session_id="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "operator" in result.stdout
+    assert _encounters(probe) == [
+        {
+            "ts": _encounters(probe)[0]["ts"],
+            "voter_key": "operator",
+            "voter_kind": "operator",
+            "evidence": "the operator hit the same seam.",
+        }
+    ]
+
+
+def test_operator_vote_is_deduped_by_voter_key(probe):
+    """AC4-EDGE: operator votes use one shared, stable dedupe key."""
+    _seed(probe, _node())
+    first = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--operator",
+        "--evidence",
+        "first operator encounter.",
+        session_id="",
+    )
+    assert first.returncode == 0, first.stderr
+    first_ts = _encounters(probe)[0]["ts"]
+
+    second = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--operator",
+        "--evidence",
+        "second operator encounter.",
+        session_id="another-session",
+    )
+
+    assert second.returncode == 3, second.stderr
+    assert first_ts in second.stderr
+
+
+def test_operator_vote_keeps_the_casting_session_on_the_record(probe):
+    """The operator lane is a declaration, so the record still names who cast it.
+
+    session_id is the provenance key the falsifiability contract names and the
+    one every pre-operator record carried. voter_key staying ``operator`` is
+    what keeps the lane one-per-node and split-visible, so both ride along.
+    """
+    _seed(probe, _node())
+
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--operator",
+        "--evidence",
+        "the operator hit the same seam.",
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["voter_key"] == "operator"
+    assert record["session_id"] == SESSION_A
+
+
 def test_a_none_identity_is_the_same_refusal(probe):
     """The prover may answer None outright; that is the same missing provenance."""
     _seed(probe, _node())
@@ -309,6 +388,8 @@ def test_a_vote_is_readable_back_to_a_transcript(probe):
     assert result.returncode == 0, result.stderr
     record = _encounters(probe)[0]
     assert record["session_id"] == SESSION_A
+    assert record["voter_key"] == SESSION_A
+    assert record["voter_kind"] == "agent"
     assert record["harness"] == "claude"
     assert record["evidence"] == "cost a CI cycle."
     assert record["ts"].endswith("+00:00") or record["ts"].endswith("Z")
@@ -460,3 +541,31 @@ def test_a_reason_symbol_not_prose_picks_the_exit_code(tmp_path, monkeypatch):
     # The collapse this guards: without the refusal, one anonymous record
     # matches every later anonymous record and blocks all of them.
     assert json.loads(graph.read_text(encoding="utf-8"))["entries"][0].get("encounters") is None
+
+
+def test_append_encounter_dedupes_operator_without_session_id(tmp_path, monkeypatch):
+    from fno.graph.store import append_encounter
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(json.dumps({"entries": [_node()]}), encoding="utf-8")
+    import fno.graph._constants as gc
+
+    monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
+
+    first = {
+        "ts": "2026-08-29T05:00:00+00:00",
+        "voter_key": "operator",
+        "voter_kind": "operator",
+        "evidence": "first.",
+    }
+    appended, error, reason = append_encounter(graph, "zz-0001", first)
+    assert appended is True
+    assert error is None
+    assert reason is None
+
+    second = dict(first, ts="2026-08-29T06:00:00+00:00", evidence="second.")
+    appended, error, reason = append_encounter(graph, "zz-0001", second)
+    assert appended is False
+    assert reason == "duplicate"
+    assert error is not None
+    assert "2026-08-29T05:00:00+00:00" in error

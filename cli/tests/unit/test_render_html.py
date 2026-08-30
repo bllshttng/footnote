@@ -74,6 +74,67 @@ def test_canonical_dashboard_has_shared_filters_and_private_detail_data(tmp_path
     assert "has a PR" in text
 
 
+def test_local_dashboard_renders_vote_controls_and_public_dashboard_excludes_them(tmp_path: Path):
+    entry = _entry(
+        "ab-vote0001",
+        project="alpha",
+        title="Vote marker",
+        encounters=[
+            {"session_id": "agent-a", "voter_key": "agent-a", "voter_kind": "agent"},
+            {"session_id": "agent-b", "voter_key": "agent-b", "voter_kind": "agent"},
+            {"voter_key": "operator", "voter_kind": "operator"},
+        ],
+    )
+    local_path = tmp_path / "local.html"
+    render_graph_html([entry], local_path)
+
+    local = local_path.read_text()
+    assert '"en":3' in local
+    assert '"eo":1' in local
+    assert '"dv":' in local
+    assert 'class="votes"' in local
+    assert "--operator --evidence" in local
+    assert 'id="demandOnly"' in local
+    assert 'data-copy="vote"' in local
+    assert "Copy upvote" in local
+    assert "state.demand" in local
+    assert "sec.rows.slice().sort" in local
+    assert "appendChild(r.el)" in local
+
+    from fno.graph.roadmap_public import render_public_backlog_html
+
+    public = render_public_backlog_html([entry], "alpha")
+    assert '"en":' not in public
+    assert '"eo":' not in public
+    assert '"dv":' not in public
+    assert "--operator" not in public
+
+
+def test_scoped_dashboard_demand_uses_cross_project_priority_context():
+    from fno.graph.demand import divergence_score
+
+    parent = _entry(
+        "ab-parent1",
+        project="alpha",
+        type="epic",
+        status="in_progress",
+        priority="p0",
+        title="Parent epic",
+    )
+    child = _entry(
+        "ab-child01",
+        project="beta",
+        parent="ab-parent1",
+        priority="p3",
+        encounters=[{"session_id": "agent-a"}],
+        title="Cross-project child",
+    )
+
+    row = _dashboard_rows([child], local=True, context_entries=[parent, child])[0]
+
+    assert row["dv"] == divergence_score(child, "p0")
+
+
 def test_public_and_local_dashboards_share_skeleton_but_not_private_fields(tmp_path: Path):
     entry = _entry(
         "shared-marker",

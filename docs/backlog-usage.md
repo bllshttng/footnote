@@ -79,15 +79,22 @@ Every other agent pushback surface is shaped for BLOCKAGE. `fno inbox outstandin
 
 ```bash
 fno backlog encounter <id> --evidence "cost two wrong diagnoses before I found the real seam."
+fno backlog encounter <id> --operator --evidence "the operator hit the same seam."
+fno backlog idea "title" --evidence "hit this while doing something else."
+fno backlog add "title" --evidence "hit this while doing something else."
 fno backlog demand                 # the divergence table
 fno backlog demand --json          # the same rows, for a groom pass or a king
 ```
 
 An encounter is a thing that HAPPENED, not a preference. Agents have no preferences, they have contexts. A poll count of N agents who like a node is unfalsifiable. N distinct sessions that each name what the node cost them is falsifiable against a transcript. So evidence is required. `config.style.word_cap.encounter` caps it at 80 words by default. Over-length evidence is refused rather than truncated.
 
-One session votes once per node. A second attempt is refused, never silently dropped. The refusal names the timestamp of the vote already on file, so the caller can add a `fno backlog note` instead. A session whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
+One voter votes once per node. Agent voters use their session identity. The operator uses the stable `operator` voter key with `--operator`, so a plain terminal does not need a harness session. A second attempt is refused, never silently dropped. The refusal names the timestamp of the vote already on file, so the caller can add a `fno backlog note` instead. An agent whose identity cannot be proven cannot vote at all: no provenance means no falsifiability. Run `fno whoami` to see what a session can prove.
 
-`demand` sorts by DIVERGENCE, not by volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. The `dispatched` column counts the encountering sessions that were also sent to that node. A row reading `enc 12, dispatched 12` is one king that fanned out. A row reading `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
+`demand` sorts by DIVERGENCE, not by raw vote volume. A p0 with many encounters tells you nothing, because you already ranked it. A p3 or a never-dispatched node with many encounters is the whole point of the read. When the operator voted, the `enc` column shows the split, for example `3 (2a/1o)`. It counts both kinds of voter. The `dispatched` column counts the encountering sessions that were also sent to that node. A row reading `enc 12, dispatched 12` is one king that fanned out. A row reading `enc 3, dispatched 0` is three sessions that hit the node while doing something else. The context renders beside the number rather than being subtracted out of it.
+
+`idea` and `add` accept optional `--evidence`. With it, the creator's encounter is recorded after the node is minted. Without it, the node has no `encounters` key. If identity cannot be proven or the best-effort encounter is refused, creation still succeeds. Stderr names the skipped vote. A new vote is never minted without evidence.
+
+The local `~/.fno/graph.html` board shows a vote pill for nodes with encounters. Click it to copy `fno backlog encounter <id> --operator --evidence "REPLACE: what it cost"`, then paste and replace the evidence. The page is a self-contained `file://` document and does not write `graph.json`. The `Demand` toggle filters to voted rows and sorts within each group by the same divergence score as the CLI read. Turning it off restores board order. Public projections do not carry vote data or the clipboard command.
 
 `demand` is a READ. It never writes `rank`, never touches `_kanban_column`, and never reorders anything. The board stays the work order and demand is a column you rank FROM, by hand, with `fno backlog rank`.
 
