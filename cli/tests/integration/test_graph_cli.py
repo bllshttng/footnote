@@ -228,6 +228,34 @@ def test_idea_keeps_the_node_when_creation_vote_identity_is_unknown(tmp_graph, m
     assert "encounters" not in _read_graph(tmp_graph)[0]
 
 
+def test_idea_rejects_evidence_before_an_automatic_fold(tmp_graph, monkeypatch):
+    _seed(
+        tmp_graph,
+        [{"id": "ab-existing", "title": "Existing", "status": "ready", "priority": "p2"}],
+    )
+    monkeypatch.setattr(
+        "fno.graph.cli._fold_candidates",
+        lambda **kwargs: (
+            [{"id": "ab-existing", "title": "Existing", "status": "ready", "holder": None, "evidence": "match"}],
+            "fixture",
+        ),
+    )
+
+    result = _invoke(
+        "backlog",
+        "idea",
+        "Folded with evidence",
+        "--difficulty",
+        "low",
+        "--evidence",
+        "hit this while doing something else.",
+    )
+
+    assert result.exit_code == 2
+    assert "--separate" in (result.output or "") + (getattr(result, "stderr", "") or "")
+    assert len(_read_graph(tmp_graph)) == 1
+
+
 def test_ac2_err_graph_add_invalid_priority(tmp_graph):
     """AC2-ERR: fno graph add with invalid priority exits 1."""
     r = runner.invoke(app, ["backlog", "add", "Bad", "--priority", "urgent"], catch_exceptions=True)

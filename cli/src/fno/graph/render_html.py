@@ -678,7 +678,7 @@ _DASHBOARD_JS = """\
   fromEl.addEventListener('change', function () { state.from = fromEl.value || '';
     document.getElementById('datef').className = 'datef' + (state.from ? ' on' : ''); render(); });
   document.getElementById('q').addEventListener('input', function (e) { state.q = e.target.value.toLowerCase().trim(); render(); });
-  function buttonFilter(id, key) { var b = document.getElementById(id); b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
+  function buttonFilter(id, key) { var b = document.getElementById(id); if (!b) return; b.addEventListener('click', function () { state[key] = !state[key]; b.setAttribute('aria-pressed', state[key] ? 'true' : 'false'); render(); }); }
   buttonFilter('planOnly', 'planOnly'); buttonFilter('prOnly', 'prOnly');
   if (LOCAL) buttonFilter('demandOnly', 'demand');
   var openStatuses = new Set(ORDER.filter(function (s) { return s !== 'superseded' && (s !== 'done' || DATA.initial_done); })); openStatuses.forEach(function (s) { state.status.add(s); });
@@ -911,7 +911,7 @@ def _dashboard_rows(
         from fno.graph._intake import make_effective_priority
         from fno.graph.demand import divergence_score, voter_key
 
-        priority_for = make_effective_priority(entries)
+        priority_for = make_effective_priority(source)
     index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
     # Successors, indexed once. Scanning `source` per entry to find what each
     # one unblocks is quadratic, and this runs inside the auto-render hook on

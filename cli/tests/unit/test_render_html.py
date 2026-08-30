@@ -110,6 +110,31 @@ def test_local_dashboard_renders_vote_controls_and_public_dashboard_excludes_the
     assert "--operator" not in public
 
 
+def test_scoped_dashboard_demand_uses_cross_project_priority_context():
+    from fno.graph.demand import divergence_score
+
+    parent = _entry(
+        "ab-parent1",
+        project="alpha",
+        type="epic",
+        status="in_progress",
+        priority="p0",
+        title="Parent epic",
+    )
+    child = _entry(
+        "ab-child01",
+        project="beta",
+        parent="ab-parent1",
+        priority="p3",
+        encounters=[{"session_id": "agent-a"}],
+        title="Cross-project child",
+    )
+
+    row = _dashboard_rows([child], local=True, context_entries=[parent, child])[0]
+
+    assert row["dv"] == divergence_score(child, "p0")
+
+
 def test_public_and_local_dashboards_share_skeleton_but_not_private_fields(tmp_path: Path):
     entry = _entry(
         "shared-marker",

@@ -1764,6 +1764,13 @@ def cmd_idea(
             except Exception as exc:  # noqa: BLE001 - filing fallback stays recall-safe
                 candidates, candidate_source = [], f"fallback:fold-check-error:{exc}"
             if candidates:
+                if evidence is not None:
+                    typer.echo(
+                        "Error: --evidence cannot be used when an idea fold is offered; "
+                        "rerun with --separate to mint a node and record the creation vote.",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
                 top = candidates[0]
                 wave_command = (
                     "fno backlog idea "
