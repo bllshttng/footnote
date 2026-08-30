@@ -954,6 +954,18 @@ def _codex_daemon_candidate(
     directly instead, via the already-wired
     :func:`fno.agents.discover._discover_from_codex_daemon` RPC.
 
+    THAT HANDOFF IS GONE ON 0.149.1, and this oracle declines by default there.
+    Measured 2026-08-29 against codex-cli 0.149.1: the pane's own TUI holds its
+    rollout open (pid 37938 fd 62u, confirmed by ``lsof`` on the same path), and
+    the daemon reports ZERO loaded threads for the spawn's cwd both before and
+    after that TUI is live and answering. So ``new_ids`` is empty on every poll
+    and ``daemon: no new codex session for this cwd`` is this oracle's steady
+    state, not an anomaly - on 0.149.1 the pane lane binds through the fd probe
+    alone. Keep this arm anyway: it costs one rate-limited read, it is the only
+    thing that would catch the handoff coming back, and the condition sink now
+    says out loud which of the two answered. Do NOT read a declining daemon here
+    as the cause of a blown window; check the fd probe's own condition first.
+
     ``baseline_ids`` is None when the pre-spawn snapshot could not be taken
     (daemon unreachable at that moment) - refused outright rather than
     treated as an empty set, because an empty stand-in would let ANY
@@ -3614,7 +3626,7 @@ def dispatch_spawn_pane(
     if resolved_monitor == "happy":
         assert route_env is not None
         argv = happy_pane_argv(argv, route_env, explicit=monitor is not None)
-    # QoS (x-c5cc): demote the provider command INSIDE the env wrapper —
+    # QoS (x-c5cc): demote the provider command INSIDE the env wrapper -
     # wrapping outermost would break the mux server's FNO_NODE provenance
     # parse, which is anchored on argv[0] == "env" (server.rs node_from_argv).
     # env(1) applies its assignments and then execs taskpolicy/nice -> provider.
