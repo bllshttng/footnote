@@ -124,6 +124,15 @@ fn roster_drives_provider_argv_and_capability_coverage() {
     let resume = resume_context();
 
     for name in KNOWN_PROVIDERS {
+        let caps = contract.capabilities(name).unwrap();
+        if caps
+            .resume_strategy
+            .forms
+            .get("headless_create")
+            .is_some_and(|form| form.kind == "unsupported")
+        {
+            continue;
+        }
         let provider = for_name(name).expect("roster provider implementation");
         let expected_create = contract
             .render_session_argv(name, "headless_create", Some(SESSION_ID))
