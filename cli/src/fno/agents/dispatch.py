@@ -8534,17 +8534,35 @@ def _reserve_send_budget(
     from fno import style
     from fno.mail import budget
 
+    words = style.word_count(message)
+    if budget.is_control(message):
+        # The control lane keeps its own ledger: a stop or resume must arrive
+        # even when the pair's ordinary window is spent.
+        try:
+            return budget.reserve_control(
+                sender=sender, recipient=recipient, words=words, msg_id=msg_id
+            )
+        except budget.BudgetRefused as exc:
+            raise DispatchAskError(
+                f"refused: control word budget for {exc.pair}: {exc.marker()}",
+                exit_code=1,
+            ) from exc
+        except budget.BudgetUnavailable as exc:
+            raise DispatchAskError(f"refused: {exc}", exit_code=1) from exc
     try:
         return budget.reserve(
             sender=sender,
             recipient=recipient,
-            words=style.word_count(message),
+            words=words,
             msg_id=msg_id,
             enforce=enforce,
         )
     except budget.BudgetRefused as exc:
         raise DispatchAskError(
-            f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
+            f"refused: rolling word budget for {exc.pair}: {exc.marker()}\n"
+            "operational control (stop, resume, scope change)? resend with the "
+            "body's first line starting `control:` -- its own lane, 60 words, "
+            "exempt from this budget",
             exit_code=1,
         ) from exc
     except budget.BudgetUnavailable as exc:
