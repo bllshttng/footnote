@@ -88,6 +88,10 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "CLAUDE_CLI",
     "CLI",  # legacy harness selector; CLI=codex flips harness resolution
     "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP",
+    # Cargo-owned build-script output. A Python test must not inherit a
+    # developer's Rust build directory; Cargo supplies its own value to build
+    # scripts when it invokes them.
+    "OUT_DIR",
     # Colour suppression, scrubbed rather than kept, which splits it from its
     # siblings TERM and COLORTERM in _ENVIRONMENT below. Those two DESCRIBE a
     # terminal's capability; this one SUPPRESSES output, so its mere presence
