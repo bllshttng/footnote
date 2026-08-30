@@ -273,6 +273,40 @@ pub fn run_loop_verb(args: &[String]) -> i32 {
     }
 }
 
+/// The wake clause for the respawned king's prompt.
+///
+/// A mail wake names the inbox the trigger matched, plus the ack that
+/// advances its cursor: the woken session is fresh and can derive neither
+/// the dead holder's name nor its reply-handle short id from any whoami of
+/// its own, and an unacked row re-wakes the scope on the next tick.
+fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
+    match reason {
+        Some("mail") => match address {
+            Some(address) => format!(
+                " You were woken by undrained bus mail addressed to \
+                 {address}: run `fno agents mail unread --name {address}` and \
+                 drain it BEFORE your first board read, then advance that \
+                 cursor with `fno agents mail ack <id> --name {address}` - an \
+                 unacked row re-wakes this scope on the next tick. The waking \
+                 message is not a board row and no board read will surface it."
+            ),
+            None => " You were woken by undrained bus mail addressed to this \
+                 scope: run `fno whoami` to recover your registry name, then \
+                 `fno agents mail unread --name <that name>` and drain it \
+                 BEFORE your first board read. The waking message is not a \
+                 board row and no board read will surface it."
+                .to_string(),
+        },
+        Some("board") => {
+            " The board changed while this scope had no king: read it first.".to_string()
+        }
+        Some("backstop") => " No event fired; this is the periodic re-check, and an \
+             unchanged board is a legitimate NoWork exit."
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // ── subcommand check ──────────────────────────────────────────────────────
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -294,6 +328,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut cli_alias: Option<String> = None;
     let mut driver_lib_dir: Option<PathBuf> = None;
     let mut king_scope: Option<String> = None;
+    let mut king_wake = false;
+    let mut king_wake_reason: Option<String> = None;
+    let mut king_wake_address: Option<String> = None;
+    let mut king_wake_holder: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -367,6 +405,18 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--scope" => {
                 king_scope = Some(require_value!("--scope", args, i).to_string());
             }
+            "--wake" => {
+                king_wake = true;
+            }
+            "--wake-reason" => {
+                king_wake_reason = Some(require_value!("--wake-reason", args, i).to_string());
+            }
+            "--wake-address" => {
+                king_wake_address = Some(require_value!("--wake-address", args, i).to_string());
+            }
+            "--wake-holder" => {
+                king_wake_holder = Some(require_value!("--wake-holder", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -376,6 +426,62 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     // ── driver validation ─────────────────────────────────────────────────────
+    // The wake flags are king-only: they name which trigger sent the walk and
+    // switch the queue out of failure-retry accounting, and neither concept
+    // exists on the target driver.
+    if (king_wake
+        || king_wake_reason.is_some()
+        || king_wake_address.is_some()
+        || king_wake_holder.is_some())
+        && driver.as_deref() != Some("king")
+    {
+        eprintln!(
+            "fno-agents loop run: --wake/--wake-reason need --driver king (they name the \
+             trigger that woke a crowned scope)"
+        );
+        return Ok(2);
+    }
+    if let Some(reason) = king_wake_reason.as_deref() {
+        if !king_wake {
+            // A reason without the mode is a prompt that lies: the clause
+            // tells the session it was woken while the walk still runs
+            // failure-retry accounting (ceiling guard and respawn bill).
+            eprintln!(
+                "fno-agents loop run: --wake-reason needs --wake (it names the \
+                 trigger that woke the scope; without --wake the walk is an \
+                 ordinary failure-retry walk and nothing woke it)"
+            );
+            return Ok(2);
+        }
+        if !matches!(reason, "mail" | "board" | "backstop") {
+            eprintln!(
+                "fno-agents loop run: --wake-reason must be mail|board|backstop, got \
+                 '{reason}'"
+            );
+            return Ok(2);
+        }
+    }
+    if king_wake_address.is_some() && king_wake_reason.as_deref() != Some("mail") {
+        // The address is the inbox the mail trigger MATCHED. It is meaningful
+        // only for a mail wake, and the woken session cannot rederive it: it
+        // is a fresh session, and the row may sit under the dead holder's
+        // reply-handle short id, which no whoami of the new session names.
+        eprintln!(
+            "fno-agents loop run: --wake-address needs --wake-reason mail (it names \
+             the inbox the mail trigger matched)"
+        );
+        return Ok(2);
+    }
+    if king_wake_holder.is_some() && !king_wake {
+        // The holder is the wake caller's assertion that transcript truth
+        // resolved this row gone; without --wake there is no wake to justify
+        // bypassing the live-crown-holder guard for it.
+        eprintln!(
+            "fno-agents loop run: --wake-holder needs --wake (it names the registry \
+             row the wake caller resolved absent by transcript)"
+        );
+        return Ok(2);
+    }
     match driver.as_deref() {
         None => {
             eprintln!("fno-agents loop run: --driver is required");
@@ -434,7 +540,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         };
         let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-        match crate::loop_king::KingQueue::from_manifest(&cwd, scope, fno_bin) {
+        match crate::loop_king::KingQueue::from_manifest(
+            &cwd,
+            scope,
+            fno_bin,
+            king_wake,
+            king_wake_holder.as_deref(),
+        ) {
             Ok(q) => {
                 unit_display = (q.walk_key().to_string(), q.scope().to_string());
                 king_queue = Some(q);
@@ -500,20 +612,26 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // for every (re)dispatch, so it IS the spawned session's instruction: a
     // target resumes its own manifest, a king reads its board and reigns. One
     // hardcoded "/target --resume" for every driver is how a respawned king
-    // once ran as a target resume that never knew it was crowned.
+    // once ran as a target resume that never knew it was crowned. The wake
+    // reason clause lives here for the same reason: a king that learns why it
+    // was woken from a file it may never read has not learned it, and a
+    // mail-woken king that reads only its board never drains the mail that
+    // woke it - the original failure with more processes.
     let continue_prompt = if driver_name == "king" {
         let scope = king_queue
             .as_ref()
             .map(|q| q.scope().to_string())
             .or_else(|| king_scope.clone())
             .unwrap_or_default();
+        let wake_clause =
+            king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
         format!(
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
              every actionable row through the court duties in \
              skills/king-for-a-day, and encode each ruling in the graph before \
              your next read. This is a reign pass, not a /target resume: do not \
-             implement nodes yourself, dispatch and rule."
+             implement nodes yourself, dispatch and rule.{wake_clause}"
         )
     } else {
         "/target --resume".to_string()
@@ -593,9 +711,14 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // The walk is one respawn of the crowned scope. Past the manifest ceiling
     // it terminates on Budget without spawning: a scope that keeps needing a
     // new king is a defect to look at, not a loop to fund. This is the
-    // ceiling's authority; KingQueue re-checks for mid-walk races.
+    // ceiling's authority; KingQueue re-checks for mid-walk races. Wake mode
+    // skips BOTH guards (this one and the queue's): the caller's wake ledger
+    // is the bound there, enforced before the walk was invoked. Skipping the
+    // queue guard alone would leave the walk terminating Budget here before
+    // it ever dequeued. An operator running --wake by hand is bypassing a
+    // rate limit, not a safety limit.
     if let Some(kq) = king_queue.as_ref() {
-        if kq.at_respawn_ceiling() {
+        if !king_wake && kq.at_respawn_ceiling() {
             journal.append(
                 "loop_terminated",
                 json!({
@@ -697,4 +820,38 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::king_wake_clause;
+
+    #[test]
+    fn a_mail_wake_names_the_matched_inbox_and_its_ack() {
+        let clause = king_wake_clause(Some("mail"), Some("aa11bb22"));
+        assert!(
+            clause.contains("mail unread --name aa11bb22"),
+            "the drain must read the matched inbox, not a derived one: {clause}"
+        );
+        assert!(
+            clause.contains("mail ack <id> --name aa11bb22"),
+            "an unacked row re-wakes the scope: {clause}"
+        );
+    }
+
+    #[test]
+    fn a_mail_wake_without_an_address_falls_back_to_whoami() {
+        let clause = king_wake_clause(Some("mail"), None);
+        assert!(clause.contains("whoami"), "hand-run fallback: {clause}");
+        assert!(!clause.contains("--name aa11bb22"));
+    }
+
+    #[test]
+    fn non_mail_reasons_carry_no_mail_instruction() {
+        for reason in ["board", "backstop"] {
+            let clause = king_wake_clause(Some(reason), None);
+            assert!(!clause.contains("mail unread"), "{reason}: {clause}");
+        }
+        assert!(king_wake_clause(None, None).is_empty());
+    }
 }

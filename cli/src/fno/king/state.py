@@ -257,6 +257,8 @@ def write_manifest(
     ``respawn_count`` starts at 0 on every write, including a force re-arm:
     a successor coronation is a new reign generation, so it must not inherit
     the predecessor's respawn bill. The count is bumped by the walk arm only.
+    ``wake_times`` starts empty for the same reason (see fno.king.wake), and
+    is rewritten by the pr-watch wake phase only.
     """
     path = Path(path)
     if path.exists() and not force:
@@ -275,6 +277,7 @@ def write_manifest(
         "budget_max_iterations": str(max_iterations),
         "respawn_count": "0",
         "respawn_ceiling": str(respawn_ceiling),
+        "wake_times": "",
     }
     body = "---\n" + "".join(f"{k}: {_dump(v)}\n" for k, v in fields.items()) + "---\n"
     path.parent.mkdir(parents=True, exist_ok=True)

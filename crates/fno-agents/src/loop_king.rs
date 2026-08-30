@@ -19,9 +19,12 @@
 //!
 //! The rebuild fixes the identity split at the source: the walk keys its unit
 //! per invocation (`{fno_id}-w{nanos}`), so no prior king terminal can close
-//! it, and bounds respawns with an explicit manifest counter rather than by
-//! key collision. At the ceiling the walk terminates on Budget before
-//! dispatching.
+//! it, and bounds dispatch-bearing walk invocations with an explicit manifest
+//! counter rather than by key collision. What `bill_one_respawn` charges is a
+//! walk that found an actionable board and dispatched a king - at most once
+//! per invocation, billed only after the NoWork return - so the counter is a
+//! dispatch budget, never a failure-retry count. At the ceiling the walk
+//! terminates on Budget before dispatching.
 //!
 //! ## What this arm is for
 //!
@@ -32,15 +35,22 @@
 //! and terminates `NoWork` when it is not.
 //!
 //! It does NOT cover the other edge, a king that correctly exited on an empty
-//! board and now needs waking because the board refilled. Nothing in this crate
-//! observes that; the fleet watchdog owns it.
+//! board and now needs waking because the board refilled. Nothing in this
+//! crate CAN observe it: a loop that terminated `NoWork` is not running, so
+//! there is no "inside" left to observe from. The fleet watchdog does NOT own
+//! it either - it wakes on `classify_tail == "stalled"`, a session gone silent
+//! while still owing its next move, and a cleanly-exited king is neither. The
+//! owner is the `wake` phase of `fno pr-watch tick`, which enters this crate
+//! through `loop run --driver king --scope <scope> --wake`.
 //!
 //! ## Why `close()` is inert
 //!
 //! Same reason `TargetQueue::close()` is. The king manifest is immutable after
-//! arming (the respawn counter is the one field the walk rewrites, under the
-//! manifest lock). There is no plan to stamp and no node to graduate, so there
-//! is nothing left for a close to do.
+//! arming except for two walk-rewritten fields, each under the manifest lock:
+//! `respawn_count` (the walk arm, after a dispatch-bearing invocation) and
+//! `wake_times` (the pr-watch wake phase's rolling wake ledger). There is no
+//! plan to stamp and no node to graduate, so there is nothing left for a
+//! close to do.
 
 use crate::loop_runtime::{CloseOutcome, Evidence, LoopError, Queue, Unit};
 use std::fs;
@@ -74,6 +84,12 @@ pub struct KingQueue {
     /// One walk invocation bills exactly one respawn, even though `next()`
     /// re-derives the unit while the board holds actionable rows.
     billed: bool,
+    /// Wake mode (`--wake`): the walk is executing a wake the caller already
+    /// gated, so it neither spends nor is refused by the failure budget above.
+    /// The wake ledger on the manifest is the bound in this mode, enforced by
+    /// the CALLER before invoking the walk; an operator running `--wake` by
+    /// hand is deliberately bypassing a rate limit, not a safety limit.
+    wake: bool,
 }
 
 impl KingQueue {
@@ -87,6 +103,31 @@ impl KingQueue {
         repo_root: &Path,
         scope: &str,
         fno_bin: String,
+        wake: bool,
+        wake_holder: Option<&str>,
+    ) -> Result<Self, LoopError> {
+        let home = crate::paths::AgentsHome::from_env();
+        Self::from_manifest_with_registry(
+            repo_root,
+            scope,
+            fno_bin,
+            wake,
+            wake_holder,
+            &home.registry_json(),
+        )
+    }
+
+    /// The construction path with the registry injected, so the live-holder
+    /// decision is unit-testable without mutating process env (a set_var race
+    /// against parallel tests reading the same env would test the scheduler,
+    /// not the guard).
+    pub fn from_manifest_with_registry(
+        repo_root: &Path,
+        scope: &str,
+        fno_bin: String,
+        wake: bool,
+        wake_holder: Option<&str>,
+        registry_path: &Path,
     ) -> Result<Self, LoopError> {
         let scope = scope.trim();
         if scope.is_empty()
@@ -129,13 +170,24 @@ impl KingQueue {
         // holding the scope means a king is already reigning: respawning a
         // second one is the double-rule the one-live-crown guard exists to
         // stop, and a stale or copied manifest must not outvote it.
-        if let Some(live_holder) = live_crown_holder(&scope) {
-            return Err(LoopError::Queue(format!(
-                "a live king ({live_holder}) already reigns over {scope:?}: the walk \
-                 respawns an orphaned scope, it never doubles a live one. Wake or \
-                 reconcile the reigning king instead (`fno agents top`, \
-                 `fno agents watchdog`)"
-            )));
+        //
+        // Wake mode skips that refusal ONLY for the row the wake caller named:
+        // the caller reached this walk after transcript truth resolved that
+        // holder gone, and a cleanly-exited session's registry row stays
+        // non-terminal (the status word is not liveness), so wake_holder names
+        // the one row the guard must not outvote. Any OTHER live holder - or
+        // a hand-run --wake that names nobody - still refuses, so the flag
+        // can never double a reigning king.
+        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+            let caller_named_this_row = wake && wake_holder == Some(live_holder.as_str());
+            if !caller_named_this_row {
+                return Err(LoopError::Queue(format!(
+                    "a live king ({live_holder}) already reigns over {scope:?}: the walk \
+                     respawns an orphaned scope, it never doubles a live one. Wake or \
+                     reconcile the reigning king instead (`fno agents top`, \
+                     `fno agents watchdog`)"
+                )));
+            }
         }
         Ok(Self {
             walk_key: mint_walk_key(&manifest.fno_id),
@@ -147,6 +199,7 @@ impl KingQueue {
             cwd: repo_root.to_path_buf(),
             manifest_path,
             billed: false,
+            wake,
         })
     }
 
@@ -154,7 +207,11 @@ impl KingQueue {
     /// `run_loop_verb_inner` is the ceiling authority: it terminates the walk
     /// on Budget before dispatching. The queue re-checks so a ceiling crossed
     /// by a concurrent walk between preflight and dequeue also stops here
-    /// rather than spawning past it.
+    /// rather than spawning past it. What the ceiling bounds is
+    /// dispatch-bearing walk invocations per crown (what `bill_one_respawn`
+    /// charges), not failures; in `--wake` mode neither this check nor the
+    /// bill runs, because a woken respawn is normal operation whose bound is
+    /// the caller's wake ledger.
     pub fn at_respawn_ceiling(&self) -> bool {
         self.respawn_ceiling > 0 && self.respawn_count >= self.respawn_ceiling
     }
@@ -229,11 +286,6 @@ pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
 /// scopes whose registry state is suspect, and refusing on a read error would
 /// strand exactly those, while the live-holder refusal above catches the
 /// double-rule case whenever the registry CAN be read.
-fn live_crown_holder(scope: &str) -> Option<String> {
-    let home = crate::paths::AgentsHome::from_env();
-    live_crown_holder_in(&home.registry_json(), scope)
-}
-
 fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
     let is_terminal = |row: &crate::state::RegistryEntry| {
@@ -391,13 +443,16 @@ impl KingQueue {
 
 impl Queue for KingQueue {
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        if self.at_respawn_ceiling() {
+        if !self.wake && self.at_respawn_ceiling() {
             return Ok(None);
         }
+        // Stays in wake mode too: a spurious trigger over an empty board must
+        // still terminate NoWork, or a missed mail flag spawns a king with
+        // nothing to do.
         if self.board_actionable()? == 0 {
             return Ok(None);
         }
-        if !self.bill_one_respawn()? {
+        if !self.wake && !self.bill_one_respawn()? {
             return Ok(None);
         }
         Ok(Some(Unit {
@@ -415,8 +470,9 @@ impl Queue for KingQueue {
     /// The respawn ceiling gates here too, so a walk re-probing after a
     /// concurrent bump answers "nothing affordable" and the outer budget
     /// check reports Budget rather than queueing a past-ceiling respawn.
+    /// Wake mode drops the ceiling term for the same reason `next()` does.
     fn has_pending(&mut self) -> Result<bool, LoopError> {
-        Ok(!self.at_respawn_ceiling() && self.board_actionable()? > 0)
+        Ok((self.wake || !self.at_respawn_ceiling()) && self.board_actionable()? > 0)
     }
 
     /// Inert close: see the module doc for why this does nothing.
@@ -499,7 +555,7 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string()).unwrap();
+        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
         fs::remove_dir_all(&dir).ok();
@@ -507,9 +563,10 @@ mod tests {
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err = KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string())
-            .err()
-            .expect("escape scope must refuse");
+        let err =
+            KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false, None)
+                .err()
+                .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
     }
 
@@ -544,6 +601,57 @@ mod tests {
             live_crown_holder_in(&registry, "epic-x"),
             Some("reigning-king".to_string())
         );
+        // The same registry through the walk: an ordinary walk refuses, and a
+        // wake refuses too unless it names the very row transcript truth
+        // resolved gone. A cleanly-exited session's row stays non-terminal
+        // (the status word is not liveness), so the named wake must pass -
+        // and a wake that names nobody (a hand-run one) can never double a
+        // live king.
+        let plain = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            false,
+            None,
+            &registry,
+        );
+        assert!(plain.is_err(), "an ordinary walk never doubles a live row");
+        let unnamed = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            None,
+            &registry,
+        );
+        assert!(
+            unnamed.is_err(),
+            "a wake that names nobody never doubles a live row"
+        );
+        let named = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("reigning-king"),
+            &registry,
+        );
+        assert!(
+            named.is_ok(),
+            "wake mode outranks the status word of the row it named"
+        );
+        let wrong_row = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("someone-else"),
+            &registry,
+        );
+        assert!(
+            wrong_row.is_err(),
+            "naming a row other than the live holder never doubles a live one"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -577,7 +685,7 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string()).unwrap();
+        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);

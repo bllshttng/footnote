@@ -145,6 +145,9 @@ Not state-root writers, listed here because they are the other family of session
 |---|---|---|
 | `.fno/target-state.md` | `hooks/helpers/init-target-state.sh` via `fno do target init` | write-once per target session; archived on a terminal |
 | `.fno/kings/<scope>.md` | `cli/src/fno/king/state.py` via coronation or `fno agents king init` | one loop-state file per live crown scope; stale files are inert without a live registry crown and cleanup is best-effort (`fno agents king done` on abdication) |
+| `.fno/kings/<scope>.md.lock`, `.md.tmp` | `state.py` / `loop_king.rs` / `king/wake.py` over the manifest lock | lock lives only for the critical section; tmp is replaced on every locked write |
+| `.fno/kings/<scope>.wake.json` | `pr_watch/_king_wake.py` (the tick's wake phase) | tick-local board-hash cache with no reign meaning; refreshed only when a wake fires, so it never outlives the manifest beside it |
+| `.fno/kings/<scope>.md.wake.log` | `pr_watch/_king_wake.py` (detached wake-mode walk) | append-only stdout of the walks this phase spawned; the events journal is the receipt, this log is diagnosis |
 
 Target state is write-once after init. King state is atomically refreshed at coronation and both gate a stop hook.
 
