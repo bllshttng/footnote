@@ -2467,7 +2467,7 @@ event_types:
       properties:
         guard:
           type: string
-          description: "Guard name: graph-write-protect, worktree-write-protect, join-partition-write-guard, plan-location-guard, git-protection, bg-process-guard, or law-authority-gate."
+          description: "Guard name: graph-write-protect, worktree-write-protect, join-partition-write-guard, plan-location-guard, git-protection, or bg-process-guard."
         decision:
           type: string
           enum: [allow, block]

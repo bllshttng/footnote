@@ -135,12 +135,10 @@ expect_row "bpg allows a bounded command" bg-process-guard allow \
 expect_row "bpg denies an unbounded yes" bg-process-guard block \
     '{"tool_name":"Bash","tool_input":{"command":"yes"}}' python3 "bg-process-guard.py"
 
-# ── law-authority-gate.py (Bash) ──────────────────────────────────────────────
-LAW_HASH="$(printf 'a%.0s' $(seq 1 64))"
-expect_row "lag allows an unrelated command" law-authority-gate allow \
-    '{"tool_name":"Bash","tool_input":{"command":"echo hello"}}' python3 "law-authority-gate.py"
-expect_row "lag denies an unattended law enact" law-authority-gate block \
-    '{"tool_name":"Bash","tool_input":{"command":"fno inbox law enact lp-abcdef012345 --content-hash '"$LAW_HASH"'"}}' python3 "law-authority-gate.py"
+# ── law-authority-gate.py: gone ───────────────────────────────────────────────
+# main deleted the guard wholesale in the law-recording collapse (363ab7b16);
+# nothing to instrument or assert here. If a law gate returns, it earns the
+# same two rows every other guard carries.
 
 # ── row shape: one deep check that a row is valid JSON with the contract ──────
 SHAPE_OK=0
