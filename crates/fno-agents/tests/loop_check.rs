@@ -2991,6 +2991,227 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     );
 }
 
+/// x-8cb6 message: the incident shape exactly - the install opts out
+/// (self_review_required=false, no lane), the PR is green and uncovered, the
+/// coverage gate is deliberately skipped. The terminal must say review was
+/// not required; the word "reviewed" asserted a review that never happened
+/// while the coverage row beside it said uncovered, and auto-merge armed.
+#[test]
+fn not_required_terminal_never_says_reviewed() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(
+        &settings_path,
+        "[review]\nrequired_bots = []\nself_review_required = false\n",
+    )
+    .unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-notreq", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = green_reviews_unreachable();
+
+    let (code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        d.decision, "allow",
+        "opt-out keeps today's semantics: {}",
+        d.message
+    );
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
+    assert!(
+        !d.message.contains("reviewed"),
+        "the not-required message must not carry the word reviewed: {}",
+        d.message
+    );
+    assert!(
+        d.message.contains("review not required"),
+        "the message must name the opt-out: {}",
+        d.message
+    );
+
+    // The durable lie lived in the event row, not the stdout.
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        !events.contains("green and reviewed"),
+        "the termination event must not say green and reviewed: {events}"
+    );
+    assert!(
+        events.contains("review not required"),
+        "the termination event must name the opt-out: {events}"
+    );
+}
+
+/// gh/git pair for the PR-payload floor tests: the branch's PR carries
+/// `files_json`, CI is green, reviews read empty, and the LOCAL cwd diff is
+/// EMPTY (the any-directory case: git resolves origin/main but the diff
+/// answers nothing). `pr_files` is served for `pulls/N/files`.
+fn pr_payload_mock(pr_files: &str) -> MockBins {
+    let dir = TempDir::new().unwrap();
+    let gh = make_script(
+        dir.path(),
+        "gh",
+        &format!(
+            r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{{"state":"OPEN","number":11,"headRefName":"feat","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000011"}}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{{"name":"ci","state":"SUCCESS","bucket":"pass"}}]'
+  exit 0
+fi
+if echo "$*" | grep -q "files"; then
+  printf '{pr_files}'
+  exit 0
+fi
+if echo "$*" | grep -q "comments"; then
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{{"reviews":[],"comments":[]}}'
+  exit 0
+fi
+exit 1
+"#,
+        ),
+    );
+    let git = make_script(
+        dir.path(),
+        "git",
+        r#"case "$*" in
+  # Freshness identity stays uncomputable (see green()).
+  *--raw*) exit 1 ;;
+  # classify_payload: origin/main resolves, and the branch diff answers
+  # EMPTY - the fire sits where the local diff says nothing.
+  rev-parse*origin/main*) echo "sha" ;;
+  *origin/main*) exit 0 ;;
+  *) echo "deadbeefdeadbeefdeadbeefdeadbeef00000011" ;;
+esac"#,
+    );
+    MockBins { _dir: dir, gh, git }
+}
+
+fn fire_pr_payload(cwd: &Path, settings: &str, mock: &MockBins) -> (i32, Decision) {
+    let settings_path = cwd.join(".fno/config.toml");
+    fs::write(&settings_path, settings).unwrap();
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-prpayload", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+    fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings_path.to_str().unwrap(),
+        // The fire() hermeticity default pins `none`, the hermetic opt-out
+        // that disables the floor; the payload tests exercise the floor, so
+        // they pin a verbful harness the way a live claude fire resolves.
+        "--author-harness",
+        "claude",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ])
+}
+
+/// x-8cb6 payload: a code PR must floor the self-review reviewer no matter
+/// what the local diff says. review_skipped is the field that told the truth
+/// while the terminal message lied, so it carries the assertion.
+#[test]
+fn code_pr_floors_even_where_the_cwd_diff_is_empty() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    // self_review_required defaults true; no lane configured.
+    let mock = pr_payload_mock(r#"[{"filename":"crates/fno-agents/src/lib.rs"}]"#);
+    let (code, d) = fire_pr_payload(cwd, "[review]\nrequired_bots = []\n", &mock);
+
+    assert_eq!(code, 0);
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"review_skipped\":false"),
+        "the floor must engage from the PR payload; review_skipped is the proof: {events}"
+    );
+    assert!(
+        !events.contains("green and reviewed"),
+        "an uncovered head must never reach the green-and-reviewed terminal: {events}"
+    );
+    assert_ne!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "an uncovered code PR must not terminate DonePRGreen: {}",
+        d.message
+    );
+}
+
+/// The mirror control: the PR is docs-only, so even with an empty cwd diff
+/// the floor stays off and the not-required terminal names the opt-out.
+#[test]
+fn docs_pr_keeps_the_floor_off_and_names_the_opt_out() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+
+    let mock = pr_payload_mock(r#"[{"filename":"docs/x.md"}]"#);
+    let (code, d) = fire_pr_payload(cwd, "[review]\nrequired_bots = []\n", &mock);
+
+    assert_eq!(code, 0);
+    assert_eq!(
+        d.decision, "allow",
+        "a docs PR with no lane stays mergeable: {}",
+        d.message
+    );
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
+    assert!(
+        !d.message.contains("reviewed"),
+        "the docs-PR message must not carry the word reviewed: {}",
+        d.message
+    );
+    let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
+    assert!(
+        events.contains("\"review_skipped\":true"),
+        "a docs-only PR must not floor: {events}"
+    );
+}
+
 /// AC3-ERR: a malformed (non-list) required_bots parses to None, which under
 /// the fresh-install default (empty required_bots) means no review gate. A
 /// malformed value does NOT enforce a gate; maintainers must pin a valid list.

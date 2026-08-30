@@ -1593,6 +1593,91 @@ fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
     (true, true)
 }
 
+/// `(is_code, assumed)` for the self-review floor, mirroring the merge gate's
+/// payload conjunct (`_pr_payload_is_code` in cli/src/fno/pr/_merge.py), which
+/// classifies the PR. The cwd diff stays the FAST PATH: when it already says
+/// code, the floor engages and no gh is spent. Only when the cwd diff says
+/// not-code - the direction where a checkout's diff can diverge from the PR
+/// (empty diff in a directory the fire does not sit in, a branch already
+/// contained in the base) - is the PR consulted, because a floor that answers
+/// for a directory can be more permissive than the merge it arms. A PR that
+/// exists but cannot be read fails closed to code, matching
+/// `classify_payload`'s degraded shape. A branch with no PR keeps the cwd
+/// answer (the pre-PR fallback the merge gate has no counterpart for) - but a
+/// NAMED PR (`pr_selector`, the review-coverage verb's --pr) that resolves to
+/// nothing is a degraded read of the PR under evaluation, never a no-PR
+/// branch, so it fails closed instead of falling back.
+fn classify_payload_for_floor(
+    gh_bin: &str,
+    git_bin: &str,
+    cwd: &Path,
+    pr_selector: Option<&str>,
+) -> (bool, bool) {
+    let local = classify_payload(git_bin, cwd);
+    if local.0 {
+        return local;
+    }
+    match read_pr_view(gh_bin, cwd, pr_selector) {
+        Ok(Some(view)) => {
+            let number = view
+                .get("number")
+                .and_then(|v| v.as_i64())
+                .unwrap_or_default();
+            if number <= 0 {
+                // A malformed view is a degraded probe, not a docs PR.
+                return (true, true);
+            }
+            let target = format!("repos/{{owner}}/{{repo}}/pulls/{number}/files");
+            let files = bounded_read(
+                gh_bin.as_ref(),
+                &["api", &target, "--paginate"],
+                cwd,
+                "pr_files",
+                stopgate_read_timeout(),
+            );
+            let Ok(out) = files else {
+                return (true, true);
+            };
+            if !out.status.success() {
+                return (true, true);
+            }
+            // --paginate may emit CONCATENATED JSON arrays (one per page), the
+            // same shape the pulls-comments read parses.
+            let mut paths: Vec<String> = Vec::new();
+            for page in serde_json::Deserializer::from_slice(&out.stdout).into_iter::<Value>() {
+                let Ok(page) = page else {
+                    return (true, true);
+                };
+                let Some(entries) = page.as_array() else {
+                    return (true, true);
+                };
+                for entry in entries {
+                    if let Some(name) = entry.get("filename").and_then(|v| v.as_str()) {
+                        let trimmed = name.trim();
+                        if !trimmed.is_empty() {
+                            paths.push(trimmed.to_string());
+                        }
+                    }
+                }
+            }
+            // An empty file list is not code, matching _pr_payload_is_code.
+            (payload_is_code(&paths), false)
+        }
+        // No PR for the branch: the cwd answer stands (pre-PR fire). A NAMED
+        // PR resolving to nothing is the degraded direction - the PR under
+        // evaluation could not be read - so it fails closed.
+        Ok(None) => {
+            if pr_selector.is_some() {
+                (true, true)
+            } else {
+                local
+            }
+        }
+        // The view failed without being a no-PR answer: degraded probe.
+        Err(_) => (true, true),
+    }
+}
+
 // ── review freshness: one predicate, both producers (x-5b99 / x-62a1) ─────────
 //
 // Freshness used to be decided TWICE with two different rules: a `github_app`
@@ -8842,44 +8927,6 @@ fn decide_inner(args: &[String]) -> (i32, String) {
         .ledger_path
         .clone()
         .unwrap_or_else(|| cwd.join(".fno/ledger.json"));
-    // A code payload carries its own review obligation on a stock install:
-    // when no lane is configured, the harness-resolved self-review reviewer is
-    // floored onto `required_reviewers` so the existing unattested_reviewers_scan
-    // holds the session for a head-pinned attestation instead of the run asking
-    // an epic leader. Opt out with config.review.self_review_required = false.
-    // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
-    // rather than waving the obligation away. The floor is additive: an
-    // already-configured lane (reviewers, bots, peers) keeps meaning exactly
-    // what it meant today, and a lane that already names code-review is a no-op.
-    let lane_configured = !required_bots.is_empty()
-        || inputs.optional_lane_configured
-        || !required_reviewers.is_empty();
-    let self_review_required = settings.self_review_required.unwrap_or(true);
-    // The floor applies where a session can satisfy it: a harness with a
-    // self-review verb (claude /code-review, codex /review, opencode
-    // /review-changes), or a harness that could not be attributed at all -
-    // ambiguity is not permission (x-129b). A KNOWN verbless harness
-    // (gemini/agy) stays unfloored: the floor would demand an attestation no
-    // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
-    // those harnesses' path and is deferred. classify_payload forks git, so it
-    // runs only when the floor could apply - a configured lane makes it moot,
-    // and most fires have one.
-    let floor_applies =
-        self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
-    let self_review_floor = if !lane_configured && self_review_required && floor_applies {
-        let payload = classify_payload(&parsed.git_bin, &cwd);
-        floor_self_review(&required_reviewers, false, payload.0, true)
-    } else {
-        None
-    };
-    if let Some(floored) = self_review_floor.clone() {
-        required_reviewers.push(floored);
-    }
-    // x-0eaf: DoneUnreviewed applies only when review is required. A stock
-    // install that opts out (self_review_required=false AND no lane, or a
-    // harness with no self-review verb) has zero coverage as its configured
-    // state, not a defect - those green PRs still reach DonePRGreen.
-    let review_required = lane_configured || self_review_floor.is_some();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -9802,6 +9849,48 @@ fn decide_inner(args: &[String]) -> (i32, String) {
             );
         }
 
+        // A code payload carries its own review obligation on a stock install:
+        // when no lane is configured, the harness-resolved self-review reviewer is
+        // floored onto `required_reviewers` so the existing unattested_reviewers_scan
+        // holds the session for a head-pinned attestation instead of the run asking
+        // an epic leader. Opt out with config.review.self_review_required = false.
+        // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
+        // rather than waving the obligation away. The floor is additive: an
+        // already-configured lane (reviewers, bots, peers) keeps meaning exactly
+        // what it meant today, and a lane that already names code-review is a no-op.
+        // It sits BELOW the stand-down gates on purpose: the payload consult can
+        // reach gh (the PR's files), and a fire the quota floor or a recent
+        // secondary refusal stands down must spend no gh read at all. Nothing
+        // between those gates and run_done reads the floored set, so the late
+        // placement changes only which fires pay for the consult.
+        let lane_configured = !required_bots.is_empty()
+            || inputs.optional_lane_configured
+            || !required_reviewers.is_empty();
+        let self_review_required = settings.self_review_required.unwrap_or(true);
+        // The floor applies where a session can satisfy it: a harness with a
+        // self-review verb (claude /code-review, codex /review, opencode
+        // /review-changes), or a harness that could not be attributed at all -
+        // ambiguity is not permission (x-129b). A KNOWN verbless harness
+        // (gemini/agy) stays unfloored: the floor would demand an attestation no
+        // verb there produces, wedging the loop; route 3 (a spawned reviewer) is
+        // those harnesses' path and is deferred.
+        let floor_applies =
+            self_review_floor_applies(author_harness.as_deref(), inputs.author_harness_pinned_none);
+        let self_review_floor = if !lane_configured && self_review_required && floor_applies {
+            let payload = classify_payload_for_floor(&parsed.gh_bin, &parsed.git_bin, &cwd, None);
+            floor_self_review(&required_reviewers, false, payload.0, true)
+        } else {
+            None
+        };
+        if let Some(floored) = self_review_floor.clone() {
+            required_reviewers.push(floored);
+        }
+        // x-0eaf: DoneUnreviewed applies only when review is required. A stock
+        // install that opts out (self_review_required=false AND no lane, or a
+        // harness with no self-review verb) has zero coverage as its configured
+        // state, not a defect - those green PRs still reach DonePRGreen.
+        let review_required = lane_configured || self_review_floor.is_some();
+
         // Run done() for code units
         let done_gh_bin = if intent == Intent::Promise {
             coverage_adapter(gh_bin)
@@ -10154,10 +10243,20 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // A rate-limited bot now fails the gate closed (x-9ab2), so a
                     // green+reviewed DonePRGreen can never carry one: reaching
                     // here means every required bot has a real completed pass.
+                    // The not-required arm must never say "reviewed": no
+                    // coverage check ran, so the word would assert the exact
+                    // opposite of the uncovered row this same fire emits
+                    // (x-8cb6: PR 1294's terminal said "green and reviewed"
+                    // while its coverage event said uncovered, and auto-merge
+                    // acted on the terminal).
                     let done_msg = match waived_green_description {
                         Some(ref description) => format!(
                             "PR #{} is green; review coverage waived ({})",
                             pr_info.number, description
+                        ),
+                        None if !review_required => format!(
+                            "PR #{} is green; review not required (no review lane and the self-review floor does not apply)",
+                            pr_info.number
                         ),
                         None => format!("PR #{} is green and reviewed", pr_info.number),
                     };
@@ -13622,7 +13721,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             inputs.author_harness_pinned_none,
         )
     {
-        let payload = classify_payload(&git_bin, &cwd);
+        let payload = classify_payload_for_floor(&gh_bin, &git_bin, &cwd, pr.as_deref());
         if let Some(floored) = floor_self_review(&required_reviewers, false, payload.0, true) {
             required_reviewers.push(floored);
         }
@@ -18541,6 +18640,177 @@ git_bounded();";
             floor_self_review(&[], false, true, true),
             Some("code-review".to_string())
         );
+    }
+
+    /// git stub whose origin/main diff is EMPTY (the any-directory case: the
+    /// fire sits where the branch diff says nothing) and gh stub serving a PR.
+    fn floor_payload_stubs(dir: &Path, files_json: &str) -> (PathBuf, PathBuf) {
+        let git = write_exec(
+            dir,
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf '' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let gh = write_exec(
+            dir,
+            "gh",
+            &format!(
+                "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{{\"number\":7}}' ;;\n  *files*) printf '{files_json}' ;;\n  *) exit 1 ;;\nesac\n"
+            ),
+        );
+        (git, gh)
+    }
+
+    #[test]
+    fn floor_payload_classifies_the_pr_when_the_cwd_diff_is_empty() {
+        // The merge gate classifies the PR (_pr_payload_is_code); a floor that
+        // answers for a directory is more permissive than the merge it arms.
+        let dir = tempfile::tempdir().unwrap();
+        let (git, gh) = floor_payload_stubs(dir.path(), r#"[{"filename":"src/x.rs"}]"#);
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
+        assert!(
+            is_code,
+            "a code PR must floor even where the cwd diff is empty"
+        );
+        assert!(!assumed);
+    }
+
+    #[test]
+    fn floor_payload_keeps_a_docs_pr_unfloored_with_an_empty_cwd_diff() {
+        // The mirror control: the PR, not the directory, decides both ways.
+        let dir = tempfile::tempdir().unwrap();
+        let (git, gh) = floor_payload_stubs(dir.path(), r#"[{"filename":"docs/x.md"}]"#);
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
+        assert!(!is_code, "a docs-only PR must not floor");
+        assert!(!assumed);
+    }
+
+    #[test]
+    fn floor_payload_falls_back_to_the_cwd_diff_before_the_pr_exists() {
+        // No PR for the branch: the cwd answer stands (pre-PR fire).
+        let dir = tempfile::tempdir().unwrap();
+        let git = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf '' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let gh = write_exec(
+            dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *) echo 'no pull requests found' >&2; exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
+        assert!(!is_code);
+        assert!(!assumed);
+    }
+
+    #[test]
+    fn floor_payload_classifies_the_named_pr_for_the_coverage_verb() {
+        // The review-coverage verb evaluates a PR it names (--pr), from a
+        // checkout that need not sit on its branch: the floor must classify
+        // THAT PR, and a named PR that resolves to nothing fails closed
+        // rather than falling back to the foreign checkout's empty diff.
+        let dir = tempfile::tempdir().unwrap();
+        let git = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf '' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let gh = write_exec(
+            dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *files*) printf '[{\"filename\":\"src/x.rs\"}]' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            Some("7"),
+        );
+        assert!(
+            is_code,
+            "a named code PR must floor even from a foreign checkout"
+        );
+        assert!(!assumed);
+
+        // The same gh refusing the named PR (no view answer): fail closed,
+        // never the foreign checkout's empty-diff answer.
+        let gh = write_exec(
+            dir.path(),
+            "gh-refuses",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *) echo 'no pull requests found' >&2; exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            Some("7"),
+        );
+        assert!(is_code, "an unreadable named PR must fail closed");
+        assert!(assumed);
+    }
+
+    #[test]
+    fn floor_payload_fails_closed_when_the_pr_files_read_fails() {
+        // A PR exists but its files cannot be read: degraded probe, code.
+        let dir = tempfile::tempdir().unwrap();
+        let git = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf '' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let gh = write_exec(
+            dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
+        assert!(is_code, "an unreadable PR files read must fail closed");
+        assert!(assumed);
+    }
+
+    #[test]
+    fn floor_payload_short_circuits_on_a_code_cwd_diff_without_asking_gh() {
+        // The common case spends no gh: a code cwd diff floors immediately.
+        let dir = tempfile::tempdir().unwrap();
+        let git = write_exec(
+            dir.path(),
+            "git",
+            "#!/bin/sh\ncase \"$*\" in\n  rev-parse*origin/main*) printf 'sha\\n' ;;\n  *origin/main*) printf 'src/x.rs\\n' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        // A gh that would answer a docs-only PR: reaching it is the failure.
+        let gh = write_exec(
+            dir.path(),
+            "gh",
+            "#!/bin/sh\ncase \"$*\" in\n  *--version*) echo 'gh version 2.x' ;;\n  *view*) echo '{\"number\":7}' ;;\n  *files*) printf '[{\"filename\":\"docs/x.md\"}]' ;;\n  *) exit 1 ;;\nesac\n",
+        );
+        let (is_code, assumed) = classify_payload_for_floor(
+            gh.to_str().unwrap(),
+            git.to_str().unwrap(),
+            Path::new("."),
+            None,
+        );
+        assert!(is_code);
+        assert!(!assumed);
     }
 
     #[test]
