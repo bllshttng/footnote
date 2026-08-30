@@ -369,6 +369,8 @@ def _dispatch_walk(
         "--wake",
         "--wake-reason",
         reason,
+        "--wake-holder",
+        target.holder,
     ]
     if address:
         argv += ["--wake-address", address]

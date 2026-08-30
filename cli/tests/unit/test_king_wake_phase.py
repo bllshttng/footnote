@@ -43,7 +43,7 @@ class _Recorder:
     def emit(self, event_type: str, data: dict) -> None:
         self.events.append((event_type, data))
 
-    def dispatch(self, target: CrownTarget, reason: str, address) -> None:
+    def dispatch(self, target: CrownTarget, reason: str, address: str | None) -> None:
         self.dispatches.append((target.scope, reason, address))
 
 
@@ -178,6 +178,7 @@ def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path
 
     assert argv[argv.index("--wake-address") + 1] == "aa11bb22"
     assert argv[argv.index("--wake-reason") + 1] == "mail"
+    assert argv[argv.index("--wake-holder") + 1] == "king-x"
 
 
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):

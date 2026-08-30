@@ -104,9 +104,17 @@ impl KingQueue {
         scope: &str,
         fno_bin: String,
         wake: bool,
+        wake_holder: Option<&str>,
     ) -> Result<Self, LoopError> {
         let home = crate::paths::AgentsHome::from_env();
-        Self::from_manifest_with_registry(repo_root, scope, fno_bin, wake, &home.registry_json())
+        Self::from_manifest_with_registry(
+            repo_root,
+            scope,
+            fno_bin,
+            wake,
+            wake_holder,
+            &home.registry_json(),
+        )
     }
 
     /// The construction path with the registry injected, so the live-holder
@@ -118,6 +126,7 @@ impl KingQueue {
         scope: &str,
         fno_bin: String,
         wake: bool,
+        wake_holder: Option<&str>,
         registry_path: &Path,
     ) -> Result<Self, LoopError> {
         let scope = scope.trim();
@@ -162,14 +171,16 @@ impl KingQueue {
         // second one is the double-rule the one-live-crown guard exists to
         // stop, and a stale or copied manifest must not outvote it.
         //
-        // Wake mode skips that refusal deliberately: the wake caller reached
-        // this walk only after transcript truth resolved the holder as gone,
-        // and a cleanly-exited session's registry row stays non-terminal (the
-        // status word is not liveness). Honoring the row here would refuse
-        // exactly the wake the caller proved was safe - the guard must not
-        // outvote the instrument that outranks it.
-        if !wake {
-            if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+        // Wake mode skips that refusal ONLY for the row the wake caller named:
+        // the caller reached this walk after transcript truth resolved that
+        // holder gone, and a cleanly-exited session's registry row stays
+        // non-terminal (the status word is not liveness), so wake_holder names
+        // the one row the guard must not outvote. Any OTHER live holder - or
+        // a hand-run --wake that names nobody - still refuses, so the flag
+        // can never double a reigning king.
+        if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+            let caller_named_this_row = wake && wake_holder == Some(live_holder.as_str());
+            if !caller_named_this_row {
                 return Err(LoopError::Queue(format!(
                     "a live king ({live_holder}) already reigns over {scope:?}: the walk \
                      respawns an orphaned scope, it never doubles a live one. Wake or \
@@ -544,7 +555,7 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_ceiling: 0\n---\n",
         )
         .unwrap();
-        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false).unwrap();
+        let q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
         assert_eq!(q.respawn_ceiling(), 0);
         assert!(!q.at_respawn_ceiling());
         fs::remove_dir_all(&dir).ok();
@@ -552,7 +563,13 @@ mod tests {
 
     #[test]
     fn refuses_an_unsafe_scope_and_names_the_manifest_it_tried() {
-        let err = KingQueue::from_manifest(Path::new("."), "../escape", "fno".to_string(), false)
+        let err = KingQueue::from_manifest(
+            Path::new("."),
+            "../escape",
+            "fno".to_string(),
+            false,
+            None,
+        )
             .err()
             .expect("escape scope must refuse");
         assert!(err.to_string().contains("unsafe king scope"));
@@ -589,17 +606,57 @@ mod tests {
             live_crown_holder_in(&registry, "epic-x"),
             Some("reigning-king".to_string())
         );
-        // The same registry through the walk: an ordinary walk refuses, wake
-        // mode does not. A cleanly-exited session's row stays non-terminal
-        // (the status word is not liveness), so the live-holder guard would
-        // refuse exactly the wake whose absence the caller proved by
-        // transcript.
-        let plain =
-            KingQueue::from_manifest_with_registry(&dir, "k", "fno".to_string(), false, &registry);
+        // The same registry through the walk: an ordinary walk refuses, and a
+        // wake refuses too unless it names the very row transcript truth
+        // resolved gone. A cleanly-exited session's row stays non-terminal
+        // (the status word is not liveness), so the named wake must pass -
+        // and a wake that names nobody (a hand-run one) can never double a
+        // live king.
+        let plain = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            false,
+            None,
+            &registry,
+        );
         assert!(plain.is_err(), "an ordinary walk never doubles a live row");
-        let wake =
-            KingQueue::from_manifest_with_registry(&dir, "k", "fno".to_string(), true, &registry);
-        assert!(wake.is_ok(), "wake mode outranks the status word");
+        let unnamed = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            None,
+            &registry,
+        );
+        assert!(
+            unnamed.is_err(),
+            "a wake that names nobody never doubles a live row"
+        );
+        let named = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("reigning-king"),
+            &registry,
+        );
+        assert!(
+            named.is_ok(),
+            "wake mode outranks the status word of the row it named"
+        );
+        let wrong_row = KingQueue::from_manifest_with_registry(
+            &dir,
+            "k",
+            "fno".to_string(),
+            true,
+            Some("someone-else"),
+            &registry,
+        );
+        assert!(
+            wrong_row.is_err(),
+            "naming a row other than the live holder never doubles a live one"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -633,7 +690,8 @@ mod tests {
             "---\nfno_id: k-1\nscope: epic-x\nrespawn_count: 3\nrespawn_ceiling: 4\n---\n",
         )
         .unwrap();
-        let mut q = KingQueue::from_manifest(&dir, "k", "fno".to_string(), false).unwrap();
+        let mut q =
+            KingQueue::from_manifest(&dir, "k", "fno".to_string(), false, None).unwrap();
         assert!(!q.at_respawn_ceiling(), "3 of 4 is under the ceiling");
         // The concurrent winner bills the ceiling first...
         assert_eq!(bump_respawn_count(&path).unwrap(), 4);

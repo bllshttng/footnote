@@ -297,6 +297,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut king_wake = false;
     let mut king_wake_reason: Option<String> = None;
     let mut king_wake_address: Option<String> = None;
+    let mut king_wake_holder: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -379,6 +380,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--wake-address" => {
                 king_wake_address = Some(require_value!("--wake-address", args, i).to_string());
             }
+            "--wake-holder" => {
+                king_wake_holder = Some(require_value!("--wake-holder", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -391,7 +395,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // The wake flags are king-only: they name which trigger sent the walk and
     // switch the queue out of failure-retry accounting, and neither concept
     // exists on the target driver.
-    if (king_wake || king_wake_reason.is_some() || king_wake_address.is_some())
+    if (king_wake
+        || king_wake_reason.is_some()
+        || king_wake_address.is_some()
+        || king_wake_holder.is_some())
         && driver.as_deref() != Some("king")
     {
         eprintln!(
@@ -428,6 +435,16 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         eprintln!(
             "fno-agents loop run: --wake-address needs --wake-reason mail (it names \
              the inbox the mail trigger matched)"
+        );
+        return Ok(2);
+    }
+    if king_wake_holder.is_some() && !king_wake {
+        // The holder is the wake caller's assertion that transcript truth
+        // resolved this row gone; without --wake there is no wake to justify
+        // bypassing the live-crown-holder guard for it.
+        eprintln!(
+            "fno-agents loop run: --wake-holder needs --wake (it names the registry \
+             row the wake caller resolved absent by transcript)"
         );
         return Ok(2);
     }
@@ -489,7 +506,13 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             return Ok(2);
         };
         let fno_bin = std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string());
-        match crate::loop_king::KingQueue::from_manifest(&cwd, scope, fno_bin, king_wake) {
+        match crate::loop_king::KingQueue::from_manifest(
+            &cwd,
+            scope,
+            fno_bin,
+            king_wake,
+            king_wake_holder.as_deref(),
+        ) {
             Ok(q) => {
                 unit_display = (q.walk_key().to_string(), q.scope().to_string());
                 king_queue = Some(q);
