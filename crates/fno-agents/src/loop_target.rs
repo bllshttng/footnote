@@ -273,6 +273,42 @@ pub fn run_loop_verb(args: &[String]) -> i32 {
     }
 }
 
+/// The wake clause for the respawned king's prompt.
+///
+/// A mail wake names the inbox the trigger matched, plus the ack that
+/// advances its cursor: the woken session is fresh and can derive neither
+/// the dead holder's name nor its reply-handle short id from any whoami of
+/// its own, and an unacked row re-wakes the scope on the next tick.
+fn king_wake_clause(reason: Option<&str>, address: Option<&str>) -> String {
+    match reason {
+        Some("mail") => match address {
+            Some(address) => format!(
+                " You were woken by undrained bus mail addressed to \
+                 {address}: run `fno agents mail unread --name {address}` and \
+                 drain it BEFORE your first board read, then advance that \
+                 cursor with `fno agents mail ack <id> --name {address}` - an \
+                 unacked row re-wakes this scope on the next tick. The waking \
+                 message is not a board row and no board read will surface it."
+            ),
+            None => " You were woken by undrained bus mail addressed to this \
+                 scope: run `fno whoami` to recover your registry name, then \
+                 `fno agents mail unread --name <that name>` and drain it \
+                 BEFORE your first board read. The waking message is not a \
+                 board row and no board read will surface it."
+                .to_string(),
+        },
+        Some("board") => {
+            " The board changed while this scope had no king: read it first.".to_string()
+        }
+        Some("backstop") => {
+            " No event fired; this is the periodic re-check, and an \
+             unchanged board is a legitimate NoWork exit."
+                .to_string()
+        }
+        _ => String::new(),
+    }
+}
+
 fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error>> {
     // ── subcommand check ──────────────────────────────────────────────────────
     let subcommand = args.first().map(|s| s.as_str()).unwrap_or("");
@@ -589,31 +625,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             .map(|q| q.scope().to_string())
             .or_else(|| king_scope.clone())
             .unwrap_or_default();
-        let wake_clause = match king_wake_reason.as_deref() {
-            Some("mail") => match king_wake_address.as_deref() {
-                Some(address) => format!(
-                    " You were woken by undrained bus mail addressed to \
-                     {address}: run `fno agents mail unread --name {address}` and \
-                     drain it BEFORE your first board read, then advance that \
-                     cursor with `fno agents mail ack <id> --name {address}` - an \
-                     unacked row re-wakes this scope on the next tick. The waking \
-                     message is not a board row and no board read will surface it."
-                ),
-                None => " You were woken by undrained bus mail addressed to this \
-                     scope: run `fno whoami` to recover your registry name, then \
-                     `fno agents mail unread --name <that name>` and drain it \
-                     BEFORE your first board read. The waking message is not a \
-                     board row and no board read will surface it."
-                    .to_string(),
-            },
-            Some("board") => " The board changed while this scope had no king: read it first.".to_string(),
-            Some("backstop") => {
-                " No event fired; this is the periodic re-check, and an \
-                 unchanged board is a legitimate NoWork exit."
-                    .to_string()
-            }
-            _ => String::new(),
-        };
+        let wake_clause = king_wake_clause(king_wake_reason.as_deref(), king_wake_address.as_deref());
         format!(
             "You are the respawned king over {scope}. Read the board \
              (fno inbox board --json --state <your kings manifest>), work \
@@ -809,4 +821,38 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     Ok(exit_code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::king_wake_clause;
+
+    #[test]
+    fn a_mail_wake_names_the_matched_inbox_and_its_ack() {
+        let clause = king_wake_clause(Some("mail"), Some("aa11bb22"));
+        assert!(
+            clause.contains("mail unread --name aa11bb22"),
+            "the drain must read the matched inbox, not a derived one: {clause}"
+        );
+        assert!(
+            clause.contains("mail ack <id> --name aa11bb22"),
+            "an unacked row re-wakes the scope: {clause}"
+        );
+    }
+
+    #[test]
+    fn a_mail_wake_without_an_address_falls_back_to_whoami() {
+        let clause = king_wake_clause(Some("mail"), None);
+        assert!(clause.contains("whoami"), "hand-run fallback: {clause}");
+        assert!(!clause.contains("--name aa11bb22"));
+    }
+
+    #[test]
+    fn non_mail_reasons_carry_no_mail_instruction() {
+        for reason in ["board", "backstop"] {
+            let clause = king_wake_clause(Some(reason), None);
+            assert!(!clause.contains("mail unread"), "{reason}: {clause}");
+        }
+        assert!(king_wake_clause(None, None).is_empty());
+    }
 }
