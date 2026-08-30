@@ -1068,8 +1068,13 @@ def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
             identity = resolve_self_identity()
         except Exception:  # noqa: BLE001 - an unresolvable vote is best-effort
             identity = None
+        # The same narrowing cmd_encounter applies: truthiness alone lets a
+        # truthy non-str reach voter_key/session_id and blow up later, inside
+        # canonical_handle, where the skip warning names nothing useful.
         session_id = getattr(identity, "session_id", None)
+        session_id = session_id if isinstance(session_id, str) else None
         harness = getattr(identity, "harness", None)
+        harness = harness if isinstance(harness, str) else None
         if not session_id or not harness:
             raise ValueError("no provable session identity")
         record = {
@@ -3274,7 +3279,7 @@ def cmd_encounter(
     as_operator: bool = typer.Option(
         False,
         "--operator",
-        help="Record this as the operator's vote rather than this session's. One per node.",
+        help="Record this as the operator's vote under the stable 'operator' voter key. A declaration, not proof; one per node, and the casting session's id is kept on the record when provable.",
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended record as JSON."),
 ) -> None:
@@ -3283,7 +3288,14 @@ def cmd_encounter(
     An encounter is a thing that happened, not an opinion. A poll count of N
     agents who like a node is unfalsifiable; N distinct sessions that each name
     what the node cost them is falsifiable against a transcript. That is why
-    evidence is required and why an unprovable identity cannot vote.
+    evidence is required, and why an agent vote needs a provable identity: a
+    vote no transcript can vouch for is a poll. The one exception is the
+    operator lane: on this single-operator machine the human may vote from a
+    plain terminal by passing --operator, which votes under the stable
+    ``operator`` voter key. That lane is a declaration, not proof - any session
+    can pass the flag - so the record keeps the casting session's id whenever
+    one is provable, and the demand read displays the agent/operator split
+    instead of folding the two kinds together.
 
     Read the signal with ``fno backlog demand``. This verb never writes rank and
     never touches a kanban column: the board stays the work order, and demand is
@@ -3321,9 +3333,10 @@ def cmd_encounter(
     session_id = session_id if isinstance(session_id, str) else None
     harness = getattr(identity, "harness", None)
     harness = harness if isinstance(harness, str) else None
-    # `--operator` is a declaration, not proof. An agent can pass it, but
-    # `via_session` makes that visible and this single-operator machine has no
-    # cryptographic operator identity worth inventing for this signal.
+    # `--operator` is a declaration, not proof. An agent can pass it, but the
+    # record keeps the casting session's identity beside the operator key and
+    # this single-operator machine has no cryptographic operator identity worth
+    # inventing for this signal.
     if not as_operator and (not session_id or not harness):
         typer.echo(
             "Error: no provable session identity, so this encounter would not be "
@@ -3354,10 +3367,17 @@ def cmd_encounter(
     }
     if as_operator:
         record.update({"voter_key": "operator", "voter_kind": "operator"})
+        # The canonical provenance keys every encounter carries, so a reader
+        # keyed on `session_id` (the falsifiability contract, and every
+        # pre-operator record) sees who cast the vote. `voter_key` stays
+        # `operator` for the dedupe and the demand split, and takes precedence
+        # over `session_id` in voter_key resolution, so provenance cannot
+        # fork the operator lane into per-session voters.
         if session_id:
-            record["via_session"] = session_id
+            record["session_id"] = session_id
+            record["fno_id"] = canonical_handle(session_id)
         if harness:
-            record["via_harness"] = harness
+            record["harness"] = harness
     else:
         assert session_id is not None and harness is not None
         record.update(

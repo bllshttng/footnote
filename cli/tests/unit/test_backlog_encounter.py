@@ -216,6 +216,30 @@ def test_operator_vote_is_deduped_by_voter_key(probe):
     assert first_ts in second.stderr
 
 
+def test_operator_vote_keeps_the_casting_session_on_the_record(probe):
+    """The operator lane is a declaration, so the record still names who cast it.
+
+    session_id is the provenance key the falsifiability contract names and the
+    one every pre-operator record carried. voter_key staying ``operator`` is
+    what keeps the lane one-per-node and split-visible, so both ride along.
+    """
+    _seed(probe, _node())
+
+    result = probe(
+        "backlog",
+        "encounter",
+        "zz-0001",
+        "--operator",
+        "--evidence",
+        "the operator hit the same seam.",
+    )
+
+    assert result.returncode == 0, result.stderr
+    record = _encounters(probe)[0]
+    assert record["voter_key"] == "operator"
+    assert record["session_id"] == SESSION_A
+
+
 def test_a_none_identity_is_the_same_refusal(probe):
     """The prover may answer None outright; that is the same missing provenance."""
     _seed(probe, _node())

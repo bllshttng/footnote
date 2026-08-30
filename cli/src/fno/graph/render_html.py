@@ -843,17 +843,26 @@ _DASHBOARD_JS = """\
   // same lie the visible-count invariant below exists to prevent. So the next
   // render the reader causes drops it, and the row obeys the filter again.
   var revealed = null;
+  // Whether the previous render left the board demand-sorted. DOM moves are a
+  // transition cost: sorting must move rows and toggling off must restore
+  // authored order, but a filter keystroke while unsorted must move nothing.
+  // Unconditional re-appending ran ~4,700 appendChild moves per keystroke on
+  // the live graph to achieve nothing.
+  var wasSorted = false;
   function render(keepReveal) {
     if (!keepReveal) revealed = null;
     var shown = 0;
+    var sorted = !!state.demand;
     sections.forEach(function (sec) {
       var vis = [];
-      // build() fixed the DOM order and render() only toggles classes, so a demand
-      // sort has to move nodes. sec.rows keeps authored order, so toggling off
-      // re-appends in that order instead of leaving the board sorted.
-      var order = state.demand ? sec.rows.slice().sort(function (a, b) { return (b.node.dv || 0) - (a.node.dv || 0); }) : sec.rows;
-      order.forEach(function (r) { r.el.parentNode.appendChild(r.el); });
-      order.forEach(function (r) { var ok = matches(r.node) || r.node.id === revealed;
+      if (sorted || wasSorted) {
+        // build() fixed the DOM order and render() only toggles classes, so a demand
+        // sort has to move nodes. sec.rows keeps authored order, so toggling off
+        // re-appends in that order instead of leaving the board sorted.
+        var moveOrder = sorted ? sec.rows.slice().sort(function (a, b) { return (b.node.dv || 0) - (a.node.dv || 0); }) : sec.rows;
+        moveOrder.forEach(function (r) { r.el.parentNode.appendChild(r.el); });
+      }
+      sec.rows.forEach(function (r) { var ok = matches(r.node) || r.node.id === revealed;
         r.el.className = 'row' + (ok ? '' : ' is-hidden'); if (ok) vis.push(r.node); });
       shown += vis.length;
       // Header count and stacked bar describe what is VISIBLE. Reading them off
@@ -869,6 +878,7 @@ _DASHBOARD_JS = """\
       }).join('') : '';
       sec.el.className = 'group' + (vis.length ? '' : ' is-hidden');
     });
+    wasSorted = sorted;
     document.getElementById('shown').textContent = shown + ' of ' + NODES.length + ' nodes shown';
   }
   // A child link can name a row the active filter hides, and an anchor to a
@@ -909,7 +919,11 @@ def _dashboard_rows(
     source = context_entries if context_entries is not None else entries
     if local:
         from fno.graph._intake import make_effective_priority
-        from fno.graph.demand import divergence_score, voter_key
+        from fno.graph.demand import (
+            divergence_score,
+            encounter_voters,
+            operator_voters,
+        )
 
         priority_for = make_effective_priority(source)
     index = {e.get("id"): e for e in source if isinstance(e.get("id"), str)}
@@ -953,18 +967,12 @@ def _dashboard_rows(
             "ty": str(entry.get("type") or ""),
         }
         if local:
-            voters = {
-                voter_key(encounter)
-                for encounter in (entry.get("encounters") or [])
-                if isinstance(encounter, dict) and voter_key(encounter)
-            }
-            operator_voters = {
-                voter_key(encounter)
-                for encounter in (entry.get("encounters") or [])
-                if isinstance(encounter, dict)
-                and encounter.get("voter_kind") == "operator"
-                and voter_key(encounter)
-            }
+            # The same helpers the CLI demand read uses. Re-walking the
+            # encounters here split the definition of a voter across two
+            # files, and a voter-key rule change would then pass one reader
+            # and silently disagree in the other on this auto-render path.
+            voters = encounter_voters(entry)
+            operators = operator_voters(entry)
             row.update(
                 {
                     "id": str(entry.get("id") or "?"),
@@ -1042,7 +1050,7 @@ def _dashboard_rows(
                 }
             )
             if voters:
-                operator_count = len(voters & operator_voters)
+                operator_count = len(voters & operators)
                 row.update(
                     {
                         "en": len(voters),
@@ -1232,7 +1240,11 @@ def _dashboard_html(
     vote_suffix = (
         ' --operator --evidence "REPLACE: what it cost"' if local else ""
     )
-    dashboard_js = _DASHBOARD_JS.replace("__VOTE_SUFFIX__", vote_suffix)
+    # The splice lands inside a single-quoted JS string literal, so an
+    # apostrophe in the suffix would terminate it and kill the whole dashboard
+    # script at parse time. Escape for that literal at the one splice site.
+    js_safe_suffix = vote_suffix.replace("\\", "\\\\").replace("'", "\\'")
+    dashboard_js = _DASHBOARD_JS.replace("__VOTE_SUFFIX__", js_safe_suffix)
     # The font is the original design's, so it stays; the LOAD is what must not
     # block. A stylesheet in <head> is render-blocking, and a network that
     # blackholes rather than refuses (captive portal, offline laptop, locked-down

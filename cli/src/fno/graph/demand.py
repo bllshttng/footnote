@@ -34,6 +34,11 @@ PRIORITY_WEIGHT = {"p0": 1, "p1": 2, "p2": 3, "p3": 4}
 _DEFAULT_WEIGHT = PRIORITY_WEIGHT["p2"]
 
 
+#: The one shared operator voter key. A literal here and a check everywhere a
+#: kind is tested; the constant is what keeps a third module from re-spelling it.
+OPERATOR_VOTER_KIND = "operator"
+
+
 def voter_key(record: dict) -> str:
     """Return the identity that makes an encounter one-per voter."""
     return str(record.get("voter_key") or record.get("session_id") or "")
@@ -51,6 +56,17 @@ def encounter_voters(entry: dict) -> set:
         voter_key(e)
         for e in (entry.get("encounters") or [])
         if isinstance(e, dict) and voter_key(e)
+    }
+
+
+def operator_voters(entry: dict) -> set:
+    """The subset of encounter voters that voted under the operator key."""
+    return {
+        voter_key(e)
+        for e in (entry.get("encounters") or [])
+        if isinstance(e, dict)
+        and e.get("voter_kind") == OPERATOR_VOTER_KIND
+        and voter_key(e)
     }
 
 
@@ -93,21 +109,15 @@ def demand_rows(entries: list[dict]) -> list[dict]:
         voters = encounter_voters(entry)
         if not voters:
             continue
-        operator_voters = {
-            voter_key(encounter)
-            for encounter in (entry.get("encounters") or [])
-            if isinstance(encounter, dict)
-            and encounter.get("voter_kind") == "operator"
-            and voter_key(encounter)
-        }
+        operators = operator_voters(entry)
         rows.append(
             {
                 "score": divergence_score(entry, priority_for(entry)),
                 "node": entry.get("id"),
                 "pri": priority_for(entry),
                 "enc": len(voters),
-                "agent": len(voters - operator_voters),
-                "operator": len(voters & operator_voters),
+                "agent": len(voters - operators),
+                "operator": len(voters & operators),
                 "dispatched": _dispatched_count(entry, voters),
                 # `status`, not the kanban column. The column is DERIVED at
                 # render time and is absent from a stored entry, so reading it
@@ -129,15 +139,21 @@ def format_rows(rows: list[dict]) -> str:
             "no encounters recorded yet. An agent files one with "
             "`fno backlog encounter <node> --evidence \"<what it cost>\"`."
         )
+    # The enc cell swallows the (Na/No) split at a FIXED width. Appending the
+    # split after a bare :>3 shifted dispatched/status/title right on
+    # operator-voted rows only, so those columns aligned with nothing. Counts
+    # beyond the width overflow it, exactly as a bare :>3 always could.
+    enc_width = 12
     header = (
-        f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':>3} {'dispatched':>10}  "
+        f"{'score':>5}  {'node':<8} {'pri':<4} {'enc':<{enc_width}} {'dispatched':>10}  "
         f"{'status':<12} title"
     )
     lines = [header]
     for row in rows:
         split = f" ({row['agent']}a/{row['operator']}o)" if row["operator"] else ""
+        enc_cell = f"{row['enc']}{split}"
         lines.append(
-            f"{row['score']:>5}  {row['node']:<8} {row['pri']:<4} {row['enc']:>3}{split} "
+            f"{row['score']:>5}  {row['node']:<8} {row['pri']:<4} {enc_cell:<{enc_width}} "
             f"{row['dispatched']:>10}  {row['status']:<12} {row['title']}"
         )
     return "\n".join(lines)

@@ -253,6 +253,39 @@ def test_operator_voter_counts_and_renders_alongside_agent_voters(tmp_graph):
     assert "(2a/1o)" in format_rows(rows)
 
 
+def test_the_operator_split_does_not_shift_the_fixed_columns(tmp_graph):
+    """The (Na/No) split rides INSIDE the enc cell at a fixed width.
+
+    Appending the split after a bare :>3 shifted dispatched/status/title right
+    on operator-voted rows only, so those columns aligned with nothing: not
+    the header, and not the unvoted rows beside them.
+    """
+    from fno.graph.demand import demand_rows, format_rows
+
+    entries = [
+        _node(
+            "zz-voted",
+            encounters=[
+                _enc("s1"),
+                _enc("s2"),
+                {
+                    "ts": "2026-08-29T06:00:00+00:00",
+                    "voter_key": "operator",
+                    "voter_kind": "operator",
+                    "evidence": "operator hit the same seam.",
+                },
+            ],
+            sessions=[{}],
+        ),
+        _node("zz-plain", encounters=[_enc("s9")], sessions=[{}]),
+    ]
+
+    lines = format_rows(demand_rows(entries)).splitlines()
+    col = lines[0].index("dispatched")
+    cells = [line[col : col + 10].strip() for line in lines[1:]]
+    assert all(cell.isdigit() for cell in cells), cells
+
+
 def test_legacy_session_ids_remain_the_voter_key(tmp_graph):
     from fno.graph.demand import demand_rows
 
