@@ -3910,7 +3910,11 @@ pub fn operator_waiver(
     let scoped = if repo_slug.is_empty() || head.is_empty() {
         LawStatus::NoLaw
     } else {
-        current_law_status(fno_bin, cwd, &scoped_waiver_subject(repo_slug, pr_number, head))
+        current_law_status(
+            fno_bin,
+            cwd,
+            &scoped_waiver_subject(repo_slug, pr_number, head),
+        )
     };
     if scoped == LawStatus::Single {
         return (
