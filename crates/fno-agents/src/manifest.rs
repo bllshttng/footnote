@@ -769,7 +769,7 @@ pub fn bundled_manifest(agent: &str) -> Option<&'static str> {
         // agy harness (id "agy"), already covered by agy.toml above.
         "amp" => Some(include_str!("manifests/amp.toml")),
         "cline" => Some(include_str!("manifests/cline.toml")),
-        "cursor" => Some(include_str!("manifests/cursor.toml")),
+        "cursor-agent" => Some(include_str!("manifests/cursor-agent.toml")),
         "devin" => Some(include_str!("manifests/devin.toml")),
         "droid" => Some(include_str!("manifests/droid.toml")),
         "copilot" => Some(include_str!("manifests/github-copilot.toml")),

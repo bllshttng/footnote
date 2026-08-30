@@ -1,0 +1,22 @@
+# cursor-agent readiness manifest, pinned against a live pane.
+#
+# The pane is the only fno driving lane. The --print stream-json mode is
+# output-only and has no input-format, rpc, acp, serve, or stdio transport.
+# The captured idle marker is `→ Add a follow-up`; working screens carry a
+# braille spinner followed by `Working` or `Running`.
+
+min_engine_version = 1
+
+[[rule]]
+id = "working_spinner"
+state = "working"
+priority = 900
+region = "bottom_non_empty_lines(8)"
+gate = { line_regex = '^\s*[\x{2800}-\x{28FF}]+\s+(Working|Running)\b' }
+
+[[rule]]
+id = "idle_follow_up"
+state = "idle"
+priority = 100
+region = "bottom_non_empty_lines(8)"
+gate = { contains = "→ Add a follow-up" }

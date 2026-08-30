@@ -1043,7 +1043,7 @@ pub fn run_trace(rest: &[String], home: &AgentsHome) -> i32 {
 fn session_id_field(harness: &str) -> Option<&'static str> {
     match harness {
         "claude" => Some("short_id"),
-        "codex" | "gemini" | "agy" | "opencode" => Some("harness_session_id"),
+        "codex" | "gemini" | "agy" | "opencode" | "cursor-agent" => Some("harness_session_id"),
         _ => None,
     }
 }
@@ -1768,6 +1768,9 @@ fn build_resume_argv(provider: &str, session_id: &str, cwd: Option<&str>) -> Opt
         Some(session_id),
     )
     .ok()?;
+    if provider == "cursor-agent" {
+        argv.push("--trust".to_string());
+    }
     // codex's bounded sandbox re-resolves from config on `resume`, so the git +
     // plan grants ride as `-c` tokens spliced right after the `codex` binary
     // token. (`codex resume` does accept --add-dir; `codex exec resume` is the
@@ -3293,7 +3296,7 @@ fn attach_via_declared_form(
     name: &str,
     events_path: &Path,
 ) -> Option<i32> {
-    if !is_codex_thread_row(entry) {
+    if harness != "cursor-agent" && !is_codex_thread_row(entry) {
         return None;
     }
     let render = |session: Option<&str>, short: Option<&str>| {
@@ -3386,7 +3389,16 @@ fn attach_via_declared_form(
     // produces the more specific of the two errors in the terminal the
     // operator is already looking at.
     use std::os::unix::process::CommandExt;
-    let err = std::process::Command::new(&argv[0]).args(&argv[1..]).exec();
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    if let Some(cwd) = entry
+        .get("cwd")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+    {
+        command.current_dir(cwd);
+    }
+    let err = command.exec();
     eprintln!("fno agents attach: failed to exec {}: {err}", argv[0]);
     Some(1)
 }
@@ -5286,6 +5298,7 @@ mod tests {
         assert_eq!(session_id_field("gemini"), Some("harness_session_id"));
         assert_eq!(session_id_field("agy"), Some("harness_session_id"));
         assert_eq!(session_id_field("opencode"), Some("harness_session_id"));
+        assert_eq!(session_id_field("cursor-agent"), Some("harness_session_id"));
         assert_eq!(session_id_field("unknown"), None);
 
         // --cd lands the resume in the row's own tree instead of the session

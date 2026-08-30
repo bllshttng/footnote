@@ -966,6 +966,8 @@ fn attach_argv(
 ///   control socket via `CODEX_HOME`), and the wrapper is claude's routing.
 /// - pi, whose argv carries env-dependent `--provider`/`--model` no static
 ///   form can name: its own builder (x-c198).
+/// - cursor-agent, whose pane attach uses the full callee-minted chat UUID and
+///   always carries `--trust`; its chat state is remote, not a local file.
 ///
 /// Any other harness falls through to the claude shape, which is what every
 /// caller did before a harness was passed at all; only rows that resolved an

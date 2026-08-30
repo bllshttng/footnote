@@ -61,6 +61,7 @@ pub mod codex_fake_daemon;
 pub mod codex_inject;
 pub mod codex_thread;
 mod completion_output;
+pub mod cursor_agent;
 pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
