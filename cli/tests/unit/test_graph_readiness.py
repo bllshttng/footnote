@@ -177,6 +177,44 @@ def test_terminal_statuses_outrank_blocked(tmp_path: Path):
     assert rows["ab-review0001"]["status"] == "in_review"
 
 
+def test_pending_supersession_uses_terminal_precedence_and_keeps_idea_blocked(
+    tmp_path: Path,
+):
+    pending = {
+        "successor": "ab-successor",
+        "cause": "consolidation",
+        "surfaces": ["src/example.py"],
+        "verified_at": None,
+    }
+    p = _write(
+        tmp_path,
+        [
+            _entry(
+                "ab-done-pending",
+                status="done",
+                completed_at="2026-01-01T00:00:00Z",
+                superseded_by="ab-successor",
+                supersession=pending,
+            ),
+            _entry(
+                "ab-idea-pending",
+                status="idea",
+                superseded_by="ab-successor",
+                supersession=pending,
+            ),
+        ],
+    )
+
+    rows = {e["id"]: e for e in read_graph(p)}
+
+    assert rows["ab-done-pending"]["status"] == "done"
+    assert rows["ab-done-pending"]["blocked_reason"] is None
+    assert rows["ab-idea-pending"]["status"] == "blocked"
+    assert rows["ab-idea-pending"]["blocked_reason"].startswith(
+        "pending supersession:"
+    )
+
+
 def test_recompute_statuses_never_round_trips_a_stale_blocked_reason():
     """The write path (locked_mutate_graph) reads via _apply_graph_defaults
     BEFORE handing entries to the mutator, so a dict can arrive at
