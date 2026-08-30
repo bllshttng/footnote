@@ -312,8 +312,9 @@ def test_subagent_stop_identifies_by_message_shape_alone(tmp_path: Path) -> None
     assert events[0]["data"]["head_sha"] == head
 
 
-def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
+def test_subagent_stop_with_findings_emits_failed_attestation(tmp_path: Path) -> None:
     repo = _temp_git_repo(tmp_path)
+    head = _head(repo)
     payload = json.dumps(
         {
             "hook_event_name": "SubagentStop",
@@ -330,7 +331,15 @@ def test_subagent_stop_with_findings_emits_nothing(tmp_path: Path) -> None:
         input=payload, cwd=repo, env=_base_env(), capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
-    assert _events(repo) == []
+    events = [e for e in _events(repo) if e.get("type") == "review_attestation"]
+    assert len(events) == 1, events
+    data = events[0]["data"]
+    assert data["verdict"] == "fail"
+    assert data["head_sha"] == head
+    assert data["findings_blocking"] == 1
+    assert data["findings_nonblocking"] == 0
+    assert "classified 1 finding(s): 1 blocking, 0 non-blocking" in r.stdout
+    assert f"reviewed head {head}" in r.stdout
 
 
 _SURFACES = {
