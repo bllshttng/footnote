@@ -157,3 +157,14 @@ def test_cursor_agent_reaps_detached_worker_server(monkeypatch):
 
     assert cursor_agent.reap_detached_worker_servers() == 1
     assert process.terminated
+
+
+def test_cursor_agent_is_named_in_spawn_help():
+    from typer.testing import CliRunner
+
+    from fno.agents.cli import agents_app
+
+    result = CliRunner().invoke(agents_app, ["spawn", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "cursor-agent" in result.output

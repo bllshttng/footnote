@@ -23,6 +23,7 @@ import pytest
 from fno.agents import dispatch as dispatch_mod
 from fno.agents.dispatch import DispatchAskError, rm_agent
 from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses import cursor_agent as cursor_agent_mod
 from fno.agents.harnesses import opencode as opencode_mod
 from fno.agents.registry import AgentEntry, load_registry, update_registry
 
@@ -288,6 +289,17 @@ def test_codex_rewrite_is_atomic_and_leaves_no_temp_file(isolated_state, monkeyp
 # conversation as a side effect of cleaning up a registry row.
 
 SES = "ses_7f3a9b2c1d"
+CURSOR_CHAT = "fadad56b-8008-45f5-b809-f9fab7074534"
+
+
+def test_cursor_agent_rm_reaps_detached_worker_server(isolated_state, monkeypatch, capsys):
+    _seed("cursor", harness="cursor-agent", session_id=CURSOR_CHAT, cwd=isolated_state)
+    monkeypatch.setattr(cursor_agent_mod, "reap_detached_worker_servers", lambda: 1)
+
+    rm_agent("cursor")
+
+    assert _names() == []
+    assert "cursor-agent worker-server processes reaped: 1" in capsys.readouterr().out
 
 
 def test_opencode_rm_is_registry_only_and_says_so(isolated_state, capsys):
