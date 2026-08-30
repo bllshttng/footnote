@@ -733,7 +733,7 @@ pub enum KeySection {
 }
 
 impl KeySection {
-    /// The section header the modal renders (herdr anatomy: accent-colored).
+    /// The section header the modal renders (accent-colored).
     pub fn title(self) -> &'static str {
         match self {
             KeySection::Global => "global",

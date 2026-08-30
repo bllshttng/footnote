@@ -331,7 +331,7 @@ _DOMAIN_KEYWORDS: Dict[str, List[str]] = {
     ],
     "devops": [
         "devops", "docker", "ci", "ci/cd", "cicd", "deploy", "terraform",
-        "kubernetes", "k8s", "motia", "workflow", "orchestration", "github actions",
+        "kubernetes", "k8s", "workflow", "orchestration", "github actions",
     ],
     "data": [
         "etl", "pipeline", "transform", "data", "analytics", "regulation",

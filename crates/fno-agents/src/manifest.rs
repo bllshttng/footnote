@@ -1425,9 +1425,9 @@ mod tests {
             let _ = m.evaluate(&synthetic);
         }
         // A genuinely-unhosted harness still resolves to None (the fail-loud
-        // guard, mirrors readiness OQ#9: no fail-open default). aider is a real
+        // guard, mirrors readiness OQ#9: no fail-open default). goose is a real
         // coding CLI we deliberately do not bundle a manifest for.
-        assert!(bundled_manifest("aider").is_none(), "unknown agent -> None");
+        assert!(bundled_manifest("goose").is_none(), "unknown agent -> None");
     }
 
     // AC-E6-4: codex/gemini ported to TOML reproduce the hardcoded
@@ -1557,9 +1557,9 @@ mod tests {
             .expect("parses");
         assert!(!m.rules().is_empty());
         // Unknown agent, no override -> None (caller fails loud). hermes is now
-        // bundled (x-83e7 full-roster parity), so use aider (a real coding CLI we
+        // bundled (x-83e7 full-roster parity), so use goose (a real coding CLI we
         // deliberately do not bundle a manifest for).
-        assert!(load_manifest("aider", None).is_none());
+        assert!(load_manifest("goose", None).is_none());
 
         // A readable <agent>.toml override wins over the bundled copy.
         let dir = tempfile::tempdir().unwrap();
@@ -1674,7 +1674,7 @@ mod tests {
     // AC2-FR / AC3 (x-8f7f, flipped live at x-51f6): the hosting gate is
     // real. opencode's manifest was BUNDLED (staged) while opencode had no
     // provider impl; x-51f6 added OpencodeProvider, so opencode is now both
-    // bundled AND hostable — like agy — and its manifest can fire. aider
+    // bundled AND hostable — like agy — and its manifest can fire. goose
     // remains the genuinely-unhosted example (bundled nothing, hosted
     // nothing).
     #[test]
@@ -1686,10 +1686,10 @@ mod tests {
                 "{hosted} IS hostable -> manifest can fire",
             );
         }
-        assert!(bundled_manifest("aider").is_none(), "aider not bundled");
+        assert!(bundled_manifest("goose").is_none(), "goose not bundled");
         assert!(
-            crate::provider::for_name("aider").is_none(),
-            "aider not hosted"
+            crate::provider::for_name("goose").is_none(),
+            "goose not hosted"
         );
     }
 

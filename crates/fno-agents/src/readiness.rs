@@ -463,18 +463,18 @@ mod tests {
 
     #[test]
     fn no_signal_detector_errors_never_guesses() {
-        // "aider" is the canonical genuinely-unhosted CLI (opencode graduated
+        // "goose" is the canonical genuinely-unhosted CLI (opencode graduated
         // to a real detector at x-51f6).
         let d = NoSignalDetector {
-            provider: "aider".to_string(),
+            provider: "goose".to_string(),
         };
         // The detector reports the real provider name (not the literal
         // "unknown") in both provider_name() and the error (cv-789fdba0).
-        assert_eq!(d.provider_name(), "aider");
+        assert_eq!(d.provider_name(), "goose");
         assert_eq!(
             d.is_ready(&view("anything at all, 9999 bytes of banner")),
             Err(ReadinessError::UnknownReadinessSignal {
-                provider: "aider".into()
+                provider: "goose".into()
             })
         );
     }

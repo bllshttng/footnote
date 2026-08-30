@@ -254,7 +254,7 @@ class LiveCensus:
         registry, NOT by filtering the display union — a bg/adopted fno agents worker
         is display-deduped into its roster row (``source == "claude"``) but is
         still fno work and must hold a slot, exactly as the Rust gate counts it.
-        The claude roster's non-work sessions (claude-mem observers, resident
+        The claude roster's non-work sessions (memory-plugin observers, resident
         idle) never enter this count; their RAM cost stays honored by the
         separate ``min_free_gb`` floor."""
         return self.fno_slot_workers + self.slot_claims
@@ -358,7 +358,7 @@ def census() -> LiveCensus:
         # pid (liveness lives in the claude daemon roster). Resolve it via the
         # roster so real fno bg workers hold slots — a pid-only filter would drop
         # them and let the cap admit unbounded bg workers (Codex P1, PR #235).
-        # Still no non-fno session counted: a claude-mem observer has no
+        # Still no non-fno session counted: a memory-plugin observer has no
         # registry row and never reaches here. v9 unified the jobId into short_id;
         # a bg row is discriminated from a daemon PTY worker by pid==None +
         # provider claude + roster membership (a worker's name-derived short is

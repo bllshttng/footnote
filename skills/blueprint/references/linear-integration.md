@@ -32,7 +32,7 @@ linear_url: https://linear.app/{workspace}/issue/{TEAM}-XXX
 **Manual fallback** (if automatic fails or for custom tickets):
 
 ```bash
-linearis issues create "[Feature Name]" \
+linear issues create "[Feature Name]" \
   --team {TEAM} \
   --description "## Overview
 [Feature description]

@@ -24,8 +24,8 @@ The next bare `/fno:target` may capture an approved native plan, while Blueprint
 
 ## Why this is Footnote-specific
 
-The workflow does not copy Superpowers.
-It independently keeps the useful separation between exploring a design and compiling an implementation plan.
+The workflow is footnote-native and copies no external workflow pack.
+It keeps the useful separation between exploring a design and compiling an implementation plan.
 Both layers ground in Footnote's graph, schema artifact, worktree ownership, discovery receipt, and durable node lifecycle.
 
 Visual aids are optional and evidence-driven.

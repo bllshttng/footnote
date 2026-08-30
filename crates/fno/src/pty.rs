@@ -4,7 +4,7 @@
 //! no output ring here - the VT grid (`vt.rs`) is the retention - so the
 //! reader thread forwards raw chunks straight into a bounded tokio channel
 //! the server core loop consumes. PTY master reads are blocking, so they live
-//! on a dedicated thread and tokio stays at the edges (the herdr model). When
+//! on a dedicated thread and tokio stays at the edges. When
 //! the channel is full the reader blocks, which backpressures the child via
 //! the kernel PTY buffer - bounded memory, never an unbounded server-side
 //! queue (AC2-EDGE).

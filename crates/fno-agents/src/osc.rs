@@ -11,8 +11,8 @@
 //! PTY reads.
 //!
 //! Hand-rolled rather than a second `vte` parser: the OSC grammar is a tiny
-//! state machine, herdr captures OSC the same way (`pane/osc.rs`), and an
-//! explicit cross-read buffer is exactly what the reassembly test pins. The
+//! state machine, and an explicit cross-read buffer is exactly what the
+//! reassembly test pins. The
 //! state and buffer are struct fields, so a sequence split across `feed` calls
 //! reassembles with no per-call setup.
 //!

@@ -58,7 +58,7 @@ def test_unique_candidate_is_captured() -> None:
 
 def test_plugin_banner_and_header_are_not_mistaken_for_ids() -> None:
     """opencode plugins print to stdout ahead of real output (verified live)."""
-    noisy = f"[claude-mem] OpenCode plugin loading\nid\n{SES_A}\n"
+    noisy = f"[memory-plugin] OpenCode plugin loading\nid\n{SES_A}\n"
     assert _backfill_opencode_session_id(
         Path("/w/proj"), 1, runner=_runner(noisy), sleep=_no_sleep,
     ) == SES_A

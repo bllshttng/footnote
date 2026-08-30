@@ -11,7 +11,8 @@ materialized back into the slot on switch. Two guards make a switch safe:
      (rotated) slot blob into its store BEFORE overwriting the slot, so its
      fresh OAuth refresh token is never lost.
   2. live-pin gate: never rotate credentials out from under a live CLI process
-     using that slot (orca's live-pty-gate lesson). A pinned slot defers.
+     using that slot (the live-pty lesson: a slot a running CLI holds must
+     not rotate). A pinned slot defers.
 
 The slot read/write and the verification are behind small module-level
 functions (``_read_slot_blob`` / ``_write_slot_blob`` / ``verify_slot``) so

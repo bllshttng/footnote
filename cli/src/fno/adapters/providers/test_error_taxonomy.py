@@ -381,7 +381,7 @@ class TestErrorRuleConstructor:
 
 
 class TestErrorRulesConstant:
-    """ERROR_RULES is the priority-ordered list ported from 9router."""
+    """ERROR_RULES is the priority-ordered rule list."""
 
     def test_text_rules_appear_before_status_rules(self) -> None:
         # The classify_error walk relies on this ordering: any text rule
@@ -399,7 +399,7 @@ class TestErrorRulesConstant:
 
     def test_canonical_text_rules_present(self) -> None:
         text_rules = {r.text: r for r in ERROR_RULES if r.text is not None}
-        # Sample of 9router-derived rules; full coverage in port verbatim.
+        # Sample of the derived rules; the full set is covered verbatim.
         assert "rate limit" in text_rules
         assert text_rules["rate limit"].backoff is True
         assert "quota exceeded" in text_rules

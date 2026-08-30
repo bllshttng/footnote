@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # SessionStart hook: inject the using-fno SKILL.md as additionalContext.
 #
-# This is the footnote equivalent of the superpowers session-start hook
-# (https://github.com/obra/superpowers/blob/main/hooks/session-start).
 # It ensures every Claude session opened in a footnote-enabled project
 # starts with the two-surface preamble already loaded, so the agent knows
 # both /fno:* slash commands and the `fno <verb>` CLI exist from
@@ -28,7 +26,7 @@ set -uo pipefail
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-}"
 if [[ -z "${PLUGIN_ROOT}" ]]; then
     # Fall back to discovering the plugin root relative to this script
-    # (one level up from hooks/). Mirrors superpowers's fallback.
+    # (one level up from hooks/).
     PLUGIN_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 
@@ -49,7 +47,6 @@ SKILL_BODY="$(cat "${SKILL_PATH}" 2>/dev/null)" || {
 
 # JSON-escape via bash parameter substitution. Each ${s//old/new} is a
 # single C-level pass - orders of magnitude faster than a character loop.
-# Pattern lifted from superpowers/hooks/session-start.
 escape_for_json() {
     local s="$1"
     s="${s//\\/\\\\}"
@@ -63,8 +60,8 @@ escape_for_json() {
 SKILL_ESCAPED="$(escape_for_json "${SKILL_BODY}")"
 
 # Wrap the skill body in framing that makes it look load-bearing at the
-# top of the conversation. The EXTREMELY_IMPORTANT marker matches the
-# superpowers convention and triggers the harness's high-attention path.
+# top of the conversation. The EXTREMELY_IMPORTANT marker triggers the
+# harness's high-attention path.
 CONTEXT="<EXTREMELY_IMPORTANT>\nYou are in a footnote-enabled project.\n\n**Below is the full content of the 'using-fno' skill - your introduction to the two surfaces (slash-command workflows and the fno CLI). Re-read it when in doubt about which surface to use:**\n\n${SKILL_ESCAPED}\n</EXTREMELY_IMPORTANT>"
 
 # Output context injection in the right JSON shape for the host platform.

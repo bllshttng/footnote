@@ -146,7 +146,7 @@ macOS (Apple Silicon or Intel), Linux (x86_64 / arm64), or Windows via [WSL2](do
 
 Pre-launch (open-source readiness). Screencast coming. Built in the open and dogfooded daily: footnote ships footnote.
 
-Inspired by Geoffrey Huntley's [Ralph Wiggum pattern](https://ghuntley.com/ralph/).
+Inspired by the community autonomous-loop pattern (keep looping a fixed prompt until the work is done).
 
 ## License
 

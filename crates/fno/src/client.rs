@@ -13332,7 +13332,7 @@ async fn keys_modal_execute_selected(
 
 /// One mouse report while the which-key modal is open (x-8ccf US3): hover moves
 /// the selection, the wheel scrolls, a left click on a row runs it, a click off
-/// the popup dismisses (herdr click-elsewhere).
+/// the popup dismisses (click-elsewhere).
 async fn keys_modal_mouse(
     view: &mut View,
     scanner: &mut Scanner,

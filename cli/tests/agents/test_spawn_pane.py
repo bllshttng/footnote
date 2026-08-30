@@ -1472,9 +1472,9 @@ def test_ac1_host_pane_gate_admits_hosted_rejects_unhosted(
     assert oc_row.mux == {"session": "main", "pane_id": 7}
     assert oc_row.status == "live"
 
-    # aider is not pane-hostable -> refused before any mux subprocess.
-    with pytest.raises(DispatchAskError, match="unknown provider 'aider'"):
-        _spawn(monkeypatch, tmp_path, provider="aider", name="ai")
+    # goose is not pane-hostable -> refused before any mux subprocess.
+    with pytest.raises(DispatchAskError, match="unknown provider 'goose'"):
+        _spawn(monkeypatch, tmp_path, provider="goose", name="ai")
 
 
 def test_unparseable_pane_id_is_a_loud_error(tmp_path: Path, monkeypatch) -> None:

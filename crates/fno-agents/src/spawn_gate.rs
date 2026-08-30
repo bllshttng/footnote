@@ -162,7 +162,7 @@ fn available_bytes() -> Option<u64> {
 /// registry rows + live `worker:<name>` headless slot claims.
 ///
 /// This is deliberately NOT the full claude daemon roster (x-bdf9). The roster
-/// carries every live claude session — dozens of claude-mem observers and
+/// carries every live claude session — dozens of memory-plugin observers and
 /// resident-idle sessions among them — none of which is fno work; counting them
 /// let the slot cap read "20/15" with zero real build workers running and wedge
 /// `/target bg`. Registry membership IS the "fno spawned this for work"
@@ -178,7 +178,7 @@ fn available_bytes() -> Option<u64> {
 /// resolved by looking its `short_id` up in the roster. This counts real fno bg
 /// workers (which a pid-only filter would drop, letting the cap admit unbounded
 /// bg workers — Codex P1 on PR #235) WITHOUT counting non-fno sessions: a
-/// claude-mem observer has no registry row, so it is never reached.
+/// memory-plugin observer has no registry row, so it is never reached.
 ///
 /// Read-only; a registry read failure degrades to a 0 contribution with one
 /// warning line pushed to `warnings` (LD5, fail open).

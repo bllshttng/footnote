@@ -225,7 +225,7 @@ def test_codex_inspector_classifies_owned_and_foreign_commands(tmp_path):
     legacy = tmp_path / "hooks.json"
     wrapper_only = "env FNO_PLATFORM=codex custom-session-command"
     other_plugin = "/opt/other-plugin/hooks/session-start.sh"
-    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    foreign = "bash '/Users/bb16/.codex/sample-agent-state.sh' session"
     _write_codex_toml(config, CMD)
     _write_codex_json(legacy, wrapper_only, other_plugin, foreign)
 
@@ -413,7 +413,7 @@ def test_codex_migration_preserves_foreign_json_and_requests_manual_consolidatio
 ):
     config = tmp_path / "config.toml"
     legacy = tmp_path / "hooks.json"
-    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    foreign = "bash '/Users/bb16/.codex/sample-agent-state.sh' session"
     _write_codex_toml(config, CMD)
     _write_codex_json(legacy, CMD, foreign)
 
@@ -750,7 +750,7 @@ def test_cli_cli_hooks_codex_defaults_hooks_json_next_to_codex_config(
 
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
-    foreign = "bash '/Users/bb16/.codex/herdr-agent-state.sh' session"
+    foreign = "bash '/Users/bb16/.codex/sample-agent-state.sh' session"
     _write_codex_json(codex_home / "hooks.json", foreign)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     res = CliRunner().invoke(app, ["cli-hooks-codex"])

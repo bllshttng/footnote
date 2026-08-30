@@ -7844,9 +7844,8 @@ fn emit_inside_leg_completion(emitter: &EventEmitter, e: &RegistryEntry) {
     }
 }
 
-/// The lowercase wire label for an inside-leg state (matches herdr's
-/// `report_agent` vocabulary). Allocation-free; the single source for the three
-/// daemon-emitted inside-leg events.
+/// The lowercase wire label for an inside-leg state. Allocation-free; the
+/// single source for the three daemon-emitted inside-leg events.
 fn inside_leg_state_str(state: state::InsideLegState) -> &'static str {
     match state {
         state::InsideLegState::Working => "working",
@@ -15667,10 +15666,10 @@ done
         // carried). opencode graduated to a real match arm (x-51f6) - using
         // it here would coincidentally still pass (both paths report
         // provider_name() == "opencode") while silently testing the wrong
-        // thing, so aider (still genuinely unhosted) is the example now.
+        // thing, so goose (still genuinely unhosted) is the example now.
         assert_eq!(
-            provider_readiness_detector("aider").provider_name(),
-            "aider"
+            provider_readiness_detector("goose").provider_name(),
+            "goose"
         );
     }
 

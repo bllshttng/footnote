@@ -180,7 +180,7 @@ sequenceDiagram
 
 ## Discovery Relay
 
-Borrowed from Citadel's discovery relay pattern. After each task completes:
+Borrowed from an established discovery-relay pattern. After each task completes:
 
 1. `discovery-brief.py` reads HANDOFF.md + git history
 2. Compresses to ~500-token brief (goal, key files, decisions, verify commands)
@@ -205,12 +205,12 @@ Run before every `--next` or `--continue`:
 
 | Pattern | Source | Usage |
 |---------|--------|-------|
-| Campaign persistence | Citadel (Archon) | Session bridging via state files |
-| Discovery relay | Citadel | Compressed knowledge between waves |
-| Pre-flight + verify+guard | Autoresearch | Validate before spending tokens |
-| Atomic operations | Autoresearch | flock + mkstemp → os.replace |
-| Git-as-memory | Autoresearch | `git log` + `git diff` for context |
-| Amnesiac sessions | Citadel | Rebuild context from files, not memory |
+| Campaign persistence | Prior art | Session bridging via state files |
+| Discovery relay | Prior art | Compressed knowledge between waves |
+| Pre-flight + verify+guard | Bounded-iteration practice | Validate before spending tokens |
+| Atomic operations | Bounded-iteration practice | flock + mkstemp → os.replace |
+| Git-as-memory | Bounded-iteration practice | `git log` + `git diff` for context |
+| Amnesiac sessions | Prior art | Rebuild context from files, not memory |
 
 ---
 

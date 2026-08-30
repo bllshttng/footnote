@@ -9,8 +9,8 @@
 //! own `--continue`/`--conversation` resume is a daemon/interactive concern, not
 //! this headless one-shot).
 //!
-//! Ported gotchas from the battle-tested MIT wrapper
-//! `antigravity-for-claude-code/scripts/agy-delegate.sh`:
+//! Battle-tested gotchas baked into the delegate wrapper this one-shot lane
+//! mirrors:
 //! - **stdin is `/dev/null`**: `agy -p` silently drops stdout when stdin is a
 //!   non-TTY waiting for input; detaching stdin avoids the empty-output hang.
 //! - **outer wall-clock guard**: without a console agy v1.0.x can hard-hang

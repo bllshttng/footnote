@@ -1753,7 +1753,7 @@ def _next_cursor(
 ) -> ComboCursor:
     """Pure: compute the next cursor state given the previous one.
 
-    Math (matches AC2.1-HP and 9router's getRotatedModels at combo.js:36-65):
+    Math (matches AC2.1-HP):
       - Fresh (no prev, hash mismatch, or stale): return (idx=0, count=1).
       - prev.count < sticky_limit: stay on idx, count += 1.
       - prev.count >= sticky_limit: advance idx by 1 modulo N, count = 1.

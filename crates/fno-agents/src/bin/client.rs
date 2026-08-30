@@ -4812,12 +4812,12 @@ mod tests {
     fn spawn_unknown_provider_does_not_force_interactive() {
         // AC1-EDGE (Boundaries): an unknown provider keeps today's behavior; the
         // daemon's provider_for_pty errors on it as before, so we must NOT force
-        // host_mode (which would change the error surface). aider is the
+        // host_mode (which would change the error surface). goose is the
         // canonical unhosted CLI (opencode joined the roster at x-51f6).
         let args = vec![
             "wk".to_string(),
             "--harness".to_string(),
-            "aider".to_string(),
+            "goose".to_string(),
         ];
         let (_m, params) = build_request("spawn", &args).unwrap();
         assert!(

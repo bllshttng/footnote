@@ -1,6 +1,6 @@
 # Iteration Loop
 
-Adapted from [autoresearch](https://github.com/arakoodev/autoresearch) and Karpathy's autonomous iteration principles.
+Adapted from established autonomous-iteration practice and Karpathy's autonomous iteration principles.
 
 ## Purpose
 

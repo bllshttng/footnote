@@ -115,7 +115,7 @@ If the JSON entries are footnote-owned, migrate only those entries with:
 fno config setup cli-hooks-codex --migrate-legacy-hooks-json
 ```
 
-The migration preserves foreign JSON hooks. For example, a `herdr-agent-state.sh` hook is
+The migration preserves foreign JSON hooks. For example, a `sample-agent-state.sh` hook is
 not owned by footnote and remains in `hooks.json`; consolidate it into `config.toml`
 manually if desired. Do not delete the legacy file until every foreign hook has been
 accounted for.

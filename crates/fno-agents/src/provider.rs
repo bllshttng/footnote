@@ -2416,7 +2416,7 @@ mod tests {
         fn run(_sql: &str, _t: Duration) -> Result<(bool, String), String> {
             Ok((
                 true,
-                format!("[claude-mem] OpenCode plugin loading\nid\n{OC_SES}\n"),
+                format!("[memory-plugin] OpenCode plugin loading\nid\n{OC_SES}\n"),
             ))
         }
         assert_eq!(

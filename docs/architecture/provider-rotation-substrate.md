@@ -9,7 +9,7 @@ status: accepted
 
 The provider rotation substrate (Spec 1 of 4) gives footnote a typed model for "which CLI + which credentials" a subprocess dispatch should use, and a pure helper that returns the env dict for that combination. It ships data + dispatch primitives only. Specs 2 through 4 layer reactive failover, per-agent routing, and proactive round-robin on top of this substrate.
 
-The motivating use case is daily-driver reliability across Jason's accounts: 2x Claude Max OAuth, 2x Gemini Pro OAuth, plus Anthropic API credits via OpenClaw, Hermes, and Codex. Manual switching between accounts replaces the cc-switch step run between sessions today.
+The motivating use case is daily-driver reliability across Jason's accounts: 2x Claude Max OAuth, 2x Gemini Pro OAuth, plus Anthropic API credits via OpenClaw, Hermes, and Codex. Manual switching between accounts replaces the external account-swap step previously run between sessions today.
 
 ## Architecture
 
@@ -48,7 +48,7 @@ These are non-negotiable for Specs 2 through 4. They are recorded here so future
 |---|----------|-----|
 | 1 | Substrate-first sequencing; consumers ship as separate specs | Lets the substrate stabilize and be dogfooded manually before automation depends on it |
 | 2 | Hybrid auth strategy: each record declares `auth: oauth_dir` or `auth: api_key` | OAuth-on-disk and env-var-keys have different staging needs; one-size validation cannot cover both |
-| 3 | footnote owns provider config; no runtime dependency on cc-switch | cc-switch operates between sessions; footnote is the session, so provider state must live inside the substrate |
+| 3 | footnote owns provider config; no runtime dependency on an external account-swap tool | that class of tool operates between sessions; footnote is the session, so provider state must live inside the substrate |
 | 4 | Dispatch-level switching only; orchestrator-level failover delegated to existing `run-target-loop.sh` | Keeps the substrate purely about "what env do I pass to this subprocess"; failover policy is a Spec 2 concern |
 | 5 | Layered routing precedence (agent > phase > default) - schema slot reserved here, consumers in Specs 3-4 | The YAML key shape is fixed now so Spec 3 does not have to migrate user configs |
 | 6 | Conservative failure detection (Specs 2-4 territory; substrate just declares the data shape) | Substrate cannot know what counts as failure; only the consumer that dispatched the work does |

@@ -228,8 +228,8 @@ impl Registry {
 /// Inside-leg agent state (inside-out multiplexer E3, "contract v2"). The inside
 /// leg is a hook that reports a claude pane's lifecycle state WITHOUT spawning or
 /// sending keystrokes; the daemon stores its latest report on the registry row.
-/// Serializes lowercase (`working` / `blocked` / `done`) to match herdr's
-/// `report_agent` wire shape. PTY liveness (`ConnState::Exited`) always overrides
+/// Serializes lowercase (`working` / `blocked` / `done`) as the inside-leg
+/// wire shape. PTY liveness (`ConnState::Exited`) always overrides
 /// this badge -- a dead pane is never resurrected by a stale inside-leg state
 /// (umbrella Locked Decision D4).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
