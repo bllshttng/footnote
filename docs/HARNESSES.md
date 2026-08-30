@@ -16,7 +16,7 @@ footnote runs as a host runtime on several AI coding CLIs. This is the public su
 | Antigravity CLI (`agy`) | Native `Stop`-hook adapter (world-gated, `decision:"continue"` re-drive). Claude-shaped hook events, Gemini-family wire format. | Sequential |
 | pi (`@earendil-works/pi-coding-agent`) | Pane-hosted TUI today, with the `pi --mode rpc` driving transport built and tested but not yet wired to a spawn arm. | Sequential |
 
-Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration.
+Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 
 ## What this means in practice
 
