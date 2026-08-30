@@ -5238,7 +5238,14 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     return SettingsModel.model_validate(raw)
 
 
-def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
+def describe_settings_for_repo(root: Path) -> list[Path]:
+    """Return the ordered settings candidates consulted for ``root``."""
+    return _candidate_paths(Path(root))
+
+
+def resolve_source(
+    key: str, root: Optional[Path] = None
+) -> Optional[tuple[Path, list[Path]]]:
     """Which config file decided ``key``: ``(decider, overridden)`` or None.
 
     Consumes the SAME aliased layers :func:`load_settings` merges (via
@@ -5259,8 +5266,8 @@ def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
 
     None = no file sets the key (the value is a built-in default).
     """
-    layers = list(_aliased_layers(tuple(_candidate_paths())))
-    candidates = _candidate_paths()
+    candidates = _candidate_paths(root)
+    layers = list(_aliased_layers(tuple(candidates)))
     if candidates:
         local_path = candidates[0].parent / "config.local.toml"
         if local_path.is_file() and not local_path.is_symlink():
