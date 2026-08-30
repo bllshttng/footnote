@@ -122,6 +122,47 @@ def test_live_mode_runs_the_lifecycle_runner(monkeypatch) -> None:
     assert [item["line"] for item in report["lines"]] == [item.line for item in expected]
 
 
+def test_recall_marker_is_not_reported_as_local_store() -> None:
+    verdict = harness_probe._identity_from_marker(
+        session_id="remote-id",
+        observed="cross-process recall nonce",
+        expected_nonce="nonce",
+        attempts=2,
+    )
+
+    assert verdict.status == "pass"
+    assert verdict.marker == "cross-process recall nonce"
+
+
+def test_mail_requires_a_distinct_worker_reply() -> None:
+    assert harness_probe._mail_response_marker(
+        "PROBE_MAIL=nonce", "PROBE_MAIL=nonce", "nonce"
+    ) == ""
+    assert harness_probe._mail_response_marker(
+        "PROBE_MAIL=nonce", "PROBE_MAIL=nonce\nPROBE_REPLY=nonce", "nonce"
+    ) == "PROBE_REPLY=nonce"
+
+
+def test_survive_requires_successful_resume_and_new_marker() -> None:
+    assert harness_probe._survive_marker(
+        1, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+    ) == ""
+    assert harness_probe._survive_marker(
+        0, "PROBE_SEED=nonce", "PROBE_SEED=nonce", "nonce"
+    ) == ""
+    assert harness_probe._survive_marker(
+        0,
+        "PROBE_SEED=nonce",
+        "PROBE_SEED=nonce\nPROBE_SURVIVE=nonce",
+        "nonce",
+    ) == "PROBE_SURVIVE=nonce"
+
+
+def test_failed_pane_read_is_not_a_screen() -> None:
+    assert harness_probe._screen_marker(1, "pane not found") == ""
+    assert harness_probe._screen_marker(0, "idle prompt") == "idle prompt"
+
+
 def test_doctor_command_exposes_dry_run_without_spawning(monkeypatch) -> None:
     from fno.cli import app
 
@@ -237,16 +278,19 @@ def test_row_match_ignores_harness_name_in_negative_claim_counts(monkeypatch, tm
     ):
         path = tmp_path / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            "KNOWN_HARNESSES = ('claude',)\n"
-            "READABLE_PROVIDERS = ('claude',)\n"
-            "PANE_HOSTABLE_PROVIDERS = ('claude',)\n"
-            "_SESSION_BINDING_HARNESSES = ('claude',)\n"
-            "KNOWN_PROVIDERS = ['claude']\n"
-            "_AMBIENT_NAMES = ('CLAUDE_HOME',)\n"
-            "[harness.claude]\n",
-            encoding="utf-8",
-        )
+        if relative.endswith("harness_capabilities.toml"):
+            content = "[harness.claude]\n"
+        elif relative.endswith("provider.rs"):
+            content = 'pub const KNOWN_PROVIDERS: &[&str] = &["claude"];\n'
+        else:
+            content = (
+                "KNOWN_HARNESSES = ('claude',)\n"
+                "READABLE_PROVIDERS = ('claude',)\n"
+                "PANE_HOSTABLE_PROVIDERS = ('claude',)\n"
+                "_SESSION_BINDING_HARNESSES = ('claude',)\n"
+                "_AMBIENT_NAMES = ('CLAUDE_HOME',)\n"
+            )
+        path.write_text(content, encoding="utf-8")
 
     verdict = harness_probe.line_row_matches("claude", repo_root=tmp_path)
 

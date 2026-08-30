@@ -107,6 +107,43 @@ def line_identity(
     )
 
 
+def _identity_from_marker(
+    *,
+    session_id: str,
+    observed: str,
+    expected_nonce: str,
+    attempts: int,
+) -> LineVerdict:
+    return line_identity(
+        session_id=session_id,
+        store_match=observed == "local store artifact",
+        recalled_nonce=expected_nonce
+        if observed == "cross-process recall nonce"
+        else "",
+        expected_nonce=expected_nonce,
+        attempts=attempts,
+    )
+
+
+def _mail_response_marker(before: str, after: str, nonce: str) -> str:
+    marker = f"PROBE_REPLY={nonce}"
+    return marker if marker in after and marker not in before else ""
+
+
+def _survive_marker(
+    resume_code: int, before: str, after: str, nonce: str
+) -> str:
+    prior = f"PROBE_SEED={nonce}"
+    reply = f"PROBE_SURVIVE={nonce}"
+    if resume_code == 0 and prior in before and prior in after and reply in after and reply not in before:
+        return reply
+    return ""
+
+
+def _screen_marker(code: int, output: str) -> str:
+    return output if code == 0 and output.strip() else ""
+
+
 def line_claim(*, holder: str | None, attempts: int = 1) -> LineVerdict:
     if holder:
         return LineVerdict("CLAIM", "pass", "live claim holder", attempts, holder)
@@ -290,6 +327,32 @@ def _sweep_has_finding(output: str, harness: str) -> bool:
     return bool(re.search(rf"(?m)^\s*{re.escape(harness)}\.", section))
 
 
+def _required_registrations(harness: str, root: Path) -> set[str]:
+    required = {
+        "CAPABILITY_TABLE",
+        "KNOWN_HARNESSES",
+        "READABLE_PROVIDERS",
+        "PANE_HOSTABLE_PROVIDERS",
+        "KNOWN_PROVIDERS",
+    }
+    try:
+        import tomllib
+
+        table = tomllib.loads(
+            (root / "crates/fno-agents/src/harness_capabilities.toml").read_text(
+                encoding="utf-8"
+            )
+        )
+        capabilities = table.get("harness", {}).get(harness, {})
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, AttributeError):
+        capabilities = {}
+    if isinstance(capabilities, dict):
+        binding = capabilities.get("session_binding")
+        if isinstance(binding, dict) and binding.get("required") is True:
+            required.add("_SESSION_BINDING_HARNESSES")
+    return required
+
+
 def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerdict:
     root = _repo_root(repo_root)
     sweep = run_instrument(
@@ -306,7 +369,7 @@ def line_row_matches(harness: str, *, repo_root: Path | None = None) -> LineVerd
         f"freshness={'fresh' if fresh_copies else 'stale'}; "
         f"registration present={','.join(present) or 'none'} absent={','.join(absent) or 'none'}"
     )
-    required = {"CAPABILITY_TABLE", "KNOWN_HARNESSES"}
+    required = _required_registrations(harness, root)
     if clean_sweep and fresh_copies and required.issubset(present):
         return LineVerdict("ROW MATCHES", "pass", "honesty sweep and three-copy freshness", detail=detail)
     return LineVerdict("ROW MATCHES", "fail", "honesty sweep and three-copy freshness", detail=detail)
@@ -607,10 +670,9 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                 matches=bool,
                 delay_s=0.5,
             )
-            identity_line = line_identity(
+            identity_line = _identity_from_marker(
                 session_id=session_id,
-                store_match=identity.marker == "local store artifact",
-                recalled_nonce=nonce if identity.marker == "cross-process recall nonce" else "",
+                observed=identity.detail,
                 expected_nonce=nonce,
                 attempts=identity.attempts,
             )
@@ -628,6 +690,7 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
             )
 
             mail_nonce = uuid.uuid4().hex
+            logs_before_mail = _worker_logs(name, cwd=root)
             _run_command(
                 [
                     "fno",
@@ -643,8 +706,8 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
             mail = retry_marker(
                 line="MAIL BOTH WAYS",
                 marker_name="worker response to sent message",
-                read_marker=lambda: (
-                    mail_nonce if mail_nonce in _worker_logs(name, cwd=root) else ""
+                read_marker=lambda: _mail_response_marker(
+                    logs_before_mail, _worker_logs(name, cwd=root), mail_nonce
                 ),
                 matches=bool,
                 delay_s=0.5,
@@ -660,11 +723,13 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                 view = retry_marker(
                     line="VIEW",
                     marker_name="harness-owned screen",
-                    read_marker=lambda: _run_command(
-                        ["fno", "mux", "pane", "read", pane_ref],
-                        cwd=root,
-                        timeout=PROBE_TIMEOUT_S,
-                    )[1],
+                    read_marker=lambda: _screen_marker(
+                        *_run_command(
+                            ["fno", "mux", "pane", "read", pane_ref],
+                            cwd=root,
+                            timeout=PROBE_TIMEOUT_S,
+                        )
+                    ),
                     matches=bool,
                     delay_s=0.5,
                 )
@@ -676,12 +741,10 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                 view_line = line_view(
                     screen_marker=None,
                     refusal="harness supplied no native pane reference",
-                )
+            )
 
-            prior_marker = f"PROBE_SEED={nonce}"
-            prior_seen = prior_marker in logs_before
             if isinstance(mux, dict) and mux.get("session") and mux.get("pane_id"):
-                _run_command(
+                resume_code, _ = _run_command(
                     [
                         "fno",
                         "mux",
@@ -706,14 +769,15 @@ def _run_live_probe(harness: str, root: Path) -> list[LineVerdict]:
                     cwd=root,
                     timeout=PROBE_TIMEOUT_S,
                 )
-            survive = retry_marker(
-                line="SURVIVE",
-                marker_name="prior turn after process stop",
-                read_marker=lambda: (
-                    prior_marker
-                    if prior_seen and prior_marker in _worker_logs(name, cwd=root)
-                    else ""
-                ),
+                survive = retry_marker(
+                    line="SURVIVE",
+                    marker_name="prior turn after process stop",
+                    read_marker=lambda: _survive_marker(
+                        resume_code,
+                        logs_before,
+                        _worker_logs(name, cwd=root),
+                        nonce,
+                    ),
                 matches=bool,
                 delay_s=0.5,
             )
