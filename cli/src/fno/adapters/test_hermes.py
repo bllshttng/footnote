@@ -127,6 +127,28 @@ def test_spawn_worker_empty_string_session_var_still_in_session(monkeypatch):
     mock_popen.assert_not_called()
 
 
+def test_spawn_worker_guard_survives_an_fno_harness_stamp(monkeypatch):
+    """AC4-SPAWN: an fno-owned canonical identity stamp must not convert the
+    HERMES_SESSION_ID guard into a permitted spawn. The spawn seam injects
+    FNO_HARNESS_NAME (and stamps hermes onto the roster as a supported
+    identity), but the guard reads the session variable directly: a hermes
+    session still refuses an in-session shell spawn, whatever else the
+    environment says about who launched it. HERMES_SESSION_ID stays out of
+    the resolver marker tuples precisely so this refusal stays armed."""
+    monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
+    monkeypatch.delenv("CODEX_SESSION_ID", raising=False)
+    monkeypatch.setenv("HERMES_SESSION_ID", "hms-002")
+    monkeypatch.setenv("FNO_HARNESS_NAME", "hermes")
+    monkeypatch.setenv("FNO_HARNESS_SESSION_ID", "hms-002")
+
+    with mock.patch("fno.adapters.hermes.subprocess.Popen") as mock_popen:
+        result = HermesCliAdapter().spawn_worker(prompt="anything")
+
+    assert result["action"] == "skill_dispatch_required"
+    assert "forbidden" in result["reason"]
+    mock_popen.assert_not_called()
+
+
 def test_spawn_worker_binary_missing(monkeypatch):
     """AC1.3-ERR: FileNotFoundError on Popen surfaces as spawn_failed."""
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)

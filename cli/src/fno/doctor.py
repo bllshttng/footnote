@@ -2870,12 +2870,14 @@ def _a2a_handle_re() -> "re.Pattern[str]":
 
     The retired form is still MATCHED here on purpose - mail queued to one before
     the flip is undeliverable, so the dead-letter report is the only thing that
-    surfaces it. Prefixes come from the harness map so adding a harness cannot
-    silently drop it out of the scan.
+    surfaces it. Prefixes come from the complete supported-harness roster
+    (KNOWN_HARNESSES), not the narrower capability-backed set, so adding a
+    harness to the roster cannot silently drop it out of the scan - the same
+    anti-drift property _legacy_handle_re in harness_identity carries.
     """
-    from fno.agents.harness_map import known_harnesses
+    from fno.harness_names import KNOWN_HARNESSES
 
-    return re.compile(rf"^(?:(?:{'|'.join(known_harnesses())})-)?[0-9a-fA-F]{{6,}}$")
+    return re.compile(rf"^(?:(?:{'|'.join(KNOWN_HARNESSES)})-)?[0-9a-fA-F]{{6,}}$")
 
 
 _A2A_HANDLE_RE = _a2a_handle_re()

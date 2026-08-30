@@ -5,6 +5,11 @@ consumer, so nothing here would have noticed when it stopped being true. These
 tests are what makes the new field load-bearing: the measured value per harness,
 the artifact behind an ``extension`` row, and the refusal that stops a looping
 dispatch from producing a worker with nothing to stop it.
+
+Every measurement here reads the capability-backed roster (``known_harnesses``),
+never the complete ``KNOWN_HARNESSES`` roster: hermes and openclaw are supported
+identities with no capability row, and loop participation is a property of the
+row, so there is nothing to measure for a row-less harness.
 """
 from __future__ import annotations
 
@@ -16,9 +21,9 @@ from fno.agents.harness_map import (
     DispatchResolveError,
     capabilities,
     check_loop_participation,
+    known_harnesses,
     resolve_dispatch,
 )
-from fno.harness_names import KNOWN_HARNESSES
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -45,7 +50,7 @@ def test_the_table_is_not_uniform():
     This is the whole defect shape: ``stop_hook`` held one value for six
     harnesses because nobody ever had to defend a second one.
     """
-    values = {capabilities(h)["loop_participation"] for h in KNOWN_HARNESSES}
+    values = {capabilities(h)["loop_participation"] for h in known_harnesses()}
     assert len(values) > 1, values
 
 
@@ -88,7 +93,7 @@ def test_no_capability_field_is_uniform_across_every_harness():
     fields = {key for row in flat.values() for key in row}
     # Non-vacuity: an empty field set would make the assertion below pass while
     # measuring nothing, which is the absence-reads-as-success trap.
-    assert len(flat) == len(KNOWN_HARNESSES)
+    assert len(flat) == len(known_harnesses())
     assert len(fields) > 30, len(fields)
     uniform = {
         field
@@ -109,7 +114,7 @@ def test_a_declared_loop_extension_exists_on_disk():
     """
     named = {
         h: capabilities(h)["loop_extension"]
-        for h in KNOWN_HARNESSES
+        for h in known_harnesses()
         if capabilities(h)["loop_extension"]
     }
     assert named, "no harness declares a loop extension; the check would be vacuous"

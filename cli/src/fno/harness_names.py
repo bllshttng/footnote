@@ -1,10 +1,15 @@
 """Canonical harness-name list (L0 platform data).
 
-The set of harness names footnote knows. Pure data with no ``fno`` imports, so
-any layer may read it without a cross-layer edge. The runtime capability table
-(``fno.agents.harness_map._HARNESS_CAPS``) asserts its keys stay in sync with
-this list at import time, so adding a harness is one coupled change: the name
-lands here AND the capability table provides it, or the table fails loudly.
+The COMPLETE roster of harnesses footnote supports, held equal to the union of
+three shipped evidence surfaces (setup docs, the Rust provider dispatch, the
+Python adapter registry) by ``scripts/ci/check-harness-roster-parity.py``.
+Pure data with no ``fno`` imports, so any layer may read it without a
+cross-layer edge. The runtime capability table
+(``fno.agents.harness_map._HARNESS_CAPS``) asserts its keys are a SUBSET of
+this list at import time: a capability row naming a harness absent here fails
+loudly, while a roster entry with no capability row (hermes, openclaw today)
+is a supported identity without a native fno spawn - legal, and deliberately
+not a capability.
 
 This inverts the old derivation (names read FROM the capability table) so the
 platform layer (``fno.harness_identity``) no longer reaches into the runtime
@@ -13,11 +18,23 @@ name set is the source of truth; the capability table validates against it.
 """
 from __future__ import annotations
 
-# The canonical, capability-backed harness set. Add a harness here AND in
-# fno.agents.harness_map._HARNESS_CAPS in the same change; the map asserts the
-# two agree at import time. Order is capability-table order, not alphabetical;
-# readers that need sorted output call sorted() (as known_harnesses() does).
-KNOWN_HARNESSES: tuple[str, ...] = ("claude", "codex", "gemini", "agy", "opencode", "pi")
+# Every harness supported by shipped evidence, not every harness with a
+# capability row. hermes and openclaw host real sessions per docs/SETUP-*.md
+# but have no native fno dispatch, so they carry no row in
+# fno.agents.harness_map._HARNESS_CAPS; the map asserts capability keys stay a
+# subset of this tuple at import time. Order is capability-table order, then
+# newly recognized hosts appended; readers that need sorted output call
+# sorted() (as known_harnesses() does).
+KNOWN_HARNESSES: tuple[str, ...] = (
+    "claude",
+    "codex",
+    "gemini",
+    "agy",
+    "opencode",
+    "pi",
+    "hermes",
+    "openclaw",
+)
 
 # Thread/headless accepts opencode through its launch seam. agy and gemini are
 # pane-only and stay out of this tuple.

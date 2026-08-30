@@ -212,6 +212,19 @@ jobs:
         timeout-minutes: 5
         run: bash tests/ci/test_check_harness_capabilities_fresh.sh
 
+      # The complete harness roster vs its shipped evidence: setup docs, the
+      # Rust provider dispatch arms, and the Python adapter registry. stdlib
+      # only - no package install, no Rust build, no network.
+      - name: Harness roster parity (complete roster vs its evidence)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: python3 scripts/ci/check-harness-roster-parity.py
+
+      - name: Run harness-roster parity selftest (positive controls)
+        if: ${{ !cancelled() }}
+        timeout-minutes: 5
+        run: python3 scripts/ci/check-harness-roster-parity.py --selftest
+
       - name: Events limits table fresh (generated from schema.yaml, not hand-edited)
         if: ${{ !cancelled() }}
         timeout-minutes: 5
