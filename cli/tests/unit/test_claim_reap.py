@@ -886,6 +886,111 @@ class TestAbandonmentProbe:
         assert summary["kept_live"] == 1
 
 
+class TestSharedPidExclusivity:
+    """The 2026-08-29 specimen: seven expired claims from distinct sessions,
+    one live daemon pid, every one prover-proven, so the corroborated hybrid
+    arm kept them all LIVE forever and the reaper reported 0 of 14. Provenance
+    was honest - the prover truthfully resolves every daemon-hosted session to
+    the daemon - so the missing predicate is EXCLUSIVITY: a pid that answers
+    for more than one distinct holder is not session evidence. The sweep
+    derives that property from the claim records it is already reading. No
+    harness name appears anywhere in it: a daemon-hosted session is a substrate
+    property, not any one harness's (the doctor_footprint lesson, PR 1295).
+    """
+
+    @staticmethod
+    def _expired_prover_on_disk(root, key, holder, pid=os.getpid()):
+        """An expired TTL claim on disk whose live pid is prover-proven.
+
+        ``acquired_at`` must postdate this process's create_time or is_live
+        reads the pid as reused and the claim dies for an unrelated reason.
+        acquire_claim cannot write this shape (its TTL is always future), so
+        the claim is serialized directly.
+        """
+        started = int(psutil.Process(os.getpid()).create_time() * 1000)
+        claim = Claim(
+            key=key, holder=holder, acquired_at=started + 1,
+            expires_at=now_ms() - 60_000, pid=pid,
+            host=socket.gethostname(), pid_provenance="session-prover",
+        )
+        path = claim_path(key, root=root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(serialize_claim(claim), encoding="utf-8")
+        return path
+
+    def test_two_expired_claims_sharing_one_live_pid_are_not_immortal(self, tmp_path):
+        """Distinct holders, one live pid: the pid alone cannot keep either
+        LIVE. Both fall to the suspect route where the secondary evidence
+        decides - here it proves abandonment, so both are reapable."""
+        self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
+        self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=False, abandonment_probe=lambda _c: True
+        )
+        assert summary["would_reap"] == 2
+        assert summary["kept_live"] == 0
+
+    def test_a_shared_pid_claim_whose_holder_is_working_is_kept(self, tmp_path):
+        """The same shape with a live worker positively found on the node:
+        kept as suspect-alive, and an apply run archives nothing."""
+        self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
+        self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: False
+        )
+        assert summary["reaped"] == 0
+        assert summary["kept_suspect_alive"] == 2
+        assert claim_path("node:x-one", root=tmp_path).exists()
+
+    def test_same_holder_claims_sharing_a_pid_stay_live(self, tmp_path):
+        """Exclusivity counts DISTINCT holders. One session's own claims on
+        its one prover pid are the corroborated hybrid arm's legitimate case
+        and must not be demoted by counting claim files."""
+        self._expired_prover_on_disk(tmp_path, "node:x-a", "target-session:s1")
+        self._expired_prover_on_disk(tmp_path, "node:x-b", "target-session:s1")
+        summary = reap_dead_claims(roots=[tmp_path], apply=False)
+        assert summary["kept_live"] == 2
+        assert summary["kept_suspect"] == 0
+
+    def test_without_a_probe_the_shared_shape_keeps(self, tmp_path):
+        """No secondary evidence supplied: unknown keeps, the pre-existing
+        doctrine, now visible as suspect instead of a false live."""
+        self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
+        self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(roots=[tmp_path], apply=False)
+        assert summary["would_reap"] == 0
+        assert summary["kept_suspect"] == 2
+        assert summary["kept_live"] == 0
+
+    def test_the_mutex_reverify_recomputes_exclusivity(self, tmp_path, monkeypatch):
+        """A sibling released between the lock-free triage and the recovery
+        mutex must flip the verdict back to LIVE before anything is archived:
+        the under-mutex re-verify rebuilds the holder map instead of reusing
+        the scan's, exactly as it re-reads the claim file."""
+        from fno.claims import core as claims_core
+
+        self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
+        sibling = self._expired_prover_on_disk(
+            tmp_path, "node:x-two", "target-session:s2"
+        )
+        real_map = claims_core._pid_holder_map
+
+        def _release_sibling_then_map(dirs):
+            holder_map = real_map(dirs)
+            if sibling.exists():
+                sibling.unlink()
+            return holder_map
+
+        monkeypatch.setattr(
+            claims_core, "_pid_holder_map", _release_sibling_then_map
+        )
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+        )
+        assert summary["reaped"] == 0
+        assert summary["kept_live"] == 1
+
+
 class TestCliProbeWiring:
     """The CLI is what injects the roster join, so the wiring needs its own
     coverage: a probe that exists but is never passed is a decorative guard."""
