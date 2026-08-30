@@ -40,7 +40,14 @@ def grok_stdio_argv(
     model: Optional[str] = None,
     effort: Optional[str] = None,
 ) -> list[str]:
-    """Build Grok's ACP stdio argv with fno's caller-assigned session id."""
+    """Build Grok's ACP stdio argv.
+
+    ``--session-id`` is passed for the CLI's own bookkeeping and is NOT the ACP
+    session id. Measured 2026-08-30 against live grok 1.0.13: ``session/new``
+    MINTS its own id and ignores this value, and ``session/list`` never shows
+    it. Grok is callee-minted, like kimi, NOT caller-assigned like pi. Do not
+    build an identity guarantee on this argument.
+    """
     argv = [
         "grok",
         "--session-id",

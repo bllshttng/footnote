@@ -141,7 +141,21 @@ def test_AC9_HP_live_turn_answers_the_planted_token(tmp_path, monkeypatch):
     with driver.GrokStdioSession(session_id, tmp_path) as session:
         assert session.initialize()["protocolVersion"] == 1
         created = session.session_new()
-        assert created and session.session_id == created
+        assert created
+        # This assertion used to read `session.session_id == created`, which is
+        # a tautology: session_new() assigns self.session_id then returns that
+        # same value, so it could not fail for ANY grok behavior. It read as
+        # proof of a caller-assigned id guarantee that does not exist.
+        #
+        # MEASURED against live grok 1.0.13: session/new mints its own id and
+        # ignores the --session-id argv; session/list never shows the assigned
+        # value. Pin the contract fno actually has, so a grok that starts
+        # honoring the argv fails HERE and loudly, instead of silently changing
+        # fno's identity model underneath the roster.
+        assert created != session_id, (
+            "grok session/new echoed fno's assigned id; this driver is built on "
+            "a callee-minted contract and that contract has changed"
+        )
         try:
             session.prompt(
                 "Reply with exactly the planted token GROK_ACP_TOKEN_829. Do not call tools."
