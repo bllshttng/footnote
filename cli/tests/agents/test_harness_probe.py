@@ -61,6 +61,32 @@ def test_dry_run_reports_composed_pane_argv(monkeypatch) -> None:
     assert report["argv"] == expected
 
 
+def test_dry_run_prints_composed_pane_argv(monkeypatch) -> None:
+    monkeypatch.setattr(
+        harness_probe,
+        "_probe_argv",
+        lambda harness: ["claude", "--model", "probe-model"],
+    )
+
+    result = CliRunner().invoke(harness_probe.app, ["claude"])
+
+    assert result.exit_code == 0, result.output
+    assert "argv would run: claude --model probe-model" in result.output
+
+
+def test_dry_run_names_pre_registration_harness_without_crashing(monkeypatch) -> None:
+    def unsupported(harness: str) -> list[str]:
+        raise RuntimeError(f"{harness} has no pane argv")
+
+    monkeypatch.setattr(harness_probe, "_probe_argv", unsupported)
+
+    report = harness_probe.run_probe("hermes", live=False)
+
+    assert len(report["lines"]) == 8
+    assert "unsupported" in report["argv_detail"]
+    assert all("unsupported" in item["detail"] for item in report["lines"])
+
+
 def test_live_missing_harness_binary_returns_a_verdict(monkeypatch) -> None:
     def missing(*args, **kwargs):
         raise FileNotFoundError("missing harness")

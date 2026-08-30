@@ -202,6 +202,31 @@ def _probe_argv(harness: str) -> list[str]:
     return build_pane_argv(harness, "", Path.cwd(), False, None)
 
 
+def _dry_run_report(harness: str) -> dict[str, object]:
+    try:
+        argv = _probe_argv(harness)
+    except Exception as exc:  # noqa: BLE001 - dry run must name unsupported lanes
+        detail = f"unsupported: cannot compose pane argv ({type(exc).__name__}: {exc})"
+        lines = [
+            LineVerdict(item.line, "skip", item.marker, item.attempts, detail)
+            for item in _dry_run_lines(harness)
+        ]
+        return {
+            "harness": harness,
+            "live": False,
+            "argv": [],
+            "argv_detail": detail,
+            "lines": [asdict(line) for line in lines],
+        }
+    return {
+        "harness": harness,
+        "live": False,
+        "argv": argv,
+        "argv_detail": "",
+        "lines": [asdict(line) for line in _dry_run_lines(harness)],
+    }
+
+
 def _missing_binary_lines(harness: str, detail: str) -> list[LineVerdict]:
     markers = [
         ("IDENTITY", "local store artifact or cross-process recall nonce"),
@@ -223,13 +248,7 @@ def _missing_binary_lines(harness: str, detail: str) -> list[LineVerdict]:
 
 def run_probe(harness: str, *, live: bool, repo_root: Path | None = None) -> dict[str, object]:
     if not live:
-        lines = _dry_run_lines(harness)
-        return {
-            "harness": harness,
-            "live": False,
-            "argv": _probe_argv(harness),
-            "lines": [asdict(line) for line in lines],
-        }
+        return _dry_run_report(harness)
     # Live execution is opt-in. Credential-gated harnesses are skipped with an
     # operator action instead of being misreported as failed support.
     try:
@@ -306,6 +325,10 @@ def harness_probe_command(
             raise RuntimeError("harness probe returned a line without a status")
         typer.echo(f"{status.upper():4} {item['line']}: marker={item['marker']} ({item['detail']})")
     if not live:
-        typer.echo(f"argv would run: {harness}")
+        argv = report.get("argv")
+        rendered = " ".join(str(token) for token in argv) if isinstance(argv, list) else ""
+        argv_detail = report.get("argv_detail")
+        suffix = f" ({argv_detail})" if isinstance(argv_detail, str) and argv_detail else ""
+        typer.echo(f"argv would run: {rendered or 'unavailable'}{suffix}")
     if any(item["status"] == "fail" for item in lines):
         raise typer.Exit(1)
