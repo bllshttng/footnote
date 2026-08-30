@@ -81,11 +81,26 @@ def test_no_law_authority_gate_is_registered() -> None:
     """Ruling d-e1eec854 retired the staged-law approval gate.
 
     A registration left behind would shell a file that no longer exists on every
-    Bash call, so the absence is asserted rather than assumed.
+    Bash call, so the absence is asserted rather than assumed. The file itself
+    stays one release as a no-op tombstone (`fno doctor lint hook-tombstones`):
+    sessions started before the retirement still hold its registration, so the
+    path must exist and do nothing when run.
     """
+    import subprocess
+    import sys
+
     text = HOOKS_JSON.read_text(encoding="utf-8")
     assert "law-authority-gate" not in text
-    assert not (REPO_ROOT / "hooks" / "law-authority-gate.py").exists()
+    stub = REPO_ROOT / "hooks" / "law-authority-gate.py"
+    assert stub.exists(), "retired gate keeps a one-release no-op tombstone"
+    probe = subprocess.run(
+        [sys.executable, str(stub)],
+        input="{}",
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert probe.returncode == 0, "the tombstone must be a no-op, not a gate"
 
 
 def test_codex_plugin_manifest_points_to_session_start_hook() -> None:

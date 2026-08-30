@@ -221,6 +221,14 @@ Because agy's transcript would be skipped by loop-check's `role=="assistant"` fi
 
 The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; the synthesizer handles the documented-likely shapes and skips anything it can't parse (safe: no promise detected → keep working). A captured sample will tighten the filter.
 
+## Hook Script Retirement (one-release tombstones)
+
+The harness reads hook config once at session start. It answers from that snapshot for the session's life. A commit that deletes a hook script while unregistering it leaves the repo self-consistent. It also bricks every session started before the merge. The cached registration points at a missing file. The dead entry sits on the Bash PreToolUse matcher, and a hook that cannot launch fails the whole tool call. On 2026-08-29 one missing file removed every shell verb at once for three live sessions. It took the diagnostic verbs with it.
+
+Retiring a hook script is two steps across two releases. First, remove its config entry and keep the file on disk as a no-op stub that exits 0. Second, in a later release, delete the stub. By then every session holding the old registration has ended. `fno doctor lint hook-tombstones` enforces this. The `guards` CI job runs it. It fails any commit that deletes a script the base revision's hook config referenced, so a one-commit retirement cannot merge.
+
+A session already bricked recovers without a shell. Write to any watched settings file, for example a whitespace-only edit to `~/.claude/settings.json`. The write forces a hook-config reload, which drops the dead registration. The next identical Bash call succeeds. Editing files still works while Bash is bricked, which is what makes the hatch reachable. Do not recreate the retired script by hand in a shared checkout. An untracked resurrection of a retired hook is a landmine for the next `git add -A`. The tracked stub is the durable replacement.
+
 ## Graceful Degradation
 
 | Feature | Claude Code | Gemini/Codex |

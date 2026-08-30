@@ -487,7 +487,7 @@ def _plugin_registry_path() -> Path:
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 
-def _plugin_cache_report() -> dict[str, Optional[str]]:
+def _plugin_cache_report() -> dict[str, Any]:
     """Freshness of the deployed CLAUDE plugin cache the hooks run from.
 
     ``fno doctor`` already owns source-vs-installed staleness for the wheel and
@@ -503,8 +503,15 @@ def _plugin_cache_report() -> dict[str, Optional[str]]:
     not HEAD), ``unknown`` when the installed-plugins file is missing, the sha
     is unknown to this clone, or git is unavailable. Never asserts staleness on
     absent evidence (same rule as the exit-code contract at module top).
+
+    When stale, the report also carries ``deleted_hook_scripts`` iff the
+    pinned..HEAD range deleted a script the pinned revision's hook config
+    referenced - the case that bricks live sessions rather than merely
+    lagging, and the only stale worth interrupting an operator for.
     """
-    report: dict[str, Optional[str]] = {
+    # Any, not Optional[str]: the stale branch adds deleted_hook_scripts,
+    # a list, beside the string fields.
+    report: dict[str, Any] = {
         "status": "unknown",
         "sha": None,
         "installed_at": None,
@@ -562,6 +569,23 @@ def _plugin_cache_report() -> dict[str, Optional[str]]:
             report["detail"] = "pinned sha is not known as an ancestor of HEAD"
     except (OSError, subprocess.SubprocessError):
         report["detail"] = "git unavailable"
+        return report
+
+    # Stale fires after EVERY merge, so it cannot by itself separate benign
+    # lag from brick risk. The separator: did this range delete a hook script
+    # the pinned revision's config referenced? Only that case takes every
+    # pre-merge session's Bash away. Same never-assert-on-absent-evidence
+    # rule: a git failure adds no key rather than claiming the all-clear.
+    from fno.hook_config import stubless_deletions
+
+    head_sha = head.stdout.strip()
+    deleted = (
+        stubless_deletions(src, sha, head_sha)
+        if report["status"] == "stale"
+        else None
+    )
+    if deleted:
+        report["deleted_hook_scripts"] = deleted
     return report
 
 
@@ -1668,7 +1692,16 @@ def _blockers(result: dict[str, Any]) -> list[str]:
 
     plugin_cache = result.get("plugin_cache") or {}
     if plugin_cache.get("status") == "stale":
-        blockers.append("deployed plugin cache is stale; hooks run pre-HEAD bytes.")
+        deleted = plugin_cache.get("deleted_hook_scripts") or []
+        if deleted:
+            blockers.append(
+                "deployed plugin cache is stale and the range deleted hook "
+                f"script(s) live sessions still reference: {', '.join(deleted)}. "
+                "Every pre-merge session loses all Bash calls until restarted "
+                "or reloaded; drain live sessions before updating the cache."
+            )
+        else:
+            blockers.append("deployed plugin cache is stale; hooks run pre-HEAD bytes.")
 
     return blockers
 
