@@ -2599,6 +2599,44 @@ def test_coverage_waive_records_one_head_scoped_operator_law(
     assert _coverage_gate.law_authority(subject)[0] == "single"
 
 
+def test_coverage_waive_publishes_the_status_positively(monkeypatch, tmp_path, capsys):
+    """The command's immediate publish is a POSITIVE control, not an absence.
+
+    The call is best-effort by design, so a bare except would swallow a
+    renamed helper or a drifted signature and every other waive test would
+    stay green while the documented post-on-record behavior silently stopped
+    existing. A recorder pins the one call that must fire, and the failure
+    branch must keep the receipt and name the cause on stderr."""
+    _waive_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    calls = []
+
+    def record(pr_number, *, head=None, cwd=None):
+        calls.append((pr_number, head, cwd))
+        return True, "posted"
+
+    monkeypatch.setattr("fno.pr._reviews.publish_coverage_status", record)
+    rc = _coverage_gate.run_coverage_waive(42, "because", cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert calls == [(42, WAIVE_HEAD, str(tmp_path))], calls
+    assert "coverage waiver recorded" in cap.out
+    assert "status publish" not in cap.err
+
+    calls.clear()
+    monkeypatch.setattr(
+        "fno.pr._reviews.publish_coverage_status",
+        lambda *a, **k: (False, "gh: 403 secondary rate limit"),
+    )
+    rc = _coverage_gate.run_coverage_waive(42, "because", cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    assert rc == 0, "a failed POST does not fail the recorded law"
+    assert "coverage waiver recorded" in cap.out, "the receipt still prints"
+    assert "status publish failed" in cap.err
+    assert "gh: 403" in cap.err, "the stderr note names the cause"
+
+
 def test_coverage_waive_refuses_an_agent_session_positively(
     monkeypatch, tmp_path, capsys
 ):
