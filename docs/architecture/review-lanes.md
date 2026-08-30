@@ -100,6 +100,12 @@ fno agents mail send '/code-review <level> --comment' --to-self --raw
 
 No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the spawned-reviewer contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
 
+## Lane 2a: what a codex `review/start` actually diffs
+
+The codex app-server's `review/start` takes a structured target, and a `baseBranch` target scopes the BASE side only. Codex computes the diff in the RECIPIENT session's cwd, so the head side is whatever checkout the recipient sits in. A session living on the base branch (canonical on main is the common shape) reviews an empty diff, reports clean with an empty findings array and high confidence, and attests nothing - measured on 2026-08-30, when open PRs sat at `review_coverage_uncovered` for hours while their reviews "succeeded" at recipients that had nothing to read.
+
+Two guards close that hole. Fire-side, `fno agents mail send --raw '/review'` measures the recipient's checkout before the RPC fires and refuses (or answers `not-injectable` under `--check`) when it has zero changed files against the base, naming the cwd so the remedy is obvious. Reviewer-side, `emit-attestation.sh`'s empty-diff refusal now journals a `review_invocation stage=refused reason=empty_diff` row carrying the same `invocation_id` the attempt opened, so the coverage row mints a refused verdict and every surface reads `reviewer_refused` - "attempted, nothing to review" - instead of a bare zero identical to "never attempted". A refused row never clears a gate; a later real review outranks it.
+
 ## A reply does not resolve a thread
 
 `fno do pr status` reports `optional_reviews_unresolved`, and `ready` is `green && unresolved == 0`.
