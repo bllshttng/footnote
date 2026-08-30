@@ -70,6 +70,7 @@ git -C "$WORK" update-ref refs/remotes/origin/main "$(git -C "$WORK" rev-parse H
 echo more >> "$WORK/a.txt"
 git -C "$WORK" add a.txt
 git -C "$WORK" commit -qm feature
+WORK_HEAD="$(git -C "$WORK" rev-parse HEAD)"
 
 # --- stub `fno`: records `doctor event emit` argv in a file this test owns,
 # and serves `do review classify` through the real repo-tree classifier,
@@ -83,6 +84,10 @@ export CLASSIFY_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
 cat > "$BIN/fno-stub" <<STUB
 #!/usr/bin/env bash
 if [[ "\${1:-}" == "doctor" && "\${2:-}" == "event" && "\${3:-}" == "emit" ]]; then
+  if [[ "\${FNO_TEST_EMIT_FAIL:-}" == "1" ]]; then
+    echo "injected event emit failure" >&2
+    exit 17
+  fi
   printf '%s\n' "\$*" >> "$EMITTED"
   exit 0
 fi
@@ -386,6 +391,37 @@ done
 echo "== SubagentStop: the header identity lane (payload from the corpus) =="
 run_hook "$(subagent_stop "" "## Review findings"$'\n\n'"$(<"$FIXTURES/headered-json-clean.attest")")"
 expect_attest_verdict "header-opens-message" pass
+
+PARTIAL_FINDINGS=$'## Review findings\n\n```json\n[{"file":"a.py","summary":"boom","failure_scenario":"the review lost its completion path"}]\n```'
+run_hook "$(forked_skill_stop "$PARTIAL_FINDINGS" "code-review")"
+expect_attest_verdict "subagent-nonempty-findings" fail
+grep -q "classified 1 finding(s): 1 blocking, 0 non-blocking" "$HOOK_STDOUT" \
+  && pass "subagent partial receipt carries finding count" \
+  || fail "subagent partial receipt lost finding count: $(cat "$HOOK_STDOUT")"
+grep -q "reviewed head $WORK_HEAD" "$HOOK_STDOUT" \
+  && pass "subagent partial receipt carries reviewed head" \
+  || fail "subagent partial receipt lost reviewed head: $(cat "$HOOK_STDOUT")"
+
+: > "$HOOK_STDOUT"
+: > "$TMP/hook-stderr.txt"
+set +e
+printf '%s' "$(subagent_stop "" "$PARTIAL_FINDINGS")" \
+  | FNO="$BIN/fno-stub" FNO_TEST_EMIT_FAIL=1 bash "$HOOK" \
+    >"$HOOK_STDOUT" 2>"$TMP/hook-stderr.txt"
+EMIT_FAIL_RC=$?
+set -e
+[[ "$EMIT_FAIL_RC" == "2" ]] \
+  && pass "emitter refusal blocks the native review stop" \
+  || fail "emitter refusal returned $EMIT_FAIL_RC"
+grep -q "attestation emission failed" "$TMP/hook-stderr.txt" \
+  && pass "emitter refusal names the missing attestation" \
+  || fail "emitter refusal was silent: $(cat "$TMP/hook-stderr.txt")"
+grep -q "reviewed head $WORK_HEAD" "$TMP/hook-stderr.txt" \
+  && pass "emitter refusal carries reviewed head" \
+  || fail "emitter refusal lost reviewed head: $(cat "$TMP/hook-stderr.txt")"
+grep -q "holding 1 finding(s)" "$TMP/hook-stderr.txt" \
+  && pass "emitter refusal carries held finding count" \
+  || fail "emitter refusal lost finding count: $(cat "$TMP/hook-stderr.txt")"
 
 echo "== SubagentStop: caller-chosen names never identify a review =="
 # The one name the harness controls: agent_type naming the skill type. This
