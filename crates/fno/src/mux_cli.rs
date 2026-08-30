@@ -7252,7 +7252,10 @@ mod tests {
         assert_eq!(session_row_json(&below_floor)["stale"], true);
 
         below_floor.wire_version = Some(proto::MIN_COMPAT_PROTO);
-        assert!(below_floor.wire_stale(), "a pre-floor sidecar at the floor value is still stale");
+        assert!(
+            below_floor.wire_stale(),
+            "a pre-floor sidecar at the floor value is still stale"
+        );
 
         let mut unstamped = live("pre");
         unstamped.wire_version = None; // a pre-sidecar (older) build
