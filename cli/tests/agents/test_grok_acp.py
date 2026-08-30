@@ -5,6 +5,7 @@ import os
 import json
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -204,3 +205,31 @@ def test_review_P2_a_silent_child_cannot_hang_the_read_forever(monkeypatch):
         with pytest.raises(RuntimeError) as hung:
             session.request("initialize", {})
     assert "exceeded" in str(hung.value)
+
+
+def test_review_P2b_an_unwatchable_stream_refuses_instead_of_blocking(monkeypatch):
+    """The select fallback must not reopen the hang it was added to close.
+
+    The first version of the deadline guard caught OSError/ValueError from
+    select and set `ready = [stdout]`, which left the blocking read1 reachable
+    with the deadline already checked. Every path above it read as protected
+    while this one still hung forever. Round 2 of the PR 1286 review caught it.
+    """
+    import select as _select
+
+    driver = _driver()
+    monkeypatch.setattr(driver, "GROK_REQUEST_TIMEOUT_S", 30.0)
+
+    def _unwatchable(*_a, **_k):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(_select, "select", _unwatchable)
+    session = driver.GrokStdioSession("sid", ".", argv=["sleep", "300"])
+    with session:
+        started = time.monotonic()
+        with pytest.raises(RuntimeError) as refused:
+            session.request("initialize", {})
+        elapsed = time.monotonic() - started
+    # It must refuse promptly, not ride the 30s deadline and not block forever.
+    assert elapsed < 5.0, f"refusal took {elapsed:.1f}s; it blocked"
+    assert "cannot be bounded" in str(refused.value)

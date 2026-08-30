@@ -190,19 +190,23 @@ class GrokStdioSession:
                 if deadline is not None:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        raise RuntimeError(
-                            f"grok ACP read exceeded {GROK_REQUEST_TIMEOUT_S:.0f}s "
-                            f"with no response; stderr: {self.stderr_text or '<empty>'}"
-                        )
+                        raise self._read_timeout()
                     try:
                         ready, _, _ = select.select([stdout], [], [], remaining)
-                    except (OSError, ValueError):
-                        ready = [stdout]  # not selectable: fall back to blocking
-                    if not ready:
+                    except (OSError, ValueError) as exc:
+                        # A stream that cannot be watched cannot be bounded, and
+                        # an unbounded read IS the defect. The first version of
+                        # this guard fell back to `ready = [stdout]` here, which
+                        # left the blocking read1 below reachable with the
+                        # deadline already checked, so the hang survived on this
+                        # one path while every path above it read as protected.
                         raise RuntimeError(
-                            f"grok ACP read exceeded {GROK_REQUEST_TIMEOUT_S:.0f}s "
-                            f"with no response; stderr: {self.stderr_text or '<empty>'}"
-                        )
+                            f"grok ACP stdout cannot be watched, so the read "
+                            f"cannot be bounded: {exc}; "
+                            f"stderr: {self.stderr_text or '<empty>'}"
+                        ) from exc
+                    if not ready:
+                        raise self._read_timeout()
                 chunk = stdout.read1(65536) if hasattr(stdout, "read1") else stdout.read(65536)
                 if not chunk:
                     return
@@ -210,6 +214,12 @@ class GrokStdioSession:
 
         self._events = iter_jsonl(_chunks())
         return self._events
+
+    def _read_timeout(self) -> RuntimeError:
+        return RuntimeError(
+            f"grok ACP read exceeded {GROK_REQUEST_TIMEOUT_S:.0f}s with no "
+            f"response; stderr: {self.stderr_text or '<empty>'}"
+        )
 
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._request_id += 1
