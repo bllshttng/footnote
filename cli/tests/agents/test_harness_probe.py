@@ -52,6 +52,27 @@ def test_probe_dry_run_has_eight_lines_and_does_not_spawn(monkeypatch) -> None:
     assert not any("claude" in str(call) for call in spawned)
 
 
+def test_dry_run_reports_composed_pane_argv(monkeypatch) -> None:
+    expected = ["claude", "--session-id", "probe-session"]
+    monkeypatch.setattr(harness_probe, "_probe_argv", lambda harness: expected)
+
+    report = harness_probe.run_probe("claude", live=False)
+
+    assert report["argv"] == expected
+
+
+def test_live_missing_harness_binary_returns_a_verdict(monkeypatch) -> None:
+    def missing(*args, **kwargs):
+        raise FileNotFoundError("missing harness")
+
+    monkeypatch.setattr(harness_probe.subprocess, "run", missing)
+
+    report = harness_probe.run_probe("missing-harness", live=True)
+
+    assert any(item["status"] == "fail" for item in report["lines"])
+    assert any(item["marker"] == "harness binary" for item in report["lines"])
+
+
 def test_doctor_command_exposes_dry_run_without_spawning(monkeypatch) -> None:
     from fno.cli import app
 

@@ -196,10 +196,40 @@ def _dry_run_lines(harness: str) -> list[LineVerdict]:
     return [LineVerdict(name, "skip", marker, detail=f"dry run for {harness}; no process spawned") for name, marker in zip(names, markers)]
 
 
+def _probe_argv(harness: str) -> list[str]:
+    from fno.agents.mux_spawn import build_pane_argv
+
+    return build_pane_argv(harness, "", Path.cwd(), False, None)
+
+
+def _missing_binary_lines(harness: str, detail: str) -> list[LineVerdict]:
+    markers = [
+        ("IDENTITY", "local store artifact or cross-process recall nonce"),
+        ("CLAIM", "live claim holder"),
+        ("MAIL BOTH WAYS", "worker response to sent message"),
+        ("VIEW", "harness-owned screen"),
+        ("SURVIVE", "prior turn after process stop"),
+        ("ROW MATCHES", "honesty sweep and three-copy freshness"),
+        ("MANIFEST PINNED", "live readiness-grid capture"),
+    ]
+    return [
+        LineVerdict("SPAWN", "fail", "harness binary", detail=detail),
+        *[
+            LineVerdict(line, "skip", marker, detail=f"blocked by {harness} binary")
+            for line, marker in markers
+        ],
+    ]
+
+
 def run_probe(harness: str, *, live: bool, repo_root: Path | None = None) -> dict[str, object]:
     if not live:
         lines = _dry_run_lines(harness)
-        return {"harness": harness, "live": False, "argv": [harness], "lines": [asdict(line) for line in lines]}
+        return {
+            "harness": harness,
+            "live": False,
+            "argv": _probe_argv(harness),
+            "lines": [asdict(line) for line in lines],
+        }
     # Live execution is opt-in. Credential-gated harnesses are skipped with an
     # operator action instead of being misreported as failed support.
     try:
@@ -213,6 +243,18 @@ def run_probe(harness: str, *, live: bool, repo_root: Path | None = None) -> dic
     except subprocess.TimeoutExpired:
         credential = None
         credential_detail = f"status probe timed out after {PROBE_TIMEOUT_S:g}s"
+    except OSError as exc:
+        return {
+            "harness": harness,
+            "live": True,
+            "argv": [harness],
+            "lines": [
+                asdict(line)
+                for line in _missing_binary_lines(
+                    harness, f"{harness} binary unavailable: {exc}"
+                )
+            ],
+        }
     try:
         authenticated = bool(json.loads(credential.stdout).get("isAuthenticated")) if credential else False
     except (json.JSONDecodeError, AttributeError):
