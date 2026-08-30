@@ -168,3 +168,39 @@ def test_AC9_HP_live_turn_answers_the_planted_token(tmp_path, monkeypatch):
                 raise
             pytest.skip(f"grok subscription quota is spent, not a driver defect: {exc}")
         assert "GROK_ACP_TOKEN_829" in json.dumps(session.notifications)
+
+
+def test_review_P1_any_auth_phrasing_keeps_the_typed_exit_13(monkeypatch):
+    """session_new must agree with require_authenticated on what auth means.
+
+    It exact-matched "Authentication required", so every other phrasing fell
+    through to result() as a bare RuntimeError and lost the typed exit 13 that
+    callers branch on. require_authenticated has always scanned AUTH_MARKERS.
+    """
+    driver = _driver()
+    session = driver.GrokStdioSession("sid", ".")
+    monkeypatch.setattr(
+        session,
+        "request",
+        lambda *a, **k: {"error": {"message": "Not authenticated", "data": "run grok login"}},
+    )
+    with pytest.raises(driver.GrokAuthenticationRequired) as refused:
+        session.session_new()
+    assert refused.value.exit_code == 13
+    assert "grok login --device-code" in str(refused.value)
+
+
+def test_review_P2_a_silent_child_cannot_hang_the_read_forever(monkeypatch):
+    """An unbounded stdout read is a hang, not a wait.
+
+    Driven with a child that never writes and never exits, which is exactly the
+    silent-grok shape: stdout stays open, so the old `while True: read1()` loop
+    blocked in initialize/session_new/prompt with no way out.
+    """
+    driver = _driver()
+    monkeypatch.setattr(driver, "GROK_REQUEST_TIMEOUT_S", 1.0)
+    session = driver.GrokStdioSession("sid", ".", argv=["sleep", "30"])
+    with session:
+        with pytest.raises(RuntimeError) as hung:
+            session.request("initialize", {})
+    assert "exceeded" in str(hung.value)

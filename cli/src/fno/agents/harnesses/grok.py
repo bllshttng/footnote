@@ -8,8 +8,10 @@ receipt.
 from __future__ import annotations
 
 import json
+import select
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Any, Iterator, Optional, Sequence
 
@@ -19,6 +21,23 @@ from fno.agents.harnesses.pi import iter_jsonl
 GROK_DEFAULT_MODEL = "grok-4.6"
 GROK_DEFAULT_EFFORT = "high"
 AUTH_MARKERS = ("not authenticated", "not signed in", "authentication required")
+
+# A read that cannot time out is a hang, not a wait. ACP notifications arrive
+# between a request and its response, so "no bytes yet" is normal and only a
+# DEADLINE distinguishes a working turn from a dead one.
+GROK_REQUEST_TIMEOUT_S = 180.0
+
+
+def is_auth_error(text: str) -> bool:
+    """One auth predicate, so every path agrees on what unauthenticated means.
+
+    `require_authenticated` scanned these markers case-insensitively while
+    `session_new` exact-matched a single message, so a grok that said "Not
+    authenticated" raised a bare RuntimeError from one path and the typed
+    exit-13 GrokAuthenticationRequired from the other.
+    """
+    lowered = text.lower()
+    return any(marker in lowered for marker in AUTH_MARKERS)
 
 
 class GrokAuthenticationRequired(DispatchAskError):
@@ -84,8 +103,7 @@ def require_authenticated(
 ) -> str:
     """Reject a command that reports unauthenticated, even when it exits 0."""
     output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
-    lowered = output.lower()
-    if any(marker in lowered for marker in AUTH_MARKERS):
+    if is_auth_error(output):
         raise GrokAuthenticationRequired(output.strip())
     if completed.returncode:
         detail = output.strip() or f"exit status {completed.returncode}"
@@ -118,6 +136,7 @@ class GrokStdioSession:
         self._stderr: list[str] = []
         self._stderr_thread: Optional[threading.Thread] = None
         self._request_id = 0
+        self._read_deadline: Optional[float] = None
 
     def __enter__(self) -> "GrokStdioSession":
         self.start()
@@ -164,6 +183,26 @@ class GrokStdioSession:
 
         def _chunks() -> Iterator[bytes]:
             while True:
+                # Bounded by the per-request deadline `request()` publishes. An
+                # unbounded read here hung initialize/session_new/prompt
+                # forever whenever grok went silent without closing stdout.
+                deadline = self._read_deadline
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RuntimeError(
+                            f"grok ACP read exceeded {GROK_REQUEST_TIMEOUT_S:.0f}s "
+                            f"with no response; stderr: {self.stderr_text or '<empty>'}"
+                        )
+                    try:
+                        ready, _, _ = select.select([stdout], [], [], remaining)
+                    except (OSError, ValueError):
+                        ready = [stdout]  # not selectable: fall back to blocking
+                    if not ready:
+                        raise RuntimeError(
+                            f"grok ACP read exceeded {GROK_REQUEST_TIMEOUT_S:.0f}s "
+                            f"with no response; stderr: {self.stderr_text or '<empty>'}"
+                        )
                 chunk = stdout.read1(65536) if hasattr(stdout, "read1") else stdout.read(65536)
                 if not chunk:
                     return
@@ -175,6 +214,7 @@ class GrokStdioSession:
     def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         self._request_id += 1
         request_id = self._request_id
+        self._read_deadline = time.monotonic() + GROK_REQUEST_TIMEOUT_S
         self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         for message in self.events():
             if message.get("id") == request_id:
@@ -220,13 +260,17 @@ class GrokStdioSession:
     def session_new(self) -> str:
         response = self.request("session/new", session_new_params(self.cwd))
         error = response.get("error")
-        if isinstance(error, dict) and error.get("message") == "Authentication required":
+        if isinstance(error, dict):
             detail = ": ".join(
                 str(part) for part in (error.get("message"), error.get("data")) if part
             )
-            if self.stderr_text:
-                detail = f"{detail}; stderr: {self.stderr_text}"
-            raise GrokAuthenticationRequired(detail)
+            # Same predicate require_authenticated uses. The old exact match on
+            # "Authentication required" dropped every other phrasing through to
+            # result(), which raises a bare RuntimeError and loses exit 13.
+            if is_auth_error(detail):
+                if self.stderr_text:
+                    detail = f"{detail}; stderr: {self.stderr_text}"
+                raise GrokAuthenticationRequired(detail)
         result = self.result(response, "session/new")
         session_id = result.get("sessionId")
         if not isinstance(session_id, str) or not session_id:
