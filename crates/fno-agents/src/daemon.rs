@@ -1311,11 +1311,7 @@ fn dispatch_termination(
         return DispatchTermination::Absent(None);
     };
     let journal = crate::loop_runtime::Journal::new(
-        crate::loop_runtime::ProjectJournalPath(
-            crate::paths::worktree_repo_root(Path::new(&entry.cwd))
-                .join(".fno")
-                .join("events.jsonl"),
-        ),
+        crate::loop_runtime::ProjectJournalPath::from_caller_root(Path::new(&entry.cwd)),
         crate::loop_runtime::GlobalJournalPath(global_events_path(home)),
     );
     match journal.find_termination_strict(&session_id) {

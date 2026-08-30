@@ -58,6 +58,16 @@ const JOURNAL_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Using a distinct type prevents silent positional swap of the two same-type args.
 pub struct ProjectJournalPath(pub PathBuf);
 
+impl ProjectJournalPath {
+    pub fn from_caller_root(cwd: &Path) -> Self {
+        Self(
+            crate::paths::worktree_repo_root(cwd)
+                .join(".fno")
+                .join("events.jsonl"),
+        )
+    }
+}
+
 /// Newtype for the global mirror journal path (`~/.fno/events.jsonl`).
 /// Writes are best-effort only.
 pub struct GlobalJournalPath(pub PathBuf);
