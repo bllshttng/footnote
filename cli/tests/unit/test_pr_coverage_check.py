@@ -2486,3 +2486,315 @@ def test_coverage_verdict_and_the_slug_read_share_one_cwd_guard(monkeypatch, tmp
     from fno.pr._rest import _repo_slug_reason
 
     assert _repo_slug_reason("")[1] == note
+
+
+# ---- the operator-law exit: one standing subject, one head-pinned command ----
+#
+# The gate had two authority surfaces that disagreed: `fno.decide.current_law`
+# recovered a live operator ruling for an exact subject and nothing consumed
+# it, while the merge predicate recognized only a non-author approval or the
+# `coverage-override` label. These tests hold the join: the deciding list is
+# `current_law` (through the gate's one seam, `law_authority`), only `single`
+# is authority, and every other answer keeps the ordinary verdict.
+
+
+def _waive_env(monkeypatch, tmp_path):
+    """An attended operator terminal, a hermetic journal, the sandbox index."""
+    import fno.paths as paths_mod
+
+    monkeypatch.setenv("FNO_REPO_ROOT", str(tmp_path))
+    monkeypatch.setenv("FNO_EVENTS_PATH", str(tmp_path / ".fno" / "events.jsonl"))
+    paths_mod.resolve_repo_root.cache_clear()
+    (tmp_path / ".fno").mkdir(parents=True, exist_ok=True)
+    from types import SimpleNamespace
+
+    from fno.agents import self_stamp
+
+    # No harness identity + a terminal is the one state the operator lane
+    # permits; a resolved session identity is the one it refuses.
+    monkeypatch.setattr(
+        self_stamp,
+        "resolve_self_identity",
+        lambda: SimpleNamespace(session_id=None, harness=None),
+    )
+    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
+
+
+def _law_law(monkeypatch, scoped="none", standing="none"):
+    """Pin the gate's one law seam: what current_law answers per subject."""
+
+    def fake(subject):
+        if subject == _coverage_gate.STANDING_WAIVER_SUBJECT:
+            if standing == "unknown":
+                return "unknown", f"decision probe failed for {subject}: boom"
+            return standing, ""
+        if scoped == "unknown":
+            return "unknown", f"decision probe: conflicting law rows for {subject}"
+        return scoped, ""
+
+    monkeypatch.setattr(_coverage_gate, "law_authority", fake)
+
+
+WAIVE_HEAD = "f" * 40
+
+
+def test_law_authority_reads_the_real_index_three_ways(tmp_path):
+    """The seam is current_law, not a second deciding list: none, single,
+    damaged -> unknown. Seeded straight into the sandboxed index the conftest
+    pins, so the statuses come from the real reader."""
+    from fno import paths
+
+    def _seed(*rows):
+        paths.decisions_jsonl().parent.mkdir(parents=True, exist_ok=True)
+        paths.decisions_jsonl().write_text(
+            "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+        )
+
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    _seed()
+    assert _coverage_gate.law_authority(subject) == ("none", "")
+    _seed(
+        {
+            "type": "operator_decision",
+            "ts": "2026-08-29T00:00:00Z",
+            "data": {
+                "decision_id": "d-law0001",
+                "decision": "waived",
+                "subject": subject,
+                "authority_source": "operator",
+            },
+        }
+    )
+    assert _coverage_gate.law_authority(subject) == ("single", "")
+    _seed(
+        {
+            "type": "operator_decision",
+            "ts": "2026-08-29T00:00:00Z",
+            "data": {
+                "decision_id": "d-law0001",
+                "decision": "waived",
+                "subject": subject,
+                "authority_source": "operator",
+            },
+        },
+        "not json at all",
+    )
+    status, probe = _coverage_gate.law_authority(subject)
+    assert status == "unknown"
+    assert "damaged" in probe
+
+
+def test_coverage_waive_records_one_head_scoped_operator_law(
+    monkeypatch, tmp_path, capsys
+):
+    """The attended command records ONE live law row at the exact
+    head-scoped subject and prints the positive receipt only after the index
+    write lands."""
+    _waive_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    rc = _coverage_gate.run_coverage_waive(
+        42, "operator read this PR by hand", cwd=str(tmp_path)
+    )
+    cap = capsys.readouterr()
+    assert rc == 0
+    assert cap.out.strip() == "coverage waiver recorded: acme/widgets#42@ffffffff"
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    assert _coverage_gate.law_authority(subject)[0] == "single"
+
+
+def test_coverage_waive_refuses_an_agent_session_positively(
+    monkeypatch, tmp_path, capsys
+):
+    """A session a harness identifies records nothing: exit nonzero, a
+    refusal marker that says who was refused, and no row any gate could read
+    as a waiver."""
+    _waive_env(monkeypatch, tmp_path)
+    from types import SimpleNamespace
+
+    from fno.agents import self_stamp
+
+    monkeypatch.setattr(
+        self_stamp,
+        "resolve_self_identity",
+        lambda: SimpleNamespace(
+            session_id="20260829T000000Z-cl71578-d947a1ff00aa", harness="claude"
+        ),
+    )
+    monkeypatch.setattr("fno.decide._attended_terminal", lambda: True)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    rc = _coverage_gate.run_coverage_waive(42, "because", cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    assert rc == 3
+    assert "coverage-waive refused" in cap.err
+    assert "cannot record under operator authority" in cap.err
+    subject = _coverage_gate.scoped_waiver_subject("acme/widgets", 42, WAIVE_HEAD)
+    assert _coverage_gate.law_authority(subject)[0] == "none"
+
+
+def test_coverage_waive_refuses_an_unreadable_head(monkeypatch, tmp_path, capsys):
+    """No head, no waiver: the failed instrument is named and nothing is
+    recorded."""
+    _waive_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: None)
+    rc = _coverage_gate.run_coverage_waive(42, "because", cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    assert rc == 4
+    assert "pr head fetch failed" in cap.err
+    assert cap.out.strip() == ""
+
+
+def test_coverage_waive_requires_a_reason(monkeypatch, tmp_path, capsys):
+    _waive_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    rc = _coverage_gate.run_coverage_waive(42, "   ", cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    assert rc == 2
+    assert "--reason" in cap.err
+
+
+def test_recorded_scoped_waiver_covers_only_its_head(
+    monkeypatch, tmp_path, capsys
+):
+    """End to end through the real store: record the waiver at one head, the
+    gate covers THAT head with the scoped receipt, and a push refuses again
+    because the new head's subject matches nothing."""
+    _waive_env(monkeypatch, tmp_path)
+    _specimen_gates(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: WAIVE_HEAD)
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=WAIVE_HEAD)
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    rc = _coverage_gate.run_coverage_waive(
+        42, "operator reviewed this head by hand", cwd=str(tmp_path)
+    )
+    assert rc == 0
+    # The real current_law read, not the pinned seam: the recorded row is the
+    # authority the gate consumed.
+    state, refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED
+    assert covered_head == WAIVE_HEAD
+    assert note == (
+        _coverage_gate.OVERRIDE_NOTE_PREFIX
+        + f"head-pinned operator waiver at {WAIVE_HEAD[:8]}"
+    )
+    # A push moves the head; the old subject no longer names it.
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "e" * 40)
+    state, refusal, _head, _note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.REFUSED
+    assert "HEAD is eeeeeeee" in refusal
+
+
+def test_standing_law_waives_an_uncovered_head_on_the_real_merge(
+    enabled, live_head, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """The standing ruling, green ordinary verdict apart: run_merge reaches
+    the merge call and the receipt says which law waived it."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    _law_law(monkeypatch, standing="single")
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch_run = pytest.MonkeyPatch()
+    monkeypatch_run.setattr(_merge, "run", fake)
+    try:
+        assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+        cap = capsys.readouterr()
+    finally:
+        monkeypatch_run.undo()
+    assert "coverage waived: standing operator law" in cap.err
+
+
+def test_standing_law_does_not_clear_a_hard_finding(
+    monkeypatch, tmp_path, capsys
+):
+    """Standing law is the NARROW waiver: an unresolved CONFIRMED security
+    finding at a spent budget keeps IMPOSSIBLE, its marker, and its finding
+    key - and no merge call happens."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    _law_law(monkeypatch, standing="single")
+    rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    line = (cap.err.strip().splitlines() or [""])[0]
+    assert rc == _coverage_gate.IMPOSSIBLE
+    assert "impossible" in line
+    assert "hooks/git-protection.py:302:security" in line
+
+
+def test_head_pinned_waiver_covers_the_impossible_shape(
+    monkeypatch, tmp_path
+):
+    """The scoped waiver is the STRONG one: the same spent-budget hard
+    finding shape, covered at that exact head with the scoped receipt."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    _law_law(monkeypatch, scoped="single")
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    state, _refusal, covered_head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.COVERED
+    assert covered_head == FIXTURE_HEAD
+    assert note == (
+        _coverage_gate.OVERRIDE_NOTE_PREFIX
+        + f"head-pinned operator waiver at {FIXTURE_HEAD[:8]}"
+    )
+
+
+def test_unknown_authority_is_unanswered_naming_the_probe(
+    enabled, live_head, monkeypatch, tmp_path  # noqa: F811
+):
+    """A dead or conflicted decision probe is UNKNOWN authority, never
+    absence: when the gate needs the waiver, the answer is UNANSWERED with
+    the probe named, not a refusal built on an unread store."""
+    monkeypatch.setattr(_merge, "_code_review_attestation_required", lambda repo, pr_number=0: False)
+    _seed_row(tmp_path, coverage="uncovered", count=0, head=HEAD)
+    _law_law(monkeypatch, scoped="unknown", standing="unknown")
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    state, refusal, _head, note = _coverage_gate.coverage_verdict(
+        42, str(tmp_path), recompute=False
+    )
+    assert state == _coverage_gate.UNANSWERED
+    assert refusal == ""
+    assert "decision probe" in note
+    assert note.count("decision probe") == 2
+
+
+def test_a_covered_row_prints_no_waiver_receipt(
+    enabled, monkeypatch, capsys, tmp_path  # noqa: F811
+):
+    """Ordinary coverage that passes on its own never consults law and never
+    prints a waiver receipt: a reviewed merge and a waived one stay legible
+    apart."""
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: HEAD)
+    monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x"))
+    _law_law(monkeypatch, standing="single")
+    fake = FakeRun(toplevel=str(tmp_path))
+    monkeypatch_run = pytest.MonkeyPatch()
+    monkeypatch_run.setattr(_merge, "run", fake)
+    try:
+        assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+        cap = capsys.readouterr()
+    finally:
+        monkeypatch_run.undo()
+    assert "coverage waived" not in cap.err
+
+
+def test_impossible_remedies_name_the_attended_command(monkeypatch, tmp_path, capsys):
+    """Three truthful exits, not two: the refusal must name the command a
+    single-account operator can actually run."""
+    _specimen_gates(monkeypatch)
+    _ac7_seed(tmp_path, rounds=3)
+    rc = _coverage_gate.run_coverage_check(42, cwd=str(tmp_path))
+    cap = capsys.readouterr()
+    line = (cap.err.strip().splitlines() or [""])[0]
+    assert rc == _coverage_gate.IMPOSSIBLE
+    assert "coverage-waive" in line
+    assert "non-author GitHub approval" in line
+    assert "coverage-override label" in line

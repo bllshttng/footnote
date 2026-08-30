@@ -34,9 +34,13 @@ answer - nothing has attested this head - and it REFUSES. Only a failed head
 fetch or a raised events read reaches ``UNANSWERED``, and both carry a note
 naming the probe that died.
 
-The one deliberate bypass is the ``coverage-override`` label: it answers
-COVERED with a note carrying ``OVERRIDE_NOTE_PREFIX``, so a caller can always
-tell a merge that was reviewed from a merge that was waived.
+The one deliberate bypass used to be the ``coverage-override`` label alone: it
+answers COVERED with a note carrying ``OVERRIDE_NOTE_PREFIX``, so a caller can
+always tell a merge that was reviewed from a merge that was waived. Operator
+law joins it through ``fno.decide.current_law`` - one standing subject, one
+head-scoped subject minted by the attended ``coverage-waive`` command - with
+the same prefix on its receipts and the same fail-closed reading of anything
+the decision store could not answer.
 """
 from __future__ import annotations
 
@@ -94,6 +98,166 @@ OVERRIDE_NOTE_PREFIX = "override: "
 # covered_head alone - a covered row that carried no head_sha returns the same
 # empty pin - so the discriminator is named rather than inferred.
 NO_LANE_NOTE = "no review lane configured"
+
+# The standing operator-law subject for review coverage. One live law verdict
+# here (single, on the law lane) waives the coverage conjunct for every PR in
+# the fleet, narrowed by the gate: it never clears an unresolved CONFIRMED
+# correctness or security finding and never bypasses the checks conjunct. The
+# per-head exit beside it is the `coverage-waive` command's head-scoped
+# subject, which IS that strong and dies on the next push.
+STANDING_WAIVER_SUBJECT = "review-coverage-waiver"
+
+
+def scoped_waiver_subject(slug: str, pr_number: int, head: str) -> str:
+    """The head-pinned waiver subject: one ruling authorizes exactly one head,
+    so a push mints a new subject the old ruling cannot answer."""
+    return f"{STANDING_WAIVER_SUBJECT}:{slug}#{pr_number}@{head}"
+
+
+def law_authority(subject: str) -> Tuple[str, str]:
+    """Three-state law resolution for one subject: ``(status, probe)``.
+
+    ``status`` is ``single`` / ``none`` / ``unknown``. The deciding list is
+    ``fno.decide.current_law`` and its exact ``--lane law --state live``
+    semantics - this wrapper adds no second reader, it only folds what
+    current_law raises (conflict, damaged rows, an unreadable index, malformed
+    output) into ``unknown``, because a probe that died is never the same
+    answer as a verdict of none. ``probe`` is empty unless status is unknown,
+    and then names what died.
+    """
+    try:
+        from fno.decide import current_law
+
+        verdict = current_law(subject)
+        law = verdict.get("current_law") if isinstance(verdict, dict) else None
+        status = str((law or {}).get("status") or "")
+        if status in ("single", "none"):
+            return status, ""
+        if status == "conflict":
+            return "unknown", f"decision probe: conflicting law rows for {subject}"
+        return "unknown", f"decision probe: malformed current_law output for {subject}"
+    except Exception as exc:  # noqa: BLE001 - a dead probe is unknown, never none
+        return (
+            "unknown",
+            f"decision probe failed for {subject}: {type(exc).__name__}: {exc}",
+        )
+
+
+def operator_waiver_verdict(
+    slug: Optional[str], pr_number: int, head: str, hard_findings: list
+) -> Tuple[bool, str, str]:
+    """The operator-law overlay for a head ordinary coverage refused.
+
+    Returns ``(waived, note, probe_note)``. ``waived`` is True only where
+    operator law authorizes this exact shape: a head-scoped waiver decision
+    first (explicit, per-head, strong enough to clear even a hard finding, and
+    dead the moment the head moves), then a single standing ruling - which
+    never clears an unresolved CONFIRMED correctness or security finding.
+    ``note`` carries OVERRIDE_NOTE_PREFIX on a waiver so a waived merge and a
+    reviewed one stay legible apart. ``probe_note`` names any decision probe
+    that answered unknown authority; a caller must never read it as absence.
+    """
+    scoped_status, scoped_probe = "none", ""
+    if slug:
+        scoped_status, scoped_probe = law_authority(
+            scoped_waiver_subject(slug, pr_number, head)
+        )
+    if scoped_status == "single":
+        return (
+            True,
+            f"{OVERRIDE_NOTE_PREFIX}head-pinned operator waiver at {head[:8]}",
+            "",
+        )
+    standing_status, standing_probe = law_authority(STANDING_WAIVER_SUBJECT)
+    if standing_status == "single" and not hard_findings:
+        return True, f"{OVERRIDE_NOTE_PREFIX}standing operator law", ""
+    probe_note = "; ".join(p for p in (scoped_probe, standing_probe) if p)
+    return False, "", probe_note
+
+
+def _repo_slug(cwd: str) -> Optional[str]:
+    """The canonical ``owner/repo`` for the waiver subject, local git only."""
+    from fno.pr._proc import run
+    from fno.pr._rest import _repo_slug_reason
+
+    def _bounded(cmd, **kwargs):
+        kwargs.setdefault("timeout", 30.0)
+        return run(cmd, **kwargs)
+
+    try:
+        slug, _reason = _repo_slug_reason(cwd, _bounded)
+    except Exception:  # noqa: BLE001 - an unreadable slug skips the scoped exit
+        return None
+    return slug or None
+
+
+def run_coverage_waive(pr_number: int, reason: str, cwd: Optional[str] = None) -> int:
+    """Record the attended, head-pinned operator waiver for one PR head.
+
+    The one per-head operator exit: resolves the canonical slug and the live
+    40-hex head, records an operator decision at the head-scoped subject, and
+    prints the positive receipt only after the index write lands. Exit 0
+    recorded; 2 no reason; 3 refused provenance (a harness-identified session
+    is not the operator); 4 an unreadable slug or head; 1 a failed decision
+    write, which records nothing a gate could read.
+    """
+    cwd = cwd or os.getcwd()
+    text = (reason or "").strip()
+    if not text:
+        sys.stderr.write("coverage-waive refused: --reason is required and empty\n")
+        return 2
+    slug = _repo_slug(cwd)
+    if not slug:
+        sys.stderr.write(
+            "coverage-waive refused: repository slug unreadable "
+            "(git remote get-url origin in this checkout)\n"
+        )
+        return 4
+    head = _merge._pr_head_oid(pr_number, cwd)
+    if not head or len(head) != 40 or set(head.lower()) - set("0123456789abcdef"):
+        sys.stderr.write(
+            "coverage-waive refused: pr head fetch failed or is not a live "
+            "40-hex head\n"
+        )
+        return 4
+    subject = scoped_waiver_subject(slug, pr_number, head)
+    from fno.decide import (
+        IndexWriteError,
+        RefusedAuthorityError,
+        UnattributedAuthorityError,
+        record_decision,
+    )
+
+    try:
+        record_decision(
+            decision="review coverage waived for this head",
+            subject=subject,
+            rationale=text,
+            authority_source="operator",
+        )
+    except (RefusedAuthorityError, UnattributedAuthorityError) as exc:
+        sys.stderr.write(
+            f"coverage-waive refused: {exc}. An operator waiver needs an "
+            "attended operator terminal; a session a harness identifies "
+            "records nothing.\n"
+        )
+        return 3
+    except IndexWriteError as exc:
+        sys.stderr.write(
+            f"coverage-waive failed: the decision is durable but not yet "
+            f"recoverable ({exc}); run `fno backlog decide-reindex`. Do not "
+            "re-run this command - that records the waiver twice. No gate can "
+            "read it yet.\n"
+        )
+        return 1
+    except Exception as exc:  # noqa: BLE001 - no receipt without a durable record
+        sys.stderr.write(
+            f"coverage-waive failed: decision write failed: "
+            f"{type(exc).__name__}: {exc}\n"
+        )
+        return 1
+    sys.stdout.write(f"coverage waiver recorded: {slug}#{pr_number}@{head[:8]}\n")
+    return 0
 
 
 def _pr_author_login(pr_number: int, cwd: str) -> Optional[str]:
@@ -313,16 +477,15 @@ def _corroboration_refusal(cov: Optional[dict], cwd: str) -> Optional[str]:
     )
 
 
-def coverage_verdict(
+def _ordinary_verdict(
     pr_number: int, cwd: str, *, recompute: bool
-) -> Tuple[int, str, str, str]:
-    """Return ``(state, refusal, covered_head, note)``.
-
-    ``refusal`` is the guard's own sentence (the one ``_coverage_refused_reason``
-    builds) and is empty unless ``state`` is REFUSED. ``covered_head`` is the
-    head the row pins, for the caller's TOCTOU pin; empty when no lane is
-    configured or no row survives. ``note`` names a recompute outcome on
-    REFUSED, or the dead probe on UNANSWERED.
+) -> Tuple[int, str, str, str, Optional[tuple]]:
+    """The evidence-only verdict: ``(state, refusal, covered_head, note,
+    waiver_inputs)``. Everything but the operator-law overlay lives here; the
+    public ``coverage_verdict`` applies that overlay to a refused or
+    impossible head. ``waiver_inputs`` is ``(head, hard_findings)`` on every
+    path the overlay may consult, None on the covered/unanswered early
+    returns that never need it.
     """
     # The second argument is a CWD, and it is threaded into every probe below.
     # Hand it a repo slug and the FIRST probe to notice is the head fetch,
@@ -342,14 +505,14 @@ def coverage_verdict(
 
     bad_cwd = _cwd_refusal(cwd)
     if bad_cwd:
-        return UNANSWERED, "", "", bad_cwd
+        return UNANSWERED, "", "", bad_cwd, None
 
     # The guard's own short circuit: a stock install with no review lane
     # configured opts out of coverage entirely. Checked FIRST so neither the
     # head fetch nor the events read runs for a PR nobody configured review
     # for - same order run_merge has always evaluated, one lane probe cheaper.
     if not _merge._review_lane_configured(cwd, pr_number):
-        return COVERED, "", "", NO_LANE_NOTE
+        return COVERED, "", "", NO_LANE_NOTE, None
 
     # The head fetch is an instrument, and it can fail. A None head is not
     # "no coverage" - it is "the probe that pins coverage to what would
@@ -357,7 +520,7 @@ def coverage_verdict(
     # describe an unknown commit. Refuse to answer rather than guess.
     head: Optional[str] = _merge._pr_head_oid(pr_number, cwd)
     if head is None:
-        return UNANSWERED, "", "", "pr head fetch failed"
+        return UNANSWERED, "", "", "pr head fetch failed", None
 
     # The valve, checked before the events read so an overridden PR skips the
     # recompute entirely, and before the attestation branch so the refusal it
@@ -368,7 +531,7 @@ def coverage_verdict(
     # uncovered answer below, so the operator sees why the valve stayed shut.
     override_valid, override, override_refusal = _override_valve(pr_number, cwd)
     if override_valid:
-        return COVERED, "", head, override
+        return COVERED, "", head, override, None
 
     code_review_required = _merge._code_review_attestation_required(cwd, pr_number)
     if recompute:
@@ -386,7 +549,7 @@ def coverage_verdict(
             # sentences for one row.
             cov, recompute_note = review_coverage_for_head_row(pr_number, cwd, head)
         except Exception as exc:  # noqa: BLE001 - instrument failure, not absence
-            return UNANSWERED, "", "", f"events read raised: {exc}"
+            return UNANSWERED, "", "", f"events read raised: {exc}", None
 
     covered, failed = covered_conjuncts(cov, head, code_review_required)
     corroboration = _corroboration_refusal(cov, cwd)
@@ -401,7 +564,7 @@ def coverage_verdict(
     # fire it on the wrong scope.
     refs = _merge._pr_base_head_refs(pr_number, cwd)
     if covered and refs is None:
-        return UNANSWERED, "", "", "pr head branch fetch failed"
+        return UNANSWERED, "", "", "pr head branch fetch failed", None
     chain = attestation_chain(
         cwd, head_branch=refs[1] if refs else "", head=head
     )
@@ -441,6 +604,7 @@ def coverage_verdict(
                 _impossible_refusal(rounds, max_rounds, ", ".join(disposition_hard)),
                 "",
                 "",
+                (head, disposition_hard),
             )
         # The operator's ruling on the cap: the PR merges with its remaining
         # findings FILED as nodes, never dropped. The class gate is what makes
@@ -456,6 +620,7 @@ def coverage_verdict(
                 f"remaining finding(s) failed, so nothing was waived: {exc}",
                 "",
                 recompute_note,
+                (head, disposition_hard),
             )
         filed_note = (
             f"{len(filed)} finding(s) filed at the round cap ({rounds}/{max_rounds}): "
@@ -467,7 +632,7 @@ def coverage_verdict(
     if covered and corroboration:
         return REFUSED, corroboration, "", "; ".join(
             x for x in (recompute_note, unread_note, filed_note) if x
-        )
+        ), (head, disposition_hard)
     if covered:
         if disposition_text:
             # Rounds remain (the exhausted case returned above), so the
@@ -475,9 +640,9 @@ def coverage_verdict(
             # next round spends - AC7-HP's "how many rounds remain".
             remaining = _rounds_remaining_note(rounds, max_rounds)
             note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
-            return REFUSED, disposition_text, "", note
+            return REFUSED, disposition_text, "", note, (head, disposition_hard)
         notes = [n for n in (recompute_note, unread_note, disposition_note, filed_note) if n]
-        return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes)
+        return COVERED, "", (cov.get("head_sha") or "") if cov else "", "; ".join(notes), None
     # x-aecc: a fail attestation answers this head, so an uncovered row in
     # that shape is uncovered BECAUSE of the non-terminal findings. Name them
     # (the disposition sentence carries each finding key) instead of falling
@@ -495,7 +660,7 @@ def coverage_verdict(
     ):
         remaining = _rounds_remaining_note(rounds, max_rounds)
         note = "; ".join(x for x in (recompute_note, unread_note, remaining) if x)
-        return REFUSED, disposition_text, "", note
+        return REFUSED, disposition_text, "", note, (head, disposition_hard)
 
     # The spent budget DISCHARGES the review obligation. It does not fail it.
     #
@@ -563,6 +728,7 @@ def coverage_verdict(
             "",
             head or "",
             "; ".join(n for n in (recompute_note, unread_note, filed_note, waiver) if n),
+            None,
         )
     if failed == "uncovered" and corroboration:
         # The policy-rewritten shape (0 counted, self-attestation preserved)
@@ -576,7 +742,7 @@ def coverage_verdict(
         # way here (same receipt contract as the returns above and below).
         return REFUSED, corroboration, "", "; ".join(
             x for x in (recompute_note, unread_note, filed_note) if x
-        )
+        ), (head, disposition_hard)
 
     # Same branch order run_merge has always used: the attestation refusal is
     # checked first, so a config requiring code-review with no row names the
@@ -622,7 +788,46 @@ def coverage_verdict(
     # receipt, never vanish behind the refusal it did not soften.
     return REFUSED, refusal, "", "; ".join(
         x for x in (recompute_note, unread_note, filed_note) if x
+    ), (head, disposition_hard)
+
+
+def coverage_verdict(
+    pr_number: int, cwd: str, *, recompute: bool
+) -> Tuple[int, str, str, str]:
+    """Return ``(state, refusal, covered_head, note)``: the ordinary verdict
+    with the operator-law overlay applied to a refused or impossible head.
+
+    ``refusal`` is the guard's own sentence (the one ``_coverage_refused_reason``
+    builds) and is empty unless ``state`` is REFUSED. ``covered_head`` is the
+    head the row pins, for the caller's TOCTOU pin; empty when no lane is
+    configured or no row survives. ``note`` names a recompute outcome on
+    REFUSED, or the dead probe on UNANSWERED; on a waiver it carries
+    OVERRIDE_NOTE_PREFIX, so a merge that landed on operator law and one that
+    was reviewed cannot read the same.
+
+    The overlay is consulted ONLY where ordinary coverage refused or reported
+    impossible: an independently covered PR never pays the lookup and never
+    prints a waiver receipt. A waiver lookup that answers UNKNOWN authority
+    (conflict, damaged rows, a dead probe) is UNANSWERED with the probe named
+    - never a refusal built on a store that could not answer, and never
+    permission either.
+    """
+    state, refusal, covered_head, note, waiver_inputs = _ordinary_verdict(
+        pr_number, cwd, recompute=recompute
     )
+    if state not in (REFUSED, IMPOSSIBLE) or waiver_inputs is None:
+        return state, refusal, covered_head, note
+    head, hard = waiver_inputs
+    waived, waiver_note, probe_note = operator_waiver_verdict(
+        _repo_slug(cwd), pr_number, head, hard
+    )
+    if waived:
+        # The live head is the pin: a waiver covers exactly the head its
+        # subject names, so the merge still refuses a push that races it.
+        return COVERED, "", head, waiver_note
+    if probe_note:
+        return UNANSWERED, "", "", probe_note
+    return state, refusal, covered_head, note
 
 
 def refusal_line(refusal: str, note: str) -> str:
@@ -931,10 +1136,14 @@ def disposition_refusal(
 DEFAULT_MAX_ROUNDS = 2
 
 #: The AC7-MARKER literals: the refusal must carry the word ``impossible``
-#: and name BOTH remedies. Never "run the review verb at HEAD" - that is the
-#: instruction that caused the loop this state exists to end.
+#: and name every truthful exit. Never "run the review verb at HEAD" - that is
+#: the instruction that caused the loop this state exists to end. Three exits,
+#: because the first two need a second GitHub account and the third is the one
+#: a single-account operator can actually run.
 IMPOSSIBLE_REMEDIES = (
-    "a non-author GitHub approval on the PR, or the coverage-override label"
+    "a non-author GitHub approval on the PR, a non-author coverage-override "
+    'label, or the attended `fno do pr coverage-waive <pr> --reason "..."` '
+    "command (the operator exit)"
 )
 
 
@@ -1183,7 +1392,7 @@ def _impossible_refusal(
         f"review coverage is impossible to satisfy by further review: {rounds} "
         f"review rounds used (max {max_rounds}) with blocking finding(s) still "
         f"non-terminal ({disposition_refusal_text}); this cannot be cleared by "
-        f"re-reviewing - the two acts that clear it are {IMPOSSIBLE_REMEDIES}"
+        f"re-reviewing - the acts that clear it are {IMPOSSIBLE_REMEDIES}"
     )
 
 

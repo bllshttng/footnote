@@ -3244,3 +3244,44 @@ def test_optional_apps_resolves_the_shared_default(tmp_path):
     assert resolved_optional_apps(ReviewBlock(optional_apps=[])) == golden["explicit_empty"]
     # A partial list EXTENDS the built-ins; it never silently drops one.
     assert resolved_optional_apps(ReviewBlock(optional_apps=["my-app"])) == golden["partial_union"]
+
+
+# ---- the operator-law waiver changes review coverage only ----
+
+
+def test_a_waiver_does_not_bypass_red_ci(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A waiver answers the coverage conjunct, never the checks conjunct:
+    with require_checks_pass on and a red rollup, the checks refusal stands,
+    no merge call is made, and the PR stays held."""
+    _checks_enabled(monkeypatch)
+    head = "a" * 40
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: head)
+    monkeypatch.setattr(_merge, "_pr_base_head_refs", lambda pr, cwd: ("main", "feature/x"))
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo, head=None: (
+            {"coverage": "uncovered", "review_state": "reviewed", "reviewed_count": 0},
+            "",
+        ),
+    )
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(
+        _coverage_gate,
+        "law_authority",
+        lambda subject: (
+            ("single", "")
+            if subject == _coverage_gate.STANDING_WAIVER_SUBJECT
+            else ("none", "")
+        ),
+    )
+    fake = _AutoMergeRejectingRun(rollup=_rollup("FAILURE", "FAILURE"), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 1
+    failed = _last_json(capsys, stream="err")
+    assert failed["outcome"] == "failed"
+    assert "require_checks_pass" in failed["reason"]
+    assert len(fake.merge_cmds) == 0

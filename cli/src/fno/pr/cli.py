@@ -429,7 +429,7 @@ def base_lineage_check(
         "gh pr merge). Exit 0 covered, 3 uncovered (the guard's refusal on "
         "stderr), 4 unanswered (a named instrument failure), 5 impossible "
         "(round budget spent with blocking findings non-terminal; the "
-        "refusal names the two remedies that can still clear it)."
+        "refusal names the remedies that can still clear it)."
     ),
 )
 def coverage_check(
@@ -443,6 +443,32 @@ def coverage_check(
     from fno.pr import _coverage_gate
 
     raise typer.Exit(code=_coverage_gate.run_coverage_check(pr_number, recompute=recompute))
+
+
+@pr_app.command(
+    "coverage-waive",
+    hidden=True,
+    help=(
+        "Record the attended operator waiver for ONE PR head (<pr_number> "
+        "--reason). Operator provenance decides, never a GitHub login: an "
+        "attended terminal records, a harness-identified session is refused. "
+        "The waiver is pinned to the live 40-hex head, so a push voids it. "
+        "Exit 0 recorded (stdout: the head-pinned receipt), 2 no reason, "
+        "3 refused provenance, 4 unreadable slug/head, 1 failed write."
+    ),
+)
+def coverage_waive(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+    reason: str = typer.Option(
+        ...,
+        "--reason",
+        "-R",
+        help="Why coverage is waived for this exact head (required, recorded).",
+    ),
+) -> None:
+    from fno.pr import _coverage_gate
+
+    raise typer.Exit(code=_coverage_gate.run_coverage_waive(pr_number, reason))
 
 
 @pr_app.command(
