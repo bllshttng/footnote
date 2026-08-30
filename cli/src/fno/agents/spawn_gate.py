@@ -260,6 +260,15 @@ class LiveCensus:
         return self.fno_slot_workers + self.slot_claims
 
 
+@dataclass(frozen=True)
+class LoadSnapshot:
+    load_1m: float | None
+    max_load_per_cpu: float
+    load_cpu_count: int
+    load_ceiling: float
+    spawn_load_status: Literal["disabled", "unavailable", "within", "exceeded"]
+
+
 def census() -> LiveCensus:
     """The full union: fno registry ∪ claude roster (deduped by claude session
     short_id) + live ``worker:<name>`` slot claims. This is the display /
@@ -1091,6 +1100,36 @@ def _load_cpus() -> int:
         return getattr(os, "process_cpu_count", os.cpu_count)() or 1
 
 
+def _load_snapshot(max_load_per_cpu: float) -> LoadSnapshot:
+    cpus = _load_cpus()
+    ceiling = max_load_per_cpu * cpus
+    if max_load_per_cpu <= 0:
+        return LoadSnapshot(
+            load_1m=None,
+            max_load_per_cpu=max_load_per_cpu,
+            load_cpu_count=cpus,
+            load_ceiling=ceiling,
+            spawn_load_status="disabled",
+        )
+    try:
+        load1 = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return LoadSnapshot(
+            load_1m=None,
+            max_load_per_cpu=max_load_per_cpu,
+            load_cpu_count=cpus,
+            load_ceiling=ceiling,
+            spawn_load_status="unavailable",
+        )
+    return LoadSnapshot(
+        load_1m=load1,
+        max_load_per_cpu=max_load_per_cpu,
+        load_cpu_count=cpus,
+        load_ceiling=ceiling,
+        spawn_load_status="within" if load1 <= ceiling else "exceeded",
+    )
+
+
 def _needs_attribution(
     load1: float, cpus: int, max_load_per_cpu: float, hard_max_load_per_cpu: float
 ) -> bool:
@@ -1125,12 +1164,14 @@ def _prefetch_fleet_reading(
     Returns `_NOT_PREFETCHED` when the band does not need attribution, so the
     caller stays free to decide from load alone.
     """
-    try:
-        load1 = os.getloadavg()[0]
-    except (OSError, AttributeError):
+    snapshot = _load_snapshot(max_load_per_cpu)
+    if snapshot.load_1m is None:
         return _NOT_PREFETCHED
     if not _needs_attribution(
-        load1, _load_cpus(), max_load_per_cpu, hard_max_load_per_cpu
+        snapshot.load_1m,
+        snapshot.load_cpu_count,
+        max_load_per_cpu,
+        hard_max_load_per_cpu,
     ):
         return _NOT_PREFETCHED
     return _fleet_cpu_reading()
@@ -1173,18 +1214,18 @@ def _check_load_ceiling(
     no getloadavg at all). Unreadable ATTRIBUTION refuses (fail closed): an
     unknown share is not evidence of headroom.
     """
-    if max_load_per_cpu <= 0:
+    snapshot = _load_snapshot(max_load_per_cpu)
+    if snapshot.spawn_load_status == "disabled":
         return
-    try:
-        load1 = os.getloadavg()[0]
-    except (OSError, AttributeError):
+    if snapshot.spawn_load_status == "unavailable":
         # OSError: unreadable. AttributeError: the platform has no getloadavg
         # at all (the Rust gate cfg-guards the same case).
         _warn("spawn-gate: could not read load average; skipping the load check")
         return
-    cpus = _load_cpus()
-    trigger = max_load_per_cpu * cpus
-    if load1 <= trigger:
+    load1 = snapshot.load_1m
+    cpus = snapshot.load_cpu_count
+    trigger = snapshot.load_ceiling
+    if load1 is None or load1 <= trigger:
         return
 
     if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:

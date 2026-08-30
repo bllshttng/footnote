@@ -59,6 +59,37 @@ def _row(name: str, *, status="live", pid=None, short_id=""):
     )
 
 
+def _load(load1: float):
+    return lambda: (load1, 0.0, 0.0)
+
+
+def test_load_snapshot_exposes_shared_trigger_measurement(monkeypatch):
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    snapshot = spawn_gate._load_snapshot(8.0)
+
+    assert snapshot.load_1m == pytest.approx(141.6)
+    assert snapshot.max_load_per_cpu == pytest.approx(8.0)
+    assert snapshot.load_cpu_count == 12
+    assert snapshot.load_ceiling == pytest.approx(96.0)
+    assert snapshot.spawn_load_status == "exceeded"
+
+
+def test_load_snapshot_marks_unreadable_load(monkeypatch):
+    def boom():
+        raise OSError("no loadavg here")
+
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", boom)
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    snapshot = spawn_gate._load_snapshot(8.0)
+
+    assert snapshot.load_1m is None
+    assert snapshot.load_ceiling == pytest.approx(96.0)
+    assert snapshot.spawn_load_status == "unavailable"
+
+
 ALIVE = os.getpid()  # a pid that is definitely alive (this test process)
 
 

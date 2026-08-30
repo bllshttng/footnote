@@ -22,6 +22,7 @@ CPU_THRESHOLD_CORES = 1.0
 DAEMON_ALLOWANCE = 1
 _PS_COLUMNS = "pid,ppid,etime,%cpu,rss,command"
 PS_TIMEOUT_SECONDS = 5.0
+_NO_LOAD_SNAPSHOT = object()
 
 
 def _cpu_capacity_cores() -> int:
@@ -455,6 +456,14 @@ def _bounded_json_command(command: str, byte_limit: int) -> str:
     return command[:low]
 
 
+def _spawn_load_snapshot():
+    from fno.agents.spawn_gate import _load_snapshot
+    from fno.config import load_settings
+
+    max_load_per_cpu = float(load_settings().agents.max_load_per_cpu)
+    return _load_snapshot(max_load_per_cpu)
+
+
 def _roster_count() -> tuple[int | None, str | None]:
     try:
         result = subprocess.run(
@@ -492,8 +501,11 @@ def _payload(
     exit_code: int,
     top_limit: int | None = None,
     command_limit: int | None = None,
+    load_snapshot: Any = _NO_LOAD_SNAPSHOT,
 ) -> dict[str, Any]:
     cpu_capacity = _cpu_capacity_cores()
+    if load_snapshot is _NO_LOAD_SNAPSHOT:
+        load_snapshot = _spawn_load_snapshot()
     measured_share = (
         reading.fleet_cpu_cores / reading.measured_cpu_cores * 100
         if reading.measured_cpu_cores > 0
@@ -514,6 +526,11 @@ def _payload(
         "cpu_capacity_cores": cpu_capacity,
         "fleet_percent_capacity": reading.fleet_cpu_cores / cpu_capacity * 100,
         "fleet_percent_measured_cpu": measured_share,
+        "load_1m": getattr(load_snapshot, "load_1m", None),
+        "max_load_per_cpu": getattr(load_snapshot, "max_load_per_cpu", None),
+        "load_ceiling": getattr(load_snapshot, "load_ceiling", None),
+        "load_cpu_count": getattr(load_snapshot, "load_cpu_count", None),
+        "spawn_load_status": getattr(load_snapshot, "spawn_load_status", "unavailable"),
         "top": [
             {
                 "cpu_percent": cpu_percent,
@@ -570,6 +587,7 @@ def _emit_result(
         exit_code=exit_code,
         top_limit=top_limit,
         command_limit=command_limit,
+        load_snapshot=None if cause_only else _spawn_load_snapshot(),
     )
     if note is not None:
         payload["degraded"] = note
@@ -582,6 +600,23 @@ def _emit_result(
             f"({payload['fleet_percent_capacity']:.1f}% capacity, "
             f"{payload['fleet_percent_measured_cpu']:.1f}% of measured CPU)"
         )
+        load_status = payload["spawn_load_status"]
+        if load_status in {"within", "exceeded"}:
+            typer.echo(
+                f"spawn load: {payload['load_1m']:.1f} against "
+                f"{payload['load_ceiling']:.1f} (max_load_per_cpu "
+                f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus; "
+                f"{load_status})"
+            )
+        else:
+            if payload["max_load_per_cpu"] is None:
+                typer.echo(f"spawn load: {load_status} (cause-only snapshot)")
+            else:
+                typer.echo(
+                    f"spawn load: {load_status} (max_load_per_cpu "
+                    f"{payload['max_load_per_cpu']:g} x {payload['load_cpu_count']} cpus; "
+                    f"{load_status})"
+                )
         typer.echo(
             f"sustained CPU: {reading.sustained_cpu_cores:.3f} cores "
             f"(threshold {CPU_THRESHOLD_CORES:.3f})"
