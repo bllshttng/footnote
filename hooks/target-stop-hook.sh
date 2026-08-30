@@ -453,13 +453,22 @@ else
         fi
         tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
     }
-    if [[ $verb_rc -ne 0 ]]; then
-        echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc for an active session" >&2
-        report_loop_check_output
-        unavailable_block_or_allow
-    fi
-    if ! echo "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
-        echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
+    # A non-zero exit means a BROKEN checker only when the output carries no
+    # verdict. The king driver deliberately returns 2 WITH a full decision
+    # payload (loopcheck.rs king_decide), while CLI misuse returns 2 with
+    # {"error": ...} and no `decision` field. So key on the field, never the
+    # code: honor any verdict, and call unavailable only a verdictless reply.
+    # Reading the code alone counted every legitimate king block as an outage,
+    # never reset the retry counter (it resets only on a clean decision), and
+    # at MAX_UNAVAIL_RETRIES released the very king it meant to hold - under a
+    # loop_check_unavailable_giveup event blaming a checker that had answered
+    # correctly every time.
+    if ! echo "$DECISION_JSON" | jq -e '.decision' >/dev/null 2>&1; then
+        if [[ $verb_rc -ne 0 ]]; then
+            echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc with no decision for an active session" >&2
+        else
+            echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
+        fi
         report_loop_check_output
         unavailable_block_or_allow
     fi

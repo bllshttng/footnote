@@ -427,5 +427,39 @@ STUB
     cleanup
 }
 
+# ── K14: a king BLOCK arrives on exit 2 and must be honored as a verdict ─────
+# king_decide returns exit 2 WITH a full decision payload, pinned by nine tests
+# in crates/fno-agents/tests/loop_check.rs ("a king block exits 2 like the
+# non-empty board"). The hook read the exit code instead of the payload and
+# counted every one of those blocks as checker-unavailable. The retry counter
+# resets only on a clean decision, which for a king means allow, so a king with
+# a persistently non-empty board never reset it and was released on the fourth
+# fire with the ship gate off. Every other stub here returns block on exit 0,
+# which is the shape production never sends.
+{
+    setup_king
+    cat > "$BIN" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "ARGS_LOG_PLACEHOLDER"
+if [[ "$1" == "manifest-for-session" ]]; then exit 1; fi
+if [[ "$1" == "loop-check" ]]; then
+    printf '%s\n' '{"actionable":3,"decision":"block","driver":"king","fires":1,"message":"3 actionable; next: undispatched:x-cdfa","termination_reason":null}'
+    exit 2
+fi
+exit 0
+STUB
+    sed -i.bak "s|ARGS_LOG_PLACEHOLDER|${ARGS_LOG}|" "$BIN" && rm -f "${BIN}.bak"
+    chmod +x "$BIN"
+    INPUT="{\"transcript_path\":\"${TRANSCRIPT}\",\"session_id\":\"transcript\"}"
+    run_claude_hook "$INPUT"
+    ERR_TEXT=$(cat "$CLAUDE_ERR" 2>/dev/null || true)
+    if [[ "$CLAUDE_RC" -eq 2 ]] && ! grep -q "checker unavailable" <<< "$ERR_TEXT"; then
+        pass "K14: a king block on exit 2 is honored, not counted as unavailable"
+    else
+        fail "K14: rc=$CLAUDE_RC (want 2) stderr=${ERR_TEXT:-<empty>}"
+    fi
+    cleanup
+}
+
 printf '[king-hook] %d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]
