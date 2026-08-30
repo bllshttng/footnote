@@ -1674,7 +1674,7 @@ mod tests {
     // AC2-FR / AC3 (x-8f7f, flipped live at x-51f6): the hosting gate is
     // real. opencode's manifest was BUNDLED (staged) while opencode had no
     // provider impl; x-51f6 added OpencodeProvider, so opencode is now both
-    // bundled AND hostable — like agy — and its manifest can fire. goose
+    // bundled AND hostable (like agy) and its manifest can fire. goose
     // remains the genuinely-unhosted example (bundled nothing, hosted
     // nothing).
     #[test]

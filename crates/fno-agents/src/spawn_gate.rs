@@ -162,8 +162,8 @@ fn available_bytes() -> Option<u64> {
 /// registry rows + live `worker:<name>` headless slot claims.
 ///
 /// This is deliberately NOT the full claude daemon roster (x-bdf9). The roster
-/// carries every live claude session — dozens of memory-plugin observers and
-/// resident-idle sessions among them — none of which is fno work; counting them
+/// carries every live claude session, dozens of memory-plugin observers and
+/// resident-idle sessions among them, none of which is fno work; counting them
 /// let the slot cap read "20/15" with zero real build workers running and wedge
 /// `/target bg`. Registry membership IS the "fno spawned this for work"
 /// provenance (spawn writes the row), so the registry alone is the slot
