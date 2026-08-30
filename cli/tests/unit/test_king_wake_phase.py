@@ -550,6 +550,48 @@ def test_an_unsafe_crown_scope_is_skipped_not_joined(tmp_path):
         assert targets == [], f"{bad_scope!r} must not become a target"
 
 
+def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
+    # `or 32` would coerce the operator's explicit 0 back to the default and
+    # silently refuse the unbounded spelling. 33 stamps - past the default
+    # ceiling - must still wake.
+    def fill(manifest):
+        for i in range(33):
+            bill_wake(manifest, now=NOW - timedelta(minutes=20 + 40 * i))
+
+    settings = SimpleNamespace(
+        king=SimpleNamespace(
+            wake_enabled=True,
+            wake_ceiling=0,
+            wake_debounce_seconds=900,
+            wake_backstop_seconds=1800,
+        )
+    )
+    rec = _Recorder()
+    root = tmp_path / "proj"
+    root.mkdir()
+    write_manifest(
+        root / ".fno" / "kings" / "epic-x.md",
+        scope="epic-x",
+        harness_session_id="11111111-2222-3333-4444-555555555555",
+    )
+    fill(root / ".fno" / "kings" / "epic-x.md")
+
+    summary = run_king_wake(
+        settings,
+        emit=rec.emit,
+        now=NOW,
+        court_fn=_court([{"holder": "king-x", "scope": "epic-x", "status": "live"}]),
+        rows_fn=_rows(root),
+        truth_fn=lambda h: {"state": "done"},
+        unread_fn=lambda a: [object()],
+        entries_fn=lambda: [],
+        dispatch_fn=rec.dispatch,
+        ask_fn=lambda *a: None,
+    )
+
+    assert rec.dispatches == [("epic-x", "mail")], "ceiling 0 is unbounded"
+
+
 def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
     import json as _json
 

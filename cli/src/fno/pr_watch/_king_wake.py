@@ -382,8 +382,7 @@ def run_king_wake(
     unread_fn: Optional[Callable] = None,
     entries_fn: Optional[Callable] = None,
     scope_resolver: Optional[Callable] = None,
-    should_wake_fn: Optional[Callable] = None,
-    bill_fn: Optional[Callable] = None,
+    admit_fn: Optional[Callable] = None,
     dispatch_fn: Optional[Callable] = None,
     ask_fn: Optional[Callable] = None,
 ) -> dict[str, Any]:
@@ -425,14 +424,22 @@ def run_king_wake(
                 return []
 
     entries: Optional[list] = None
-    if should_wake_fn is None:
-        from fno.king.wake import should_wake
+    if admit_fn is None:
+        from fno.king.wake import admit_wake
 
-        should_wake_fn = should_wake
+        admit_fn = admit_wake
 
-    ceiling = int(getattr(cfg, "wake_ceiling", 32) or 32)
-    debounce_s = int(getattr(cfg, "wake_debounce_seconds", 900) or 900)
-    backstop_s = int(getattr(cfg, "wake_backstop_seconds", 1800) or 1800)
+    # None-vs-zero matters on all three: a configured 0 is the unbounded or
+    # disabled spelling (mirroring at_respawn_ceiling's convention), and `or`
+    # would coerce it back to the default, silently refusing an operator's
+    # explicit choice.
+    def _cfg_int(key: str, default: int) -> int:
+        raw = getattr(cfg, key, None)
+        return int(raw) if raw is not None else default
+
+    ceiling = _cfg_int("wake_ceiling", 32)
+    debounce_s = _cfg_int("wake_debounce_seconds", 900)
+    backstop_s = _cfg_int("wake_backstop_seconds", 1800)
 
     targets, note = _crowned(court_fn, rows_fn)
     summary: dict[str, Any] = {
@@ -470,7 +477,10 @@ def run_king_wake(
                 reason = "backstop"
         if reason is None:
             continue
-        verdict = should_wake_fn(
+        # Admit-and-bill in ONE lock: `allowed` means the bill already landed,
+        # so two overlapping ticks cannot both dispatch - the loser sees the
+        # winner's stamp inside the critical section and takes the refusal.
+        verdict = admit_fn(
             target.manifest, now=now, ceiling=ceiling, debounce_s=debounce_s
         )
         if not verdict.allowed:
@@ -494,12 +504,7 @@ def run_king_wake(
                 {"scope": target.scope, "refusal": verdict.refusal}
             )
             continue
-        if bill_fn is not None:
-            window_count = bill_fn(target.manifest, now=now)
-        else:
-            from fno.king.wake import bill_wake
-
-            window_count = bill_wake(target.manifest, now=now, keep=ceiling)
+        window_count = verdict.count
         if dispatch_fn is not None:
             dispatch_fn(target, reason)
         else:

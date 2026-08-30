@@ -105,6 +105,21 @@ impl KingQueue {
         fno_bin: String,
         wake: bool,
     ) -> Result<Self, LoopError> {
+        let home = crate::paths::AgentsHome::from_env();
+        Self::from_manifest_with_registry(repo_root, scope, fno_bin, wake, &home.registry_json())
+    }
+
+    /// The construction path with the registry injected, so the live-holder
+    /// decision is unit-testable without mutating process env (a set_var race
+    /// against parallel tests reading the same env would test the scheduler,
+    /// not the guard).
+    pub fn from_manifest_with_registry(
+        repo_root: &Path,
+        scope: &str,
+        fno_bin: String,
+        wake: bool,
+        registry_path: &Path,
+    ) -> Result<Self, LoopError> {
         let scope = scope.trim();
         if scope.is_empty()
             || scope.contains("..")
@@ -146,13 +161,22 @@ impl KingQueue {
         // holding the scope means a king is already reigning: respawning a
         // second one is the double-rule the one-live-crown guard exists to
         // stop, and a stale or copied manifest must not outvote it.
-        if let Some(live_holder) = live_crown_holder(&scope) {
-            return Err(LoopError::Queue(format!(
-                "a live king ({live_holder}) already reigns over {scope:?}: the walk \
-                 respawns an orphaned scope, it never doubles a live one. Wake or \
-                 reconcile the reigning king instead (`fno agents top`, \
-                 `fno agents watchdog`)"
-            )));
+        //
+        // Wake mode skips that refusal deliberately: the wake caller reached
+        // this walk only after transcript truth resolved the holder as gone,
+        // and a cleanly-exited session's registry row stays non-terminal (the
+        // status word is not liveness). Honoring the row here would refuse
+        // exactly the wake the caller proved was safe - the guard must not
+        // outvote the instrument that outranks it.
+        if !wake {
+            if let Some(live_holder) = live_crown_holder_in(registry_path, &scope) {
+                return Err(LoopError::Queue(format!(
+                    "a live king ({live_holder}) already reigns over {scope:?}: the walk \
+                     respawns an orphaned scope, it never doubles a live one. Wake or \
+                     reconcile the reigning king instead (`fno agents top`, \
+                     `fno agents watchdog`)"
+                )));
+            }
         }
         Ok(Self {
             walk_key: mint_walk_key(&manifest.fno_id),
@@ -251,11 +275,6 @@ pub(crate) const WALK_SESSION_KEY_ENV: &str = "FNO_KING_WALK_SESSION_KEY";
 /// scopes whose registry state is suspect, and refusing on a read error would
 /// strand exactly those, while the live-holder refusal above catches the
 /// double-rule case whenever the registry CAN be read.
-fn live_crown_holder(scope: &str) -> Option<String> {
-    let home = crate::paths::AgentsHome::from_env();
-    live_crown_holder_in(&home.registry_json(), scope)
-}
-
 fn live_crown_holder_in(registry_path: &Path, scope: &str) -> Option<String> {
     let registry = crate::state::load_registry(registry_path).ok()?;
     let is_terminal = |row: &crate::state::RegistryEntry| {
@@ -570,6 +589,17 @@ mod tests {
             live_crown_holder_in(&registry, "epic-x"),
             Some("reigning-king".to_string())
         );
+        // The same registry through the walk: an ordinary walk refuses, wake
+        // mode does not. A cleanly-exited session's row stays non-terminal
+        // (the status word is not liveness), so the live-holder guard would
+        // refuse exactly the wake whose absence the caller proved by
+        // transcript.
+        let plain =
+            KingQueue::from_manifest_with_registry(&dir, "k", "fno".to_string(), false, &registry);
+        assert!(plain.is_err(), "an ordinary walk never doubles a live row");
+        let wake =
+            KingQueue::from_manifest_with_registry(&dir, "k", "fno".to_string(), true, &registry);
+        assert!(wake.is_ok(), "wake mode outranks the status word");
         fs::remove_dir_all(&dir).ok();
     }
 

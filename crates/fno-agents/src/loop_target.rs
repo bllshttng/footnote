@@ -552,9 +552,10 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         let wake_clause = match king_wake_reason.as_deref() {
             Some("mail") => {
                 " You were woken by undrained bus mail addressed to this \
-                 scope: run `fno agents mail unread` and drain it BEFORE your \
-                 first board read. The waking message is not a board row and no \
-                 board read will surface it."
+                 scope: run `fno whoami` to recover your registry name, then \
+                 `fno agents mail unread --name <that name>` and drain it \
+                 BEFORE your first board read. The waking message is not a \
+                 board row and no board read will surface it."
             }
             Some("board") => " The board changed while this scope had no king: read it first.",
             Some("backstop") => {

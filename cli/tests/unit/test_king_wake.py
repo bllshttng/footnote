@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fno.king.wake import bill_wake, read_wakes, should_wake
+from fno.king.wake import admit_wake, bill_wake, read_wakes, should_wake
 
 NOW = datetime(2026, 8, 29, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -177,3 +177,39 @@ def test_write_manifest_arms_wake_times_empty_and_a_rearm_resets_it(tmp_path):
         path, scope="epic-x", harness_session_id="session-2", force=True
     )
     assert parse_manifest(path)["wake_times"] == ""
+
+
+def test_admit_wake_bills_on_allow_so_the_second_tick_takes_the_refusal(tmp_path):
+    # The two-reader race: two ticks both read an empty ledger. Deciding and
+    # billing under one lock means the FIRST call lands its stamp before the
+    # second ever reads, so the second answers the same question with the
+    # winner's stamp in view.
+    path = tmp_path / "kings" / "epic-x.md"
+    _manifest(path, [])
+
+    first = admit_wake(path, now=NOW, ceiling=CEILING, debounce_s=DEBOUNCE_S)
+    second = admit_wake(path, now=NOW, ceiling=CEILING, debounce_s=DEBOUNCE_S)
+
+    assert first.allowed and first.count == 1
+    assert not second.allowed and second.refusal == "debounce"
+    assert len(read_wakes(path, now=NOW)) == 1, "exactly one wake was billed"
+
+
+def test_admit_wake_at_the_ceiling_refuses_without_billing(tmp_path):
+    path = tmp_path / "kings" / "epic-x.md"
+    _thirty_two = [_stamp(1410 - 45 * i) for i in range(32)]
+    _manifest(path, _thirty_two)
+
+    verdict = admit_wake(path, now=NOW, ceiling=CEILING, debounce_s=DEBOUNCE_S)
+
+    assert verdict.refusal == "ceiling"
+    assert len(read_wakes(path, now=NOW)) == 32, "a refusal must not bill"
+
+
+def test_a_ceiling_of_zero_is_unbounded_even_past_the_default(tmp_path):
+    path = tmp_path / "kings" / "epic-x.md"
+    _manifest(path, [_stamp(20 + 60 * i) for i in range(40)])
+
+    verdict = should_wake(path, now=NOW, ceiling=0, debounce_s=DEBOUNCE_S)
+
+    assert verdict.allowed, "40 stamps pass when the operator disabled the cap"
