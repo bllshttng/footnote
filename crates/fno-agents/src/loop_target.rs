@@ -296,6 +296,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut king_scope: Option<String> = None;
     let mut king_wake = false;
     let mut king_wake_reason: Option<String> = None;
+    let mut king_wake_address: Option<String> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // Helper: advance i and return the next argument, or emit a "missing value"
@@ -375,6 +376,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--wake-reason" => {
                 king_wake_reason = Some(require_value!("--wake-reason", args, i).to_string());
             }
+            "--wake-address" => {
+                king_wake_address = Some(require_value!("--wake-address", args, i).to_string());
+            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -387,7 +391,9 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     // The wake flags are king-only: they name which trigger sent the walk and
     // switch the queue out of failure-retry accounting, and neither concept
     // exists on the target driver.
-    if (king_wake || king_wake_reason.is_some()) && driver.as_deref() != Some("king") {
+    if (king_wake || king_wake_reason.is_some() || king_wake_address.is_some())
+        && driver.as_deref() != Some("king")
+    {
         eprintln!(
             "fno-agents loop run: --wake/--wake-reason need --driver king (they name the \
              trigger that woke a crowned scope)"
@@ -413,6 +419,17 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             );
             return Ok(2);
         }
+    }
+    if king_wake_address.is_some() && king_wake_reason.as_deref() != Some("mail") {
+        // The address is the inbox the mail trigger MATCHED. It is meaningful
+        // only for a mail wake, and the woken session cannot rederive it: it
+        // is a fresh session, and the row may sit under the dead holder's
+        // reply-handle short id, which no whoami of the new session names.
+        eprintln!(
+            "fno-agents loop run: --wake-address needs --wake-reason mail (it names \
+             the inbox the mail trigger matched)"
+        );
+        return Ok(2);
     }
     match driver.as_deref() {
         None => {
@@ -550,19 +567,29 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             .or_else(|| king_scope.clone())
             .unwrap_or_default();
         let wake_clause = match king_wake_reason.as_deref() {
-            Some("mail") => {
-                " You were woken by undrained bus mail addressed to this \
-                 scope: run `fno whoami` to recover your registry name, then \
-                 `fno agents mail unread --name <that name>` and drain it \
-                 BEFORE your first board read. The waking message is not a \
-                 board row and no board read will surface it."
-            }
-            Some("board") => " The board changed while this scope had no king: read it first.",
+            Some("mail") => match king_wake_address.as_deref() {
+                Some(address) => format!(
+                    " You were woken by undrained bus mail addressed to \
+                     {address}: run `fno agents mail unread --name {address}` and \
+                     drain it BEFORE your first board read, then advance that \
+                     cursor with `fno agents mail ack <id> --name {address}` - an \
+                     unacked row re-wakes this scope on the next tick. The waking \
+                     message is not a board row and no board read will surface it."
+                ),
+                None => " You were woken by undrained bus mail addressed to this \
+                     scope: run `fno whoami` to recover your registry name, then \
+                     `fno agents mail unread --name <that name>` and drain it \
+                     BEFORE your first board read. The waking message is not a \
+                     board row and no board read will surface it."
+                    .to_string(),
+            },
+            Some("board") => " The board changed while this scope had no king: read it first.".to_string(),
             Some("backstop") => {
                 " No event fired; this is the periodic re-check, and an \
                  unchanged board is a legitimate NoWork exit."
+                    .to_string()
             }
-            _ => "",
+            _ => String::new(),
         };
         format!(
             "You are the respawned king over {scope}. Read the board \

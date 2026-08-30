@@ -132,8 +132,8 @@ def _holder_absent(truth: dict) -> "str | None":
     return str(state)
 
 
-def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> bool:
-    """True when undrained bus mail is addressed to the holder or the scope.
+def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> Optional[str]:
+    """The matched address with undrained mail, else ``None``.
 
     A non-empty ``scan_unread`` is a complete positive signal: the cursor has
     not advanced past those rows by construction, so there is no "since last
@@ -141,14 +141,19 @@ def _mail_trigger(target: CrownTarget, unread_fn: Callable) -> bool:
     both spellings a sender produces (registry name, reply-handle short id -
     see :class:`CrownTarget.short_id`) plus every project in the scope, whose
     broadcasts carry ``to == <project>``.
+
+    The match is RETURNED, not just reported: the woken king is a fresh
+    session whose whoami names its own ids, and ``scan_unread`` matches
+    ``to ==`` exactly, so the wake prompt must carry the address the trigger
+    matched or the row that woke the scope can never be drained.
     """
     from fno.agents.crown import split_scope
 
     addresses = {target.holder, target.short_id, *split_scope(target.scope)}
     for address in sorted(a for a in addresses if a):
         if unread_fn(address):
-            return True
-    return False
+            return address
+    return None
 
 
 def _raise_ceiling_question(target: CrownTarget, count: int, ceiling: int) -> str:
@@ -340,30 +345,37 @@ def _backstop_due(
 
 
 def _dispatch_walk(
-    target: CrownTarget, reason: str, binary: str
+    target: CrownTarget, reason: str, binary: str, address: Optional[str] = None
 ) -> None:
     """Spawn the wake-mode walk, detached.
 
     The walk blocks for the whole reign it starts, and the tick has later legs
     and a hard deadline, so the walk runs in its own session. Its stdout goes
     to a per-scope log beside the manifest; its terminations go to the events
-    journal, which is the receipt the next reader trusts.
+    journal, which is the receipt the next reader trusts. A mail wake carries
+    the matched address: the woken session is fresh and can derive neither the
+    dead holder's name nor its reply-handle short id from any whoami of its
+    own, so without the address on the command line the row that woke the
+    scope is undrainable and the wake refires on it.
     """
+    argv = [
+        binary,
+        "loop",
+        "run",
+        "--driver",
+        "king",
+        "--scope",
+        target.scope,
+        "--wake",
+        "--wake-reason",
+        reason,
+    ]
+    if address:
+        argv += ["--wake-address", address]
     log = target.manifest.with_suffix(".md.wake.log")
     with log.open("ab") as sink:
         subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            [
-                binary,
-                "loop",
-                "run",
-                "--driver",
-                "king",
-                "--scope",
-                target.scope,
-                "--wake",
-                "--wake-reason",
-                reason,
-            ],
+            argv,
             cwd=str(target.root),
             stdout=sink,
             stderr=subprocess.STDOUT,
@@ -457,7 +469,12 @@ def run_king_wake(
             # crown per 600s tick is noise that buries the real refusals.
             summary["refused"].append({"scope": target.scope, "refusal": refusal})
             continue
-        reason = "mail" if _mail_trigger(target, unread_fn) else None
+        reason: Optional[str] = None
+        wake_address: Optional[str] = None
+        matched = _mail_trigger(target, unread_fn)
+        if matched is not None:
+            reason = "mail"
+            wake_address = matched
         fresh_board_hash: Optional[str] = None
         if reason is None:
             if entries is None:
@@ -506,11 +523,16 @@ def run_king_wake(
             continue
         window_count = verdict.count
         if dispatch_fn is not None:
-            dispatch_fn(target, reason)
+            dispatch_fn(target, reason, wake_address)
         else:
             import shutil
 
-            _dispatch_walk(target, reason, shutil.which("fno-agents") or "fno-agents")
+            _dispatch_walk(
+                target,
+                reason,
+                shutil.which("fno-agents") or "fno-agents",
+                wake_address,
+            )
         if fresh_board_hash:
             _store_board_hash(target, fresh_board_hash)
         emit(
@@ -518,9 +540,12 @@ def run_king_wake(
             {
                 "scope": target.scope,
                 "reason": reason,
+                "address": wake_address,
                 "window_count": window_count,
                 "ceiling": ceiling,
             },
         )
-        summary["woke"].append({"scope": target.scope, "reason": reason})
+        summary["woke"].append(
+            {"scope": target.scope, "reason": reason, "address": wake_address}
+        )
     return summary

@@ -43,8 +43,8 @@ class _Recorder:
     def emit(self, event_type: str, data: dict) -> None:
         self.events.append((event_type, data))
 
-    def dispatch(self, target: CrownTarget, reason: str) -> None:
-        self.dispatches.append((target.scope, reason))
+    def dispatch(self, target: CrownTarget, reason: str, address) -> None:
+        self.dispatches.append((target.scope, reason, address))
 
 
 def _court(crowns):
@@ -109,9 +109,10 @@ def test_absent_holder_with_undrained_mail_wakes_and_bills(tmp_path):
         unread=lambda address: [object()] if address == "king-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "king-x")], f"woke: {rec.dispatches}"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "mail"
+    assert woken[0][1]["address"] == "king-x"
     assert woken[0][1]["scope"] == "epic-x"
     # The bill landed BEFORE the dispatch: the ledger names the wake.
     text = manifest.read_text(encoding="utf-8")
@@ -127,7 +128,9 @@ def test_mail_addressed_to_the_reply_handle_short_id_wakes(tmp_path):
         unread=lambda address: [object()] if address == "aa11bb22" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail")], f"addresses: {rec.unread_calls}"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], (
+        f"addresses: {rec.unread_calls}"
+    )
 
 
 def test_project_broadcast_address_wakes_an_absent_holder(tmp_path):
@@ -139,7 +142,42 @@ def test_project_broadcast_address_wakes_an_absent_holder(tmp_path):
         unread=lambda address: [object()] if address == "epic-x" else [],
     )
 
-    assert rec.dispatches == [("epic-x", "mail")]
+    assert rec.dispatches == [("epic-x", "mail", "epic-x")]
+
+
+def test_the_spawned_walk_argv_carries_the_matched_address(monkeypatch, tmp_path):
+    # Every dispatch_fn-injected test stops one call short of the real spawn;
+    # this pins the argv the walk process actually receives. The address must
+    # travel on the command line: the woken session is fresh and can derive
+    # neither the dead holder's name nor its reply-handle short id from any
+    # whoami of its own.
+    import subprocess as subprocess_mod
+
+    from fno.pr_watch import _king_wake as phase_mod
+
+    argv: list[str] = []
+
+    class _FakePopen:
+        def __init__(self, args, **kwargs):
+            argv.extend(args)
+
+    monkeypatch.setattr(subprocess_mod, "Popen", _FakePopen)
+    target = CrownTarget(
+        holder="king-x",
+        scope="epic-x",
+        root=tmp_path,
+        manifest=tmp_path / ".fno" / "kings" / "epic-x.md",
+        short_id="aa11bb22",
+    )
+    target.manifest.parent.mkdir(parents=True, exist_ok=True)
+    target.manifest.write_text(
+        "---\nfno_id: k-1\nscope: epic-x\n---\n", encoding="utf-8"
+    )
+
+    phase_mod._dispatch_walk(target, "mail", "fno-agents", "aa11bb22")
+
+    assert argv[argv.index("--wake-address") + 1] == "aa11bb22"
+    assert argv[argv.index("--wake-reason") + 1] == "mail"
 
 
 def test_working_stalled_and_broken_instrument_holders_never_wake(tmp_path):
@@ -173,7 +211,7 @@ def test_unknown_not_found_is_absence_and_wakes(tmp_path):
         unread=lambda address: [object()],
     )
 
-    assert rec.dispatches == [("epic-x", "mail")]
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")]
 
 
 def test_unarmed_phase_reads_no_bus_and_emits_nothing(tmp_path):
@@ -385,7 +423,7 @@ def test_a_changed_board_wakes_with_reason_board_and_stores_the_hash(tmp_path):
         extra={"entries_fn": lambda: _BOARD_B, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "board")], "the refill wakes"
+    assert rec.dispatches == [("epic-x", "board", None)], "the refill wakes"
     woken = [e for e in rec.events if e[0] == "king_woken"]
     assert woken and woken[0][1]["reason"] == "board"
     assert _stored(manifest) == _board_hash("epic-x", _BOARD_B, _PROJECT_RESOLVER)
@@ -453,7 +491,7 @@ def test_a_priority_move_alone_counts_as_a_board_change(tmp_path):
         },
     )
 
-    assert rec.dispatches == [("epic-x", "board")]
+    assert rec.dispatches == [("epic-x", "board", None)]
 
 
 def test_an_empty_graph_read_is_not_a_board_emptied(tmp_path):
@@ -495,7 +533,7 @@ def test_the_backstop_fires_when_no_event_did(tmp_path):
         extra={"entries_fn": lambda: _BOARD_A, "scope_resolver": _PROJECT_RESOLVER},
     )
 
-    assert rec.dispatches == [("epic-x", "backstop")], (
+    assert rec.dispatches == [("epic-x", "backstop", None)], (
         "actionable work, no event, no recent wake: the re-check fires"
     )
     woken = [e for e in rec.events if e[0] == "king_woken"]
@@ -589,7 +627,7 @@ def test_a_configured_ceiling_of_zero_resolves_unbounded(tmp_path):
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail")], "ceiling 0 is unbounded"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], "ceiling 0 is unbounded"
 
 
 def test_a_recent_king_terminal_suppresses_the_backstop(tmp_path):
@@ -675,7 +713,7 @@ def test_the_wake_fires_on_a_real_bus_row_and_drains_by_cursor(tmp_path, monkeyp
         ask_fn=lambda *a: None,
     )
 
-    assert rec.dispatches == [("epic-x", "mail")], f"woke: {rec.dispatches}"
+    assert rec.dispatches == [("epic-x", "mail", "aa11bb22")], f"woke: {rec.dispatches}"
 
     # The respawned session drains: the ack verb advances the cursor.
     assert advance_cursor("aa11bb22", waking.id) is True
