@@ -300,8 +300,12 @@ got="$(stored '.reviewed_file_count')"
 
 # 12. An EMPTY diff refuses: a checkout sitting AT the base (HEAD equals the
 #     merge-base, no changed files) has read nothing, and a clean review of
-#     nothing must not become a pass. The refusal names base and head, and no
-#     event is written. Lines never decide this - case 12b shows why.
+#     nothing must not become a pass. The refusal names base and head, writes
+#     NO attestation, and journals ONE refused review_invocation row - the
+#     durable terminal of the attempt, so a coverage reader can tell
+#     "attempted, nothing to read" from "never attempted" (the measured
+#     2026-08-30 shape where open PRs sat uncovered behind reviews that
+#     reported clean over empty diffs). Lines never decide this - case 12b.
 git -C "$REPO" checkout -q -b zero/at-base origin/main
 rm -f "$TMP/last-emit.txt"
 RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
@@ -309,8 +313,24 @@ RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
 RECEIPT_RC=$?
 [[ $RECEIPT_RC -ne 0 ]] && pass "empty diff refuses to emit" \
   || fail "empty diff emitted anyway (exit $RECEIPT_RC)"
-[[ ! -f "$TMP/last-emit.txt" ]] && pass "empty diff writes no event" \
-  || fail "empty diff wrote an event"
+if [[ -f "$TMP/last-emit.txt" ]] \
+  && grep -q "review_invocation" "$TMP/last-emit.txt" \
+  && ! grep -q "review_attestation" "$TMP/last-emit.txt"; then
+  pass "empty diff writes the refused terminal row, no attestation"
+else
+  fail "empty diff wrote neither or the wrong terminal: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
+fi
+stored '.stage' | grep -qx "refused" && pass "terminal row is stage=refused" \
+  || fail "terminal stage: want refused, got '$(stored '.stage')'"
+stored '.reason' | grep -qx "empty_diff" && pass "terminal row names reason=empty_diff" \
+  || fail "terminal reason: want empty_diff, got '$(stored '.reason')'"
+[[ "$(stored '.reviewed_file_count')" == "0" ]] && pass "terminal row records files=0" \
+  || fail "terminal files: want 0, got '$(stored '.reviewed_file_count')'"
+[[ "$(stored '.verb')" == "/code-review" ]] && pass "terminal row names the verb" \
+  || fail "terminal verb: got '$(stored '.verb')'"
+[[ -n "$(stored '.invocation_id')" && "$(stored '.invocation_id')" != "<missing>" ]] \
+  && pass "terminal row carries an invocation_id" \
+  || fail "terminal row lost invocation_id"
 case "$RECEIPT" in
   *"the diff under review is empty (no changed files"*)
     pass "refusal names the empty shape" ;;

@@ -6645,6 +6645,66 @@ fn zero_evidence_attestation(val: &Value) -> bool {
     }
 }
 
+/// Refused review attempts read from `review_invocation stage=refused` rows:
+/// the durable terminal of a review that ran and produced no verdict because
+/// there was nothing to read (reason `empty_diff`: the reviewer's measured
+/// diff changed no file, so the producer refused to attest). Minted as a
+/// `Refused` local verdict so `review_state` reads `ReviewerRefused` -
+/// "attempted, nothing to review" - instead of the generic unreviewed that is
+/// byte-identical to "never attempted" at every coverage surface. A refused
+/// verdict never counts toward coverage; it only names the state, and a later
+/// real review outranks it (`review_state` checks `Reviewed` first).
+fn local_refused_verdicts(
+    events_text: &str,
+    head_branch: &str,
+    head_sha: &str,
+) -> Vec<ReviewerVerdict> {
+    let mut out: Vec<ReviewerVerdict> = Vec::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_invocation") {
+            continue;
+        }
+        if val.pointer("/data/stage").and_then(|v| v.as_str()) != Some("refused") {
+            continue;
+        }
+        let line_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let line_branch = val
+            .pointer("/data/branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !attestation_in_scope(line_branch, line_head, head_branch, head_sha) {
+            continue;
+        }
+        let mut name = val
+            .pointer("/data/verb")
+            .and_then(|v| v.as_str())
+            .unwrap_or("review")
+            .trim_start_matches('/')
+            .to_string();
+        if name.is_empty() {
+            name = "review".to_string();
+        }
+        out.push(ReviewerVerdict {
+            producer: CoverageProducer::LocalAttestation,
+            name,
+            verdict: CoverageVerdict::Refused,
+            human_approval: false,
+            author_approval: false,
+            attestation_origin: AttestationOrigin::Unknown,
+            reviewed_sha: line_head.to_string(),
+            freshness: None,
+            scope: None,
+        });
+    }
+    out
+}
+
 fn local_latest_attestations(
     events_text: &str,
     head_branch: &str,
@@ -6928,6 +6988,7 @@ pub fn classify_coverage_tiled(
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
+    verdicts.extend(local_refused_verdicts(events_text, head_branch, head_sha));
 
     if github_read_ok {
         // (1) Collect distinct KNOWN review-App authors that posted a review
@@ -14703,6 +14764,93 @@ mod tests {
             "submittedAt": "2026-08-12T17:51:48Z",
             "commit": {"oid": "8e557ccdecec07abc7e409ad8d888318016612c1"}
         })]
+    }
+
+    #[test]
+    fn refused_invocation_row_reads_reviewer_refused_not_unreviewed() {
+        // The measured 2026-08-30 empty-diff shape: a review ran at a
+        // recipient sitting on the base branch, read nothing, and the producer
+        // refused to attest. Before the refused terminal row, that attempt was
+        // byte-identical to "never attempted" at every coverage surface, so a
+        // king re-fired the review and reproduced the failure exactly.
+        let events = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "review_invocation",
+                "data": {"invocation_id": "ri-1", "stage": "refused",
+                         "verb": "/review", "reason": "empty_diff",
+                         "head_sha": "abc123", "branch": "feature/x"}
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "review_invocation",
+                "data": {"invocation_id": "ri-1", "stage": "sent",
+                         "verb": "/review"}
+            })
+            .to_string(),
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(0), "a refusal never covers");
+        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
+        assert_eq!(rep.refused_reviewers(), vec!["review"]);
+        // A real review outranks the refusal: once something Reviewed exists,
+        // the state must not stay parked at ReviewerRefused.
+        let with_pass = format!(
+            "{}{}\n",
+            events,
+            attestation_line("code-review", "abc123", "pass")
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &with_pass,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+    }
+
+    #[test]
+    fn refused_invocation_row_out_of_scope_is_ignored() {
+        // A refusal on ANOTHER branch's attempt is not this PR's state; only
+        // in-scope rows (branch match, or the exact head) mint a verdict. The
+        // row below carries a foreign branch AND a foreign head: an exact-head
+        // match alone would admit it through the legacy arm, so both must
+        // differ for this to be the honest out-of-scope shape.
+        let events = serde_json::json!({
+            "type": "review_invocation",
+            "data": {"invocation_id": "ri-1", "stage": "refused",
+                     "verb": "/review", "reason": "empty_diff",
+                     "head_sha": "fff999", "branch": "feature/OTHER"}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+        assert!(rep.refused_reviewers().is_empty());
     }
 
     #[test]

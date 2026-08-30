@@ -184,6 +184,44 @@ if [[ "$upstream" == */* && "${upstream#*/}" != "$base" && "$ahead" == "0" ]]; t
   branch="${upstream#*/}"
 fi
 
+# Shared resolution for BOTH exits below (the refusal and the emit): the actor
+# reads and the invocation id. Hoisted above the diff measurement so the
+# empty-diff refusal can journal its own terminal row - a refusal that writes
+# nothing leaves the daemon's `sent` review_invocation row orphaned, which
+# reads downstream as "never attempted" rather than "attempted, nothing to
+# read" (the 2026-08-30 shape: open PRs sat uncovered while their reviews
+# reported clean over empty diffs).
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+session_id=""; harness=""
+if [[ -f "$repo_root/.fno/target-state.md" ]]; then
+  session_id=$(grep '^session_id:' "$repo_root/.fno/target-state.md" \
+    | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+  harness=$(grep '^harness:' "$repo_root/.fno/target-state.md" \
+    | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
+fi
+local_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+hold_json=""
+if [[ -n "$local_branch" ]]; then
+  hold_json="$("${FNO:-fno}" do pr review-hold metadata --branch "$local_branch" \
+    --repo "$repo_root" 2>/dev/null || true)"
+fi
+invocation_id="$(printf '%s' "$hold_json" \
+  | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
+if [[ -z "$invocation_id" && -n "$session_id" ]]; then
+  invocation_id="$(jq -r '.invocation_id // empty' \
+    "${FNO_HOME:-$HOME/.fno}/review-invocations/${session_id}.json" \
+    2>/dev/null || true)"
+fi
+if [[ -z "$invocation_id" ]]; then
+  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
+fi
+review_verb="$(printf '%s' "$hold_json" | jq -r '.metadata.verb // "/code-review"' 2>/dev/null || echo /code-review)"
+# jq reads EMPTY stdin as zero inputs: no output, exit 0, so the || default
+# above never fires and an empty hold reads as an empty verb. The explicit
+# defaults below are what cover that (same for the metadata fields that
+# follow, whose fallbacks ride the same empty-input shape).
+[[ -n "$review_verb" ]] || review_verb="/code-review"
+
 # The diff under review, recorded with the event: its merge-base, its head, and
 # the added+deleted line count across it. Without these a clean review and a
 # review of NOTHING are byte-identical downstream: a session resolving its
@@ -206,47 +244,38 @@ reviewed_head_sha="$head_sha"
 reviewed_file_count="$(git diff --name-only "${reviewed_base_sha}..HEAD" 2>/dev/null | command grep -c . || true)"
 reviewed_line_count="$(git diff --numstat "${reviewed_base_sha}..HEAD" 2>/dev/null | awk '{ add += $1; del += $2 } END { print add + del + 0 }')"
 if (( reviewed_file_count == 0 )); then
+  # The refusal is durable, not just stderr: one review_invocation row with
+  # stage=refused closes the `sent` row this attempt opened, carrying the same
+  # invocation_id and the measured zero. Best-effort (the script still exits 1
+  # whatever happens to the emit), and it attests nothing - a refusal never
+  # clears the coverage gate; it names why the attempt produced no verdict.
+  "${FNO:-fno}" doctor event emit -t review_invocation -s daemon \
+    --events "$repo_root/.fno/events.jsonl" \
+    -d "$(jq -cn \
+      --arg invocation_id "$invocation_id" \
+      --arg stage refused \
+      --arg verb "$review_verb" \
+      --arg reason empty_diff \
+      --arg head_sha "$head_sha" \
+      --arg branch "$branch" \
+      --arg reviewed_base_sha "$reviewed_base_sha" \
+      --arg reviewed_head_sha "$reviewed_head_sha" \
+      --argjson reviewed_file_count "$reviewed_file_count" \
+      '{invocation_id:$invocation_id,stage:$stage,verb:$verb,reason:$reason,head_sha:$head_sha,branch:$branch,reviewed_base_sha:$reviewed_base_sha,reviewed_head_sha:$reviewed_head_sha,reviewed_file_count:$reviewed_file_count}')" \
+    >/dev/null 2>&1 || true
   echo "emit-attestation: the diff under review is empty (no changed files, base ${reviewed_base_sha} .. HEAD ${reviewed_head_sha} on branch ${branch})." >&2
-  echo "A review with nothing to read is not a pass; no event emitted." >&2
+  echo "A review with nothing to read is not a pass; a refused review_invocation row was emitted for invocation ${invocation_id}." >&2
   echo "If you are reviewing a worktree from the canonical checkout, hand the review its" >&2
   echo "target explicitly: run from the worktree path, or pass the PR number to the review verb." >&2
   exit 1
 fi
 
-# Record the attesting ACTOR alongside what was certified (x-27c5): without a
-# session, an author attesting its own diff is indistinguishable from an
-# independent reviewer, which clears config.review.reviewers with no trace.
-# session_id + head_sha is the authorship join. Read from the live session
-# manifest with the same grep the stop hook uses
-# (hooks/target-stop-hook.sh). Both stay empty when no manifest is bound; the
-# emit chokepoint then rejects an actorless attestation rather than lie.
-repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
-session_id=""; harness=""
-if [[ -f "$repo_root/.fno/target-state.md" ]]; then
-  session_id=$(grep '^session_id:' "$repo_root/.fno/target-state.md" \
-    | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
-  harness=$(grep '^harness:' "$repo_root/.fno/target-state.md" \
-    | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
-fi
-
-# The review hook owns the attempt, while this script owns the completion
-# marker. Read the hold before releasing it so both records use one join id.
-local_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-hold_json=""
-if [[ -n "$local_branch" ]]; then
-  hold_json="$("${FNO:-fno}" do pr review-hold metadata --branch "$local_branch" \
-    --repo "$repo_root" 2>/dev/null || true)"
-fi
-invocation_id="$(printf '%s' "$hold_json" | jq -r '.metadata.invocation_id // empty' 2>/dev/null || true)"
-if [[ -z "$invocation_id" && -n "$session_id" ]]; then
-  invocation_id="$(jq -r '.invocation_id // empty' \
-    "${FNO_HOME:-$HOME/.fno}/review-invocations/${session_id}.json" \
-    2>/dev/null || true)"
-fi
-if [[ -z "$invocation_id" ]]; then
-  invocation_id="ri-$(date -u +%s 2>/dev/null || echo 0)-$$"
-fi
-review_verb="$(printf '%s' "$hold_json" | jq -r '.metadata.verb // "/code-review"' 2>/dev/null || echo /code-review)"
+# The actor reads (repo_root, session_id, harness), the hold, and the
+# invocation id resolve ONCE in the hoisted shared block above, so the
+# empty-diff refusal exit and the started row quote the same join id; see the
+# comments there for why each read is what it is (the authorship-join and
+# actorless-refusal rationale lives with the chokepoint that enforces it).
+# What follows reads the metadata only the started row needs.
 review_args_raw="$(printf '%s' "$hold_json" | jq -r '.metadata.args_raw // empty' 2>/dev/null || true)"
 review_level="$(printf '%s' "$hold_json" | jq -r '.metadata.level // "unset"' 2>/dev/null || echo unset)"
 review_level_source="$(printf '%s' "$hold_json" | jq -r '.metadata.level_source // "fallback"' 2>/dev/null || echo fallback)"

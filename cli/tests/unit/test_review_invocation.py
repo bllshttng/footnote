@@ -51,6 +51,25 @@ def test_review_invocation_event_is_a_valid_canonical_record() -> None:
     assert event["data"]["receipt"] == "text delivered, submission unconfirmed"
 
 
+def test_refused_stage_with_reason_is_a_valid_canonical_record() -> None:
+    """The empty-diff terminal row validates against the schema.
+
+    emit-attestation.sh journals stage=refused reason=empty_diff when a review
+    ran and its measured diff had nothing to read, so the schema must admit
+    the stage and the reason field (the emit chokepoint validates every row
+    against this schema before writing, so a schema without them would refuse
+    the row and re-orphan the attempt it terminates).
+    """
+    event = _sent_event()
+    event["data"]["stage"] = "refused"
+    event["data"]["reason"] = "empty_diff"
+    event["data"]["reviewed_base_sha"] = "b" * 40
+    event["data"]["reviewed_head_sha"] = event["data"]["head_sha"]
+    event["data"]["reviewed_file_count"] = 0
+
+    validate(event)
+
+
 def test_review_invocation_data_omits_unknown_and_keeps_false_and_zero() -> None:
     data = build_review_invocation_data(
         invocation_id="ri-test-2",

@@ -1038,17 +1038,30 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if coverage.get("review_state") == "reviewer_refused":
         raw_verdicts = coverage.get("verdicts")
         verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []
-        refused_names = [
-            str(verdict.get("name"))
+        refused = [
+            verdict
             for verdict in verdicts
-            if isinstance(verdict, dict)
-            and verdict.get("verdict") == "refused"
-            and verdict.get("name")
+            if isinstance(verdict, dict) and verdict.get("verdict") == "refused"
         ]
+        refused_names = [str(v.get("name")) for v in refused if v.get("name")]
         who = ", ".join(refused_names) or "configured reviewer"
-        sys.stderr.write(
-            f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
-        )
+        if any(v.get("producer") == "local_attestation" for v in refused):
+            # A local refused verdict is the empty-diff terminal: the review
+            # attempt RAN and produced no verdict because the reviewer's
+            # measured diff had nothing to read. The generic "declined" remedy
+            # (nudge the reviewer) reproduces the failure exactly; the remedy
+            # is to move the review to the PR's checkout.
+            sys.stderr.write(
+                f"note: reviewer_refused: {who} ran and refused to attest "
+                "(an empty diff at the reviewer's checkout: it sat on the "
+                "base branch, so the review read nothing). Fire from the PR "
+                "worktree session (`fno do target request-self-review --pr "
+                "<n>`) or spawn the reviewer with --cwd <worktree>.\n"
+            )
+        else:
+            sys.stderr.write(
+                f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
+            )
     # `unknown` from a degraded gh read and `unknown` from "nobody reviewed
     # this" are different facts; the recompute note is the only thing that
     # separates them, and the JSON field alone would never reach a terminal.
