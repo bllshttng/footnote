@@ -18,6 +18,8 @@ Think fully. Send outcome, reason, next action. Drop articles only where clear. 
 
 Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
 
+Operational control (a stop, a resume, a scope change) that the 80-word budget refuses: open the body's first line with `control:` and it rides its own lane, capped at 60 words, exempt from the pair budget.
+
 ## 1. Slash-command workflows (orchestration, reasoning-required)
 
 Invoke via `/fno:<verb>`. Front door:
