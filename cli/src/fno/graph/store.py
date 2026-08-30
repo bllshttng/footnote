@@ -1171,7 +1171,7 @@ def append_progress_note(
 def append_encounter(
     path: Path, node_id: str, record: dict
 ) -> "tuple[bool, str | None, str | None]":
-    """Append one encounter, refusing a second from the same session.
+    """Append one encounter, refusing a second from the same voter.
 
     Returns ``(appended, error, reason)``. ``reason`` is one of ``"missing"``,
     ``"duplicate"``, or ``"unidentified"``, and it exists so a caller picks an
@@ -1183,19 +1183,20 @@ def append_encounter(
     already voted needs to know WHEN, so it can decide whether to add a progress
     note instead of arguing with a gate.
 
-    The duplicate scan is a linear walk comparing ``session_id``. The list is
-    per node and small, so an index would be a second store to keep true.
+    The duplicate scan is a linear walk comparing the resolved voter key. The
+    list is per node and small, so an index would be a second store to keep true.
     """
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
+    from fno.graph.demand import voter_key
 
     result: dict[str, object] = {"appended": False, "error": None, "reason": None}
 
-    session_id = record.get("session_id")
-    if not session_id:
-        # Without this the duplicate scan collapses: every session-id-less
+    key = voter_key(record)
+    if not key:
+        # Without this the duplicate scan collapses: every voter-key-less
         # record matches every other one, so the FIRST anonymous encounter
         # would silently block all the rest.
-        return False, "an encounter with no session_id is not readable back to a transcript", "unidentified"
+        return False, "an encounter with no voter key (session_id) is not readable back to a transcript", "unidentified"
 
     def mutator(entries: list[dict]) -> list[dict]:
         node = _find_node(entries, node_id)
@@ -1204,9 +1205,9 @@ def append_encounter(
             result["reason"] = "missing"
             return entries
         for existing in node.get("encounters") or []:
-            if existing.get("session_id") == session_id:
+            if voter_key(existing) == key:
                 result["error"] = (
-                    f"session {session_id} already recorded an encounter on "
+                    f"voter {key} already recorded an encounter on "
                     f"{node.get('id', node_id)} at {existing.get('ts')}"
                 )
                 result["reason"] = "duplicate"

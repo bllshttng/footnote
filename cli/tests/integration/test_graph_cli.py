@@ -154,6 +154,80 @@ def test_ac1_hp_graph_add_with_priority(tmp_graph):
     assert entries[0]["priority"] == "p1"
 
 
+def test_idea_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda: SimpleNamespace(session_id="creator-session", harness="claude"),
+    )
+
+    result = _invoke(
+        "backlog",
+        "idea",
+        "Idea with evidence",
+        "--difficulty",
+        "low",
+        "--evidence",
+        "hit this while doing something else.",
+    )
+
+    assert result.exit_code == 0, result.output
+    encounter = _read_graph(tmp_graph)[0]["encounters"][0]
+    assert encounter["voter_key"] == "creator-session"
+    assert encounter["voter_kind"] == "agent"
+    assert encounter["evidence"] == "hit this while doing something else."
+
+
+def test_add_evidence_records_the_creator_encounter(tmp_graph, monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "fno.claims.self_identity.resolve_self_identity",
+        lambda: SimpleNamespace(session_id="add-creator", harness="codex"),
+    )
+
+    result = _invoke(
+        "backlog",
+        "add",
+        "Added with evidence",
+        "--evidence",
+        "hit this while doing something else.",
+    )
+
+    assert result.exit_code == 0, result.output
+    encounter = _read_graph(tmp_graph)[0]["encounters"][0]
+    assert encounter["voter_key"] == "add-creator"
+    assert encounter["voter_kind"] == "agent"
+
+
+def test_add_without_evidence_keeps_encounters_sparse(tmp_graph):
+    result = _invoke("backlog", "add", "Idea without evidence")
+
+    assert result.exit_code == 0, result.output
+    assert "encounters" not in _read_graph(tmp_graph)[0]
+
+
+def test_idea_keeps_the_node_when_creation_vote_identity_is_unknown(tmp_graph, monkeypatch):
+    monkeypatch.setattr("fno.claims.self_identity.resolve_self_identity", lambda: None)
+
+    result = _invoke(
+        "backlog",
+        "idea",
+        "Unproven creator",
+        "--difficulty",
+        "low",
+        "--evidence",
+        "hit this without a provable session.",
+    )
+
+    assert result.exit_code == 0, result.output
+    combined = (result.output or "") + (getattr(result, "stderr", "") or "")
+    assert "warning" in combined.lower()
+    assert "vote" in combined.lower()
+    assert "encounters" not in _read_graph(tmp_graph)[0]
+
+
 def test_ac2_err_graph_add_invalid_priority(tmp_graph):
     """AC2-ERR: fno graph add with invalid priority exits 1."""
     r = runner.invoke(app, ["backlog", "add", "Bad", "--priority", "urgent"], catch_exceptions=True)

@@ -225,6 +225,46 @@ def test_json_output_carries_the_same_rows(tmp_graph):
     assert rows[1]["dispatched"] == 1
 
 
+def test_operator_voter_counts_and_renders_alongside_agent_voters(tmp_graph):
+    from fno.graph.demand import demand_rows, format_rows
+
+    entries = [
+        _node(
+            "zz-operator",
+            encounters=[
+                _enc("s1"),
+                _enc("s2"),
+                {
+                    "ts": "2026-08-29T06:00:00+00:00",
+                    "voter_key": "operator",
+                    "voter_kind": "operator",
+                    "evidence": "operator hit the same seam.",
+                },
+            ],
+            sessions=[{}],
+        )
+    ]
+
+    rows = demand_rows(entries)
+
+    assert rows[0]["enc"] == 3
+    assert rows[0]["agent"] == 2
+    assert rows[0]["operator"] == 1
+    assert "(2a/1o)" in format_rows(rows)
+
+
+def test_legacy_session_ids_remain_the_voter_key(tmp_graph):
+    from fno.graph.demand import demand_rows
+
+    row = demand_rows(
+        [_node("zz-legacy", encounters=[_enc("s1"), _enc("s2"), _enc("s1")])]
+    )[0]
+
+    assert row["enc"] == 2
+    assert row["agent"] == 2
+    assert row["operator"] == 0
+
+
 def test_an_empty_signal_says_so_and_exits_clean(tmp_graph):
     """No encounters is not an error; it is the state of a fresh install."""
     _write(tmp_graph, _node("zz-0001"))

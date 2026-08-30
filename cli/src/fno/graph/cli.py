@@ -863,8 +863,8 @@ def _session_provenance(
     from fno.claims.self_identity import resolve_self_identity
 
     identity = resolve_self_identity()
-    session = identity.session_id
-    harness = identity.harness
+    session = getattr(identity, "session_id", None)
+    harness = getattr(identity, "harness", None)
 
     source_node_id: Optional[str] = None
     source_plan_path: Optional[str] = None
@@ -1040,6 +1040,54 @@ def _prompt_difficulty_value(value: str) -> str:
         raise click.UsageError(f"{exc}. {DIFFICULTY_HELP}") from exc
 
 
+def _append_creation_encounter(path: Path, node_id: str, evidence: str) -> None:
+    """Best-effort creator encounter after a node is safely minted."""
+    try:
+        from fno import style
+        from fno.claims.self_identity import resolve_self_identity
+        from fno.config import load_settings
+        from fno.graph.store import append_encounter
+        from fno.harness_identity import canonical_handle
+
+        evidence = evidence.strip()
+        if not evidence:
+            raise ValueError("an encounter with no evidence is a poll")
+        if (
+            os.environ.get("FNO_STYLE_ENFORCE") != "0"
+            and not style.has_exception(evidence)
+        ):
+            violations = style.check(
+                evidence,
+                surface="encounter",
+                word_cap=load_settings().style.word_cap.encounter,
+            )
+            if violations:
+                raise ValueError(style.format_violations(violations))
+
+        try:
+            identity = resolve_self_identity()
+        except Exception:  # noqa: BLE001 - an unresolvable vote is best-effort
+            identity = None
+        session_id = getattr(identity, "session_id", None)
+        harness = getattr(identity, "harness", None)
+        if not session_id or not harness:
+            raise ValueError("no provable session identity")
+        record = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "session_id": session_id,
+            "voter_key": session_id,
+            "voter_kind": "agent",
+            "harness": harness,
+            "fno_id": canonical_handle(session_id),
+            "evidence": evidence,
+        }
+        appended, error, _reason = append_encounter(path, node_id, record)
+        if not appended:
+            raise ValueError(error or "append refused")
+    except Exception as exc:  # noqa: BLE001 - filing must remain primary
+        _safe_stderr_warn(f"warning: creation vote skipped for {node_id}: {exc}\n")
+
+
 def _create_node_impl(
     *,
     title: str,
@@ -1061,6 +1109,7 @@ def _create_node_impl(
     tags: Optional[list[str]] = None,
     source_node: Optional[str] = None,
     related: Optional[list[str]] = None,
+    evidence: Optional[str] = None,
     require_difficulty: bool = False,
 ) -> None:
     """Shared create-a-backlog-node body for ``cmd_add`` and ``cmd_idea``.
@@ -1273,6 +1322,9 @@ def _create_node_impl(
 
     locked_mutate_graph(_graph_path(), mutator)
 
+    if new_id_holder[0] is not None and evidence is not None:
+        _append_creation_encounter(_graph_path(), new_id_holder[0], evidence)
+
     if rollup_error[0] is not None:
         typer.echo(f"warning: rollup skipped ({rollup_error[0]})", err=True)
     # stderr, not stdout: this verb's stdout is a machine-readable JSON payload
@@ -1369,6 +1421,12 @@ def cmd_add(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Roadmap group ID"),
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
+    evidence: Optional[str] = typer.Option(
+        None,
+        "--evidence",
+        "-e",
+        help="Record why the creator encountered this node. Optional.",
+    ),
     description: Optional[str] = typer.Option(
         None,
         "--description",
@@ -1419,6 +1477,7 @@ def cmd_add(
         tags=tag,
         source_node=source_node,
         related=related,
+        evidence=evidence,
     )
 
 
@@ -1542,6 +1601,12 @@ def cmd_idea(
     roadmap_id: Optional[str] = typer.Option(None, "--roadmap-id", help="Roadmap group ID"),
     vision_path: Optional[str] = typer.Option(None, "--vision-path", help="Source vision doc path"),
     details: Optional[str] = typer.Option(None, "--details", "-d", help="Implementation guidance"),
+    evidence: Optional[str] = typer.Option(
+        None,
+        "--evidence",
+        "-e",
+        help="Record why the creator encountered this node. Optional.",
+    ),
     description: Optional[str] = typer.Option(
         None,
         "--description",
@@ -1583,6 +1648,9 @@ def cmd_idea(
     can carry parent/size/domain without a follow-up ``fno backlog update``.
     """
     if wave_of:
+        if evidence is not None:
+            typer.echo("Error: --wave-of cannot record a creation vote", err=True)
+            raise typer.Exit(code=2)
         if separate:
             typer.echo("Error: --wave-of and --separate are mutually exclusive", err=True)
             raise typer.Exit(code=2)
@@ -1768,6 +1836,7 @@ def cmd_idea(
         tags=tag,
         source_node=source_node,
         related=related,
+        evidence=evidence,
         require_difficulty=True,
     )
 
@@ -3195,6 +3264,11 @@ def cmd_encounter(
         "-e",
         help="What it cost, in a sentence or two. Required, and capped by config.style.word_cap.encounter.",
     ),
+    as_operator: bool = typer.Option(
+        False,
+        "--operator",
+        help="Record this as the operator's vote rather than this session's. One per node.",
+    ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit the appended record as JSON."),
 ) -> None:
     """Record ONE encounter with this node, from this session, with evidence.
@@ -3237,8 +3311,13 @@ def cmd_encounter(
     except Exception:  # noqa: BLE001 - an unresolvable identity is a refusal, not a crash
         identity = None
     session_id = getattr(identity, "session_id", None)
+    session_id = session_id if isinstance(session_id, str) else None
     harness = getattr(identity, "harness", None)
-    if not session_id or not harness:
+    harness = harness if isinstance(harness, str) else None
+    # `--operator` is a declaration, not proof. An agent can pass it, but
+    # `via_session` makes that visible and this single-operator machine has no
+    # cryptographic operator identity worth inventing for this signal.
+    if not as_operator and (not session_id or not harness):
         typer.echo(
             "Error: no provable session identity, so this encounter would not be "
             "readable back to a transcript. Run `fno whoami` to see what this "
@@ -3262,13 +3341,27 @@ def cmd_encounter(
             typer.echo(style.format_violations(violations), err=True)
             raise typer.Exit(code=4)
 
-    record = {
+    record: dict[str, object] = {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "session_id": session_id,
-        "harness": harness,
-        "fno_id": canonical_handle(session_id),
         "evidence": evidence,
     }
+    if as_operator:
+        record.update({"voter_key": "operator", "voter_kind": "operator"})
+        if session_id:
+            record["via_session"] = session_id
+        if harness:
+            record["via_harness"] = harness
+    else:
+        assert session_id is not None and harness is not None
+        record.update(
+            {
+                "session_id": session_id,
+                "voter_key": session_id,
+                "voter_kind": "agent",
+                "harness": harness,
+                "fno_id": canonical_handle(session_id),
+            }
+        )
     appended, error, reason = append_encounter(_graph_path(), task_id, record)
     if not appended:
         typer.echo(f"Error: {error}", err=True)
@@ -3299,10 +3392,14 @@ def cmd_encounter(
             )
         )
     else:
-        typer.echo(
-            f"encounter recorded on {task_id} "
-            f"(session {canonical_handle(session_id)}, {total} total)"
-        )
+        if as_operator:
+            typer.echo(f"encounter recorded on {task_id} (operator, {total} total)")
+        else:
+            assert session_id is not None
+            typer.echo(
+                f"encounter recorded on {task_id} "
+                f"(session {canonical_handle(session_id)}, {total} total)"
+            )
 
 
 @cli.command("demand", hidden=True)
@@ -3314,6 +3411,10 @@ def cmd_demand(
     Sorted by divergence, not by volume. A p0 with many encounters tells you
     nothing, because you already ranked it. A p3 or a never-dispatched node with
     many encounters is the whole point of the signal.
+
+    Operator votes count in ``enc`` and remain visible in the split: ``enc 5
+    (4a/1o)``. Provenance is displayed rather than excluded, so the reader can
+    distinguish agent demand from the operator's own vote.
 
     `dispatched` is how many of the encountering sessions were also sent to this
     node. Read it beside the count: `enc 12, dispatched 12` is one king that
