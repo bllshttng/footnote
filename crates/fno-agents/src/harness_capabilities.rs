@@ -424,6 +424,7 @@ impl HarnessContract {
                 // no session here and, on pi, CREATES a second one under the
                 // same id rather than failing.
                 "caller-assigned-cwd-scoped",
+                "callee-minted-read-back",
                 "store-lookup",
                 "unsupported",
             ]

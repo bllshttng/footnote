@@ -1901,7 +1901,7 @@ pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgen
                     .map(str::to_string),
                 // A full session id addresses a durable thread, and only a
                 // thread-shaped row may take one.
-                IdKind::Session if is_thread_shape => row
+                IdKind::Session if is_thread_shape || harness_name == Some("cursor-agent") => row
                     .get("harness_session_id")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())

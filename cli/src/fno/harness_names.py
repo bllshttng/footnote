@@ -34,6 +34,7 @@ KNOWN_HARNESSES: tuple[str, ...] = (
     "pi",
     "hermes",
     "openclaw",
+    "cursor-agent",
 )
 
 # Thread/headless accepts opencode through its launch seam. agy and gemini are

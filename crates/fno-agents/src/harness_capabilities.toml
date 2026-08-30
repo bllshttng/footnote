@@ -4,7 +4,7 @@
 # resync BOTH copies, not just the first:
 #   bash scripts/ci/check-harness-capabilities-fresh.sh --write
 # scripts/ci/check-harness-capabilities-fresh.sh fails CI when any copy differs.
-map_version = 13
+map_version = 14
 
 [harness.claude]
 permission_bypass = ["--dangerously-skip-permissions"]
@@ -699,6 +699,83 @@ tokens = ["pi", "--session-id", "{session_id}"]
 # `direct` here would be a spelling borrowed from codex rather than a fact about
 # pi. The rpc lane's own driver reaches `set_model` directly.
 [harness.pi.model_switch_strategy]
+kind = "unsupported"
+tokens = []
+effort_labels = {}
+status_command = ""
+status_pattern = ""
+
+# cursor-agent is a pane-only fno harness. Its --print stream-json mode is
+# output-only: it has no input-format, rpc, acp, serve, or stdio drive lane.
+[harness.cursor-agent]
+permission_bypass = ["--force"]
+resume = "native-session"
+thread = false
+autonomous_pane = false
+route_on_pane = false
+loop_participation = "extension"
+# hooks.json has a stop command, but this run did not capture a positive hook
+# firing marker. Keep looping dispatch refused until that boundary is proven.
+loop_extension = ""
+command_surface = "slash"
+slash_prefix = ""
+ready_marker = "idle_follow_up"
+ready_rule_ids = ["idle_follow_up"]
+manifest_rules = [{ id = "idle_follow_up", state = "idle" }]
+# Three 6KB-class / 43-line pastes followed immediately by Enter all returned
+# their marker with the composer clear; a single-line control also returned.
+# This is the live pane measurement, so the delay is 0 rather than a borrowed
+# default. The observed idle marker was `→ Add a follow-up`; working screens
+# carried a braille spinner and `Working` or `Running`.
+send_keys_enter_delay_ms = 0
+submit_keys = ["enter"]
+# Stop is pane teardown; remove also runs cursor-agent's detached worker-server
+# reaper before deleting the registry row.
+stop_strategy = "registry-noop"
+remove_strategy = "registry-only"
+session_binding = { strategy = "callee-minted-read-back", required = true, timeout_ms = 60000 }
+
+[harness.cursor-agent.state_root_grant]
+pane = "argv-add-dir"
+thread = "unmeasured"
+headless = "unmeasured"
+
+[harness.cursor-agent.permission_response.allow_once]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.permission_response.allow_always]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.permission_response.deny]
+supported = false
+rule_ids = []
+keys = []
+
+[harness.cursor-agent.resume_strategy.forms.interactive_create]
+kind = "flag"
+tokens = ["cursor-agent", "--resume", "{session_id}"]
+
+[harness.cursor-agent.resume_strategy.forms.interactive_resume]
+kind = "flag"
+tokens = ["cursor-agent", "--resume", "{session_id}"]
+
+[harness.cursor-agent.resume_strategy.forms.interactive_attach]
+kind = "flag"
+tokens = ["cursor-agent", "--resume", "{session_id}", "--trust"]
+
+[harness.cursor-agent.resume_strategy.forms.headless_create]
+kind = "unsupported"
+tokens = []
+
+[harness.cursor-agent.resume_strategy.forms.headless_resume]
+kind = "unsupported"
+tokens = []
+
+[harness.cursor-agent.model_switch_strategy]
 kind = "unsupported"
 tokens = []
 effort_labels = {}
