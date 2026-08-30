@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import sys
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -60,6 +60,7 @@ def test_cursor_agent_create_chat_reads_one_line_then_kills_process(monkeypatch)
     class FakeProcess:
         def __init__(self):
             self.stdout = os.fdopen(read_fd, "rb")
+            self.stderr = None
             self.killed = False
             self.waited = False
 
@@ -78,6 +79,47 @@ def test_cursor_agent_create_chat_reads_one_line_then_kills_process(monkeypatch)
     assert process.waited
 
 
+def test_cursor_agent_create_chat_keeps_stderr_out_of_uuid_stream(monkeypatch):
+    from fno.agents.harnesses import cursor_agent
+
+    stdout_read, stdout_write = os.pipe()
+    stderr_read, stderr_write = os.pipe()
+    os.write(stdout_write, b"fadad56b-8008-45f5-b809-f9fab7074534\n")
+    os.write(stderr_write, b"warning before uuid\n")
+    os.close(stdout_write)
+    os.close(stderr_write)
+
+    class FakeProcess:
+        def __init__(self):
+            self.stdout = os.fdopen(stdout_read, "rb")
+            self.stderr = os.fdopen(stderr_read, "rb")
+            self.killed = False
+
+        def kill(self):
+            self.killed = True
+
+        def wait(self, timeout):
+            return -9
+
+    process = FakeProcess()
+    captured = {}
+
+    def fake_popen(*args, **kwargs):
+        captured.update(kwargs)
+        return process
+
+    monkeypatch.setattr(cursor_agent, "_subprocess_popen", fake_popen)
+
+    assert cursor_agent.create_chat("/tmp") == "fadad56b-8008-45f5-b809-f9fab7074534"
+    assert captured["stderr"] is subprocess.PIPE
+
+
+def test_cursor_agent_registry_session_id_mapping_is_explicit():
+    from fno.agents.registry import HARNESS_SESSION_ID_FIELDS
+
+    assert HARNESS_SESSION_ID_FIELDS["cursor-agent"] == "harness_session_id"
+
+
 def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():
     from fno.agents.mux_spawn import build_pane_argv
 
@@ -88,6 +130,22 @@ def test_cursor_agent_pane_argv_is_trusted_and_never_native_worktree():
     assert "--trust" in argv
     assert chat_id in argv
     assert not any(token in {"-w", "--worktree", "--worktree-base"} for token in argv)
+
+
+@pytest.mark.parametrize("flag", ["-w", "--worktree", "--worktree-base"])
+def test_cursor_agent_refuses_native_worktree_passthrough(flag):
+    from fno.agents.mux_spawn import DispatchAskError, build_pane_argv
+
+    chat_id = "fadad56b-8008-45f5-b809-f9fab7074534"
+    with pytest.raises(DispatchAskError, match="native worktree"):
+        build_pane_argv(
+            "cursor-agent",
+            "",
+            Path("/tmp/worktree"),
+            False,
+            chat_id,
+            passthrough=[flag, "native"],
+        )
 
 
 def test_cursor_agent_permission_and_effort_mappings_fail_closed():
@@ -111,52 +169,17 @@ def test_cursor_agent_native_worktree_location_is_forbidden():
     assert "~/.cursor/worktrees" in rule
 
 
-def test_cursor_agent_reaps_detached_worker_server(monkeypatch):
+def test_cursor_agent_worker_server_selector_is_exclusive_to_owner_tree():
     from fno.agents.harnesses import cursor_agent
 
-    class FakeProcess:
-        pid = 731
+    rows = [
+        (100, 1, "/bin/zsh"),
+        (200, 100, "/Users/test/cursor-agent worker-server"),
+        (300, 999, "/Users/test/cursor-agent worker-server"),
+        (400, 200, "/Users/test/cursor-agent worker-server"),
+    ]
 
-        def __init__(self):
-            self.info = {
-                "cmdline": [
-                    "/Users/test/.local/share/cursor-agent/index.js",
-                    "worker-server",
-                ]
-            }
-            self.terminated = False
-
-        def terminate(self):
-            self.terminated = True
-
-        def wait(self, timeout):
-            assert timeout == 2
-            assert self.terminated
-
-    process = FakeProcess()
-
-    class FakePsutil:
-        class AccessDenied(Exception):
-            pass
-
-        class NoSuchProcess(Exception):
-            pass
-
-        class ZombieProcess(Exception):
-            pass
-
-        class TimeoutExpired(Exception):
-            pass
-
-        @staticmethod
-        def process_iter(attrs):
-            assert attrs == ["cmdline"]
-            return [process]
-
-    monkeypatch.setitem(sys.modules, "psutil", FakePsutil)
-
-    assert cursor_agent.reap_detached_worker_servers() == 1
-    assert process.terminated
+    assert cursor_agent.select_owned_worker_server_pids(rows, owner_pid=100) == [200, 400]
 
 
 def test_cursor_agent_is_named_in_spawn_help():

@@ -4380,6 +4380,17 @@ def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
     mux = existing.mux or {}
     session = mux.get("session")
     pane_id = mux.get("pane_id")
+    from fno.agents.harnesses.cursor_agent import (
+        capture_detached_worker_servers,
+        reap_detached_worker_servers,
+    )
+
+    try:
+        worker_servers = capture_detached_worker_servers(
+            existing.pid, existing.pid_start_time
+        )
+    except RuntimeError as exc:
+        raise DispatchAskError(str(exc), exit_code=1) from exc
     if session and pane_id is not None:
         try:
             result = subprocess.run(
@@ -4399,10 +4410,8 @@ def _stop_cursor_agent(name: str, existing: AgentEntry) -> StopResult:
                 raise DispatchAskError(
                     f"cursor-agent pane teardown failed for {name!r}: {detail}", exit_code=1
                 )
-    from fno.agents.harnesses.cursor_agent import reap_detached_worker_servers
-
     try:
-        reaped = reap_detached_worker_servers()
+        reaped = reap_detached_worker_servers(worker_servers)
     except RuntimeError as exc:
         raise DispatchAskError(str(exc), exit_code=1) from exc
     _mark_stopped_orphaned(name, existing)
@@ -4683,10 +4692,16 @@ def _teardown_harness_session(
         return None
 
     if harness == "cursor-agent":
-        from fno.agents.harnesses.cursor_agent import reap_detached_worker_servers
+        from fno.agents.harnesses.cursor_agent import (
+            capture_detached_worker_servers,
+            reap_detached_worker_servers,
+        )
 
         try:
-            reaped = reap_detached_worker_servers()
+            worker_servers = capture_detached_worker_servers(
+                existing.pid, existing.pid_start_time
+            )
+            reaped = reap_detached_worker_servers(worker_servers)
         except RuntimeError as exc:
             return _fail(str(exc), exit_code=1)
         print(

@@ -1332,13 +1332,21 @@ fn cascade_harness_session_result_with(
                 Err((_, reason)) => CascadeOutcome::Failed(reason),
             }
         }
-        "cursor-agent" => match crate::cursor_agent::reap_detached_worker_servers() {
-            Ok(0) => CascadeOutcome::AlreadyAbsent(
-                "cursor-agent worker-server was already absent".into(),
-            ),
-            Ok(_count) => CascadeOutcome::Removed,
-            Err(reason) => CascadeOutcome::Failed(reason),
-        },
+        "cursor-agent" => {
+            let handles =
+                match crate::cursor_agent::capture_detached_worker_servers(e.pid, e.pid_start_time)
+                {
+                    Ok(handles) => handles,
+                    Err(reason) => return CascadeOutcome::Failed(reason),
+                };
+            match crate::cursor_agent::reap_detached_worker_servers(&handles) {
+                Ok(0) => CascadeOutcome::AlreadyAbsent(
+                    "cursor-agent worker-server was already absent".into(),
+                ),
+                Ok(_count) => CascadeOutcome::Removed,
+                Err(reason) => CascadeOutcome::Failed(reason),
+            }
+        }
         _ => CascadeOutcome::NotApplicable,
     }
 }

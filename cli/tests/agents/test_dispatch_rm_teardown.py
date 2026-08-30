@@ -294,7 +294,12 @@ CURSOR_CHAT = "fadad56b-8008-45f5-b809-f9fab7074534"
 
 def test_cursor_agent_rm_reaps_detached_worker_server(isolated_state, monkeypatch, capsys):
     _seed("cursor", harness="cursor-agent", session_id=CURSOR_CHAT, cwd=isolated_state)
-    monkeypatch.setattr(cursor_agent_mod, "reap_detached_worker_servers", lambda: 1)
+    monkeypatch.setattr(
+        cursor_agent_mod,
+        "capture_detached_worker_servers",
+        lambda owner_pid, owner_pid_start_time: (),
+    )
+    monkeypatch.setattr(cursor_agent_mod, "reap_detached_worker_servers", lambda handles: 1)
 
     rm_agent("cursor")
 
