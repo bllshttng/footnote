@@ -109,6 +109,11 @@ _AMBIENT_NAMES: tuple[str, ...] = (
     "TASK_LOCK_TTL_HOURS",
     "POST_MERGE_NONINTERACTIVE",
     "MCP_CHANNEL_INBOUND_POKE",
+    # CI transport state, never developer intent: the push-event sha the
+    # hook-tombstones base resolver falls back to. A test wanting a base
+    # revision passes --base; inheriting the runner's push context would
+    # make the gate read a range no local run chose.
+    "GITHUB_EVENT_BEFORE",
     # Credentials, connections and provider ROUTE. No test in this suite should
     # reach a real provider or database; if one does, it must fail rather than
     # succeed against the developer's account.
