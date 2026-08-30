@@ -145,19 +145,10 @@ def classify(
         # corroboration. The shared shape reads SUSPECT, not STALE: the pid
         # proves the daemon lives, which is neither holder-live nor holder-dead,
         # so the sweep's secondary instruments settle it.
-        corroborated = (
-            claim.pid_provenance == "session-prover"
-            and pid_exclusive is not False
-            and is_live(claim)
-        )
-        if corroborated:
+        if claim.pid_provenance == "session-prover" and is_live(claim):
+            if pid_exclusive is False:
+                return ClaimState.SUSPECT
             return ClaimState.LIVE
-        if (
-            claim.pid_provenance == "session-prover"
-            and pid_exclusive is False
-            and is_live(claim)
-        ):
-            return ClaimState.SUSPECT
         return ClaimState.STALE
     if claim.expires_at is None:
         return ClaimState.LIVE if is_live(claim) else ClaimState.STALE

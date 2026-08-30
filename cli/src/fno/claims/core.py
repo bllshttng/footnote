@@ -1436,9 +1436,11 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
-def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], set[str]]:
+def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], dict[str, Path]]:
     """Sweep-time PID-exclusivity evidence: which distinct holders each
-    ``(machine, pid)`` pair names across the swept roots.
+    ``(machine, pid)`` pair names across the swept roots, with one claim
+    file per holder so the mutex re-verify can re-read just the siblings
+    (see :func:`_pid_exclusive_rechecked`).
 
     The property a single claim cannot carry: a pid identifies a session only
     when it is the ONLY holder it answers for. A daemon-hosted substrate
@@ -1458,7 +1460,7 @@ def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], set[str]]:
     A claim that cannot be read contributes no holder; the sweep's own
     corrupted/vanished bucketing already reports those files.
     """
-    holders: dict[tuple[str, int], set[str]] = {}
+    holders: dict[tuple[str, int], dict[str, Path]] = {}
     for cdir in dirs:
         if not cdir.is_dir():
             continue
@@ -1472,13 +1474,13 @@ def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], set[str]]:
             if claim.pid is None:
                 continue
             holders.setdefault(
-                (claim.machine_id or claim.host, claim.pid), set()
-            ).add(claim.holder)
+                (claim.machine_id or claim.host, claim.pid), {}
+            )[claim.holder] = entry
     return holders
 
 
 def _pid_exclusive(
-    claim: Claim, holder_map: dict[tuple[str, int], set[str]]
+    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
 ) -> Optional[bool]:
     """Does the claim's pid name exactly one distinct holder?
 
@@ -1493,6 +1495,34 @@ def _pid_exclusive(
     if named is None:
         return None
     return len(named) <= 1
+
+
+def _pid_exclusive_rechecked(
+    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
+) -> Optional[bool]:
+    """Mutex-time exclusivity for one claim: re-read ONLY this pid's sibling
+    files the scan map named, never the whole store.
+
+    The one direction that can flip a verdict under the recovery mutex is a
+    sibling going away (shared -> exclusive -> possibly LIVE, must not
+    archive) or being replaced by a different holder, and both are answered
+    by those few files. A sibling APPEARING cannot matter here: a claim the
+    scan read as exclusive corroborated to LIVE and never became a reap
+    candidate in this sweep. An unreadable sibling no longer names a holder,
+    which is the going-away case.
+    """
+    if claim.pid is None:
+        return None
+    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
+    if named is None:
+        return None
+    holders: set[str] = set()
+    for path in named.values():
+        try:
+            holders.add(read_claim_file(path).holder)
+        except Exception:  # noqa: BLE001 - a vanished/unreadable sibling stops naming a holder
+            continue
+    return len(holders) <= 1
 
 
 def sweep_verdict(
@@ -1778,14 +1808,14 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    # Rebuild the sibling map here too, for the same TOCTOU
+                    # Re-verify exclusivity here too, for the same TOCTOU
                     # reason as the fresh read: a sibling released since the
                     # scan flips this pid back to exclusive, and a recreated
                     # one flips it shared, and the archive decision must ride
-                    # the property as it stands UNDER the lock.
-                    fresh_map = _pid_holder_map(use_dirs)
+                    # the property as it stands UNDER the lock. The recheck
+                    # re-reads only this pid's sibling files, not the store.
                     fresh_dead, fresh_bucket = _sweep_verdict(
-                        fresh, _pid_exclusive(fresh, fresh_map)
+                        fresh, _pid_exclusive_rechecked(fresh, holder_map)
                     )
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
