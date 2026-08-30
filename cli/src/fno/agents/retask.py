@@ -1,6 +1,7 @@
 """Read-only planning for reusing one mux worker on its existing node."""
 from __future__ import annotations
 
+import json
 import io
 import re
 import subprocess
@@ -34,6 +35,104 @@ class RetaskCoordinate:
     permission_mode: Optional[str]
     route: Optional[str]
     account: Optional[str]
+
+
+def _source_node_for_entry(entry: AgentEntry) -> tuple[Optional[dict], Optional[str]]:
+    """Join a live registry row to exactly one graph session entry."""
+    from fno.graph.load import load_graph
+
+    session_id = entry.harness_session_id
+    if not session_id:
+        return None, "source_node_unresolved"
+    matches = [
+        node
+        for node in load_graph()
+        for session in node.get("sessions", [])
+        if isinstance(session, dict)
+        and session.get("harness") == entry.harness
+        and session.get("session_id") == session_id
+    ]
+    if not matches:
+        return None, "source_node_unresolved"
+    if len(matches) > 1:
+        return None, "source_node_ambiguous"
+    return matches[0], None
+
+
+def _source_preflight(entry: AgentEntry) -> dict:
+    """Return a positive source/PR authorization before any pane mutation."""
+    try:
+        source, reason = _source_node_for_entry(entry)
+    except Exception as exc:  # unreadable graph evidence cannot authorize clear
+        return {"status": "refused", "reason": "source_node_unresolved", "error": str(exc)}
+    if source is None:
+        return {"status": "refused", "reason": reason or "source_node_unresolved"}
+
+    pr_number = source.get("pr_number")
+    if pr_number is None:
+        return {"status": "ready", "source_node_id": source.get("id")}
+
+    try:
+        result = subprocess.run(
+            ["fno", "do", "pr", "status", str(pr_number), "--refresh"],
+            cwd=source.get("cwd") or None,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        payload = json.loads(result.stdout.strip().splitlines()[-1])
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired) as exc:
+        return {
+            "status": "refused",
+            "reason": "source_pr_status_unknown",
+            "source_node_id": source.get("id"),
+            "pr": pr_number,
+            "error": str(exc),
+        }
+
+    state = str(payload.get("pr_state") or payload.get("state") or "").upper()
+    if state in {"MERGED", "CLOSED"} or (state == "OPEN" and payload.get("green") is True):
+        return {
+            "status": "ready",
+            "source_node_id": source.get("id"),
+            "source_pr": pr_number,
+            "pr_state": state,
+        }
+    if state == "OPEN":
+        return {
+            "status": "refused",
+            "reason": "source_pr_not_green",
+            "source_node_id": source.get("id"),
+            "pr": pr_number,
+            "head": payload.get("head_sha") or payload.get("head"),
+            "verdict": payload.get("verdict"),
+            "blockers": payload.get("checks"),
+        }
+    return {
+        "status": "refused",
+        "reason": "source_pr_status_unknown",
+        "source_node_id": source.get("id"),
+        "pr": pr_number,
+        "verdict": payload.get("verdict"),
+    }
+
+
+def _transition_receipt(value: object, predecessor: str) -> Optional[dict]:
+    """Normalize x-dfe7's structured transition receipt at the consumer seam."""
+    if isinstance(value, str):
+        if value == predecessor:
+            return None
+        return {
+            "classification": "succession",
+            "predecessor_session_id": predecessor,
+            "current_session_id": value,
+            "registry_rows": 1,
+            "lineage_recorded": True,
+        }
+    if not isinstance(value, Mapping):
+        return None
+    return dict(value)
 
 
 def _flag_value(args: Sequence[str], *names: str) -> Optional[str]:
@@ -220,11 +319,12 @@ def execute_retask(
     node: str,
     read_frame: Callable[[], str],
     send: Callable[[str, bool], bool],
-    restamp: Callable[[], Optional[str]],
+    restamp: Callable[[], object],
     rename: Callable[[str], Optional[str]],
     project_tier: Callable[[str, str], None] = lambda _model, _effort: None,
     ready_frame: Optional[Callable[[str], Mapping[str, object]]] = None,
     settle: Callable[[], None] = lambda: None,
+    source_preflight: Optional[Callable[[AgentEntry], Mapping[str, object]]] = None,
 ) -> dict:
     """Run the bounded retask transaction through injected pane seams.
 
@@ -251,6 +351,10 @@ def execute_retask(
     desired_effort = target.effort or entry.effort
     if strategy["kind"] == "unsupported":
         return {**refusal, "reason": "unsupported_switch_strategy"}
+    if source_preflight is not None:
+        source = source_preflight(entry)
+        if source.get("status") != "ready":
+            return {**refusal, **source}
     planned = detect_retask(entry, target, node=node)
     if planned["outcome"] in {"spawn_required", "refused"}:
         return {**refusal, "reason": planned.get("reason", planned["outcome"])}
@@ -267,9 +371,25 @@ def execute_retask(
         return {**refusal, "reason": "pane_not_idle"}
     if not send("/clear", True):
         return {**refusal, "reason": "clear_not_confirmed"}
-    new_session = restamp()
-    if not new_session or new_session == entry.harness_session_id:
-        return {**refusal, "cleared": True, "reason": "session_not_restamped"}
+    predecessor = entry.harness_session_id or ""
+    transition = _transition_receipt(restamp(), predecessor)
+    if transition is None:
+        return {**refusal, "cleared": True, "reason": "session_transition_unconfirmed"}
+    if transition.get("classification") != "succession":
+        return {
+            **refusal,
+            "cleared": True,
+            "reason": transition.get("reason") or "session_transition_not_succession",
+        }
+    if transition.get("predecessor_session_id") != predecessor:
+        return {**refusal, "cleared": True, "reason": "clear_predecessor_mismatch"}
+    new_session = transition.get("current_session_id")
+    if not isinstance(new_session, str) or not new_session or new_session == predecessor:
+        return {**refusal, "cleared": True, "reason": "session_transition_unconfirmed"}
+    if transition.get("registry_rows") != 1:
+        return {**refusal, "cleared": True, "reason": "successor_row_count_invalid"}
+    if transition.get("lineage_recorded") is not True:
+        return {**refusal, "cleared": True, "reason": "successor_lineage_unrecorded"}
     renamed = rename(f"target-{node}")
     if not renamed:
         return {
@@ -418,6 +538,11 @@ def execute_retask(
         "switch_verified": True,
         "target_submit_confirmed": True,
         "registry_name": renamed,
+        "source_session_id": predecessor,
+        "current_session_id": new_session,
+        "transition": "succession",
+        "registry_rows": 1,
+        "lineage_recorded": True,
     }
 
 
@@ -445,6 +570,7 @@ def run_retask(
     pane = str(mux.get("pane_id"))
     renamed_name = [entry.name]
     restamped_session = [entry.harness_session_id]
+    clear_sent = [False]
 
     def read_frame() -> str:
         try:
@@ -477,6 +603,10 @@ def run_retask(
         except subprocess.TimeoutExpired as exc:
             raise RetaskTransportError("pane_wait_timeout") from exc
 
+    def settled_read() -> str:
+        settle()
+        return read_frame()
+
     def send(text: str, submit: bool) -> bool:
         command = [
             "fno", "mux", "pane", "send", "--session", session, pane,
@@ -488,15 +618,72 @@ def run_retask(
             result = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
         except subprocess.TimeoutExpired as exc:
             raise RetaskTransportError("pane_send_timeout") from exc
+        if text == "/clear" and submit and result.returncode == 0:
+            clear_sent[0] = True
         return result.returncode == 0
 
-    def restamp() -> Optional[str]:
+    def restamp() -> object:
+        clear_frame = settled_read()
+        predecessor = entry.harness_session_id or ""
+        match = re.search(
+            r"To continue this session, run codex resume (?P<predecessor>[^\s]+)",
+            clear_frame,
+        )
+        if match and match.group("predecessor") != predecessor:
+            return {
+                "classification": "deferred",
+                "reason": "clear_predecessor_mismatch",
+                "predecessor_session_id": match.group("predecessor"),
+            }
         for _ in range(40):
-            for candidate in load_registry(path=registry_path):
+            rows = load_registry(path=registry_path)
+            branch = next(
+                (
+                    candidate
+                    for candidate in rows
+                    if candidate.harness == entry.harness
+                    and candidate.forked_from_session_id == predecessor
+                    and candidate.harness_session_id
+                ),
+                None,
+            )
+            if branch is not None:
+                return {
+                    "classification": "branch",
+                    "reason": "session_transition_not_succession",
+                    "predecessor_session_id": predecessor,
+                    "current_session_id": branch.harness_session_id,
+                }
+            for candidate in rows:
                 if candidate.name == entry.name and candidate.harness_session_id:
-                    if candidate.harness_session_id != entry.harness_session_id:
+                    if candidate.harness_session_id != predecessor:
+                        if not match:
+                            return {
+                                "classification": "deferred",
+                                "reason": "clear_predecessor_unconfirmed",
+                                "predecessor_session_id": predecessor,
+                                "current_session_id": candidate.harness_session_id,
+                            }
                         restamped_session[0] = candidate.harness_session_id
-                        return candidate.harness_session_id
+                        if predecessor not in (candidate.predecessor_session_ids or []):
+                            return {
+                                "classification": "deferred",
+                                "reason": "successor_lineage_unrecorded",
+                                "predecessor_session_id": predecessor,
+                                "current_session_id": candidate.harness_session_id,
+                            }
+                        return {
+                            "classification": "succession",
+                            "predecessor_session_id": predecessor,
+                            "current_session_id": candidate.harness_session_id,
+                            "registry_rows": sum(
+                                1
+                                for row in load_registry(path=registry_path)
+                                if row.harness == entry.harness
+                                and row.harness_session_id == candidate.harness_session_id
+                            ),
+                            "lineage_recorded": True,
+                        }
             time.sleep(0.25)
         return None
 
@@ -542,6 +729,7 @@ def run_retask(
             project_tier=project_tier,
             ready_frame=ready_frame,
             settle=settle,
+            source_preflight=_source_preflight,
         )
     except RetaskTransportError as exc:
         # A timeout mid-transaction must not claim the pane is untouched: the
@@ -550,7 +738,7 @@ def run_retask(
         restamped = restamped_session[0] != entry.harness_session_id
         receipt = {
             "status": "refused",
-            "cleared": restamped,
+            "cleared": clear_sent[0] or restamped,
             "session_restamped": restamped,
             "switch": "not_started",
             "switch_verified": False,
