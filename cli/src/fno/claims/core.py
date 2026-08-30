@@ -1498,7 +1498,9 @@ def _pid_exclusive(
 
 
 def _pid_exclusive_rechecked(
-    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
+    claim: Claim,
+    holder_map: dict[tuple[str, int], dict[str, Path]],
+    archived_this_run: set[Path],
 ) -> Optional[bool]:
     """Mutex-time exclusivity for one claim: re-read ONLY this pid's sibling
     files the scan map named, never the whole store.
@@ -1508,8 +1510,15 @@ def _pid_exclusive_rechecked(
     archive) or being replaced by a different holder, and both are answered
     by those few files. A sibling APPEARING cannot matter here: a claim the
     scan read as exclusive corroborated to LIVE and never became a reap
-    candidate in this sweep. An unreadable sibling no longer names a holder,
-    which is the going-away case.
+    candidate in this sweep.
+
+    Two going-away shapes differ. A sibling ARCHIVED BY THIS SWEEP was
+    sharing evidence when the set was judged non-exclusive, and the survivor
+    must keep reading it that way - otherwise apply drains one member per
+    sweep while the dry run promised N, and each survivor becomes the sole
+    record for the pid and lives forever (ab-6d5afbde). Any OTHER absent
+    sibling (its holder's own release, a concurrent recovery) genuinely
+    stops naming a holder.
     """
     if claim.pid is None:
         return None
@@ -1517,7 +1526,10 @@ def _pid_exclusive_rechecked(
     if named is None:
         return None
     holders: set[str] = set()
-    for path in named.values():
+    for holder, path in named.items():
+        if path in archived_this_run:
+            holders.add(holder)
+            continue
         try:
             holders.add(read_claim_file(path).holder)
         except Exception:  # noqa: BLE001 - a vanished/unreadable sibling stops naming a holder
@@ -1716,8 +1728,11 @@ def reap_dead_claims(
     contended = 0
     reap_failed: list[tuple[str, str]] = []
     # Node ids whose claims this run archived (confirmed re-reads only), for
-    # the lock-mirror clear after the loop.
+    # the lock-mirror clear after the loop; and the archived files
+    # themselves, which stay sharing evidence for their pid's surviving
+    # claims for the rest of THIS sweep (see _pid_exclusive_rechecked).
     settled_nodes: list[str] = []
+    archived_paths: set[Path] = set()
 
     def _read_or_bucket(entry: Path) -> Optional[Claim]:
         """Read one claim file for the sweep, or bucket why it can't be read.
@@ -1813,9 +1828,12 @@ def reap_dead_claims(
                     # scan flips this pid back to exclusive, and a recreated
                     # one flips it shared, and the archive decision must ride
                     # the property as it stands UNDER the lock. The recheck
-                    # re-reads only this pid's sibling files, not the store.
+                    # re-reads only this pid's sibling files, not the store,
+                    # and counts siblings archived by THIS run as still
+                    # sharing (a drained set stays drained in one sweep).
                     fresh_dead, fresh_bucket = _sweep_verdict(
-                        fresh, _pid_exclusive_rechecked(fresh, holder_map)
+                        fresh,
+                        _pid_exclusive_rechecked(fresh, holder_map, archived_paths),
                     )
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
@@ -1847,6 +1865,7 @@ def reap_dead_claims(
                         # would make entry.exists() true again with no
                         # bearing on whether the archive itself worked.
                         reaped += 1
+                        archived_paths.add(entry)
                         emit_claim_reaped(
                             fresh,
                             root=root_label,

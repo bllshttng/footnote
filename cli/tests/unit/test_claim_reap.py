@@ -930,6 +930,21 @@ class TestSharedPidExclusivity:
         assert summary["would_reap"] == 2
         assert summary["kept_live"] == 0
 
+    def test_apply_drains_the_whole_shared_set_not_one_member(self, tmp_path):
+        """The apply/dry parity the sweep owes a shared set: archiving one
+        member must not flip its twins pid-exclusive mid-sweep. A sibling THIS
+        sweep archived was sharing evidence when the set was judged
+        non-exclusive, and the survivor's re-verify must keep reading it that
+        way - or the dry run says 2, apply archives 1, and the survivor
+        becomes the sole record for the pid and lives forever."""
+        self._expired_prover_on_disk(tmp_path, "node:x-one", "target-session:s1")
+        self._expired_prover_on_disk(tmp_path, "node:x-two", "target-session:s2")
+        summary = reap_dead_claims(
+            roots=[tmp_path], apply=True, abandonment_probe=lambda _c: True
+        )
+        assert summary["reaped"] == 2
+        assert summary["kept_live"] == 0
+
     def test_a_shared_pid_claim_whose_holder_is_working_is_kept(self, tmp_path):
         """The same shape with a live worker positively found on the node:
         kept as suspect-alive, and an apply run archives nothing."""
