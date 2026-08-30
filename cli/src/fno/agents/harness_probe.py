@@ -18,6 +18,7 @@ from typing import Callable, Literal, Sequence
 import typer
 
 Status = Literal["pass", "fail", "skip"]
+PROBE_TIMEOUT_S = 5.0
 
 
 @dataclass(frozen=True)
@@ -120,7 +121,16 @@ def _repo_root(repo_root: Path | None) -> Path:
 
 def run_instrument(command: Sequence[str], *, cwd: Path) -> tuple[int, str]:
     """Run one instrument directly so its return code remains observable."""
-    result = subprocess.run(command, cwd=cwd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, f"command timed out after {PROBE_TIMEOUT_S:g}s: {command[0]}"
     return result.returncode, (result.stdout + result.stderr).strip()
 
 
@@ -192,13 +202,26 @@ def run_probe(harness: str, *, live: bool, repo_root: Path | None = None) -> dic
         return {"harness": harness, "live": False, "argv": [harness], "lines": [asdict(line) for line in lines]}
     # Live execution is opt-in. Credential-gated harnesses are skipped with an
     # operator action instead of being misreported as failed support.
-    credential = subprocess.run([harness, "status", "--format", "json"], capture_output=True, text=True)
     try:
-        authenticated = bool(json.loads(credential.stdout).get("isAuthenticated"))
+        credential = subprocess.run(
+            [harness, "status", "--format", "json"],
+            capture_output=True,
+            text=True,
+            timeout=PROBE_TIMEOUT_S,
+        )
+        credential_detail = credential.stdout or credential.stderr
+    except subprocess.TimeoutExpired:
+        credential = None
+        credential_detail = f"status probe timed out after {PROBE_TIMEOUT_S:g}s"
+    try:
+        authenticated = bool(json.loads(credential.stdout).get("isAuthenticated")) if credential else False
     except (json.JSONDecodeError, AttributeError):
-        authenticated = credential.returncode == 0
+        authenticated = bool(credential and credential.returncode == 0)
     if not authenticated:
-        lines = [LineVerdict(name, "skip", marker, detail=f"credential required: run {harness} login") for name, marker in (("SPAWN", "registry row"), ("IDENTITY", "cross-process recall nonce"), ("CLAIM", "live claim holder"), ("MAIL BOTH WAYS", "worker response to sent message"), ("VIEW", "harness-owned screen"), ("SURVIVE", "prior turn after process stop"), ("ROW MATCHES", "honesty sweep and three-copy freshness"), ("MANIFEST PINNED", "live readiness-grid capture"))]
+        action = f"credential required: run {harness} login"
+        if credential_detail and "timed out" in credential_detail:
+            action = f"{credential_detail}; verify credentials before retrying"
+        lines = [LineVerdict(name, "skip", marker, detail=action) for name, marker in (("SPAWN", "registry row"), ("IDENTITY", "cross-process recall nonce"), ("CLAIM", "live claim holder"), ("MAIL BOTH WAYS", "worker response to sent message"), ("VIEW", "harness-owned screen"), ("SURVIVE", "prior turn after process stop"), ("ROW MATCHES", "honesty sweep and three-copy freshness"), ("MANIFEST PINNED", "live readiness-grid capture"))]
     else:
         root = _repo_root(repo_root)
         lines = _dry_run_lines(harness)
@@ -223,6 +246,8 @@ def harness_probe_command(
     report = run_probe(harness, live=live)
     if json_out:
         typer.echo(json.dumps(report))
+        if any(item["status"] == "fail" for item in report["lines"]):
+            raise typer.Exit(1)
         return
     typer.echo(f"fno doctor harness {harness} ({'live' if live else 'dry run'})")
     for item in report["lines"]:
