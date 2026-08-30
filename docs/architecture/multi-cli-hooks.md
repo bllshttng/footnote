@@ -221,6 +221,14 @@ Because agy's transcript would be skipped by loop-check's `role=="assistant"` fi
 
 The remaining build-time unknown is agy's exact `transcript.jsonl` line schema; the synthesizer handles the documented-likely shapes and skips anything it can't parse (safe: no promise detected → keep working). A captured sample will tighten the filter.
 
+## Hook Script Retirement (one-release tombstones)
+
+The harness reads hook config once at session start and answers from that snapshot for the session's life. A commit that deletes a hook script while unregistering it leaves the repo self-consistent but bricks every session started before the merge: the cached registration points at a missing file, and because the dead entry sits on the Bash PreToolUse matcher, a hook that cannot launch fails the whole tool call. One missing file removed every shell verb at once for three live sessions on 2026-08-29, including the verbs needed to diagnose it.
+
+Retiring a hook script is therefore two steps across two releases. First, remove its config entry and keep the file on disk as a no-op stub (exit 0). Second, in a later release, delete the stub; by then every session still holding the old registration has ended. `fno doctor lint hook-tombstones` (wired into the `guards` CI job) fails any commit that deletes a script the base revision's hook config referenced, so the one-commit version of a retirement cannot merge.
+
+If a session is already bricked, the recovery needs no shell: write to any watched settings file, for example a whitespace-only edit to `~/.claude/settings.json`. The settings write forces a hook-config reload, which drops the dead registration, and the next identical Bash call succeeds. Editing files still works while Bash is bricked, which is what makes this escape hatch reachable. Do not repair the symptom by recreating the retired script by hand in a shared checkout; an untracked resurrection of a retired hook is a landmine for the next `git add -A`, and the tracked stub above is the durable replacement.
+
 ## Graceful Degradation
 
 | Feature | Claude Code | Gemini/Codex |
