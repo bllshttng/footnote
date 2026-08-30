@@ -7,6 +7,7 @@ receipt.
 """
 from __future__ import annotations
 
+import io
 import json
 import select
 import subprocess
@@ -38,6 +39,20 @@ def is_auth_error(text: str) -> bool:
     """
     lowered = text.lower()
     return any(marker in lowered for marker in AUTH_MARKERS)
+
+
+def _error_detail(error: dict[str, Any], sep: str) -> str:
+    """Join an ACP error's message and data so both reach the caller.
+
+    `message` is a bare category ("Rate limited"); `data` carries the cause a
+    caller can act on ("subscription:free-usage-exhausted"). Keeping only
+    `message` reads a billing stop as an unexplained failure, which is the
+    wrong thing to page someone about. One join for every raiser, so the two
+    extraction sites cannot drift the way the auth predicate once did.
+    """
+    return sep.join(
+        str(part) for part in (error.get("message", error), error.get("data")) if part
+    )
 
 
 class GrokAuthenticationRequired(DispatchAskError):
@@ -171,8 +186,19 @@ class GrokStdioSession:
     def send(self, message: dict[str, Any]) -> None:
         if self.proc is None or self.proc.stdin is None:
             raise RuntimeError("grok ACP session is not started")
-        self.proc.stdin.write((json.dumps(message) + "\n").encode())
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write((json.dumps(message) + "\n").encode())
+            self.proc.stdin.flush()
+        except BrokenPipeError as exc:
+            # A dead child must fail typed: dispatch branches on exit codes,
+            # and this is the one write path where a raw OSError would escape
+            # that contract as an untyped traceback.
+            code = self.proc.poll()
+            raise DispatchAskError(
+                f"grok ACP child is gone (broken pipe, code {code}); "
+                f"stderr: {self.stderr_text or '<empty>'}",
+                exit_code=code if code else 1,
+            ) from exc
 
     def events(self) -> Iterator[dict[str, Any]]:
         if self.proc is None or self.proc.stdout is None:
@@ -180,6 +206,14 @@ class GrokStdioSession:
         if self._events is not None:
             return self._events
         stdout = self.proc.stdout
+        if not isinstance(stdout, io.BufferedReader):
+            # Popen(PIPE) yields a BufferedReader; a stream without read1
+            # cannot be bounded, and an unbounded read is the defect this
+            # module bans. Refuse the shape; never fall back to it.
+            raise RuntimeError(
+                f"grok ACP stdout is not a BufferedReader, so the read "
+                f"cannot be bounded; stderr: {self.stderr_text or '<empty>'}"
+            )
 
         def _chunks() -> Iterator[bytes]:
             while True:
@@ -207,7 +241,7 @@ class GrokStdioSession:
                         ) from exc
                     if not ready:
                         raise self._read_timeout()
-                chunk = stdout.read1(65536) if hasattr(stdout, "read1") else stdout.read(65536)
+                chunk = stdout.read1(65536)
                 if not chunk:
                     return
                 yield chunk
@@ -227,6 +261,20 @@ class GrokStdioSession:
         self._read_deadline = time.monotonic() + GROK_REQUEST_TIMEOUT_S
         self.send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
         for message in self.events():
+            # A response has id and no method. A server-to-client request
+            # (session/request_permission and friends) also carries an id, so
+            # keying on the id alone either swallows it into notifications,
+            # leaving grok blocked awaiting a permission until the deadline
+            # reads as "read exceeded", or, on an id collision, returns the
+            # server's request as the response to ours.
+            if "method" in message and message.get("id") is not None:
+                self.notifications.append(message)
+                raise RuntimeError(
+                    f"grok ACP sent server-to-client request "
+                    f"{message.get('method')!r} (id {message.get('id')}) during "
+                    f"{method!r}; fno answers no server requests yet; "
+                    f"stderr: {self.stderr_text or '<empty>'}"
+                )
             if message.get("id") == request_id:
                 return message
             self.notifications.append(message)
@@ -239,15 +287,7 @@ class GrokStdioSession:
     def result(response: dict[str, Any], method: str) -> dict[str, Any]:
         error = response.get("error")
         if isinstance(error, dict):
-            # `message` is a bare category ("Rate limited"); `data` carries the
-            # cause a caller can act on ("subscription:free-usage-exhausted").
-            # Keeping only `message` reads a billing stop as an unexplained
-            # failure, which is the wrong thing to page someone about.
-            detail = " ".join(
-                str(part)
-                for part in (error.get("message", error), error.get("data"))
-                if part
-            )
+            detail = _error_detail(error, " ")
             raise RuntimeError(f"grok ACP {method} failed: {detail}")
         result = response.get("result")
         if not isinstance(result, dict):
@@ -271,9 +311,7 @@ class GrokStdioSession:
         response = self.request("session/new", session_new_params(self.cwd))
         error = response.get("error")
         if isinstance(error, dict):
-            detail = ": ".join(
-                str(part) for part in (error.get("message"), error.get("data")) if part
-            )
+            detail = _error_detail(error, " ")
             # Same predicate require_authenticated uses. The old exact match on
             # "Authentication required" dropped every other phrasing through to
             # result(), which raises a bare RuntimeError and loses exit 13.

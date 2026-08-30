@@ -26,6 +26,13 @@ def _driver():
 
 @pytest.mark.skipif(GROK is None, reason="grok binary is not on PATH")
 def test_AC4_HP_real_initialize_and_session_list_are_positive_markers(tmp_path):
+    """The real binary completes the ACP handshake and answers session/list.
+
+    Login-state-independent on purpose: `sessions` is a list both logged out
+    (empty) and logged in (the user's sessions), so an operator running
+    `grok login` cannot turn this test red with no code change. The typed
+    logged-out refusal is covered hermetically by test_review_P1.
+    """
     driver = _driver()
     session_id = str(uuid.uuid4())
     session = driver.GrokStdioSession(
@@ -39,12 +46,7 @@ def test_AC4_HP_real_initialize_and_session_list_are_positive_markers(tmp_path):
         assert session.proc is not None and session.proc.poll() is None
 
         listed = session.session_list()
-        assert listed["sessions"] == []
-
-        with pytest.raises(driver.GrokAuthenticationRequired) as refused:
-            session.session_new()
-        assert "grok login --device-code" in str(refused.value)
-        assert "Authentication required" in str(refused.value)
+        assert isinstance(listed.get("sessions"), list)
 
 
 @pytest.mark.skipif(GROK is None, reason="grok binary is not on PATH")
@@ -194,13 +196,15 @@ def test_review_P1_any_auth_phrasing_keeps_the_typed_exit_13(monkeypatch):
 def test_review_P2_a_silent_child_cannot_hang_the_read_forever(monkeypatch):
     """An unbounded stdout read is a hang, not a wait.
 
-    Driven with a child that never writes and never exits, which is exactly the
-    silent-grok shape: stdout stays open, so the old `while True: read1()` loop
-    blocked in initialize/session_new/prompt with no way out.
+    Driven with a child that never writes, which is exactly the silent-grok
+    shape: stdout stays open, so the old `while True: read1()` loop blocked in
+    initialize/session_new/prompt with no way out. The child (`cat` into
+    /dev/null) exits on stdin EOF, so close() reaps it instead of burning its
+    full wait timeout the way a `sleep` child forced.
     """
     driver = _driver()
     monkeypatch.setattr(driver, "GROK_REQUEST_TIMEOUT_S", 1.0)
-    session = driver.GrokStdioSession("sid", ".", argv=["sleep", "30"])
+    session = driver.GrokStdioSession("sid", ".", argv=["sh", "-c", "cat > /dev/null"])
     with session:
         with pytest.raises(RuntimeError) as hung:
             session.request("initialize", {})
@@ -208,12 +212,12 @@ def test_review_P2_a_silent_child_cannot_hang_the_read_forever(monkeypatch):
 
 
 def test_review_P2b_an_unwatchable_stream_refuses_instead_of_blocking(monkeypatch):
-    """The select fallback must not reopen the hang it was added to close.
+    """The select failure path must not reopen the hang it was added to close.
 
     The first version of the deadline guard caught OSError/ValueError from
     select and set `ready = [stdout]`, which left the blocking read1 reachable
     with the deadline already checked. Every path above it read as protected
-    while this one still hung forever. Round 2 of the PR 1286 review caught it.
+    while this one still hung forever. The second review round caught it.
     """
     import select as _select
 
@@ -224,7 +228,7 @@ def test_review_P2b_an_unwatchable_stream_refuses_instead_of_blocking(monkeypatc
         raise OSError(9, "Bad file descriptor")
 
     monkeypatch.setattr(_select, "select", _unwatchable)
-    session = driver.GrokStdioSession("sid", ".", argv=["sleep", "300"])
+    session = driver.GrokStdioSession("sid", ".", argv=["sh", "-c", "cat > /dev/null"])
     with session:
         started = time.monotonic()
         with pytest.raises(RuntimeError) as refused:
@@ -233,3 +237,81 @@ def test_review_P2b_an_unwatchable_stream_refuses_instead_of_blocking(monkeypatc
     # It must refuse promptly, not ride the 30s deadline and not block forever.
     assert elapsed < 5.0, f"refusal took {elapsed:.1f}s; it blocked"
     assert "cannot be bounded" in str(refused.value)
+
+
+def test_review_R3_a_server_request_is_never_read_as_the_response(monkeypatch):
+    """A server-to-client request (id + method) is not this request's response.
+
+    The matcher keyed on the id alone, so a session/request_permission was
+    either swallowed into notifications while grok blocked awaiting a
+    permission, or, when the ids collided, returned as the response to our
+    own request. Both shapes must refuse loudly instead.
+    """
+    driver = _driver()
+    session = driver.GrokStdioSession("sid", ".")
+    monkeypatch.setattr(session, "send", lambda message: None)
+
+    def _wire(frames):
+        stream = iter(frames)
+        monkeypatch.setattr(session, "events", lambda: stream)
+
+    # Distinct id: swallowed today, the turn hangs to the deadline.
+    _wire(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "session/request_permission",
+                "params": {},
+            }
+        ]
+    )
+    with pytest.raises(RuntimeError) as refused:
+        session.request("session/prompt", {})
+    assert "session/request_permission" in str(refused.value)
+    assert "fno answers no server requests" in str(refused.value)
+
+    # Id collision with our own request: returned as the response today.
+    session._request_id = 0
+    _wire(
+        [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "session/request_permission",
+                "params": {},
+            }
+        ]
+    )
+    with pytest.raises(RuntimeError) as collided:
+        session.request("session/prompt", {})
+    assert "fno answers no server requests" in str(collided.value)
+
+    # A real response past an unrelated notification still lands.
+    session._request_id = 0
+    _wire(
+        [
+            {"jsonrpc": "2.0", "method": "session/update", "params": {}},
+            {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}},
+        ]
+    )
+    assert session.request("session/prompt", {})["result"] == {"ok": True}
+    assert session.notifications[-1]["method"] == "session/update"
+
+
+def test_review_R3_send_to_a_dead_child_fails_typed():
+    """A broken pipe must raise the lane's typed error, never a raw OSError.
+
+    Dispatch branches on typed exit codes; the child dying between requests
+    left send() as the one path that escaped that contract with an untyped
+    BrokenPipeError traceback.
+    """
+    driver = _driver()
+    session = driver.GrokStdioSession("sid", ".", argv=["true"])
+    session.start()
+    assert session.proc is not None
+    session.proc.wait(timeout=5)
+    with pytest.raises(driver.DispatchAskError) as typed:
+        session.send({"jsonrpc": "2.0", "id": 1, "method": "x", "params": {}})
+    assert "broken pipe" in str(typed.value)
+    session.close()
