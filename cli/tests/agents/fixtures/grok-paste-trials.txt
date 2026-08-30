@@ -1,0 +1,13 @@
+# Measured 2026-08-29 with grok 1.0.13 in a tmux pane.
+# Each paste used the same generated payload shape: 6,330 UTF-8 bytes and 42 lines.
+# The command sent Enter 200 ms after tmux paste-buffer returned.
+payload_bytes=6330
+payload_lines=42
+paste_to_enter_delay_ms=200
+trial 1 SUBMITTED token=GROK_PANE_TOKEN_4 user_prompt_submit=yes model_reply=yes
+trial 2 SUBMITTED token=GROK_PANE_TOKEN_5 user_prompt_submit=yes model_reply=yes
+trial 3 SUBMITTED token=GROK_PANE_TOKEN_6 user_prompt_submit=yes model_reply=no reason="free usage limit"
+
+# A zero-delay control was not accepted consistently: two earlier pastes
+# replied, while the third remained in the composer until Enter was sent again.
+zero_delay_control submitted=2/3 model_reply=2/3
