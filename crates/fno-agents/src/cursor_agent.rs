@@ -6,6 +6,7 @@
 //! transcript store is remote, so reachability cannot be inferred from a local
 //! session file.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use crate::provider::{AgentEntry, Provider, ReachabilityProbeError, ResumeContext};
@@ -14,6 +15,12 @@ use crate::ParsedEvent;
 pub const CURSOR_AGENT_BINARY: &str = "cursor-agent";
 pub const CURSOR_AGENT_DEFAULT_PROVIDER: &str = "cursor";
 pub const CURSOR_AGENT_DEFAULT_MODEL: &str = "auto";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorWorkerServerHandle {
+    pub pid: u32,
+    pub start_time: u64,
+}
 
 pub fn cursor_agent_provider() -> String {
     std::env::var("FNO_CURSOR_AGENT_PROVIDER")
@@ -72,14 +79,54 @@ pub fn is_cursor_worker_server_command(command: &str) -> bool {
         && (command.contains("/cursor-agent/") || command.contains("cursor-agent"))
 }
 
-/// Reap Cursor's detached worker-server children after pane teardown.
-///
-/// The daemon is reparented, so killing the pane child alone does not remove
-/// it. The command-line identity is the only provider-owned marker available
-/// after reparenting; unrelated Node worker servers do not match.
-pub fn reap_detached_worker_servers() -> Result<usize, String> {
+pub fn select_owned_worker_server_pids(
+    process_rows: &[(u32, u32, String)],
+    owner_pid: u32,
+) -> Vec<u32> {
+    let mut children: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut commands: BTreeMap<u32, &str> = BTreeMap::new();
+    for (pid, parent_pid, command) in process_rows {
+        children.entry(*parent_pid).or_default().push(*pid);
+        commands.insert(*pid, command);
+    }
+
+    let mut descendants = BTreeSet::new();
+    let mut pending = vec![owner_pid];
+    while let Some(parent_pid) = pending.pop() {
+        for child_pid in children.get(&parent_pid).into_iter().flatten() {
+            if descendants.insert(*child_pid) {
+                pending.push(*child_pid);
+            }
+        }
+    }
+    descendants
+        .into_iter()
+        .filter(|pid| {
+            commands
+                .get(pid)
+                .is_some_and(|command| is_cursor_worker_server_command(command))
+        })
+        .collect()
+}
+
+/// Capture Cursor's detached worker-server children while the pane still
+/// proves their ownership. A command name alone is never a cleanup selector.
+pub fn capture_detached_worker_servers(
+    owner_pid: Option<u32>,
+    owner_pid_start_time: Option<u64>,
+) -> Result<Vec<CursorWorkerServerHandle>, String> {
+    let owner_pid = owner_pid
+        .ok_or_else(|| "cursor-agent worker-server ownership requires the pane pid".to_string())?;
+    let owner_pid_start_time = owner_pid_start_time.ok_or_else(|| {
+        "cursor-agent worker-server ownership requires the pane start time".to_string()
+    })?;
+    if crate::daemon::process_start_time(owner_pid) != Some(owner_pid_start_time) {
+        return Err(format!(
+            "cursor-agent pane ownership token did not match live pid {owner_pid}"
+        ));
+    }
     let output = std::process::Command::new("ps")
-        .args(["-axo", "pid=,command="])
+        .args(["-axo", "pid=,ppid=,command="])
         .output()
         .map_err(|error| format!("cursor-agent worker-server census failed: {error}"))?;
     if !output.status.success() {
@@ -88,40 +135,67 @@ pub fn reap_detached_worker_servers() -> Result<usize, String> {
             output.status.code().unwrap_or(-1)
         ));
     }
-    let mut pids = Vec::new();
+    let mut rows = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let mut fields = line.split_whitespace();
         let Some(pid) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
             continue;
         };
+        let Some(parent_pid) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
         let command = fields.collect::<Vec<_>>().join(" ");
-        if pid != std::process::id() as i32 && is_cursor_worker_server_command(&command) {
-            pids.push(pid);
+        if pid > 1 && parent_pid > 0 {
+            rows.push((pid as u32, parent_pid as u32, command));
         }
     }
-    for pid in &pids {
-        let result = unsafe { libc::kill(*pid, libc::SIGTERM) };
+    let mut handles = Vec::new();
+    for pid in select_owned_worker_server_pids(&rows, owner_pid) {
+        if let Some(start_time) = crate::daemon::process_start_time(pid) {
+            handles.push(CursorWorkerServerHandle { pid, start_time });
+        }
+    }
+    Ok(handles)
+}
+
+/// Reap only previously captured, start-token-pinned worker servers.
+pub fn reap_detached_worker_servers(handles: &[CursorWorkerServerHandle]) -> Result<usize, String> {
+    for handle in handles {
+        let Some(current_start) = crate::daemon::process_start_time(handle.pid) else {
+            continue;
+        };
+        if current_start != handle.start_time {
+            return Err(format!(
+                "cursor-agent worker-server pid {} identity changed",
+                handle.pid
+            ));
+        }
+        let result = unsafe { libc::kill(handle.pid as libc::pid_t, libc::SIGTERM) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
             if error.raw_os_error() != Some(libc::ESRCH) {
                 return Err(format!(
-                    "cursor-agent worker-server pid {pid} could not be terminated: {error}"
+                    "cursor-agent worker-server pid {} could not be terminated: {error}",
+                    handle.pid
                 ));
             }
         }
     }
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    for pid in &pids {
-        while unsafe { libc::kill(*pid, 0) } == 0 && std::time::Instant::now() < deadline {
+    for handle in handles {
+        while unsafe { libc::kill(handle.pid as libc::pid_t, 0) } == 0
+            && std::time::Instant::now() < deadline
+        {
             std::thread::sleep(Duration::from_millis(25));
         }
-        if unsafe { libc::kill(*pid, 0) } == 0 {
+        if unsafe { libc::kill(handle.pid as libc::pid_t, 0) } == 0 {
             return Err(format!(
-                "cursor-agent worker-server pid {pid} survived teardown"
+                "cursor-agent worker-server pid {} survived teardown",
+                handle.pid
             ));
         }
     }
-    Ok(pids.len())
+    Ok(handles.len())
 }
 
 pub fn attach_argv(chat_id: &str) -> Vec<String> {

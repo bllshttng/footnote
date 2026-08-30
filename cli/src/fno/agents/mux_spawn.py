@@ -1162,6 +1162,21 @@ def pane_passthrough_tokens(
     return list(passthrough)
 
 
+_CURSOR_NATIVE_WORKTREE_FLAGS = frozenset({"-w", "--worktree", "--worktree-base"})
+
+
+def refuse_cursor_native_worktree_tokens(passthrough: Optional[Sequence[str]]) -> None:
+    """Refuse Cursor's native worktree controls at the passthrough boundary."""
+    for token in passthrough or ():
+        flag = token.split("=", 1)[0]
+        if flag in _CURSOR_NATIVE_WORKTREE_FLAGS:
+            raise DispatchAskError(
+                f"cursor-agent passthrough refuses native worktree flag {flag!r}; "
+                "fno owns the worker worktree",
+                exit_code=2,
+            )
+
+
 #: x-1caa: provider tokens that turn a pane into a dead one-shot, promoted from
 #: the comments on the arms below into guards now that passthrough hands the
 #: operator the exact token each comment warned about. Bare tokens match too -
@@ -1506,6 +1521,7 @@ def build_pane_argv(
         if effort:
             argv += effort_tokens("cursor-agent", effort)
         argv += tier3
+        refuse_cursor_native_worktree_tokens(passthrough)
         argv += pane_passthrough_tokens(passthrough, argv)
         return argv
     raise DispatchAskError(f"provider {provider!r} has no interactive pane form", exit_code=2)
