@@ -844,6 +844,42 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         # wrong. A review that is RUNNING blocks whether or not one was ever
         # required.
         blockers.append(activity.blocker)
+    # The operator-law overlay, through the SAME resolver the merge gate
+    # applies at its own coverage verdict: a waiver clears exactly the
+    # coverage conjuncts (never CI, never an optional finding), and the
+    # payload names it so a waived ready never reads as a reviewed one. An
+    # unknown decision probe is its own blocker - fail closed on a store that
+    # could not answer, never "no waiver".
+    coverage_waiver = None
+    if review_lane and str(coverage.get("coverage") or "") != "unknown":
+        from fno.pr import _coverage_gate
+
+        failing = [
+            b
+            for b in blockers
+            if b.startswith("review_coverage_") and b != "review_coverage_unknown"
+        ]
+        if failing:
+            overlay_head = str(pr_json.get("headRefOid") or "")
+            hard = _coverage_gate.unresolved_hard_findings(
+                cwd or os.getcwd(),
+                overlay_head,
+                str(pr_json.get("headRefName") or ""),
+                coverage,
+            )
+            waived, waiver_note, probe_note = _coverage_gate.operator_waiver_verdict(
+                _coverage_gate._repo_slug(cwd or os.getcwd()),
+                int(pr),
+                overlay_head,
+                hard,
+            )
+            if waived:
+                blockers = [b for b in blockers if b not in failing]
+                coverage_waiver = waiver_note[
+                    len(_coverage_gate.OVERRIDE_NOTE_PREFIX) :
+                ]
+            elif probe_note:
+                blockers.append("review_coverage_waiver_unknown")
     coverage_status_repost = None
     if not is_terminal and review_lane:
         from fno.pr import _reviews
@@ -947,6 +983,10 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         "ready": not blockers,
         "ready_blockers": blockers,
     }
+    if coverage_waiver is not None:
+        # The positive marker beside a waived ready: without it, a PR the
+        # operator waived and a PR a reviewer covered render identically.
+        payload["coverage_waiver"] = coverage_waiver
     if owner_guidance is not None:
         payload["review_owner_guidance"] = owner_guidance
     if coverage_status_repost is not None:

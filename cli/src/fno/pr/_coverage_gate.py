@@ -191,6 +191,19 @@ def _repo_slug(cwd: str) -> Optional[str]:
     return slug or None
 
 
+def unresolved_hard_findings(
+    cwd: str, head: str, head_branch: str, cov: Optional[dict]
+) -> list:
+    """The unresolved CONFIRMED correctness/security finding keys, derived
+    exactly as ``_ordinary_verdict`` derives them (the same chain scan, the
+    same disposition re-derivation). The standing operator waiver consults
+    this list; a second severity table here would be a second place the two
+    surfaces could disagree."""
+    chain = attestation_chain(cwd, head_branch=head_branch, head=head)
+    _text, _note, _named, hard = disposition_refusal(chain, cov, cwd)
+    return hard
+
+
 def run_coverage_waive(pr_number: int, reason: str, cwd: Optional[str] = None) -> int:
     """Record the attended, head-pinned operator waiver for one PR head.
 
