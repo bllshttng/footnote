@@ -2208,6 +2208,98 @@ def test_plugin_cache_no_source_is_unknown(tmp_path, monkeypatch):
     assert doctor._plugin_cache_report()["status"] == "unknown"
 
 
+def _plugin_repo_with_hook_deletion(tmp_path: Path) -> tuple[Path, str]:
+    """Two commits: the first references hooks/demo-gate.sh, the second
+    deletes the script and its config entry together (the incident shape).
+    Returns (repo, base_sha)."""
+    import subprocess
+
+    repo = tmp_path / "src-hookdel"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    for cmd in (
+        ["config", "user.email", "t@t"],
+        ["config", "user.name", "t"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *cmd], check=True)
+    hooks = repo / "hooks"
+    hooks.mkdir()
+    (hooks / "hooks.json").write_text(
+        '{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": ['
+        '{"type": "command", "command": '
+        '"python3 ${CLAUDE_PLUGIN_ROOT}/hooks/demo-gate.sh"}]}]}}',
+        encoding="utf-8",
+    )
+    (hooks / "demo-gate.sh").write_text("#!/usr/bin/env bash\nexit 0\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "base"], check=True)
+    base = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    (hooks / "hooks.json").write_text('{"hooks": {}}', encoding="utf-8")
+    (hooks / "demo-gate.sh").unlink()
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "delete"], check=True)
+    return repo, base
+
+
+def test_plugin_cache_stale_names_deleted_hook_scripts(tmp_path, monkeypatch):
+    repo, base = _plugin_repo_with_hook_deletion(tmp_path)
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, base)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    report = doctor._plugin_cache_report()
+    assert report["status"] == "stale"
+    assert report["deleted_hook_scripts"] == ["hooks/demo-gate.sh"]
+    blockers = doctor._blockers({"plugin_cache": report})
+    assert any("demo-gate.sh" in b and "drain live sessions" in b for b in blockers)
+
+
+def test_plugin_cache_stale_without_hook_deletion_stays_plain(tmp_path, monkeypatch):
+    # Lag without brick risk: same shape, but the referenced script survives
+    # the range as a stub, so the blocker must stay the plain stale line.
+    import subprocess
+
+    repo, base = _plugin_repo_with_hook_deletion(tmp_path)
+    # Re-add the path as a stub and amend the deleting commit into a stubbing
+    # one, so the range deletes nothing referenced at base.
+    (repo / "hooks" / "demo-gate.sh").write_text("# stub\nexit 0\n")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "--amend", "--no-edit", "-q"],
+        check=True,
+    )
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, base)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    report = doctor._plugin_cache_report()
+    assert report["status"] == "stale"
+    assert "deleted_hook_scripts" not in report
+    blockers = doctor._blockers({"plugin_cache": report})
+    assert any("pre-HEAD bytes" in b for b in blockers)
+    assert not any("drain live sessions" in b for b in blockers)
+
+
+def test_plugin_cache_fresh_never_computes_the_range(tmp_path, monkeypatch):
+    import subprocess
+
+    repo, _base = _plugin_repo_with_hook_deletion(tmp_path)
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    monkeypatch.setattr(
+        doctor, "_plugin_registry_path", lambda: _write_plugin_registry(tmp_path, head)
+    )
+    monkeypatch.setattr(doctor, "_resolve_source", lambda source: repo)
+    report = doctor._plugin_cache_report()
+    assert report["status"] == "fresh"
+    assert "deleted_hook_scripts" not in report
+
+
 # --- x-2486: the stale-cache line must name a command that can perform the fix ---
 #
 # `fno update` was measured against this artifact: 15m07s, exit 0,
