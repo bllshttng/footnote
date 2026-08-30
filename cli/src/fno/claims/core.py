@@ -1436,10 +1436,112 @@ def force_release_claim(
             release_dir_mutex(recovery_lock, recovery_token)
 
 
+def _pid_holder_map(dirs: list[Path]) -> dict[tuple[str, int], dict[str, Path]]:
+    """Sweep-time PID-exclusivity evidence: which distinct holders each
+    ``(machine, pid)`` pair names across the swept roots, with one claim
+    file per holder so the mutex re-verify can re-read just the siblings
+    (see :func:`_pid_exclusive_rechecked`).
+
+    The property a single claim cannot carry: a pid identifies a session only
+    when it is the ONLY holder it answers for. A daemon-hosted substrate
+    honestly resolves every session it hosts to the daemon's pid, so
+    provenance-true claims from distinct holders can share one live pid
+    (ab-6d5afbde: seven claims on one app-server pid, every one reading LIVE
+    forever, none reapable, all consuming max_live permanently). Counting
+    DISTINCT holders - never claim files, which one session legitimately
+    writes several of - is what keeps the legitimate same-holder shape
+    exclusive.
+
+    Keyed by ``(machine_id or host, pid)`` because a pid is host-local: the
+    same number on two machines names two processes. Claims whose machine
+    identity spelling differs (a legacy no-machine_id row beside a modern
+    one) simply do not group, which reads exclusive - the safe direction.
+
+    A claim that cannot be read contributes no holder; the sweep's own
+    corrupted/vanished bucketing already reports those files.
+    """
+    holders: dict[tuple[str, int], dict[str, Path]] = {}
+    for cdir in dirs:
+        if not cdir.is_dir():
+            continue
+        for entry in sorted(cdir.iterdir()):
+            if entry.is_dir() or not entry.name.endswith(".lock"):
+                continue
+            try:
+                claim = read_claim_file(entry)
+            except Exception:  # noqa: BLE001 - an unreadable claim is no sibling evidence
+                continue
+            if claim.pid is None:
+                continue
+            holders.setdefault(
+                (claim.machine_id or claim.host, claim.pid), {}
+            )[claim.holder] = entry
+    return holders
+
+
+def _pid_exclusive(
+    claim: Claim, holder_map: dict[tuple[str, int], dict[str, Path]]
+) -> Optional[bool]:
+    """Does the claim's pid name exactly one distinct holder?
+
+    ``None`` (unknown) when the claim has no pid or the map predates the
+    claim's write - absent sibling evidence must never read as
+    exclusive-by-absence; ``classify`` keeps the claim's own evidence
+    deciding.
+    """
+    if claim.pid is None:
+        return None
+    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
+    if named is None:
+        return None
+    return len(named) <= 1
+
+
+def _pid_exclusive_rechecked(
+    claim: Claim,
+    holder_map: dict[tuple[str, int], dict[str, Path]],
+    archived_this_run: set[Path],
+) -> Optional[bool]:
+    """Mutex-time exclusivity for one claim: re-read ONLY this pid's sibling
+    files the scan map named, never the whole store.
+
+    The one direction that can flip a verdict under the recovery mutex is a
+    sibling going away (shared -> exclusive -> possibly LIVE, must not
+    archive) or being replaced by a different holder, and both are answered
+    by those few files. A sibling APPEARING cannot matter here: a claim the
+    scan read as exclusive corroborated to LIVE and never became a reap
+    candidate in this sweep.
+
+    Two going-away shapes differ. A sibling ARCHIVED BY THIS SWEEP was
+    sharing evidence when the set was judged non-exclusive, and the survivor
+    must keep reading it that way - otherwise apply drains one member per
+    sweep while the dry run promised N, and each survivor becomes the sole
+    record for the pid and lives forever (ab-6d5afbde). Any OTHER absent
+    sibling (its holder's own release, a concurrent recovery) genuinely
+    stops naming a holder.
+    """
+    if claim.pid is None:
+        return None
+    named = holder_map.get((claim.machine_id or claim.host, claim.pid))
+    if named is None:
+        return None
+    holders: set[str] = set()
+    for holder, path in named.items():
+        if path in archived_this_run:
+            holders.add(holder)
+            continue
+        try:
+            holders.add(read_claim_file(path).holder)
+        except Exception:  # noqa: BLE001 - a vanished/unreadable sibling stops naming a holder
+            continue
+    return len(holders) <= 1
+
+
 def sweep_verdict(
     claim: Claim,
     *,
     now: Optional[int] = None,
+    pid_exclusive: Optional[bool] = None,
     abandonment_probe: Optional[Callable[[Claim], Optional[bool]]] = None,
     node_settlement: Optional[Callable[..., Optional[bool]]] = None,
 ) -> tuple[bool, str]:
@@ -1468,6 +1570,13 @@ def sweep_verdict(
     probe was supplied), ``"suspect_alive"`` (a worker is on the node) and
     ``"suspect_unprobed"`` (the probe could not run). The last two are kept
     apart deliberately: one is a measurement and the other is its absence.
+
+    ``pid_exclusive`` is the sweep's sibling evidence (ab-6d5afbde): a
+    prover-proven pid shared across DISTINCT holders cannot corroborate an
+    expired lease, so the claim reads SUSPECT and the instruments below -
+    not the shared daemon pid - settle it. ``None`` keeps today's behavior
+    for every caller without sibling context (the spawn guard's single-key
+    recovery).
     """
     if node_settlement is not None and claim.key.startswith("node:"):
         # A settlement instrument that raises answers nothing; a broken probe
@@ -1478,7 +1587,7 @@ def sweep_verdict(
                 return True, ""
         except Exception:  # noqa: BLE001 - unknown keeps
             pass
-    provably_dead, bucket = classify_for_sweep(claim, now)
+    provably_dead, bucket = classify_for_sweep(claim, now, pid_exclusive=pid_exclusive)
     if provably_dead or bucket != "suspect":
         return provably_dead, bucket
     if abandonment_probe is None or not claim.key.startswith("node:"):
@@ -1556,6 +1665,12 @@ def reap_dead_claims(
     is called ONLY for a ``node:`` key that classified SUSPECT - never to
     override a live claim, and never for a key family with no roster to consult.
 
+    SUSPECT is also where an expired claim whose prover-proven pid is shared
+    across distinct holders lands (ab-6d5afbde): the sweep derives
+    PID-exclusivity from the records it scans, and a pid answering for more
+    than one holder corroborates neither the lease nor the holder's death, so
+    the probe - not the daemon both holders point at - decides reap vs keep.
+
     Its three answers are deliberately not a bool:
 
       ``True``  proven abandoned; reap it.
@@ -1592,10 +1707,13 @@ def reap_dead_claims(
         "suspect_alive": 0, "suspect_unprobed": 0,
     }
 
-    def _sweep_verdict(claim: Claim) -> tuple[bool, str]:
+    def _sweep_verdict(
+        claim: Claim, pid_exclusive: Optional[bool] = None
+    ) -> tuple[bool, str]:
         return sweep_verdict(
             claim,
             now=ts,
+            pid_exclusive=pid_exclusive,
             abandonment_probe=abandonment_probe,
             node_settlement=node_settlement,
         )
@@ -1610,8 +1728,11 @@ def reap_dead_claims(
     contended = 0
     reap_failed: list[tuple[str, str]] = []
     # Node ids whose claims this run archived (confirmed re-reads only), for
-    # the lock-mirror clear after the loop.
+    # the lock-mirror clear after the loop; and the archived files
+    # themselves, which stay sharing evidence for their pid's surviving
+    # claims for the rest of THIS sweep (see _pid_exclusive_rechecked).
     settled_nodes: list[str] = []
+    archived_paths: set[Path] = set()
 
     def _read_or_bucket(entry: Path) -> Optional[Claim]:
         """Read one claim file for the sweep, or bucket why it can't be read.
@@ -1632,6 +1753,12 @@ def reap_dead_claims(
             # outcome, not a failure of this run.
             vanished += 1
             return None
+
+    # PID-exclusivity evidence for the sweep: which (machine, pid) pairs name
+    # more than one distinct holder (ab-6d5afbde). A prover-proven pid shared
+    # across distinct holders cannot corroborate an expired lease, so those
+    # claims read SUSPECT here and the secondary instruments settle them.
+    holder_map = _pid_holder_map(use_dirs)
 
     for cdir in use_dirs:
         if not cdir.is_dir():
@@ -1656,7 +1783,13 @@ def reap_dead_claims(
             # because the claim may have been archived-and-recreated between
             # this scan and the lock. Do not "de-duplicate" that second call;
             # it is the TOCTOU check, not redundant work.
-            provably_dead, bucket = _sweep_verdict(claim)
+            #
+            # The holder map feeding pid exclusivity is built once per sweep,
+            # before the scan: a claim acquired after it is absent from the
+            # map, which reads UNKNOWN and keeps - never exclusive-by-absence.
+            provably_dead, bucket = _sweep_verdict(
+                claim, _pid_exclusive(claim, holder_map)
+            )
 
             if provably_dead:
                 if not apply:
@@ -1690,7 +1823,18 @@ def reap_dead_claims(
                     if fresh is None:
                         continue
 
-                    fresh_dead, fresh_bucket = _sweep_verdict(fresh)
+                    # Re-verify exclusivity here too, for the same TOCTOU
+                    # reason as the fresh read: a sibling released since the
+                    # scan flips this pid back to exclusive, and a recreated
+                    # one flips it shared, and the archive decision must ride
+                    # the property as it stands UNDER the lock. The recheck
+                    # re-reads only this pid's sibling files, not the store,
+                    # and counts siblings archived by THIS run as still
+                    # sharing (a drained set stays drained in one sweep).
+                    fresh_dead, fresh_bucket = _sweep_verdict(
+                        fresh,
+                        _pid_exclusive_rechecked(fresh, holder_map, archived_paths),
+                    )
                     if not fresh_dead:
                         kept[fresh_bucket] += 1
                         continue
@@ -1721,6 +1865,7 @@ def reap_dead_claims(
                         # would make entry.exists() true again with no
                         # bearing on whether the archive itself worked.
                         reaped += 1
+                        archived_paths.add(entry)
                         emit_claim_reaped(
                             fresh,
                             root=root_label,

@@ -161,6 +161,59 @@ def test_classify_stale_ttl_expired_live_pid_legacy_claim():
     assert classify(claim) == ClaimState.STALE
 
 
+def _expired_prover_claim() -> Claim:
+    """The hybrid-arm specimen shape: expired TTL, live local pid, prover-proven.
+
+    ``acquired_at`` must postdate this process's create_time or is_live reads
+    the pid as reused and the claim dies for an unrelated reason.
+    """
+    started = int(psutil.Process(os.getpid()).create_time() * 1000)
+    return _live_claim(
+        acquired_at=started + 1,
+        expires_at=now_ms() - 1000,
+        pid_provenance="session-prover",
+    )
+
+
+def test_classify_suspect_ttl_expired_with_live_non_exclusive_prover_pid():
+    """THE 2026-08-29 SPECIMEN: seven expired claims from distinct sessions all
+    carried one live daemon pid, each prover-proven, because the prover
+    truthfully resolves every daemon-hosted session to the daemon. Provenance
+    is honest; EXCLUSIVITY is what is missing. A pid that answers for more
+    than one holder is not session evidence: it can neither corroborate the
+    lease (LIVE) nor prove the holder dead (STALE), so the claim reads SUSPECT
+    and the roster/transcript instruments decide."""
+    claim = _expired_prover_claim()
+    assert classify(claim, pid_exclusive=False) == ClaimState.SUSPECT
+
+
+def test_classify_live_ttl_expired_with_exclusive_prover_pid():
+    """The same shape with the pid naming exactly one distinct holder keeps
+    the corroborated arm: a suspended local session holds its slot."""
+    claim = _expired_prover_claim()
+    assert classify(claim, pid_exclusive=True) == ClaimState.LIVE
+
+
+def test_classify_unknown_exclusivity_keeps_today_behavior():
+    """``pid_exclusive`` unsupplied (every single-claim caller: acquire,
+    status, the spawn guard) is UNKNOWN, and unknown keeps the claim LIVE -
+    the exclusivity property is sweep-time evidence no single-claim reader
+    has, and absent evidence must not demote a claim."""
+    claim = _expired_prover_claim()
+    assert classify(claim) == ClaimState.LIVE
+    assert classify(claim, pid_exclusive=None) == ClaimState.LIVE
+
+
+def test_classify_non_exclusive_pid_does_not_touch_the_unexpired_arm():
+    """Exclusivity is consulted only where provenance is: the expired hybrid
+    arm. Inside the TTL window the lease itself protects the slot whatever
+    the pid says."""
+    claim = _live_claim(
+        expires_at=now_ms() + 60_000, pid_provenance="session-prover"
+    )
+    assert classify(claim, pid_exclusive=False) == ClaimState.LIVE
+
+
 def test_classify_live_ttl_unexpired_with_live_pid_regardless_of_provenance():
     """The corroboration gate touches ONLY the expired arm: inside the TTL
     window a live pid reads LIVE whether or not its provenance is proven (the

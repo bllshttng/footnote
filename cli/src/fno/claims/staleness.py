@@ -92,7 +92,12 @@ def is_expired(claim: Claim, now: Optional[int] = None) -> bool:
     return now >= claim.expires_at
 
 
-def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
+def classify(
+    claim: Claim,
+    now: Optional[int] = None,
+    *,
+    pid_exclusive: Optional[bool] = None,
+) -> ClaimState:
     """Compose is_live + is_expired into a state classification.
 
     A PID-liveness claim is STALE when the holder process is dead or replaced.
@@ -112,6 +117,19 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     make it permanent. ``is_live`` still guards host + pid-reuse
     (create_time < acquired_at).
 
+    ``pid_exclusive`` is the second thing a prover-proven pid must be besides
+    proven: the ONLY session it names (ab-6d5afbde). A prover can honestly
+    resolve every session a daemon hosts to that daemon, so several distinct
+    holders end up prover-proven onto one live pid; provenance alone then
+    proves the DAEMON lives, never any one holder. When a caller that sees
+    multiple claims (the reap sweep, which builds the property from the claim
+    records it scans) passes ``False``, that pid can neither corroborate the
+    lease (LIVE) nor prove the holder dead (STALE), so the claim reads SUSPECT
+    and the roster/transcript instruments decide. ``None`` - unsupplied by
+    every single-claim reader (acquire, status, the spawn guard) - is UNKNOWN,
+    and unknown keeps the corroborated arm exactly as before: absent sibling
+    evidence must not demote a claim.
+
     SUSPECT arm (x-ba4b): a TTL claim still inside its window whose recorded pid
     is NOT live reads SUSPECT, not LIVE. Dead-pid-but-unexpired is the respawned-
     worker case; the TTL keeps protecting the slot (acquire/dispatch refuse it
@@ -121,10 +139,17 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     if is_expired(claim, now=now):
         # HYBRID, corroborated: an expired clock does NOT imply a dead session,
         # but a live pid speaks for the holder only when it was prover-proven
-        # at write time. Anything else - an ambient pid a foreign process
-        # answers for, or a legacy claim that cannot prove its pid - is STALE.
-        corroborated = claim.pid_provenance == "session-prover" and is_live(claim)
-        return ClaimState.LIVE if corroborated else ClaimState.STALE
+        # at write time AND names no other holder. Anything else - an ambient
+        # pid a foreign process answers for, a legacy claim that cannot prove
+        # its pid, or a pid shared across distinct holders - loses the pid's
+        # corroboration. The shared shape reads SUSPECT, not STALE: the pid
+        # proves the daemon lives, which is neither holder-live nor holder-dead,
+        # so the sweep's secondary instruments settle it.
+        if claim.pid_provenance == "session-prover" and is_live(claim):
+            if pid_exclusive is False:
+                return ClaimState.SUSPECT
+            return ClaimState.LIVE
+        return ClaimState.STALE
     if claim.expires_at is None:
         return ClaimState.LIVE if is_live(claim) else ClaimState.STALE
     # TTL claim, not yet expired: live pid => LIVE, dead/replaced pid => SUSPECT
@@ -132,7 +157,12 @@ def classify(claim: Claim, now: Optional[int] = None) -> ClaimState:
     return ClaimState.LIVE if is_live(claim) else ClaimState.SUSPECT
 
 
-def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, str]:
+def classify_for_sweep(
+    claim: Claim,
+    now: Optional[int] = None,
+    *,
+    pid_exclusive: Optional[bool] = None,
+) -> tuple[bool, str]:
     """Classify one claim for GC: can its holder be PROVEN dead from this host?
 
     The single liveness authority for reaping. Two proofs, and which one a
@@ -154,6 +184,13 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     (the corroborated hybrid arm in ``classify``), so the expiry arm never reaps
     a running local session - but it does reap an expired claim whose pid a
     foreign process merely answers for.
+
+    ``pid_exclusive`` carries the sweep's sibling evidence into that arm
+    (ab-6d5afbde): a prover-proven pid that names MORE THAN ONE distinct holder
+    reads the expired claim SUSPECT rather than LIVE, so the sweep's
+    roster/transcript instruments - not the shared daemon - decide. ``None``
+    (single-claim callers, and any sweep that could not build the property)
+    is unknown and keeps the claim's own evidence deciding, exactly as before.
 
     Host-independent expiry is what keeps the store from filling forever
     (x-cd1e). ``machine_id`` is authoritative when present, but a claim written
@@ -194,7 +231,7 @@ def classify_for_sweep(claim: Claim, now: Optional[int] = None) -> tuple[bool, s
     unidentifiable = not claim.machine_id
     if not same_machine and not (unidentifiable and is_expired(claim, now=now)):
         return False, "offhost"
-    state = classify(claim, now=now)
+    state = classify(claim, now=now, pid_exclusive=pid_exclusive)
     if state is ClaimState.STALE:
         return True, ""
     # NO one-shot arm here, and the omission is deliberate. A `dispatch:<id>`
