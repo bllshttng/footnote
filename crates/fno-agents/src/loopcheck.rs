@@ -4110,18 +4110,18 @@ fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> LawStatus {
             });
             match status.as_deref() {
                 Some("single") => {
-                    let affirmative = parsed
+                    // A readable decision that is a different string is a
+                    // definitive no; a missing or non-string decision on the
+                    // one row is malformed authority, which is Unknown and
+                    // never a clean no (mirrors `law_authority`).
+                    match parsed
                         .as_ref()
-                        .and_then(|v| {
-                            v.pointer("/decisions/0/decision")
-                                .and_then(|s| s.as_str())
-                                .map(|s| s == WAIVER_DECISION)
-                        })
-                        .unwrap_or(false);
-                    if affirmative {
-                        LawStatus::Single
-                    } else {
-                        LawStatus::NoLaw
+                        .and_then(|v| v.pointer("/decisions/0/decision"))
+                        .and_then(|s| s.as_str())
+                    {
+                        Some(d) if d == WAIVER_DECISION => LawStatus::Single,
+                        Some(_) => LawStatus::NoLaw,
+                        None => LawStatus::Unknown,
                     }
                 }
                 Some("none") => LawStatus::NoLaw,

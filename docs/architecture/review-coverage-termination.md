@@ -40,7 +40,7 @@ The command resolves the repository slug and the live 40-character head. It reco
 
 Current law resolves in three states and only one of them is authority. `single` (exactly one live law verdict on the subject) authorizes. `none` preserves the ordinary predicate. A conflict, a damaged index row, a failed read, or malformed output is UNKNOWN authority. The gate then answers UNANSWERED with the dead probe named. That is never a refusal built on a store that cannot answer, and never permission either. No caller scans the decision index, picks the newest row, or treats a failed query as `none`.
 
-Only a row whose decision equals the affirmative value the command mints counts as authority. That value is `review coverage waived for this head`. Row existence carries no polarity: a note or a denial recorded at a waiver subject reads as no waiver, never as one. The command also publishes the head-pinned success status immediately after recording, so GitHub's ruleset sees the context the law already answers.
+Only a row whose decision equals the affirmative value the command mints counts as authority. That value is `review coverage waived for this head`. Row existence carries no polarity: a note or a denial recorded at a waiver subject reads as no waiver, never as one. A single row with no readable decision is malformed authority and answers unknown. The command also publishes the head-pinned success status immediately after recording, so GitHub's ruleset sees the context the law already answers.
 
 The two waiver shapes are deliberately different strengths:
 

@@ -135,7 +135,10 @@ def law_authority(subject: str) -> Tuple[str, str]:
     A single row counts as authority only when its decision EQUALS
     ``WAIVER_DECISION`` - the exact value the ``coverage-waive`` command
     mints. Row existence carries no polarity: a note or a denial recorded at
-    a waiver subject reads as none, never as a waiver.
+    a waiver subject reads as none, never as a waiver. A single row whose
+    decision is missing or unreadable is malformed authority, not a clean no:
+    that is ``unknown`` with the field named, the same rule that folds a
+    damaged row.
     """
     try:
         from fno.decide import list_decisions
@@ -153,7 +156,13 @@ def law_authority(subject: str) -> Tuple[str, str]:
         return "none", ""
     if len(rows) > 1:
         return "unknown", f"decision probe: conflicting law rows for {subject}"
-    if str(rows[0].get("decision") or "") == WAIVER_DECISION:
+    decision = rows[0].get("decision")
+    if decision is None:
+        return (
+            "unknown",
+            f"decision probe: single law row carries no decision for {subject}",
+        )
+    if str(decision) == WAIVER_DECISION:
         return "single", ""
     return "none", ""
 
