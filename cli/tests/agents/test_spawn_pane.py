@@ -4668,8 +4668,29 @@ def test_a_seed_unconfirmed_twice_reaps_the_pane_and_writes_no_row(
     """The measured failure: readiness reported live for a worker that never
     started. A retry that still cannot get the seed in means a pane that will
     not accept the payload, so it takes the existing readiness-failure path."""
+    from fno.agents import spawn_gate
     from fno.agents.mux_spawn import DispatchAskError
     from fno.agents.registry import load_registry
+
+    # The reap confirms a kill by watching the child's start time change, and
+    # this fixture's child_pid is the literal 4242. Unpatched, the probe asks
+    # the HOST whether pid 4242 is alive: absent on a dev laptop (reaped, green)
+    # and frequently present on a CI runner (reads as "the worker survived
+    # teardown", red). The assertion below was therefore decided by the machine
+    # rather than by the code. Pin the sequence the way the sibling reap tests
+    # in tests/unit/test_mux_pane_guarded.py already do: alive, then gone.
+    # First read per pid is the pre-kill sample; every read after it reports the
+    # process gone. A fixed-length iter would StopIteration here, because this
+    # flow reaps more than once.
+    seen: set[int] = set()
+
+    def _start_time(pid: int) -> object:
+        if pid in seen:
+            return None
+        seen.add(pid)
+        return 7
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", _start_time)
 
     calls = _seed_script(monkeypatch, "unattempted", "unconfirmed")
 
