@@ -114,6 +114,140 @@ def _resolve_source(source: Optional[Path]) -> Optional[Path]:
         return None
 
 
+def _plugin_file_relative_path(active_path: Path) -> Optional[str]:
+    parts = active_path.parts
+    if (
+        len(parts) < 3
+        or parts[-3] != "skills"
+        or not parts[-2]
+        or parts[-1] != "SKILL.md"
+    ):
+        return None
+    return "/".join(parts[-3:])
+
+
+def _plugin_source_file(source: Path, relative_path: str) -> Path:
+    candidates = (source / relative_path, source.parent / relative_path)
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
+def _is_claude_plugin_cache(path: Path) -> bool:
+    parts = path.parts
+    return any(
+        parts[index : index + 3] == (".claude", "plugins", "cache")
+        for index in range(max(0, len(parts) - 2))
+    )
+
+
+def _plugin_file_report(active_path: Path) -> dict[str, Any]:
+    """Compare one active skill file with the matching source bytes."""
+    try:
+        active_path = active_path.expanduser().resolve()
+    except OSError as exc:
+        return {
+            "record": "PLUGIN_FILE_UNKNOWN",
+            "status": "unknown",
+            "active_path": str(active_path),
+            "relative_path": None,
+            "detail": f"could not resolve active path: {exc}",
+        }
+
+    relative_path = _plugin_file_relative_path(active_path)
+    base = {
+        "active_path": str(active_path),
+        "relative_path": relative_path,
+    }
+    if relative_path is None:
+        return {
+            "record": "PLUGIN_FILE_UNKNOWN",
+            "status": "unknown",
+            **base,
+            "detail": "active path must end in skills/<name>/SKILL.md",
+        }
+
+    source = _resolve_source(None)
+    if source is None:
+        return {
+            "record": "PLUGIN_FILE_UNKNOWN",
+            "status": "unknown",
+            **base,
+            "detail": "source checkout could not be resolved",
+        }
+    source_path = _plugin_source_file(source, relative_path)
+    try:
+        active_bytes = active_path.read_bytes()
+        source_bytes = source_path.read_bytes()
+    except OSError as exc:
+        return {
+            "record": "PLUGIN_FILE_UNKNOWN",
+            "status": "unknown",
+            **base,
+            "source_path": str(source_path),
+            "detail": f"could not read active/source bytes: {exc}",
+        }
+
+    active_digest = hashlib.sha256(active_bytes).hexdigest()
+    source_digest = hashlib.sha256(source_bytes).hexdigest()
+    stale = active_digest != source_digest
+    report: dict[str, Any] = {
+        "record": "PLUGIN_FILE_STALE" if stale else "PLUGIN_FILE_FRESH",
+        "status": "stale" if stale else "fresh",
+        **base,
+        "source_path": str(source_path),
+        "active_digest": active_digest,
+        "source_digest": source_digest,
+    }
+    if stale and _is_claude_plugin_cache(active_path):
+        report["detail"] = (
+            "active Claude plugin bytes are stale; run `claude plugin update "
+            "fno@footnote`, then restart the session; `fno doctor update` does "
+            "NOT refresh this artifact"
+        )
+    return report
+
+
+def _plugin_file_text(report: dict[str, Any]) -> str:
+    fields = [
+        report["record"],
+        f"path={report.get('relative_path') or 'unknown'}",
+    ]
+    if "active_digest" in report:
+        fields.extend(
+            [
+                f"active_sha256={report['active_digest']}",
+                f"source_sha256={report['source_digest']}",
+            ]
+        )
+    if report.get("detail"):
+        fields.append(str(report["detail"]))
+    return " ".join(fields)
+
+
+def plugin_file_command(
+    active_skill_path: Path = typer.Argument(
+        ..., help="Active skills/<name>/SKILL.md path."
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit the diagnostic as one JSON object."
+    ),
+) -> None:
+    report = _plugin_file_report(active_skill_path)
+    if json_out:
+        typer.echo(json.dumps(report, sort_keys=True))
+    else:
+        typer.echo(_plugin_file_text(report))
+    raise typer.Exit(
+        code={
+            "PLUGIN_FILE_FRESH": 0,
+            "PLUGIN_FILE_STALE": 3,
+            "PLUGIN_FILE_UNKNOWN": 4,
+        }[report["record"]]
+    )
+
+
 def _source_rev(source: Path) -> Optional[str]:
     """``git rev-parse HEAD`` of the source (reuses update's network-free probe)."""
     from fno import update
