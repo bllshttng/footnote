@@ -509,7 +509,9 @@ def _plugin_cache_report() -> dict[str, Optional[str]]:
     referenced - the case that bricks live sessions rather than merely
     lagging, and the only stale worth interrupting an operator for.
     """
-    report: dict[str, Optional[str]] = {
+    # Any, not Optional[str]: the stale branch adds deleted_hook_scripts,
+    # a list, beside the string fields.
+    report: dict[str, Any] = {
         "status": "unknown",
         "sha": None,
         "installed_at": None,
