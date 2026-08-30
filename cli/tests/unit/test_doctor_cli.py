@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 runner = CliRunner()
 
 
-def test_doctor_advertises_ten_direct_actions() -> None:
+def test_doctor_lists_direct_actions() -> None:
     from fno.doctor_cli import doctor_app
 
     command = typer.main.get_command(doctor_app)
@@ -21,6 +21,7 @@ def test_doctor_advertises_ten_direct_actions() -> None:
         "evals",
         "event",
         "footprint",
+        "harness",
         "lint",
         "observer",
         "route",

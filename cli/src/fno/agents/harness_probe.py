@@ -234,6 +234,13 @@ def run_probe(harness: str, *, live: bool, repo_root: Path | None = None) -> dic
     return {"harness": harness, "live": True, "lines": [asdict(line) for line in lines]}
 
 
+def _report_lines(report: dict[str, object]) -> list[dict[str, object]]:
+    raw = report.get("lines")
+    if not isinstance(raw, list) or not all(isinstance(item, dict) for item in raw):
+        raise RuntimeError("harness probe returned an invalid line report")
+    return raw
+
+
 app = typer.Typer(add_completion=False, no_args_is_help=False, invoke_without_command=True)
 
 
@@ -244,15 +251,19 @@ def harness_probe_command(
     json_out: bool = typer.Option(False, "--json", "-J", help="Emit machine-readable JSON."),
 ) -> None:
     report = run_probe(harness, live=live)
+    lines = _report_lines(report)
     if json_out:
         typer.echo(json.dumps(report))
-        if any(item["status"] == "fail" for item in report["lines"]):
+        if any(item["status"] == "fail" for item in lines):
             raise typer.Exit(1)
         return
     typer.echo(f"fno doctor harness {harness} ({'live' if live else 'dry run'})")
-    for item in report["lines"]:
-        typer.echo(f"{item['status'].upper():4} {item['line']}: marker={item['marker']} ({item['detail']})")
+    for item in lines:
+        status = item["status"]
+        if not isinstance(status, str):
+            raise RuntimeError("harness probe returned a line without a status")
+        typer.echo(f"{status.upper():4} {item['line']}: marker={item['marker']} ({item['detail']})")
     if not live:
         typer.echo(f"argv would run: {harness}")
-    if any(item["status"] == "fail" for item in report["lines"]):
+    if any(item["status"] == "fail" for item in lines):
         raise typer.Exit(1)
