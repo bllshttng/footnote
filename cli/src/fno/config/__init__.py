@@ -4763,7 +4763,7 @@ def _ensure_migrated(locations: list[Path]) -> None:
             _migrate_yaml_to_toml(local_yaml, "config.local.toml")
 
 
-def _settings_yaml_locations() -> list[Path]:
+def _settings_yaml_locations(root: Optional[Path] = None) -> list[Path]:
     """Return the ordered list of settings file candidates.
 
     Order:
@@ -4789,14 +4789,19 @@ def _settings_yaml_locations() -> list[Path]:
     if env_path:
         return [Path(env_path)]
 
-    # Resolve project-local candidates from the repo root, not cwd.
-    # Lazy import to avoid circular dependency (paths imports config).
+    # Resolve project-local candidates from the seeded root, or from the
+    # process context when no root was supplied. Lazy import avoids the
+    # circular dependency (paths imports config).
     try:
-        from fno.paths import resolve_canonical_repo_root, resolve_repo_root
-        repo_root = resolve_repo_root()
-        canonical_root = resolve_canonical_repo_root()
+        from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree, resolve_repo_root
+        if root is None:
+            repo_root = resolve_repo_root()
+            canonical_root = resolve_canonical_repo_root()
+        else:
+            repo_root = Path(root).resolve()
+            canonical_root = resolve_canonical_worktree(repo_root) or repo_root
     except (ImportError, ModuleNotFoundError):
-        repo_root = Path.cwd()
+        repo_root = Path(root).resolve() if root is not None else Path.cwd()
         canonical_root = repo_root
 
     candidates = [repo_root / ".fno" / "settings.yaml"]
@@ -4813,7 +4818,7 @@ def _settings_yaml_locations() -> list[Path]:
     return _apply_search_ceiling(candidates)
 
 
-def _candidate_paths() -> list[Path]:
+def _candidate_paths(root: Optional[Path] = None) -> list[Path]:
     """Ordered read candidates for the loader, config.toml-first.
 
     Runs the one-shot yaml->toml auto-migrate over the settings locations, then
@@ -4822,7 +4827,7 @@ def _candidate_paths() -> list[Path]:
     e.g. a malformed file). After a successful migrate only the config.toml
     exists at each location, so the read is effectively toml-only.
     """
-    locations = _settings_yaml_locations()
+    locations = _settings_yaml_locations(root)
     _ensure_migrated(locations)
     return _prefer_toml(locations)
 
