@@ -82,7 +82,7 @@ The 0.148 handoff is gone on 0.149.1, so the daemon oracle declines by default t
 
 Claude uses a preassigned ID or SessionStart restamp. Gemini uses a preassigned ID. OpenCode uses a best-effort store lookup. Agy declares binding unsupported. pi is `caller-assigned-cwd-scoped`, a strategy of its own. fno mints the id AND pi scopes its lookup by working directory. So the identity is the PAIR and the id alone addresses nothing. A resume from the canonical checkout cannot see a session started in a worktree. On pi that miss is not an error. It CREATES a second session under the same id. See the pi section above.
 
-Cursor Agent uses `callee-minted-read-back`, a strategy of its own. `create-chat` returns the full chat UUID before the pane starts, and a second process on `--resume <same id>` recalls the first process's nonce. The transcript is remote, so no local session file is an identity oracle; the full UUID and cross-process recall are the markers.
+Cursor Agent uses `callee-minted-read-back`, a strategy of its own. `create-chat` returns the full chat UUID before the pane starts, and a second process on `--resume <same id>` recalls the first process's nonce. The transcript is remote. No local session file is an identity oracle. The full UUID and cross-process recall are the markers.
 
 Permission responses are rule-gated. Without explicit authorization, a matched permission rule reports `blocked`, never `live`. With an authorized action, fno resolves the harness-native keys. It re-reads the prompt fingerprint while it holds the pane writer claim. Then it sends only those keys and waits for the positive ready marker.
 ### Loop participation
