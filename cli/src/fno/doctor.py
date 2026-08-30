@@ -487,7 +487,7 @@ def _plugin_registry_path() -> Path:
     return Path.home() / ".claude" / "plugins" / "installed_plugins.json"
 
 
-def _plugin_cache_report() -> dict[str, Optional[str]]:
+def _plugin_cache_report() -> dict[str, Any]:
     """Freshness of the deployed CLAUDE plugin cache the hooks run from.
 
     ``fno doctor`` already owns source-vs-installed staleness for the wheel and
