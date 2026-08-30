@@ -358,10 +358,10 @@ def test_live_root_pids_refuses_unavailable_pidless_worker_discovery(monkeypatch
         lambda **_kwargs: {},
     )
 
-    assert doctor_footprint._live_root_pids() == (
-        set(),
-        "worker root discovery unavailable",
-    )
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "socket map" in error.text
 
 
 def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
@@ -378,10 +378,12 @@ def test_live_root_pids_refuses_pidless_live_pane(monkeypatch) -> None:
     )
     monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
 
-    assert doctor_footprint._live_root_pids() == (
-        set(),
-        "worker root discovery unavailable",
-    )
+    # x-e040: one pidless non-claude row is a NAMED attribution gap, not a
+    # dead reading. The old contract killed the whole report here.
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "codex" in error.text
 
 
 def test_ac9_edge_cause_payload_is_bounded(monkeypatch) -> None:
@@ -844,9 +846,13 @@ def test_ac4_edge_process_count_also_exits_three(
     assert "direct processes: 2 (threshold 1)" in result.stdout
 
 
-def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(
+def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     monkeypatch, no_worker_roots
 ) -> None:
+    """x-e040: the roster is an enrichment. On roster failure the measurement
+    still prints, with the threshold degraded away and the reason named - a
+    5s roster timeout under load is exactly when this reading matters. The
+    old contract killed the whole report (exit 4, no reading)."""
     from fno import doctor_footprint
 
     calls: list[list[str]] = []
@@ -865,9 +871,10 @@ def test_ac5_edge_roster_failure_exits_four_without_a_default_threshold(
 
     result = runner.invoke(app, ["doctor", "footprint"])
 
-    assert result.exit_code == 4
+    assert result.exit_code == 0
     assert "roster unavailable" in result.stdout
-    assert "processes:" not in result.stdout
+    assert "processes:" in result.stdout
+    assert "degraded: roster unavailable" in result.stdout
     assert calls[-1] == [
         "/usr/local/bin/fno",
         "agents",
@@ -906,3 +913,97 @@ def test_ac7_edge_json_contains_thresholds_and_exit_meaning(
     assert payload["sustained_cpu_threshold_cores"] == 1.0
     assert payload["direct_process_count_threshold"] == 2
     assert payload["exit_code"] == 0
+
+
+def _pidless_row(harness: str, *, name: str = "w1"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        status="live",
+        pid=None,
+        pid_start_time=None,
+        harness=harness,
+        short_id=None,
+        name=name,
+    )
+
+
+def test_pidless_nonclaude_row_is_a_named_gap_not_a_dead_reading(monkeypatch):
+    """x-e040, the falsifiable discriminator: a pidless live CODEX row is
+    present, and the reading still ANSWERS with the gap named."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("codex")]
+    )
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "codex" in error.text
+
+
+def test_pidless_unknown_harness_row_is_the_same_named_gap(monkeypatch):
+    """The anti-hardcode assertion: a harness this code has never heard of
+    degrades exactly like codex. No name list, no crash, no dead reading."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda: [_pidless_row("luna")]
+    )
+    roots, error = doctor_footprint._live_root_pids()
+    assert roots == set()
+    assert isinstance(error, doctor_footprint.AttributionGap)
+    assert "luna" in error.text
+
+
+def test_no_pidless_rows_still_yields_a_clean_reading(monkeypatch):
+    """The other half of the discriminator: without the pidless row there is
+    no gap, so a green run cannot hide behind an always-gap."""
+    from fno import doctor_footprint
+
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [])
+    assert doctor_footprint._live_root_pids() == (set(), None)
+
+
+def test_gap_reading_still_prints_the_measurement_and_exits_four(monkeypatch):
+    """The acceptance: the verb prints a CPU and process-count reading WITH a
+    named degradation. Exit 4 stays (gating unavailable), but the measurement
+    is present in exactly the condition that used to print only an error."""
+    from fno import doctor_footprint
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
+    monkeypatch.setattr(
+        doctor_footprint, "cause_reading", lambda: (reading, None)
+    )
+    result = runner.invoke(app, ["doctor", "footprint", "--json", "--cause-only"])
+    assert result.exit_code == 4, result.output
+    payload = json.loads(result.stdout)
+    assert payload["process_count"] >= 1
+    assert "fleet_cpu_cores" in payload
+    assert "codex" in payload["attribution_gap"]
+    assert payload["exit_code"] == 4
+
+
+def test_spawn_gate_treats_a_gap_reading_as_not_headroom(monkeypatch):
+    """A gapped fleet share is an undercount; None is the gate's existing
+    never-headroom answer, so the gate refuses above the trigger with the gap
+    named instead of admitting on an undercount."""
+    from fno import doctor_footprint
+    from fno.agents import spawn_gate
+
+    reading = doctor_footprint.parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n100 1 01:00:00 0.5 1024 fno daemon\n",
+        excluded_root_pids=set(),
+        attributed_root_pids=set(),
+        threshold_excluded_root_pids=set(),
+    )._replace(attribution_gap="1 pidless codex row(s) unresolved")
+    monkeypatch.setattr(
+        "fno.doctor_footprint.cause_reading", lambda: (reading, None)
+    )
+    assert spawn_gate._fleet_cpu_reading() is None
+    assert spawn_gate._footprint_cause_evidence() is None
