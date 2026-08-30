@@ -9620,3 +9620,154 @@ fn external_read_timeout_king_board_blocks_named() {
         "a king block exits 2 like the non-empty board: {code}"
     );
 }
+
+// ── operator-law waiver (review coverage) ───────────────────────────────────
+
+use fno_agents::loopcheck::operator_waiver;
+
+const HEAD40: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+/// A stub `fno` whose `backlog decisions` answers `single` for one subject
+/// pattern (shell case pattern against $3, the subject) and `none` for every
+/// other. `--json` stdout is the exact shape `fno backlog decisions --json`
+// prints when the law verdict resolves; the single row carries the
+/// affirmative decision value the coverage-waive command mints. Pass a
+/// different `row_decision` to model a note or denial recorded at the same
+/// subject.
+fn law_single_stub(dir: &Path, name: &str, single_pattern: &str) -> PathBuf {
+    law_stub_with(
+        dir,
+        name,
+        single_pattern,
+        "review coverage waived for this head",
+    )
+}
+
+fn law_stub_with(dir: &Path, name: &str, single_pattern: &str, row_decision: &str) -> PathBuf {
+    make_script(
+        dir,
+        name,
+        &format!(
+            r#"case "$3" in
+{single_pattern}) echo '{{"canonical_subject":"s","current_law":{{"status":"single","decision_ids":["d-1"],"decision_id":"d-1"}},"decisions":[{{"decision_id":"d-1","decision":"{row_decision}"}}]}}'; exit 0 ;;
+*) echo '{{"canonical_subject":"s","current_law":{{"status":"none"}}}}'; exit 0 ;;
+esac"#
+        ),
+    )
+}
+
+#[test]
+fn operator_waiver_scoped_names_the_head_it_pinned() {
+    let dir = TempDir::new().unwrap();
+    let fno = law_single_stub(
+        dir.path(),
+        "fno",
+        "review-coverage-waiver:acme/widgets#42@deadbeef*",
+    );
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(
+        waiver.as_deref(),
+        Some("head-pinned operator waiver at deadbeef"),
+        "the scoped waiver names the head it covers"
+    );
+    assert!(!unknown);
+}
+
+#[test]
+fn standing_waiver_never_clears_a_hard_finding() {
+    let dir = TempDir::new().unwrap();
+    let fno = law_single_stub(dir.path(), "fno", "review-coverage-waiver");
+    // A hard blocker stands: the standing ruling waives an unreviewed head,
+    // never an unresolved CONFIRMED correctness or security finding.
+    let (waiver_hard, unknown_hard) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        true,
+    );
+    assert_eq!(waiver_hard, None);
+    assert!(!unknown_hard, "a narrow no is a clean no, not an unknown");
+    // Without the hard blocker the standing law waives.
+    let (waiver_soft, _) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver_soft.as_deref(), Some("standing operator law"));
+}
+
+#[test]
+fn operator_waiver_never_reads_a_negative_row_as_a_waiver() {
+    let dir = TempDir::new().unwrap();
+    // A single law row whose decision is a denial, recorded at the exact
+    // standing subject: row existence carries no polarity, so this is a
+    // clean no, never a waiver and never an unknown.
+    let fno = law_stub_with(
+        dir.path(),
+        "fno",
+        "review-coverage-waiver",
+        "coverage waiver DENIED for this head",
+    );
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver, None);
+    assert!(!unknown, "a different decision is a no, not a failed probe");
+}
+
+#[test]
+fn operator_waiver_answers_unknown_on_a_dead_probe() {
+    let dir = TempDir::new().unwrap();
+    let fno = make_script(
+        dir.path(),
+        "fno",
+        "echo 'decide: index unreadable' >&2; exit 1",
+    );
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver, None, "unknown authority never waives");
+    assert!(unknown, "a dead probe must be NAMED, never read as no-law");
+}
+
+#[test]
+fn operator_waiver_no_law_is_a_clean_no() {
+    let dir = TempDir::new().unwrap();
+    let fno = make_script(
+        dir.path(),
+        "fno",
+        r#"echo '{"canonical_subject":"s","current_law":{"status":"none"}}'; exit 0"#,
+    );
+    let (waiver, unknown) = operator_waiver(
+        fno.to_str().unwrap(),
+        dir.path(),
+        "acme/widgets",
+        42,
+        HEAD40,
+        false,
+    );
+    assert_eq!(waiver, None);
+    assert!(!unknown, "a verdict of none is an answer, not a failure");
+}

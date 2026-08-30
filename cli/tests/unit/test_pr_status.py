@@ -909,6 +909,104 @@ def test_ready_is_false_when_coverage_is_uncovered(monkeypatch, capsys):
     assert "review_coverage_uncovered" in out["ready_blockers"]
 
 
+def test_operator_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
+    """The same pure resolver the merge gate reads: a single standing ruling
+    turns an uncovered row into ready with the waiver NAMED, so a waived PR
+    never reads as a reviewed one."""
+    import json
+
+    from fno.pr import _coverage_gate
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "law_authority",
+        lambda subject: (
+            ("single", "")
+            if subject == _coverage_gate.STANDING_WAIVER_SUBJECT
+            else ("none", "")
+        ),
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert not [b for b in out["ready_blockers"] if b.startswith("review_coverage_")]
+    assert out["coverage_waiver"] == "standing operator law"
+
+
+def test_head_pinned_waiver_clears_the_coverage_blockers(monkeypatch, capsys):
+    """The scoped waiver resolves at this exact head: the status and the
+    merge gate build the same subject from the same slug, PR, and head."""
+    import json
+
+    from fno.pr import _coverage_gate
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "_fetch",
+        lambda pr, cwd: (
+            {
+                "state": "OPEN",
+                "headRefOid": "1" * 40,
+                "statusCheckRollup": [
+                    {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}
+                ],
+            },
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    monkeypatch.setattr(_coverage_gate, "_repo_slug", lambda cwd: "acme/widgets")
+    monkeypatch.setattr(
+        _coverage_gate,
+        "law_authority",
+        lambda subject: (
+            ("single", "")
+            if subject
+            == _coverage_gate.scoped_waiver_subject("acme/widgets", 42, "1" * 40)
+            else ("none", "")
+        ),
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is True
+    assert out["coverage_waiver"] == "head-pinned operator waiver at 11111111"
+
+
+def test_unknown_waiver_authority_is_its_own_blocker(monkeypatch, capsys):
+    """A dead or conflicted decision probe is not 'no waiver': the status
+    names UNKNOWN as its own blocker instead of reporting none."""
+    import json
+
+    from fno.pr import _coverage_gate
+
+    _green_fetch(monkeypatch)
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd, **kw: {"coverage": "uncovered", "reviewed_count": 0},
+    )
+    monkeypatch.setattr(
+        _coverage_gate,
+        "law_authority",
+        lambda subject: ("unknown", f"decision probe failed for {subject}: boom"),
+    )
+    _status.run_status("42")
+    out = json.loads(capsys.readouterr().out)
+    assert out["ready"] is False
+    assert "review_coverage_waiver_unknown" in out["ready_blockers"]
+
+
 def test_ready_names_reviewer_refused_and_the_reviewer(monkeypatch, capsys):
     import json
 

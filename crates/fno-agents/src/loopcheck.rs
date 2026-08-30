@@ -3009,6 +3009,7 @@ fn read_pr_info(
         unaddressed_findings,
         coverage,
         impossible,
+        hard_finding_present,
     ) = if login_skipped {
         // No GitHub logins to poll (nothing configured, or no_external): skip
         // the gh review reads entirely (fewer calls + no spurious gh-error
@@ -3144,6 +3145,7 @@ fn read_pr_info(
             Vec::new(),
             coverage,
             blockers_impossible(&blockers, tiling.rounds_exhausted),
+            blockers.iter().any(|b| b.hard),
         )
     } else {
         // Read 3: top-level reviews + issue comments
@@ -3408,12 +3410,16 @@ fn read_pr_info(
             unaddressed,
             coverage,
             blockers_impossible(&blockers, tiling.rounds_exhausted),
+            blockers.iter().any(|b| b.hard),
         )
     };
     // The IMPOSSIBLE predicate rides the row beside the raw budget flag, so
     // the status surface can name it without re-running the disposition scan.
+    // The hard axis rides beside it: the standing waiver's condition is hard
+    // findings alone, independent of the budget.
     let mut tiling = tiling;
     tiling.impossible = impossible;
+    tiling.hard_blocker = hard_finding_present;
 
     // Emit coverage every gate eval so the Python readers (the merge primitive
     // and the polling command) and audit see one coherent, fresh number rather
@@ -3870,6 +3876,14 @@ fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool 
     })
 }
 
+/// The fno binary every loop-check surface shells, resolved through the same
+/// env seam the hint and fidelity probes use (`FNO_LOOPCHECK_FNO_BIN`,
+/// default `fno`). One resolver so a stubbed test and a live gate cannot
+/// disagree about which binary answered.
+fn loopcheck_fno_bin() -> String {
+    std::env::var("FNO_LOOPCHECK_FNO_BIN").unwrap_or_else(|_| "fno".to_string())
+}
+
 /// Best-effort `fno inbox notify TITLE BODY`. Spawned detached and never waited on;
 /// any failure (missing binary, non-zero exit) is non-fatal - the terminal
 /// completes on the durable event row alone (AC2-FR). Suppressed under
@@ -4035,6 +4049,133 @@ fn current_coverage_description(gh_bin: &str, cwd: &Path, head: &str) -> Option<
     ))
 }
 
+/// The standing operator-law subject for review coverage. One live law
+/// verdict here waives the coverage conjunct fleet-wide; the per-head exit
+/// beside it is the attended `fno do pr coverage-waive` command's scoped
+/// subject. Mirrors `STANDING_WAIVER_SUBJECT` in
+/// cli/src/fno/pr/_coverage_gate.py; the two spellings are held equal by the
+/// coverage-path tests, not by trust.
+const STANDING_WAIVER_SUBJECT: &str = "review-coverage-waiver";
+
+/// The one decision value that counts as an affirmative waiver. Mirrors
+/// `WAIVER_DECISION` in cli/src/fno/pr/_coverage_gate.py: a single law row at
+/// a waiver subject counts ONLY when its decision equals this string - row
+/// existence carries no polarity, so a note or a denial recorded at the
+/// subject reads as no waiver. An exact match against a constant, never free
+/// prose parsing.
+const WAIVER_DECISION: &str = "review coverage waived for this head";
+
+fn scoped_waiver_subject(repo_slug: &str, pr_number: i64, head: &str) -> String {
+    format!("{STANDING_WAIVER_SUBJECT}:{repo_slug}#{pr_number}@{head}")
+}
+
+/// Three-state current-law verdict for one subject, read through the one
+/// canonical CLI query (`fno backlog decisions <subject> --lane law --state
+/// live --json`). `current_law.status` decides the shape, and a `single`
+/// verdict counts ONLY when the one row's decision equals `WAIVER_DECISION`
+/// (row existence carries no polarity); everything else is `NoLaw` or
+/// `Unknown`: a nonzero exit (the reader refuses a damaged index), a dead
+/// probe, a conflict, or malformed output all answer UNKNOWN authority,
+/// which no consumer may read as either permission or absence. Mirrors
+/// `law_authority` on the Python side, seam for seam.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LawStatus {
+    Single,
+    NoLaw,
+    Unknown,
+}
+
+fn current_law_status(fno_bin: &str, cwd: &Path, subject: &str) -> LawStatus {
+    match run_bounded(
+        fno_bin.as_ref(),
+        &[
+            "backlog",
+            "decisions",
+            subject,
+            "--lane",
+            "law",
+            "--state",
+            "live",
+            "--json",
+        ],
+        cwd,
+        stopgate_read_timeout(),
+    ) {
+        BoundedRun::Completed(out) if out.status.success() => {
+            let parsed = serde_json::from_slice::<Value>(&out.stdout).ok();
+            let status = parsed.as_ref().and_then(|v| {
+                v.pointer("/current_law/status")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string())
+            });
+            match status.as_deref() {
+                Some("single") => {
+                    let affirmative = parsed
+                        .as_ref()
+                        .and_then(|v| {
+                            v.pointer("/decisions/0/decision")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == WAIVER_DECISION)
+                        })
+                        .unwrap_or(false);
+                    if affirmative {
+                        LawStatus::Single
+                    } else {
+                        LawStatus::NoLaw
+                    }
+                }
+                Some("none") => LawStatus::NoLaw,
+                _ => LawStatus::Unknown,
+            }
+        }
+        _ => LawStatus::Unknown,
+    }
+}
+
+/// The operator-waiver overlay for a head the computed verdict did not cover:
+/// `(Some(description), authority_unknown)`. Scoped first - explicit,
+/// per-head, strong enough to clear even a hard finding, dead on the next
+/// push - then the standing ruling, which never clears an unresolved
+/// CONFIRMED correctness or security finding. `authority_unknown` is true
+/// when either probe could not answer; a caller naming it must never report
+/// "no waiver" on that evidence. Mirrors `operator_waiver_verdict` in
+/// cli/src/fno/pr/_coverage_gate.py.
+pub fn operator_waiver(
+    fno_bin: &str,
+    cwd: &Path,
+    repo_slug: &str,
+    pr_number: i64,
+    head: &str,
+    hard_blocker: bool,
+) -> (Option<String>, bool) {
+    let scoped = if repo_slug.is_empty() || head.is_empty() {
+        LawStatus::NoLaw
+    } else {
+        current_law_status(
+            fno_bin,
+            cwd,
+            &scoped_waiver_subject(repo_slug, pr_number, head),
+        )
+    };
+    if scoped == LawStatus::Single {
+        return (
+            Some(format!(
+                "head-pinned operator waiver at {}",
+                short_sha(head)
+            )),
+            false,
+        );
+    }
+    let standing = current_law_status(fno_bin, cwd, STANDING_WAIVER_SUBJECT);
+    if standing == LawStatus::Single && !hard_blocker {
+        return (Some("standing operator law".to_string()), false);
+    }
+    (
+        None,
+        scoped == LawStatus::Unknown || standing == LawStatus::Unknown,
+    )
+}
+
 /// The one POST shape every coverage-marker writer uses.
 fn post_coverage_status(
     gh_bin: &str,
@@ -4106,7 +4247,9 @@ fn uncovered_status_description(pr_head_oid: &str, pr_number: i64) -> String {
 
 fn publish_coverage_status(
     gh_bin: &str,
+    fno_bin: &str,
     cwd: &Path,
+    repo_slug: &str,
     pr_number: i64,
     pr_head_oid: &str,
     event_head: &str,
@@ -4120,6 +4263,10 @@ fn publish_coverage_status(
     // thing that clears it is another review round, and the budget will not
     // fund one.
     budget_spent: bool,
+    // Whether an unresolved CONFIRMED correctness or security finding
+    // remains, budget aside. The standing operator-law waiver consults it and
+    // never clears a hard finding; the head-scoped waiver does.
+    hard_blocker: bool,
 ) {
     // A status target that is not a real 40-hex sha (an unresolved local
     // HEAD, the "unknown" sentinel from a failed git read) would POST to a
@@ -4222,6 +4369,51 @@ fn publish_coverage_status(
                     && v.producer == CoverageProducer::LocalAttestation
                     && v.verdict == CoverageVerdict::Reviewed
             }));
+    // The operator-law overlay, consulted ONLY where the computed verdict did
+    // not cover, exactly as the Python merge gate consults it: a waiver green
+    // posted here is what the merge gate would allow, and the two writers of
+    // one context must never disagree about that. Unknown authority never
+    // posts success - it names itself on the failure description instead, so
+    // a reader can tell "no waiver" from "the store could not answer".
+    let mut waiver_description: Option<String> = None;
+    let mut authority_unknown = false;
+    if !covered && !matches!(coverage.coverage, Coverage::Unknown) {
+        let (waiver, unknown) = operator_waiver(
+            fno_bin,
+            cwd,
+            repo_slug,
+            pr_number,
+            pr_head_oid,
+            hard_blocker,
+        );
+        waiver_description = waiver;
+        authority_unknown = unknown;
+    }
+    if let Some(description) = waiver_description {
+        eprintln!(
+            "review-coverage publisher: operator waiver green for {pr_head_oid}: {description}"
+        );
+        post_coverage_status(
+            gh_bin,
+            cwd,
+            pr_head_oid,
+            COVERAGE_STATUS_CONTEXT,
+            "success",
+            &description,
+        );
+        // The diagnostic mirrors the waiver, not the computed read: a waived
+        // review must not wear "retry the review verb" beside its waiver
+        // success, same as the override arm above.
+        post_coverage_status(
+            gh_bin,
+            cwd,
+            pr_head_oid,
+            COVERAGE_UNAVAILABLE_STATUS_CONTEXT,
+            "success",
+            &format!("coverage read healthy at {}", short_sha(pr_head_oid)),
+        );
+        return;
+    }
     let (state, description) = if covered {
         let Coverage::Covered(n) = coverage.coverage else {
             eprintln!(
@@ -4236,10 +4428,15 @@ fn publish_coverage_status(
     } else if matches!(coverage.coverage, Coverage::Unknown) {
         ("pending", coverage_unavailable_description(pr_head_oid))
     } else {
-        (
-            "failure",
-            uncovered_status_description(pr_head_oid, pr_number),
-        )
+        let mut description = uncovered_status_description(pr_head_oid, pr_number);
+        if authority_unknown {
+            description = format!("{description}; operator waiver authority unknown");
+        }
+        // ASCII only, so a byte truncate cannot split a character.
+        if description.len() > 140 {
+            description.truncate(140);
+        }
+        ("failure", description)
     };
     post_coverage_status(
         gh_bin,
@@ -5803,6 +6000,12 @@ pub struct RangeTiling {
     /// Filled by `read_pr_info` after the disposition scan, since it needs
     /// the corroboration state the arms compute.
     pub impossible: bool,
+    /// Whether ANY hard non-terminal finding remains, budget aside. The
+    /// standing operator-law waiver consults this: it may waive an uncovered
+    /// review but never an unresolved CONFIRMED correctness or security
+    /// finding, whatever the round budget says. `impossible` above is the
+    /// conjunction with a spent budget; this is the hard axis alone.
+    pub hard_blocker: bool,
 }
 
 // --- The disposition-complete pass condition, Rust gate side ----------------
@@ -9854,10 +10057,26 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
+                    let mut waived_green_description: Option<String> = None;
                     if review_required
                         && pr_info.state != PrState::Merged
                         && !pr_info.coverage.coverage.is_covered()
                     {
+                        // The operator-law overlay, the same resolver the merge
+                        // gate and the publisher apply: a waiver turns this
+                        // head covered, so the loop terminates DonePRGreen with
+                        // the waiver NAMED instead of wedging green PRs behind
+                        // an unreviewed terminal no review can clear. Unknown
+                        // authority keeps DoneUnreviewed - fail closed on a
+                        // store that could not answer.
+                        let (waiver, _authority_unknown) = operator_waiver(
+                            &parsed.fno_bin,
+                            &cwd,
+                            &repo_slug,
+                            pr_info.number,
+                            &pr_info.head_oid,
+                            pr_info.range_tiling.hard_blocker,
+                        );
                         // The hint renders the exact sized invocation (Python
                         // single source) so an unreviewed-green termination
                         // names what to run, not just that something must be.
@@ -9865,69 +10084,83 @@ fn decide_inner(args: &[String]) -> (i32, String) {
                         // receipt then carries the spent budget and names the
                         // terminal act instead. The max here is the same
                         // resolve read_pr_info judged the tiling against.
-                        let cov_line = coverage_receipt_line(
-                            &pr_info.coverage,
-                            sized_self_review_hint(
-                                &parsed.fno_bin,
-                                &cwd,
-                                author_harness.as_deref(),
-                            )
-                            .as_deref(),
-                            pr_info.range_tiling.rounds_exhausted.then(|| {
-                                (
-                                    pr_info.range_tiling.rounds_used,
-                                    settings.max_rounds.unwrap_or(2).max(1),
+                        if waiver.is_none() {
+                            let mut cov_line = coverage_receipt_line(
+                                &pr_info.coverage,
+                                sized_self_review_hint(
+                                    &parsed.fno_bin,
+                                    &cwd,
+                                    author_harness.as_deref(),
                                 )
-                            }),
-                        );
-                        let done_msg = format!(
-                            "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
-                            pr_info.number, cov_line
-                        );
-                        emit(
-                            "termination",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "reason": "DoneUnreviewed",
-                                "message": done_msg.clone()
-                            }),
-                        );
-                        emit(
-                            "loop_check",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "fingerprint": fingerprint,
-                                "fires": this_fire,
-                                "consecutive_unchanged": consecutive_after,
-                                "streak_window_secs": streak_window,
-                                "decision": "allow",
-                                "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                                "intent_source": intent_source,
-                                "pr_state": pr_info.state.as_str(),
-                                "ci": pr_info.ci_conclusion.render(),
-                                "reviewed": pr_info.reviewed,
-                                "review_skipped": pr_info.review_skipped,
-                                "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug, manifest.harness_session_id.as_deref()),
-                                "done_probes": probe_results,
-                                "fp_read_failed": fp_read_failed,
-                            }),
-                        );
-                        return (
-                            0,
-                            allow_output(
-                                "allow",
-                                Some(TerminationReason::DoneUnreviewed),
-                                &done_msg,
-                                this_fire,
-                                Some(fingerprint),
-                            ),
-                        );
+                                .as_deref(),
+                                pr_info.range_tiling.rounds_exhausted.then(|| {
+                                    (
+                                        pr_info.range_tiling.rounds_used,
+                                        settings.max_rounds.unwrap_or(2).max(1),
+                                    )
+                                }),
+                            );
+                            if _authority_unknown {
+                                cov_line = format!(
+                                    "{cov_line}; operator waiver authority unknown (decision probe)"
+                                );
+                            }
+                            let done_msg = format!(
+                                "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
+                                pr_info.number, cov_line
+                            );
+                            emit(
+                                "termination",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "reason": "DoneUnreviewed",
+                                    "message": done_msg.clone()
+                                }),
+                            );
+                            emit(
+                                "loop_check",
+                                serde_json::json!({
+                                    "session_id": session_id,
+                                    "fingerprint": fingerprint,
+                                    "fires": this_fire,
+                                    "consecutive_unchanged": consecutive_after,
+                                    "streak_window_secs": streak_window,
+                                    "decision": "allow",
+                                    "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                                    "intent_source": intent_source,
+                                    "pr_state": pr_info.state.as_str(),
+                                    "ci": pr_info.ci_conclusion.render(),
+                                    "reviewed": pr_info.reviewed,
+                                    "review_skipped": pr_info.review_skipped,
+                                    "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                                    "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug, manifest.harness_session_id.as_deref()),
+                                    "done_probes": probe_results,
+                                    "fp_read_failed": fp_read_failed,
+                                }),
+                            );
+                            return (
+                                0,
+                                allow_output(
+                                    "allow",
+                                    Some(TerminationReason::DoneUnreviewed),
+                                    &done_msg,
+                                    this_fire,
+                                    Some(fingerprint),
+                                ),
+                            );
+                        }
+                        waived_green_description = waiver;
                     }
                     // A rate-limited bot now fails the gate closed (x-9ab2), so a
                     // green+reviewed DonePRGreen can never carry one: reaching
                     // here means every required bot has a real completed pass.
-                    let done_msg = format!("PR #{} is green and reviewed", pr_info.number);
+                    let done_msg = match waived_green_description {
+                        Some(ref description) => format!(
+                            "PR #{} is green; review coverage waived ({})",
+                            pr_info.number, description
+                        ),
+                        None => format!("PR #{} is green and reviewed", pr_info.number),
+                    };
                     emit(
                         "termination",
                         serde_json::json!({
@@ -10558,7 +10791,9 @@ fn run_done(
     if matches!(info.state, PrState::Open) {
         publish_coverage_status(
             gh_bin,
+            &loopcheck_fno_bin(),
             cwd,
+            repo_slug,
             info.number,
             &info.head_oid,
             head_sha,
@@ -10568,6 +10803,7 @@ fn run_done(
             optional_lane_configured,
             reviewers,
             info.range_tiling.rounds_exhausted,
+            info.range_tiling.hard_blocker,
         );
     }
     Ok(info)
@@ -13200,6 +13436,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
     let mut gh_bin =
         std::env::var("FNO_LOOPCHECK_GH_BIN").unwrap_or_else(|_| "fno-gh-coverage".to_string());
     let mut git_bin = std::env::var("FNO_LOOPCHECK_GIT_BIN").unwrap_or_else(|_| "git".to_string());
+    let fno_bin = loopcheck_fno_bin();
     let mut author_harness_override: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
@@ -13431,7 +13668,9 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
             if matches!(pr_info.state, PrState::Open) {
                 publish_coverage_status(
                     &gh_bin,
+                    &fno_bin,
                     &cwd,
+                    &inputs.repo_slug,
                     pr_info.number,
                     &pr_info.head_oid,
                     &head_sha,
@@ -13441,6 +13680,7 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                     inputs.optional_lane_configured,
                     &required_reviewers,
                     pr_info.range_tiling.rounds_exhausted,
+                    pr_info.range_tiling.hard_blocker,
                 );
             }
             (
@@ -13504,7 +13744,9 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                 if head_explicit {
                     publish_coverage_status(
                         &gh_bin,
+                        &fno_bin,
                         &cwd,
+                        &inputs.repo_slug,
                         pr_num,
                         &head_sha,
                         &head_sha,
@@ -13519,6 +13761,9 @@ fn decide_review_coverage(args: &[String]) -> (i32, String) {
                         &required_reviewers,
                         // No tiling on the failed-read path, so no budget
                         // claim. The Unknown arm never reaches the veto.
+                        false,
+                        // No chain was read, so no hard-finding claim either;
+                        // the Unknown arm never consults the waiver.
                         false,
                     );
                 }
