@@ -88,8 +88,8 @@ set -euo pipefail
 # 352 measured, the rest is the rounding the zero-spare rule below demands.
 # Raised by 357 for two positive-marker specimens (zsh eats `:c` in an
 # unquoted HASH:path; stat prints local time and a hand-appended Z falsified
-# an elimination), plus the +1000 the ratchet band asks for on a growth step.
-CEILING_BYTES=39168
+# an elimination). Measured, no band banked: zero spare.
+CEILING_BYTES=38165
 # The working band under the ceiling. Spare above this fails the gate and names
 # the value to write, so a cut is banked in the same PR that makes it rather
 # than becoming headroom.
