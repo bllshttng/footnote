@@ -3048,6 +3048,65 @@ def _codex_default_review_base(cwd: str | None) -> str | None:
     return ref if proc.returncode == 0 and ref else None
 
 
+def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool, str]:
+    """Whether the recipient session's checkout has branch-side changes to read.
+
+    A ``baseBranch`` review/start diffs the RECIPIENT session's checkout against
+    the base: the target scopes the base side only, and codex computes the diff
+    in the thread's cwd. A session living on the base branch therefore reviews
+    an empty diff, reports clean with an empty findings array, and attests
+    nothing - the measured 2026-08-30 shape where reviews "succeeded" at
+    recipients on main while the PRs sat at review_coverage_uncovered with a
+    receipt in hand. This is the fire-side mirror of emit-attestation.sh's
+    empty-diff refusal: refuse BEFORE the RPC when the measured subject is
+    empty or unmeasurable, naming the checkout so the remedy is obvious.
+    """
+    if not cwd:
+        return False, (
+            "the recipient session's cwd is unknown, so the review subject "
+            "cannot be measured; re-register the row (`fno agents register`) "
+            "or fire from the PR worktree session"
+        )
+
+    import subprocess
+
+    def _git(*args: str) -> str | None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", cwd, *args],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return proc.stdout.strip() if proc.returncode == 0 else None
+
+    head = _git("rev-parse", "HEAD")
+    if not head:
+        return False, (
+            f"the recipient session's checkout at {cwd} has no resolvable HEAD"
+        )
+    merge_base = _git("merge-base", head, base_ref) or _git(
+        "merge-base", head, base_ref.removeprefix("origin/")
+    )
+    if not merge_base:
+        return False, (
+            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) "
+            f"cannot resolve {base_ref} to a merge-base; fetch the base or "
+            "fire from a checkout that tracks it"
+        )
+    names = _git("diff", "--name-only", f"{merge_base}..{head}")
+    count = len([line for line in (names or "").splitlines() if line])
+    if count == 0:
+        return False, (
+            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) has "
+            f"0 changed files against {base_ref}; the review would read an "
+            "empty diff, complete cleanly, and attest nothing"
+        )
+    return True, f"{count} changed files against {base_ref} at HEAD {head[:8]}"
+
+
 def _codex_review_target(
     payload: str, *, default_base: str | None = None
 ) -> tuple[str | None, bool]:
@@ -3060,8 +3119,13 @@ def _codex_review_target(
     explicit_pr = _EXPLICIT_PR_REVIEW.fullmatch(remainder)
     if explicit_pr:
         # The PR/HEAD identity remains in the raw payload for the author and
-        # audit trail. Codex review/start receives the PR's explicit base scope,
-        # which is the diff it must inspect rather than its ambient cwd.
+        # audit trail. Codex review/start receives the PR's explicit base
+        # scope; that scopes the BASE side only - codex still computes the
+        # diff in the recipient session's cwd, so the head side is whatever
+        # checkout the recipient sits in. The fire-side guard in _raw_send
+        # measures that checkout and refuses an empty subject (2026-08-30:
+        # open PRs sat uncovered because their recipients lived on the base
+        # branch and honestly reviewed nothing).
         return f"baseBranch:origin/{explicit_pr.group('base')}", False
     if remainder.startswith("HEAD "):
         # A malformed explicit target must not fall through to
@@ -3422,6 +3486,30 @@ def _raw_send(
             target, ignored_remainder = _codex_review_target(
                 stripped, default_base=default_base
             )
+            # Fire-side empty-subject guard: a baseBranch target diffs the
+            # RECIPIENT session's checkout against the base, so measure that
+            # checkout before the RPC fires. Empty or unmeasurable refuses on
+            # both surfaces (-check answers not-injectable, the send refuses)
+            # with the checkout named, instead of letting the review complete
+            # cleanly over nothing and leave the PR uncovered with a receipt.
+            # Explicit-scope targets (uncommittedChanges, commit:, custom:)
+            # are not checkout-vs-base and skip the guard.
+            if target is not None and target.startswith("baseBranch:"):
+                subject_base = target.split(":", 1)[1]
+                subject_ok, subject_detail = _codex_review_subject_nonempty(
+                    getattr(entry, "cwd", None), subject_base
+                )
+                if not subject_ok:
+                    reason = (
+                        f"{name!r} review/start would read an empty diff: "
+                        f"{subject_detail}. Fire from the PR worktree session "
+                        "(`fno do target request-self-review --pr <n>`) or "
+                        "spawn the reviewer with --cwd <worktree>."
+                    )
+                    if check:
+                        print(f"not-injectable: {reason}")
+                        raise typer.Exit(code=1)
+                    _refused(reason)
             if check:
                 if target is None:
                     print(
