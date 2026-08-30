@@ -26,6 +26,33 @@ requires:
 
 This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's reference and follows it in this same context. It never calls another skill at runtime (it dispatches review subagents via the Task/Agent tool and loads modes via Read).
 
+## Active skill freshness preflight
+
+Before resolving any argument, run the diagnostic against the active review instructions:
+
+```bash
+if FRESHNESS_OUTPUT=$(fno doctor plugin-file "$SKILL_DIR/SKILL.md"); then
+  FRESHNESS_EXIT=0
+else
+  FRESHNESS_EXIT=$?
+fi
+printf '%s\n' "$FRESHNESS_OUTPUT"
+case "$FRESHNESS_OUTPUT" in
+  *PLUGIN_FILE_STALE*)
+    exit "$FRESHNESS_EXIT"
+    ;;
+  *PLUGIN_FILE_UNKNOWN*)
+    echo "review warning: active skill freshness is unknown; continuing"
+    ;;
+  *PLUGIN_FILE_FRESH*)
+    ;;
+  *)
+    echo "review refused: active skill freshness diagnostic returned no recognized marker"
+    exit 4
+    ;;
+esac
+```
+
 ## Step 1: Resolve the mode (ALWAYS announce it)
 
 The grammar is `[level] [--comment] [--fix] [<pr#>|<branch>|<path>]`, with `prove-it`, `cleanup`, `peer`, `research`, and `declare` as leading mode tokens. Strip the flags first, then read the first remaining token:
