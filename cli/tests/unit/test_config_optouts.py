@@ -207,6 +207,42 @@ def test_doctor_reports_unbacked_file_residue(tmp_path, monkeypatch):
     ]
 
 
+def test_stale_claim_takeover_preserves_the_original_prior_value(tmp_path, monkeypatch):
+    from fno.claims.io import claim_path
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[review]\nself_review_required = true\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "settings.yaml"))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "global"))
+    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-a")
+    writer.set_config_value("review.self_review_required", "false")
+
+    path = claim_path(
+        "config-optout:review.self_review_required",
+        root=claims_root_for("config-optout:review.self_review_required"),
+    )
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.update(
+        {
+            "schema_version": 2,
+            "pid": None,
+            "pid_unavailable": True,
+            "expires_at": 1,
+        }
+    )
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    monkeypatch.setattr(writer, "_resolve_optout_holder", lambda: "session-b")
+    writer.set_config_value("review.self_review_required", "false")
+
+    replacement = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert replacement["metadata"]["prior_present"] is True
+    assert replacement["metadata"]["prior_value"] is True
+
+
 def test_rust_optout_keys_are_registered_in_python_membership():
     from fno.config.optouts import MERGE_GATING_OPTOUTS
 

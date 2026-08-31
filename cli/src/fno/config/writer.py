@@ -738,13 +738,12 @@ def set_config_values(
                 }
                 # An idempotent refresh must preserve the original value that
                 # the lease is responsible for restoring.
-                if (
-                    state in {"live", "suspect"}
-                    and existing_holder == holder
-                    and isinstance(status.get("metadata"), dict)
-                ):
-                    old_metadata = status["metadata"]
-                    if old_metadata.get("config_key") == key:
+                old_metadata = status.get("metadata")
+                if isinstance(old_metadata, dict) and old_metadata.get("config_key") == key:
+                    # Preserve the original prior value on an idempotent
+                    # refresh, and when a stale lease is taken over while its
+                    # opt-out value still remains in the file.
+                    if state in {"live", "suspect", "stale"}:
                         metadata = old_metadata
                 try:
                     claim = acquire_claim(
