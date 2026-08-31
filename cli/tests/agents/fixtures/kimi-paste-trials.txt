@@ -1,0 +1,21 @@
+# Measured 2026-08-31 with kimi 0.39.1 in a tmux pane. Each paste used the
+# same generated payload shape: 6,102 UTF-8 bytes and 42 lines. Enter was sent
+# as tmux C-m. No model token was spent: kimi has no provider configured, and
+# the submit outcome is proven by the cleared composer plus the harness's own
+# error line, which is the positive marker available pre-onboarding.
+payload_bytes=6102
+payload_lines=42
+paste_to_enter_delay_ms=300
+trial 1 SUBMITTED composer_cleared=yes model_reply=no reason="Error: LLM not set, send \"/login\" to login"
+trial 2 SUBMITTED composer_cleared=yes model_reply=no reason="Error: LLM not set, send \"/login\" to login"
+trial 3 SUBMITTED composer_cleared=yes model_reply=no reason="Error: LLM not set, send \"/login\" to login"
+
+# Boundary at this payload size: 200 ms did not submit (0/2, observed at
+# 5,622 and 6,102 bytes) and a zero-delay control did not submit (0/1), so
+# 300 ms is the measured floor for a 6.1KB paste, not a copy of grok's 200.
+# A short single-line control submitted at the same 300 ms delay.
+short_control submitted=1/1
+zero_delay_control submitted=0/1
+
+# The binary auto-updated 0.38.0 -> 0.39.1 on this session's first pane
+# launch, mid-measurement. The ACP contract tests pass against both versions.
