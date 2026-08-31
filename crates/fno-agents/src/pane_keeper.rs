@@ -378,6 +378,8 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
             "child_pid": child_pid,
             "argv": cfg.argv,
             "cwd": cfg.cwd.to_string_lossy(),
+            "rows": cfg.rows,
+            "cols": cfg.cols,
             "started_at": started_at,
         })
         .to_string()

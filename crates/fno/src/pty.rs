@@ -701,8 +701,8 @@ const KEEPER_TAG_INPUT: u8 = 1;
 const KEEPER_TAG_RESIZE: u8 = 2;
 const KEEPER_TAG_KILL: u8 = 3;
 const KEEPER_TAG_IDENTIFY: u8 = 4;
-const KEEPER_TAG_IDENTIFY_REPLY: u8 = 5;
-const KEEPER_TAG_OUTPUT: u8 = 6;
+pub(crate) const KEEPER_TAG_IDENTIFY_REPLY: u8 = 5;
+pub(crate) const KEEPER_TAG_OUTPUT: u8 = 6;
 const KEEPER_TAG_EXITED: u8 = 7;
 
 /// The keeper protocol version this client speaks.
@@ -723,7 +723,7 @@ fn keeper_frame_kill() -> Vec<u8> {
     keeper_encode(KEEPER_TAG_KILL, &[])
 }
 
-fn keeper_frame_identify() -> Vec<u8> {
+pub(crate) fn keeper_frame_identify() -> Vec<u8> {
     keeper_encode(KEEPER_TAG_IDENTIFY, &[])
 }
 
@@ -735,14 +735,14 @@ fn keeper_encode(tag: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-enum KeeperRead {
+pub(crate) enum KeeperRead {
     /// tag, payload, bytes consumed.
     Frame(u8, Vec<u8>, usize),
     NeedMore,
 }
 
 /// Read one frame from `buf`, consuming whole frames only.
-fn keeper_decode(buf: &[u8]) -> KeeperRead {
+pub(crate) fn keeper_decode(buf: &[u8]) -> KeeperRead {
     if buf.len() < 5 {
         return KeeperRead::NeedMore;
     }
@@ -780,6 +780,44 @@ pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
     }
     out.sort();
     out
+}
+
+/// One successful re-adoption: the wired shell plus the handshake facts the
+/// server needs to rebuild the pane's identity and its lost window.
+pub struct KeeperAdoption {
+    pub shell: PtyShell,
+    pub reply: serde_json::Value,
+    /// Output produced while no server watched, already drained from the
+    /// keeper's ring during the handshake.
+    pub ring: Vec<u8>,
+}
+
+/// Adopt a live keeper through its socket: handshake synchronously (ring
+/// drained, child pid learned), then wire the reader/writer threads.
+/// `Ok(None)` = the socket has no listener behind it; the CALLER unlinks it
+/// and names the pane (the stale-socket contract).
+#[allow(clippy::too_many_arguments)]
+pub fn adopt_keeper_socket(
+    sock: &std::path::Path,
+    pane_id: u64,
+    out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+    exit_tx: tokio::sync::mpsc::Sender<u64>,
+) -> Result<Option<KeeperAdoption>, String> {
+    match keeper_handshake(sock, keeper_handshake_quiet())? {
+        None => Ok(None),
+        Some((stream, reply, ring)) => {
+            let child_pid = reply
+                .get("child_pid")
+                .and_then(serde_json::Value::as_u64)
+                .map(|p| p as u32);
+            let shell = wire_keeper(stream, child_pid, sock.to_path_buf(), pane_id, out_tx, exit_tx);
+            Ok(Some(KeeperAdoption {
+                shell: PtyShell::Keeper(shell),
+                reply,
+                ring,
+            }))
+        }
+    }
 }
 
 /// Launch the keeper process for one pane. Plain pipes (the conversation
@@ -1092,6 +1130,46 @@ impl KeeperPty {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// A Keeper wired to an in-process socket pair: no real keeper process.
+    /// The shutdown-sweep and deliberate-close contract tests assert frames
+    /// on the wire, which needs a peer that observes them - the fake keeps
+    /// those tests honest without dragging real processes into unit time.
+    #[cfg(test)]
+    pub(crate) fn for_test(stream: std::os::unix::net::UnixStream, child_pid: Option<u32>) -> KeeperPty {
+        let exited = Arc::new(AtomicBool::new(false));
+        let reader_done = Arc::new(AtomicBool::new(false));
+        let read_half = stream.try_clone().expect("clone keeper test stream");
+        let (out_tx, _out_rx) = tokio::sync::mpsc::channel(64);
+        let (exit_tx, _exit_rx) = tokio::sync::mpsc::channel(4);
+        spawn_keeper_reader(
+            read_half,
+            0,
+            out_tx,
+            exit_tx,
+            Arc::clone(&exited),
+            Arc::clone(&reader_done),
+        );
+        let (frame_tx, frame_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(16);
+        let mut writer_half = stream;
+        std::thread::Builder::new()
+            .name("fno-mux-keeper-test-writer".into())
+            .spawn(move || {
+                while let Ok(frame) = frame_rx.recv() {
+                    if writer_half.write_all(&frame).is_err() {
+                        break;
+                    }
+                }
+            })
+            .expect("spawn keeper test writer thread");
+        KeeperPty {
+            _sock_path: PathBuf::from("/fno-test/keeper.sock"),
+            child_pid,
+            exited,
+            reader_done,
+            frame_tx,
         }
     }
 }
