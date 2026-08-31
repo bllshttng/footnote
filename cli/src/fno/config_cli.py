@@ -859,6 +859,7 @@ def get_cmd(
     as one object.
     """
     import json
+    import os
     import sys
 
     from fno.config import describe_settings_for_repo, load_settings, resolve_source
@@ -866,8 +867,18 @@ def get_cmd(
     from pydantic import BaseModel
 
     root = load_settings()
-    settings_root = resolve_repo_root().resolve()
-    searched_candidates = describe_settings_for_repo(settings_root)
+    # The receipt must describe the chain that PRODUCED the value.
+    # load_settings() reads a pinned FNO_CONFIG through the env branch, which
+    # short-circuits the repo chain, so provenance seeded at the repo root
+    # would name files that did not decide the key.
+    pinned_config = os.environ.get("FNO_CONFIG")
+    settings_root = (
+        Path(pinned_config).resolve().parent
+        if pinned_config
+        else resolve_repo_root().resolve()
+    )
+    provenance_root: Optional[Path] = None if pinned_config else settings_root
+    searched_candidates = describe_settings_for_repo(provenance_root)
 
     def _traverse(dotted: str) -> tuple[bool, object]:
         node: object = root
@@ -910,7 +921,7 @@ def get_cmd(
     # command exists to end, just with the block as the lie.
     is_leaf = not isinstance(node, (BaseModel, dict))
     if is_leaf:
-        source = resolve_source(key, root=settings_root)
+        source = resolve_source(key, root=provenance_root)
         if source is None and (
             key.startswith("providers.")
             or key.startswith("config.providers.")
@@ -920,7 +931,7 @@ def get_cmd(
             # The value resolved through the rename; provenance must too, or a
             # file that DOES set the key reports "source: default".
             source = resolve_source(
-                key.replace("providers", "accounts", 1), root=settings_root
+                key.replace("providers", "accounts", 1), root=provenance_root
             )
         if source is not None:
             decider, overridden = source

@@ -5241,9 +5241,14 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     return SettingsModel.model_validate(raw)
 
 
-def describe_settings_for_repo(root: Path) -> list[Path]:
-    """Return the ordered settings candidates consulted for ``root``."""
-    return _candidate_paths(Path(root))
+def describe_settings_for_repo(root: Optional[Path] = None) -> list[Path]:
+    """Return the ordered settings candidates consulted for ``root``.
+
+    ``None`` seeds the chain the way :func:`load_settings` seeds it, from the
+    process context, so a pinned ``FNO_CONFIG`` is described as the one
+    candidate it is.
+    """
+    return _candidate_paths(Path(root) if root is not None else None)
 
 
 def resolve_source(

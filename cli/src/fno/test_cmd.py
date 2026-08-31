@@ -165,6 +165,30 @@ def _state_canary_status(path: Path) -> str | None:
     return None
 
 
+def _state_both_exit(
+    clean_rc: int,
+    diff: Sequence[str],
+    canary_clean: str | None,
+    canary_populated: str | None,
+) -> int:
+    """The --state both verdict, decided by the junit comparison alone.
+
+    The populated lane is SUPPOSED to end red on the state canary (that is the
+    positive control), so its raw exit code can never decide the verdict: an
+    exit code fed from it reports failure on the tool's own definition of
+    success. The comparison is the verdict; the raw populated rc is not read.
+    """
+    if canary_clean != "passed" or canary_populated != "failed":
+        return 1
+    if clean_rc:
+        return clean_rc
+    if not diff:
+        return 1
+    if any("test_state_canary" not in nodeid for nodeid in diff):
+        return 1
+    return 0
+
+
 def _state_steps(
     steps: Sequence[tuple[str, str, str]], mode: str
 ) -> list[tuple[str, str, str]]:
@@ -1500,7 +1524,7 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             )
         return clean_rc or dirty_rc
 
-    if opts["state"] == "both":
+    if opts["state"] == "both" and not opts["list"]:
         state_rest: list[str] = []
         skip_next = False
         for a in args:
@@ -1516,30 +1540,29 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         print("state: clean lane")
         clean_rc = _run_smoke([*state_rest, "--state=clean"], stream=stream)
         print("state: populated lane")
-        populated_rc = _run_smoke(
-            [*state_rest, "--state=populated"], stream=stream
-        )
+        # The populated lane's raw exit code is never the verdict: it is red by
+        # design on the canary. _state_both_exit reads the junit comparison.
+        _run_smoke([*state_rest, "--state=populated"], stream=stream)
         diff = _state_verdict_diff(
             _state_junit_path("clean"), _state_junit_path("populated")
         )
         canary_clean = _state_canary_status(_state_junit_path("clean"))
         canary_populated = _state_canary_status(_state_junit_path("populated"))
+        if diff:
+            print("state verdict diff:")
+            for nodeid in diff:
+                print(f"  {nodeid}")
         if canary_clean != "passed" or canary_populated != "failed":
             sys.stderr.write(
                 "state verdict diff: positive control missing or unexpected; "
                 "require canary clean=passed and populated=failed\n"
             )
-            return 1
-        if diff:
-            print("state verdict diff:")
-            for nodeid in diff:
-                print(f"  {nodeid}")
-        else:
+        elif not diff:
             sys.stderr.write(
                 "state verdict diff: no changed testcase; verify the populated "
                 "lane ran its positive control before trusting this result\n"
             )
-        return clean_rc or populated_rc
+        return _state_both_exit(clean_rc, diff, canary_clean, canary_populated)
 
     global _AMBIENT_MODE, _STATE_MODE
     _AMBIENT_MODE = opts["ambient"]
