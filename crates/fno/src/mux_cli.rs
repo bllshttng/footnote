@@ -8469,11 +8469,21 @@ mod tests {
 
     #[test]
     fn mux_pane_dnd_refusal_has_a_distinct_exit() {
-        let refused = ServerMsg::Err {
-            code: 14,
+        let dnd = ServerMsg::Err {
+            code: err_code::TARGET_DND,
             msg: "target is DND; use fno agents mail send to queue durable".into(),
         };
-        assert_eq!(render_reply(refused, false, false, None), 23);
+        assert_eq!(render_reply(dnd, false, false, None), EXIT_TARGET_DND);
+        // The identity refusal keeps its own exit: an earlier draft fed code 14
+        // here, which passed with the DND arm deleted.
+        let identity = ServerMsg::Err {
+            code: err_code::TARGET_IDENTITY_MISMATCH,
+            msg: "target identity mismatch".into(),
+        };
+        assert_eq!(
+            render_reply(identity, false, false, None),
+            EXIT_TARGET_IDENTITY_MISMATCH
+        );
     }
 
     #[test]

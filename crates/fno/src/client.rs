@@ -14233,8 +14233,10 @@ async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
     // could land after we already told the user the save failed. needs_overlay,
     // digest_overlay, and connections_view set it for the same shell-out shape.
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    // --local: the startup ladder gives the project config precedence, so a
+    // global write is silently shadowed on the next attach to this workspace.
     command
-        .args(["config", "set", key, value])
+        .args(["config", "set", key, value, "--local"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
