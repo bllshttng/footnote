@@ -11977,9 +11977,9 @@ def cmd_reconcile(
     # Ledger session harvest (x-4f1b): fill every execution row's ABSENT
     # `sessions` from its graph node and mark the rest explicitly, before the
     # sweep reports. Reconcile auto-fires on SessionStart, so this lands
-    # before any reaping work can consult a row. Run on BOTH output paths -
-    # the --json payload's consumers (the SessionStart hook) discard stderr,
-    # so the count line rides stderr there to keep the JSON parseable.
+    # before any reaping work can consult a row. The counts ride the JSON
+    # payload on --json (a stray stdout line breaks json.loads consumers)
+    # and a plain line on the human path.
     from fno.cost._register import harvest_ledger_sessions
 
     _harvest_nodes = {
@@ -11988,7 +11988,9 @@ def cmd_reconcile(
         if isinstance(e, dict) and e.get("id")
     }
     _filled, _marked = harvest_ledger_sessions(_harvest_nodes, dry_run=dry_run)
-    typer.echo(f"ledger harvest: filled {_filled}, marked {_marked}", err=json_out)
+    _harvest = {"filled": _filled, "marked": _marked}
+    if not json_out:
+        typer.echo(f"ledger harvest: filled {_filled}, marked {_marked}")
 
     if json_out:
         payload = {
@@ -12040,6 +12042,7 @@ def cmd_reconcile(
             # the exact failure mode this feature exists to end.
             "sync_catchup": sync_catchup,
             "claim_reap": claim_reap,
+            "ledger_harvest": _harvest,
             "failures": [
                 {
                     "node_id": r.node_id,
