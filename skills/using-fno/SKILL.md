@@ -14,9 +14,11 @@ This workspace has the `footnote` plugin installed. Two surfaces compose: skills
 
 Agent-authored `fno agents mail send`, `fno agents mail reply`, and `fno mux pane send` are handoffs. Use 80 words or fewer.
 
-Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, pleasantries, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
+Think fully. Send outcome, reason, next action. Drop articles only where clear. Cut filler, hedges, repeated context. Fragments work. Keep technical terms, commands, errors, numbers, negation exact. Put findings on node/doc. Send link. Operator text stays exact.
 
 Use `Status: X. Why Y. Done at Z.` or `Approval: Problem X. Options Y/Z. Recommend Z because A. Your call?`
+
+Budget-refused stop, resume, or scope change? Start the body with `control:`: own 60-word lane, pair budget untouched.
 
 ## 1. Slash-command workflows (orchestration, reasoning-required)
 
@@ -57,21 +59,21 @@ Substrate vocabulary: `pane` and `thread` are both interactive and attachable. `
 
 **Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno agents mail reply --to X "..."`: it threads the reply and resolves the sender itself, live or drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
-**Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (a busy recipient can still get it), then `resume`/`attach`. One exception: a `[bus-only]` queue drains by design. The recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
+**Read send evidence literally.** `delivered (hosted)` is confirmed. `queued (durable)` can sit undrained - no receipt is no coordination. Before re-sending, `peek` (busy can still receive), then `resume`/`attach`. A `[bus-only]` queue drains by design; the recipient's turn-boundary `notify-self` surfaces it. A bus-only receipt IS coordination, never a stranded message.
 
-**Pane drives carry an envelope; `typed` is not `delivered`.** `fno mux pane send` wraps in `<fno_mail>` by default and refuses a pane showing an option prompt. `--raw` types bytes verbatim; without `--submit` a send only types, and a confirmed submit prints `submitted`. On a `live-miss` that reads busy, not dead, `fno agents mail send --force` types the wrapped body, keeping the msg-id, reply handle and outbox row. `typed (pane <id>)` is not delivery. [Details](docs/architecture/pane-transport.md).
+**Pane drives carry an envelope; `typed` is not `delivered`.** `fno mux pane send` wraps in `<fno_mail>` by default and refuses a pane showing an option prompt. `--raw` types bytes verbatim; without `--submit` a send only types (`submitted` confirms a real submit). On a `live-miss` that reads busy, `fno agents mail send --force` retypes the wrapped body, keeping msg-id, reply handle and outbox row. `typed (pane <id>)` is not delivery. [Details](docs/architecture/pane-transport.md).
 
-**Codex: full session_id or pane, never head-8.** A codex UUIDv7 head-8 is a ~65.5s clock bucket, so siblings from one minute collide and `mail send` refuses that shape. A claude UUIDv4 head-8 is safe. On an old ambiguous one, `mail reply --sender-session <full-id>` keeps the thread.
+**Codex: full session_id or pane, never head-8.** A codex UUIDv7 head-8 is a ~65.5s clock bucket, so minute-siblings collide and `mail send` refuses that shape; claude UUIDv4 is safe. On an old ambiguous one, `mail reply --sender-session <full-id>` keeps the thread.
 
-**Sending with a reply address.** `send <name>` self-stamps your handle; `--to-project` stamps the project (add `--from-self` if you will hold for the answer). Only `fno whoami`'s `mail:` line is a valid `--from-name`.
+**Sending with a reply address.** `send <name>` self-stamps your handle; `--to-project` stamps the project (add `--from-self` to hold for the answer). Only `fno whoami`'s `mail:` line is a valid `--from-name`.
 
-**Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or a pane worker via its mux ref. Distinct from `fno agents logs <name>` (registry-scoped).
+**Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or pane worker via its mux ref; `fno agents logs <name>` is registry-scoped.
 
-**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as panes you can watch, drive, or message.
+**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno agents mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as watchable, drivable panes.
 
 **Citizens vs limbs.** `fno agents spawn` makes an addressable, durable roster citizen. A native subagent is a one-shot, observable-only limb. Spawn work that must outlive you, hold a claim, or receive mail. Use a limb for a result consumed next turn. [Details](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** It is the fallback after a worker's own invocation is refused: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
+**Mail is user-shaped.** Fallback when a worker's own invocation is refused: `fno agents mail send <worker> --raw '/<verb>'`. A mail probe proves user-triggered behavior, never autonomy. No live king means [advisory self-review](docs/architecture/review-lanes.md).
 
 **Fix what you find. Carve out only what is too big.** A problem you spot mid-task gets FIXED in this PR as its own commit, unrelated or not. SIZE is the only justification for filing instead: `fno backlog carveout add --kind deferred|oos-bug "<what + why>"`. Harvested at merge, cleared only by `fno backlog retro sweep-carveouts --apply`. Prefer a node. Applies in every pipeline.
 

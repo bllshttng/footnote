@@ -47,6 +47,8 @@ Rule 7 inherits the existing escapes. Add a `style-exception:` line with a reaso
 
 The send boundary also caps each canonical sender-recipient pair at `config.style.pair_budget_words` masked words, 80 by default, in a rolling 10-minute window. Any inbound `send` from that recipient resets the pair to zero. Self-sends and non-send audit or migration rows do not reset it. A style exception or `FNO_STYLE_ENFORCE=0` bypasses refusal for that send but still records and reserves the real word count. A refused attempt does not reserve words. Raise `pair_budget_words` alongside `word_cap.mail`: a higher per-message cap that leaves the window at 80 refuses the very message the cap now permits.
 
+Operational control has its own lane. When the pair window is spent, a stop, a resume, or a scope change must still arrive. To use the lane, start the body's first line with `control:`. Such a body is exempt from the pair budget and skips the style check. It rides a separate rolling window, capped at 60 words per pair. The lane stays bounded. The control window is strictly smaller than the pair budget, so a chatter channel gains nothing by moving through it. A control body over 60 words refuses. An over-budget ordinary refusal names the escape in its own text.
+
 ### Which surfaces take the cap, and why progress notes do not
 
 The test is whether a reader meets the text MID-TURN, in the flow of doing something else. Mail is read mid-turn. An encounter's evidence is read mid-turn, while a person scans a demand table. A PR body, a node's details, and a plan doc are opened deliberately, so they carry no cap.

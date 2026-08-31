@@ -36,6 +36,34 @@ from typing import Optional
 CAP = 80
 WINDOW_SECONDS = 600
 
+# The control lane. A stop, a resume, or a scope change must arrive
+# even when the pair's ordinary window is spent, because the window fills with
+# incident traffic exactly when control matters most -- three refusals measured
+# on 2026-08-29 were all control during a live incident, none chatter. The lane
+# is bounded so it cannot become a bypass: the body must OPEN with a `control:`
+# line, and the lane keeps its OWN rolling ledger at CONTROL_CAP words per pair
+# per window. The window cap is also the first message's length cap, so one
+# number bounds both directions. It stays fixed policy like WINDOW_SECONDS,
+# strictly below CAP, and deliberately unconfigurable: an override would let
+# the lane become the bypass. Control traffic never charges the ordinary
+# window, so a stop cannot spend the budget the conversation after it needs.
+CONTROL_CAP = 60
+CONTROL_PREFIX = "control:"
+
+
+def is_control(body: str) -> bool:
+    """Whether ``body`` opens with a control directive line.
+
+    First non-blank line only, and case-insensitive like every other wire
+    marker: an exact-case check is bypassed by one capital letter. A `control:`
+    mention anywhere else in a body is prose, not the directive.
+    """
+    for line in body.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped.lower().startswith(CONTROL_PREFIX)
+    return False
+
 
 class BudgetRefused(Exception):
     """The projected pair total exceeds the cap inside the window."""
@@ -266,6 +294,37 @@ def reserve(
         )
     finally:
         _release(lock)
+
+
+def reserve_control(
+    *,
+    sender: str,
+    recipient: str,
+    words: int,
+    msg_id: str,
+    sender_key: Optional[str] = None,
+    recipient_key: Optional[str] = None,
+) -> Reservation:
+    """Reserve against the control lane's own ledger, never the ordinary window.
+
+    The ledger is keyed ``control:<sender> -> <recipient>`` so control traffic
+    neither spends nor competes with the pair's ordinary budget. The inbound
+    reset still matches raw bus handles (``reserve`` keeps those on the display
+    pair), so a peer's reply clears both windows. ``sender_key`` /
+    ``recipient_key`` rekey the control ledger the same way ``reserve`` rekeys
+    the ordinary one: two codex siblings sharing a head-8 handle charge their
+    own windows, never one fused pair.
+    """
+    return reserve(
+        sender=sender,
+        recipient=recipient,
+        words=words,
+        msg_id=msg_id,
+        enforce=True,
+        sender_key=f"{CONTROL_PREFIX}{sender_key or sender}",
+        recipient_key=recipient_key,
+        cap=CONTROL_CAP,
+    )
 
 
 def release(reservation: Reservation) -> None:

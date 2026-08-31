@@ -482,6 +482,156 @@ def test_exception_permits_the_send_and_still_charges_it():
     assert exc.value.running == 100, "the exempt send stays charged"
 
 
+# --- control lane: operational control rides its own window ----------------
+
+def test_is_control_reads_the_first_non_blank_line_only():
+    assert budget.is_control("control: stop all spawns now")
+    assert budget.is_control("CONTROL: stop all spawns now"), "one capital letter bypasses an exact-case check"
+    assert budget.is_control("  \n control: lift the hold")
+    assert not budget.is_control("we need a control: review of this")
+    assert not budget.is_control("status report\ncontrol: mentioned below")
+    assert not budget.is_control("")
+
+
+def test_control_lane_caps_itself_and_leaves_the_pair_untouched():
+    res = budget.reserve_control(sender="a", recipient="b", words=50, msg_id="msg-ctl-1")
+    assert res.pair == "control:a -> b"
+
+    with pytest.raises(budget.BudgetRefused) as exc:
+        budget.reserve_control(sender="a", recipient="b", words=11, msg_id="msg-ctl-2")
+    assert exc.value.cap == budget.CONTROL_CAP
+    assert exc.value.pair == "control:a -> b"
+
+    # The control traffic never touched the ordinary window: a full 80-word
+    # ordinary send still passes, and the ordinary ledger holds only itself.
+    send("a", "b", 80, "msg-ordinary")
+    stored = json.loads(budget._ledger_path("a -> b").read_text())
+    assert [e["words"] for e in stored["entries"]] == [80]
+
+
+def test_control_window_resets_on_an_inbound_reply():
+    budget.reserve_control(sender="a", recipient="b", words=55, msg_id="msg-ctl-1")
+    reset_id = _inbound("a", "b", "msg-in-ctl")
+    second = budget.reserve_control(sender="a", recipient="b", words=55, msg_id="msg-ctl-2")
+    assert second.running_before == 0
+    assert second.reset_by == reset_id
+
+
+def test_control_lane_keys_colliding_codex_siblings_separately():
+    budget.reserve_control(
+        sender="king", recipient="01a0370b", words=55, msg_id="ctl-a",
+        recipient_key="aaaa1111-2222-3333-4444-555566667777",
+    )
+    second = budget.reserve_control(
+        sender="king", recipient="01a0370b", words=55, msg_id="ctl-b",
+        recipient_key="bbbb1111-2222-3333-4444-555566667777",
+    )
+    assert second.running_before == 0, "distinct full-id keys charge separate control windows"
+
+
+def test_control_body_skips_the_style_check(monkeypatch):
+    from fno import style
+    from fno.mail import cli
+
+    def _violation(text, **_kw):
+        return [style.Violation(rule=1, sentence_index=0, sentence=text, detail="flagged")]
+
+    monkeypatch.setattr(style, "check", _violation)
+    with pytest.raises(typer.Exit):
+        cli._enforce_style(words(10))
+    cli._enforce_style("control: HOLD all spawns now. Load 219 on 12 cores.")
+
+
+def test_name_lane_control_send_delivers_when_the_pair_window_is_spent(monkeypatch, capsys):
+    """The node's acceptance, end to end on the real user path: spend the pair,
+    deliver a control stop, then watch an ordinary body of the same length
+    refuse in the same window. The control send proves the lane; the refusal
+    proves the budget still works."""
+    from fno.agents.discover import DiscoveredSession
+    from fno.mail import cli
+
+    recipient = DiscoveredSession(
+        session_id="11111111-2222-3333-4444-555566667777",
+        short_id="11111111",
+        handle="11111111",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status=None,
+        agent="codex",
+        truth_state="working",
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda _sid, _body, **_kwargs: False,
+    )
+    body = words(79)
+
+    cli._name_lane_send(body, from_name="sender", resolved=recipient)
+    assert "queued (durable)" in capsys.readouterr().out
+
+    control = "control: HOLD all spawns now. Load 219 on 12 cores."
+    cli._name_lane_send(control, from_name="sender", resolved=recipient)
+    captured = capsys.readouterr()
+    assert "queued (durable)" in captured.out, "the control stop is delivered"
+    assert "control lane" in captured.err, "the receipt names the lane"
+
+    with pytest.raises(typer.Exit) as raised:
+        cli._name_lane_send(body, from_name="sender", resolved=recipient)
+    assert raised.value.exit_code == 1
+    refusal = capsys.readouterr().err
+    assert "running=79 current=79 projected=158 cap=80 window=10m" in refusal
+    assert "control:" in refusal, "the refusal teaches the escape"
+
+
+def test_registered_dispatch_control_send_delivers_when_the_window_is_spent(
+    monkeypatch,
+    tmp_path,
+):
+    from fno import paths
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "agents.json"
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
+    write_registry(
+        [
+            AgentEntry(
+                name="worker",
+                harness="claude",
+                harness_session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                short_id="aaaaaaaa",
+                cwd=str(tmp_path),
+                log_path="",
+                status="idle",
+            )
+        ],
+        registry,
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._registered_family1_state",
+        lambda _entry: "sleeping",
+    )
+    body = words(79)
+
+    first = dispatch_send("worker", body, provider=None, cwd=tmp_path, from_name="sender")
+    assert first.delivery == "durable"
+
+    second = dispatch_send(
+        "worker",
+        "control: resume now. Load back under cap.",
+        provider=None,
+        cwd=tmp_path,
+        from_name="sender",
+    )
+    assert second.delivery == "durable", "the control resume is delivered"
+
+    with pytest.raises(DispatchAskError) as raised:
+        dispatch_send("worker", body, provider=None, cwd=tmp_path, from_name="sender")
+    assert "running=79 current=79 projected=158 cap=80" in str(raised.value)
+    assert "control:" in str(raised.value), "the refusal teaches the escape"
+
+
 # --- window expiry and release --------------------------------------------
 
 def test_entries_older_than_the_window_are_pruned():

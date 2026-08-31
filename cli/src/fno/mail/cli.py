@@ -345,6 +345,12 @@ def _enforce_style(body: str, *, allow_reason: str | None = None) -> None:
         return
     from fno import style
     from fno.config import load_settings
+    from fno.mail import budget
+
+    if budget.is_control(body):
+        # A control body is terse operational fragments, and refusing it for
+        # prose style re-creates the wall the lane exists to remove.
+        return
 
     if style.has_exception(body):
         return
@@ -371,6 +377,15 @@ def _reserve_budget(
     from fno.mail import budget
 
     words = style.word_count(body)
+    if budget.is_control(body):
+        return _reserve_control_budget(
+            sender=sender,
+            recipient=recipient,
+            words=words,
+            msg_id=msg_id,
+            sender_key=sender_key,
+            recipient_key=recipient_key,
+        )
     exempt = not _budget_enforced(body, allow_reason=allow_reason)
     try:
         reservation = budget.reserve(
@@ -388,10 +403,64 @@ def _reserve_budget(
             f"refused: rolling word budget for {exc.pair}: {exc.marker()}",
             file=sys.stderr,
         )
+        # The refusal is the one moment the sender is listening: teach the
+        # control lane here, or the next incident re-derives nothing.
+        print(_CONTROL_HINT, file=sys.stderr)
         raise typer.Exit(code=1) from exc
     except budget.BudgetUnavailable as exc:
         print(f"refused: {exc}", file=sys.stderr)
         raise typer.Exit(code=1) from exc
+    return reservation, words
+
+
+_CONTROL_HINT = (
+    "operational control (stop, resume, scope change)? resend with the body's "
+    "first line starting `control:` -- its own lane, 60 words, exempt from "
+    "this budget"
+)
+
+
+def _reserve_control_budget(
+    *,
+    sender: str,
+    recipient: str,
+    words: int,
+    msg_id: str,
+    sender_key: str | None = None,
+    recipient_key: str | None = None,
+):
+    """Reserve a control send against the control lane's own ledger.
+
+    Never touches the ordinary window: a stop must not spend the budget the
+    conversation after it needs. The stderr note is the receipt's lane marker,
+    in one place, for every lane that routes through here; it reads RESERVED
+    because delivery is proven later, by the lane's own receipt.
+    """
+    from fno.mail import budget
+
+    try:
+        reservation = budget.reserve_control(
+            sender=sender,
+            recipient=recipient,
+            words=words,
+            msg_id=msg_id,
+            sender_key=sender_key,
+            recipient_key=recipient_key,
+        )
+    except budget.BudgetRefused as exc:
+        print(
+            f"refused: control word budget for {exc.pair}: {exc.marker()}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1) from exc
+    except budget.BudgetUnavailable as exc:
+        print(f"refused: {exc}", file=sys.stderr)
+        raise typer.Exit(code=1) from exc
+    print(
+        "control lane: reserved against its own 60-word window; "
+        "the pair budget is untouched",
+        file=sys.stderr,
+    )
     return reservation, words
 
 
