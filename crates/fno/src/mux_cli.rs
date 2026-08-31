@@ -2301,6 +2301,11 @@ fn squad_prune(args: &[OsString]) -> i32 {
             Some(notice) => format!("{}; {notice}", unreachable_notice(&unreachable)),
             None => unreachable_notice(&unreachable),
         };
+        // `applied` tracks an APPLY run, not the store pass alone: the tab arm
+        // above may have really closed tabs while the store pass was refused,
+        // and reporting that run as a dry run would un-close them in prose.
+        // The refusal still rides `notice`, so no reader mistakes "pruned 0"
+        // for an evaluated zero.
         (
             Vec::new(),
             loaded.squads.len(),
@@ -2309,7 +2314,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             0,
             0,
             0,
-            false,
+            !dry_run,
             Some(detail),
         )
     } else if tabs_only && !dead_only {
@@ -2411,8 +2416,14 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
         // A no-op headline only when NOTHING happened: a run that closed tabs
         // or reaped members acted, and calling it "nothing to prune" reads as
-        // a failed run to whoever ran it.
-        if applied && removed.is_empty() && tab_outcome.closed == 0 && members_reaped == 0 {
+        // a failed run to whoever ran it. A refused store pass never ran, so
+        // it cannot claim an evaluated zero either - its notice carries that.
+        if applied
+            && notice.is_none()
+            && removed.is_empty()
+            && tab_outcome.closed == 0
+            && members_reaped == 0
+        {
             println!("nothing to prune");
         } else if !applied {
             println!("dry-run: no changes written");
