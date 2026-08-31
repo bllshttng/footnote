@@ -2040,7 +2040,6 @@ def _short_codex_home(monkeypatch):
     """A CODEX_HOME short enough for the 104-char AF_UNIX bind limit (pytest's
     tmp_path on macOS is not; dir="/tmp" escapes the long TMPDIR). Caller
     cleans up the returned parent."""
-    import shutil
     import tempfile
 
     home = tempfile.mkdtemp(prefix="fno-x571-", dir="/tmp")
@@ -2354,6 +2353,95 @@ def test_fresh_plugin_cache_prescribes_nothing(
     )
     assert "claude plugin update" not in line
     assert "fno doctor update" not in line
+
+
+def _write_skill_file(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+
+
+def test_plugin_file_fresh_reports_equal_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    active = tmp_path / "active" / "skills" / "review" / "SKILL.md"
+    _write_skill_file(source / "skills" / "review" / "SKILL.md", b"same")
+    _write_skill_file(active, b"same")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: source)
+
+    result = runner.invoke(app, ["doctor", "plugin-file", str(active)])
+
+    assert result.exit_code == 0, result.output
+    assert "PLUGIN_FILE_FRESH" in result.stdout
+    assert "active_sha256=" in result.stdout
+    assert "source_sha256=" in result.stdout
+    assert "skills/review/SKILL.md" in result.stdout
+
+
+def test_plugin_file_stale_names_claude_refresh_and_digests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    active = (
+        tmp_path
+        / ".claude"
+        / "plugins"
+        / "cache"
+        / "footnote"
+        / "fno"
+        / "0.3.1"
+        / "skills"
+        / "review"
+        / "SKILL.md"
+    )
+    _write_skill_file(source / "skills" / "review" / "SKILL.md", b"source")
+    _write_skill_file(active, b"deployed")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: source)
+
+    result = runner.invoke(app, ["doctor", "plugin-file", str(active)])
+
+    assert result.exit_code == 3, result.output
+    assert "PLUGIN_FILE_STALE" in result.stdout
+    assert "active_sha256=" in result.stdout
+    assert "source_sha256=" in result.stdout
+    assert "claude plugin update fno@footnote" in result.stdout
+    assert "fno doctor update" in result.stdout
+    assert "does NOT refresh" in result.stdout
+    assert "restart" in result.stdout
+
+
+def test_plugin_file_unknown_is_not_fresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    active = tmp_path / "active" / "skills" / "review" / "SKILL.md"
+    _write_skill_file(active, b"deployed")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: None)
+
+    result = runner.invoke(app, ["doctor", "plugin-file", str(active)])
+
+    assert result.exit_code == 4, result.output
+    assert "PLUGIN_FILE_UNKNOWN" in result.stdout
+    assert "active_sha256" not in result.stdout
+
+
+def test_plugin_file_json_contains_positive_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    active = tmp_path / "active" / "skills" / "review" / "SKILL.md"
+    _write_skill_file(source / "skills" / "review" / "SKILL.md", b"source")
+    _write_skill_file(active, b"deployed")
+    monkeypatch.setattr(doctor, "_resolve_source", lambda _source: source)
+
+    result = runner.invoke(
+        app, ["doctor", "plugin-file", str(active), "--json"]
+    )
+
+    assert result.exit_code == 3, result.output
+    payload = json.loads(result.stdout)
+    assert payload["record"] == "PLUGIN_FILE_STALE"
+    assert payload["relative_path"] == "skills/review/SKILL.md"
+    assert payload["active_digest"] != payload["source_digest"]
 
 
 # The second prescription site (the silent-switch cause line) is already covered

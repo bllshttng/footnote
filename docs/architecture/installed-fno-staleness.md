@@ -23,6 +23,10 @@ crying wolf:
   `present | missing | unknown` so a "could not probe" result can never be
   conflated with "proven missing".
 
+The hidden `fno doctor plugin-file <active-skill-path>` diagnostic compares the active `skills/<name>/SKILL.md` bytes with the matching source file. When both files are readable, it reports `PLUGIN_FILE_FRESH`, `PLUGIN_FILE_STALE`, or `PLUGIN_FILE_UNKNOWN` with SHA-256 values. It exits 0, 3, or 4 respectively. A proven stale Claude cache names `claude plugin update fno@footnote`, session restart, and the fact that `fno doctor update` does not refresh the Claude plugin registry.
+
+Review instructions run this diagnostic before argument routing. A stale active skill stops the review before any lane marker or attestation can be produced. When comparison is unknown, the diagnostic warns and continues. This keeps a green CLI and a green emitter from hiding stale instructions that route the review elsewhere.
+
 For the Rust side, `doctor` reports which `fno-agents` binary `auto` mode resolves (wheel-bundled or `~/.cargo/bin`). It proves Rust staleness through the `installed-rust-rev` marker (see below). `rust_stale` requires four known facts: a cargo binary, marker, crates-subtree revision, and mismatch. Anything less degrades to `unknown`, never false `fresh`. Proven Rust staleness sets the overall status to `stale` and exits 1. A binary-embedded commit cross-check remains planned for machines without a marker.
 
 Plus an advisory **mux front-door** check: now that the Rust mux binary

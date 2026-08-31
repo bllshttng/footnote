@@ -7,8 +7,10 @@ import os
 import subprocess
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from fno.footprint import parse_footprint
 from fno.cli import app
 
 
@@ -576,6 +578,49 @@ def test_ac5_hp_json_reports_fleet_totals_and_cpu_shares(
     assert payload["fleet_percent_measured_cpu"] == pytest.approx(50.0)
 
 
+def test_spawn_load_snapshot_is_rendered_in_text_and_json(
+    monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from fno import doctor_footprint
+    from fno.agents import spawn_gate
+
+    reading = parse_footprint(
+        "PID PPID ELAPSED %CPU RSS COMMAND\n"
+        "100 1 01:00:00 49.0 1024 fno-agents-worker --run\n"
+    )
+    settings = SimpleNamespace(
+        agents=SimpleNamespace(max_load_per_cpu=8.0),
+    )
+    snapshot = SimpleNamespace(
+        load_1m=141.6,
+        max_load_per_cpu=8.0,
+        load_ceiling=96.0,
+        load_cpu_count=12,
+        spawn_load_status="exceeded",
+    )
+    monkeypatch.setattr("fno.config.load_settings", lambda: settings)
+    monkeypatch.setattr(spawn_gate, "_load_snapshot", lambda _factor: snapshot)
+    monkeypatch.setattr(doctor_footprint, "_cpu_capacity_cores", lambda: 12)
+
+    payload = doctor_footprint._payload(
+        reading, process_threshold=None, exit_code=0
+    )
+
+    assert payload["load_1m"] == pytest.approx(141.6)
+    assert payload["max_load_per_cpu"] == pytest.approx(8.0)
+    assert payload["load_ceiling"] == pytest.approx(96.0)
+    assert payload["load_cpu_count"] == 12
+    assert payload["spawn_load_status"] == "exceeded"
+
+    with pytest.raises(typer.Exit):
+        doctor_footprint._emit_result(
+            reading, process_threshold=None, json_output=False
+        )
+    assert "spawn load: 141.6 against 96.0" in capsys.readouterr().out
+
+
 def test_ac6_edge_cause_only_excludes_observer_subtree_and_skips_roster(
     monkeypatch, no_worker_roots
 ) -> None:
@@ -875,13 +920,9 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     assert "roster unavailable" in result.stdout
     assert "processes:" in result.stdout
     assert "degraded: roster unavailable" in result.stdout
-    assert calls[-1] == [
-        "/usr/local/bin/fno",
-        "agents",
-        "list",
-        "--status",
-        "live",
-        "--json",
+    assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
+        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
+        ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
     ]
 
 

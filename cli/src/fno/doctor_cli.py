@@ -11,7 +11,7 @@ import typer.core
 
 from fno.bundle import bundle_app
 from fno.codemap_cli import app as codemap_app
-from fno.doctor import doctor_command
+from fno.doctor import doctor_command, plugin_file_command
 from fno.agents.harness_probe import harness_probe_command
 from fno.doctor_footprint import footprint_command
 from fno.evals.cli import evals_app
@@ -61,6 +61,7 @@ doctor_app.add_typer(doctor_event_app, name="event")
 doctor_app.command("lint")(lint)
 doctor_app.command("footprint", hidden=True)(footprint_command)
 doctor_app.command("harness", hidden=True)(harness_probe_command)
+doctor_app.command("plugin-file", hidden=True)(plugin_file_command)
 # `doctor route` is the reachability read: what this installation's declared
 # routing inventory can actually reach (absorbs the old "no surface answers
 # this" gap). Hidden per the new-verb convention; `fno help doctor --all`.
