@@ -75,7 +75,8 @@ run_hook() {
     HOOK_STDERR=$(
         cd "$TMP_DIR" || exit 1
         printf '{"transcript_path":"%s"}' "$TRANSCRIPT_FILE" \
-            | env HOME="$HOME_DIR" FNO_AGENTS_BIN="$STUB" bash "$HOOK" 2>&1 >/dev/null
+            | env HOME="$HOME_DIR" FNO_AGENTS_BIN="$STUB" \
+                CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= bash "$HOOK" 2>&1 >/dev/null
     ) || HOOK_RC=$?
 }
 

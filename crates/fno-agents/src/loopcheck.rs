@@ -13163,6 +13163,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // Blind is not clean. Block, but let the dry-fire counter below
             // bound it: a board that never answers reaches the ceiling and
             // terminates NoProgress rather than holding the king forever.
+            // Unlike the clean block at the bottom, exit 2 here marks the
+            // degraded path for log readers; no consumer acts on it (the shim
+            // keys on the decision field, never the code). The real bound is
+            // the dry-fire ceiling above, which terminates NoProgress when
+            // the board never answers.
             if dry + 1 >= KING_DRY_FIRE_CEILING {
                 return terminate(
                     TerminationReason::NoProgress,
@@ -13256,8 +13261,16 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let top = board
         .top_row
         .unwrap_or_else(|| "an actionable queue".to_string());
+    // decide()'s documented contract, one screen up: exit 0 for allow and for
+    // this healthy block; the ONLY other verdict-bearing exit is the degraded
+    // unreadable-board block above, which carries the same payload on 2. Any
+    // non-zero without a `decision` field is an internal/CLI error. Encoding a
+    // healthy block in the exit code made the shim read it as a broken checker
+    // and count it toward the unavailable budget that ends in a ship-gate-off
+    // allow. The JSON `decision` field is the block signal; the exit code
+    // never is.
     (
-        2,
+        0,
         king_output(
             "block",
             None,

@@ -9,7 +9,7 @@
 # Tests:
 #   T1  no state file -> exit 0, no unavailable counter written
 #   T2  binary missing (active session) -> exit 2 bounded-block + event + counter=1
-#   T3  block decision -> exit 2, message on stderr
+#   T3  block decision (non-claude env) -> exit 2, message on stderr
 #   T4  allow decision with TerminationReason -> exit 0
 #   T5  read-only invariant: state file unchanged across a block fire
 #   T6  foreign transcript -> exit 0 without invoking the binary
@@ -26,6 +26,10 @@
 #   T13  codex-authored manifest + a CLAUDE stop -> exit 0, binary not called
 #   T14  codex-authored manifest + that codex session's own stop -> binary called
 #   T15  canonical fno_id keys the unavailable retry counter
+#
+# Block-as-JSON on the claude harness:
+#   T16  block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
+#   T17  claude marker + foreign marker -> ambiguous, legacy exit-2 block, no JSON
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -138,9 +142,12 @@ run_hook() {
 
     HOOK_RC=0
     HOOK_STDERR=""
+    # Default the claude markers off so a block reads as exit 2 even
+    # when the suite itself runs inside a claude session (its env exports
+    # CLAUDECODE=1); a test opts back in by passing its own assignment after.
     HOOK_STDERR=$(
         cd "$cwd" || exit 1
-        env "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
+        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
     ) || HOOK_RC=$?
 }
 
@@ -223,9 +230,9 @@ log "T2: binary missing (active session) -> exit 2 bounded-block + event + count
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T3: block decision -> exit 2, message on stderr
+# T3: block decision (non-claude env) -> exit 2, message on stderr
 # ─────────────────────────────────────────────────────────────────────────────
-log "T3: block decision -> exit 2 + message on stderr"
+log "T3: block decision (non-claude env) -> exit 2 + message on stderr"
 {
     setup_env "cccc-0003"
 
@@ -613,6 +620,117 @@ STATE
         fail "T15: legacy session_id incorrectly keyed the retry counter"; t15_ok=false
     }
     [[ "$t15_ok" == "true" ]] && pass "T15: canonical fno_id wins for retry identity"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T16: block decision on the claude harness -> stdout JSON + exit 0
+# ─────────────────────────────────────────────────────────────────────────────
+log "T16: claude block -> stdout JSON decision + exit 0"
+{
+    setup_env "eeee-0016"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_STDOUT=$(
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
+            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+
+    t16_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T16: expected exit 0 (structured block), got $HOOK_RC"; t16_ok=false
+    fi
+    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "keep going"' >/dev/null 2>&1; then
+        fail "T16: stdout is not a block decision JSON; got: ${HOOK_STDOUT}"; t16_ok=false
+    fi
+    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
+        fail "T16: a clean block must not write an unavailable counter"; t16_ok=false
+    fi
+    [[ "$t16_ok" == "true" ]] && pass "T16: claude block -> stdout JSON + exit 0, no counter"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T17: claude marker + foreign marker is ambiguous -> legacy exit-2 block
+# ─────────────────────────────────────────────────────────────────────────────
+log "T17: claude marker with foreign marker -> exit 2 stderr block"
+{
+    setup_env "eeee-0017"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_OUT_FILE="${TMP_DIR}/t17-stdout.txt"
+    (
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" "CODEX_THREAD_ID=from-parent" \
+            bash "$HOOK" >"$HOOK_OUT_FILE" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+    HOOK_STDOUT="$(cat "$HOOK_OUT_FILE" 2>/dev/null)"
+
+    t17_ok=true
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T17: ambiguous markers must take the exit-2 block, got $HOOK_RC"; t17_ok=false
+    fi
+    if [[ -n "$HOOK_STDOUT" ]]; then
+        fail "T17: ambiguous markers must not emit stdout JSON: ${HOOK_STDOUT}"; t17_ok=false
+    fi
+    [[ "$t17_ok" == "true" ]] && pass "T17: ambiguous markers -> exit 2 block, no JSON"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T18: degraded exit-2 reply WITH a verdict (king unreadable board) under claude
+# markers -> honored as a block: stdout JSON + exit 0, never counted unavailable
+# ─────────────────────────────────────────────────────────────────────────────
+log "T18: exit-2-with-verdict under claude markers -> stdout JSON + exit 0"
+{
+    setup_env "eeee-0018"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"king board unreadable","fires":1,"fingerprint":"x"}\n'
+exit 2
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_STDOUT=$(
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" \
+            bash "$HOOK" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+
+    t18_ok=true
+    if [[ "$HOOK_RC" -ne 0 ]]; then
+        fail "T18: a verdict on exit 2 must still emit a structured block, got rc $HOOK_RC"; t18_ok=false
+    fi
+    if ! echo "$HOOK_STDOUT" | jq -e '.decision == "block" and .reason == "king board unreadable"' >/dev/null 2>&1; then
+        fail "T18: stdout is not the degraded block JSON; got: ${HOOK_STDOUT}"; t18_ok=false
+    fi
+    if ls "${TMP_DIR}/.fno/.loop-check-unavail-"* >/dev/null 2>&1; then
+        fail "T18: a verdict on exit 2 must not write an unavailable counter"; t18_ok=false
+    fi
+    [[ "$t18_ok" == "true" ]] && pass "T18: degraded exit-2 verdict -> stdout JSON + exit 0, no counter"
     cleanup
 }
 
