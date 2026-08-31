@@ -238,6 +238,7 @@ fi
    After successful adoption, close the blueprint phase before returning the completion message:
 
    ```bash
+   CLOSE_RECEIPT="$(mktemp)"
    test -n "${NODE_ID:-}" || { echo "Blueprint close refused: intake produced no node." >&2; exit 2; }
    fno backlog session close "$NODE_ID" \
      --summary "<short plan summary>" \
@@ -250,11 +251,10 @@ fi
    Read the adopted node back and require the exact close receipt's harness and full session id in a `blueprint` entry before presenting the saved-plan summary or launch instruction. The readback is a positive marker produced only by the completed close:
 
    ```bash
-   CLOSE_RECEIPT="$(mktemp)"
    NODE_READBACK="$(mktemp)"
    test -s "${CLOSE_RECEIPT:-}" || { echo "Blueprint close refused: no close receipt." >&2; exit 2; }
    fno backlog get "$NODE_ID" >"$NODE_READBACK"
-   python - "$CLOSE_RECEIPT" "$NODE_READBACK" <<'PY'
+   python3 - "$CLOSE_RECEIPT" "$NODE_READBACK" <<'PY'
    import json
    import sys
 

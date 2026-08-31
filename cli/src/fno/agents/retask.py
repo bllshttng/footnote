@@ -14,6 +14,7 @@ from fno.agents.harness_map import capabilities, dispatch_command
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
+    classify_session_transition,
     load_registry,
     rename_agent,
     resolve_agent,
@@ -635,6 +636,8 @@ def run_retask(
                 "reason": "clear_predecessor_mismatch",
                 "predecessor_session_id": match.group("predecessor"),
             }
+        # Verdicts ride x-dfe7's shared classifier so the succession/branch
+        # rules cannot drift from the registry writer that stamps lineage.
         for _ in range(40):
             rows = load_registry(path=registry_path)
             branch = next(
@@ -644,6 +647,10 @@ def run_retask(
                     if candidate.harness == entry.harness
                     and candidate.forked_from_session_id == predecessor
                     and candidate.harness_session_id
+                    and classify_session_transition(
+                        predecessor, candidate.harness_session_id, True
+                    )
+                    == "branch"
                 ),
                 None,
             )
@@ -669,6 +676,15 @@ def run_retask(
                             return {
                                 "classification": "deferred",
                                 "reason": "successor_lineage_unrecorded",
+                                "predecessor_session_id": predecessor,
+                                "current_session_id": candidate.harness_session_id,
+                            }
+                        if classify_session_transition(
+                            predecessor, candidate.harness_session_id, False
+                        ) != "succession":
+                            return {
+                                "classification": "deferred",
+                                "reason": "session_transition_not_succession",
                                 "predecessor_session_id": predecessor,
                                 "current_session_id": candidate.harness_session_id,
                             }
