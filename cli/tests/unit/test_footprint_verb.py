@@ -920,14 +920,10 @@ def test_ac5_edge_roster_failure_degrades_the_threshold_not_the_reading(
     assert "roster unavailable" in result.stdout
     assert "processes:" in result.stdout
     assert "degraded: roster unavailable" in result.stdout
-    assert [
-        "/usr/local/bin/fno",
-        "agents",
-        "list",
-        "--status",
-        "live",
-        "--json",
-    ] in calls
+    assert [call for call in calls if call[0] in {"ps", "/usr/local/bin/fno"}] == [
+        ["ps", "-Ao", "pid,ppid,etime,%cpu,rss,command"],
+        ["/usr/local/bin/fno", "agents", "list", "--status", "live", "--json"],
+    ]
 
 
 def test_ac7_edge_json_contains_thresholds_and_exit_meaning(

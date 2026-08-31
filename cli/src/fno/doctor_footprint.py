@@ -460,7 +460,12 @@ def _spawn_load_snapshot():
     from fno.agents.spawn_gate import _load_snapshot
     from fno.config import load_settings
 
-    max_load_per_cpu = float(load_settings().agents.max_load_per_cpu)
+    try:
+        max_load_per_cpu = float(load_settings().agents.max_load_per_cpu)
+    except Exception:
+        # footprint is a reading, not an enforcer: a broken settings value
+        # degrades the load fields instead of killing the diagnostic.
+        return _load_snapshot(0.0)
     return _load_snapshot(max_load_per_cpu)
 
 

@@ -1225,7 +1225,8 @@ def _check_load_ceiling(
     load1 = snapshot.load_1m
     cpus = snapshot.load_cpu_count
     trigger = snapshot.load_ceiling
-    if load1 is None or load1 <= trigger:
+    assert load1 is not None  # "within"/"exceeded" always carry a reading
+    if load1 <= trigger:
         return
 
     if hard_max_load_per_cpu > 0 and load1 > hard_max_load_per_cpu * cpus:

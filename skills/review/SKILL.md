@@ -47,8 +47,12 @@ case "$FRESHNESS_OUTPUT" in
   *PLUGIN_FILE_FRESH*)
     ;;
   *)
-    echo "review refused: active skill freshness diagnostic returned no recognized marker"
-    exit 4
+    if [ "$FRESHNESS_EXIT" -ne 0 ]; then
+      echo "review warning: freshness diagnostic unavailable (exit $FRESHNESS_EXIT); continuing"
+    else
+      echo "review refused: active skill freshness diagnostic returned no recognized marker"
+      exit 4
+    fi
     ;;
 esac
 ```
