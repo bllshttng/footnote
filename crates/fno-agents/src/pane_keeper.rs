@@ -262,8 +262,12 @@ struct Keeper {
     /// Bumped per accept so a departing old client cannot clear a newer
     /// subscriber's slot.
     client_gen: AtomicU64,
-    /// The prebuilt IdentifyReply frame (version, both pids, argv, cwd, age).
-    identify: OnceLock<Vec<u8>>,
+    /// The IdentifyReply body (version, both pids, argv, cwd, age), encoded
+    /// per Identify so the answer can carry whether THIS connection holds
+    /// the subscriber seat - a re-adopting server that loses the seat race
+    /// must know it is a probe, or it wires a pane that never receives
+    /// output and never gets input honored.
+    identify: OnceLock<serde_json::Value>,
     /// The child's pid: the Kill frame's target and the Identify reply's
     /// answer. The keeper owns the master; the CHILD is the process every
     /// fleet count and later kill must aim at.
@@ -388,20 +392,16 @@ pub fn run(cfg: KeeperConfig) -> Result<(), String> {
         master: Mutex::new(pair.master),
         input: Mutex::new(Some(input)),
     });
-    let identify = encode(&Frame::IdentifyReply(
-        serde_json::json!({
-            "v": PROTOCOL_VERSION,
-            "keeper_pid": std::process::id(),
-            "child_pid": child_pid,
-            "argv": cfg.argv,
-            "cwd": cfg.cwd.to_string_lossy(),
-            "rows": cfg.rows,
-            "cols": cfg.cols,
-            "started_at": started_at,
-        })
-        .to_string()
-        .into_bytes(),
-    ));
+    let identify = serde_json::json!({
+        "v": PROTOCOL_VERSION,
+        "keeper_pid": std::process::id(),
+        "child_pid": child_pid,
+        "argv": cfg.argv,
+        "cwd": cfg.cwd.to_string_lossy(),
+        "rows": cfg.rows,
+        "cols": cfg.cols,
+        "started_at": started_at,
+    });
     let _ = keeper.identify.set(identify);
 
     // The pty-reader thread: master -> ring + Output frames. Blocking reads
@@ -550,8 +550,12 @@ fn serve_client(
                                     let _ = stream.flush();
                                 }
                             };
-                            if let Some(frame) = keeper.identify.get() {
-                                reply_on(frame);
+                            if let Some(value) = keeper.identify.get() {
+                                let mut value = value.clone();
+                                value["subscriber"] = serde_json::json!(is_subscriber);
+                                reply_on(&encode(&Frame::IdentifyReply(
+                                    value.to_string().into_bytes(),
+                                )));
                             }
                             // Replay the retained window (AC3-HP), with the
                             // drop stated rather than silent.

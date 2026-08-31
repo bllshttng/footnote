@@ -702,15 +702,54 @@ fn parse_bool(v: &str) -> Option<bool> {
 /// running `fno` binary (the installed layout, mirroring `resolve_daemon_bin`),
 /// else bare `fno-agents` on PATH. Crate-visible: the server's claim-sweep
 /// shell-out (x-54fa) resolves the same binary the same way.
-pub(crate) fn fno_agents_bin() -> PathBuf {
-    if let Some(v) = std::env::var_os("FNO_AGENTS_BIN") {
+/// Resolve a paired binary that ships alongside this one: `$<env_var>` when
+/// set, else a sibling of the running binary (the installed layout), else
+/// the sibling crate's cargo target dir (dev builds keep per-crate target
+/// dirs, so a freshly built `fno` would otherwise PATH-fall-back to a stale
+/// binary), else bare `name` on PATH.
+pub(crate) fn paired_bin(env_var: &str, name: &str) -> PathBuf {
+    if let Some(v) = std::env::var_os(env_var) {
         return PathBuf::from(v);
     }
-    std::env::current_exe()
+    let exe_dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("fno-agents")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| PathBuf::from("fno-agents"))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Some(dir) = &exe_dir {
+        let sibling = dir.join(name);
+        if sibling.exists() {
+            return sibling;
+        }
+        // …/crates/fno/target/debug → …/crates/fno/target → …/crates/fno
+        // → …/crates
+        if dir
+            .file_name()
+            .is_some_and(|d| d == "debug" || d == "release")
+            && dir
+                .parent()
+                .is_some_and(|p| p.file_name().is_some_and(|d| d == "target"))
+        {
+            let dev = dir
+                .parent()
+                .and_then(|t| t.parent())
+                .and_then(|crate_dir| crate_dir.parent())
+                .map(|crates| {
+                    crates
+                        .join("fno-agents")
+                        .join("target")
+                        .join(dir.file_name().unwrap())
+                        .join(name)
+                })
+                .filter(|p| p.exists());
+            if let Some(dev) = dev {
+                return dev;
+            }
+        }
+    }
+    PathBuf::from(name)
+}
+
+pub(crate) fn fno_agents_bin() -> PathBuf {
+    paired_bin("FNO_AGENTS_BIN", "fno-agents")
 }
 
 // ── overlay assembly ───────────────────────────────────────────────────────

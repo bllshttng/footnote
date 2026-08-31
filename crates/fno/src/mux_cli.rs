@@ -3396,8 +3396,7 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                 let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(750)));
                 let identified = (|| -> Option<serde_json::Value> {
                     use crate::pty::{
-                        keeper_decode, keeper_frame_identify, KeeperRead,
-                        KEEPER_TAG_IDENTIFY_REPLY, KEEPER_TAG_OUTPUT,
+                        keeper_decode, keeper_frame_identify, KeeperRead, KEEPER_TAG_IDENTIFY_REPLY,
                     };
                     use std::io::{Read as _, Write as _};
                     stream.write_all(&keeper_frame_identify()).ok()?;
@@ -3412,7 +3411,6 @@ pub(crate) fn pane_keeper_list(json: bool, stale_after: Option<std::time::Durati
                                     if tag == KEEPER_TAG_IDENTIFY_REPLY {
                                         return serde_json::from_slice(&payload).ok();
                                     }
-                                    let _ = KEEPER_TAG_OUTPUT;
                                 }
                             }
                         }

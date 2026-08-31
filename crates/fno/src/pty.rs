@@ -617,6 +617,15 @@ impl PtyShell {
                     return Err(PtyError::Spawn(format!("keeper handshake: {e}")));
                 }
             };
+        // A fresh launch owns the seat by connect-before-bind; a held seat
+        // here means another server is still attached to this pane's keeper.
+        if !reply_holds_seat(&reply) {
+            cleanup(keeper_child);
+            return Err(PtyError::Spawn(format!(
+                "keeper at {} is already subscribed by another client",
+                sock_path.display()
+            )));
+        }
         let child_pid = reply
             .get("child_pid")
             .and_then(serde_json::Value::as_u64)
@@ -762,6 +771,18 @@ pub fn keeper_dir() -> PathBuf {
     crate::proto::mux_dir().join("panes")
 }
 
+/// True when a socket stem belongs to `session`: the trailing `-<pane key>`
+/// splits off first and must be numeric, and the session part matches
+/// exactly. Free function so the prefix-collision rule is unit-testable
+/// without a mux dir - a prefix match would let session `work` adopt
+/// session `work-2`'s live keeper panes at startup.
+fn socket_belongs_to(stem: &str, session: &str) -> bool {
+    let Some((sock_session, pane_key)) = stem.rsplit_once('-') else {
+        return false;
+    };
+    sock_session == session && !pane_key.is_empty() && pane_key.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Every keeper socket for `session`, newest-last. The sweep and the
 /// `pane keeper list` verb both read this.
 pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
@@ -770,13 +791,15 @@ pub fn keeper_sockets(session: &str) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return out;
     };
-    let prefix = format!("{session}-");
     for entry in entries.flatten() {
         let name = entry.file_name();
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name.starts_with(&prefix) && name.ends_with(".sock") {
+        let Some(stem) = name.strip_suffix(".sock") else {
+            continue;
+        };
+        if socket_belongs_to(stem, session) {
             out.push(entry.path());
         }
     }
@@ -794,40 +817,84 @@ pub struct KeeperAdoption {
     pub ring: Vec<u8>,
 }
 
+/// The three ways reading one keeper socket can land. Distinguishing
+/// SeatHeld from NoListener matters: a seat held by a dying previous server
+/// is a pane to RETRY and leave alone, never a stale socket to unlink.
+pub enum KeeperAdopt {
+    /// The socket has no listener behind it; the CALLER unlinks and names it.
+    NoListener,
+    /// A live keeper answered but another connection holds the subscriber
+    /// seat (a server still mid-death, or another live server). The caller
+    /// leaves the socket alone and names the pane.
+    SeatHeld,
+    Adopted(KeeperAdoption),
+}
+
+/// How long adopt_keeper_socket waits for a held subscriber seat to clear:
+/// the holder is a SIGKILLed server whose EOF the keeper processes within
+/// milliseconds; the bound only covers a pathologically slow reap.
+const SEAT_RETRY_ATTEMPTS: u32 = 10;
+const SEAT_RETRY_SLEEP: std::time::Duration = std::time::Duration::from_millis(150);
+
+/// True when the reply names THIS connection the subscriber. A reply from a
+/// keeper predating the field reads as subscribed, preserving that pair's
+/// today-behavior (the field is additive; both sides ship from this repo).
+fn reply_holds_seat(reply: &serde_json::Value) -> bool {
+    reply
+        .get("subscriber")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(true)
+}
+
 /// Adopt a live keeper through its socket: handshake synchronously (ring
-/// drained, child pid learned), then wire the reader/writer threads.
-/// `Ok(None)` = the socket has no listener behind it; the CALLER unlinks it
-/// and names the pane (the stale-socket contract).
+/// drained, child pid learned), then wire the reader/writer threads. A held
+/// subscriber seat is retried briefly before giving up as SeatHeld - the
+/// seat's holder is a server whose EOF the keeper is still processing, and
+/// adopting as a silent probe would freeze the pane.
 #[allow(clippy::too_many_arguments)]
 pub fn adopt_keeper_socket(
     sock: &std::path::Path,
     pane_id: u64,
     out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     exit_tx: tokio::sync::mpsc::Sender<u64>,
-) -> Result<Option<KeeperAdoption>, String> {
-    match keeper_handshake(sock, keeper_handshake_quiet())? {
-        None => Ok(None),
-        Some((stream, reply, ring, seed_buf)) => {
-            let child_pid = reply
-                .get("child_pid")
-                .and_then(serde_json::Value::as_u64)
-                .map(|p| p as u32);
-            let shell = wire_keeper(
-                stream,
-                child_pid,
-                sock.to_path_buf(),
-                pane_id,
-                seed_buf,
-                out_tx,
-                exit_tx,
-            );
-            Ok(Some(KeeperAdoption {
-                shell: PtyShell::Keeper(shell),
-                reply,
-                ring,
-            }))
+) -> Result<KeeperAdopt, String> {
+    let mut held = 0u32;
+    let (stream, reply, ring, seed_buf) = loop {
+        match keeper_handshake(sock, keeper_handshake_quiet())? {
+            None => return Ok(KeeperAdopt::NoListener),
+            Some((stream, reply, ring, seed_buf)) => {
+                if reply_holds_seat(&reply) {
+                    break (stream, reply, ring, seed_buf);
+                }
+                // Another connection holds the seat. Drop this probe and
+                // retry: the holder is a dead server whose EOF the keeper
+                // processes within milliseconds of the kill.
+                held += 1;
+                if held >= SEAT_RETRY_ATTEMPTS {
+                    return Ok(KeeperAdopt::SeatHeld);
+                }
+                std::thread::sleep(SEAT_RETRY_SLEEP);
+            }
         }
-    }
+    };
+    let child_pid = reply
+        .get("child_pid")
+        .and_then(serde_json::Value::as_u64)
+        .map(|p| p as u32);
+    let shell = wire_keeper(
+        stream,
+        child_pid,
+        sock.to_path_buf(),
+        pane_id,
+        seed_buf,
+        out_tx,
+        exit_tx,
+    );
+    Ok(KeeperAdopt::Adopted(KeeperAdoption {
+        shell: PtyShell::Keeper(shell),
+        reply,
+        ring,
+    }))
 }
 
 /// Launch the keeper process for one pane. Plain pipes (the conversation
@@ -1964,6 +2031,18 @@ mod tests {
             shell_candidates(Some(OsStr::new("/bin/sh"))),
             vec![OsString::from("/bin/sh")]
         );
+    }
+
+    #[test]
+    fn keeper_socket_match_is_exact_per_session_not_by_prefix() {
+        // A prefix match would let session `work` adopt session `work-2`'s
+        // live keeper panes at startup.
+        assert!(socket_belongs_to("work-771", "work"));
+        assert!(socket_belongs_to("work-2-771", "work-2"));
+        assert!(!socket_belongs_to("work-2-771", "work"));
+        assert!(!socket_belongs_to("work", "work"), "no pane key, not ours");
+        assert!(!socket_belongs_to("work-", "work"), "empty pane key");
+        assert!(!socket_belongs_to("work-abc", "work"), "non-numeric key");
     }
 
     #[test]

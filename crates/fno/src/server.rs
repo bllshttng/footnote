@@ -832,53 +832,11 @@ fn node_from_argv(argv: &[String]) -> Option<String> {
     env_token_from_argv(argv, "FNO_NODE=")
 }
 
-/// Resolve the `fno-agents-worker` binary the keeper lane execs: the test
-/// override `$FNO_AGENTS_WORKER_BIN`, else a sibling of the running `fno`
-/// binary (the installed layout, mirroring `fno_agents_bin`), else bare
-/// `fno-agents-worker` on PATH.
+/// Resolve the `fno-agents-worker` binary the keeper lane execs. Shared
+/// shape with `fno_agents_bin` via `paired_bin`: env override, installed
+/// sibling, dev-tree target dir, PATH.
 fn keeper_worker_bin() -> std::path::PathBuf {
-    if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
-        return std::path::PathBuf::from(v);
-    }
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    if let Some(dir) = &exe_dir {
-        let sibling = dir.join("fno-agents-worker");
-        if sibling.exists() {
-            return sibling;
-        }
-        // Dev builds: cargo keeps each crate's target dir separate, so a
-        // freshly built `fno` pairs with a worker that lives in the sibling
-        // crate's target dir. Production ships both binaries in one
-        // directory, where the probe above already answers.
-        // …/crates/fno/target/debug → …/crates/fno/target → …/crates/fno
-        // → …/crates
-        if dir
-            .file_name()
-            .is_some_and(|d| d == "debug" || d == "release")
-            && dir
-                .parent()
-                .is_some_and(|p| p.file_name().is_some_and(|d| d == "target"))
-        {
-            let dev = dir
-                .parent()
-                .and_then(|t| t.parent())
-                .and_then(|crate_dir| crate_dir.parent())
-                .map(|crates| {
-                    crates
-                        .join("fno-agents")
-                        .join("target")
-                        .join(dir.file_name().unwrap())
-                        .join("fno-agents-worker")
-                })
-                .filter(|p| p.exists());
-            if let Some(dev) = dev {
-                return dev;
-            }
-        }
-    }
-    std::path::PathBuf::from("fno-agents-worker")
+    crate::digest_overlay::paired_bin("FNO_AGENTS_WORKER_BIN", "fno-agents-worker")
 }
 
 /// A pane this server re-adopted from a surviving keeper at startup, before
@@ -3630,7 +3588,6 @@ impl Core {
                 self.exit_tx.clone(),
                 permit,
             )
-            .map(|(shell, ring)| (shell, ring))
         } else {
             PtyShell::spawn_cmd_with_permit(
                 argv,
@@ -7750,14 +7707,24 @@ impl Core {
                 self.out_tx.clone(),
                 self.exit_tx.clone(),
             ) {
-                Ok(None) => {
+                Ok(crate::pty::KeeperAdopt::NoListener) => {
                     let _ = std::fs::remove_file(&sock);
                     self.notice_all(format!(
                         "keeper readopt: {} had no live keeper behind it; removed",
                         sock.display()
                     ));
                 }
-                Ok(Some(adoption)) => {
+                Ok(crate::pty::KeeperAdopt::SeatHeld) => {
+                    // A live keeper whose subscriber seat is still held: a
+                    // server mid-death. Leave the socket alone - the pane is
+                    // real and the next start adopts it - and say so. The
+                    // reserved id simply goes unused.
+                    self.notice_all(format!(
+                        "keeper readopt: {} still holds a subscriber seat; left for the next start",
+                        sock.display()
+                    ));
+                }
+                Ok(crate::pty::KeeperAdopt::Adopted(adoption)) => {
                     let str_list = |key: &str| -> Vec<String> {
                         adoption
                             .reply
