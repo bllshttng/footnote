@@ -840,11 +840,45 @@ fn keeper_worker_bin() -> std::path::PathBuf {
     if let Some(v) = std::env::var_os("FNO_AGENTS_WORKER_BIN") {
         return std::path::PathBuf::from(v);
     }
-    std::env::current_exe()
+    let exe_dir = std::env::current_exe()
         .ok()
-        .and_then(|p| p.parent().map(|d| d.join("fno-agents-worker")))
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("fno-agents-worker"))
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    if let Some(dir) = &exe_dir {
+        let sibling = dir.join("fno-agents-worker");
+        if sibling.exists() {
+            return sibling;
+        }
+        // Dev builds: cargo keeps each crate's target dir separate, so a
+        // freshly built `fno` pairs with a worker that lives in the sibling
+        // crate's target dir. Production ships both binaries in one
+        // directory, where the probe above already answers.
+        // …/crates/fno/target/debug → …/crates/fno/target → …/crates/fno
+        // → …/crates
+        if dir
+            .file_name()
+            .is_some_and(|d| d == "debug" || d == "release")
+            && dir
+                .parent()
+                .is_some_and(|p| p.file_name().is_some_and(|d| d == "target"))
+        {
+            let dev = dir
+                .parent()
+                .and_then(|t| t.parent())
+                .and_then(|crate_dir| crate_dir.parent())
+                .map(|crates| {
+                    crates
+                        .join("fno-agents")
+                        .join("target")
+                        .join(dir.file_name().unwrap())
+                        .join("fno-agents-worker")
+                })
+                .filter(|p| p.exists());
+            if let Some(dev) = dev {
+                return dev;
+            }
+        }
+    }
+    std::path::PathBuf::from("fno-agents-worker")
 }
 
 /// A pane this server re-adopted from a surviving keeper at startup, before
@@ -3583,7 +3617,7 @@ impl Core {
         let resume_target = resume_target_from_argv(argv);
         let id = self.reserve_pane_id()?;
         let dir = Some(std::path::Path::new(cwd)).filter(|_| !cwd.is_empty());
-        let pty = if keeper {
+        let (pty, keeper_ring) = if keeper {
             PtyShell::spawn_cmd_keeper_with_permit(
                 &keeper_worker_bin(),
                 argv,
@@ -3596,6 +3630,7 @@ impl Core {
                 self.exit_tx.clone(),
                 permit,
             )
+            .map(|(shell, ring)| (shell, ring))
         } else {
             PtyShell::spawn_cmd_with_permit(
                 argv,
@@ -3608,6 +3643,7 @@ impl Core {
                 self.exit_tx.clone(),
                 permit,
             )
+            .map(|shell| (shell, Vec::new()))
         }
         .map_err(|e| e.to_string())?;
         self.register_pane(
@@ -3622,6 +3658,14 @@ impl Core {
             account,
             resume_target,
         );
+        // The keeper's handshake replay carries everything the child printed
+        // before the reader thread existed; the VT only now exists, so feed
+        // it here (the re-adopt path feeds its ring the same way).
+        if !keeper_ring.is_empty() {
+            if let Some(entry) = self.panes.get_mut(&id) {
+                entry.vt.feed(&keeper_ring);
+            }
+        }
         Ok(id)
     }
 

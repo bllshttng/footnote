@@ -562,6 +562,10 @@ impl PtyShell {
     /// this server. This server holds only the keeper socket. Admission is
     /// recorded against the CHILD's pid (the keeper's Identify answer), so
     /// a fleet count and any later kill aim at the process the user sees.
+    /// Returns the shell plus the ring replay the handshake drained: output
+    /// the child produced between its start and the handshake is NOT live on
+    /// the socket (the reader thread starts after it), so the caller must
+    /// feed those bytes into the pane's VT once registered.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_cmd_keeper_with_permit(
         keeper_bin: &std::path::Path,
@@ -574,7 +578,7 @@ impl PtyShell {
         out_tx: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
         exit_tx: tokio::sync::mpsc::Sender<u64>,
         permit: crate::process_admission::AdmissionPermit,
-    ) -> Result<PtyShell, PtyError> {
+    ) -> Result<(PtyShell, Vec<u8>), PtyError> {
         if argv.is_empty() {
             return Err(PtyError::Spawn("empty argv".into()));
         }
@@ -593,14 +597,17 @@ impl PtyShell {
             }
             let _ = child.wait();
         };
-        let (stream, reply, _ring, seed_buf) =
+        let (stream, reply, ring, seed_buf) =
             match keeper_handshake(&sock_path, keeper_handshake_quiet()) {
                 Ok(found) => match found {
                     Some(found) => found,
                     None => {
                         cleanup(keeper_child);
                         return Err(PtyError::Spawn(format!(
-                            "keeper at {} died before answering Identify",
+                            "keeper at {} died before answering Identify; its stderr \
+                             carries the startup error - a keeper binary from before \
+                             the pane lane exits on the unknown flags (check \
+                             FNO_AGENTS_WORKER_BIN and the binary pairing)",
                             sock_path.display()
                         )));
                     }
@@ -626,7 +633,7 @@ impl PtyShell {
             stream, child_pid, sock_path, pane_id, seed_buf, out_tx, exit_tx,
         );
         drop(keeper_child);
-        Ok(PtyShell::Keeper(pty))
+        Ok((PtyShell::Keeper(pty), ring))
     }
 
     pub fn child_pid(&self) -> Option<u32> {
