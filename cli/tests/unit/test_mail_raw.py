@@ -794,6 +794,40 @@ def test_raw_codex_review_uncommitted_target_skips_the_guard(
     assert not measured, "the guard never measures an explicit-scope target"
 
 
+def test_codex_review_subject_reports_a_failed_measurement_as_unmeasurable(
+    tmp_path, monkeypatch
+):
+    """A git timeout at the diff stage is not a measured empty diff.
+
+    _git returns None on TimeoutExpired, and the None must keep its own
+    refusal message: reporting "0 changed files" on a measurement that never
+    completed sends the caller to move a review that was aimed correctly
+    (the review-lane fork's finding 2, verified against the code).
+    """
+    import fno.mail.cli as mail_cli
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "base"],
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    real_run = subprocess.run
+
+    def _flaky_diff(argv, **kwargs):
+        if "diff" in argv:
+            raise subprocess.TimeoutExpired(argv, 2)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", _flaky_diff)
+    ok, detail = mail_cli._codex_review_subject_nonempty(str(tmp_path), "main")
+    assert not ok
+    assert "could not be measured" in detail
+    assert "0 changed files" not in detail, \
+        "an unmeasurable diff must not read as a measured empty one"
+
+
 def test_raw_codex_review_stale_binary_names_doctor(mailbox, monkeypatch, capsys):
     from fno.mail.cli import _raw_send
 

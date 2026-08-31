@@ -349,7 +349,7 @@ event_types:
           description: "Review verb, including its leading slash, as observed by the speaker."
         reason:
           type: string
-          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file, so the producer refused to attest; the checkout the reviewer sat in is named by the emitted base/head pair."
+          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base, so nothing could be measured. Both name an ATTEMPT that produced no verdict; neither attests anything."
         args_raw:
           type: string
           description: "Everything after the verb, preserved verbatim when observable."

@@ -5797,6 +5797,13 @@ pub struct ReviewerVerdict {
     /// scope field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<AttestationScope>,
+    /// The refusal class from the `review_invocation stage=refused` row this
+    /// verdict was minted from (`empty_diff`, `unresolvable_base`). Only
+    /// meaningful on `Refused` local verdicts: it is what lets a reader name
+    /// WHY the attempt produced no verdict instead of guessing one diagnosis
+    /// for both classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -6690,6 +6697,11 @@ fn local_refused_verdicts(
         if name.is_empty() {
             name = "review".to_string();
         }
+        let refusal_reason = val
+            .pointer("/data/reason")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+            .map(str::to_string);
         out.push(ReviewerVerdict {
             producer: CoverageProducer::LocalAttestation,
             name,
@@ -6700,6 +6712,7 @@ fn local_refused_verdicts(
             reviewed_sha: line_head.to_string(),
             freshness: None,
             scope: None,
+            refusal_reason,
         });
     }
     out
@@ -6917,6 +6930,7 @@ fn local_attestation_verdict(
         } else {
             AttestationScope::AttestedBranch
         }),
+        refusal_reason: None,
     }
 }
 
@@ -7088,6 +7102,7 @@ pub fn classify_coverage_tiled(
                 reviewed_sha,
                 freshness: fresh,
                 scope: None,
+                refusal_reason: None,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7108,6 +7123,7 @@ pub fn classify_coverage_tiled(
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
                     scope: None,
+                    refusal_reason: None,
                 });
             }
         }
@@ -7163,6 +7179,7 @@ pub fn classify_coverage_tiled(
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
                     scope: None,
+                    refusal_reason: None,
                 });
             }
         }
@@ -7364,6 +7381,7 @@ pub fn classify_coverage_tiled(
                     } else {
                         AttestationScope::AttestedBranch
                     }),
+                    refusal_reason: None,
                 });
             }
         }
@@ -14803,6 +14821,11 @@ mod tests {
         assert_eq!(rep.coverage, Coverage::Covered(0), "a refusal never covers");
         assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
         assert_eq!(rep.refused_reviewers(), vec!["review"]);
+        assert_eq!(
+            rep.verdicts[0].refusal_reason.as_deref(),
+            Some("empty_diff"),
+            "the refusal class rides the verdict so a reader names the cause"
+        );
         // A real review outranks the refusal: once something Reviewed exists,
         // the state must not stay parked at ReviewerRefused.
         let with_pass = format!(
@@ -17434,6 +17457,7 @@ git_bounded();";
                     reviewed_sha: String::new(),
                     freshness: None,
                     scope: None,
+                    refusal_reason: None,
                 }],
             };
             pr

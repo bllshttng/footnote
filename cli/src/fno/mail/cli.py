@@ -3060,6 +3060,14 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
     receipt in hand. This is the fire-side mirror of emit-attestation.sh's
     empty-diff refusal: refuse BEFORE the RPC when the measured subject is
     empty or unmeasurable, naming the checkout so the remedy is obvious.
+
+    The measurement is the COMMITTED range (merge-base..HEAD), matching the
+    ``baseBranch`` target's own scope; the protocol's separate
+    ``uncommittedChanges`` target exists precisely because baseBranch does not
+    read the working tree. A checkout whose branch-side work is entirely
+    uncommitted reads empty HERE as it would in the review itself; the caller
+    who wants the working tree asks for ``/review --uncommitted`` and skips
+    this guard.
     """
     if not cwd:
         return False, (
@@ -3097,7 +3105,18 @@ def _codex_review_subject_nonempty(cwd: str | None, base_ref: str) -> tuple[bool
             "fire from a checkout that tracks it"
         )
     names = _git("diff", "--name-only", f"{merge_base}..{head}")
-    count = len([line for line in (names or "").splitlines() if line])
+    if names is None:
+        # A failed or timed-out measurement is NOT a measured empty diff: the
+        # refusal below would assert "0 changed files" on a git call that never
+        # completed, sending the caller to move the review when nothing was
+        # wrong with it. Unmeasurable keeps its own message, like the HEAD and
+        # merge-base stages above.
+        return False, (
+            f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) "
+            f"could not be measured against {base_ref} (git timed out or "
+            "failed); measure it by hand before firing the review"
+        )
+    count = len([line for line in names.splitlines() if line])
     if count == 0:
         return False, (
             f"the recipient session's checkout at {cwd} (HEAD {head[:8]}) has "

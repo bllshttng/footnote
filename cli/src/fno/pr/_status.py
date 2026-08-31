@@ -1045,19 +1045,31 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         ]
         refused_names = [str(v.get("name")) for v in refused if v.get("name")]
         who = ", ".join(refused_names) or "configured reviewer"
-        if any(v.get("producer") == "local_attestation" for v in refused):
-            # A local refused verdict is the empty-diff terminal: the review
-            # attempt RAN and produced no verdict because the reviewer's
-            # measured diff had nothing to read. The generic "declined" remedy
-            # (nudge the reviewer) reproduces the failure exactly; the remedy
-            # is to move the review to the PR's checkout.
-            sys.stderr.write(
-                f"note: reviewer_refused: {who} ran and refused to attest "
-                "(an empty diff at the reviewer's checkout: it sat on the "
-                "base branch, so the review read nothing). Fire from the PR "
-                "worktree session (`fno do target request-self-review --pr "
-                "<n>`) or spawn the reviewer with --cwd <worktree>.\n"
-            )
+        local_refused = [v for v in refused if v.get("producer") == "local_attestation"]
+        if local_refused:
+            # A local refused verdict is a review attempt that RAN and produced
+            # no verdict. The refusal_reason names the class, and the two
+            # classes carry different remedies: an empty diff means the
+            # reviewer's checkout was the wrong one; an unresolvable base means
+            # the checkout was fine but could not measure against the base.
+            # Diagnosing one as the other sends the caller to move a review
+            # that was aimed correctly.
+            reasons = {str(v.get("refusal_reason") or "") for v in local_refused}
+            if reasons - {"", "empty_diff"}:
+                sys.stderr.write(
+                    f"note: reviewer_refused: {who} ran and refused to attest "
+                    "(its checkout could not resolve the base to a "
+                    "merge-base). Fetch the base in the reviewer's checkout, "
+                    "or run a local review at HEAD.\n"
+                )
+            else:
+                sys.stderr.write(
+                    f"note: reviewer_refused: {who} ran and refused to attest "
+                    "(an empty diff at the reviewer's checkout: it sat on the "
+                    "base branch, so the review read nothing). Fire from the PR "
+                    "worktree session (`fno do target request-self-review --pr "
+                    "<n>`) or spawn the reviewer with --cwd <worktree>.\n"
+                )
         else:
             sys.stderr.write(
                 f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
