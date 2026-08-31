@@ -2888,8 +2888,7 @@ fn parse_block_sel(s: &str) -> Result<BlockSel, String> {
 /// `split` and `break` shipped without reaching the first, so an operator who
 /// typed a bare `fno mux pane` to discover the surface was told verbs that
 /// exist do not.
-pub const PANE_VERBS: &str =
-    "ls|read|run|send|wait|kill|claim|release|split|break|focus|keeper";
+pub const PANE_VERBS: &str = "ls|read|run|send|wait|kill|claim|release|split|break|focus|keeper";
 pub const PANE_REFERENCE_USAGE: &str =
     "pane refs are <pane-id> or <session>:<pane-id>; --session overrides the prefix";
 
