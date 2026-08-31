@@ -394,6 +394,7 @@ FIELD_META: dict[str, Meta] = {
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
     "mux.restore.hold_workers": Meta("advanced", "Rebuild named held panes for pane-substrate workers after a mux server restart; focusing a held pane resumes its persisted harness session (default on).", default_source="default"),
     "mux.restore.policy": Meta("advanced", "Startup restore policy for worker members: hold (rebuild named held panes, default), idle (members stay idle rows), or resume (run the bulk restore and resume every member through its own harness). Overrides hold_workers when set.", default_source="default"),
+    "mux.status_row": Meta("advanced", "Show the mux status row at the bottom of the terminal (default on).", default_source="default"),
     "mux.theme": Meta(
         "advanced",
         "Mux chrome theme: terminal (default, inherits the emulator colors) | catppuccin | tokyo-night | gruvbox. A named palette recolors the chrome while the body stays the emulator's inverse block. Set from the settings picker.",

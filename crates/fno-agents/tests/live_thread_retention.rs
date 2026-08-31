@@ -40,6 +40,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         crown_level: None,
         crown_scope: None,
         liveness: Liveness::Alive,
+        dnd: false,
     };
     let mut evidence = MemberEvidence::from_sets(
         [worker.to_string(), session_id.to_string()]
@@ -79,6 +80,7 @@ fn live_thread_identity_survives_store_gc_and_sideline_facts() {
         no_pane_reason: None,
         pane_activity: None,
         reach: Default::default(),
+        dnd: false,
     };
     assert_eq!(sideline.harness_session_id.as_deref(), Some(session_id));
 

@@ -63,9 +63,10 @@ until the loop yields to a human. When `fno-agents loop-check` returns a
 `block` decision, it now appends a one-line nudge for the oldest unread message
 addressed to the session's project to the decision `message`. **Vehicle
 (AC3-VERIFY):** the stop hook surfaces a `block` message to the continuing
-model via `exit 2` + stderr (Claude Code's documented Stop-hook block
-protocol) — the footnote loop already relies on it, so P2 needs no new
-substrate.
+model the way the calling harness honors it: stdout JSON
+`{"decision":"block","reason":...}` at exit 0 on Claude Code, `exit 2` +
+stderr on exit-code readers such as codex - the footnote loop already relies
+on it, so P2 needs no new substrate.
 
 - `crates/fno-agents/src/nudge.rs` (deliberately OUTSIDE the `loop*`
   loc-ratchet glob) shells out fail-open to `fno agents nudge-peek`;

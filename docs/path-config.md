@@ -28,9 +28,13 @@ The CLI reads every candidate that exists and **deep-merges** them, with higher-
 
 The merge is per key: nested maps merge recursively, while scalars and lists replace wholesale (a project-level `config.external_reviewers` list fully replaces the global one rather than appending). A key absent from a higher-priority file falls through to the next file down. So the per-user global can hold shared defaults (for example `config.obsidian.vault`) while each repo's project-local file sets only its deltas (for example `config.post_merge.parking_lot_path`). The project-local file no longer shadows the entire global; it overrides only the keys it actually sets.
 
+The loader has one chain with two seeds. `load_settings()` seeds it from the current checkout, while `load_settings_for_repo(root)` seeds it from the explicit worktree or checkout root. Both use worktree config over canonical config over global config, and both apply a real worktree `config.local.toml` only through the allowlisted local keys. The explicit repo loader does not let ambient `FNO_CONFIG` replace the root supplied by its caller.
+
 Pointing `state_dir` at a per-project root is how one checkout gets its own graph, ledger, briefs, agent registry and mail bus. `fno config project init <id>` writes that key for you and prints which half of the environment it actually isolated: see [project environments](architecture/fno-project-environments.md). The mux socket directory (`<state_dir>/mux/`) follows the same key, with two limits. The mux reads the EXPLICIT tier only: a pinned `FNO_CONFIG`, or the global config. A project-local `config.toml` does NOT move the mux. The mux is one fleet per machine, invoked from many directories. An ambient project tier splits external callers (kings, watchdogs, mail inject) off the sessions they manage. A project that needs its own mux pins `FNO_CONFIG` or sets `FNO_MUX_DIR` in its shells. And the value must be one the mux can follow on its own: an absolute path or a `~` path. Relative values, template variables, `$VAR` references, and `~user` forms are declined with a warning. Python's own cross-project surfaces (ledger, operator lane) apply the same rule to a relative `state_dir`. `FNO_MUX_DIR` still overrides the dir outright. A pinned `FNO_CONFIG` can also carry no usable `state_dir`, because the file is unparseable or the key is absent. The socket dir then lands beside the pinned file, with a warning, never back on the real `~/.fno/mux`. When sessions still sit at the pre-config-chain root `~/.fno/mux` while this process resolves elsewhere, `fno mux doctor` warns. A dir abandoned by a `state_dir` CHANGE is not tracked. Re-point or kill servers there by hand.
 
 This matches the shell reader (`scripts/lib/config.sh`, which already does per-key local-over-global fallback) and the provider loader, so all three config surfaces agree on precedence. Note `fno config get` only resolves schema-modeled keys (`config.{state_dir, plans_dir, paths.*, obsidian, project, blueprint, post_merge, target}`); unmodeled keys such as `external_reviewers`, `auto_merge`, `gates`, and `budget_cap` are read only by the shell reader.
+
+`fno config get <key>` prints the resolved value on stdout and keeps provenance on stderr. For a leaf key, the `source:` line names the deciding file, the root used for the lookup, and the ordered candidates searched. A built-in default is reported as `source: default (no config file sets this key)` with the same searched-candidate receipt. Absence is therefore a searched result, not an unmeasured zero.
 
 ## Full schema
 
@@ -137,6 +141,8 @@ For each accessor call (e.g. `paths.graph_json()`):
 1. If `config.paths.graph_json` is set in settings, resolve that value.
 2. Otherwise, derive from `state_dir` (e.g. `state_dir / "graph.json"`).
 3. Apply `$VAR` expansion, template substitution, `~` expansion, then `Path.resolve()`.
+
+Under `FNO_TEST_HERMETIC=1`, state accessors reject a resolved path outside the test sandbox. The fence reuses the events `HermeticEscapeError` and allowed-root calculation. `locks_dir()` is the deliberate config-free exception.
 
 Project-relative paths (`plans_dir`, `inbox_dir`) anchor relative strings to the git repo root (or `FNO_REPO_ROOT` in tests).
 

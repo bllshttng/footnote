@@ -2539,6 +2539,7 @@ def test_unrepresentable_name_projects_a_node_identifying_failure(iso, monkeypat
     node_id = "n-" + "z" * 70
     node = {"id": node_id, "title": "irrelevant", "project": "fno", "_resolved_cwd": "/tmp/x"}
     monkeypatch.setattr(adv, "_next_node", lambda project: node)
+    monkeypatch.setattr("fno.claims.core.machine_id", lambda: "")
     monkeypatch.setattr(
         adv.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn")
     )

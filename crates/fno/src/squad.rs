@@ -68,17 +68,29 @@ impl Squad {
         self.origins.first().map(String::as_str).unwrap_or("")
     }
 
+    /// The length of the LONGEST origin owning `path`, or `None` when none
+    /// does. The specificity [`Session::find_by_cwd`] needs: `/home/u` and
+    /// `/home/u/repo` both own `/home/u/repo/sub`, and only the second one
+    /// describes it.
+    pub fn owning_origin_len(&self, path: &str) -> Option<usize> {
+        self.origins
+            .iter()
+            .filter(|o| {
+                path == o.as_str()
+                    || path
+                        .strip_prefix(o.as_str())
+                        .is_some_and(|r| r.starts_with('/'))
+            })
+            .map(String::len)
+            .max()
+    }
+
     /// Whether `path` is one of this squad's origins or a child of one. The
     /// shared predicate behind attach origin-matching and the watch-only
     /// agent→squad fallback: an empty-origin (named) squad owns nothing, so it
     /// is never auto-joined.
     pub fn owns_path(&self, path: &str) -> bool {
-        self.origins.iter().any(|o| {
-            path == o
-                || path
-                    .strip_prefix(o.as_str())
-                    .is_some_and(|r| r.starts_with('/'))
-        })
+        self.owning_origin_len(path).is_some()
     }
 
     /// The tab dictionary entry for the tab at vector index `idx` (x-1499):
@@ -214,9 +226,26 @@ impl Session {
     /// attaches still converge on the resolved repo root, and an attach from a
     /// subdir of a named squad's origin joins it rather than spawning a new
     /// squad. Named (empty-origin) squads own nothing, so they are bypassed
-    /// here - explicit creation is the only way into them.
+    /// here - explicit creation is the only way into them. The LONGEST owning
+    /// origin wins, so a home-rooted squad never captures a repo cwd its
+    /// deeper origin describes better (x-6e79); on equal length the FIRST
+    /// squad keeps it, because two rows may share one origin by design and
+    /// the first is the established answer. An empty `cwd` owns nothing.
     pub fn find_by_cwd(&self, cwd: &str) -> Option<u64> {
-        self.squads.iter().find(|s| s.owns_path(cwd)).map(|s| s.id)
+        if cwd.is_empty() {
+            return None;
+        }
+        let mut best: Option<(usize, u64)> = None;
+        for s in &self.squads {
+            let Some(len) = s.owning_origin_len(cwd) else {
+                continue;
+            };
+            // STRICTLY greater, so an equal-length origin keeps the incumbent.
+            if best.is_none_or(|(best_len, _)| len > best_len) {
+                best = Some((len, s.id));
+            }
+        }
+        best.map(|(_, id)| id)
     }
 
     /// Register a fresh squad (with its first tab already built) and make it
@@ -578,6 +607,50 @@ mod tests {
         // (deterministic), and the second still exists independently.
         assert_eq!(s.squad(1).unwrap().canonical_cwd(), "/shared");
         assert!(s.squad(2).unwrap().owns_path("/shared/deep"));
+    }
+
+    #[test]
+    fn squad_find_by_cwd_prefers_the_longest_matching_origin() {
+        // AC1-HP (x-6e79): the home-rooted squad is added FIRST, as squad 1,
+        // and iterates first. A first-match walk hands it every cwd under
+        // home; the assertion is that the DEEPER origin wins anyway, because
+        // iteration order is the whole defect. Asserting some squad answers
+        // proves nothing: one always did.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/home/u".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/home/u/repo".into()], None, tab(&[20]));
+        assert_eq!(s.find_by_cwd("/home/u/repo/sub"), Some(2));
+        assert_eq!(s.find_by_cwd("/home/u/repo"), Some(2));
+        assert_eq!(s.find_by_cwd("/home/u/other"), Some(1));
+        // Reversed insertion order: the answer must not be order-luck.
+        let mut r = Session::default();
+        r.add_squad(7, vec!["/home/u/repo".into()], None, tab(&[20]));
+        r.add_squad(8, vec!["/home/u".into()], None, tab(&[10]));
+        assert_eq!(r.find_by_cwd("/home/u/repo/sub"), Some(7));
+    }
+
+    #[test]
+    fn squad_find_by_cwd_keeps_first_on_equal_length_origins() {
+        // AC2-EDGE (x-6e79): two rows may share one origin by design
+        // (`squad_named_squads_stay_distinct_on_shared_or_empty_origins`).
+        // Only a STRICTLY longer origin beats the incumbent, so the first
+        // squad stays the established answer and the duplicate home rows keep
+        // behaving exactly as pinned.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/home/u".into()], None, tab(&[10]));
+        s.add_squad(2, vec!["/home/u".into()], None, tab(&[20]));
+        assert_eq!(s.find_by_cwd("/home/u"), Some(1));
+        assert_eq!(s.find_by_cwd("/home/u/deep"), Some(1));
+    }
+
+    #[test]
+    fn squad_find_by_cwd_returns_none_for_an_empty_cwd() {
+        // AC3-EDGE (x-6e79): the inline `!cwd.is_empty()` guards at the
+        // placement call sites move into the shared helper, so a caller added
+        // later cannot omit it. An empty cwd owns nothing.
+        let mut s = Session::default();
+        s.add_squad(1, vec!["/home/u".into()], None, tab(&[10]));
+        assert_eq!(s.find_by_cwd(""), None);
     }
 
     #[test]

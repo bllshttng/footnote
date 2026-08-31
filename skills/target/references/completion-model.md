@@ -12,7 +12,7 @@ This file explains the machinery behind `SKILL.md`'s "Completion: what you do" p
 
 ## The loop-check verb
 
-The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is one JSON object: `{decision, termination_reason, message, fires, fingerprint}`. Exit 0 for both allow and block; exit 2 for CLI misuse only.
+The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is one JSON object: `{decision, termination_reason, message, fires, fingerprint}`. Exit 0 for allow and for a healthy block; exit 2 also carries a full decision payload when the king's board is unreadable (degraded block); exit 2 with no `decision` field means CLI misuse only. The shim keys on the `decision` field, never the exit code.
 
 **Decision algorithm:**
 

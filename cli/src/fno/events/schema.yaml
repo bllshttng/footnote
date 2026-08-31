@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals, bash]
+      enum: [target, megawalk, megatron, fno-loop, loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals, bash, config]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -323,6 +323,13 @@ event_types:
       reviewer observations may arrive as separate rows joined by
       invocation_id; a sent row with no later started or attestation row names
       a lost review without claiming that an absence is a delivery result.
+      A refused row is the TERMINAL of a sent row that ended in a producer
+      refusal: the review attempt ran and produced no verdict because there
+      was nothing to read (reason empty_diff: the reviewer's measured diff
+      changed no file, so the producer refused to attest). It attests nothing
+      and never clears a gate; it exists so a reader can tell "attempted,
+      nothing to review" from "never attempted" - the two states that were
+      byte-identical at the coverage surface before this stage existed.
     # The daemon owns this cross-language registry entry. Python control-plane
     # sites and Rust transports both append the same canonical event, while
     # data.initiator and data.transport retain their measured provenance.
@@ -335,11 +342,14 @@ event_types:
           description: "Stable join id minted at the earliest observable invocation site."
         stage:
           type: string
-          enum: [sent, started]
-          description: "Whether the sender recorded a transport attempt or the reviewer started."
+          enum: [sent, started, refused]
+          description: "Whether the sender recorded a transport attempt, the reviewer started, or the attempt terminated in a producer refusal that attests nothing."
         verb:
           type: string
           description: "Review verb, including its leading slash, as observed by the speaker."
+        reason:
+          type: string
+          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base, so nothing could be measured. Both name an ATTEMPT that produced no verdict; neither attests anything."
         args_raw:
           type: string
           description: "Everything after the verb, preserved verbatim when observable."
@@ -1716,6 +1726,45 @@ event_types:
           type: string
           description: "Optional diagnostic: the observer harness (claude|codex). Never participates in the predicate, observation id, or recurrence threshold."
     consumers: [fno agents workspace worktree overlaps]
+
+  - name: config_write
+    description: "One config key changed on disk. Emitted by the fno.config.writer choke point after the atomic replace lands, once per changed leaf key. Answers when a key changed, from what to what, in which resolved root, and which session made the change, with no transcript search."
+    sources: [config]
+    data:
+      required: [key, scope, root_kind, config_path, present_before, present_after, attester_session_id, attester_witness]
+      properties:
+        key:
+          type: string
+          description: "Dotted leaf path of the changed key, as stored (e.g. review.self_review_required)."
+        old_value:
+          description: "Value before the write, JSON-representable. OMITTED when present_before is false. Redacted or truncated per the writer's rules."
+        new_value:
+          description: "Value after the write. OMITTED when present_after is false (an unset)."
+        present_before:
+          type: boolean
+          description: "Whether the key was stored in this file before the write. Distinguishes a first set from a change."
+        present_after:
+          type: boolean
+          description: "Whether the key is stored in this file after the write. False for an unset."
+        scope:
+          type: string
+          description: "The scope the caller asked for: global or project."
+        root_kind:
+          type: string
+          description: "The state root the write landed in: operator (~/.fno or config state_dir) or project (<canonical checkout>/.fno)."
+        config_path:
+          type: string
+          description: "The RESOLVED real path written, after symlink resolution. A worktree write through a symlink records the canonical file it actually changed, never the link."
+        redacted:
+          type: boolean
+          description: "Optional. True when old_value or new_value was replaced by a digest because the key path looked secret-bearing."
+        attester_session_id:
+          type: string
+          description: "The harness session that made the write, resolved from the emitting process. Empty string when nothing in the env names one."
+        attester_witness:
+          type: string
+          description: "process when a readable ancestor corroborates the session id, env_only when nothing does, conflict when an ancestor carries a different value. Recorded, never gating."
+    consumers: [fno config history]
 
 # ---------------------------------------------------------------------------
 # W7 additive: Rust fno-agents supervisor event kinds.

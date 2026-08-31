@@ -422,6 +422,18 @@ def resolve_configured_path(
     return _resolve(raw, project_root=project_root, settings=settings)
 
 
+def _guard_state_path(path: Path) -> Path:
+    """Refuse a resolved state path outside the hermetic test sandbox."""
+    if os.environ.get("FNO_TEST_HERMETIC") == "1":
+        # Reuse the events fence and its allowed-root calculation. A hand-built
+        # state path still cannot be reached here; that remaining R4 surface is
+        # guarded by the state-path lint rather than by an accessor.
+        from fno.events import _refuse_hermetic_escape
+
+        _refuse_hermetic_escape(path)
+    return path
+
+
 # ---------------------------------------------------------------------------
 # The state-file table: one resolver per state file
 # ---------------------------------------------------------------------------
@@ -545,7 +557,7 @@ STATE_FILES: tuple[StateFile, ...] = (
 def state_dir() -> Path:
     """Return the state directory (default: ~/.fno/)."""
     settings = _settings()
-    return _resolve(settings.state_dir)
+    return _guard_state_path(_resolve(settings.state_dir))
 
 
 def graphql_quota_lock() -> Path:
@@ -575,7 +587,7 @@ def graph_json() -> Path:
     settings = _settings()
     override = settings.paths.graph_json
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "graph.json"
 
 
@@ -617,12 +629,14 @@ def ledger_json() -> Path:
     if override is not None:
         expanded = os.path.expanduser(os.path.expandvars(override))
         if os.path.isabs(expanded):
-            return _resolve(override)
-        return _resolve(override, project_root=_resolve("~/.fno/"), settings=settings)
+            return _guard_state_path(_resolve(override))
+        return _guard_state_path(
+            _resolve(override, project_root=_resolve("~/.fno/"), settings=settings)
+        )
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return state_dir() / "ledger.json"
-    return _resolve("~/.fno/") / "ledger.json"
+        return _guard_state_path(state_dir() / "ledger.json")
+    return _guard_state_path(_resolve("~/.fno/") / "ledger.json")
 
 
 def operator_lane() -> Path:
@@ -638,17 +652,19 @@ def operator_lane() -> Path:
     if override is not None:
         expanded = os.path.expanduser(os.path.expandvars(override))
         if os.path.isabs(expanded):
-            return _resolve(override)
-        return _resolve(override, project_root=_resolve("~/.fno/"), settings=settings)
+            return _guard_state_path(_resolve(override))
+        return _guard_state_path(
+            _resolve(override, project_root=_resolve("~/.fno/"), settings=settings)
+        )
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return state_dir() / "my-priorities.md"
-    return _resolve("~/.fno/") / "my-priorities.md"
+        return _guard_state_path(state_dir() / "my-priorities.md")
+    return _guard_state_path(_resolve("~/.fno/") / "my-priorities.md")
 
 
 def global_events_json() -> Path:
     """Return the cross-checkout event journal beside the global ledger."""
-    return ledger_json().parent / "events.jsonl"
+    return _guard_state_path(ledger_json().parent / "events.jsonl")
 
 
 def decisions_jsonl() -> Path:
@@ -658,12 +674,12 @@ def decisions_jsonl() -> Path:
     rotates, and a rotated-away ruling is a ruling the operator asked for and
     cannot get back. This one never rotates and holds nothing else.
     """
-    return ledger_json().parent / "decisions.jsonl"
+    return _guard_state_path(ledger_json().parent / "decisions.jsonl")
 
 
 def questions_jsonl() -> Path:
     """Return the permanent machine-wide operator-question index."""
-    return ledger_json().parent / "questions.jsonl"
+    return _guard_state_path(ledger_json().parent / "questions.jsonl")
 
 
 def project_events_json() -> Path:
@@ -694,8 +710,8 @@ def project_events_json() -> Path:
     """
     override = os.environ.get("FNO_EVENTS_PATH")
     if override:
-        return Path(override)
-    return resolve_repo_root() / ".fno" / "events.jsonl"
+        return _guard_state_path(Path(override))
+    return _guard_state_path(resolve_repo_root() / ".fno" / "events.jsonl")
 
 
 def repo_identity_from_remote_url(url: str) -> Optional[str]:
@@ -786,11 +802,11 @@ def evals_history() -> Path:
     settings = _settings()
     override = settings.paths.evals_history
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
         return state_dir() / "evals-history.jsonl"
-    return _resolve("~/.fno/") / "evals-history.jsonl"
+    return _guard_state_path(_resolve("~/.fno/") / "evals-history.jsonl")
 
 
 def benchmarks_json() -> Path:
@@ -806,8 +822,8 @@ def benchmarks_json() -> Path:
     settings = _settings()
     raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
     if os.path.isabs(raw):
-        return state_dir() / "benchmarks.json"
-    return _resolve("~/.fno/") / "benchmarks.json"
+        return _guard_state_path(state_dir() / "benchmarks.json")
+    return _guard_state_path(_resolve("~/.fno/") / "benchmarks.json")
 
 
 def runtime_state_json() -> Path:
@@ -827,10 +843,10 @@ def runtime_state_json() -> Path:
         settings = _settings()
         raw = os.path.expanduser(os.path.expandvars(settings.state_dir))
         if os.path.isabs(raw):
-            return state_dir() / "provider-runtime-state.json"
+            return _guard_state_path(state_dir() / "provider-runtime-state.json")
     except Exception:  # noqa: BLE001 - see docstring: never raise on config
         pass
-    return _resolve("~/.fno/") / "provider-runtime-state.json"
+    return _guard_state_path(_resolve("~/.fno/") / "provider-runtime-state.json")
 
 
 def loops_paused_json() -> Path:
@@ -847,8 +863,8 @@ def loops_paused_json() -> Path:
     settings = _settings()
     override = settings.paths.loops_paused_json
     if override is not None:
-        return _resolve(override)
-    return _resolve("~/.fno/") / "loops-paused.json"
+        return _guard_state_path(_resolve(override))
+    return _guard_state_path(_resolve("~/.fno/") / "loops-paused.json")
 
 
 def observer_reports_dir(
@@ -908,14 +924,14 @@ def bus_dir() -> Path:
     """
     explicit = os.environ.get("FNO_BUS_DIR")
     if explicit:
-        return Path(explicit)
+        return _guard_state_path(Path(explicit))
     inbox_root = os.environ.get("FNO_INBOX_ROOT")
     if inbox_root:
-        return Path(inbox_root) / ".bus"
+        return _guard_state_path(Path(inbox_root) / ".bus")
     settings = _settings()
     override = settings.paths.bus_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "bus"
 
 
@@ -1042,7 +1058,7 @@ def briefs_dir() -> Path:
     settings = _settings()
     override = settings.paths.briefs_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "briefs"
 
 
@@ -1079,7 +1095,7 @@ def fleet_dir() -> Path:
     settings = _settings()
     override = settings.paths.fleet_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "fleet"
 
 
@@ -1088,7 +1104,7 @@ def postmortems_dir() -> Path:
     settings = _settings()
     override = settings.paths.postmortems_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "postmortems"
 
 
@@ -1109,7 +1125,7 @@ def worktrees_base() -> Path:
     settings = _settings()
     override = settings.paths.worktrees_base
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "worktrees"
 
 
@@ -1118,7 +1134,7 @@ def memory_dir() -> Path:
     settings = _settings()
     override = settings.paths.memory_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "memory"
 
 
@@ -1132,7 +1148,7 @@ def retro_pending_dir() -> Path:
     settings = _settings()
     override = settings.paths.retro_pending_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "retro-pending"
 
 
@@ -1141,7 +1157,7 @@ def hook_logs_dir() -> Path:
     settings = _settings()
     override = settings.paths.hook_logs_dir
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "hook-logs"
 
 
@@ -1150,7 +1166,7 @@ def agents_registry_path() -> Path:
     settings = _settings()
     override = settings.paths.agents_registry_path
     if override is not None:
-        return _resolve(override)
+        return _guard_state_path(_resolve(override))
     return state_dir() / "agents" / "registry.json"
 
 

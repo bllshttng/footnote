@@ -5797,6 +5797,13 @@ pub struct ReviewerVerdict {
     /// scope field.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<AttestationScope>,
+    /// The refusal class from the `review_invocation stage=refused` row this
+    /// verdict was minted from (`empty_diff`, `unresolvable_base`). Only
+    /// meaningful on `Refused` local verdicts: it is what lets a reader name
+    /// WHY the attempt produced no verdict instead of guessing one diagnosis
+    /// for both classes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal_reason: Option<String>,
 }
 
 /// The one counting rule for human GitHub approvals: a `reviewed` verdict
@@ -6645,6 +6652,75 @@ fn zero_evidence_attestation(val: &Value) -> bool {
     }
 }
 
+/// Refused review attempts read from `review_invocation stage=refused` rows:
+/// the durable terminal of a review that ran and produced no verdict because
+/// there was nothing to read (reason `empty_diff`: the reviewer's measured
+/// diff changed no file, so the producer refused to attest). Minted as a
+/// `Refused` local verdict so `review_state` reads `ReviewerRefused` -
+/// "attempted, nothing to review" - instead of the generic unreviewed that is
+/// byte-identical to "never attempted" at every coverage surface. A refused
+/// verdict never counts toward coverage; it only names the state, a later
+/// real review outranks it (`review_state` checks `Reviewed` first), and a
+/// moved head retires it (exact-head scoping, below).
+fn local_refused_verdicts(events_text: &str, head_sha: &str) -> Vec<ReviewerVerdict> {
+    let mut out: Vec<ReviewerVerdict> = Vec::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_invocation") {
+            continue;
+        }
+        if val.pointer("/data/stage").and_then(|v| v.as_str()) != Some("refused") {
+            continue;
+        }
+        let line_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        // EXACT-HEAD scoping, deliberately narrower than an attestation's: a
+        // refusal is a terminal of one ATTEMPT at one measured head, not a
+        // claim about the branch. Admitting it on the branch arm alone would
+        // park ReviewerRefused at every later head (an author's fix push
+        // cannot clear it, only a real review can), which reads downstream as
+        // "the reviewer declined" at a head nobody attempted - and the local
+        // refusal feeds the same reviewer_refused paths a bot quota bounce
+        // does. Once the head moves, the state honestly returns to unreviewed:
+        // nothing has reviewed the new head. An empty head (a forged or legacy
+        // row) scopes to nothing.
+        if line_head.is_empty() || line_head != head_sha {
+            continue;
+        }
+        let mut name = val
+            .pointer("/data/verb")
+            .and_then(|v| v.as_str())
+            .unwrap_or("review")
+            .trim_start_matches('/')
+            .to_string();
+        if name.is_empty() {
+            name = "review".to_string();
+        }
+        let refusal_reason = val
+            .pointer("/data/reason")
+            .and_then(|v| v.as_str())
+            .filter(|r| !r.is_empty())
+            .map(str::to_string);
+        out.push(ReviewerVerdict {
+            producer: CoverageProducer::LocalAttestation,
+            name,
+            verdict: CoverageVerdict::Refused,
+            human_approval: false,
+            author_approval: false,
+            attestation_origin: AttestationOrigin::Unknown,
+            reviewed_sha: line_head.to_string(),
+            freshness: None,
+            scope: None,
+            refusal_reason,
+        });
+    }
+    out
+}
+
 fn local_latest_attestations(
     events_text: &str,
     head_branch: &str,
@@ -6857,6 +6933,7 @@ fn local_attestation_verdict(
         } else {
             AttestationScope::AttestedBranch
         }),
+        refusal_reason: None,
     }
 }
 
@@ -6928,6 +7005,7 @@ pub fn classify_coverage_tiled(
     let (local_passes, pairs_raising_findings) =
         local_latest_attestations(events_text, head_branch, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
+    verdicts.extend(local_refused_verdicts(events_text, head_sha));
 
     if github_read_ok {
         // (1) Collect distinct KNOWN review-App authors that posted a review
@@ -7027,6 +7105,7 @@ pub fn classify_coverage_tiled(
                 reviewed_sha,
                 freshness: fresh,
                 scope: None,
+                refusal_reason: None,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -7047,6 +7126,7 @@ pub fn classify_coverage_tiled(
                     reviewed_sha: sha.clone(),
                     freshness: Some(*fresh),
                     scope: None,
+                    refusal_reason: None,
                 });
             }
         }
@@ -7102,6 +7182,7 @@ pub fn classify_coverage_tiled(
                     reviewed_sha: oid.to_string(),
                     freshness: Some(fresh),
                     scope: None,
+                    refusal_reason: None,
                 });
             }
         }
@@ -7303,6 +7384,7 @@ pub fn classify_coverage_tiled(
                     } else {
                         AttestationScope::AttestedBranch
                     }),
+                    refusal_reason: None,
                 });
             }
         }
@@ -13163,6 +13245,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // Blind is not clean. Block, but let the dry-fire counter below
             // bound it: a board that never answers reaches the ceiling and
             // terminates NoProgress rather than holding the king forever.
+            // Unlike the clean block at the bottom, exit 2 here marks the
+            // degraded path for log readers; no consumer acts on it (the shim
+            // keys on the decision field, never the code). The real bound is
+            // the dry-fire ceiling above, which terminates NoProgress when
+            // the board never answers.
             if dry + 1 >= KING_DRY_FIRE_CEILING {
                 return terminate(
                     TerminationReason::NoProgress,
@@ -13256,8 +13343,16 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let top = board
         .top_row
         .unwrap_or_else(|| "an actionable queue".to_string());
+    // decide()'s documented contract, one screen up: exit 0 for allow and for
+    // this healthy block; the ONLY other verdict-bearing exit is the degraded
+    // unreadable-board block above, which carries the same payload on 2. Any
+    // non-zero without a `decision` field is an internal/CLI error. Encoding a
+    // healthy block in the exit code made the shim read it as a broken checker
+    // and count it toward the unavailable budget that ends in a ship-gate-off
+    // allow. The JSON `decision` field is the block signal; the exit code
+    // never is.
     (
-        2,
+        0,
         king_output(
             "block",
             None,
@@ -14703,6 +14798,129 @@ mod tests {
             "submittedAt": "2026-08-12T17:51:48Z",
             "commit": {"oid": "8e557ccdecec07abc7e409ad8d888318016612c1"}
         })]
+    }
+
+    #[test]
+    fn refused_invocation_row_reads_reviewer_refused_not_unreviewed() {
+        // The measured 2026-08-30 empty-diff shape: a review ran at a
+        // recipient sitting on the base branch, read nothing, and the producer
+        // refused to attest. Before the refused terminal row, that attempt was
+        // byte-identical to "never attempted" at every coverage surface, so a
+        // king re-fired the review and reproduced the failure exactly.
+        let events = format!(
+            "{}\n{}\n",
+            serde_json::json!({
+                "type": "review_invocation",
+                "data": {"invocation_id": "ri-1", "stage": "refused",
+                         "verb": "/review", "reason": "empty_diff",
+                         "head_sha": "abc123", "branch": "feature/x"}
+            })
+            .to_string(),
+            serde_json::json!({
+                "type": "review_invocation",
+                "data": {"invocation_id": "ri-1", "stage": "sent",
+                         "verb": "/review"}
+            })
+            .to_string(),
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.coverage, Coverage::Covered(0), "a refusal never covers");
+        assert_eq!(rep.review_state(), Some(ReviewState::ReviewerRefused));
+        assert_eq!(rep.refused_reviewers(), vec!["review"]);
+        assert_eq!(
+            rep.verdicts[0].refusal_reason.as_deref(),
+            Some("empty_diff"),
+            "the refusal class rides the verdict so a reader names the cause"
+        );
+        // A real review outranks the refusal: once something Reviewed exists,
+        // the state must not stay parked at ReviewerRefused.
+        let with_pass = format!(
+            "{}{}\n",
+            events,
+            attestation_line("code-review", "abc123", "pass")
+        );
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &with_pass,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Fresh,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.review_state(), Some(ReviewState::Reviewed));
+    }
+
+    #[test]
+    fn refused_invocation_row_out_of_scope_is_ignored() {
+        // A refusal on ANOTHER branch's attempt is not this PR's state; only
+        // exact-head rows mint a verdict. The row below carries a foreign
+        // branch AND a foreign head.
+        let events = serde_json::json!({
+            "type": "review_invocation",
+            "data": {"invocation_id": "ri-1", "stage": "refused",
+                     "verb": "/review", "reason": "empty_diff",
+                     "head_sha": "fff999", "branch": "feature/OTHER"}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "abc123",
+        );
+        assert_eq!(rep.review_state(), Some(ReviewState::Unreviewed));
+        assert!(rep.refused_reviewers().is_empty());
+    }
+
+    #[test]
+    fn refused_invocation_row_retires_when_the_head_moves() {
+        // The refusal is a terminal of ONE attempt at ONE measured head, not a
+        // claim about the branch: once the author pushes a new head, the old
+        // refusal must not park ReviewerRefused at the new head (round-2
+        // review finding 1 - the state read as "the reviewer declined" at a
+        // head nobody attempted, and only a real review could clear it).
+        let events = serde_json::json!({
+            "type": "review_invocation",
+            "data": {"invocation_id": "ri-1", "stage": "refused",
+                     "verb": "/review", "reason": "empty_diff",
+                     "head_sha": "abc123", "branch": "feature/x"}
+        })
+        .to_string();
+        let rep = classify_coverage(
+            &[],
+            &[],
+            &events,
+            &[],
+            true,
+            None,
+            &|_| Freshness::Stale,
+            "feature/x",
+            "def456",
+        );
+        assert_eq!(
+            rep.review_state(),
+            Some(ReviewState::Unreviewed),
+            "a moved head retires the old refusal; nothing reviewed the new head"
+        );
+        assert!(rep.refused_reviewers().is_empty());
     }
 
     #[test]
@@ -17286,6 +17504,7 @@ git_bounded();";
                     reviewed_sha: String::new(),
                     freshness: None,
                     scope: None,
+                    refusal_reason: None,
                 }],
             };
             pr

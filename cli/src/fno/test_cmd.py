@@ -42,6 +42,7 @@ import time
 from collections import deque
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
+from xml.etree import ElementTree
 
 import click
 
@@ -57,6 +58,11 @@ _TAIL_LINES = 40
 _AMBIENT_MODES = ("clean", "dirty", "both")
 _AMBIENT_MODE = "clean"
 
+_STATE_MODES = ("clean", "populated", "both")
+_STATE_MODE = "clean"
+STATE_LEAK_CANARY = "STATE_LEAK_CANARY"
+_STATE_FIXTURE_DIR = Path(__file__).resolve().parents[3] / "cli" / "tests" / "fixtures" / "populated-state"
+
 _SANDBOX: Optional[Path] = None
 
 
@@ -71,6 +77,129 @@ def _sandbox() -> Path:
 
 def _poison_fixtures(root: Path) -> Path:
     return root / "cli" / "tests" / "fixtures" / "ambient-poison"
+
+
+def _populate_state(sandbox: Path) -> Path:
+    """Seed a populated state shape and return its profile directory."""
+    profile = sandbox / "populated-state"
+    state_dir = sandbox / "home" / ".fno"
+    (state_dir / "agents").mkdir(parents=True, exist_ok=True)
+    (state_dir / "claims").mkdir(parents=True, exist_ok=True)
+    profile.mkdir(parents=True, exist_ok=True)
+    readme = _STATE_FIXTURE_DIR / "README.md"
+    if readme.is_file():
+        shutil.copyfile(readme, profile / "README.md")
+
+    (profile / "config.toml").write_text(
+        f"state_dir = {json.dumps(str(state_dir))}\n", encoding="utf-8"
+    )
+    (state_dir / "graph.json").write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": STATE_LEAK_CANARY,
+                        "title": "state lane positive control",
+                        "status": "idea",
+                        "blocked_by": [],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (state_dir / "agents" / "registry.json").write_text(
+        json.dumps({"entries": [{"name": "state-canary", "crown_label": "state-canary"}]}),
+        encoding="utf-8",
+    )
+    (state_dir / "claims" / "state-canary.lock").write_text(
+        json.dumps({"holder": "state-canary", "session_id": "state-canary-session"}),
+        encoding="utf-8",
+    )
+    return profile
+
+
+def _state_junit_path(mode: str) -> Path:
+    return _sandbox() / f"state-verdict-{mode}.xml"
+
+
+def _state_verdicts(path: Path) -> dict[str, str]:
+    """Read pytest's positive testcase statuses from a JUnit report."""
+    try:
+        root = ElementTree.parse(path).getroot()
+    except (ElementTree.ParseError, OSError):
+        return {}
+    verdicts: dict[str, str] = {}
+    for testcase in root.iter("testcase"):
+        classname = testcase.get("classname", "")
+        name = testcase.get("name", "")
+        nodeid = f"{classname}::{name}" if classname else name
+        if testcase.find("failure") is not None or testcase.find("error") is not None:
+            verdict = "failed"
+        elif testcase.find("skipped") is not None:
+            verdict = "skipped"
+        else:
+            verdict = "passed"
+        verdicts[nodeid] = verdict
+    return verdicts
+
+
+def _state_verdict_diff(clean: Path, populated: Path) -> list[str]:
+    """Return testcase node IDs whose clean/populated verdict changed."""
+    clean_verdicts = _state_verdicts(clean)
+    populated_verdicts = _state_verdicts(populated)
+    return sorted(
+        nodeid
+        for nodeid in set(clean_verdicts) | set(populated_verdicts)
+        if clean_verdicts.get(nodeid, "missing")
+        != populated_verdicts.get(nodeid, "missing")
+    )
+
+
+def _state_canary_status(path: Path) -> str | None:
+    """Return the recorded state-canary verdict, or None when it did not run."""
+    verdicts = _state_verdicts(path)
+    for nodeid, verdict in verdicts.items():
+        if "test_state_canary" in nodeid:
+            return verdict
+    return None
+
+
+def _state_both_exit(
+    clean_rc: int,
+    diff: Sequence[str],
+    canary_clean: str | None,
+    canary_populated: str | None,
+) -> int:
+    """The --state both verdict, decided by the junit comparison alone.
+
+    The populated lane is SUPPOSED to end red on the state canary (that is the
+    positive control), so its raw exit code can never decide the verdict: an
+    exit code fed from it reports failure on the tool's own definition of
+    success. The comparison is the verdict; the raw populated rc is not read.
+    """
+    if canary_clean != "passed" or canary_populated != "failed":
+        return 1
+    if clean_rc:
+        return clean_rc
+    if not diff:
+        return 1
+    if any("test_state_canary" not in nodeid for nodeid in diff):
+        return 1
+    return 0
+
+
+def _state_steps(
+    steps: Sequence[tuple[str, str, str]], mode: str
+) -> list[tuple[str, str, str]]:
+    """Add testcase receipts to the Python suite for a state lane."""
+    report = shlex.quote(str(_state_junit_path(mode)))
+    out: list[tuple[str, str, str]] = []
+    for name, cwd, command in steps:
+        if name == "Pytest (unit + integration)":
+            command = f"{command} --junitxml={report}"
+        out.append((name, cwd, command))
+    return out
 
 
 def _repo_root(start: Path) -> Optional[Path]:
@@ -725,6 +854,13 @@ def _smoke_env(root: Path) -> dict:
     env.pop("FORCE_COLOR", None)
     venv_bin = str((root / "cli" / ".venv" / "bin"))
     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    env["FNO_STATE_POPULATED"] = "1" if _STATE_MODE == "populated" else "0"
+    env["STATE_LANE"] = _STATE_MODE
+    if _STATE_MODE == "populated":
+        profile = _populate_state(_sandbox())
+        env["FNO_CONFIG"] = str(profile / "config.toml")
+        env["STATE_PROFILE_DIR"] = str(_sandbox() / "home" / ".fno")
+        env["CLAUDE_CODE_SESSION_ID"] = "state-canary-session"
     return env
 
 
@@ -810,11 +946,11 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
     opts: dict = {
         "list": False, "keep_going": False, "retry_failed": False,
         "verbose": False, "only": "", "skip": "", "changed": False,
-        "base": "", "head": "", "ambient": "clean",
+        "base": "", "head": "", "ambient": "clean", "state": "clean",
     }
     valued = {
         "--only": "only", "--skip": "skip", "--base": "base", "--head": "head",
-        "--ambient": "ambient",
+        "--ambient": "ambient", "--state": "state",
     }
     pending = ""
     for a in args:
@@ -868,6 +1004,11 @@ def _parse_smoke_args(args: Sequence[str]) -> dict:
         raise ValueError(
             f"smoke: --ambient {opts['ambient']!r} is not one of "
             f"{'/'.join(_AMBIENT_MODES)}"
+        )
+    if opts["state"] not in _STATE_MODES:
+        raise ValueError(
+            f"smoke: --state {opts['state']!r} is not one of "
+            f"{'/'.join(_STATE_MODES)}"
         )
     return opts
 
@@ -1383,8 +1524,49 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
             )
         return clean_rc or dirty_rc
 
-    global _AMBIENT_MODE
+    if opts["state"] == "both" and not opts["list"]:
+        state_rest: list[str] = []
+        skip_next = False
+        for a in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a == "--state":
+                skip_next = True
+                continue
+            if a.startswith("--state="):
+                continue
+            state_rest.append(a)
+        print("state: clean lane")
+        clean_rc = _run_smoke([*state_rest, "--state=clean"], stream=stream)
+        print("state: populated lane")
+        # The populated lane's raw exit code is never the verdict: it is red by
+        # design on the canary. _state_both_exit reads the junit comparison.
+        _run_smoke([*state_rest, "--state=populated"], stream=stream)
+        diff = _state_verdict_diff(
+            _state_junit_path("clean"), _state_junit_path("populated")
+        )
+        canary_clean = _state_canary_status(_state_junit_path("clean"))
+        canary_populated = _state_canary_status(_state_junit_path("populated"))
+        if diff:
+            print("state verdict diff:")
+            for nodeid in diff:
+                print(f"  {nodeid}")
+        if canary_clean != "passed" or canary_populated != "failed":
+            sys.stderr.write(
+                "state verdict diff: positive control missing or unexpected; "
+                "require canary clean=passed and populated=failed\n"
+            )
+        elif not diff:
+            sys.stderr.write(
+                "state verdict diff: no changed testcase; verify the populated "
+                "lane ran its positive control before trusting this result\n"
+            )
+        return _state_both_exit(clean_rc, diff, canary_clean, canary_populated)
+
+    global _AMBIENT_MODE, _STATE_MODE
     _AMBIENT_MODE = opts["ambient"]
+    _STATE_MODE = opts["state"]
     list_mode, keep_going = opts["list"], opts["keep_going"]
     retry_failed, verbose, only_glob = opts["retry_failed"], opts["verbose"], opts["only"]
     skip_glob = opts["skip"]
@@ -1404,6 +1586,8 @@ def _run_smoke(args: Sequence[str], stream: bool = False) -> int:
         steps = list(ns["STEPS"])
     else:
         steps = smoke_steps(root)
+    if any(a == "--state" or a.startswith("--state=") for a in args):
+        steps = _state_steps(steps, _STATE_MODE)
 
     names = [s[0] for s in steps]
     total = len(steps)

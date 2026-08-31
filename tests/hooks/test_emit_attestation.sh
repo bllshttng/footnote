@@ -300,8 +300,12 @@ got="$(stored '.reviewed_file_count')"
 
 # 12. An EMPTY diff refuses: a checkout sitting AT the base (HEAD equals the
 #     merge-base, no changed files) has read nothing, and a clean review of
-#     nothing must not become a pass. The refusal names base and head, and no
-#     event is written. Lines never decide this - case 12b shows why.
+#     nothing must not become a pass. The refusal names base and head, writes
+#     NO attestation, and journals ONE refused review_invocation row - the
+#     durable terminal of the attempt, so a coverage reader can tell
+#     "attempted, nothing to read" from "never attempted" (the measured
+#     2026-08-30 shape where open PRs sat uncovered behind reviews that
+#     reported clean over empty diffs). Lines never decide this - case 12b.
 git -C "$REPO" checkout -q -b zero/at-base origin/main
 rm -f "$TMP/last-emit.txt"
 RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
@@ -309,8 +313,24 @@ RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
 RECEIPT_RC=$?
 [[ $RECEIPT_RC -ne 0 ]] && pass "empty diff refuses to emit" \
   || fail "empty diff emitted anyway (exit $RECEIPT_RC)"
-[[ ! -f "$TMP/last-emit.txt" ]] && pass "empty diff writes no event" \
-  || fail "empty diff wrote an event"
+if [[ -f "$TMP/last-emit.txt" ]] \
+  && grep -q "review_invocation" "$TMP/last-emit.txt" \
+  && ! grep -q "review_attestation" "$TMP/last-emit.txt"; then
+  pass "empty diff writes the refused terminal row, no attestation"
+else
+  fail "empty diff wrote neither or the wrong terminal: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
+fi
+stored '.stage' | grep -qx "refused" && pass "terminal row is stage=refused" \
+  || fail "terminal stage: want refused, got '$(stored '.stage')'"
+stored '.reason' | grep -qx "empty_diff" && pass "terminal row names reason=empty_diff" \
+  || fail "terminal reason: want empty_diff, got '$(stored '.reason')'"
+[[ "$(stored '.reviewed_file_count')" == "0" ]] && pass "terminal row records files=0" \
+  || fail "terminal files: want 0, got '$(stored '.reviewed_file_count')'"
+[[ "$(stored '.verb')" == "/code-review" ]] && pass "terminal row names the verb" \
+  || fail "terminal verb: got '$(stored '.verb')'"
+[[ -n "$(stored '.invocation_id')" && "$(stored '.invocation_id')" != "<missing>" ]] \
+  && pass "terminal row carries an invocation_id" \
+  || fail "terminal row lost invocation_id"
 case "$RECEIPT" in
   *"the diff under review is empty (no changed files"*)
     pass "refusal names the empty shape" ;;
@@ -320,6 +340,35 @@ case "$RECEIPT" in
   *"$BASE_SHA"*|*"${BASE_SHA:0:8}"*)
     pass "refusal names the base sha" ;;
   *) fail "refusal lacks the base sha: $RECEIPT" ;;
+esac
+
+# 12c. A FAILED event writer must not be reported as a journaled row: the
+#      receipt claims the terminal only on the writer's own success, so an
+#      operator told "a refused row was emitted" can trust that it exists
+#      (the inline P2: an unconditional receipt over a suppressed emit
+#      failure made the attempt indistinguishable from an unrecorded one).
+cat > "$TMP/fno-emit-dead" <<'DEADSTUB'
+#!/usr/bin/env bash
+if [[ "$1" == "doctor" && "$2" == "event" && "$3" == "emit" ]]; then
+  exit 3
+fi
+exit 0
+DEADSTUB
+chmod +x "$TMP/fno-emit-dead"
+rm -f "$TMP/last-emit.txt"
+RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
+  FNO="$TMP/fno-emit-dead" bash "$EMITTER" code-review pass 2>&1 >/dev/null)"
+RECEIPT_RC=$?
+[[ $RECEIPT_RC -ne 0 ]] && pass "empty diff still refuses with a dead writer" \
+  || fail "dead writer let the emit through (exit $RECEIPT_RC)"
+[[ ! -f "$TMP/last-emit.txt" ]] && pass "dead writer journals nothing" \
+  || fail "dead writer journaled anyway"
+case "$RECEIPT" in
+  *"could NOT be journaled"*)
+    pass "dead writer is reported as unrecorded, never as emitted" ;;
+  *"row was emitted"*)
+    fail "receipt claims a row the dead writer never wrote: $RECEIPT" ;;
+  *) fail "receipt unclear about the failed journal: $RECEIPT" ;;
 esac
 
 # 12b. A binary-only diff is a real review: numstat prints "-" for binary
@@ -358,8 +407,16 @@ RECEIPT="$(cd "$REPO" && env -u ANTHROPIC_MODEL -u ANTHROPIC_BASE_URL \
 RECEIPT_RC=$?
 [[ $RECEIPT_RC -ne 0 ]] && pass "unresolvable base refuses to emit" \
   || fail "unresolvable base emitted anyway (exit $RECEIPT_RC)"
-[[ ! -f "$TMP/last-emit.txt" ]] && pass "unresolvable base writes no event" \
-  || fail "unresolvable base wrote an event"
+if [[ -f "$TMP/last-emit.txt" ]] \
+  && grep -q "review_invocation" "$TMP/last-emit.txt" \
+  && ! grep -q "review_attestation" "$TMP/last-emit.txt"; then
+  pass "unresolvable base writes the refused terminal, no attestation"
+else
+  fail "unresolvable base wrote neither or the wrong terminal: $(cat "$TMP/last-emit.txt" 2>/dev/null)"
+fi
+stored '.reason' | grep -qx "unresolvable_base" \
+  && pass "unresolvable-base terminal names reason=unresolvable_base" \
+  || fail "terminal reason: want unresolvable_base, got '$(stored '.reason')'"
 
 # 14-16. --findings-file (AC2-HP / AC2-ERR / AC2-EDGE). The classify leg runs
 # the REAL classifier from the repo tree (PYTHONPATH, no fno binary), so these

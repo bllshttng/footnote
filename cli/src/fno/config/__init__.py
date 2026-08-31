@@ -3849,6 +3849,9 @@ class MuxBlock(BaseModel):
     # interactive Rust client (same split-brain as attach_digest); modeled here so
     # the off-switch is discoverable via `fno config get/set`.
     hover_focus: bool = True
+    # Show the mux status row. The interactive Rust client reads this directly
+    # from config.toml, matching the `hover_focus` startup path.
+    status_row: bool = True
     # The mux chrome theme name (x-f75e): one of the shipped palettes the modal
     # chrome reads (`terminal`, `catppuccin`, `tokyo-night`, `gruvbox`). Read by
     # the interactive Rust client via the same config ladder as `hover_focus`;
@@ -4763,7 +4766,7 @@ def _ensure_migrated(locations: list[Path]) -> None:
             _migrate_yaml_to_toml(local_yaml, "config.local.toml")
 
 
-def _settings_yaml_locations() -> list[Path]:
+def _settings_yaml_locations(root: Optional[Path] = None) -> list[Path]:
     """Return the ordered list of settings file candidates.
 
     Order:
@@ -4786,17 +4789,25 @@ def _settings_yaml_locations() -> list[Path]:
          $FNO_GLOBAL_SETTINGS_PATH override for test isolation)
     """
     env_path = os.environ.get("FNO_CONFIG")
-    if env_path:
+    if env_path and root is None:
         return [Path(env_path)]
 
-    # Resolve project-local candidates from the repo root, not cwd.
-    # Lazy import to avoid circular dependency (paths imports config).
+    # Resolve project-local candidates from the seeded root, or from the
+    # process context when no root was supplied. Lazy import avoids the
+    # circular dependency (paths imports config).
     try:
-        from fno.paths import resolve_canonical_repo_root, resolve_repo_root
-        repo_root = resolve_repo_root()
-        canonical_root = resolve_canonical_repo_root()
+        from fno.paths import resolve_canonical_repo_root, resolve_canonical_worktree, resolve_repo_root
+        if root is None:
+            repo_root = resolve_repo_root()
+            canonical_root = resolve_canonical_repo_root()
+        else:
+            repo_root = Path(root).resolve()
+            if (repo_root / ".git").exists():
+                canonical_root = resolve_canonical_worktree(repo_root) or repo_root
+            else:
+                canonical_root = repo_root
     except (ImportError, ModuleNotFoundError):
-        repo_root = Path.cwd()
+        repo_root = Path(root).resolve() if root is not None else Path.cwd()
         canonical_root = repo_root
 
     candidates = [repo_root / ".fno" / "settings.yaml"]
@@ -4813,7 +4824,7 @@ def _settings_yaml_locations() -> list[Path]:
     return _apply_search_ceiling(candidates)
 
 
-def _candidate_paths() -> list[Path]:
+def _candidate_paths(root: Optional[Path] = None) -> list[Path]:
     """Ordered read candidates for the loader, config.toml-first.
 
     Runs the one-shot yaml->toml auto-migrate over the settings locations, then
@@ -4822,7 +4833,7 @@ def _candidate_paths() -> list[Path]:
     e.g. a malformed file). After a successful migrate only the config.toml
     exists at each location, so the read is effectively toml-only.
     """
-    locations = _settings_yaml_locations()
+    locations = _settings_yaml_locations(root)
     _ensure_migrated(locations)
     return _prefer_toml(locations)
 
@@ -5219,32 +5230,33 @@ def load_settings_for_repo(repo_root: Path) -> SettingsModel:
     read per-repo config (e.g. ``config.review.required_bots``) for each
     candidate PR's repository, without polluting the process-level cache.
 
-    Merge order (highest to lowest priority):
-      worktree config.local.toml -> <repo_root>/.fno/config.toml ->
-      ~/.fno/config.toml -> built-in defaults.
+    Uses the shared candidate chain seeded at ``repo_root`` so the worktree,
+    canonical, and global tiers cannot drift from ``load_settings``.
     """
-    layers: list[tuple[Path, dict[str, object]]] = []
-
-    locations = [
-        repo_root / ".fno" / "settings.yaml",
-        _global_settings_path(),
-    ]
-    _ensure_migrated(locations)
-    candidates = _prefer_toml(locations)
-    for candidate in candidates:
-        if candidate.is_file():
-            parsed, ok = _load_raw(candidate)
-            if ok:
-                layers.append((candidate.resolve(), parsed))
+    candidates = _candidate_paths(repo_root)
+    layers = list(_aliased_layers(tuple(candidates)))
 
     raw: dict[str, object] = {}
     for _path, parsed in reversed(layers):
-        raw = _deep_merge(raw, _alias_legacy_keys(parsed))
-    raw = _layer_worktree_local_override(raw, Path(repo_root) / ".fno")
+        raw = _deep_merge(raw, parsed)
+    if candidates:
+        raw = _layer_worktree_local_override(raw, candidates[0].parent)
     return SettingsModel.model_validate(raw)
 
 
-def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
+def describe_settings_for_repo(root: Optional[Path] = None) -> list[Path]:
+    """Return the ordered settings candidates consulted for ``root``.
+
+    ``None`` seeds the chain the way :func:`load_settings` seeds it, from the
+    process context, so a pinned ``FNO_CONFIG`` is described as the one
+    candidate it is.
+    """
+    return _candidate_paths(Path(root) if root is not None else None)
+
+
+def resolve_source(
+    key: str, root: Optional[Path] = None
+) -> Optional[tuple[Path, list[Path]]]:
     """Which config file decided ``key``: ``(decider, overridden)`` or None.
 
     Consumes the SAME aliased layers :func:`load_settings` merges (via
@@ -5265,8 +5277,8 @@ def resolve_source(key: str) -> Optional[tuple[Path, list[Path]]]:
 
     None = no file sets the key (the value is a built-in default).
     """
-    layers = list(_aliased_layers(tuple(_candidate_paths())))
-    candidates = _candidate_paths()
+    candidates = _candidate_paths(root)
+    layers = list(_aliased_layers(tuple(candidates)))
     if candidates:
         local_path = candidates[0].parent / "config.local.toml"
         if local_path.is_file() and not local_path.is_symlink():

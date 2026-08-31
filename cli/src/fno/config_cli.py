@@ -6,6 +6,7 @@ lives in setup/doctor.py.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from pathlib import Path
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
@@ -859,12 +860,26 @@ def get_cmd(
     as one object.
     """
     import json
+    import os
     import sys
 
-    from fno.config import load_settings, resolve_source
+    from fno.config import describe_settings_for_repo, load_settings, resolve_source
+    from fno.paths import resolve_repo_root
     from pydantic import BaseModel
 
     root = load_settings()
+    # The receipt must describe the chain that PRODUCED the value.
+    # load_settings() reads a pinned FNO_CONFIG through the env branch, which
+    # short-circuits the repo chain, so provenance seeded at the repo root
+    # would name files that did not decide the key.
+    pinned_config = os.environ.get("FNO_CONFIG")
+    settings_root = (
+        Path(pinned_config).resolve().parent
+        if pinned_config
+        else resolve_repo_root().resolve()
+    )
+    provenance_root: Optional[Path] = None if pinned_config else settings_root
+    searched_candidates = describe_settings_for_repo(provenance_root)
 
     def _traverse(dotted: str) -> tuple[bool, object]:
         node: object = root
@@ -907,7 +922,7 @@ def get_cmd(
     # command exists to end, just with the block as the lie.
     is_leaf = not isinstance(node, (BaseModel, dict))
     if is_leaf:
-        source = resolve_source(key)
+        source = resolve_source(key, root=provenance_root)
         if source is None and (
             key.startswith("providers.")
             or key.startswith("config.providers.")
@@ -916,7 +931,9 @@ def get_cmd(
         ):
             # The value resolved through the rename; provenance must too, or a
             # file that DOES set the key reports "source: default".
-            source = resolve_source(key.replace("providers", "accounts", 1))
+            source = resolve_source(
+                key.replace("providers", "accounts", 1), root=provenance_root
+            )
         if source is not None:
             decider, overridden = source
         else:
@@ -939,6 +956,8 @@ def get_cmd(
                     "value": value,
                     "source": str(decider) if decider else None,
                     "overrides": [str(p) for p in overridden],
+                    "root": str(settings_root),
+                    "searched": [str(p) for p in searched_candidates],
                 },
                 default=str,
             )
@@ -951,6 +970,8 @@ def get_cmd(
             source_line += " (overrides " + ", ".join(str(p) for p in overridden) + ")"
     else:
         source_line = "source: mixed - a block merges leaves from several files; query a leaf (e.g. auto_merge.enabled) for its decider"
+    searched = ", ".join(str(path) for path in searched_candidates) or "<none>"
+    source_line += f" (root: {settings_root}; searched: {searched})"
 
     if isinstance(node, BaseModel):
         typer.echo(node.model_dump_json())
@@ -1220,6 +1241,109 @@ def unset_cmd(
 
 # `fno config rm` is an alias for `unset` (Claude's Discretion #3).
 app.command("rm")(unset_cmd)
+
+
+def _reversed_lines(path: Path, chunk: int = 65536):
+    """Yield the journal's lines newest-first without loading the whole file.
+
+    events.jsonl has no size bound, so a full read per `config history` call
+    would pay for a lifetime of receipts to return `--limit` rows.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        tail = b""
+        while position > 0:
+            step = min(chunk, position)
+            position -= step
+            handle.seek(position)
+            lines = (handle.read(step) + tail).split(b"\n")
+            tail = lines[0]
+            for line in reversed(lines[1:]):
+                yield line
+        if tail.strip():
+            yield tail
+
+
+@app.command("history", hidden=True)
+def history(
+    key: Optional[str] = typer.Argument(
+        None,
+        help="Exact config key or dotted prefix to filter.",
+    ),
+    limit: int = typer.Option(50, "--limit", min=1, help="Maximum rows to print."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit matching rows as JSONL."),
+    scope: Literal["global", "project", "all"] = typer.Option(
+        "all", "--scope", help="Limit rows by the config scope that was written."
+    ),
+) -> None:
+    """Read config-write receipts from the global and project journals."""
+    import json
+
+    from fno.paths import global_events_json, project_events_json
+
+    journal_paths = [global_events_json(), project_events_json()]
+    rows: list[dict[str, Any]] = []
+    for journal_path in journal_paths:
+        # Bounded per file: the newest `limit` matching rows of one journal
+        # cover every row that file can contribute to the overall top-`limit`,
+        # because every filter here is per-row.
+        try:
+            matched = 0
+            for line in _reversed_lines(journal_path):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "config_write":
+                    continue
+                data = row.get("data")
+                if not isinstance(data, dict) or not isinstance(data.get("key"), str):
+                    continue
+                if scope != "all" and data.get("scope") != scope:
+                    continue
+                if key and data["key"] != key and not data["key"].startswith(f"{key}."):
+                    continue
+                rows.append(row)
+                matched += 1
+                if matched >= limit:
+                    break
+        except OSError:
+            continue
+
+    rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
+    rows = rows[:limit]
+    if not rows:
+        typer.echo(
+            "no config_write rows; searched journals: "
+            + ", ".join(str(path) for path in journal_paths)
+        )
+        return
+
+    if json_out:
+        for row in rows:
+            typer.echo(json.dumps(row, ensure_ascii=False, separators=(",", ":")))
+        return
+
+    def display_value(data: dict[str, Any], field: str, presence: str) -> str:
+        if not data.get(presence):
+            return "(unset)"
+        value = data.get(field)
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    for row in rows:
+        data = row["data"]
+        old_value = display_value(data, "old_value", "present_before")
+        new_value = display_value(data, "new_value", "present_after")
+        attester = data.get("attester_session_id") or "(none)"
+        witness = data.get("attester_witness") or "(unknown)"
+        typer.echo(
+            f"{row.get('ts', '')} {data['key']} {old_value} -> {new_value} "
+            f"{data.get('scope', '(unknown)')}/{data.get('root_kind', '(unknown)')} "
+            f"{data.get('config_path', '(unknown)')} session {attester} ({witness})"
+        )
 
 
 @app.command("schema")

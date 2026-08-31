@@ -48,6 +48,9 @@ pub struct RegistryAgent {
     pub forked_from_session_id: Option<String>,
     /// Registry status is terminal (exited/permanent-dead).
     pub exited: bool,
+    /// Active do-not-disturb delivery policy. Presence only: it never changes
+    /// the row's liveness badge or whether the worker is alive.
+    pub dnd: bool,
     /// In-TTL inside-leg badge; `None` = liveness-only. Never a scraped guess.
     pub badge: Option<AgentBadge>,
     pub reason: Option<String>,
@@ -1765,20 +1768,36 @@ pub fn stale_live_attach_ids(reg_raw: &str) -> std::collections::HashSet<String>
 /// the whole lattice derivation is unit-testable without a file or a clock.
 /// A malformed document yields `None` (the caller keeps its last-good rows -
 /// a torn concurrent write must not blank the sideline).
-pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
+/// `derive_rows`, plus how many rows the document CONTAINS that could not be
+/// attributed to a pane: a row with no readable `name` (skipped entirely), or
+/// one whose `mux` key is PRESENT but does not parse into a
+/// `(session, pane_id)` pair (kept, with `mux: None`).
+///
+/// Both mean one thing to a caller that reasons from absence: some agent
+/// exists whose pane is unknown, so "no row for this pane" has stopped being
+/// proof that the pane is a shell. The tolerant-reader semantics are
+/// deliberately UNCHANGED - the sideline still renders what it can read. The
+/// count is the fact that was being thrown away, offered to the callers that
+/// cannot safely ignore it.
+pub fn derive_rows_counted(raw: &str, now_secs: u64) -> Option<(Vec<RegistryAgent>, usize)> {
     let doc: serde_json::Value = serde_json::from_str(raw).ok()?;
     let rows = doc
         .get("agents")
         .or_else(|| doc.get("entries"))?
         .as_array()?;
     let mut out = Vec::with_capacity(rows.len());
+    let mut unattributable = 0usize;
     for row in rows {
         let Some(name) = row.get("name").and_then(|v| v.as_str()) else {
-            continue; // tolerate an alien row; the registry owners validate
+            // tolerate an alien row; the registry owners validate. It still
+            // EXISTED - count it, or absence reads as "this pane is a shell".
+            unattributable += 1;
+            continue;
         };
         let cwd = row.get("cwd").and_then(|v| v.as_str()).unwrap_or_default();
         let status = row.get("status").and_then(|v| v.as_str()).unwrap_or("");
         let exited = matches!(status, "exited" | "permanent-dead" | "permanent_dead");
+        let dnd = row.get("delivery_policy").and_then(|v| v.as_str()) == Some("bus-only");
         let liveness = derive_liveness(
             status,
             row.get("pid").and_then(|v| v.as_u64()),
@@ -1790,6 +1809,12 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
                 m.get("pane_id")?.as_u64()?,
             ))
         });
+        // A PRESENT, non-null `mux` key that did not parse (the same raw read
+        // `is_thread_shape`/`is_pi_thread` make) is a pane binding that exists
+        // but cannot be read: the row stays, and the unreadable binding counts.
+        if row.get("mux").is_some_and(|m| !m.is_null()) && mux.is_none() {
+            unattributable += 1;
+        }
         // The claude bg jobId, when present, is the `claude attach <id>` target
         // for a paneless row. Since v9 it lives in `short_id` (the unified
         // transport key), so this must be claude-scoped: a codex/gemini row's
@@ -2058,6 +2083,7 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
             predecessor_session_ids,
             forked_from_session_id,
             exited,
+            dnd,
             badge,
             reason,
             mux,
@@ -2076,7 +2102,14 @@ pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
     // Stable order so row-set equality (the change gate) and the rendered
     // sideline are deterministic across ticks.
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    Some(out)
+    Some((out, unattributable))
+}
+
+/// The tolerant reader on its own, for every caller that renders or resolves
+/// rather than guards: same rows, count discarded. One body behind both forms
+/// so the two readers cannot drift.
+pub fn derive_rows(raw: &str, now_secs: u64) -> Option<Vec<RegistryAgent>> {
+    derive_rows_counted(raw, now_secs).map(|(rows, _)| rows)
 }
 
 /// Union the fno registry rows with claude's roster (x-0a2e). Pure so the
@@ -2147,6 +2180,7 @@ pub fn merge_rows(reg_rows: Vec<RegistryAgent>, roster: &[RosterWorker]) -> Vec<
             name: w.name.clone(),
             cwd: w.cwd.clone(),
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -2918,6 +2952,54 @@ mod tests {
     }
 
     #[test]
+    fn derive_rows_counted_counts_the_nameless_row_it_skips() {
+        // AC1-HP (x-0b40): the skipped row EXISTED. Its absence from the
+        // vector was never news - that absence IS the defect shape. The count
+        // is the positive marker a caller that reasons from absence needs.
+        let (rows, unattributable) = derive_rows_counted(
+            &reg(r#"{"cwd":"/w"}, {"name":"ok","cwd":"/w","status":"live"}"#),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "ok");
+        assert_eq!(unattributable, 1);
+    }
+
+    #[test]
+    fn derive_rows_counted_counts_a_present_but_unparseable_mux_on_the_surviving_row() {
+        // AC2-HP (x-0b40): a PRESENT `mux` key that does not parse into a
+        // (session, pane_id) pair keeps the row (the sideline renders what it
+        // can read) and counts it, because the row's pane is unknown. Pinned
+        // to the surviving row on purpose: a drop count alone would miss it.
+        let (rows, unattributable) = derive_rows_counted(
+            &reg(r#"{"name":"half","cwd":"/w","status":"live","mux":{"session":"s"}}"#),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].mux, None);
+        assert_eq!(unattributable, 1);
+    }
+
+    #[test]
+    fn derive_rows_counted_is_zero_for_a_clean_registry() {
+        // AC3-EDGE (x-0b40): the control that keeps the two counting tests
+        // honest - a well-formed registry counts zero, so the count is a fact
+        // about the rows and not a constant.
+        let (rows, unattributable) = derive_rows_counted(
+            &reg(
+                r#"{"name":"a","cwd":"/w","status":"live","mux":{"session":"s","pane_id":3}},
+               {"name":"b","cwd":"/w","status":"exited"}"#,
+            ),
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(unattributable, 0);
+    }
+
+    #[test]
     fn agent_rows_screen_state_rung_badges_only_hookless_rows() {
         // The screen-manifest rung (v7): a hook-less row with a fresh scrape
         // verdict badges (blocked/working); `idle` renders as a plain live
@@ -3285,6 +3367,27 @@ tokens = []"#,
         // An empty scope string degrades to None (the badge then shows `?`).
         assert_eq!(get("partial").crown_level, Some(0));
         assert_eq!(get("partial").crown_scope, None, "empty scope => None");
+    }
+
+    #[test]
+    fn derive_rows_carries_dnd_separately_from_liveness() {
+        let raw = reg(
+            r#"{"name":"held","cwd":"/w","status":"live","harness":"claude",
+                "delivery_policy":"bus-only",
+                "inside_leg":{"state":"working","seq":1,"received_at":"2027-01-15T07:59:30Z","ttl_ms":120000}},
+               {"name":"plain","cwd":"/w","status":"live","harness":"claude"}"#,
+        );
+        let now = rfc3339_like_to_secs("2027-01-15T08:00:00Z").unwrap();
+        let rows = derive_rows(&raw, now).unwrap();
+        let get = |n: &str| rows.iter().find(|r| r.name == n).unwrap();
+        let held = format!("{:?}", get("held"));
+        let plain = format!("{:?}", get("plain"));
+        assert!(held.contains("dnd: true"), "held row: {held}");
+        assert!(
+            held.contains("badge: Some(Working)"),
+            "DND keeps liveness: {held}"
+        );
+        assert!(plain.contains("dnd: false"), "plain row: {plain}");
     }
 
     #[test]
@@ -4001,6 +4104,7 @@ config_dir = "~/.claude-alt"
             name: name.into(),
             cwd: "/w".into(),
             exited,
+            dnd: false,
             badge,
             reason: None,
             mux: None,

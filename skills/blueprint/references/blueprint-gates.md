@@ -243,9 +243,7 @@ DIFFICULTY="$(awk '/^---[[:space:]]*$/{c++; next} c==1 && /^difficulty:/{sub(/^d
 
 ## Blueprint Provenance Stamp (x-b6e4)
 
-Blueprint provenance is stamped automatically by `fno backlog update --plan-path` (the choke point every blueprinted node passes through), not by a prose block here.
-The plan-bind is blueprint's end, so the row carries `ended_at` at the bind instant; the roster renders it 'end only'.
-A direct CLI call or non-Claude worker that skips this skill still gets the stamp, because it lives in the verb.
+Blueprint provenance is written by the identity-guarded `fno backlog session close` transaction and verified by an exact graph readback before the Blueprint handoff. Plan binding is artifact-only and never claims that the Blueprint phase completed.
 
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 

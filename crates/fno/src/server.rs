@@ -297,6 +297,40 @@ fn rerun_allowed(agents: &[RegistryAgent], session: &str, pane: u64) -> Result<(
     }
 }
 
+/// The guard's verdict on one raw registry read. Pure, so every arm of the
+/// fail-closed matrix is a unit test.
+///
+/// An unattributable row is an agent whose PANE is unknown. `rerun_allowed`
+/// reasons from absence ("no row for this pane means shell"), and that
+/// inference is only sound over a lossless read. So a row-level malformation
+/// earns the same verdict a document-level one already gets, for the same
+/// reason: absent liveness must never read as idle.
+fn classify_guard_registry(raw: &str, now: u64) -> Result<Vec<RegistryAgent>, &'static str> {
+    match agents_view::derive_rows_counted(raw, now) {
+        None => Err("agents registry malformed - target agent state unknown"),
+        Some((_, unattributable)) if unattributable > 0 => Err(
+            "agents registry carries a row with no readable pane binding - \
+             target agent state unknown",
+        ),
+        Some((rows, _)) => Ok(rows),
+    }
+}
+
+/// True only when the current session/pane join names a LIVE row that
+/// explicitly declared the bus-only delivery policy. DND is presence, never
+/// liveness, but an exited row is skipped (matching [`rerun_allowed`]): a hold
+/// stamped on a reaped agent must not veto the shell or successor that
+/// inherited the pane and can never lift it.
+fn pane_is_dnd(agents: &[RegistryAgent], session: &str, pane: u64) -> bool {
+    agents.iter().any(|a| {
+        !a.exited
+            && a.dnd
+            && a.mux
+                .as_ref()
+                .is_some_and(|(s, p)| s == session && *p == pane)
+    })
+}
+
 /// (x-fbb1) Whether a focused NON-viewer leaf may be taken over by `.`=here.
 /// Pure over the three inputs so the reap gate (the safety-critical bit) is
 /// unit-testable without a Core, mirroring [`rerun_allowed`]. Take-over is
@@ -524,10 +558,12 @@ enum CoreMsg {
         guarded: bool,
         expected_identity: Option<String>,
         /// Fresh registry snapshot for a guarded send, read off-loop in
-        /// `handle_control`. `None` means either the read failed (guarded ->
-        /// fail closed) or the send is unguarded (unused). `Some(rows)` is the
-        /// idle authority the guard checks, `rows` empty => no agents => proceed.
-        agents: Option<Vec<RegistryAgent>>,
+        /// `handle_control`. `Err` carries the refusal reason: either the read
+        /// failed or the registry carries a row whose pane cannot be read
+        /// (guarded -> fail closed); an unguarded send leaves it unused.
+        /// `Ok(rows)` is the idle authority the guard checks, `rows` empty =>
+        /// no agents => proceed.
+        agents: Result<Vec<RegistryAgent>, &'static str>,
         reply: ControlReply,
     },
     PaneWait {
@@ -2643,10 +2679,10 @@ fn no_resume_form_reason(harness: &str, session_id: &str) -> String {
     format!("{harness} has no resume form; session {session_id} is not resumable")
 }
 
-/// The registry rows the restore verb classifies against, read fresh from
-/// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
-/// overrides the file (a unit test cannot populate the real registry, and
-/// reading it would clobber the fake rows the test installed).
+// The registry rows the restore verb classifies against, read fresh from
+// the registry file at verb time. In tests, `RESTORE_REGISTRY_ROWS`
+// overrides the file (a unit test cannot populate the real registry, and
+// reading it would clobber the fake rows the test installed).
 #[cfg(test)]
 thread_local! {
     static RESTORE_REGISTRY_ROWS: std::cell::RefCell<Option<Option<Vec<RegistryAgent>>>> =
@@ -6444,13 +6480,7 @@ impl Core {
                 })
             })
             .map(|(sid, _)| *sid)
-            .or_else(|| {
-                self.session
-                    .squads
-                    .iter()
-                    .find(|squad| squad.owns_path(&facts.cwd))
-                    .map(|squad| squad.id)
-            })
+            .or_else(|| self.session.find_by_cwd(&facts.cwd))
             .unwrap_or(view.0);
         // (x-d285) A claude row's resume runs the canonical re-entry
         // plan; the `None` arm fires the off-loop resolution and the
@@ -7968,7 +7998,7 @@ impl Core {
             HOLD_WORKERS_OVERRIDE.with(|slot| {
                 slot.borrow()
                     .map(crate::digest_overlay::policy_from_hold_workers)
-                    .unwrap_or_else(|| restore_policy_now())
+                    .unwrap_or_else(restore_policy_now)
             })
         });
         #[cfg(not(test))]
@@ -9761,6 +9791,7 @@ impl Core {
                                 badge: if exited { None } else { a.badge },
                                 reason: if exited { None } else { a.reason.clone() },
                                 exited,
+                                dnd: a.dnd,
                                 unmeasured,
                                 answerable: if exited { None } else { a.answerable.clone() },
                                 // A pane-hosted row focuses its pane; the attach
@@ -9824,6 +9855,7 @@ impl Core {
                                 reason: None,
                                 exited: pane_dead
                                     || e.is_some_and(|entry| entry.refused_worker.is_some()),
+                                dnd: false,
                                 unmeasured: false,
                                 answerable: None,
                                 attach_id: None,
@@ -9888,13 +9920,9 @@ impl Core {
                     // membership FIRST (cwd ownership only as a fallback), so
                     // the panel shows it where ResumeAgent will actually place
                     // the pane - the two lookups must agree.
-                    let squad = self.member_squad_for_agent(a).or_else(|| {
-                        self.session
-                            .squads
-                            .iter()
-                            .find(|s| s.owns_path(&a.cwd))
-                            .map(|s| s.id)
-                    });
+                    let squad = self
+                        .member_squad_for_agent(a)
+                        .or_else(|| self.session.find_by_cwd(&a.cwd));
                     out.push(AgentRow {
                         spawned_by_session: a.spawned_by_session.clone(),
                         harness_session_id: a.harness_session_id.clone(),
@@ -9904,6 +9932,7 @@ impl Core {
                         badge: None,
                         reason: None,
                         exited: true,
+                        dnd: a.dnd,
                         unmeasured: false,
                         answerable: None,
                         attach_id: None,
@@ -9936,13 +9965,7 @@ impl Core {
                     let squad = self
                         .member_squad_for_agent(a)
                         .or_else(|| mission_squad_for(&a.name))
-                        .or_else(|| {
-                            self.session
-                                .squads
-                                .iter()
-                                .find(|s| s.owns_path(&a.cwd))
-                                .map(|s| s.id)
-                        });
+                        .or_else(|| self.session.find_by_cwd(&a.cwd));
                     // (x-6851 US3) Every row carries its cwd basename: an orphan
                     // uses it for the `~ elsewhere` disambiguation suffix
                     // (x-0090 AC2-UI), a squad-matched row for the foreign-cwd
@@ -9957,6 +9980,7 @@ impl Core {
                         badge: if a.exited { None } else { a.badge },
                         reason: if a.exited { None } else { a.reason.clone() },
                         exited: a.exited,
+                        dnd: a.dnd,
                         unmeasured: a.exited && a.liveness == agents_view::Liveness::Unmeasured,
                         answerable: if a.exited { None } else { a.answerable.clone() },
                         attach_id: if a.exited { None } else { a.attach_id.clone() },
@@ -10019,6 +10043,7 @@ impl Core {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     // Carried so the client can DismissMember; exited: true keeps
@@ -10078,13 +10103,7 @@ impl Core {
                 S::Stopping => (false, Some("stopping…".to_string())),
                 S::Removing => (false, Some("removing…".to_string())),
             };
-            let squad = mission_squad_for(&r.name).or_else(|| {
-                self.session
-                    .squads
-                    .iter()
-                    .find(|s| s.owns_path(&r.cwd))
-                    .map(|s| s.id)
-            });
+            let squad = mission_squad_for(&r.name).or_else(|| self.session.find_by_cwd(&r.cwd));
             // (x-6851 US3) Every row carries its cwd basename - including a
             // squad-matched external-lifecycle row, so its foreign-cwd subline
             // still renders (the "every row" wire contract; codex review).
@@ -10098,6 +10117,7 @@ impl Core {
                 badge: None,
                 reason,
                 exited,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 // Carried on an exited row so the client can send RemoveExternal;
@@ -10558,30 +10578,34 @@ impl Core {
     /// serial, the check and the inject are atomic: no other input for this
     /// pane interleaves between them, so the writer-claim holder cannot start a
     /// burst in the gap. `agents` is the FRESH registry snapshot read off-loop
-    /// for this send (not `self.agents`, which is parked with no viewer); `None`
-    /// here means the read failed, so the guard fails closed. Raw `PaneSend`
-    /// (`guarded == false`) is the writer-claim holder's own channel and stays
-    /// unguarded (`agents` is unused).
+    /// for this send (not `self.agents`, which is parked with no viewer); `Err`
+    /// carries the refusal reason - the read failed, or the registry carries a
+    /// row whose pane cannot be read - so the guard fails closed. A guarded
+    /// send also consults a positive DND row first; raw `PaneSend`
+    /// (`guarded == false`) is the writer-claim holder's own channel: it still
+    /// consults DND, but an unreadable registry there maps to no rows observed,
+    /// so absent a positive DND marker it remains unguarded.
     fn pane_send(
         &mut self,
         pane: u64,
         bytes: &[u8],
         guarded: bool,
         expected_identity: Option<&str>,
-        agents: Option<Vec<RegistryAgent>>,
+        agents: Result<Vec<RegistryAgent>, &'static str>,
     ) -> ServerMsg {
         let Some(entry) = self.panes.get(&pane) else {
             return dead_pane(pane);
         };
         if let Some(expected) = expected_identity {
             let host = entry.name.as_deref().unwrap_or("<unknown>");
-            let Some(rows) = agents.as_deref() else {
-                return ServerMsg::Err {
-                    code: err_code::TARGET_IDENTITY_MISMATCH,
-                    msg: format!(
-                        "addressed {expected}, pane hosts {host}; agent registry unreadable"
-                    ),
-                };
+            let rows = match agents.as_deref() {
+                Ok(rows) => rows,
+                Err(reason) => {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_IDENTITY_MISMATCH,
+                        msg: format!("addressed {expected}, pane hosts {host}; {reason}"),
+                    };
+                }
             };
             let matches: Vec<&RegistryAgent> = rows
                 .iter()
@@ -10627,12 +10651,25 @@ impl Core {
                 };
             }
         }
+        if agents
+            .as_deref()
+            .is_ok_and(|rows| pane_is_dnd(rows, &self.session_name, pane))
+        {
+            return ServerMsg::Err {
+                code: err_code::TARGET_DND,
+                msg: "target is DND; use fno agents mail send to queue durable until the hold lifts, or fno agents mail hold --off to release it"
+                    .to_string(),
+            };
+        }
         if guarded {
-            let Some(rows) = agents.as_deref() else {
-                return ServerMsg::Err {
-                    code: err_code::TARGET_NOT_IDLE,
-                    msg: "agents registry unreadable - target agent state unknown".to_string(),
-                };
+            let rows = match agents.as_deref() {
+                Ok(rows) => rows,
+                Err(reason) => {
+                    return ServerMsg::Err {
+                        code: err_code::TARGET_NOT_IDLE,
+                        msg: reason.to_string(),
+                    };
+                }
             };
             if let Err(reason) = rerun_allowed(rows, &self.session_name, pane) {
                 return ServerMsg::Err {
@@ -11327,13 +11364,7 @@ impl Core {
         // then the shared placement helper. The slot is recorded only after
         // placement succeeds, and NO squad member is persisted - the one
         // deliberate difference from the ordinary attach tail.
-        let owner = self
-            .session
-            .squads
-            .iter()
-            .find(|s| !spawn_cwd.is_empty() && s.owns_path(&spawn_cwd))
-            .map(|s| s.id)
-            .unwrap_or(view.0);
+        let owner = self.session.find_by_cwd(&spawn_cwd).unwrap_or(view.0);
         let dest = match self.resolve_placement_target(&PaneTarget::CurrentRoute, Some(owner)) {
             Ok(d) => d,
             Err(e) => {
@@ -12149,13 +12180,7 @@ impl Core {
                 // default: the squad whose `owns_path` matches the row cwd, so
                 // the attach lands where the agent lives, not the viewer's
                 // squad; fall back to the viewed squad for an orphan (AC1-EDGE).
-                let owner = self
-                    .session
-                    .squads
-                    .iter()
-                    .find(|s| !row_cwd.is_empty() && s.owns_path(&row_cwd))
-                    .map(|s| s.id)
-                    .unwrap_or(view.0);
+                let owner = self.session.find_by_cwd(&row_cwd).unwrap_or(view.0);
                 // (x-d6a8 G3) An anchored drop ("attach beside THIS pane") names a
                 // concrete pane the operator can see, which overrides owner
                 // routing: the pane lands in the anchor's OWN tab, resolved from
@@ -14910,6 +14935,27 @@ async fn read_guard_agents() -> Option<Vec<RegistryAgent>> {
     }
 }
 
+/// The classified twin of [`read_guard_agents`], for the guarded-`PaneSend`
+/// lane only: same io, but the raw read goes through
+/// [`classify_guard_registry`], so a row-level malformation refuses the send
+/// instead of reading as "no row for that pane". The tolerant twin stays as-is
+/// on purpose - the display verbs render what they can read and must not blank
+/// a whole sideline over one bad row.
+async fn read_guard_agents_for_send() -> Result<Vec<RegistryAgent>, &'static str> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let read =
+        tokio::task::spawn_blocking(|| std::fs::read_to_string(agents_view::registry_path())).await;
+    match read {
+        Ok(Ok(raw)) => classify_guard_registry(&raw, now),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Ok(Err(_)) => Err("agents registry unreadable - target agent state unknown"),
+        Err(_) => Err("agents registry read failed - target agent state unknown"),
+    }
+}
+
 /// Return every pane/worker pair that blocks an unforced tab close. Matching
 /// is exact on the server session and pane id, and every joined row whose
 /// liveness is not positively `Dead` is destructive-risk evidence. Rows that
@@ -15085,9 +15131,14 @@ async fn handle_control(
             // is what closes the client/server HOME-divergence gap; passing the
             // snapshot into the core loop keeps the check + inject atomic.
             let agents = if guarded || expected_identity.is_some() {
-                read_guard_agents().await
+                // The classified read: an unattributable row refuses here,
+                // before the core loop, instead of reading as "no agent".
+                read_guard_agents_for_send().await
             } else {
-                None
+                // Every script send still consults DND. A plain read suffices:
+                // an unreadable registry maps to no rows observed, and a raw
+                // send with no positive DND marker stays unguarded.
+                Ok(read_guard_agents().await.unwrap_or_default())
             };
             core_tx
                 .send(CoreMsg::PaneSend {
@@ -16366,6 +16417,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited,
+            dnd: false,
             badge,
             reason: None,
             mux: Some((sess.into(), pane)),
@@ -16482,7 +16534,7 @@ mod tests {
             b"payload",
             false,
             Some("target-id"),
-            Some(vec![addressed]),
+            Ok(vec![addressed]),
         ) {
             ServerMsg::Err { msg, .. } => {
                 assert!(msg.contains("addressed"), "refusal names addressee: {msg}");
@@ -16508,8 +16560,66 @@ mod tests {
                 b"payload",
                 false,
                 Some("target-id"),
-                Some(vec![first, duplicate]),
+                Ok(vec![first, duplicate]),
             ),
+            ServerMsg::Ok
+        ));
+    }
+
+    #[test]
+    fn pane_send_refuses_when_the_registry_carries_an_unattributable_row() {
+        // AC4-ERR (x-0b40), the guard seam: the registry carries a malformed
+        // row for the target pane's session; the classified read refuses, and
+        // the guarded send answers TARGET_NOT_IDLE with that reason instead of
+        // reading the pane as a shell and writing into a working agent. The
+        // assertion is the refusal itself, never "the bytes did not land".
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        let raw =
+            r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
+        let reason = classify_guard_registry(raw, 0).unwrap_err();
+        match core.pane_send(pane, b"payload", true, None, Err(reason)) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_NOT_IDLE);
+                assert!(
+                    msg.contains("no readable pane binding"),
+                    "refusal carries the row-level cause: {msg}"
+                );
+            }
+            other => panic!("expected guard refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_identity_check_carries_the_registry_refusal_reason() {
+        // The identity check consumes the same Result (x-0b40): its Err arm
+        // reports the carried reason, not the old hardcoded "unreadable".
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        core.panes.get_mut(&pane).unwrap().name = Some("hosted".into());
+        let reason = classify_guard_registry("not json", 0).unwrap_err();
+        match core.pane_send(pane, b"payload", false, Some("target-id"), Err(reason)) {
+            ServerMsg::Err { code, msg } => {
+                assert_eq!(code, err_code::TARGET_IDENTITY_MISMATCH);
+                assert!(
+                    msg.contains("malformed"),
+                    "carried reason, not hardcoded text: {msg}"
+                );
+            }
+            other => panic!("expected identity refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_send_on_an_empty_registry_proceeds_like_a_shell() {
+        // AC5-EDGE (x-0b40): a missing registry reads as Ok(empty) - no
+        // daemon, no agents - and the guarded send proceeds exactly as today.
+        // Empty stays permission; only an unreadable or unattributable read
+        // refuses.
+        let (mut core, pane) = template_core();
+        core.session_name = "sess".into();
+        assert!(matches!(
+            core.pane_send(pane, b"payload", true, None, Ok(Vec::new())),
             ServerMsg::Ok
         ));
     }
@@ -16536,6 +16646,7 @@ mod tests {
                 name: "foreign-pane".into(),
                 cwd: "/other".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: Some(("other".into(), 5)),
@@ -16561,6 +16672,7 @@ mod tests {
                 name: "bg-worker".into(),
                 cwd: "/bg".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16586,6 +16698,7 @@ mod tests {
                 name: "live-paneless".into(),
                 cwd: "/live".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16722,6 +16835,7 @@ mod tests {
                 name: "watcher".into(),
                 cwd: "/grp/backend/sub/dir".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16801,6 +16915,7 @@ mod tests {
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -16852,6 +16967,7 @@ mod tests {
                 name: "think-x-9999".into(),
                 cwd: "/w".into(),
                 exited: false,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16876,6 +16992,7 @@ mod tests {
                 name: "dead-ext".into(),
                 cwd: "/w".into(),
                 exited: true,
+                dnd: false,
                 badge: None,
                 reason: None,
                 mux: None,
@@ -16934,6 +17051,7 @@ mod tests {
             name: "upgraded".into(),
             cwd: "/w".into(),
             exited: false,
+            dnd: false,
             liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -19649,6 +19767,7 @@ mod tests {
             name: name.into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             liveness: agents_view::Liveness::Dead,
             badge: None,
             reason: None,
@@ -20543,6 +20662,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -20623,6 +20743,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -20708,6 +20829,7 @@ mod tests {
             name: "live-codex".into(),
             cwd: "/tmp".into(),
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: Some(("test".into(), live)),
@@ -20832,6 +20954,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -20965,6 +21088,7 @@ mod tests {
             name: "w".into(),
             cwd: "/w".into(),
             exited: true,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -21119,6 +21243,7 @@ mod tests {
             harness: Some("claude".into()),
             name: "worker".into(),
             cwd: "/w".into(),
+            dnd: false,
             exited: false,
             badge: None,
             reason: None,
@@ -23313,6 +23438,7 @@ mod tests {
             name: name.into(),
             cwd: cwd.into(),
             exited: false,
+            dnd: false,
             liveness: agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -23787,8 +23913,59 @@ mod tests {
     }
 
     #[test]
+    fn classify_guard_registry_fails_closed_on_a_row_with_no_readable_pane_binding() {
+        // AC4-ERR (x-0b40), the positive marker: the malformed row IS the
+        // defect. A registry holding an agent whose pane cannot be read must
+        // refuse - a nameless row used to be skipped outright and read as
+        // "no row for this pane, it is a shell", so the guarded send wrote
+        // into a working agent.
+        let raw =
+            r#"{"agents":[{"name":"ok","cwd":"/w","status":"live"},{"cwd":"/w","status":"live"}]}"#;
+        let err = classify_guard_registry(raw, 0).unwrap_err();
+        assert!(
+            err.contains("no readable pane binding"),
+            "refusal names the row-level cause: {err}"
+        );
+    }
+
+    #[test]
+    fn classify_guard_registry_fails_closed_on_a_present_but_unparseable_mux() {
+        // The fold arm (x-0b40): the row SURVIVES derivation with `mux: None`,
+        // so this is not a skip and a drop count alone would miss it. The
+        // half-read `session` is this pane's own; the missing `pane_id` is
+        // exactly the part that cannot be attributed.
+        let raw =
+            r#"{"agents":[{"name":"half","cwd":"/w","status":"live","mux":{"session":"sess"}}]}"#;
+        let err = classify_guard_registry(raw, 0).unwrap_err();
+        assert!(
+            err.contains("no readable pane binding"),
+            "refusal names the row-level cause: {err}"
+        );
+    }
+
+    #[test]
+    fn classify_guard_registry_keeps_document_and_row_failures_distinct() {
+        // Document-level malformation already failed closed and keeps its own
+        // reason (x-0b40 leaves that arm untouched); a clean registry still
+        // proceeds, the control that keeps the two refusals above honest.
+        assert_eq!(
+            classify_guard_registry("not json", 0).unwrap_err(),
+            "agents registry malformed - target agent state unknown"
+        );
+        assert!(classify_guard_registry(
+            r#"{"agents":[{"name":"a","cwd":"/w","status":"live","mux":{"session":"s","pane_id":1}}]}"#,
+            0
+        )
+        .is_ok());
+    }
+
+    #[test]
     fn rerun_allowed_on_a_plain_shell_pane() {
-        // AC-HP: a pane with no agent row is a shell - rerun is always safe.
+        // AC-HP (x-0b40): over a LOSSLESS read, a pane with no agent row is a
+        // shell - rerun is always safe. The losslessness is the precondition,
+        // not a given: `classify_guard_registry` is what refuses a registry
+        // carrying a row with no readable pane binding BEFORE this predicate
+        // runs, so absence reaching here really does mean absence.
         assert_eq!(rerun_allowed(&[], "main", 7), Ok(()));
         // Another agent on a different pane does not gate this one.
         assert_eq!(
@@ -24455,6 +24632,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -24565,6 +24743,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -24637,6 +24816,7 @@ mod tests {
             harness: Some("codex".into()),
             name: "t-codex-one".into(),
             cwd: cwd.to_string_lossy().into_owned(),
+            dnd: false,
             exited: true,
             badge: None,
             reason: None,
@@ -26005,6 +26185,21 @@ mod tests {
         // And a foreign busy row must not spuriously gate our plain-shell pane.
         let foreign_only = [agent_in("other", 5, Some(AgentBadge::Working), false)];
         assert_eq!(rerun_allowed(&foreign_only, "main", 5), Ok(()));
+    }
+
+    #[test]
+    fn pane_send_refuses_a_dnd_agent_even_when_unguarded() {
+        let (mut core, _client_id, p1, _p2, _rx) = seen_test_core();
+        let raw = format!(
+            r#"{{"agents":[{{"name":"held","cwd":"/w","status":"live",
+                "delivery_policy":"bus-only",
+                "mux":{{"session":"test","pane_id":{p1}}}}}]}}"#
+        );
+        let rows = agents_view::derive_rows(&raw, 0).unwrap();
+        match core.pane_send(p1, b"must-not-land", false, None, Ok(rows)) {
+            ServerMsg::Err { msg, .. } => assert!(msg.contains("DND"), "wording: {msg}"),
+            other => panic!("expected DND refusal, got {other:?}"),
+        }
     }
 
     // -- W4 touch telemetry (human_touch emitters) -------------------------

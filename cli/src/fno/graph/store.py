@@ -491,18 +491,13 @@ def _apply_readiness_overlay(entries: list[dict]) -> None:
     the next explicit read. The per-entry precedence lives in
     `statuses.readiness_status`, shared with `_compute_children`.
     """
-    from fno.graph.statuses import pending_supersession_reason, readiness_status
+    from fno.graph.statuses import readiness_status
 
     id_to_entry = {
         e["id"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)
     }
     for e in entries:
         if not isinstance(e, dict):
-            continue
-        pending_reason = pending_supersession_reason(e)
-        if pending_reason:
-            e["status"] = "blocked"
-            e["blocked_reason"] = pending_reason
             continue
         e["status"], e["blocked_reason"] = readiness_status(e, id_to_entry)
 

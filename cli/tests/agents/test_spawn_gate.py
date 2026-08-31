@@ -59,10 +59,75 @@ def _row(name: str, *, status="live", pid=None, short_id=""):
     )
 
 
+def _load(load1: float):
+    return lambda: (load1, 0.0, 0.0)
+
+
+def test_load_snapshot_exposes_shared_trigger_measurement(monkeypatch):
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", _load(141.6))
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    snapshot = spawn_gate._load_snapshot(8.0)
+
+    assert snapshot.load_1m == pytest.approx(141.6)
+    assert snapshot.max_load_per_cpu == pytest.approx(8.0)
+    assert snapshot.load_cpu_count == 12
+    assert snapshot.load_ceiling == pytest.approx(96.0)
+    assert snapshot.spawn_load_status == "exceeded"
+
+
+def test_load_snapshot_marks_unreadable_load(monkeypatch):
+    def boom():
+        raise OSError("no loadavg here")
+
+    monkeypatch.setattr(spawn_gate.os, "getloadavg", boom)
+    monkeypatch.setattr(spawn_gate, "_load_cpus", lambda: 12)
+
+    snapshot = spawn_gate._load_snapshot(8.0)
+
+    assert snapshot.load_1m is None
+    assert snapshot.load_ceiling == pytest.approx(96.0)
+    assert snapshot.spawn_load_status == "unavailable"
+
+
 ALIVE = os.getpid()  # a pid that is definitely alive (this test process)
 
 
 class TestCensus:
+    def test_succession_keeps_one_positive_slot_and_current_address(self, monkeypatch):
+        """AC5-HP/AC6-HP: one row remains one slot while its address advances."""
+        from fno.agents.registry import resolve_agent_in
+
+        row = _row("target-worker", pid=ALIVE, short_id="old-session")
+        row.mux = {"session": "main", "pane_id": 12}
+        row.harness_session_id = "old-session"
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        before = spawn_gate.census()
+
+        row.harness_session_id = "new-session"
+        row.predecessor_session_ids = ["old-session"]
+        after = spawn_gate.census()
+        resolved = resolve_agent_in([row], "new-session")
+
+        assert before.fno_slot_workers == 1
+        assert after.fno_slot_workers == 1
+        assert resolved.entry.harness_session_id == "new-session"
+        assert resolved.entry.mux == {"session": "main", "pane_id": 12}
+
+    def test_duplicate_successor_is_an_explicit_address_ambiguity(self):
+        """AC5-ERR: two rows carrying B cannot resolve as one worker."""
+        from fno.agents.registry import AgentResolutionError, resolve_agent_in
+
+        rows = [
+            _row("target-a", pid=ALIVE, short_id="new-session"),
+            _row("target-b", pid=ALIVE, short_id="new-session"),
+        ]
+        for row in rows:
+            row.harness_session_id = "new-session"
+
+        with pytest.raises(AgentResolutionError, match="ambiguous"):
+            resolve_agent_in(rows, "new-session")
+
     def test_pid_start_token_mismatch_is_not_our_process(self, monkeypatch):
         """A reused numeric PID must not keep an old registry row alive."""
         class Proc:

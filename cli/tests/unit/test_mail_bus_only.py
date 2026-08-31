@@ -132,6 +132,7 @@ def test_bus_only_send_never_pastes_and_queues_durable(runner, mailbox, monkeypa
     assert res.exit_code == 0, res.output
     assert "queued (durable)" in res.output
     assert "bus-only" in res.output
+    assert "DND" in res.output
     # Not a miss, not stranded: the receipt names the polling contract.
     assert "live-miss" not in res.output
     assert "not live" not in res.output
@@ -210,6 +211,7 @@ def test_raw_send_to_bus_only_is_refused_loud(runner, mailbox, monkeypatch):
 
     assert res.exit_code == 2, res.output
     assert "bus-only" in res.output
+    assert "DND" in res.output
     assert "queued (durable)" not in res.output
 
 

@@ -24,9 +24,38 @@
 #
 # Exit codes forwarded from the JSON decision:
 #   0  allow  (includes all TerminationReason variants: DonePRGreen, NoWork, etc.)
+#   0  block on the claude harness (stdout {"decision":"block",...}; see below)
 #   2  block  (keep the session running; message echoed to stderr)
+#
+# On the claude harness a block is instead emitted as stdout JSON
+# {"decision":"block","reason":...} at exit 0: Claude Code's structured Stop
+# decision. Claude Code ignores JSON on a non-zero exit and renders exit-2 +
+# stderr as a "Stop hook error", while codex/gemini read only the exit code -
+# so exit 2 remains their block signal.
 
 set -uo pipefail
+
+# Emit a block the way the CALLING harness honors it, then exit. Claude Code
+# honors a Stop block only as structured stdout JSON at exit 0; an exit-2 block
+# renders as a "Stop hook error" and the session stops anyway. Codex/gemini read
+# only the exit code, so exit 2 stays their block signal. The claude markers are
+# claims, not proof (see the king resolution below): a non-claude session
+# spawned under a claude parent inherits them, and reading them as claude hands
+# that session a block it parses as allow. A foreign marker in the same env
+# makes the claim ambiguous, so the legacy exit-2 path runs instead.
+emit_block_for_harness() {
+    local reason="$1" json=""
+    if [[ "${CLAUDECODE:-0}" == "1" || -n "${CLAUDE_PLUGIN_ROOT:-}" ]] \
+        && [[ -z "${CODEX_THREAD_ID:-}" && -z "${CODEX_SESSION_ID:-}" \
+            && -z "${GEMINI_SESSION_ID:-}" && -z "${OPENCODE_SESSION_ID:-}" ]] \
+        && json=$(jq -cn --arg r "$reason" '{"decision":"block","reason":$r}' 2>/dev/null) \
+        && [[ -n "$json" ]]; then
+        printf '%s\n' "$json"
+        exit 0
+    fi
+    echo "target stop-hook: $reason" >&2
+    exit 2
+}
 
 # Consecutive checker-unavailable fires tolerated for an active session before a
 # loud give-up allow. 3 gives a transient cause room to recover; 2-5 defensible
@@ -201,8 +230,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         RCOUNT=$((10#$RCOUNT + 1))
         echo "$RCOUNT" > "$RCOUNT_FILE" 2>/dev/null || true
         if (( RCOUNT <= MAX_UNAVAIL_RETRIES )); then
-            echo "target stop-hook: checker unavailable (${RCOUNT}/${MAX_UNAVAIL_RETRIES}), keeping session running" >&2
-            exit 2
+            emit_block_for_harness "checker unavailable (${RCOUNT}/${MAX_UNAVAIL_RETRIES}), keeping session running"
         fi
         echo "target stop-hook: manifest resolver unavailable ${RCOUNT} times; allowing visitor stop" >&2
         exit 0
@@ -272,8 +300,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
         KNUM=$((10#$KNUM + 1))
         echo "$KNUM" > "$KCOUNT" 2>/dev/null || true
         if (( KNUM <= MAX_UNAVAIL_RETRIES )); then
-            echo "target stop-hook: king manifest resolver unavailable (${KNUM}/${MAX_UNAVAIL_RETRIES}) for an active kings dir, keeping session running" >&2
-            exit 2
+            emit_block_for_harness "king manifest resolver unavailable (${KNUM}/${MAX_UNAVAIL_RETRIES}) for an active kings dir, keeping session running"
         fi
         echo "target stop-hook: king manifest resolver unavailable ${KNUM} times (counter ${KCOUNT}); allowing stop (king gate off for this stop)" >&2
         exit 0
@@ -328,8 +355,7 @@ unavailable_block_or_allow() {
     count=$((10#$count + 1))              # 10# so a stray leading zero isn't read as octal
     echo "$count" > "$counter" 2>/dev/null || true
     if (( count <= MAX_UNAVAIL_RETRIES )); then
-        echo "target stop-hook: checker unavailable (${count}/${MAX_UNAVAIL_RETRIES}), keeping session running" >&2
-        exit 2
+        emit_block_for_harness "checker unavailable (${count}/${MAX_UNAVAIL_RETRIES}), keeping session running"
     fi
     emit_event_both "loop_check_unavailable_giveup" "{\"session_id\":\"${SESSION_ID}\",\"count\":${count}}"
     echo "target stop-hook: checker unavailable ${count} times; allowing stop (ship gate off for this stop)" >&2
@@ -454,8 +480,9 @@ else
         tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
     }
     # A non-zero exit means a BROKEN checker only when the output carries no
-    # verdict. The king driver deliberately returns 2 WITH a full decision
-    # payload (loopcheck.rs king_decide), while CLI misuse returns 2 with
+    # verdict. The king driver sends a full decision payload on both block
+    # shapes (loopcheck.rs king_decide): exit 0 for a healthy non-empty board,
+    # exit 2 when the board is unreadable, while CLI misuse returns 2 with
     # {"error": ...} and no `decision` field. So key on the field, never the
     # code: honor any verdict, and call unavailable only a verdictless reply.
     # Reading the code alone counted every legitimate king block as an outage,
@@ -484,8 +511,7 @@ DECISION=$(echo "$DECISION_JSON" | jq -r '.decision // "allow"')
 MESSAGE=$(echo "$DECISION_JSON" | jq -r '.message // ""')
 
 if [[ "$DECISION" == "block" ]]; then
-    echo "target stop-hook: $MESSAGE" >&2
-    exit 2
+    emit_block_for_harness "$MESSAGE"
 fi
 
 # ── 10. Terminal-allow: invoke the finalize WRITER (step 6, ab-f8e5f214) ───────
@@ -542,8 +568,7 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
             && { [[ $CANDIDATE_READY -ne 1 ]] \
                 || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
-            echo "target stop-hook: generic delivery state could not be preserved; will retry" >&2
-            exit 2
+            emit_block_for_harness "generic delivery state could not be preserved; will retry"
         fi
         FINALIZE_STATE="$DELIVERY_PENDING_STATE"
     fi
@@ -562,13 +587,11 @@ elif [[ -n "$TERMINATION_REASON" ]]; then
         echo "target stop-hook: finalize note (non-blocking): $(printf '%s' "$FINALIZE_OUT" | tail -n 3)" >&2
     fi
     if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then
-        echo "target stop-hook: generic delivery finalization failed; will retry" >&2
-        exit 2
+        emit_block_for_harness "generic delivery finalization failed; will retry"
     fi
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
         if ! rm -f "$DELIVERY_PENDING_STATE" 2>/dev/null; then
-            echo "target stop-hook: generic delivery retry state cleanup failed; will retry" >&2
-            exit 2
+            emit_block_for_harness "generic delivery retry state cleanup failed; will retry"
         fi
     fi
 fi

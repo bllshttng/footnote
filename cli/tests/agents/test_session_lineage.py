@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from fno.paths_testing import use_tmpdir
 
 BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
@@ -97,6 +99,43 @@ def test_observation_succession_advances_the_primary_and_chains_a(
     assert rows[0].harness_session_id == REMINT
     assert rows[0].predecessor_session_ids == [BIRTH]
     assert entry.forked_from_session_id is None, "succession is not a fork edge"
+
+
+def test_observation_succession_refuses_successor_already_owned_by_another_row(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A succession cannot overwrite into a session id already owned by a row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _isolate_daemon_log(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    successor = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"
+    write_registry([
+        AgentEntry(
+            name="target-x-f0c2",
+            harness="claude",
+            harness_session_id=BIRTH,
+            short_id=BIRTH.split("-", 1)[0],
+            cwd="/proj",
+            log_path="",
+            status="live",
+        ),
+        AgentEntry(
+            name="target-existing",
+            harness="claude",
+            harness_session_id=successor,
+            short_id=successor.split("-", 1)[0],
+            cwd="/proj",
+            log_path="",
+            status="live",
+        ),
+    ])
+
+    with pytest.raises(ValueError, match="succession session .* already has a registry row"):
+        _observe("target-x-f0c2", successor, predecessor_reachable=False)
+
+    rows = load_registry()
+    assert [row.harness_session_id for row in rows] == [BIRTH, successor]
 
 
 def test_observation_branch_mints_a_second_row_and_leaves_a_untouched(

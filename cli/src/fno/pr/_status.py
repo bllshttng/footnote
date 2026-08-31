@@ -1038,17 +1038,53 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     if coverage.get("review_state") == "reviewer_refused":
         raw_verdicts = coverage.get("verdicts")
         verdicts = raw_verdicts if isinstance(raw_verdicts, list) else []
-        refused_names = [
-            str(verdict.get("name"))
+        refused = [
+            verdict
             for verdict in verdicts
-            if isinstance(verdict, dict)
-            and verdict.get("verdict") == "refused"
-            and verdict.get("name")
+            if isinstance(verdict, dict) and verdict.get("verdict") == "refused"
         ]
+        refused_names = [str(v.get("name")) for v in refused if v.get("name")]
         who = ", ".join(refused_names) or "configured reviewer"
-        sys.stderr.write(
-            f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
-        )
+        local_refused = [v for v in refused if v.get("producer") == "local_attestation"]
+        if local_refused:
+            # A local refused verdict is a review attempt that RAN and produced
+            # no verdict. The refusal_reason names the class, and the two
+            # classes carry different remedies: an empty diff means the
+            # reviewer's checkout was the wrong one; an unresolvable base means
+            # the checkout was fine but could not measure against the base.
+            # Both classes can be present at once (two attempts), so each is
+            # diagnosed with its own reviewer names - one message for all
+            # classes misdiagnoses whichever it drops.
+            empty = [
+                str(v.get("name") or "review")
+                for v in local_refused
+                if str(v.get("refusal_reason") or "empty_diff") == "empty_diff"
+            ]
+            unresolvable = [
+                str(v.get("name") or "review")
+                for v in local_refused
+                if str(v.get("refusal_reason") or "") == "unresolvable_base"
+            ]
+            if empty:
+                sys.stderr.write(
+                    f"note: reviewer_refused: {', '.join(empty)} ran and refused "
+                    "to attest (an empty diff at the reviewer's checkout: it "
+                    "sat on the base branch, so the review read nothing). Fire "
+                    "from the PR worktree session (`fno do target "
+                    "request-self-review --pr <n>`) or spawn the reviewer with "
+                    "--cwd <worktree>.\n"
+                )
+            if unresolvable:
+                sys.stderr.write(
+                    f"note: reviewer_refused: {', '.join(unresolvable)} ran and "
+                    "refused to attest (its checkout could not resolve the "
+                    "base to a merge-base). Fetch the base in the reviewer's "
+                    "checkout, or run a local review at HEAD.\n"
+                )
+        else:
+            sys.stderr.write(
+                f"note: reviewer_refused: {who} declined to review; run a local review at HEAD.\n"
+            )
     # `unknown` from a degraded gh read and `unknown` from "nobody reviewed
     # this" are different facts; the recompute note is the only thing that
     # separates them, and the JSON field alone would never reach a terminal.

@@ -243,7 +243,7 @@ impl SessionRow {
         self.is_live()
             && self
                 .wire_version
-                .map_or(true, |version| version < proto::FLOOR_SINCE_PROTO)
+                .is_none_or(|version| version < proto::FLOOR_SINCE_PROTO)
     }
 }
 
@@ -1452,7 +1452,7 @@ fn squad_store_check() -> Check {
     // pass an empty `live_cwds` and no clock, so the number the operator read
     // could disagree with what a bare `prune` would do. `include_named: false`
     // stays hardcoded on purpose: it is what a bare `prune` uses.
-    let (_, live_cwds, _) = live_tabs();
+    let (_, live_cwds, ..) = live_tabs();
     let now = crate::squad_store::now_epoch_secs();
     let orphan = loaded
         .squads
@@ -2035,24 +2035,41 @@ struct LiveTab {
     pristine: bool,
 }
 
-/// Read every live tab once. The same snapshot supplies squad liveness cwds
-/// and the empty-tab candidates, so the receipt and the destructive pass cannot
-/// disagree because one probe was newer than the other.
-fn live_tabs() -> (Vec<LiveTab>, Vec<String>, bool) {
+/// Read every live tab once, keeping WHICH sessions answered. The same
+/// snapshot supplies squad liveness cwds and the empty-tab candidates, so the
+/// receipt and the destructive pass cannot disagree because one probe was
+/// newer than the other. Returns `(tabs, cwds, answered, unreachable)`:
+/// `answered` counts the sessions whose `PaneLs` returned a `PaneList` and
+/// `unreachable` holds the sorted names of the rest. A dead server leaves its
+/// socket behind by design (`kill-server` owns removal, see
+/// [`session_names`]), so an unreachable session is a steady state, not an
+/// anomaly - folding the per-session fact into one boolean disabled the sweep
+/// for every healthy session and reported a clean exit 0 (x-6e79).
+fn live_tabs() -> (Vec<LiveTab>, Vec<String>, usize, Vec<String>) {
     let Ok(names) = session_names() else {
-        return (Vec::new(), Vec::new(), false);
+        // The session list itself is unreadable: nothing was probed, so no
+        // session answered, and the refusal below must name that hole rather
+        // than a clean zero.
+        return (
+            Vec::new(),
+            Vec::new(),
+            0,
+            vec!["<session list unreadable>".into()],
+        );
     };
     let mut groups: std::collections::BTreeMap<(String, u64, u64), LiveTab> =
         std::collections::BTreeMap::new();
     let mut cwds = Vec::new();
-    let mut reachable = true;
+    let mut answered = 0usize;
+    let mut unreachable = Vec::new();
     for name in names {
         let Ok(sock) = proto::socket_path(&name) else {
-            reachable = false;
+            unreachable.push(name);
             continue;
         };
         match control_roundtrip(&sock, &name, ControlVerb::PaneLs) {
             Ok(ServerMsg::PaneList { panes }) => {
+                answered += 1;
                 for pane in panes {
                     cwds.push(pane.cwd.clone());
                     let key = (name.clone(), pane.squad_id, pane.tab_id);
@@ -2068,10 +2085,10 @@ fn live_tabs() -> (Vec<LiveTab>, Vec<String>, bool) {
                     tab.pristine &= pane.pristine_idle_shell;
                 }
             }
-            _ => reachable = false,
+            _ => unreachable.push(name),
         }
     }
-    (groups.into_values().collect(), cwds, reachable)
+    (groups.into_values().collect(), cwds, answered, unreachable)
 }
 
 #[derive(Debug, Default)]
@@ -2152,6 +2169,39 @@ fn prune_live_tabs(tabs: &[LiveTab], include_named: bool, dry_run: bool) -> TabP
     out
 }
 
+/// Which halves of the sweep the per-session probe results permit.
+///
+/// The tab fold is per-session and safe: a `LiveTab` carries its own session,
+/// and an unreachable session contributes ZERO tab rows, so its tabs cannot be
+/// touched by a fold over what was collected.
+///
+/// The store pass is NOT per-session and stays globally fail-closed.
+/// `live_cwds` is cross-session PROTECTIVE evidence: a live pane's cwd makes
+/// `prune_decision_with_evidence` return Keep, and an unreachable session
+/// contributes no cwds, so running the store pass on partial evidence would
+/// turn a Keep into a Prune. Absent liveness must never read as dead.
+struct SweepScope {
+    fold_tabs: bool,
+    sweep_store: bool,
+}
+
+fn sweep_scope(answered: usize, unreachable: &[String]) -> SweepScope {
+    SweepScope {
+        fold_tabs: answered > 0,
+        sweep_store: unreachable.is_empty(),
+    }
+}
+
+/// The refusal line for a store pass blocked on an unprobeable session: it
+/// names WHICH sessions, so a stale socket can never again read as a clean
+/// zero (x-6e79).
+fn unreachable_notice(unreachable: &[String]) -> String {
+    format!(
+        "server liveness incomplete for session(s) {}; no squad records changed",
+        unreachable.join(", ")
+    )
+}
+
 /// `fno mux workspace prune [--dry-run] [--include-named] [--tabs-only]
 /// [--dead-only] [--json]`: remove squads
 /// whose every recorded origin is gone and which host no live member or pane
@@ -2195,8 +2245,9 @@ fn squad_prune(args: &[OsString]) -> i32 {
     }
 
     let evidence = member_evidence();
-    let (tabs, live_cwds, server_reachable) = live_tabs();
-    let tab_outcome = if server_reachable && !dead_only {
+    let (tabs, live_cwds, answered, unreachable) = live_tabs();
+    let scope = sweep_scope(answered, &unreachable);
+    let tab_outcome = if scope.fold_tabs && !dead_only {
         prune_live_tabs(&tabs, include_named, dry_run)
     } else {
         TabPruneOutcome {
@@ -2244,14 +2295,17 @@ fn squad_prune(args: &[OsString]) -> i32 {
         members_kept_unknown,
         applied,
         notice,
-    ) = if !server_reachable {
+    ) = if !scope.sweep_store {
         let loaded = crate::squad_store::load();
         let detail = match loaded.notice {
-            Some(notice) => {
-                format!("server liveness incomplete; no squad records changed; {notice}")
-            }
-            None => "server liveness incomplete; no squad records changed".into(),
+            Some(notice) => format!("{}; {notice}", unreachable_notice(&unreachable)),
+            None => unreachable_notice(&unreachable),
         };
+        // `applied` tracks an APPLY run, not the store pass alone: the tab arm
+        // above may have really closed tabs while the store pass was refused,
+        // and reporting that run as a dry run would un-close them in prose.
+        // The refusal still rides `notice`, so no reader mistakes "pruned 0"
+        // for an evaluated zero.
         (
             Vec::new(),
             loaded.squads.len(),
@@ -2260,7 +2314,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
             0,
             0,
             0,
-            false,
+            !dry_run,
             Some(detail),
         )
     } else if tabs_only && !dead_only {
@@ -2321,6 +2375,7 @@ fn squad_prune(args: &[OsString]) -> i32 {
         eprintln!("fno mux workspace prune: {notice}");
     }
 
+    let probed = answered + unreachable.len();
     if json {
         render_prune_json(
             &removed,
@@ -2335,7 +2390,8 @@ fn squad_prune(args: &[OsString]) -> i32 {
             tab_outcome.would_close,
             tab_outcome.skipped_named,
             tab_outcome.kept,
-            server_reachable,
+            probed,
+            &unreachable,
             notice.as_deref(),
         );
     } else {
@@ -2360,8 +2416,14 @@ fn squad_prune(args: &[OsString]) -> i32 {
         }
         // A no-op headline only when NOTHING happened: a run that closed tabs
         // or reaped members acted, and calling it "nothing to prune" reads as
-        // a failed run to whoever ran it.
-        if applied && removed.is_empty() && tab_outcome.closed == 0 && members_reaped == 0 {
+        // a failed run to whoever ran it. A refused store pass never ran, so
+        // it cannot claim an evaluated zero either - its notice carries that.
+        if applied
+            && notice.is_none()
+            && removed.is_empty()
+            && tab_outcome.closed == 0
+            && members_reaped == 0
+        {
             println!("nothing to prune");
         } else if !applied {
             println!("dry-run: no changes written");
@@ -2380,7 +2442,9 @@ fn squad_prune(args: &[OsString]) -> i32 {
             tab_outcome.would_close,
             tab_outcome.skipped_named,
             tab_outcome.kept,
-            server_reachable,
+            answered,
+            probed,
+            &unreachable,
         );
     }
     EXIT_OK
@@ -2411,7 +2475,9 @@ fn print_prune_summary(
     tabs_would_close: usize,
     tabs_skipped_named: usize,
     tabs_kept: usize,
-    server_reachable: bool,
+    answered: usize,
+    probed: usize,
+    unreachable: &[String],
 ) {
     let mut parts = vec![format!("{verb} {n} squad(s)")];
     // The acted-on count carries its mood in the verb: an apply run says
@@ -2424,8 +2490,14 @@ fn print_prune_summary(
         ("would close", tabs_would_close)
     };
     parts.push(format!(
-        "tabs {tabs_word} {tabs_n} (skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {server_reachable})"
+        "tabs {tabs_word} {tabs_n} (skipped named {tabs_skipped_named}, kept {tabs_kept}, server reachable {answered}/{probed})"
     ));
+    if !unreachable.is_empty() {
+        parts.push(format!(
+            "skipped unreachable session(s): {}",
+            unreachable.join(", ")
+        ));
+    }
     if kept_protected > 0 {
         parts.push(format!("kept {kept_protected} (live/origin)"));
     }
@@ -2470,7 +2542,8 @@ fn render_prune_json(
     tabs_would_close: usize,
     tabs_skipped_named: usize,
     tabs_kept: usize,
-    server_reachable: bool,
+    probed: usize,
+    unreachable: &[String],
     notice: Option<&str>,
 ) {
     let pruned: Vec<_> = removed
@@ -2501,7 +2574,9 @@ fn render_prune_json(
             "tabs_would_close": tabs_would_close,
             "tabs_skipped_named": tabs_skipped_named,
             "tabs_kept": tabs_kept,
-            "server_reachable": server_reachable,
+            "server_reachable": unreachable.is_empty(),
+            "sessions_probed": probed,
+            "sessions_unreachable": unreachable,
             "notice": notice,
         })
     );
@@ -2566,6 +2641,7 @@ fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> S
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
 pub const EXIT_TARGET_IDENTITY_MISMATCH: i32 = 23; // send: pane occupant differs from addressee
+pub const EXIT_TARGET_DND: i32 = 25; // pane send: target declared DND; bytes did not land
 
 // Keep these aligned with fno-agents mail_inject: the same PTY paste needs the
 // same settle and retry cadence whether it arrived through mail or pane send.
@@ -5823,6 +5899,8 @@ fn render_reply(
                 EXIT_BLOCK_UNAVAILABLE
             } else if code == err_code::TARGET_NOT_IDLE {
                 EXIT_TARGET_NOT_IDLE
+            } else if code == err_code::TARGET_DND {
+                EXIT_TARGET_DND
             } else if code == err_code::NOT_FOUND {
                 EXIT_NOT_FOUND
             } else if code == err_code::NOT_PANE_HOSTED {
@@ -6397,7 +6475,9 @@ fn send_pane_bytes(
         },
     )? {
         ServerMsg::Ok => Ok(()),
-        ServerMsg::Err { code, msg } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+        ServerMsg::Err { code, msg }
+            if code == err_code::TARGET_IDENTITY_MISMATCH || code == err_code::TARGET_DND =>
+        {
             Err(ControlError::FatalCode { code, msg })
         }
         ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
@@ -6424,6 +6504,7 @@ fn submit_pane(
             ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
                 EXIT_TARGET_IDENTITY_MISMATCH
             }
+            ControlError::FatalCode { code, .. } if code == err_code::TARGET_DND => EXIT_TARGET_DND,
             ControlError::FatalCode { .. } => EXIT_ERROR,
         };
     }
@@ -6434,6 +6515,9 @@ fn submit_pane(
         if let ControlError::FatalCode { code, .. } = e {
             if code == err_code::TARGET_IDENTITY_MISMATCH {
                 return EXIT_TARGET_IDENTITY_MISMATCH;
+            }
+            if code == err_code::TARGET_DND {
+                return EXIT_TARGET_DND;
             }
         }
         return EXIT_SUBMIT_UNCONFIRMED;
@@ -6561,6 +6645,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_NOT_IDLE => {
             eprintln!("fno mux block: {msg} - rerun with --force to override");
             return EXIT_TARGET_NOT_IDLE;
+        }
+        Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_DND => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_TARGET_DND;
         }
         Ok(ServerMsg::Err { msg, .. }) => {
             eprintln!("fno mux block: {msg}");
@@ -6862,6 +6950,7 @@ mod tests {
             name: name.into(),
             cwd: "/tmp/seen".into(),
             exited: false,
+            dnd: false,
             liveness: crate::agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -6990,6 +7079,94 @@ mod tests {
         let outcome = prune_live_tabs(&three, false, true);
         assert_eq!(outcome.would_close, 2, "the count decrements as tabs fold");
         assert_eq!(outcome.kept, 1, "a workspace never folds to zero tabs");
+    }
+
+    #[test]
+    fn workspace_prune_folds_answering_session_despite_dead_sibling() {
+        // AC4-HP (x-6e79): one session answers PaneLs, a sibling (the socket a
+        // dead server left behind) does not. The assertion is that the tab
+        // fold RUNS over the answering session's tabs anyway - asserting the
+        // prune ran proves nothing, it always ran when every socket was live.
+        let scope = sweep_scope(1, &["x7b5e-proof".into()]);
+        assert!(
+            scope.fold_tabs,
+            "a dead sibling does not silence the answering session"
+        );
+
+        let pristine = |tab_id: u64| LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id,
+            pane_count: 1,
+            pristine: true,
+        };
+        // Five tabs in one squad: four pristine, one running. The fold
+        // empties the squad to its LAST tab - the running one is it - so all
+        // four pristine tabs are surplus (the pinned two-tab case folds a
+        // pristine down to a lone running tab the same way).
+        let mut tabs: Vec<LiveTab> = (11..=14).map(pristine).collect();
+        tabs.push(LiveTab {
+            session: "main".into(),
+            squad_id: 1,
+            squad_name: None,
+            tab_id: 15,
+            pane_count: 1,
+            pristine: false,
+        });
+        let outcome = prune_live_tabs(&tabs, false, true);
+        assert_eq!(
+            outcome.would_close, 4,
+            "the fold runs despite the dead sibling"
+        );
+        assert_eq!(outcome.kept, 1, "the squad's last tab stands");
+    }
+
+    #[test]
+    fn workspace_prune_names_the_unreachable_session_in_the_receipt() {
+        // AC5-ERR (x-6e79): a positive marker - the refusal names WHICH
+        // session could not be probed. The measured defect: a dead
+        // x7b5e-proof socket disabled the sweep for every healthy session and
+        // the receipt printed a clean zero at exit 0, naming nothing.
+        let notice = unreachable_notice(&["x7b5e-proof".into()]);
+        assert!(notice.contains("x7b5e-proof"), "{notice}");
+        assert!(
+            notice.contains("no squad records changed"),
+            "the refusal still says nothing changed: {notice}"
+        );
+        let two = unreachable_notice(&["a-dead".into(), "z-dead".into()]);
+        assert_eq!(
+            two,
+            "server liveness incomplete for session(s) a-dead, z-dead; no squad records changed"
+        );
+    }
+
+    #[test]
+    fn workspace_prune_store_pass_stays_closed_on_partial_liveness() {
+        // AC6-EDGE (x-6e79): live_cwds is CROSS-session protective evidence -
+        // a live pane's cwd makes prune_decision_with_evidence return Keep,
+        // and an unreachable session contributes no cwds. Running the store
+        // pass on partial evidence would turn a Keep into a Prune, so it
+        // stays globally fail-closed even while the tab arm folds per
+        // session. Absent liveness must never read as dead.
+        let partial = sweep_scope(1, &["x7b5e-proof".into()]);
+        assert!(partial.fold_tabs, "the tab arm is per-session and safe");
+        assert!(
+            !partial.sweep_store,
+            "partial liveness closes the store pass"
+        );
+        let full = sweep_scope(2, &[]);
+        assert!(
+            full.sweep_store,
+            "every session answered, the store pass runs"
+        );
+        assert!(full.fold_tabs);
+        let none_answered = sweep_scope(0, &[]);
+        assert!(!none_answered.fold_tabs, "nothing answered, nothing folds");
+        assert!(
+            none_answered.sweep_store,
+            "zero sessions is empty, not partial"
+        );
     }
 
     #[test]
@@ -7179,6 +7356,7 @@ mod tests {
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -8512,6 +8690,25 @@ mod tests {
             msg: "no such pane".into(),
         };
         assert_eq!(render_reply(other, false, false, None), EXIT_ERROR);
+    }
+
+    #[test]
+    fn mux_pane_dnd_refusal_has_a_distinct_exit() {
+        let dnd = ServerMsg::Err {
+            code: err_code::TARGET_DND,
+            msg: "target is DND; use fno agents mail send to queue durable".into(),
+        };
+        assert_eq!(render_reply(dnd, false, false, None), EXIT_TARGET_DND);
+        // The identity refusal keeps its own exit: an earlier draft fed code 14
+        // here, which passed with the DND arm deleted.
+        let identity = ServerMsg::Err {
+            code: err_code::TARGET_IDENTITY_MISMATCH,
+            msg: "target identity mismatch".into(),
+        };
+        assert_eq!(
+            render_reply(identity, false, false, None),
+            EXIT_TARGET_IDENTITY_MISMATCH
+        );
     }
 
     #[test]
