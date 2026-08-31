@@ -240,6 +240,7 @@ def _emit_write_receipts(
     changed_keys: list[str] = []
     failed_keys: list[str] = []
     last_error: Exception | None = None
+    receipt_stage_failed = False
     try:
         import hashlib
         import json
@@ -280,15 +281,27 @@ def _emit_write_receipts(
             if len(serialized) > 4096:
                 omitted = len(serialized) - 4096
                 return f"{serialized[:4096]}...(truncated {omitted} chars)", False
-            return value, False
+            # The receipt must survive events.validate()'s plain json.dumps, so
+            # a non-JSON-native leaf (TOML date, UUID) rides in its serialized
+            # form instead of the live object.
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                return value, False
+            return json.loads(serialized), False
 
         journal = (
             paths.project_events_json()
             if scope == "project"
             else paths.global_events_json()
         )
-        root_kind = "project" if scope == "project" else "operator"
         config_path = str(Path(os.path.realpath(real_target)))
+        # Observed from the landed path, not renamed from the requested scope,
+        # so the schema's "the state root the write landed in" stays true even
+        # if a scope ever writes outside its own root.
+        root_kind = (
+            "operator"
+            if config_path == str(Path(os.path.realpath(paths.config_file())))
+            else "project"
+        )
         for key in changed_keys:
             present_before = key in before_flat
             present_after = key in after_flat
@@ -318,6 +331,7 @@ def _emit_write_receipts(
                 failed_keys.append(key)
                 last_error = exc
     except Exception as exc:
+        receipt_stage_failed = True
         failed_keys.extend(key for key in changed_keys if key not in failed_keys)
         last_error = exc
 
@@ -326,6 +340,12 @@ def _emit_write_receipts(
         print(
             "warning: config write receipt not recorded for key(s): "
             f"{', '.join(failed_keys)}{detail}",
+            file=sys.stderr,
+        )
+    elif receipt_stage_failed:
+        print(
+            "warning: config write receipt not recorded: "
+            f"receipt computation failed before any key was staged: {last_error}",
             file=sys.stderr,
         )
 

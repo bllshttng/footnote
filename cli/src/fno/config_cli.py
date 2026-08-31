@@ -6,6 +6,7 @@ lives in setup/doctor.py.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import os
 from pathlib import Path
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Literal, Optional, Union
@@ -1222,6 +1223,28 @@ def unset_cmd(
 app.command("rm")(unset_cmd)
 
 
+def _reversed_lines(path: Path, chunk: int = 65536):
+    """Yield the journal's lines newest-first without loading the whole file.
+
+    events.jsonl has no size bound, so a full read per `config history` call
+    would pay for a lifetime of receipts to return `--limit` rows.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        tail = b""
+        while position > 0:
+            step = min(chunk, position)
+            position -= step
+            handle.seek(position)
+            lines = (handle.read(step) + tail).split(b"\n")
+            tail = lines[0]
+            for line in reversed(lines[1:]):
+                yield line
+        if tail.strip():
+            yield tail
+
+
 @app.command("history", hidden=True)
 def history(
     key: Optional[str] = typer.Argument(
@@ -1242,25 +1265,31 @@ def history(
     journal_paths = [global_events_json(), project_events_json()]
     rows: list[dict[str, Any]] = []
     for journal_path in journal_paths:
+        # Bounded per file: the newest `limit` matching rows of one journal
+        # cover every row that file can contribute to the overall top-`limit`,
+        # because every filter here is per-row.
         try:
-            lines = journal_path.read_text(encoding="utf-8").splitlines()
+            matched = 0
+            for line in _reversed_lines(journal_path):
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict) or row.get("type") != "config_write":
+                    continue
+                data = row.get("data")
+                if not isinstance(data, dict) or not isinstance(data.get("key"), str):
+                    continue
+                if scope != "all" and data.get("scope") != scope:
+                    continue
+                if key and data["key"] != key and not data["key"].startswith(f"{key}."):
+                    continue
+                rows.append(row)
+                matched += 1
+                if matched >= limit:
+                    break
         except OSError:
             continue
-        for line in lines:
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(row, dict) or row.get("type") != "config_write":
-                continue
-            data = row.get("data")
-            if not isinstance(data, dict) or not isinstance(data.get("key"), str):
-                continue
-            if scope != "all" and data.get("scope") != scope:
-                continue
-            if key and data["key"] != key and not data["key"].startswith(f"{key}."):
-                continue
-            rows.append(row)
 
     rows.sort(key=lambda row: str(row.get("ts", "")), reverse=True)
     rows = rows[:limit]

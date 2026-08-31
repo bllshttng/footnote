@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import date
 
 import pytest
 from typer.testing import CliRunner
@@ -355,3 +356,38 @@ def test_history_empty_result_names_both_journals(tmp_path, monkeypatch) -> None
     assert result.exit_code == 0, result.output
     assert str(global_journal) in result.stdout
     assert str(project_journal) in result.stdout
+
+
+def test_non_json_leaf_value_is_recorded_in_serialized_form(tmp_path, monkeypatch) -> None:
+    captured = _capture_events(monkeypatch)
+    monkeypatch.setattr("fno.paths.global_events_json", lambda: tmp_path / "events.jsonl")
+
+    _emit_write_receipts(
+        {"deadline": "2026-01-01"},
+        {"deadline": date(2026, 8, 31)},
+        tmp_path / "config.toml",
+        "global",
+    )
+
+    assert len(captured) == 1
+    event, _journal = captured[0]
+    assert event["data"]["new_value"] == "2026-08-31"
+    events.validate(event)
+
+
+def test_receipt_stage_failure_before_any_key_is_still_warned(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    _capture_events(monkeypatch)
+    monkeypatch.setattr("fno.paths.global_events_json", lambda: tmp_path / "events.jsonl")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("flatten exploded")
+
+    monkeypatch.setattr("fno.config._flatten_leaf_paths", boom)
+
+    _emit_write_receipts({"a": 1}, {"a": 2}, tmp_path / "config.toml", "global")
+
+    err = capsys.readouterr().err
+    assert "config write receipt not recorded" in err
+    assert "before any key was staged" in err
