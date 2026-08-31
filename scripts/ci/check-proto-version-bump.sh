@@ -275,8 +275,15 @@ case "$FLOOR_GREP_RC" in
         exit 2 ;;
 esac
 
-if [[ "$FLOOR_GREP_RC" -ne 0 && "$FLOOR_HEAD_LINE" == "$FLOOR_BASE_LINE" ]]; then
-    : # untouched and identical: nothing to check
+if [[ "$FLOOR_GREP_RC" -ne 0 ]]; then
+    : # Untouched by this PR's own commits, so the merge cannot remove or move
+      # it: git keeps the base's side of a file the PR never edited. A
+      # head-vs-base LINE-PRESENCE comparison here misfires on every branch
+      # forked before the floor landed (head predates the const, base has it,
+      # patch untouched) and reads "stale branch" as "deletes the guard",
+      # blocking pre-floor PRs that merge the floor in untouched. The per-
+      # commit patch scan above is the only instrument that can say "this PR
+      # removes it"; presence at the head alone cannot.
 elif [[ -z "$FLOOR_BASE_LINE" ]]; then
     : # floor newly introduced by this PR; no base value to collide with
 elif [[ -z "$FLOOR_HEAD_LINE" ]]; then

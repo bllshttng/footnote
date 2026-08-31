@@ -100,6 +100,16 @@ fno agents mail send '/code-review <level> --comment' --to-self --raw
 
 No lane above carries `--fix`. A fix pass writes, which moves HEAD. An attestation is head-pinned, so the round that wrote it also voids it. This matches the spawned-reviewer contract further down. `--fix` stays legal for a caller who asks for it directly, and only the machinery advice drops it.
 
+## Lane 2a: what a codex `review/start` actually diffs
+
+The codex app-server's `review/start` takes a structured target. A `baseBranch` target scopes the BASE side only. Codex computes the diff in the RECIPIENT session's cwd. The head side is whatever checkout the recipient sits in.
+
+When the recipient lives on the base branch, it reviews an empty diff. Canonical on main is the common shape. The review reports clean with an empty findings array and high confidence, and attests nothing. This was measured on 2026-08-30. Open PRs sat at `review_coverage_uncovered` for hours while their reviews "succeeded" at recipients that had nothing to read.
+
+Two guards close that hole. When the recipient's checkout has zero changed files against the base, the fire-side guard in `fno agents mail send --raw '/review'` refuses before the RPC fires. Under `--check` it answers `not-injectable` with the same detail. The refusal names the cwd, so the remedy is obvious. When a review still reads an empty diff, `emit-attestation.sh`'s refusal journals a `review_invocation stage=refused reason=empty_diff` row. It carries the same `invocation_id` the attempt opened, so the sent row gets a terminal instead of orphaning. A refused row never clears a gate. A later real review outranks it.
+
+One boundary on where the refused state surfaces. The row is scoped to the EXACT HEAD the attempt measured, in the reviewer's own checkout. When the attempt ran in the PR's own branch checkout at the PR's head, the coverage row mints the refused verdict. When the head moves, the refusal retires and the state returns to unreviewed: nothing has reviewed the new head. A refusal is the terminal of one attempt, not a claim about the branch. When the attempt ran in a foreign checkout, the terminal lands in the journal where the attempt ran. The incident shape is exactly that: a session on the base branch. No PR reads it as its own state, because nothing in the raw lane carries the PR's identity. The fire-side guard is what stops that shape, before the RPC. Attributing a foreign-checkout refusal to the PR it was aimed at needs the invocation-id join to the sent row. That join is future work, deliberately not guessed here. Attributing it wrongly marks every PR against that base as refused.
+
 ## A reply does not resolve a thread
 
 `fno do pr status` reports `optional_reviews_unresolved`, and `ready` is `green && unresolved == 0`.

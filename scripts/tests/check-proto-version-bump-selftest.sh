@@ -676,6 +676,37 @@ else
     fail "no-floor-const case: rc=$rc out=$out"
 fi
 
+# --- floor case 4: pre-floor branch against a floored base passes ----------
+# The first PRs to land after the floor shipped all forked before it existed:
+# their proto.rs lacks the const, the base's has it, and their own commits
+# never touch the file. The merge keeps the base's floor (git takes the base
+# side of a file the branch never edited), so nothing is deleted - but a
+# head-vs-base LINE-PRESENCE comparison reads the stale branch as "removes
+# the guard" and blocked exactly that fleet. The per-commit patch scan is
+# what can say "this PR removes it"; absence at the head alone cannot.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 60)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "pre-floor base"
+git -C "$dir" checkout --quiet -b feature
+echo unrelated > "$dir/other.txt"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "unrelated change"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+write_proto "$dir" "$(version_line 61)
+pub const MIN_COMPAT_PROTO: u32 = 58;"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "add the floor"
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"PROTO_VERSION line untouched"* ]]; then
+    pass "a pre-floor branch against a floored base exits 0"
+else
+    fail "pre-floor-branch case: rc=$rc out=$out"
+fi
+
 if [[ $failures -eq 0 ]]; then
     echo "proto-version-bump selftest: all cases passed"
     exit 0

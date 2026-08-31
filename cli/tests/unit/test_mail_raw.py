@@ -6,6 +6,7 @@ never-durable invariant (AC18/AC30).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -98,6 +99,18 @@ def _seed_codex_app_server(mailbox, monkeypatch):
     )
     monkeypatch.setattr(
         mail_cli, "_codex_default_review_base", lambda _cwd: "origin/main"
+    )
+    # The fixture's cwd is a plain tmp dir, not a git repo, so the fire-side
+    # empty-subject guard would refuse every baseBranch send before the
+    # transport-level behavior these tests exercise. Default the subject to a
+    # measured non-empty; the guard's own tests override this stub.
+    monkeypatch.setattr(
+        mail_cli,
+        "_codex_review_subject_nonempty",
+        lambda _cwd, _base: (
+            True,
+            "3 changed files against origin/main at HEAD abc12345",
+        ),
     )
     return entry
 
@@ -645,6 +658,174 @@ def test_review_start_codex_flags_stale_deployed_binary(monkeypatch):
         "delivered": False,
         "reason": "stale-binary",
     }
+
+
+def test_codex_review_subject_nonempty_measures_a_real_repo(tmp_path):
+    """The guard's own measure, against a real git repo: a branch with a
+    commit against its base passes; a checkout sitting ON the base refuses;
+    a non-repo is unmeasurable. These are the three measured shapes of the
+    2026-08-30 incident (recipients on main reviewed empty diffs while the
+    PR worktrees held the changes)."""
+    import fno.mail.cli as mail_cli
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "base"],
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    ok, detail = mail_cli._codex_review_subject_nonempty(str(tmp_path), "main")
+    assert not ok, "HEAD == base tip is an empty subject by construction"
+    assert "0 changed files" in detail
+
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "checkout", "-q", "-b", "feature"],
+        check=True,
+    )
+    (tmp_path / "changed.txt").write_text("change\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", "changed.txt"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "change"],
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    ok, detail = mail_cli._codex_review_subject_nonempty(str(tmp_path), "main")
+    assert ok, "a branch commit ahead of the base is a reviewable subject"
+    assert "changed files" in detail
+
+    # A directory OUTSIDE any repo: a subdir of tmp_path would resolve the
+    # parent repo's HEAD through git's upward search and read as measurable.
+    bare = tmp_path.parent / "codex-subject-guard-no-repo"
+    bare.mkdir(exist_ok=True)
+    ok, detail = mail_cli._codex_review_subject_nonempty(str(bare), "main")
+    assert not ok
+    assert "no resolvable HEAD" in detail
+
+
+def test_raw_codex_review_refuses_empty_diff_subject(mailbox, monkeypatch, capsys):
+    """A baseBranch review at a checkout with nothing to read must refuse
+    BEFORE the RPC fires, naming the checkout: the review would otherwise
+    complete cleanly over nothing and leave the PR uncovered with a receipt."""
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    entry = _seed_codex_app_server(mailbox, monkeypatch)
+    monkeypatch.setattr(
+        mail_cli,
+        "_codex_review_subject_nonempty",
+        lambda _cwd, _base: (
+            False,
+            f"the recipient session's checkout at {entry.cwd} (HEAD abc12345) "
+            "has 0 changed files against origin/main; the review would read "
+            "an empty diff, complete cleanly, and attest nothing",
+        ),
+    )
+    fired = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *_a, **_k: fired.append(True) or {"delivered": True},
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review", self_ok=False)
+    assert exc.value.exit_code == 2
+    err = capsys.readouterr().err
+    assert "empty diff" in err
+    assert entry.cwd in err, "the refusal names the checkout so the remedy is obvious"
+    assert "request-self-review" in err
+    assert not fired, "the RPC must not fire on a refused subject"
+
+
+def test_raw_check_codex_review_answers_empty_diff_subject(mailbox, monkeypatch, capsys):
+    """--check answers the same refusal the send would fire: not-injectable
+    with the measured detail, never a promised path into an empty review."""
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    monkeypatch.setattr(
+        "fno.rust_binary.resolve_installed_binary", lambda: Path("/bin/fno-agents")
+    )
+    monkeypatch.setattr(
+        mail_cli,
+        "_codex_review_subject_nonempty",
+        lambda _cwd, _base: (
+            False,
+            "the recipient session's checkout at /nowhere (HEAD abc12345) has "
+            "0 changed files against origin/main; the review would read an "
+            "empty diff, complete cleanly, and attest nothing",
+        ),
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review", self_ok=False, check=True)
+    assert exc.value.exit_code == 1
+    out = capsys.readouterr().out
+    assert out.startswith("not-injectable:")
+    assert "empty diff" in out
+
+
+def test_raw_codex_review_uncommitted_target_skips_the_guard(
+    mailbox, monkeypatch, capsys
+):
+    """An uncommittedChanges target is an explicit scope, not checkout-vs-base:
+    the guard does not measure it, so an empty committed subject does not
+    block a review the caller explicitly aimed at the working tree."""
+    import fno.mail.cli as mail_cli
+    from fno.mail.cli import _raw_send
+
+    _seed_codex_app_server(mailbox, monkeypatch)
+    measured = []
+    monkeypatch.setattr(
+        mail_cli,
+        "_codex_review_subject_nonempty",
+        lambda cwd, base: measured.append((cwd, base)) or (False, "unreachable"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._review_start_codex",
+        lambda *_a, **_k: {"delivered": True, "turn_id": "t", "review_thread_id": "r"},
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("codexpeer", "/review --uncommitted", self_ok=False)
+    assert exc.value.exit_code == 0
+    assert not measured, "the guard never measures an explicit-scope target"
+
+
+def test_codex_review_subject_reports_a_failed_measurement_as_unmeasurable(
+    tmp_path, monkeypatch
+):
+    """A git timeout at the diff stage is not a measured empty diff.
+
+    _git returns None on TimeoutExpired, and the None must keep its own
+    refusal message: reporting "0 changed files" on a measurement that never
+    completed sends the caller to move a review that was aimed correctly
+    (the review-lane fork's finding 2, verified against the code).
+    """
+    import fno.mail.cli as mail_cli
+
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "--allow-empty", "-m", "base"],
+        check=True,
+        env={**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+             "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"},
+    )
+    real_run = subprocess.run
+
+    def _flaky_diff(argv, **kwargs):
+        if "diff" in argv:
+            raise subprocess.TimeoutExpired(argv, 2)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr("subprocess.run", _flaky_diff)
+    ok, detail = mail_cli._codex_review_subject_nonempty(str(tmp_path), "main")
+    assert not ok
+    assert "could not be measured" in detail
+    assert "0 changed files" not in detail, \
+        "an unmeasurable diff must not read as a measured empty one"
 
 
 def test_raw_codex_review_stale_binary_names_doctor(mailbox, monkeypatch, capsys):

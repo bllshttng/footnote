@@ -323,6 +323,13 @@ event_types:
       reviewer observations may arrive as separate rows joined by
       invocation_id; a sent row with no later started or attestation row names
       a lost review without claiming that an absence is a delivery result.
+      A refused row is the TERMINAL of a sent row that ended in a producer
+      refusal: the review attempt ran and produced no verdict because there
+      was nothing to read (reason empty_diff: the reviewer's measured diff
+      changed no file, so the producer refused to attest). It attests nothing
+      and never clears a gate; it exists so a reader can tell "attempted,
+      nothing to review" from "never attempted" - the two states that were
+      byte-identical at the coverage surface before this stage existed.
     # The daemon owns this cross-language registry entry. Python control-plane
     # sites and Rust transports both append the same canonical event, while
     # data.initiator and data.transport retain their measured provenance.
@@ -335,11 +342,14 @@ event_types:
           description: "Stable join id minted at the earliest observable invocation site."
         stage:
           type: string
-          enum: [sent, started]
-          description: "Whether the sender recorded a transport attempt or the reviewer started."
+          enum: [sent, started, refused]
+          description: "Whether the sender recorded a transport attempt, the reviewer started, or the attempt terminated in a producer refusal that attests nothing."
         verb:
           type: string
           description: "Review verb, including its leading slash, as observed by the speaker."
+        reason:
+          type: string
+          description: "The refusal class, present only on stage=refused rows. empty_diff = the reviewer's measured diff changed no file; unresolvable_base = the reviewer's checkout could not resolve the base to a merge-base, so nothing could be measured. Both name an ATTEMPT that produced no verdict; neither attests anything."
         args_raw:
           type: string
           description: "Everything after the verb, preserved verbatim when observable."
