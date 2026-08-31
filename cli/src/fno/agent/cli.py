@@ -640,9 +640,11 @@ def status_command(
 whoami_app.command("status")(status_command)
 
 from fno.context_probe import context_command  # noqa: E402
+from fno.ledger_show import ledger_show_command  # noqa: E402
 from fno.scoreboard.cli import scoreboard_command  # noqa: E402
 
 whoami_app.command("context", hidden=True)(context_command)
+whoami_app.command("ledger", hidden=True)(ledger_show_command)
 whoami_app.command("scoreboard", hidden=True)(scoreboard_command)
 
 
