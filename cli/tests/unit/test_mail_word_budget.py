@@ -517,6 +517,18 @@ def test_control_window_resets_on_an_inbound_reply():
     assert second.reset_by == reset_id
 
 
+def test_control_lane_keys_colliding_codex_siblings_separately():
+    budget.reserve_control(
+        sender="king", recipient="01a0370b", words=55, msg_id="ctl-a",
+        recipient_key="aaaa1111-2222-3333-4444-555566667777",
+    )
+    second = budget.reserve_control(
+        sender="king", recipient="01a0370b", words=55, msg_id="ctl-b",
+        recipient_key="bbbb1111-2222-3333-4444-555566667777",
+    )
+    assert second.running_before == 0, "distinct full-id keys charge separate control windows"
+
+
 def test_control_body_skips_the_style_check(monkeypatch):
     from fno import style
     from fno.mail import cli

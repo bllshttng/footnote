@@ -296,13 +296,24 @@ def reserve(
         _release(lock)
 
 
-def reserve_control(*, sender: str, recipient: str, words: int, msg_id: str) -> Reservation:
+def reserve_control(
+    *,
+    sender: str,
+    recipient: str,
+    words: int,
+    msg_id: str,
+    sender_key: Optional[str] = None,
+    recipient_key: Optional[str] = None,
+) -> Reservation:
     """Reserve against the control lane's own ledger, never the ordinary window.
 
     The ledger is keyed ``control:<sender> -> <recipient>`` so control traffic
     neither spends nor competes with the pair's ordinary budget. The inbound
     reset still matches raw bus handles (``reserve`` keeps those on the display
-    pair), so a peer's reply clears both windows.
+    pair), so a peer's reply clears both windows. ``sender_key`` /
+    ``recipient_key`` rekey the control ledger the same way ``reserve`` rekeys
+    the ordinary one: two codex siblings sharing a head-8 handle charge their
+    own windows, never one fused pair.
     """
     return reserve(
         sender=sender,
@@ -310,7 +321,8 @@ def reserve_control(*, sender: str, recipient: str, words: int, msg_id: str) -> 
         words=words,
         msg_id=msg_id,
         enforce=True,
-        sender_key=f"{CONTROL_PREFIX}{sender}",
+        sender_key=f"{CONTROL_PREFIX}{sender_key or sender}",
+        recipient_key=recipient_key,
         cap=CONTROL_CAP,
     )
 
