@@ -15,6 +15,7 @@ footnote runs as a host runtime on several AI coding CLIs. This is the public su
 | OpenCode | Native stop-hook plugin (world-gated, in-session re-drive) + loop-wrapper fallback. Reads `AGENTS.md` natively. | Sequential |
 | Antigravity CLI (`agy`) | Native `Stop`-hook adapter (world-gated, `decision:"continue"` re-drive). Claude-shaped hook events, Gemini-family wire format. | Sequential |
 | pi (`@earendil-works/pi-coding-agent`) | Pane-hosted TUI today, with the `pi --mode rpc` driving transport built and tested but not yet wired to a spawn arm. | Sequential |
+| Cursor Agent (`cursor-agent`) | Pane-hosted TUI. `--print --output-format stream-json` is output-only, so the pane is the shipping driving lane. | Sequential |
 
 Other CLIs (Cursor, GitHub Copilot Agents, Kiro, Qoder, Rovo Dev, Trae) are out of scope for footnote orchestration. For a new harness that enters scope, run `fno doctor harness <name> --live` and record its positive markers before adding a capability row; the runnable rubric is the evidence gate, not this summary.
 
@@ -54,6 +55,14 @@ The reader half is separate and outlives the fix: when one id resolves to more t
 
 1. rpc mode EXITS ON STDIN EOF, mid-turn, with status 0. A prompt fed from a file yielded five events and stopped at the user's own `message_end`; the assistant never spoke and the exit code still read success. Hold stdin open for the session's life and settle on the typed `agent_settled` event. A clean exit proves nothing.
 2. `--provider openai-codex` WITHOUT `--model` does not resolve to gpt-5.5. It falls through to a Bedrock model and fails with "Token is expired. To refresh this SSO session run 'aws sso login'", naming AWS and misdirecting completely. Pass both, always.
+
+## Cursor Agent: pane lane and remote chat identity
+
+Cursor Agent is a pane-hosted TUI. Its `--print --output-format stream-json` mode emits output but has no input-format, RPC, ACP, serve, or stdio drive lane, so fno ships the pane keystroke path. The pane readiness markers are the captured `Working` or `Running` state and the idle `→ Add a follow-up` marker.
+
+`cursor-agent create-chat` mints a full UUID and stays alive after printing it. fno reads the first line, terminates the helper, records that UUID before launching, and always passes it explicitly to `--resume`. A bare `--resume` opens Cursor's interactive picker. The chat transcript is remote: identity is proven when a second process on the same chat recalls the first process's nonce, never by looking for a local session file.
+
+The credential is the operator's login. `~/.cursor/` is a mixed GUI-and-CLI state root: `cli-config.json` carries CLI settings while `hooks.json` is unattributed between the CLI and editor. fno never passes `-w`, `--worktree`, or `--worktree-base`; it owns the worktree outside Cursor's native `~/.cursor/worktrees/` location.
 
 **Mail will ride `steer`, and today it does not.** The pane lane is what ships, so an envelope reaches a pi worker as keystrokes at a measured 0 ms enter delay. The driver implements `steer` and the tests cover it; nothing dispatches it yet. When the rpc spawn arm lands, this is the path it takes, and the reason is worth keeping: pi delivers a steering message after the current assistant turn finishes its tool calls and before the next LLM call, which is exactly the semantics fno's mail injection wants and what typing into a pane only approximates. Read the response literally: `success: true` means accepted, queued, or handled. Failures after acceptance arrive through the event stream, never as a second response for the same id.
 
