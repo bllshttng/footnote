@@ -17,6 +17,28 @@ use std::time::Duration;
 
 use common::{ClientHarness, Scratch};
 
+#[test]
+fn explicit_reinstall_is_the_only_path_that_replaces_an_installed_keymap() {
+    use fno::keys::{self, Event, Keymap};
+
+    keys::install(Keymap {
+        prefix: 0x01,
+        rebinds: Vec::new(),
+    });
+    keys::install(Keymap {
+        prefix: 0x18,
+        rebinds: Vec::new(),
+    });
+    assert_eq!(keys::prefix(), 0x01, "a second config install is ignored");
+
+    keys::reinstall(Keymap {
+        prefix: 0x18,
+        rebinds: Vec::new(),
+    });
+    assert_eq!(keys::prefix(), 0x18);
+    assert_eq!(keys::resolve_chord(0x18), Event::Forward(vec![0x18]));
+}
+
 /// Write a config.toml inside the scratch and return the path, for `FNO_CONFIG`.
 ///
 /// Pinned explicitly rather than dropped beside the isolated global settings:

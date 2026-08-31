@@ -2209,9 +2209,8 @@ struct AuxPopup {
 }
 
 /// What a MENU / settings-modal / mini-kanban row does. Menu entries open a
-/// surface or detach; settings entries flip a session-local view toggle; a
-/// kanban entry names a card. Not `Copy` since x-1d91 - a card action carries
-/// its node id.
+/// surface or detach; settings entries change a live setting; a kanban entry
+/// names a card. Not `Copy` since x-1d91 - a card action carries its node id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum AuxAction {
     OpenKeybinds,
@@ -2237,17 +2236,42 @@ enum AuxAction {
     /// persist via `fno config set mux.theme`. The picker lists the shipped
     /// names, so this carries one of them.
     ApplyTheme(String),
+    /// Apply a validated mux prefix now, then persist it through the CLI.
+    ApplyPrefix(String),
     /// (x-1d91) Jump the sideline selector to this Backlog card and close the
     /// mini-kanban - the overlay is a scanning surface, so acting on a card
     /// hands you back to the row where its full menu lives.
     BacklogGoto(String),
 }
 
-/// (x-f75e) The settings modal's two tabs.
+/// The settings modal's tabs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsTab {
     General,
     Theme,
+    Keys,
+}
+
+const PREFIX_PICKS: [&str; 4] = ["C-a", "C-b", "C-x", "C-t"];
+
+fn build_prefix_settings_rows(live_prefix: &str) -> (Vec<PopupRow>, Vec<AuxAction>) {
+    let mut rows = vec![PopupRow::Header(format!("prefix: {live_prefix}"))];
+    let mut actions = Vec::new();
+    for spec in PREFIX_PICKS {
+        let active = live_prefix == spec;
+        rows.push(PopupRow::Entry {
+            glyph: if active { "●".into() } else { "○".into() },
+            label: spec.into(),
+            hint: if active {
+                "active".into()
+            } else {
+                String::new()
+            },
+            enabled: true,
+        });
+        actions.push(AuxAction::ApplyPrefix(spec.into()));
+    }
+    (rows, actions)
 }
 
 /// (x-1d91) Build the mini-kanban: the Backlog's lanes as collapsed columns, each
@@ -3858,12 +3882,7 @@ impl View {
         self.aux = Some(menu);
     }
 
-    /// Build the settings modal (x-8ccf US5, x-f75e theme picker): a `general`
-    /// tab of session-only toggles and a `theme` tab of the shipped palettes.
-    /// This is the first real consumer of `Chrome::tabs`. The toggles live-apply
-    /// to this session and are honestly labeled "session only" (persistence to
-    /// config.toml is out of scope for them); the theme picker persists via
-    /// `fno config set` on apply.
+    /// Build the settings modal: general toggles plus theme and prefix pickers.
     fn build_settings_modal(&self) -> AuxPopup {
         let tab = self.settings_tab;
         let mut rows = Vec::new();
@@ -3873,7 +3892,7 @@ impl View {
                 let toggle = |on: bool, label: &str| PopupRow::Entry {
                     glyph: if on { "☑".into() } else { "☐".into() },
                     label: label.into(),
-                    hint: "session only".into(),
+                    hint: String::new(),
                     enabled: true,
                 };
                 rows.push(toggle(self.hover_focus, "focus follows mouse"));
@@ -3899,12 +3918,16 @@ impl View {
                     actions.push(AuxAction::ApplyTheme(name.into()));
                 }
             }
+            SettingsTab::Keys => {
+                (rows, actions) = build_prefix_settings_rows(&crate::keys::prefix_display());
+            }
         }
         let popup = Popup::new(rows, Anchor::Center)
             .title("settings")
             .tabs(vec![
                 ("general".to_string(), tab == SettingsTab::General),
                 ("theme".to_string(), tab == SettingsTab::Theme),
+                ("keys".to_string(), tab == SettingsTab::Keys),
             ])
             .footer("tab switches section · esc close");
         AuxPopup { popup, actions }
@@ -8094,9 +8117,10 @@ impl View {
                     // after the fixed mark+glyph prefix) so a long agent name or a
                     // narrow sideline never truncates the billing badge away (codex
                     // P2). Absent for the default account.
+                    let dnd = if a.dnd { " [DND]" } else { "" };
                     let mut text = match a.account.as_deref() {
-                        Some(acct) => format!(" {mark}{glyph} @{acct} {}", a.name),
-                        None => format!(" {mark}{glyph} {}", a.name),
+                        Some(acct) => format!(" {mark}{glyph}{dnd} @{acct} {}", a.name),
+                        None => format!(" {mark}{glyph}{dnd} {}", a.name),
                     };
                     // (x-132c) Indent the row under its lineage parent: one
                     // step per depth, read from the compose-pass depth vec.
@@ -10730,6 +10754,7 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    view.status_on = crate::digest_overlay::status_row_enabled(Path::new(&cwd));
     view.obsidian = crate::digest_overlay::ObsidianCfg::read(Path::new(&cwd));
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
@@ -12834,6 +12859,18 @@ async fn dispatch_event(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+            // Persist here too: prefix+s and the settings toggle write the
+            // same key, or the two entry points disagree about what the
+            // operator asked for. Fire-and-forget, so the flip stays instant;
+            // a lost write just means this flip was session-only. The writes
+            // serialize: config set is a read-modify-write of one file, and
+            // two overlapping processes could persist the earlier flip last.
+            let enabled = if view.status_on { "true" } else { "false" };
+            tokio::spawn(async move {
+                static TOGGLE_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+                let _guard = TOGGLE_WRITE.lock().await;
+                let _ = spawn_config_set("mux.status_row", enabled).await;
+            });
         }
         Event::CycleSection => {
             // Pure local state, no I/O - usable even when the socket write path
@@ -14117,6 +14154,12 @@ async fn execute_aux_action(
         }
         AuxAction::ToggleHoverFocus => {
             view.hover_focus = !view.hover_focus;
+            let enabled = if view.hover_focus { "true" } else { "false" };
+            let notice = match spawn_config_set("mux.hover_focus", enabled).await {
+                Ok(()) => format!("focus follows mouse: {enabled}"),
+                Err(_) => "focus follows mouse applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
         AuxAction::BacklogGoto(node) => {
@@ -14142,6 +14185,12 @@ async fn execute_aux_action(
             write_msg(sock_w, &ClientMsg::Resize { rows: r, cols: c })
                 .await
                 .map_err(|e| format!("resize send failed: {e}"))?;
+            let enabled = if view.status_on { "true" } else { "false" };
+            let notice = match spawn_config_set("mux.status_row", enabled).await {
+                Ok(()) => format!("status row: {enabled}"),
+                Err(_) => "status row applied this session; save failed".into(),
+            };
+            view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
         AuxAction::ApplyTheme(name) => {
@@ -14152,7 +14201,7 @@ async fn execute_aux_action(
             // never claiming a persistence it did not achieve.
             let (theme, warn) = Theme::from_name(&name);
             view.theme = theme;
-            let notice = match spawn_set_theme(&name).await {
+            let notice = match spawn_config_set("mux.theme", &name).await {
                 Ok(()) => match warn {
                     None => format!("theme: {name}"),
                     Some(w) => w.0,
@@ -14162,15 +14211,29 @@ async fn execute_aux_action(
             view.set_notice(notice);
             view.reopen_settings_keeping_sel();
         }
+        AuxAction::ApplyPrefix(spec) => {
+            let notice = match crate::keys::resolve_prefix_change(&spec) {
+                Err(refusal) => refusal,
+                Ok(map) => {
+                    crate::keys::reinstall(map);
+                    match spawn_config_set("mux.prefix", &spec).await {
+                        Ok(()) => format!("prefix: {spec}"),
+                        Err(_) => format!("prefix {spec} applied this session; save failed"),
+                    }
+                }
+            };
+            view.set_notice(notice);
+            view.reopen_settings_keeping_sel();
+        }
     }
     Ok(DispatchFlow::Continue)
 }
 
-/// Run `fno config set mux.theme <name>`, bounded. The mux shells the CLI rather
+/// Run `fno config set <key> <value>`, bounded. The mux shells the CLI rather
 /// than writing config itself (the graph-write rule applied to config). Returns
 /// `Err` on a non-zero exit, spawn failure, or timeout - the caller keeps the
-/// in-memory theme either way and reports honestly.
-async fn spawn_set_theme(name: &str) -> Result<(), String> {
+/// in-memory value either way and reports honestly.
+async fn spawn_config_set(key: &str, value: &str) -> Result<(), String> {
     // spawn + wait rather than .output(): the exit check reads `.success()` on
     // the child's ExitStatus directly, so the word the plan-readiness ratchet
     // (check-plan-rung-authority) watches for never appears here. That ratchet
@@ -14182,8 +14245,19 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
     // could land after we already told the user the save failed. needs_overlay,
     // digest_overlay, and connections_view set it for the same shell-out shape.
     let mut command = crate::process_admission::tokio_command(crate::server::fno_bin());
+    // --local: the startup ladder gives the project config precedence, so a
+    // global write is silently shadowed on the next attach to this workspace.
+    // FNO_CONFIG is the exception: when it pins an explicit file, that file is
+    // the ONLY candidate on both write and read, and --local would land the
+    // write somewhere the latch never looks.
+    let scope: &[&str] = if std::env::var_os("FNO_CONFIG").is_some_and(|v| !v.is_empty()) {
+        &[]
+    } else {
+        &["--local"]
+    };
     command
-        .args(["config", "set", "mux.theme", name])
+        .args(["config", "set", key, value])
+        .args(scope)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -14192,7 +14266,7 @@ async fn spawn_set_theme(name: &str) -> Result<(), String> {
         .map_err(|e| format!("fno config set spawn failed: {e}"))?;
     match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
         Ok(Ok(es)) if es.success() => Ok(()),
-        Ok(_) => Err(format!("fno config set mux.theme {name} failed")),
+        Ok(_) => Err(format!("fno config set {key} {value} failed")),
         Err(_) => Err("fno config set timed out".into()),
     }
 }
@@ -14276,7 +14350,7 @@ async fn aux_keys(
                     return Ok(StdinFlow::Detach);
                 }
             }
-            // Tab switches the settings modal's section (general/theme). Other aux
+            // Tab switches the settings modal's section. Other aux
             // popups have no tab strip, so Tab dismisses as every unbound key does.
             ModalKey::Byte(b'\t') => {
                 let has_tabs = view
@@ -14287,7 +14361,8 @@ async fn aux_keys(
                 if has_tabs {
                     view.settings_tab = match view.settings_tab {
                         SettingsTab::General => SettingsTab::Theme,
-                        SettingsTab::Theme => SettingsTab::General,
+                        SettingsTab::Theme => SettingsTab::Keys,
+                        SettingsTab::Keys => SettingsTab::General,
                     };
                     view.reopen_settings_keeping_sel();
                 } else {
@@ -16810,6 +16885,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -16857,6 +16933,7 @@ mod tests {
             pane_id: None,
             attach_id: Some("job1".into()),
             exited: true,
+            dnd: false,
             unmeasured: false,
             tombstone: true,
             ..hosted.clone()
@@ -16936,6 +17013,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: true,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -17000,6 +17078,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("job1".into()),
@@ -17264,6 +17343,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -17792,6 +17872,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -19752,6 +19833,7 @@ mod tests {
             badge,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20431,6 +20513,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20622,6 +20705,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20939,6 +21023,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -20997,6 +21082,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21113,6 +21199,7 @@ mod tests {
             badge: Some(AgentBadge::Working),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21147,6 +21234,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("c19cd2c3".into()),
@@ -21180,6 +21268,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -21257,6 +21346,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -21807,6 +21897,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: attach.map(Into::into),
@@ -23033,6 +23124,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -24652,6 +24744,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -24932,8 +25025,8 @@ mod tests {
 
     #[tokio::test]
     async fn sideline_menu_settings_toggle_flips_session_state_and_stays_open() {
-        // US4->US5: MENU -> settings chains, and a toggle flips session state and
-        // keeps the modal open (labeled session-only, no config write).
+        // MENU -> settings chains, and a toggle flips session state and keeps
+        // the modal open while its persistence result is reported.
         let mut v = two_pane_view();
         v.term = (30, 100);
         v.open_sideline_menu(Anchor::Center);
@@ -24966,6 +25059,10 @@ mod tests {
         v.aux.as_mut().unwrap().popup.sel = hf;
         aux_execute_selected(&mut v, &mut buf).await.unwrap();
         assert_eq!(v.hover_focus, !before, "toggle flips session state");
+        assert!(v
+            .notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("focus follows mouse")));
         assert!(v.aux.is_some(), "settings stays open for another toggle");
     }
 
@@ -24997,8 +25094,68 @@ mod tests {
                 .any(|r| matches!(r, PopupRow::Entry { glyph, .. } if glyph == "●")),
             "active theme is marked"
         );
-        // The chrome carries the two section tabs (positive marker it framed).
-        assert_eq!(modal.popup.chrome.tabs.len(), 2);
+        // The chrome carries all section tabs (positive marker it framed).
+        assert_eq!(modal.popup.chrome.tabs.len(), 3);
+    }
+
+    #[test]
+    fn settings_keys_tab_lists_prefix_picks_and_names_the_live_prefix() {
+        let (rows, actions) = build_prefix_settings_rows("C-b");
+        assert!(matches!(
+            rows.first(),
+            Some(PopupRow::Header(header)) if header == "prefix: C-b"
+        ));
+        let specs: Vec<String> = actions
+            .iter()
+            .filter_map(|action| match action {
+                AuxAction::ApplyPrefix(spec) => Some(spec.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(specs, PREFIX_PICKS.map(String::from));
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            PopupRow::Entry { glyph, label, .. } if glyph == "●" && label == "C-b"
+        )));
+
+        let (custom_rows, _) = build_prefix_settings_rows("C-q");
+        assert!(matches!(
+            custom_rows.first(),
+            Some(PopupRow::Header(header)) if header == "prefix: C-q"
+        ));
+        assert!(!custom_rows
+            .iter()
+            .any(|row| matches!(row, PopupRow::Entry { glyph, .. } if glyph == "●")));
+    }
+
+    #[tokio::test]
+    async fn settings_tabs_cycle_through_keys() {
+        let mut v = two_pane_view();
+        v.aux = Some(v.build_settings_modal());
+        let mut buf: Vec<u8> = Vec::new();
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::Theme);
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::Keys);
+        aux_keys(&mut v, b"\t", &mut buf).await.unwrap();
+        assert_eq!(v.settings_tab, SettingsTab::General);
+    }
+
+    #[tokio::test]
+    async fn refused_prefix_pick_changes_nothing_and_shows_the_validator_reason() {
+        let before = crate::keys::prefix();
+        let mut v = two_pane_view();
+        v.settings_tab = SettingsTab::Keys;
+        v.aux = Some(v.build_settings_modal());
+        let mut buf: Vec<u8> = Vec::new();
+        execute_aux_action(&mut v, AuxAction::ApplyPrefix("3".into()), &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(crate::keys::prefix(), before);
+        assert!(v
+            .notice
+            .as_ref()
+            .is_some_and(|(notice, _)| notice.contains("1-9 select tabs")));
     }
 
     #[test]
@@ -25008,6 +25165,26 @@ mod tests {
         let modal = v.build_settings_modal();
         assert!(modal.actions.contains(&AuxAction::ToggleHoverFocus));
         assert!(modal.actions.contains(&AuxAction::ToggleStatus));
+        assert!(modal.popup.rows.iter().all(|row| !matches!(
+            row,
+            PopupRow::Entry { hint, .. } if hint == "session only"
+        )));
+    }
+
+    #[tokio::test]
+    async fn settings_status_toggle_stays_live_when_the_save_fails() {
+        let mut v = two_pane_view();
+        let before = v.status_on;
+        let mut buf: Vec<u8> = Vec::new();
+        execute_aux_action(&mut v, AuxAction::ToggleStatus, &mut buf)
+            .await
+            .unwrap();
+        assert_eq!(v.status_on, !before);
+        assert!(!buf.is_empty(), "status toggle still sends the resize");
+        assert!(v.notice.as_ref().is_some_and(|(notice, _)| {
+            notice == "status row applied this session; save failed"
+                || notice.starts_with("status row: ")
+        }));
     }
 
     #[test]
@@ -25635,6 +25812,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: Some("perm prompt".into()),
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25666,6 +25844,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25697,6 +25876,7 @@ mod tests {
                     badge: Some(AgentBadge::Working),
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -25767,6 +25947,26 @@ mod tests {
     }
 
     #[test]
+    fn client_agent_row_renders_dnd_as_presence_not_liveness() {
+        let held: AgentRow = serde_json::from_str(
+            r#"{"squad":1,"name":"dnd-worker","pane_id":10,
+                "badge":"working","reason":null,"exited":false,"dnd":true}"#,
+        )
+        .unwrap();
+        let mut view = two_pane_view();
+        view.layout.agents = vec![held];
+        let text = frame_text(&view.compose());
+        let row = text
+            .lines()
+            .find(|line| line.contains("dnd-worker"))
+            .unwrap();
+        assert!(
+            row.contains("● [DND] dnd-worker"),
+            "DND leads the truncatable identity without replacing liveness: {row:?}"
+        );
+    }
+
+    #[test]
     fn squad_header_rollup_counts_in_every_view_state() {
         // x-6851 US2 (AC2-HP): each squad header carries always-on per-state
         // rollup counts (nonzero only, severity order), folded from its live rows
@@ -25784,6 +25984,7 @@ mod tests {
                 badge,
                 reason: None,
                 exited,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -26198,6 +26399,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: true,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -26229,6 +26431,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: Some("ab12cd34".into()),
@@ -26260,6 +26463,7 @@ mod tests {
                     badge: None,
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: None,
@@ -26294,6 +26498,7 @@ mod tests {
                     badge: Some(AgentBadge::Blocked),
                     reason: None,
                     exited: false,
+                    dnd: false,
                     unmeasured: false,
                     answerable: None,
                     attach_id: Some("ff99ff99".into()),
@@ -26803,6 +27008,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: attach_id.map(Into::into),
@@ -27534,6 +27740,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: Some("waiting on a menu".into()),
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: Some(answerable(&[("1", "Yes"), ("2", "No")], 7)),
             attach_id: None,
@@ -27974,6 +28181,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: true,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: Some("deadbeef".into()),
@@ -28026,6 +28234,7 @@ mod tests {
             badge: None,
             reason: None,
             exited,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29056,6 +29265,7 @@ mod tests {
                 badge: Some(AgentBadge::Working),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29087,6 +29297,7 @@ mod tests {
                 badge: None,
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: Some("deadbee1".into()),
@@ -29157,6 +29368,7 @@ mod tests {
             badge,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29231,6 +29443,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -29356,6 +29569,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29387,6 +29601,7 @@ mod tests {
                 badge: Some(AgentBadge::Done),
                 reason: None,
                 exited: false,
+                dnd: false,
                 unmeasured: false,
                 answerable: None,
                 attach_id: None,
@@ -29611,6 +29826,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -30073,6 +30289,7 @@ mod tests {
             badge: None,
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: None,
             attach_id: None,
@@ -30242,6 +30459,7 @@ mod tests {
             badge: Some(AgentBadge::Blocked),
             reason: None,
             exited: false,
+            dnd: false,
             unmeasured: false,
             answerable: ans,
             attach_id: None,
@@ -30622,6 +30840,7 @@ mod tests {
                     basis: r["basis"].as_str().map(str::to_string),
                     last_activity_age_s: r["last_activity_age_s"].as_u64(),
                     exited: r["exited"].as_bool().unwrap_or(false),
+                    dnd: false,
                     unmeasured: r["unmeasured"].as_bool().unwrap_or(false),
                     ..blocked_row(r["name"].as_str().expect("row has a name"), 0, None)
                 };

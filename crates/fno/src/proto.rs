@@ -302,7 +302,11 @@ fn default_true() -> bool {
 /// variants, so a v59 peer cannot decode the pair; the handshake is what
 /// stops the skew. (Second-to-merge re-bump: this branch first claimed 59,
 /// the lineage branch merged first.)
-pub const PROTO_VERSION: u32 = 60;
+///
+/// v61 (x-7d02, DND presence): `AgentRow.dnd` - additive do-not-disturb
+/// presence, separate from the liveness badge; the pane-send DND refusal
+/// rides the same generation.
+pub const PROTO_VERSION: u32 = 61;
 
 /// The oldest wire version this build can speak. Bumps that only add verbs or
 /// `#[serde(default)]` fields move `PROTO_VERSION`; a change to an existing
@@ -708,7 +712,8 @@ pub enum ControlVerb {
     /// lock immediately before the write, bouncing `busy: relay` with
     /// [`err_code::TARGET_NOT_IDLE`] instead of injecting into an in-flight
     /// write. Default `false` keeps raw `PaneSend` (the claim holder's own
-    /// channel, `fno mux pane send`) unguarded.
+    /// channel, `fno mux pane send`) unguarded for liveness; every script send
+    /// still respects a target row's DND policy.
     PaneSend {
         pane: u64,
         bytes: Vec<u8>,
@@ -1104,6 +1109,11 @@ pub struct AgentRow {
     /// Pane-exit / registry-exited fact: renders dim + exit marker regardless
     /// of any live-TTL badge (fact beats report, structurally).
     pub exited: bool,
+    /// (v52) Slack-style do-not-disturb presence. This is orthogonal to
+    /// `badge`: a held row remains working/blocked/done exactly as observed.
+    /// Missing on an older wire defaults false and false stays off the wire.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dnd: bool,
     /// (v47, x-9de7) True only when `exited` is a terminal registry status
     /// with NO positive corroboration (no confirmed-dead pid, no confirmed-
     /// gone pane) -- `agents_view::Liveness::Unmeasured`. `exited` keeps its
@@ -2438,6 +2448,9 @@ pub mod err_code {
     /// member list would read as "nothing to restore". The refusal names the
     /// attach precondition; the store is untouched.
     pub const RESTORE_NOT_RUN: u32 = 15;
+    /// (v61, x-7d02) `PaneSend` targeted a pane whose registry row is DND.
+    /// The bytes did not land; use mail send to queue durable until release.
+    pub const TARGET_DND: u32 = 16;
 }
 
 /// One pane inside a [`TabMeta`] (v22, x-653d): the leaf id the session
@@ -4073,7 +4086,7 @@ mod tests {
         // bumps it 56 -> 57; the ThreadPane control verb (x-07c2) bumps it
         // 57 -> 58; the classified-lineage pair bumped it 58 -> 59; the
         // workspace-restore verb (x-7b5e) re-bumped it 59 -> 60 (second to
-        // merge).
+        // merge); DND presence (x-7d02) bumps it 60 -> 61.
         // The additive crown fields, `unmeasured`, `resumable`, and now the
         // lineage pair, stay skew-tolerant both ways regardless of the
         // version number.
@@ -4082,7 +4095,7 @@ mod tests {
         // roundtrip tests used to re-assert the same literal, which caught
         // nothing a single pin does not and turned every bump into a three-file
         // edit; they now assert only their own wire shapes.
-        assert_eq!(PROTO_VERSION, 60);
+        assert_eq!(PROTO_VERSION, 61);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         // It also predates `unmeasured` (v47), so that key is absent too.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
@@ -4097,6 +4110,19 @@ mod tests {
         assert_eq!(
             row.no_pane_reason, None,
             "missing no_pane_reason => generic compatibility fallback"
+        );
+        let dnd_wire = r#"{"squad":null,"name":"held","pane_id":null,
+                          "badge":"working","reason":null,"exited":false,
+                          "dnd":true}"#;
+        let dnd_row: AgentRow = serde_json::from_str(dnd_wire).unwrap();
+        let encoded = serde_json::to_string(&dnd_row).unwrap();
+        assert!(
+            encoded.contains(r#""dnd":true"#),
+            "DND survives the wire: {encoded}"
+        );
+        assert!(
+            !serde_json::to_string(&row).unwrap().contains("dnd"),
+            "legacy false DND stays absent from the wire"
         );
         // A crowned row round-trips losslessly.
         let mut crowned = row.clone();
@@ -4371,6 +4397,7 @@ mod tests {
                         badge: Some(AgentBadge::Blocked),
                         reason: Some("permission prompt".into()),
                         exited: false,
+                        dnd: false,
                         unmeasured: false,
                         answerable: Some(AnswerablePrompt {
                             prompt: "Do you want to proceed?".into(),
@@ -4418,6 +4445,7 @@ mod tests {
                         badge: None,
                         reason: None,
                         exited: true,
+                        dnd: false,
                         unmeasured: false,
                         answerable: None,
                         attach_id: None,

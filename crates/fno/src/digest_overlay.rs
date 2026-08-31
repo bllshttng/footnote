@@ -90,6 +90,11 @@ pub fn hover_focus_enabled(cwd: &Path) -> bool {
     mux_bool(cwd, "hover_focus", true)
 }
 
+/// `config.mux.status_row` (default ON), latched once at client startup.
+pub fn status_row_enabled(cwd: &Path) -> bool {
+    mux_bool(cwd, "status_row", true)
+}
+
 /// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
 /// off-switch. A mission can never hold a session, so an operator who runs no
 /// epics can drop the band entirely rather than dismiss it each session.
@@ -874,6 +879,24 @@ mod tests {
             Some("30")
         );
         assert_eq!(read_mux_value(yaml, "missing"), None);
+    }
+
+    #[test]
+    fn status_row_reads_the_project_config_and_defaults_on() {
+        let root = std::env::temp_dir().join(format!("fno-status-row-{}", std::process::id()));
+        let config_dir = root.join(".fno");
+        std::fs::create_dir_all(root.join(".git")).expect("repo marker");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::write(
+            config_dir.join("config.toml"),
+            "[mux]\nstatus_row = false\n",
+        )
+        .expect("config");
+        assert!(!status_row_enabled(&root));
+
+        std::fs::write(config_dir.join("config.toml"), "[mux]\n").expect("config without key");
+        assert!(status_row_enabled(&root));
+        std::fs::remove_dir_all(root).ok();
     }
 
     #[test]

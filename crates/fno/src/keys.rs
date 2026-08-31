@@ -45,11 +45,12 @@ pub const DEFAULT_PREFIX: u8 = 0x02;
 /// The resolved key layer for this process: the prefix byte plus any per-action
 /// rebinds from `config.mux`.
 ///
-/// Installed ONCE, before the scanner runs, by whichever front door owns the
-/// client (see [`install`]). Everything downstream - the chord dispatcher, the
-/// which-key modal, the parity test - reads it through [`key_bindings`], so a
-/// rebind cannot reach the dispatcher without also reaching the help that
-/// documents it.
+/// Installed from config before the scanner runs by whichever front door owns
+/// the client (see [`install`]). An explicit settings action may replace it via
+/// [`reinstall`]. Everything downstream - the chord dispatcher, the which-key
+/// modal, the parity test - reads it through [`key_bindings`], so a rebind
+/// cannot reach the dispatcher without also reaching the help that documents
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keymap {
     pub prefix: u8,
@@ -248,22 +249,86 @@ pub fn resolve_keymap(
     )
 }
 
-static KEYMAP: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
-
-/// Install the resolved keymap. First call wins; later calls are ignored, so a
-/// re-attach in the same process cannot swap the keyboard mid-session.
-pub fn install(map: Keymap) {
-    let _ = KEYMAP.set(map);
+/// Resolve a candidate prefix against the live rebinds.
+///
+/// The returned map is safe to pass to [`reinstall`]. A refusal carries the
+/// same operator-readable warning as [`resolve_keymap`] and changes nothing.
+pub fn resolve_prefix_change(spec: &str) -> Result<Keymap, String> {
+    let rebinds = KEYMAP
+        .read()
+        .map_err(|_| "keymap is unavailable; prefix unchanged".to_string())?
+        .as_ref()
+        .map(|map| map.rebinds.clone())
+        .unwrap_or_default();
+    resolve_prefix_change_with_rebinds(spec, &rebinds)
 }
 
-fn keymap() -> &'static Keymap {
-    KEYMAP.get_or_init(Keymap::default)
+fn resolve_prefix_change_with_rebinds(
+    spec: &str,
+    live_rebinds: &[(String, u8)],
+) -> Result<Keymap, String> {
+    let requested = parse_key(spec);
+    let specs: Vec<(String, String)> = live_rebinds
+        .iter()
+        .map(|(action, byte)| (action.clone(), key_disp(*byte)))
+        .collect();
+    let (map, warnings) = resolve_keymap(Some(spec), &specs);
+    if requested != Some(map.prefix) || map.rebinds != live_rebinds || !warnings.is_empty() {
+        return Err(warnings
+            .first()
+            .map(|warning| warning.0.clone())
+            .unwrap_or_else(|| "prefix could not be applied exactly; unchanged".to_string()));
+    }
+    Ok(map)
+}
+
+static KEYMAP: std::sync::RwLock<Option<Keymap>> = std::sync::RwLock::new(None);
+
+/// Install the resolved keymap read from config. First call wins; later config
+/// reads are ignored, so a re-attach cannot swap the keyboard mid-session.
+pub fn install(map: Keymap) {
+    if let Ok(mut keymap) = KEYMAP.write() {
+        if keymap.is_none() {
+            *keymap = Some(map);
+        }
+    }
+}
+
+/// Replace the live keymap after an explicit user action.
+///
+/// This is deliberately separate from [`install`]: config re-reads cannot
+/// change the keyboard behind the operator's back, while a prefix chosen in the
+/// settings modal is direct operator intent.
+pub fn reinstall(map: Keymap) {
+    if let Ok(mut keymap) = KEYMAP.write() {
+        *keymap = Some(map);
+    }
 }
 
 /// The prefix byte in force. The scanner compares against THIS, never the
 /// const, so `config.mux.prefix` reaches every chord.
 pub fn prefix() -> u8 {
-    keymap().prefix
+    KEYMAP
+        .read()
+        .ok()
+        .and_then(|keymap| keymap.as_ref().map(|map| map.prefix))
+        .unwrap_or(DEFAULT_PREFIX)
+}
+
+/// A snapshot of the keymap in force, taken NOW: install (config) or the last
+/// explicit `reinstall` wins. Returns the default map when nothing is
+/// installed yet, so early callers behave exactly as an unset config would.
+fn keymap() -> Keymap {
+    KEYMAP
+        .read()
+        .ok()
+        .and_then(|keymap| keymap.as_ref().cloned())
+        .unwrap_or_else(|| resolve_keymap(None, &[]).0)
+}
+
+/// The prefix byte in force, rendered in the same grammar config accepts.
+pub fn prefix_display() -> String {
+    key_disp(prefix())
 }
 
 /// After a resize chord fires, bare resize keys (`H/J/K/L`) keep resizing for
@@ -395,7 +460,6 @@ pub struct Scanner {
     /// The repeatable action and its deadline. Keeping the action beside the
     /// deadline prevents a pane-id pulse from being mistaken for resize input.
     repeat: Option<RepeatState>,
-    keymap: Keymap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -415,7 +479,6 @@ impl Default for Scanner {
         Scanner {
             state: State::Normal(0),
             repeat: None,
-            keymap: keymap().clone(),
         }
     }
 }
@@ -452,7 +515,7 @@ impl Scanner {
             let mut replay = false;
             match std::mem::replace(&mut self.state, State::Normal(0)) {
                 State::Normal(open_idx) => {
-                    if b == self.keymap.prefix {
+                    if b == prefix() {
                         // Prefix disarms first, then chords normally (Locked 5);
                         // a prefix+resize re-arms at its emission site below.
                         self.repeat = None;
@@ -674,17 +737,12 @@ impl Scanner {
         }
     }
 
-    #[cfg(test)]
-    fn with_keymap(map: Keymap) -> Self {
-        Scanner {
-            state: State::Normal(0),
-            repeat: None,
-            keymap: map,
-        }
-    }
-
+    // Live lookup, never a constructor-time snapshot: the client builds one
+    // Scanner for the whole session, so a prefix picked in the settings modal
+    // must reach the next keystroke through this read, not through a stored
+    // copy of the keymap.
     fn chord(&self, byte: u8) -> Event {
-        chord_for(&self.keymap, byte)
+        chord_for(&keymap(), byte)
     }
 }
 
@@ -1002,7 +1060,7 @@ fn default_bindings() -> Vec<KeyBinding> {
 /// specials handled in `chord()` and shown by [`meta_rows`], so they are
 /// deliberately absent here and refused as rebind targets.
 pub fn key_bindings() -> Vec<KeyBinding> {
-    bindings_for(keymap())
+    bindings_for(&keymap())
 }
 
 fn bindings_for(map: &Keymap) -> Vec<KeyBinding> {
@@ -1261,7 +1319,7 @@ pub fn resolve_chord(byte: u8) -> Event {
 }
 
 fn chord(b: u8) -> Event {
-    chord_for(keymap(), b)
+    chord_for(&keymap(), b)
 }
 
 fn chord_for(map: &Keymap, b: u8) -> Event {
@@ -1816,6 +1874,19 @@ mod tests {
             warn.iter().any(|w| w.0.contains("is the prefix")),
             "{warn:?}"
         );
+    }
+
+    #[test]
+    fn resolve_prefix_change_reuses_the_full_keymap_validator() {
+        let map = resolve_prefix_change_with_rebinds("C-a", &[]).unwrap();
+        assert_eq!(map.prefix, 0x01);
+
+        let collision =
+            resolve_prefix_change_with_rebinds("Q", &[("detach".to_string(), b'Q')]).unwrap_err();
+        assert!(collision.contains("prefix"), "{collision}");
+
+        let digit = resolve_prefix_change_with_rebinds("3", &[]).unwrap_err();
+        assert!(digit.contains("1-9 select tabs"), "{digit}");
     }
 
     #[test]
@@ -2381,22 +2452,31 @@ mod tests {
     fn pane_id_chord_is_rebindable_and_repeats_without_prefix() {
         assert_eq!(format!("{:?}", resolve_chord(b'\\')), "ShowPaneIds");
 
+        // Rebind resolution stays pure (no process-global keymap install):
+        // the moved chord dispatches through the same table a live scanner
+        // would consult.
         let (map, warnings) = resolve_keymap(None, &[("show-pane-ids".into(), ";".into())]);
         assert!(
             warnings.is_empty(),
             "rebind should be accepted: {warnings:?}"
         );
+        assert_eq!(format!("{:?}", chord_for(&map, b';')), "ShowPaneIds");
+
+        // The repeat window runs on the default keymap: bare show-pane-ids
+        // repeats without the prefix while the window is open, then forwards.
         let t0 = Instant::now();
-        let mut scanner = Scanner::with_keymap(map);
-        assert_eq!(format!("{:?}", scanner.scan(b"\x02\\", t0)), "[Bell]");
-        assert_eq!(format!("{:?}", scanner.scan(b"\x02;", t0)), "[ShowPaneIds]");
+        let mut scanner = Scanner::default();
         assert_eq!(
-            format!("{:?}", scanner.scan(b";", t0 + Duration::from_millis(40))),
+            format!("{:?}", scanner.scan(b"\x02\\", t0)),
             "[ShowPaneIds]"
         );
         assert_eq!(
-            format!("{:?}", scanner.scan(b";", t0 + Duration::from_millis(791))),
-            "[Forward([59])]"
+            format!("{:?}", scanner.scan(b"\\", t0 + Duration::from_millis(40))),
+            "[ShowPaneIds]"
+        );
+        assert_eq!(
+            format!("{:?}", scanner.scan(b"\\", t0 + Duration::from_millis(791))),
+            "[Forward([92])]"
         );
     }
 

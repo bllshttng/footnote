@@ -2641,6 +2641,7 @@ fn paneless_route_hint(verb: &str, row: &crate::agents_view::RegistryAgent) -> S
 pub const EXIT_AMBIGUOUS: i32 = 21; // view/where: selector matches a family, not one agent (x-b80d)
 pub const EXIT_SUBMIT_UNCONFIRMED: i32 = 22; // text landed, but no post-submit marker appeared
 pub const EXIT_TARGET_IDENTITY_MISMATCH: i32 = 23; // send: pane occupant differs from addressee
+pub const EXIT_TARGET_DND: i32 = 25; // pane send: target declared DND; bytes did not land
 
 // Keep these aligned with fno-agents mail_inject: the same PTY paste needs the
 // same settle and retry cadence whether it arrived through mail or pane send.
@@ -5683,6 +5684,8 @@ fn render_reply(
                 EXIT_BLOCK_UNAVAILABLE
             } else if code == err_code::TARGET_NOT_IDLE {
                 EXIT_TARGET_NOT_IDLE
+            } else if code == err_code::TARGET_DND {
+                EXIT_TARGET_DND
             } else if code == err_code::NOT_FOUND {
                 EXIT_NOT_FOUND
             } else if code == err_code::NOT_PANE_HOSTED {
@@ -6257,7 +6260,9 @@ fn send_pane_bytes(
         },
     )? {
         ServerMsg::Ok => Ok(()),
-        ServerMsg::Err { code, msg } if code == err_code::TARGET_IDENTITY_MISMATCH => {
+        ServerMsg::Err { code, msg }
+            if code == err_code::TARGET_IDENTITY_MISMATCH || code == err_code::TARGET_DND =>
+        {
             Err(ControlError::FatalCode { code, msg })
         }
         ServerMsg::Err { msg, .. } => Err(ControlError::Fatal(msg)),
@@ -6284,6 +6289,7 @@ fn submit_pane(
             ControlError::FatalCode { code, .. } if code == err_code::TARGET_IDENTITY_MISMATCH => {
                 EXIT_TARGET_IDENTITY_MISMATCH
             }
+            ControlError::FatalCode { code, .. } if code == err_code::TARGET_DND => EXIT_TARGET_DND,
             ControlError::FatalCode { .. } => EXIT_ERROR,
         };
     }
@@ -6294,6 +6300,9 @@ fn submit_pane(
         if let ControlError::FatalCode { code, .. } = e {
             if code == err_code::TARGET_IDENTITY_MISMATCH {
                 return EXIT_TARGET_IDENTITY_MISMATCH;
+            }
+            if code == err_code::TARGET_DND {
+                return EXIT_TARGET_DND;
             }
         }
         return EXIT_SUBMIT_UNCONFIRMED;
@@ -6421,6 +6430,10 @@ fn block_pipe(args: &[OsString], env_session: Option<&str>) -> i32 {
         Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_NOT_IDLE => {
             eprintln!("fno mux block: {msg} - rerun with --force to override");
             return EXIT_TARGET_NOT_IDLE;
+        }
+        Ok(ServerMsg::Err { code, msg }) if code == err_code::TARGET_DND => {
+            eprintln!("fno mux block: {msg}");
+            return EXIT_TARGET_DND;
         }
         Ok(ServerMsg::Err { msg, .. }) => {
             eprintln!("fno mux block: {msg}");
@@ -6722,6 +6735,7 @@ mod tests {
             name: name.into(),
             cwd: "/tmp/seen".into(),
             exited: false,
+            dnd: false,
             liveness: crate::agents_view::Liveness::Alive,
             badge: None,
             reason: None,
@@ -7127,6 +7141,7 @@ mod tests {
             predecessor_session_ids: Vec::new(),
             forked_from_session_id: None,
             exited: false,
+            dnd: false,
             badge: None,
             reason: None,
             mux: None,
@@ -8460,6 +8475,25 @@ mod tests {
             msg: "no such pane".into(),
         };
         assert_eq!(render_reply(other, false, false, None), EXIT_ERROR);
+    }
+
+    #[test]
+    fn mux_pane_dnd_refusal_has_a_distinct_exit() {
+        let dnd = ServerMsg::Err {
+            code: err_code::TARGET_DND,
+            msg: "target is DND; use fno agents mail send to queue durable".into(),
+        };
+        assert_eq!(render_reply(dnd, false, false, None), EXIT_TARGET_DND);
+        // The identity refusal keeps its own exit: an earlier draft fed code 14
+        // here, which passed with the DND arm deleted.
+        let identity = ServerMsg::Err {
+            code: err_code::TARGET_IDENTITY_MISMATCH,
+            msg: "target identity mismatch".into(),
+        };
+        assert_eq!(
+            render_reply(identity, false, false, None),
+            EXIT_TARGET_IDENTITY_MISMATCH
+        );
     }
 
     #[test]
