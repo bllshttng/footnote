@@ -130,6 +130,7 @@ run_claude_hook() {
         cd "$TMP_DIR" || exit 1
         env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS=claude \
             FNO_AGENTS_BIN="$BIN" \
+            CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
             bash "$CLAUDE_HOOK" <<< "$input" >/dev/null 2>"$CLAUDE_ERR"
     ) || CLAUDE_RC=$?
 }
@@ -427,15 +428,14 @@ STUB
     cleanup
 }
 
-# ── K14: a king BLOCK arrives on exit 2 and must be honored as a verdict ─────
-# king_decide returns exit 2 WITH a full decision payload, pinned by nine tests
-# in crates/fno-agents/tests/loop_check.rs ("a king block exits 2 like the
-# non-empty board"). The hook read the exit code instead of the payload and
-# counted every one of those blocks as checker-unavailable. The retry counter
-# resets only on a clean decision, which for a king means allow, so a king with
-# a persistently non-empty board never reset it and was released on the fourth
-# fire with the ship gate off. Every other stub here returns block on exit 0,
-# which is the shape production never sends.
+# ── K14: a king BLOCK arrives as a verdict and must be honored as one ────────
+# king_decide sends a full decision payload on both block shapes: exit 0 for a
+# healthy non-empty board, exit 2 when the board is unreadable. The hook once
+# read the exit code instead of the payload and counted every one of those
+# blocks as checker-unavailable. The retry counter resets only on a clean
+# decision, which for a king means allow, so a king with a persistently
+# non-empty board never reset it and was released on the fourth fire with the
+# ship gate off. Key on the decision field, never the code.
 {
     setup_king
     cat > "$BIN" <<'STUB'

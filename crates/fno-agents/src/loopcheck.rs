@@ -13163,9 +13163,11 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
             // Blind is not clean. Block, but let the dry-fire counter below
             // bound it: a board that never answers reaches the ceiling and
             // terminates NoProgress rather than holding the king forever.
-            // Unlike the clean block at the bottom, exit 2 here is
-            // deliberate: an unreadable board is an unavailable path, and the
-            // shim's bounded-block counter - fail-closed - decides it.
+            // Unlike the clean block at the bottom, exit 2 here marks the
+            // degraded path for log readers; no consumer acts on it (the shim
+            // keys on the decision field, never the code). The real bound is
+            // the dry-fire ceiling above, which terminates NoProgress when
+            // the board never answers.
             if dry + 1 >= KING_DRY_FIRE_CEILING {
                 return terminate(
                     TerminationReason::NoProgress,

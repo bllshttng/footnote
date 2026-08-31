@@ -8983,7 +8983,10 @@ fn king_arm_blocks_rather_than_certifying_a_board_it_cannot_read() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
     assert_eq!(code, 2, "blind is not clean: {d}");
-    assert_eq!(d["decision"], "block", "the unavailable path stays exit 2 (fail-closed): {d}");
+    assert_eq!(
+        d["decision"], "block",
+        "the unavailable path stays exit 2 (fail-closed): {d}"
+    );
     assert!(d["reason"].as_str().unwrap().contains("unreadable"));
 }
 
@@ -9033,7 +9036,10 @@ fn a_cleared_row_is_progress_and_needs_no_event_producer() {
     let (code, d) = king_fire(&state, cwd, &events, &fno);
 
     assert_eq!(code, 0, "clearing a row must keep the loop running: {d}");
-    assert_eq!(d["decision"], "block", "a block at exit 0 must still say so in the JSON: {d}");
+    assert_eq!(
+        d["decision"], "block",
+        "a block at exit 0 must still say so in the JSON: {d}"
+    );
     assert_eq!(d["fires"], 1, "the dry-fire counter must have reset");
 }
 

@@ -94,7 +94,7 @@ run_target() {
     TARGET_RC=0
     (
         cd "$TMP/b" || exit 1
-        env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" SELECTED_STATE="$TMP/a/.fno/target-state.md" \
+        env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$TMP/a/.fno/target-state.md" \
             RESOLVER_RC="$resolver_rc" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
             bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$TMP/session-a.jsonl\"}"
     ) >/dev/null 2>"$stderr_file" || TARGET_RC=$?
@@ -109,7 +109,7 @@ run_agy() {
     AGY_RC=0
     (
         cd "$TMP/b" || exit 1
-        env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" SELECTED_STATE="$TMP/a/.fno/target-state.md" \
+        env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$TMP/a/.fno/target-state.md" \
             RESOLVER_RC="$resolver_rc" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
             bash "$AGY_HOOK" <<< "{\"conversationId\":\"session-a\",\"transcriptPath\":\"$TMP/session-a.jsonl\",\"workspacePaths\":[\"$TMP/b\"],\"fullyIdle\":true}"
     ) >"$stdout_file" 2>"$stderr_file" || AGY_RC=$?
@@ -140,7 +140,7 @@ printf '{"message":{"role":"assistant","content":"working"}}\n' > "$TMP/joiner-j
 JOINER_RC=0
 (
     cd "$TMP/b" || exit 1
-    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" SELECTED_STATE="$TMP/a/.fno/target-state.md" \
+    env HOME="$TMP/home" FNO_AGENTS_BIN="$STUB" CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= SELECTED_STATE="$TMP/a/.fno/target-state.md" \
         RESOLVER_RC=1 STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
         bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$TMP/joiner-j-x-8d1d-1.jsonl\"}"
 ) >/dev/null 2>"$TMP/joiner.stderr" || JOINER_RC=$?
@@ -218,6 +218,7 @@ CODEX_RC=0
 (
     cd "$TMP/b" || exit 1
     env HOME="$TMP/home" CODEX_THREAD_ID="session-a" FNO_AGENTS_BIN="$STUB" \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
         SELECTED_STATE="$TMP/a/.fno/target-state.md" RESOLVER_RC=0 \
         RESOLVER_ID_RECORD="$TMP/resolver-id" STATE_RECORD="$TMP/state-record" CWD_RECORD="$TMP/cwd-record" \
         bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$CODEX_TRANSCRIPT\"}"
@@ -270,6 +271,7 @@ MISSING_TARGET_RC=0
 MISSING_TARGET_STDERR=$(
     cd "$TMP/b" || exit 1
     env HOME="$TMP/home" PATH="$NO_BIN_PATH" FNO_AGENTS_BIN=/nonexistent \
+        CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
         bash "$TARGET_HOOK" <<< "{\"transcript_path\":\"$TMP/session-a.jsonl\"}" 2>&1 >/dev/null
 ) || MISSING_TARGET_RC=$?
 if [[ "$MISSING_TARGET_RC" -eq 2 && "$MISSING_TARGET_STDERR" == *"checker unavailable"* ]]; then

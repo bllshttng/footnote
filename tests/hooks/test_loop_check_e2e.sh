@@ -129,7 +129,9 @@ run_hook() {
     HOOK_STDERR=""
     HOOK_STDERR=$(
         cd "$cwd" || exit 1
-        env "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
+        # Default the claude markers off so a block reads as exit 2 even when
+        # the suite runs inside a claude session (which exports CLAUDECODE=1).
+        env CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= "$@" bash "$HOOK" <<< "$input_json" 2>&1 >/dev/null
     ) || HOOK_RC=$?
 }
 

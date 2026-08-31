@@ -29,6 +29,7 @@
 #
 # x-154c block-as-JSON on the claude harness:
 #   T16  block decision (claude env) -> stdout {"decision":"block","reason"} + exit 0
+#   T17  claude marker + foreign marker -> ambiguous, legacy exit-2 block, no JSON
 #
 # Each test feeds the shim stdin JSON: {"transcript_path":"<tmp>/<uuid>.jsonl"}
 # and runs the shim from a tmp cwd containing .fno/target-state.md.
@@ -245,9 +246,7 @@ STUB
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" \
         "HOME=${HOME_DIR}" \
-        "FNO_AGENTS_BIN=${STUB}" \
-        "CLAUDECODE=0" \
-        "CLAUDE_PLUGIN_ROOT="
+        "FNO_AGENTS_BIN=${STUB}"
 
     t3_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -504,8 +503,7 @@ exit 0
 STUB
 
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
-    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
-        "CLAUDECODE=0" "CLAUDE_PLUGIN_ROOT="
+    run_hook "$TMP_DIR" "$INPUT_JSON" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
 
     t12_ok=true
     if [[ "$HOOK_RC" -ne 2 ]]; then
@@ -659,6 +657,42 @@ STUB
         fail "T16: a clean block must not write an unavailable counter"; t16_ok=false
     fi
     [[ "$t16_ok" == "true" ]] && pass "T16: claude block -> stdout JSON + exit 0, no counter"
+    cleanup
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T17: claude marker + foreign marker is ambiguous -> legacy exit-2 block
+# ─────────────────────────────────────────────────────────────────────────────
+log "T17: claude marker with foreign marker -> exit 2 stderr block"
+{
+    setup_env "eeee-0017"
+
+    STUB="${TMP_DIR}/fno-agents-stub"
+    make_stub "$STUB" <<'STUB'
+#!/usr/bin/env bash
+printf '{"decision":"block","termination_reason":null,"message":"keep going","fires":1,"fingerprint":"x"}\n'
+exit 0
+STUB
+
+    INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT_FILE}\"}"
+    HOOK_RC=0
+    HOOK_OUT_FILE="${TMP_DIR}/t17-stdout.txt"
+    (
+        cd "$TMP_DIR" || exit 1
+        env "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}" \
+            "CLAUDECODE=1" "CLAUDE_PLUGIN_ROOT=" "CODEX_THREAD_ID=from-parent" \
+            bash "$HOOK" >"$HOOK_OUT_FILE" 2>/dev/null <<<"$INPUT_JSON"
+    ) || HOOK_RC=$?
+    HOOK_STDOUT="$(cat "$HOOK_OUT_FILE" 2>/dev/null)"
+
+    t17_ok=true
+    if [[ "$HOOK_RC" -ne 2 ]]; then
+        fail "T17: ambiguous markers must take the exit-2 block, got $HOOK_RC"; t17_ok=false
+    fi
+    if [[ -n "$HOOK_STDOUT" ]]; then
+        fail "T17: ambiguous markers must not emit stdout JSON: ${HOOK_STDOUT}"; t17_ok=false
+    fi
+    [[ "$t17_ok" == "true" ]] && pass "T17: ambiguous markers -> exit 2 block, no JSON"
     cleanup
 }
 
