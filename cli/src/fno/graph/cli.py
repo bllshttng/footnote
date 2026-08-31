@@ -11367,6 +11367,9 @@ def cmd_reconcile(
     # (x-59a6 review fix) so its "still open" read agrees with the same
     # preview `candidates`/`healed_epics` already report as would-close.
     _sim: Optional[list[dict]] = None
+    # The post-lock graph exists only when the sweep mutated something; the
+    # ledger harvest below falls back to a fresh read when it stayed empty.
+    post_entries: list[dict] = []
 
     if not dry_run and (closeable or strandable or strandable_contained or owed_evidence):
         # Apply every close in ONE locked mutation rather than locking once
@@ -11980,7 +11983,9 @@ def cmd_reconcile(
     from fno.cost._register import harvest_ledger_sessions
 
     _harvest_nodes = {
-        e.get("id"): e for e in post_entries if isinstance(e, dict) and e.get("id")
+        e.get("id"): e
+        for e in (post_entries or read_graph(_graph_path()))
+        if isinstance(e, dict) and e.get("id")
     }
     _filled, _marked = harvest_ledger_sessions(_harvest_nodes, dry_run=dry_run)
     typer.echo(f"ledger harvest: filled {_filled}, marked {_marked}", err=json_out)
