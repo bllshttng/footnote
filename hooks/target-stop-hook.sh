@@ -44,12 +44,16 @@ set -uo pipefail
 # that session a block it parses as allow. A foreign marker in the same env
 # makes the claim ambiguous, so the legacy exit-2 path runs instead.
 emit_block_for_harness() {
+    local reason="$1" json=""
     if [[ "${CLAUDECODE:-0}" == "1" || -n "${CLAUDE_PLUGIN_ROOT:-}" ]] \
-        && [[ -z "${CODEX_THREAD_ID:-}" && -z "${GEMINI_SESSION_ID:-}" ]]; then
-        jq -cn --arg r "$1" '{"decision":"block","reason":$r}'
+        && [[ -z "${CODEX_THREAD_ID:-}" && -z "${CODEX_SESSION_ID:-}" \
+            && -z "${GEMINI_SESSION_ID:-}" && -z "${OPENCODE_SESSION_ID:-}" ]] \
+        && json=$(jq -cn --arg r "$reason" '{"decision":"block","reason":$r}' 2>/dev/null) \
+        && [[ -n "$json" ]]; then
+        printf '%s\n' "$json"
         exit 0
     fi
-    echo "target stop-hook: $1" >&2
+    echo "target stop-hook: $reason" >&2
     exit 2
 }
 
@@ -476,8 +480,9 @@ else
         tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
     }
     # A non-zero exit means a BROKEN checker only when the output carries no
-    # verdict. The king driver deliberately returns 2 WITH a full decision
-    # payload (loopcheck.rs king_decide), while CLI misuse returns 2 with
+    # verdict. The king driver sends a full decision payload on both block
+    # shapes (loopcheck.rs king_decide): exit 0 for a healthy non-empty board,
+    # exit 2 when the board is unreadable, while CLI misuse returns 2 with
     # {"error": ...} and no `decision` field. So key on the field, never the
     # code: honor any verdict, and call unavailable only a verdictless reply.
     # Reading the code alone counted every legitimate king block as an outage,

@@ -145,6 +145,7 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     (
         cd "$TMP_DIR" || exit 1
         env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS="" \
+            CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
             CODEX_THREAD_ID="foreign-codex" CLAUDE_CODE_SESSION_ID="transcript" \
             FNO_AGENTS_BIN="$BIN" bash "$CLAUDE_HOOK" \
             <<< "{\"transcript_path\":\"${TRANSCRIPT}\"}" >/dev/null 2>/dev/null
@@ -169,6 +170,7 @@ cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
     (
         cd "$TMP_DIR" || exit 1
         env HOME="$HOME_DIR" PATH="${TMP_DIR}/bin:${PATH}" FNO_HARNESS="" \
+            CLAUDECODE=0 CLAUDE_PLUGIN_ROOT= \
             CODEX_THREAD_ID="foreign-codex" \
             FNO_AGENTS_BIN="$BIN" bash "$CLAUDE_HOOK" \
             <<< "{\"transcript_path\":\"${CLAUDE_TRANSCRIPT}\"}" >/dev/null 2>/dev/null

@@ -13261,10 +13261,12 @@ fn king_decide(parsed: &LoopCheckArgs) -> (i32, String) {
     let top = board
         .top_row
         .unwrap_or_else(|| "an actionable queue".to_string());
-    // decide()'s documented contract, one screen up: exit 0 ALWAYS for
-    // allow/block; non-zero only for internal/CLI errors. Encoding a healthy
-    // block in the exit code made the shim read it as a broken checker and
-    // count it toward the unavailable budget that ends in a ship-gate-off
+    // decide()'s documented contract, one screen up: exit 0 for allow and for
+    // this healthy block; the ONLY other verdict-bearing exit is the degraded
+    // unreadable-board block above, which carries the same payload on 2. Any
+    // non-zero without a `decision` field is an internal/CLI error. Encoding a
+    // healthy block in the exit code made the shim read it as a broken checker
+    // and count it toward the unavailable budget that ends in a ship-gate-off
     // allow. The JSON `decision` field is the block signal; the exit code
     // never is.
     (
